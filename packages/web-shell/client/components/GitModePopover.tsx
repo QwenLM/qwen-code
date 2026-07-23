@@ -26,6 +26,7 @@ function validateBranchName(name: string): boolean {
     name.startsWith('/') ||
     name.endsWith('/') ||
     name.endsWith('.') ||
+    name.endsWith('.git') ||
     name.includes('@{') ||
     name.split('/').some((c) => c.startsWith('.') || c.endsWith('.lock')) ||
     name === 'HEAD'
@@ -195,7 +196,10 @@ export function GitModePopover({
           {selectedMode === 'branch' && (
             <div className={styles.branchBox}>
               <div className={styles.branchRow}>
-                <label className={styles.branchLabel}>
+                <label
+                  className={styles.branchLabel}
+                  htmlFor="git-mode-branch-input"
+                >
                   {t('gitMode.branchLabel')}
                 </label>
                 <span className={styles.branchInputWrap}>
@@ -211,6 +215,7 @@ export function GitModePopover({
                     autoFocus
                     spellCheck={false}
                     autoComplete="off"
+                    id="git-mode-branch-input"
                     data-testid="git-mode-branch-input"
                   />
                   {branchName && (

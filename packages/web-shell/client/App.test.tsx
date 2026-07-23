@@ -1868,6 +1868,61 @@ describe('App session callbacks', () => {
     expect(arg?.['branch']).toBeUndefined();
   });
 
+  it('hides the git mode chip when the workspace is not trusted', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: false },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.gitModeIntent).toBeUndefined();
+    expect(
+      testState.latestChatEditorProps?.onGitModeIntentChange,
+    ).toBeUndefined();
+  });
+
+  it('forwards the branch intent to createSession when submitting a prompt', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    const intentChange = testState.latestChatEditorProps?.onGitModeIntentChange;
+    expect(intentChange).toBeDefined();
+    act(() => {
+      intentChange?.({ mode: 'branch', name: 'feat/test' });
+    });
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('branch session');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ branch: { name: 'feat/test' } }),
+    );
+  });
+
   it('reloads skills from the target workspace when starting a new session', async () => {
     const { container } = renderApp({
       lockedWorkspaceCwd: '/work/secondary',

@@ -4150,8 +4150,8 @@ export function App({
       const targetWorkspaceCwd = lockedWorkspaceCwd ?? workspaceCwd;
       selectedWorkspaceCwdRef.current = targetWorkspaceCwd;
       setSelectedWorkspaceCwd(targetWorkspaceCwd);
-      // Starting a fresh chat drops any pending worktree intent set from the
-      // empty-state toggle, so it never leaks into the next created session.
+      // Starting a fresh chat drops any pending git mode intent so it never
+      // leaks into the next created session.
       setGitModeIntent({ mode: 'current' });
       // Close the drawer before awaiting so a failed createSession() doesn't leave
       // it stuck open with the page scroll still locked, matching loadSidebarSession.

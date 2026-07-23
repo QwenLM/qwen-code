@@ -1283,6 +1283,7 @@ export function registerSessionRoutes(
         branchName.startsWith('/') ||
         branchName.endsWith('/') ||
         branchName.endsWith('.') ||
+        branchName.endsWith('.git') ||
         branchName.includes('@{') ||
         branchName
           .split('/')
@@ -1563,7 +1564,13 @@ export function registerSessionRoutes(
               inFlightBranchWorkspaces.delete(workspaceCwd);
             }
           } catch {
-            // Best-effort cleanup; channel.exited will eventually reap.
+            // Best-effort cleanup; channel.exited will eventually reap the
+            // session, but it has no awareness of this route-local in-flight
+            // reservation. Release it so a throwing killSession/removeSession
+            // doesn't permanently block the workspace from new branch sessions.
+            if (branchMeta) {
+              inFlightBranchWorkspaces.delete(workspaceCwd);
+            }
           }
         } else {
           // When an attaching client disconnects

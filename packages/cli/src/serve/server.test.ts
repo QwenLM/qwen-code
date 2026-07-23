@@ -8517,6 +8517,23 @@ describe('createServeApp', () => {
       expect(bridge.calls).toHaveLength(0);
     });
 
+    it('400 when branch name ends with .git', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ branch: { name: 'feature.git' } });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('branch_invalid_name');
+      expect(bridge.calls).toHaveLength(0);
+    });
+
     it('500 when worktree creation fails', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(

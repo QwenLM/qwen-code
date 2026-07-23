@@ -42,6 +42,11 @@ async function main() {
       console.log('✓ Git mode chip visible');
     } catch {
       console.log('✗ Git mode chip not found, taking screenshot anyway');
+      await page.screenshot({
+        path: `${OUT_DIR}/git-mode-1-default.png`,
+        animations: 'disabled',
+      });
+      return;
     }
     await page.screenshot({
       path: `${OUT_DIR}/git-mode-1-default.png`,
@@ -59,6 +64,11 @@ async function main() {
       console.log('✓ Popover visible');
     } catch {
       console.log('✗ Popover not found');
+      await page.screenshot({
+        path: `${OUT_DIR}/git-mode-2-popover.png`,
+        animations: 'disabled',
+      });
+      return;
     }
     await page.screenshot({
       path: `${OUT_DIR}/git-mode-2-popover.png`,
