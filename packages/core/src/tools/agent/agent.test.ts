@@ -479,6 +479,9 @@ describe('AgentTool', () => {
       expect(properties.properties.run_in_background.description).toContain(
         'interactive fork',
       );
+      expect(properties.properties.run_in_background.description).toContain(
+        'Nested agents run in the foreground unless run_in_background is explicitly true',
+      );
     });
 
     it('declares the optional todo association', () => {
@@ -1366,6 +1369,7 @@ describe('AgentTool', () => {
         description: 'Fork from a nested sub-agent',
         prompt: 'Do work',
         subagent_type: 'fork',
+        run_in_background: true,
       });
       const result = await runWithAgentContext('sub-1', () =>
         invocation.execute(new AbortController().signal),
@@ -2549,11 +2553,13 @@ describe('AgentTool', () => {
       function lastStartSpec(): {
         depth?: number;
         parentAgentId?: string;
+        agentDescription?: string;
       } {
         const calls = mockStartSubagentSpan.mock.calls;
         return calls[calls.length - 1][0] as {
           depth?: number;
           parentAgentId?: string;
+          agentDescription?: string;
         };
       }
 
@@ -2698,6 +2704,9 @@ describe('AgentTool', () => {
         const spec = lastStartSpec();
         expect(spec.depth).toBe(0);
         expect(spec.parentAgentId).toBeUndefined();
+        expect(spec.agentDescription).toBe(
+          'Specialized agent for searching and analyzing files',
+        );
       });
 
       it('startSubagentSpan receives depth=parentDepth+1 when invoked inside an outer agent frame', async () => {
@@ -5090,12 +5099,10 @@ describe('AgentTool', () => {
       );
     });
 
-    it('downgrades a background request from a nested sub-agent to an awaited foreground run', async () => {
+    it('rejects an explicit background request from a nested sub-agent', async () => {
       // Background delegation is top-level-only in v1: a nested launcher
-      // cannot honor the background completion contract (send_message /
-      // task_stop are excluded from its toolset, and completion
-      // notifications go to the top-level session). The run must complete
-      // inline instead of orphaning the child's results.
+      // cannot honor the completion contract. Do not silently turn an
+      // explicit background request into an awaited foreground run.
       vi.mocked(config.getMaxSubagentDepth).mockReturnValue(5);
       const params: AgentParams = {
         description: 'Start monitor from a nested sub-agent',
@@ -5112,11 +5119,19 @@ describe('AgentTool', () => {
       );
 
       const llmText = partToString(result.llmContent);
-      expect(llmText).not.toContain('Background agent launched');
-      expect(llmText).toContain('Monitor done');
-      expect(mockRegistry.register).toHaveBeenCalledWith(
-        expect.objectContaining({ isBackgrounded: false }),
-      );
+      expect(llmText).toContain('run_in_background: true');
+      expect(llmText).toContain('not supported from within a sub-agent');
+      expect(result.error?.message).toBe(llmText);
+      expect(result.returnDisplay).toMatchObject({
+        type: 'task_execution',
+        status: 'failed',
+        subagentName: 'monitor',
+      });
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+      expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+      expect(mockAgent.execute).not.toHaveBeenCalled();
+      expect(mockRegistry.register).not.toHaveBeenCalled();
+      expect(mockRegistry.tryReserveBackgroundSlot).not.toHaveBeenCalled();
     });
 
     it('keeps an omitted background flag in the foreground for nested sub-agents', async () => {

@@ -25,6 +25,7 @@ export type FakeOpenAIToolCall = {
 };
 
 export type FakeOpenAIResponse = {
+  model?: string;
   content?: string;
   contentChunks?: string[];
   disconnectAfterContentChunks?: number;
@@ -34,6 +35,9 @@ export type FakeOpenAIResponse = {
     prompt_tokens: number;
     completion_tokens: number;
     total_tokens: number;
+    prompt_tokens_details?: {
+      cached_tokens?: number;
+    };
   };
 };
 
@@ -213,7 +217,7 @@ function writeNonStreamed(
       id: chatCompletionId(),
       object: 'chat.completion',
       created: nowSeconds(),
-      model,
+      model: message.model ?? model,
       choices: [
         {
           index: 0,
@@ -243,6 +247,7 @@ function writeStreamed(
 
   const id = chatCompletionId();
   const created = nowSeconds();
+  const responseModel = message.model ?? model;
   const chunk = (
     delta: JsonObject,
     finish_reason: string | null = null,
@@ -251,7 +256,7 @@ function writeStreamed(
     id,
     object: 'chat.completion.chunk',
     created,
-    model,
+    model: responseModel,
     choices: [{ index: 0, delta, finish_reason }],
     ...(usage ? { usage } : {}),
   });

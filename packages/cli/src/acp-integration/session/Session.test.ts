@@ -53,6 +53,7 @@ const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
 const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
 const refreshMemoryAfterManagedWriteSpy = vi.hoisted(() => vi.fn());
 const transcribeVoiceAudioSpy = vi.hoisted(() => vi.fn());
+const startToolSpanSpy = vi.hoisted(() => vi.fn());
 // Records every LoopTickResolver construction's deps so a test can assert what
 // Session computed (e.g. the home confinement root) without a private-field peek.
 const loopTickResolverDepsSpy = vi.hoisted(() => vi.fn());
@@ -72,6 +73,10 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     logPromptSuggestion: vi.fn(),
     runVisionBridge: runVisionBridgeSpy,
     refreshMemoryAfterManagedWrite: refreshMemoryAfterManagedWriteSpy,
+    startToolSpan: (...args: Parameters<typeof actual.startToolSpan>) => {
+      startToolSpanSpy(...args);
+      return actual.startToolSpan(...args);
+    },
     // Transparent recording wrapper: records the constructor deps, then behaves
     // exactly like the real resolver (subclass → instanceof + methods preserved).
     LoopTickResolver: class extends actual.LoopTickResolver {
@@ -437,6 +442,7 @@ describe('Session', () => {
   }
 
   beforeEach(() => {
+    startToolSpanSpy.mockClear();
     runVisionBridgeSpy.mockReset();
     refreshMemoryAfterManagedWriteSpy.mockReset();
     refreshMemoryAfterManagedWriteSpy.mockResolvedValue(false);
@@ -772,6 +778,32 @@ describe('Session', () => {
     await expect(session.assertCanStartTurn()).rejects.toMatchObject({
       code: -32602,
     });
+  });
+
+  it('cancels an admitted call without cancelling a background turn', async () => {
+    let releaseAdmission!: () => void;
+    const admission = new Promise<void>((resolve) => {
+      releaseAdmission = resolve;
+    });
+    mockConfig.assertCanStartTurn = vi.fn().mockReturnValue(admission);
+    const cancellation = new AbortController();
+
+    const prompt = session.prompt(
+      {
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      },
+      undefined,
+      cancellation.signal,
+    );
+    await vi.waitFor(() =>
+      expect(mockConfig.assertCanStartTurn).toHaveBeenCalledOnce(),
+    );
+    cancellation.abort();
+    releaseAdmission();
+
+    await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
   });
 
   it('pins durable cron startup, prompt restart, and stop to the session runtime', async () => {
@@ -2508,6 +2540,137 @@ describe('Session', () => {
   });
 
   describe('prompt', () => {
+    it('installs a trusted daemon context only for the root prompt', async () => {
+      const trustedContext: core.InvocationContextV1 = {
+        version: 1,
+        sessionId: 'test-session-id',
+        promptId: 'daemon-prompt-id',
+        originatorClientId: 'client-1',
+      };
+      let observed: core.InvocationContextV1 | undefined;
+      mockChat.sendMessageStream = vi.fn().mockImplementation(() => {
+        observed = core.getInvocationContext();
+        return Promise.resolve(createEmptyStream());
+      });
+
+      await session.prompt(
+        {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'trusted prompt' }],
+        },
+        trustedContext,
+      );
+
+      expect(observed).toEqual(trustedContext);
+      expect(core.getInvocationContext()).toBeUndefined();
+    });
+
+    it('rejects a trusted context for a different session', async () => {
+      const trustedContext: core.InvocationContextV1 = {
+        version: 1,
+        sessionId: 'different-session',
+        promptId: 'daemon-prompt-id',
+      };
+
+      await expect(
+        session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'mismatched prompt' }],
+          },
+          trustedContext,
+        ),
+      ).rejects.toThrow(
+        'Invocation context session does not match the active session',
+      );
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    });
+
+    it('does not create invocation context for standalone ACP prompts', async () => {
+      let observed: core.InvocationContextV1 | undefined;
+      mockChat.sendMessageStream = vi.fn().mockImplementation(() => {
+        observed = core.getInvocationContext();
+        return Promise.resolve(createEmptyStream());
+      });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'standalone prompt' }],
+      });
+
+      expect(observed).toBeUndefined();
+    });
+
+    it('clears the root invocation context from automatic turns', async () => {
+      const rootContext: core.InvocationContextV1 = {
+        version: 1,
+        sessionId: 'test-session-id',
+        promptId: 'root-prompt-id',
+      };
+      let cronCallback: ((job: { prompt: string }) => void) | undefined;
+      const scheduler = {
+        size: 1,
+        hasPendingWork: true,
+        start: vi.fn((callback: (job: { prompt: string }) => void) => {
+          cronCallback = callback;
+        }),
+        stop: vi.fn(),
+        getExitSummary: vi.fn().mockReturnValue(undefined),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      const observed: Array<core.InvocationContextV1 | undefined> = [];
+      mockChat.sendMessageStream = vi.fn().mockImplementation(() => {
+        observed.push(core.getInvocationContext());
+        return Promise.resolve(createEmptyStream());
+      });
+      const internals = session as unknown as {
+        cronCompletion: Promise<void> | null;
+        notificationCompletion: Promise<void> | null;
+      };
+
+      await session.prompt(
+        {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'root prompt' }],
+        },
+        rootContext,
+      );
+
+      expect(observed).toEqual([rootContext]);
+
+      await core.runWithInvocationContext(rootContext, async () => {
+        cronCallback?.({ prompt: 'scheduled prompt' });
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        });
+        await vi.waitFor(() => {
+          expect(internals.cronCompletion).toBeNull();
+        });
+      });
+
+      const backgroundCallback = mockBackgroundTaskRegistry
+        .setNotificationCallback.mock.calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+      await core.runWithInvocationContext(rootContext, async () => {
+        backgroundCallback('done', '<task-notification />', {
+          agentId: 'agent-1',
+          status: 'completed',
+        });
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+        });
+        await vi.waitFor(() => {
+          expect(internals.notificationCompletion).toBeNull();
+        });
+      });
+
+      expect(observed).toEqual([rootContext, undefined, undefined]);
+    });
+
     it('records the latest file history snapshot after makeSnapshot', async () => {
       const latestSnapshot = {
         promptId: 'test-session-id########1',
@@ -13929,6 +14092,64 @@ describe('Session', () => {
       );
     });
 
+    it('uses the provider tool-call id for the GenAI field only', async () => {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'read',
+        returnDisplay: 'read',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(core.ToolNames.READ_FILE, execute),
+      );
+      const [normalized] = core.normalizeModelToolCallIds(
+        [
+          {
+            functionCall: {
+              id: 'provider-call',
+              name: core.ToolNames.READ_FILE,
+              args: { file_path: 'test.ts' },
+            },
+          },
+        ],
+        new Set(['provider-call']),
+        new Set(),
+      );
+
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        'prompt-tool-span',
+        [normalized.functionCall!],
+      );
+
+      expect(startToolSpanSpy).toHaveBeenCalledWith(
+        core.ToolNames.READ_FILE,
+        expect.objectContaining({
+          'tool.call_id': 'provider-call__qwen_dup_2',
+          call_id: 'provider-call__qwen_dup_2',
+          'gen_ai.tool.call.id': 'provider-call',
+        }),
+      );
+
+      startToolSpanSpy.mockClear();
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        'prompt-tool-span-fallback',
+        [
+          {
+            id: 'internal-call',
+            name: core.ToolNames.READ_FILE,
+            args: { file_path: 'test.ts' },
+          },
+        ],
+      );
+      expect(startToolSpanSpy).toHaveBeenCalledWith(
+        core.ToolNames.READ_FILE,
+        expect.objectContaining({
+          'tool.call_id': 'internal-call',
+          'gen_ai.tool.call.id': 'internal-call',
+        }),
+      );
+    });
+
     it('isolates enter_plan_mode from executable ACP siblings while preserving duplicate responses', async () => {
       const writeExecute = vi.fn().mockResolvedValue({
         llmContent: 'wrote',
@@ -16370,6 +16591,54 @@ describe('Session', () => {
         prompt: [{ type: 'text', text: 'finish everything' }],
       });
     }
+
+    it('cleans up an admitted retry cancelled during previous-turn drain', async () => {
+      rebuildSessionWithGuard();
+      let releasePreviousTurn!: () => void;
+      const previousTurn = new Promise<void>((resolve) => {
+        releasePreviousTurn = resolve;
+      });
+      const cancellation = new AbortController();
+      const internals = session as unknown as {
+        pendingPrompt: AbortController | null;
+        pendingPromptCompletion: Promise<void> | null;
+        todoStopGuard: {
+          hasTrustedUnfinishedState: boolean;
+          isHardSuspended: boolean;
+          observeTodoWrite(resultDisplay: unknown, allowArm: boolean): boolean;
+        };
+      };
+      internals.todoStopGuard.observeTodoWrite(
+        { type: 'todo_list', todos: pendingTodos },
+        true,
+      );
+      expect(internals.todoStopGuard.hasTrustedUnfinishedState).toBe(true);
+      internals.pendingPromptCompletion = previousTurn;
+
+      const prompt = session.prompt(
+        {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'retry after cancellation' }],
+          _meta: { 'qwen.daemon.retry': true },
+        } as Parameters<typeof session.prompt>[0],
+        undefined,
+        cancellation.signal,
+      );
+      await vi.waitFor(() => {
+        expect(internals.pendingPrompt).not.toBeNull();
+        expect(internals.todoStopGuard.isHardSuspended).toBe(false);
+      });
+
+      cancellation.abort();
+      releasePreviousTurn();
+
+      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      expect(internals.pendingPrompt).toBeNull();
+      expect(internals.todoStopGuard.isHardSuspended).toBe(true);
+      await expect(session.cancelPendingPrompt()).rejects.toThrow(
+        'Not currently generating',
+      );
+    });
 
     function createDeferredAbortStream() {
       let markStarted!: () => void;
