@@ -237,6 +237,27 @@ npm run preflight  → clean → install → format → lint → build → typec
 
 **模式：** 面向用户的输出必须使用用户的概念模型，而非系统的内部簿记。
 
+### 5.8 结构化数据替代文本反解析（Structure over Prose）
+
+- **PR #7564**：`VerificationReport.gaps` 从 `string[]` 变为 `{subject, reason, subjectZh, reasonZh}`——消灭了 `compose-review` 中最后一处 `indexOf(' — ')` 边界反解析
+- **PR #7564**：`Bi` 对（`{en, zh}`）让翻译分布式存在、渲染策略集中式决策
+
+**模式：** 当消费者需要拆解生产者渲染的文本时，让生产者直接发射结构化数据。反解析是 bug 的温床——边界字符串会变、会歧义、会国际化。
+
+### 5.9 单一事实来源（Single Source of Truth）
+
+- **PR #7565**：测试不再手写 `INFRA_FAILURE_SIGNATURES` 副本，而是从工作流源提取——与 `NON_BLOCKING_CHECKS` 同一惯例
+- **PR #7569**：英文子串被重置检测器 glob 消费——修改前必须 grep 所有消费方
+
+**模式：** 如果一个值存在于生产配置中，测试应提取而非誊写。添加守卫断言在提取失败时响亮报错（而非空模式静默通过）。修改承重文本前，grep 所有程序化消费方。
+
+### 5.10 只读 Fork 模式（Read-Only Fork for Side Queries）
+
+- **PR #7567**：`/advisor` 用 `runForkedAgent` + `cacheSafeParams` 实现只读模型调用——共享 prompt cache 但 `NO_TOOLS` 禁止工具执行
+- **PR #7567**：主会话历史不被修改，advisor 输出仅展示给用户
+
+**模式：** 需要模型访问但不需要工具或会话修改时，用 forked side-query。缓存路径（`cacheSafeParams`）省 token，`NO_TOOLS` 保安全。并发控制由调用方负责。
+
 ## 六、架构演进方向
 
 基于当前 PR 趋势的观察：
