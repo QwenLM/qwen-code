@@ -137,7 +137,7 @@ env:
   # so a persistent infra problem cannot loop. Deliberately conservative — only
   # unambiguous machine failures, never a test-level timeout, which could be a
   # real regression. Case-insensitive, matched against the check's annotations.
-  INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (?:was|has been) (?:lost|terminated)'
+  INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)'
   # Upper bound on review targets emitted per scan (fan-out defense-in-depth;
   # excess is logged and deferred to the next scan).
   MAX_TARGETS_PER_SCAN: '10'

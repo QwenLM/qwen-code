@@ -460,7 +460,7 @@ describe('qwen-autofix workflow', () => {
             PR_META: JSON.stringify({ headRefOid: 'headSHA' }),
             CHECKS_JSON: JSON.stringify(checks),
             INFRA_FAILURE_SIGNATURES:
-              'lost communication with the server|No space left on device',
+              'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)',
             PATH: `${bin}:${process.env.PATH}`,
           },
           encoding: 'utf8',
@@ -517,6 +517,45 @@ describe('qwen-autofix workflow', () => {
         rerunOk: false,
       }),
     ).toEqual({ reran: true, continued: false });
+    // Each remaining production signature also triggers a rerun.
+    for (const msg of [
+      'ENOSPC',
+      'The runner has received a shutdown signal',
+      'The runner has received an unexpected signal',
+      'Failed to initialize container for job',
+      'The runner was lost',
+      'The runner was terminated',
+      'The runner has been lost',
+      'The runner has been terminated',
+    ]) {
+      expect(run({ checks: [FAIL], annotations: msg })).toEqual({
+        reran: true,
+        continued: true,
+      });
+    }
+    // Self-trigger guard: a "Qwen Autofix" workflow's own failed check must NOT
+    // be rerun (prevents the autofix from re-triggering itself), UNLESS the
+    // check is a review-address job (the exception carved out in the jq filter).
+    const AUTOFIX_CHECK = {
+      name: 'E2E',
+      conclusion: 'FAILURE',
+      workflowName: 'Qwen Autofix',
+    };
+    expect(
+      run({ checks: [AUTOFIX_CHECK], annotations: 'No space left on device' }),
+    ).toEqual({ reran: false, continued: false });
+    expect(
+      run({
+        checks: [
+          {
+            name: 'review-address issue-123',
+            conclusion: 'FAILURE',
+            workflowName: 'Qwen Autofix',
+          },
+        ],
+        annotations: 'No space left on device',
+      }),
+    ).toEqual({ reran: true, continued: true });
   });
 
   it('keeps a still-red check visible, but only once per head', () => {
