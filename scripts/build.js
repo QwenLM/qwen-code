@@ -49,7 +49,7 @@ const cliOnly = process.argv.includes('--cli-only');
 // 9. webui (shared UI components - used by vscode companion)
 // 10. web-shell (depends on webui and sdk)
 // 11. vscode-ide-companion (depends on webui)
-// 12. external-context (standalone Qwen extension)
+// 12. external-context (private Qwen extension)
 const buildOrder = [
   'packages/core',
   'packages/web-templates',

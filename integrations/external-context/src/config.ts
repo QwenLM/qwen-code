@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFile, realpath, stat } from 'node:fs/promises';
-import { isAbsolute, relative, sep } from 'node:path';
+import { readFile, stat } from 'node:fs/promises';
+import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 import type {
   ExternalContextConfig,
@@ -19,20 +19,7 @@ const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const configSchema = z
   .object({
     version: z.literal(1),
-    repositoryRoot: z.string().min(1),
-    autoRecall: z
-      .object({
-        enabled: z.boolean().default(false),
-        timeoutMs: z.number().int().min(1).max(5000).default(1500),
-      })
-      .strict()
-      .default({ enabled: false, timeoutMs: 1500 }),
-    write: z
-      .object({
-        enabled: z.boolean().default(false),
-      })
-      .strict()
-      .default({ enabled: false }),
+    timeoutMs: z.number().int().min(1).max(30_000).default(5000),
     provider: z.discriminatedUnion('type', [
       z
         .object({
@@ -62,7 +49,9 @@ export class ConfigurationError extends Error {
 export async function loadConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<ExternalContextConfig> {
-  const configPath = env['QWEN_EXTERNAL_CONTEXT_CONFIG'];
+  const configPath = Object.hasOwn(env, 'QWEN_EXTERNAL_CONTEXT_CONFIG')
+    ? env['QWEN_EXTERNAL_CONTEXT_CONFIG']
+    : undefined;
   if (!configPath || !isAbsolute(configPath)) {
     throw new ConfigurationError(
       'QWEN_EXTERNAL_CONTEXT_CONFIG must name an absolute file path.',
@@ -93,30 +82,14 @@ export async function loadConfig(
   }
 
   const result = configSchema.safeParse(parsed);
-  if (!result.success || !isAbsolute(result.data.repositoryRoot)) {
+  if (!result.success) {
     throw new ConfigurationError('External context config is invalid.');
-  }
-
-  let repositoryRoot: string;
-  try {
-    repositoryRoot = await realpath(result.data.repositoryRoot);
-    if (!(await stat(repositoryRoot)).isDirectory()) {
-      throw new ConfigurationError(
-        'Configured repository root is not a directory.',
-      );
-    }
-  } catch {
-    throw new ConfigurationError(
-      'Configured repository root could not be resolved.',
-    );
   }
 
   const provider = resolveProvider(result.data.provider, env);
   return {
     version: 1,
-    repositoryRoot,
-    autoRecall: result.data.autoRecall,
-    write: result.data.write,
+    timeoutMs: result.data.timeoutMs,
     provider,
   };
 }
@@ -127,44 +100,22 @@ function resolveProvider(
 ): Mem0ProviderConfig | GenericHttpProviderConfig {
   switch (provider.type) {
     case 'mem0-platform-v3': {
-      const apiKey = env[provider.apiKeyEnv];
-      if (!apiKey) {
-        throw new ConfigurationError(
-          'Configured external context credential is unavailable.',
-        );
-      }
+      const apiKey = readCredential(env, provider.apiKeyEnv);
       return { ...provider, apiKey };
     }
     case 'generic-http-search-v1': {
-      const token = env[provider.tokenEnv];
-      if (!token) {
-        throw new ConfigurationError(
-          'Configured external context credential is unavailable.',
-        );
-      }
+      const token = readCredential(env, provider.tokenEnv);
       return { ...provider, token };
     }
   }
 }
 
-export async function isInsideRepository(
-  repositoryRoot: string,
-  cwd: string,
-): Promise<boolean> {
-  if (!isAbsolute(cwd)) {
-    return false;
+function readCredential(env: NodeJS.ProcessEnv, name: string): string {
+  const value = Object.hasOwn(env, name) ? env[name] : undefined;
+  if (typeof value !== 'string' || value.length === 0) {
+    throw new ConfigurationError(
+      'Configured external context credential is unavailable.',
+    );
   }
-  let resolvedCwd: string;
-  try {
-    resolvedCwd = await realpath(cwd);
-  } catch {
-    return false;
-  }
-  const pathFromRoot = relative(repositoryRoot, resolvedCwd);
-  return (
-    pathFromRoot === '' ||
-    (pathFromRoot !== '..' &&
-      !pathFromRoot.startsWith(`..${sep}`) &&
-      !isAbsolute(pathFromRoot))
-  );
+  return value;
 }

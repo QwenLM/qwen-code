@@ -18,35 +18,32 @@ afterEach(async () => {
 });
 
 describe('external context MCP server', () => {
-  it.each([false, true])(
-    'registers only search when write.enabled=%s and no writer is available',
-    async (writeEnabled) => {
-      const runtime = {
-        config: config(writeEnabled),
-        binding: searchBinding(),
-      };
-      const client = await connect(runtime);
-      const tools = await client.listTools();
-      expect(tools.tools.map((tool) => tool.name)).toEqual(['context_search']);
-      expect(tools.tools[0]?.annotations?.readOnlyHint).toBe(true);
-      expect(tools.tools[0]?.inputSchema).not.toHaveProperty(
-        'properties.tenantId',
-      );
-      expect(tools.tools[0]?.inputSchema).not.toHaveProperty(
-        'properties.repositoryId',
-      );
-      expect(tools.tools[0]?.inputSchema).not.toHaveProperty(
-        'properties.filters',
-      );
-    },
-  );
+  it('registers only a provider-bound retrieval tool', async () => {
+    const client = await connect({
+      config: config(),
+      binding: searchBinding(),
+    });
+    const tools = await client.listTools();
+    expect(tools.tools.map((tool) => tool.name)).toEqual(['context_search']);
+    expect(tools.tools[0]?.annotations?.readOnlyHint).toBeUndefined();
+    expect(tools.tools[0]?.annotations?.destructiveHint).toBe(false);
+    expect(tools.tools[0]?.inputSchema).not.toHaveProperty(
+      'properties.tenantId',
+    );
+    expect(tools.tools[0]?.inputSchema).not.toHaveProperty(
+      'properties.repositoryId',
+    );
+    expect(tools.tools[0]?.inputSchema).not.toHaveProperty(
+      'properties.filters',
+    );
+  });
 
   it('returns normalized context from the bound search provider', async () => {
     const search = vi
       .fn()
       .mockResolvedValue([{ id: 'one', content: 'repository policy' }]);
     const client = await connect({
-      config: config(false),
+      config: config(),
       binding: {
         type: 'generic-http-search-v1',
         provider: { search },
@@ -78,47 +75,82 @@ describe('external context MCP server', () => {
     });
   });
 
-  it('registers remember only for an enabled writer and returns its status', async () => {
-    const log = vi
-      .spyOn(process.stderr, 'write')
-      .mockImplementation(() => true);
-    const remember = vi.fn().mockResolvedValue({
-      status: 'accepted',
-      providerOperationId: 'event-1',
-    });
-    const runtime = {
-      config: config(true),
+  it('accepts 2000 astral Unicode characters and rejects 2001', async () => {
+    const search = vi.fn().mockResolvedValue([]);
+    const client = await connect({
+      config: config(),
       binding: {
-        ...searchBinding(),
-        writer: { remember },
+        type: 'generic-http-search-v1',
+        provider: { search },
       },
-    };
-    const client = await connect(runtime);
-    const tools = await client.listTools();
-    const rememberTool = tools.tools.find(
-      (tool) => tool.name === 'context_remember',
-    );
-    expect(rememberTool?.annotations?.readOnlyHint).toBe(false);
+    });
+    const acceptedQuery = '🙂'.repeat(2000);
 
     const result = await client.callTool({
-      name: 'context_remember',
-      arguments: { content: '  shared decision  ' },
+      name: 'context_search',
+      arguments: { query: acceptedQuery },
     });
-    expect(remember).toHaveBeenCalledWith({
-      content: 'shared decision',
+    expect(result.isError).not.toBe(true);
+    expect(search).toHaveBeenCalledWith({
+      query: acceptedQuery,
+      limit: 5,
       signal: expect.any(AbortSignal),
     });
-    const text = result.content[0];
-    expect(JSON.parse(text.type === 'text' ? text.text : '{}')).toEqual({
-      status: 'accepted',
-      providerOperationId: 'event-1',
+
+    const rejected = await client.callTool({
+      name: 'context_search',
+      arguments: { query: `${acceptedQuery}🙂` },
     });
-    expect(log.mock.calls.join(' ')).toContain('status=accepted');
+    expect(rejected.isError).toBe(true);
+    expect(JSON.stringify(rejected.content)).toContain(
+      'Search query must contain at most 2000',
+    );
+    expect(search).toHaveBeenCalledTimes(1);
+  });
+
+  it('aborts the provider when the client cancels a tool request', async () => {
+    let providerSignal: AbortSignal | undefined;
+    let signalReceived: (() => void) | undefined;
+    const received = new Promise<void>((resolve) => {
+      signalReceived = resolve;
+    });
+    const search = vi.fn(
+      ({ signal }: { signal: AbortSignal }) =>
+        new Promise<never>((_resolve, reject) => {
+          providerSignal = signal;
+          signalReceived?.();
+          signal.addEventListener('abort', () => reject(signal.reason), {
+            once: true,
+          });
+        }),
+    );
+    const client = await connect({
+      config: config(),
+      binding: {
+        type: 'generic-http-search-v1',
+        provider: { search },
+      },
+    });
+    const controller = new AbortController();
+
+    const result = client.callTool(
+      {
+        name: 'context_search',
+        arguments: { query: 'cancel this request' },
+      },
+      undefined,
+      { signal: controller.signal },
+    );
+    await received;
+    controller.abort();
+
+    await expect(result).rejects.toThrow();
+    await vi.waitFor(() => expect(providerSignal?.aborted).toBe(true));
   });
 
   it('returns stable errors without provider details', async () => {
     const client = await connect({
-      config: config(false),
+      config: config(),
       binding: {
         type: 'generic-http-search-v1',
         provider: {
@@ -139,12 +171,10 @@ describe('external context MCP server', () => {
   });
 });
 
-function config(writeEnabled: boolean): ExternalContextConfig {
+function config(): ExternalContextConfig {
   return {
     version: 1,
-    repositoryRoot: process.cwd(),
-    autoRecall: { enabled: false, timeoutMs: 1000 },
-    write: { enabled: writeEnabled },
+    timeoutMs: 1000,
     provider: {
       type: 'generic-http-search-v1',
       baseUrl: 'https://context.example.com',

@@ -5,15 +5,14 @@
     "zh": "外部上下文"
   },
   "description": {
-    "en": "Repository-bound search and optional memory writes for trusted teams",
-    "zh": "为可信团队提供仓库绑定的搜索和可选记忆写入"
+    "en": "Provider-bound external context search for trusted teams",
+    "zh": "为可信团队提供 Provider 绑定的外部上下文搜索"
   },
   "version": "1.0.0",
-  "hooks": "hooks/hooks.json",
   "mcpServers": {
     "external-context": {
       "command": "node",
-      "args": ["${extensionPath}${/}dist${/}main.js", "mcp"],
+      "args": ["${extensionPath}${/}dist${/}main.js"],
       "cwd": "${extensionPath}"
     }
   }

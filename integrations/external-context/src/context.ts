@@ -6,76 +6,25 @@
 
 import type { ExternalContextItem } from './types.js';
 
-const MAX_AUTO_QUERY_CHARS = 512;
 const MAX_ITEMS = 5;
 const MAX_ITEM_CONTENT_CHARS = 1000;
 const MAX_RENDERED_CHARS = 4000;
+export const MAX_SEARCH_QUERY_CHARACTERS = 2000;
 
-export function sanitizeAutoRecallQuery(prompt: string): string {
-  let query = prompt
-    .replace(/```[\s\S]*?```/g, ' ')
-    .replace(/~~~[\s\S]*?~~~/g, ' ')
-    .replace(/```[\s\S]*$/g, ' ')
-    .replace(/~~~[\s\S]*$/g, ' ')
-    .replace(/\bauthorization\s*:\s*bearer\s+\S+/gi, ' ')
-    .replace(
-      /\b(?:api[_-]?key|access[_-]?token|auth(?:orization)?|bearer|client[_-]?secret|password|secret|token)\b\s*[:=]\s*(?:"[^"]*"|'[^']*'|\S+)/gi,
-      ' ',
-    )
-    .replace(
-      /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/g,
-      ' ',
-    )
-    .replace(
-      /\b(?:sk|pk|ghp|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{16,}\b/gi,
-      ' ',
-    );
-
-  query = query.replace(/[A-Za-z0-9_+/=-]{24,}/g, (candidate) =>
-    looksLikeHighEntropyToken(candidate) ? ' ' : candidate,
-  );
-
-  return truncate(query.replace(/\s+/g, ' ').trim(), MAX_AUTO_QUERY_CHARS);
-}
-
-function looksLikeHighEntropyToken(value: string): boolean {
-  const counts = new Map<string, number>();
-  for (const char of value) {
-    counts.set(char, (counts.get(char) ?? 0) + 1);
-  }
-  let entropy = 0;
-  for (const count of counts.values()) {
-    const probability = count / value.length;
-    entropy -= probability * Math.log2(probability);
-  }
-  return entropy >= 3.3;
-}
-
-export function normalizeManualQuery(query: string): string {
+export function normalizeSearchQuery(query: string): string {
   const normalized = query.replace(/\s+/g, ' ').trim();
   if (!normalized) {
     throw new Error('Search query must not be empty.');
   }
-  if (Array.from(normalized).length > 2000) {
+  if (Array.from(normalized).length > MAX_SEARCH_QUERY_CHARACTERS) {
     throw new Error('Search query is too long.');
-  }
-  return normalized;
-}
-
-export function normalizeRememberContent(content: string): string {
-  const normalized = content.trim();
-  if (!normalized) {
-    throw new Error('Memory content must not be empty.');
-  }
-  if (Array.from(normalized).length > 10_000) {
-    throw new Error('Memory content is too long.');
   }
   return normalized;
 }
 
 export function renderExternalContext(
   sourceItems: readonly ExternalContextItem[],
-): string | undefined {
+): string {
   const items: ExternalContextItem[] = [];
 
   for (const source of sourceItems.slice(0, MAX_ITEMS)) {
@@ -87,9 +36,6 @@ export function renderExternalContext(
     }
   }
 
-  if (items.length === 0) {
-    return undefined;
-  }
   return JSON.stringify(envelope(items));
 }
 

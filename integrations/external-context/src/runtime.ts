@@ -9,9 +9,12 @@ import type { ProviderBinding } from './types.js';
 
 export async function withProviderTimeout<T>(
   timeoutMs: number,
+  requestSignal: AbortSignal,
   operation: (signal: AbortSignal) => Promise<T>,
 ): Promise<T> {
-  return operation(AbortSignal.timeout(timeoutMs));
+  return operation(
+    AbortSignal.any([requestSignal, AbortSignal.timeout(timeoutMs)]),
+  );
 }
 
 export async function observeProviderOperation<T>(input: {
@@ -19,7 +22,6 @@ export async function observeProviderOperation<T>(input: {
   operation: string;
   execute: () => Promise<T>;
   count?: (result: T) => number;
-  resultStatus?: (result: T) => string;
 }): Promise<T> {
   const startedAt = performance.now();
   try {
@@ -27,7 +29,7 @@ export async function observeProviderOperation<T>(input: {
     log({
       provider: input.binding.type,
       operation: input.operation,
-      status: input.resultStatus?.(result) ?? 'ok',
+      status: 'ok',
       durationMs: performance.now() - startedAt,
       count: input.count?.(result),
     });

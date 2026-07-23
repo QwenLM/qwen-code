@@ -1,13 +1,6 @@
 {
   "version": 1,
-  "repositoryRoot": "/absolute/path/to/repository",
-  "autoRecall": {
-    "enabled": false,
-    "timeoutMs": 1500
-  },
-  "write": {
-    "enabled": false
-  },
+  "timeoutMs": 5000,
   "provider": {
     "type": "mem0-platform-v3",
     "apiKeyEnv": "MEM0_API_KEY",

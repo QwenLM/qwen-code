@@ -6,8 +6,8 @@
 
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 
-export class ProviderHttpError extends Error {
-  constructor(readonly status: number) {
+class ProviderHttpError extends Error {
+  constructor() {
     super('External context provider rejected the request.');
     this.name = 'ProviderHttpError';
   }
@@ -36,9 +36,15 @@ export class ProviderTimeoutError extends ProviderTransportError {
 
 export function validateProviderBaseUrl(value: string): URL {
   const url = new URL(value);
-  if (url.username || url.password || url.search || url.hash) {
+  if (
+    url.username ||
+    url.password ||
+    url.pathname !== '/' ||
+    url.search ||
+    url.hash
+  ) {
     throw new Error(
-      'Provider URL must not contain credentials, query, or fragment.',
+      'Provider URL must not contain credentials, path, query, or fragment.',
     );
   }
   if (url.protocol === 'https:') {
@@ -84,7 +90,7 @@ export async function postJson(input: {
   }
   if (!response.ok) {
     cancelResponseBody(response);
-    throw new ProviderHttpError(response.status);
+    throw new ProviderHttpError();
   }
 
   const declaredLength = response.headers.get('content-length');

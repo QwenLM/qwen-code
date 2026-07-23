@@ -97,34 +97,50 @@ describe('GenericHttpSearchV1Adapter', () => {
           baseUrl: 'https://user:password@context.example.com',
         }),
     ).toThrow('Provider URL must not contain credentials');
+    expect(
+      () =>
+        new GenericHttpSearchV1Adapter({
+          ...config,
+          baseUrl: 'https://context.example.com/safe-prefix',
+        }),
+    ).toThrow('Provider URL must not contain credentials, path');
   });
 
-  it('rejects redirects and responses larger than 1 MiB', async () => {
-    const redirectUrl = await startServer((_request, response) => {
+  it('rejects redirects', async () => {
+    const baseUrl = await startServer((_request, response) => {
       response.writeHead(302, { location: 'https://other.example.com' });
       response.end();
     });
-    const oversizedUrl = await startServer((_request, response) => {
-      json(response, {
-        items: [{ id: 'one', content: 'x'.repeat(1024 * 1024) }],
+
+    await expect(searchGeneric(baseUrl)).rejects.toBeInstanceOf(
+      ProviderResponseError,
+    );
+  });
+
+  it('rejects a declared response larger than 1 MiB', async () => {
+    const baseUrl = await startServer((_request, response) => {
+      response.writeHead(200, {
+        'content-length': String(1024 * 1024 + 1),
+        'content-type': 'application/json',
       });
+      response.end('{}');
     });
 
-    for (const baseUrl of [redirectUrl, oversizedUrl]) {
-      const adapter = new GenericHttpSearchV1Adapter({
-        type: 'generic-http-search-v1',
-        baseUrl,
-        tokenEnv: 'TOKEN',
-        token: 'credential',
-      });
-      await expect(
-        adapter.search({
-          query: 'query',
-          limit: 5,
-          signal: AbortSignal.timeout(1000),
-        }),
-      ).rejects.toBeInstanceOf(ProviderResponseError);
-    }
+    await expect(searchGeneric(baseUrl)).rejects.toBeInstanceOf(
+      ProviderResponseError,
+    );
+  });
+
+  it('rejects a streamed response larger than 1 MiB', async () => {
+    const baseUrl = await startServer((_request, response) => {
+      response.setHeader('content-type', 'application/json');
+      response.write('x'.repeat(512 * 1024));
+      response.end('x'.repeat(512 * 1024 + 1));
+    });
+
+    await expect(searchGeneric(baseUrl)).rejects.toBeInstanceOf(
+      ProviderResponseError,
+    );
   });
 
   it.each([429, 500])('rejects HTTP %s without retrying', async (status) => {
@@ -169,6 +185,16 @@ describe('GenericHttpSearchV1Adapter', () => {
         signal: AbortSignal.timeout(1000),
       }),
     ).rejects.toBeInstanceOf(ProviderResponseError);
+  });
+
+  it('rejects a valid JSON response with an invalid envelope', async () => {
+    const baseUrl = await startServer((_request, response) => {
+      json(response, {});
+    });
+
+    await expect(searchGeneric(baseUrl)).rejects.toThrow(
+      'External context provider returned an invalid response.',
+    );
   });
 
   it('rejects invalid UTF-8 as a provider response error', async () => {
@@ -278,129 +304,6 @@ describe('Mem0PlatformV3Adapter', () => {
     );
   });
 
-  it('reports successful adds as accepted without claiming persistence', async () => {
-    const requests: unknown[] = [];
-    const acceptedUrl = await startServer(async (request, response) => {
-      requests.push(JSON.parse(await readBody(request)));
-      json(response, { status: 'PENDING', event_id: 'event-1' });
-    });
-    const completedUrl = await startServer((_request, response) => {
-      json(response, { status: 'SUCCEEDED', event_id: 'event-2' });
-    });
-
-    await expect(
-      mem0Adapter(acceptedUrl).remember({
-        content: 'shared decision',
-        signal: AbortSignal.timeout(1000),
-      }),
-    ).resolves.toEqual({
-      status: 'accepted',
-      providerOperationId: 'event-1',
-    });
-    await expect(
-      mem0Adapter(completedUrl).remember({
-        content: 'shared decision',
-        signal: AbortSignal.timeout(1000),
-      }),
-    ).resolves.toEqual({
-      status: 'accepted',
-      providerOperationId: 'event-2',
-    });
-    expect(requests).toEqual([
-      {
-        messages: [{ role: 'user', content: 'shared decision' }],
-        app_id: 'fixed-repository',
-        infer: false,
-      },
-    ]);
-  });
-
-  it('does not echo an unbounded provider operation ID', async () => {
-    const baseUrl = await startServer((_request, response) => {
-      json(response, { status: 'PENDING', event_id: 'x'.repeat(10_000) });
-    });
-
-    await expect(
-      mem0Adapter(baseUrl).remember({
-        content: 'shared decision',
-        signal: AbortSignal.timeout(1000),
-      }),
-    ).resolves.toEqual({ status: 'accepted' });
-  });
-
-  it.each(['REJECTED', 42, null])(
-    'does not treat an unknown explicit status (%j) as accepted',
-    async (status) => {
-      const baseUrl = await startServer((_request, response) => {
-        json(response, { status, event_id: 'event-rejected' });
-      });
-
-      await expect(
-        mem0Adapter(baseUrl).remember({
-          content: 'shared decision',
-          signal: AbortSignal.timeout(1000),
-        }),
-      ).resolves.toEqual({ status: 'unknown' });
-    },
-  );
-
-  it('returns unknown and does not retry an ambiguous add', async () => {
-    let requestCount = 0;
-    const baseUrl = await startServer(async (request) => {
-      requestCount += 1;
-      await readBody(request);
-      request.socket.destroy();
-    });
-    const adapter = mem0Adapter(baseUrl);
-
-    await expect(
-      adapter.remember({
-        content: 'shared decision',
-        signal: AbortSignal.timeout(1000),
-      }),
-    ).resolves.toEqual({ status: 'unknown' });
-    expect(requestCount).toBe(1);
-  });
-
-  it('treats provider failures as errors and server failures as unknown', async () => {
-    const failedUrl = await startServer((_request, response) => {
-      json(response, { status: 'FAILED', event_id: 'event-failed' });
-    });
-    const rejectedUrl = await startServer((_request, response) => {
-      response.writeHead(400);
-      response.end();
-    });
-    const uncertainUrls = await Promise.all(
-      [408, 500].map((status) =>
-        startServer((_request, response) => {
-          response.writeHead(status);
-          response.end();
-        }),
-      ),
-    );
-
-    await expect(
-      mem0Adapter(failedUrl).remember({
-        content: 'shared decision',
-        signal: AbortSignal.timeout(1000),
-      }),
-    ).rejects.toBeInstanceOf(ProviderResponseError);
-    await expect(
-      mem0Adapter(rejectedUrl).remember({
-        content: 'shared decision',
-        signal: AbortSignal.timeout(1000),
-      }),
-    ).rejects.toThrow('External context provider rejected the request.');
-    for (const uncertainUrl of uncertainUrls) {
-      await expect(
-        mem0Adapter(uncertainUrl).remember({
-          content: 'shared decision',
-          signal: AbortSignal.timeout(1000),
-        }),
-      ).resolves.toEqual({ status: 'unknown' });
-    }
-  });
-
   it('normalizes Mem0 and Generic HTTP results to the same context', async () => {
     const genericUrl = await startServer((_request, response) => {
       json(response, {
@@ -448,6 +351,20 @@ function mem0Adapter(baseUrl: string) {
     },
     new URL(baseUrl),
   );
+}
+
+async function searchGeneric(baseUrl: string) {
+  const adapter = new GenericHttpSearchV1Adapter({
+    type: 'generic-http-search-v1',
+    baseUrl,
+    tokenEnv: 'TOKEN',
+    token: 'credential',
+  });
+  return adapter.search({
+    query: 'query',
+    limit: 5,
+    signal: AbortSignal.timeout(1000),
+  });
 }
 
 async function startServer(

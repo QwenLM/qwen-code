@@ -4,21 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  postJson,
-  ProviderHttpError,
-  ProviderResponseError,
-  validateProviderBaseUrl,
-} from './http-client.js';
+import { postJson, validateProviderBaseUrl } from './http-client.js';
 import type {
   ExternalContextItem,
   ExternalContextProvider,
-  ExternalMemoryWriter,
   GenericHttpProviderConfig,
   Mem0ProviderConfig,
   ProviderBinding,
   ProviderConfig,
-  RememberResult,
 } from './types.js';
 
 const MEM0_BASE_URL = new URL('https://api.mem0.ai/');
@@ -28,7 +21,7 @@ export function createProvider(config: ProviderConfig): ProviderBinding {
   switch (config.type) {
     case 'mem0-platform-v3': {
       const adapter = new Mem0PlatformV3Adapter(config);
-      return { type: config.type, provider: adapter, writer: adapter };
+      return { type: config.type, provider: adapter };
     }
     case 'generic-http-search-v1':
       return {
@@ -61,9 +54,7 @@ export class GenericHttpSearchV1Adapter implements ExternalContextProvider {
   }
 }
 
-export class Mem0PlatformV3Adapter
-  implements ExternalContextProvider, ExternalMemoryWriter
-{
+export class Mem0PlatformV3Adapter implements ExternalContextProvider {
   constructor(
     private readonly config: Mem0ProviderConfig,
     private readonly baseUrl: URL = MEM0_BASE_URL,
@@ -87,35 +78,6 @@ export class Mem0PlatformV3Adapter
       signal: input.signal,
     });
     return parseMem0Items(response);
-  }
-
-  async remember(input: {
-    content: string;
-    signal: AbortSignal;
-  }): Promise<RememberResult> {
-    let response: unknown;
-    try {
-      response = await postJson({
-        url: new URL('/v3/memories/add/', this.baseUrl),
-        authorization: `Token ${this.config.apiKey}`,
-        body: {
-          messages: [{ role: 'user', content: input.content }],
-          app_id: this.config.appId,
-          infer: false,
-        },
-        signal: input.signal,
-      });
-    } catch (error) {
-      if (
-        error instanceof ProviderHttpError &&
-        error.status < 500 &&
-        error.status !== 408
-      ) {
-        throw error;
-      }
-      return { status: 'unknown' };
-    }
-    return parseMem0WriteResult(response);
   }
 }
 
@@ -217,38 +179,6 @@ function parseOptionalString(
     return null;
   }
   return value;
-}
-
-function parseMem0WriteResult(response: unknown): RememberResult {
-  if (!isRecord(response)) {
-    return { status: 'unknown' };
-  }
-  const operationId =
-    typeof response['event_id'] === 'string' &&
-    response['event_id'].length > 0 &&
-    response['event_id'].length <= 128
-      ? response['event_id']
-      : undefined;
-  const status =
-    typeof response['status'] === 'string'
-      ? response['status'].toUpperCase()
-      : undefined;
-
-  if (status === 'FAILED' || status === 'ERROR') {
-    throw new ProviderResponseError();
-  }
-  if (
-    status === 'PENDING' ||
-    status === 'ACCEPTED' ||
-    status === 'SUCCEEDED' ||
-    status === 'COMPLETED' ||
-    (response['status'] === undefined && operationId !== undefined)
-  ) {
-    return operationId
-      ? { status: 'accepted', providerOperationId: operationId }
-      : { status: 'accepted' };
-  }
-  return { status: 'unknown' };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

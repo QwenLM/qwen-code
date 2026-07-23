@@ -12,13 +12,6 @@ export interface ExternalContextProvider {
   }): Promise<readonly ExternalContextItem[]>;
 }
 
-export interface ExternalMemoryWriter {
-  remember(input: {
-    content: string;
-    signal: AbortSignal;
-  }): Promise<RememberResult>;
-}
-
 export interface ExternalContextItem {
   id: string;
   content: string;
@@ -28,27 +21,14 @@ export interface ExternalContextItem {
   updatedAt?: string;
 }
 
-export type RememberResult =
-  | { status: 'stored'; providerOperationId?: string }
-  | { status: 'accepted'; providerOperationId?: string }
-  | { status: 'unknown'; providerOperationId?: string };
-
 export interface ProviderBinding {
   type: ProviderConfig['type'];
   provider: ExternalContextProvider;
-  writer?: ExternalMemoryWriter;
 }
 
 export interface ExternalContextConfig {
   version: 1;
-  repositoryRoot: string;
-  autoRecall: {
-    enabled: boolean;
-    timeoutMs: number;
-  };
-  write: {
-    enabled: boolean;
-  };
+  timeoutMs: number;
   provider: ProviderConfig;
 }
 

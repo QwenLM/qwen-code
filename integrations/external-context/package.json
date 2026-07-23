@@ -2,13 +2,14 @@
   "name": "@qwen-code/external-context",
   "version": "0.20.1",
   "private": true,
-  "description": "Repository-bound external context extension for Qwen Code",
+  "description": "Provider-bound external context search for Qwen Code",
   "type": "module",
   "engines": {
     "node": ">=22.0.0"
   },
   "scripts": {
-    "build": "tsc --build",
+    "clean": "node -e \"const fs=require('node:fs'); fs.rmSync('dist',{recursive:true,force:true}); fs.rmSync('tsconfig.tsbuildinfo',{force:true})\"",
+    "build": "npm run clean && tsc --build",
     "test": "vitest run --config vitest.config.ts",
     "test:ci": "vitest run --config vitest.config.ts",
     "typecheck": "tsc --noEmit",
@@ -17,7 +18,6 @@
   "files": [
     "dist",
     "examples",
-    "hooks",
     "qwen-extension.json",
     "README.md"
   ],
