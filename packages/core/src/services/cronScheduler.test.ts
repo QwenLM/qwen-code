@@ -1393,6 +1393,62 @@ describe('CronScheduler', () => {
       await settle(schedB);
     });
 
+    it('does not classify an armed bound one-shot as missed on watcher reload', async () => {
+      vi.useFakeTimers();
+      try {
+        const createdAt = new Date(2025, 0, 15, 10, 14, 0).getTime();
+        vi.setSystemTime(new Date(2025, 0, 15, 10, 14, 30));
+        await writeCronTasks(tmpDir, [
+          {
+            id: 'armedOneShot',
+            cron: '15 10 * * *',
+            prompt: 'armed prompt',
+            recurring: false,
+            createdAt,
+            lastFiredAt: null,
+            sessionId: 'sess-A',
+            delivery: {
+              kind: 'channel',
+              target: {
+                channelName: 'dingtalk',
+                type: 'user',
+                id: 'user-1',
+              },
+            },
+          },
+        ]);
+        const fired: CronJob[] = [];
+        scheduler.start((job) => fired.push(job));
+        await scheduler.enableDurable('sess-A');
+
+        vi.setSystemTime(new Date(2025, 0, 15, 10, 15, 0, 500));
+        await (
+          scheduler as unknown as {
+            loadFileTasks(handleMissed: boolean): Promise<void>;
+          }
+        ).loadFileTasks(false);
+
+        expect(fired).toHaveLength(0);
+        scheduler.tick();
+        expect(fired).toHaveLength(1);
+        expect(fired[0]).toMatchObject({
+          id: 'armedOneShot',
+          prompt: 'armed prompt',
+          delivery: {
+            kind: 'channel',
+            target: {
+              channelName: 'dingtalk',
+              type: 'user',
+              id: 'user-1',
+            },
+          },
+        });
+        expect(fired[0]!.missed).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('a non-owner session catches up its own overdue bound task', async () => {
       const createdAt = Date.now() - 3 * 60 * 60_000; // 3h overdue
       await writeCronTasks(tmpDir, [

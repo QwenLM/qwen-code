@@ -260,6 +260,10 @@ export class CronScheduler {
   // the live job away (or clear its pendingRemoval guard) as if it had
   // been deleted on disk.
   private pendingAdd = new Set<string>();
+  // Durable one-shots this continuously-running scheduler loaded while it was
+  // eligible to fire them. Cleared on stop so a later enable still treats
+  // genuinely overdue work as missed.
+  private armedDurableOneShots = new Set<string>();
   // Ids of legacy tasks (a pre-removal `isolated` task with a `condition`
   // precondition) already reported as skipped, so the fail-closed remediation
   // breadcrumb is logged once per task rather than on every file reload.
@@ -503,6 +507,13 @@ export class CronScheduler {
     this.pendingAdd.add(job.id);
     try {
       await addCronTask(this.projectRoot, jobToDurableTask(job));
+      if (
+        !job.recurring &&
+        this.durableEnabled &&
+        this.#shouldFireDurable(job)
+      ) {
+        this.armedDurableOneShots.add(job.id);
+      }
     } catch (error) {
       this.jobs.delete(job.id);
       throw error;
@@ -534,6 +545,7 @@ export class CronScheduler {
         throw error;
       }
     }
+    this.armedDurableOneShots.delete(id);
     return true;
   }
 
@@ -813,6 +825,16 @@ export class CronScheduler {
         // same slot a second time. (A catch-up merely buffered then dropped is
         // NOT in this set, so it still re-detects from disk — intended recovery.)
         if (this.firePersistPending.has(t.id)) continue;
+        // A live scheduler may reload after another one-shot rewrites the shared
+        // tasks file but before this armed job's next 1s tick. Leave it to that
+        // tick; treating the sub-second gap as downtime would replace its real
+        // delivery with a synthetic missed-task confirmation.
+        if (
+          !t.recurring &&
+          this.timer !== null &&
+          this.armedDurableOneShots.has(t.id)
+        )
+          continue;
         const jitter = computeJitter(t.id, t.cron, t.recurring);
         const anchor = t.recurring
           ? (t.lastFiredAt ?? t.createdAt)
@@ -860,6 +882,7 @@ export class CronScheduler {
       // existed.
       for (const t of [...missedOneShots, ...finalTasks]) {
         this.pendingRemoval.add(t.id);
+        this.armedDurableOneShots.delete(t.id);
         // A prior non-owner load may have installed this task as a
         // live job — drop it, or the now-owning tick could fire it a
         // second time before the on-disk removal propagates back
@@ -878,6 +901,7 @@ export class CronScheduler {
     for (const job of this.jobs.values()) {
       if (job.durable && !diskIds.has(job.id)) {
         this.jobs.delete(job.id);
+        this.armedDurableOneShots.delete(job.id);
       }
     }
     for (const id of this.pendingRemoval) {
@@ -907,6 +931,11 @@ export class CronScheduler {
         job.lastFiredAt = Math.max(existing.lastFiredAt, job.lastFiredAt ?? 0);
       }
       this.jobs.set(task.id, job);
+      if (!task.recurring && this.#shouldFireDurable(job)) {
+        this.armedDurableOneShots.add(task.id);
+      } else {
+        this.armedDurableOneShots.delete(task.id);
+      }
       if (!existing) durableJobCount++;
     }
 
@@ -1248,6 +1277,7 @@ export class CronScheduler {
     }
     this.wakeupChainStartedAt = null;
     this.onFire = null;
+    this.armedDurableOneShots.clear();
 
     if (this.durableEnabled) {
       // Invalidate in-flight durable continuations (see durableGeneration).
@@ -1381,7 +1411,10 @@ export class CronScheduler {
     // Persist durable changes in one write so the lastFiredAt update and
     // the removals can't clobber each other's read-modify-write cycle.
     if (this.projectRoot && (firedAt.size > 0 || removedIds.length > 0)) {
-      for (const id of removedIds) this.pendingRemoval.add(id);
+      for (const id of removedIds) {
+        this.pendingRemoval.add(id);
+        this.armedDurableOneShots.delete(id);
+      }
       const removed = new Set(removedIds);
       // Guard the just-fired recurring ids against re-detection by a reload that
       // races this async write (removed one-shots are already covered by
