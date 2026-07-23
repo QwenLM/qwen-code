@@ -831,6 +831,30 @@ export function assertToolCalled(
 }
 
 /**
+ * Assert that a specific tool was called and all its results succeeded
+ */
+export function assertToolSucceeded(
+  messages: SDKMessage[],
+  toolName: string,
+): void {
+  const results = findToolResults(messages, toolName);
+
+  if (results.length === 0) {
+    throw new Error(
+      `Expected tool '${toolName}' to have at least one result, but found none`,
+    );
+  }
+
+  for (const result of results) {
+    if (result.isError) {
+      throw new Error(
+        `Expected tool '${toolName}' to succeed, but got error: ${result.content}`,
+      );
+    }
+  }
+}
+
+/**
  * Assert that the conversation completed successfully
  */
 export function assertSuccessfulCompletion(messages: SDKMessage[]): void {

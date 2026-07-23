@@ -26,6 +26,7 @@ import {
   findToolCalls,
   findToolResults,
   assertSuccessfulCompletion,
+  assertToolSucceeded,
   createSharedTestOptions,
   createResultWaiter,
 } from './test-helper.js';
@@ -91,11 +92,7 @@ describe('Tool Control Parameters (E2E)', () => {
 
           // Verify write_file executed successfully (tool-control check,
           // not model-content check — the model may echo back the original).
-          const writeResults = findToolResults(messages, 'write_file');
-          expect(writeResults.length).toBeGreaterThan(0);
-          for (const result of writeResults) {
-            expect(result.isError).toBe(false);
-          }
+          assertToolSucceeded(messages, 'write_file');
         } finally {
           await q.close();
         }
@@ -589,11 +586,7 @@ describe('Tool Control Parameters (E2E)', () => {
 
           // Verify write_file executed successfully (tool-control check,
           // not model-content check — the model may echo back the original).
-          const writeResults = findToolResults(messages, 'write_file');
-          expect(writeResults.length).toBeGreaterThan(0);
-          for (const result of writeResults) {
-            expect(result.isError).toBe(false);
-          }
+          assertToolSucceeded(messages, 'write_file');
         } finally {
           await q.close();
         }
@@ -889,11 +882,7 @@ describe('Tool Control Parameters (E2E)', () => {
 
           // Verify write_file executed successfully (tool-control check,
           // not model-content check — the model may echo back the original).
-          const writeResults = findToolResults(messages, 'write_file');
-          expect(writeResults.length).toBeGreaterThan(0);
-          for (const result of writeResults) {
-            expect(result.isError).toBe(false);
-          }
+          assertToolSucceeded(messages, 'write_file');
         } finally {
           await q.close();
         }
@@ -995,11 +984,7 @@ describe('Tool Control Parameters (E2E)', () => {
 
           // Verify write_file executed successfully (tool-control check,
           // not model-content check — the model may echo back the original).
-          const writeResults = findToolResults(messages, 'write_file');
-          expect(writeResults.length).toBeGreaterThan(0);
-          for (const result of writeResults) {
-            expect(result.isError).toBe(false);
-          }
+          assertToolSucceeded(messages, 'write_file');
         } finally {
           await q.close();
         }
