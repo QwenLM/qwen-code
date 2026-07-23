@@ -396,6 +396,7 @@ export default {
   'Tool Output Truncation Lines': 'ツール出力の切り詰め行数',
   'Tool Schema Compliance': 'Tool Schema 準拠',
   'Auto (detect from system)': '自動(システムから検出)',
+  'Auto (follow user input)': '自動(ユーザー入力に従う)',
   'Auto (detect terminal theme)': '自動（端末テーマを検出）',
   Auto: '自動',
   'Show model-specific usage statistics.': 'モデル別の使用統計を表示',
@@ -1911,8 +1912,14 @@ export default {
   'A new version of Qwen Code is available! {{current}} → {{latest}}':
     'Qwen Code の新しいバージョンがあります！{{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} は最新です！',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    'アップデートの確認に失敗しました。ネットワークまたはレジストリ設定を確認してください。',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    'アップデートの確認に失敗しました（{{reason}}）。ネットワークまたはレジストリ設定を確認してください。',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    'アップデートの確認をスキップしました（{{reason}}）— /update で再試行できます。',
+  'registry did not respond within {{seconds}}s':
+    'レジストリが {{seconds}} 秒以内に応答しませんでした',
+  'registry unreachable': 'レジストリに接続できません',
+  'registry error': 'レジストリエラー',
   'Unable to check for updates: {{reason}}':
     'アップデートを確認できません: {{reason}}',
   'Update successful! The new version will be used on your next run.':

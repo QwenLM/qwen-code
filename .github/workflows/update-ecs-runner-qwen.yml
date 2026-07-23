@@ -1,0 +1,67 @@
+name: 'Update ECS Runner Qwen'
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Optional. Empty means latest from npm.'
+        required: false
+        default: ''
+        type: 'string'
+  repository_dispatch:
+    types: ['npm-published']
+
+permissions:
+  contents: 'read'
+
+jobs:
+  update:
+    name: 'Update Qwen on ${{ matrix.runner }}'
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    strategy:
+      matrix:
+        runner: ['ecs-update-sg', 'ecs-update-64c']
+      fail-fast: false
+    runs-on: ['self-hosted', 'linux', 'x64', '${{ matrix.runner }}']
+    concurrency:
+      group: 'update-ecs-runner-qwen-${{ matrix.runner }}'
+      cancel-in-progress: false
+    timeout-minutes: 10
+    steps:
+      - name: 'Resolve version'
+        id: 'version'
+        env:
+          INPUT_VERSION: '${{ inputs.version || github.event.client_payload.version }}'
+        run: |-
+          set -euo pipefail
+          specifier="@qwen-code/qwen-code@${INPUT_VERSION#v}"
+          if [[ "${specifier}" == '@qwen-code/qwen-code@' ]]; then
+            specifier='@qwen-code/qwen-code@latest'
+          fi
+          version="$(npm view "${specifier}" version | tail -n 1)" || true
+          if [[ -z "${version}" ]]; then
+            echo "::error::No published qwen version matches '${INPUT_VERSION:-latest}'."
+            exit 1
+          fi
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "Resolved qwen version: ${version}"
+
+      - name: 'Update qwen'
+        env:
+          VERSION: '${{ steps.version.outputs.version }}'
+        run: |-
+          set -euo pipefail
+          # Always use sudo so the package lands in /usr/local (the system-wide
+          # global prefix that every user's PATH resolves first).  Without sudo
+          # the runner user (github-runner) installs into its own home directory
+          # which is shadowed by the older root-installed binary in /usr/local/bin.
+          sudo npm install -g "@qwen-code/qwen-code@${VERSION}"
+
+      - name: 'Verify version'
+        env:
+          VERSION: '${{ steps.version.outputs.version }}'
+        run: |-
+          set -euo pipefail
+          actual="$(qwen --version)"
+          echo "qwen version: ${actual}"
+          test "${actual}" = "${VERSION}"

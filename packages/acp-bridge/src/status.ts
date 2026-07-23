@@ -149,6 +149,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceMcpInitialize: 'qwen/control/workspace/mcp/initialize',
   workspaceMcpReload: 'qwen/control/workspace/mcp/reload',
   workspaceAgentGenerate: 'qwen/control/workspace/agents/generate',
+  workspaceGenerationStart: 'qwen/control/workspace/generation/start',
+  workspaceGenerationCancel: 'qwen/control/workspace/generation/cancel',
   workspaceMemoryRememberAvailability:
     'qwen/control/workspace/memory/remember/availability',
   workspaceMemoryRemember: 'qwen/control/workspace/memory/remember',
@@ -157,6 +159,13 @@ export const SERVE_CONTROL_EXT_METHODS = {
   // Runtime MCP server mutation ext-methods
   sessionTaskCancel: 'qwen/control/session/task/cancel',
   sessionGoalClear: 'qwen/control/session/goal/clear',
+  /**
+   * Read a live session's `/goal` state. The active goal lives only in the
+   * child's in-memory store, so this is the sole authoritative source for the
+   * condition, its running turn count and the judge's last verdict. Params:
+   * `{ sessionId }`; result: `{ active: ActiveGoalView | null }`.
+   */
+  sessionGoalGet: 'qwen/control/session/goal/get',
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
   workspaceReload: 'qwen/control/workspace/reload',
@@ -611,6 +620,8 @@ export interface ServeSessionAgentTaskStatus {
   stats?: { totalTokens: number; toolUses: number; durationMs: number };
   recentActivities?: Array<{ name: string; description: string; at: number }>;
   prompt?: string;
+  /** Tool call in the parent session that launched this agent. */
+  toolUseId?: string;
   /**
    * `id` of the agent task that spawned this one; absent for agents
    * launched by the top-level session. Mirrors `AgentTask.parentAgentId`

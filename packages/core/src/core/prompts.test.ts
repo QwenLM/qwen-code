@@ -11,7 +11,9 @@ import {
   getPlanModeSystemReminder,
   resolvePathFromEnv,
   getCompressionPrompt,
+  resolveInteractionMode,
 } from './prompts.js';
+import { InputFormat } from '../output/types.js';
 import { isGitRepository } from '../utils/gitUtils.js';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -42,6 +44,7 @@ describe('Core System Prompt (prompts.ts)', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     vi.stubEnv('QWEN_SYSTEM_MD', undefined);
+    vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', undefined);
     vi.stubEnv('QWEN_WRITE_SYSTEM_MD', undefined);
   });
 
@@ -64,7 +67,58 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toContain(
       'genuinely safer alternative that does not accomplish the denied action',
     );
-    expect(prompt).toContain('stop and ask the user for explicit approval');
+    expect(prompt).toContain(
+      'request explicit approval only when the current interaction mode can receive it',
+    );
+  });
+
+  it.each([
+    [
+      'interactive',
+      'an interactive CLI agent',
+      "Use 'ask_user_question' when you need clarification",
+    ],
+    [
+      'headless',
+      'a non-interactive CLI agent',
+      'Never ask the user a question',
+    ],
+    [
+      'acp',
+      'a CLI agent operating through an ACP host',
+      'The ACP host can relay the question and response',
+    ],
+  ] as const)(
+    'aligns the system prompt with %s mode',
+    (mode, role, questionGuidance) => {
+      vi.stubEnv('SANDBOX', undefined);
+      const prompt = getCoreSystemPrompt(undefined, undefined, undefined, mode);
+
+      expect(prompt).toContain(`You are Qwen Code, ${role}`);
+      expect(prompt).toContain(questionGuidance);
+    },
+  );
+
+  it('does not tell headless runs to wait for user input', () => {
+    vi.stubEnv('SANDBOX', undefined);
+    vi.mocked(isGitRepository).mockReturnValue(true);
+    const prompt = getCoreSystemPrompt(
+      undefined,
+      undefined,
+      undefined,
+      'headless',
+    );
+
+    expect(prompt).not.toContain('stop and ask the user for explicit approval');
+    expect(prompt).not.toContain('ask clarifying questions');
+    expect(prompt).not.toContain('If unsure, ask the user');
+    expect(prompt).not.toContain(
+      'ask for clarification or confirmation where needed',
+    );
+    expect(prompt).not.toMatch(/Use 'ask_user_question' when you need/);
+    expect(
+      prompt.lastIndexOf('This is a non-interactive, single-turn run'),
+    ).toBeGreaterThan(prompt.lastIndexOf('# Examples'));
   });
 
   it('instructs the model to preserve unrelated existing work', () => {
@@ -309,6 +363,132 @@ describe('Core System Prompt (prompts.ts)', () => {
     });
   });
 
+  describe('QWEN_SYSTEM_IDENTITY_MD environment variable', () => {
+    const customIdentity =
+      'You are Acme Code, an interactive CLI agent for Acme Corp.';
+
+    /** Sample the default identity from the live prompt to avoid drift. */
+    const sampleDefaultIdentity = (): string => {
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', undefined);
+      vi.stubEnv('QWEN_SYSTEM_MD', undefined);
+      return getCoreSystemPrompt().split('\n\n', 1)[0];
+    };
+
+    it('should keep default prompt byte-identical when identity env is unset', () => {
+      const defaultIdentity = sampleDefaultIdentity();
+      const prompt = getCoreSystemPrompt();
+      expect(prompt.startsWith(defaultIdentity)).toBe(true);
+      expect(fs.readFileSync).not.toHaveBeenCalled();
+    });
+
+    it('should replace only the identity sentence when identity env points to a file', () => {
+      const defaultIdentity = sampleDefaultIdentity();
+      const identityPath = path.resolve('/custom/identity.md');
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', identityPath);
+      vi.mocked(fs.existsSync).mockImplementation(
+        (p) => path.resolve(String(p)) === identityPath,
+      );
+      vi.mocked(fs.readFileSync).mockImplementation((p) => {
+        if (path.resolve(String(p)) === identityPath) {
+          return `${customIdentity}  \n\n`;
+        }
+        throw new Error(`unexpected read: ${String(p)}`);
+      });
+
+      const withOverride = getCoreSystemPrompt();
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', undefined);
+      const baseline = getCoreSystemPrompt();
+
+      expect(withOverride.startsWith(customIdentity)).toBe(true);
+      expect(withOverride).not.toContain('You are Qwen Code');
+      // trimEnd() strips trailing spaces/newlines from the identity file.
+      expect(withOverride.slice(customIdentity.length)).toBe(
+        baseline.slice(defaultIdentity.length),
+      );
+    });
+
+    it('should ignore identity env when QWEN_SYSTEM_MD is set', () => {
+      const systemPath = path.resolve('/custom/system.md');
+      const identityPath = path.resolve('/custom/identity.md');
+      vi.stubEnv('QWEN_SYSTEM_MD', systemPath);
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', identityPath);
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockImplementation((p) => {
+        if (path.resolve(String(p)) === systemPath) {
+          return 'full system override';
+        }
+        throw new Error(`identity file should not be read: ${String(p)}`);
+      });
+
+      const prompt = getCoreSystemPrompt();
+      expect(prompt).toBe('full system override');
+      expect(fs.readFileSync).toHaveBeenCalledTimes(1);
+      expect(fs.readFileSync).toHaveBeenCalledWith(systemPath, 'utf8');
+    });
+
+    it('should not inject identity when QWEN_SYSTEM_MD points to an empty file', () => {
+      const systemPath = path.resolve('/custom/empty-system.md');
+      const identityPath = path.resolve('/custom/identity.md');
+      vi.stubEnv('QWEN_SYSTEM_MD', systemPath);
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', identityPath);
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockImplementation((p) => {
+        if (path.resolve(String(p)) === systemPath) {
+          return '';
+        }
+        throw new Error(`identity file should not be read: ${String(p)}`);
+      });
+
+      const prompt = getCoreSystemPrompt();
+      expect(prompt).toBe('');
+      expect(prompt).not.toContain(customIdentity);
+      expect(prompt).not.toContain('You are Qwen Code');
+    });
+
+    it('should throw when identity env points to a missing file', () => {
+      const identityPath = path.resolve('/missing/identity.md');
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', identityPath);
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+
+      expect(() => getCoreSystemPrompt()).toThrow(
+        `missing system identity file '${identityPath}'`,
+      );
+    });
+
+    it('should throw when identity env points to an empty or whitespace-only file', () => {
+      const identityPath = path.resolve('/custom/blank-identity.md');
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', identityPath);
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue('  \n\t  ');
+
+      expect(() => getCoreSystemPrompt()).toThrow(
+        `empty system identity file '${identityPath}'`,
+      );
+    });
+
+    it('should throw when a ~/ identity path cannot resolve the home directory', () => {
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', '~/identity.md');
+      vi.spyOn(os, 'homedir').mockImplementation(() => {
+        throw new Error('homedir unavailable');
+      });
+
+      expect(() => getCoreSystemPrompt()).toThrow(
+        `failed to resolve system identity path '~/identity.md'`,
+      );
+    });
+
+    it.each(['0', 'false', '1', 'true'] as const)(
+      'should not override identity when env is switch value %s',
+      (switchValue) => {
+        const defaultIdentity = sampleDefaultIdentity();
+        vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', switchValue);
+        const prompt = getCoreSystemPrompt();
+        expect(prompt.startsWith(defaultIdentity)).toBe(true);
+        expect(fs.readFileSync).not.toHaveBeenCalled();
+      },
+    );
+  });
+
   describe('QWEN_WRITE_SYSTEM_MD environment variable', () => {
     it('should not write to file when QWEN_WRITE_SYSTEM_MD is "false"', () => {
       vi.stubEnv('QWEN_WRITE_SYSTEM_MD', 'false');
@@ -490,6 +670,40 @@ describe('Model-specific tool call formats', () => {
 
     expect(prompt).toMatchSnapshot();
   });
+
+  it('should use native Gemma 4 format for gemma4 models', () => {
+    vi.mocked(isGitRepository).mockReturnValue(false);
+
+    // Test detection via regex
+    const prompt = getCoreSystemPrompt(
+      undefined,
+      'unsloth/gemma-4-26B-A4B-it-qat',
+    );
+
+    // Should contain Gemma native token boundaries and quotes
+    expect(prompt).toContain('<|tool_call>call:run_shell_command');
+    expect(prompt).toContain(
+      '{command:<|"|>node server.js<|"|>,is_background:true}<tool_call|>',
+    );
+
+    // Should NOT contain legacy/generic formats
+    expect(prompt).not.toContain('[tool_call: run_shell_command for');
+    expect(prompt).not.toContain('<function=run_shell_command>');
+    expect(prompt).not.toContain('{"name": "run_shell_command"');
+
+    expect(prompt).toMatchSnapshot();
+  });
+
+  it('should override tool call format via QWEN_CODE_TOOL_CALL_STYLE env variable for gemma4', () => {
+    vi.stubEnv('QWEN_CODE_TOOL_CALL_STYLE', 'gemma4');
+    vi.mocked(isGitRepository).mockReturnValue(false);
+
+    // Pass a non-gemma model string to verify env var takes precedence
+    const prompt = getCoreSystemPrompt(undefined, 'gpt-4');
+
+    expect(prompt).toContain('<|tool_call>call:run_shell_command');
+    expect(prompt).not.toContain('[tool_call: run_shell_command for');
+  });
 });
 
 describe('getCustomSystemPrompt', () => {
@@ -556,7 +770,12 @@ describe('getPlanModeSystemReminder', () => {
 
     expect(result).toContain('When a Tool is Blocked by Plan Mode');
     expect(result).toContain('Do NOT retry');
+    expect(result).toContain(
+      'wrappers, quoting tricks, aliases, or obfuscation',
+    );
     expect(result).toContain('Pivot to read-only');
+    expect(result).toContain('does not approve the plan');
+    expect(result).toContain('exit Plan mode');
   });
 
   it('should be deterministic', () => {
@@ -774,5 +993,72 @@ describe('getCompressionPrompt', () => {
     expect(prompt).not.toMatch(
       /resume.*directly|continue the conversation from where it left off/i,
     );
+  });
+});
+
+describe('resolveInteractionMode', () => {
+  const makeConfig = (opts: {
+    zed?: boolean;
+    inputFormat?: string;
+    interactive?: boolean;
+  }) => ({
+    getExperimentalZedIntegration: () => opts.zed ?? false,
+    getInputFormat: () => opts.inputFormat ?? InputFormat.TEXT,
+    isInteractive: () => opts.interactive ?? false,
+  });
+
+  it("resolves the Zed integration to 'acp'", () => {
+    expect(resolveInteractionMode(makeConfig({ zed: true }))).toBe('acp');
+  });
+
+  it("resolves a stream-json session to 'acp' so the model may still ask questions", () => {
+    // Must match the runtime question/permission sites, which treat a
+    // stream-json session as ACP-capable (the host relays the question).
+    expect(
+      resolveInteractionMode(
+        makeConfig({ inputFormat: InputFormat.STREAM_JSON }),
+      ),
+    ).toBe('acp');
+  });
+
+  it("resolves an interactive text session to 'interactive'", () => {
+    expect(
+      resolveInteractionMode(
+        makeConfig({ inputFormat: InputFormat.TEXT, interactive: true }),
+      ),
+    ).toBe('interactive');
+  });
+
+  it("resolves a non-interactive text session to 'headless'", () => {
+    expect(
+      resolveInteractionMode(
+        makeConfig({ inputFormat: InputFormat.TEXT, interactive: false }),
+      ),
+    ).toBe('headless');
+  });
+
+  it("prefers 'acp' over 'interactive' for a stream-json session (ACP precedence)", () => {
+    expect(
+      resolveInteractionMode(
+        makeConfig({ inputFormat: InputFormat.STREAM_JSON, interactive: true }),
+      ),
+    ).toBe('acp');
+  });
+
+  it('treats a missing getInputFormat as a text session', () => {
+    // getInputFormat is optional on the structural type; its absence must not
+    // throw and must not resolve to 'acp'.
+    expect(
+      resolveInteractionMode({
+        getExperimentalZedIntegration: () => false,
+        isInteractive: () => true,
+      }),
+    ).toBe('interactive');
+    expect(
+      resolveInteractionMode({
+        getExperimentalZedIntegration: () => false,
+        isInteractive: () => false,
+      }),
+    ).toBe('headless');
   });
 });

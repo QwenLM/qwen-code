@@ -45,7 +45,6 @@ export {
 } from './mcp-status.js';
 
 import type { FunctionDeclaration } from '@google/genai';
-import { mcpToTool } from '@google/genai';
 import { existsSync } from 'node:fs';
 import { basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -59,6 +58,7 @@ import { getErrorMessage, getErrorStatus } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { retryWithBackoff } from './mcp-retry.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
+import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 import type {
   Unsubscribe,
   WorkspaceContext,
@@ -77,6 +77,19 @@ export const MCP_DEFAULT_TIMEOUT_MSEC = 10 * 60 * 1000; // default to 10 minutes
 
 const debugLogger = createDebugLogger('MCP');
 const AUTOMATIC_MCP_OAUTH_TIMEOUT_MS = 60_000;
+
+const invocationContextTransports = new WeakSet<Transport>();
+const invocationContextClients = new WeakSet<Client>();
+
+function bindInvocationContextPolicy(
+  client: Client,
+  transport: Transport,
+): void {
+  invocationContextClients.delete(client);
+  if (invocationContextTransports.has(transport)) {
+    invocationContextClients.add(client);
+  }
+}
 
 const STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES = new Set([400]);
 const STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT = 512;
@@ -337,6 +350,7 @@ export class McpClient {
    */
   async connect(): Promise<void> {
     this.isDisconnecting = false;
+    invocationContextClients.delete(this.client);
     clearMcpOAuthRequirement(this.serverName, this.serverConfig);
     // clear stale upstream error from
     // any prior connect/disconnect cycle. The silent-drop reader
@@ -391,6 +405,7 @@ export class McpClient {
         timeout: this.serverConfig.timeout,
       });
       this.instructions = this.client.getInstructions();
+      bindInvocationContextPolicy(this.client, this.transport);
 
       this.updateStatus(MCPServerStatus.CONNECTED);
     } catch (error) {
@@ -1240,6 +1255,7 @@ export async function discoverTools(
   opts?: { applyConfigFilters?: boolean },
 ): Promise<DiscoveredMCPTool[]> {
   try {
+    const { mcpToTool } = await import('@google/genai');
     const mcpCallableTool = mcpToTool(mcpClient, {
       timeout: mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
     });
@@ -1313,6 +1329,7 @@ export async function discoverTools(
             cliConfig?.getMcpToolIdleTimeoutMs?.(),
             annotationsMap.get(funcDecl.name!),
             mcpServerConfig.alwaysLoadTools === true,
+            invocationContextClients.has(mcpClient),
           ),
         );
       } catch (error) {
@@ -1653,6 +1670,7 @@ export async function connectToMcpServer(
       await mcpClient.connect(transport, {
         timeout: mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
       });
+      bindInvocationContextPolicy(mcpClient, transport);
       clearMcpOAuthRequirement(mcpServerName, mcpServerConfig);
       return mcpClient;
     } catch (error) {
@@ -2148,7 +2166,7 @@ export async function createTransport(
     // config providing its own PATH fully replaces the parent value instead of
     // being merged with a stale case-variant.
     const env = {
-      ...normalizePathEnvForWindows({ ...process.env }),
+      ...normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
       ...(mcpServerConfig.env || {}),
     };
 
@@ -2159,6 +2177,7 @@ export async function createTransport(
       cwd: mcpServerConfig.cwd,
       stderr: 'pipe',
     });
+    invocationContextTransports.add(transport);
     if (debugMode) {
       transport.stderr!.on('data', (data) => {
         const stderrStr = data.toString().trim();

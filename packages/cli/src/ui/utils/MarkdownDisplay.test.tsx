@@ -11,6 +11,18 @@ import { LoadedSettings } from '../../config/settings.js';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { renderMermaidVisual } from './mermaidVisualRenderer.js';
 import { RenderModeProvider } from '../contexts/RenderModeContext.js';
+import { getScreenBuffer } from '../selection/screen-buffer.js';
+import { getSelectedText } from '../selection/selection-text.js';
+
+function copiedFrame(stdout: NodeJS.WriteStream): string {
+  const frame = getScreenBuffer(stdout)!.frame!;
+  return getSelectedText(frame, {
+    sx: 0,
+    sy: 0,
+    ex: frame.width - 1,
+    ey: frame.height - 1,
+  });
+}
 
 describe('<MarkdownDisplay />', () => {
   const baseProps = {
@@ -375,10 +387,13 @@ describe('<MarkdownDisplay />', () => {
 * item B
 + item C
 `.replace(/\n/g, eol);
-      const { lastFrame } = renderWithProviders(
+      const { lastFrame, stdout } = renderWithProviders(
         <MarkdownDisplay {...baseProps} text={text} />,
       );
       expect(lastFrame()).toMatchSnapshot();
+      expect(copiedFrame(stdout as unknown as NodeJS.WriteStream)).toContain(
+        '- item A\n* item B\n+ item C',
+      );
     });
 
     it('renders nested unordered lists', () => {
@@ -425,10 +440,13 @@ Test
 | Cell 1   | Cell 2   |
 | Cell 3   | Cell 4   |
 `.replace(/\n/g, eol);
-      const { lastFrame } = renderWithProviders(
+      const { lastFrame, stdout } = renderWithProviders(
         <MarkdownDisplay {...baseProps} text={text} />,
       );
       expect(lastFrame()).toMatchSnapshot();
+      expect(copiedFrame(stdout as unknown as NodeJS.WriteStream)).toContain(
+        '│ Cell 1   │  Cell 2  │',
+      );
     });
 
     it('handles a table at the end of the input', () => {

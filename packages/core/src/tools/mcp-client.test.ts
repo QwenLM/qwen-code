@@ -23,6 +23,11 @@ import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { ResourceRegistry } from '../resources/resource-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import {
+  INVOCATION_CONTEXT_META_KEY,
+  runWithInvocationContext,
+  type InvocationContextV1,
+} from '../utils/invocation-context.js';
+import {
   addMCPStatusChangeListener,
   attemptAutomaticMcpOAuth,
   connectToMcpServer,
@@ -1387,6 +1392,150 @@ describe('mcp-client', () => {
       expect(tools[0].alwaysLoad).toBe(true);
     });
 
+    it('allows invocation context only for a client bound to a created stdio transport', async () => {
+      const callTool = vi.fn().mockResolvedValue({
+        content: [{ type: 'text', text: 'ok' }],
+      });
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({}),
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        getInstructions: vi.fn(),
+        callTool,
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [{ name: 'local-tool' }],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+      const client = new McpClient(
+        'local-server',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      const { tools } = await client.discoverAndReturn(cfgWithResources());
+      const context: InvocationContextV1 = {
+        version: 1,
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+      };
+
+      await runWithInvocationContext(context, () =>
+        tools[0].build({ param: 'test' }).execute(new AbortController().signal),
+      );
+
+      expect(callTool.mock.calls[0][0]._meta).toEqual({
+        [INVOCATION_CONTEXT_META_KEY]: context,
+      });
+    });
+
+    it('does not trust a stdio-shaped config without an internally bound client', async () => {
+      const callTool = vi.fn().mockResolvedValue({
+        content: [{ type: 'text', text: 'ok' }],
+      });
+      const arbitraryClient = {
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        callTool,
+      } as unknown as ClientLib.Client;
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [{ name: 'unbound-tool' }],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+      const [unboundTool] = await discoverTools(
+        'unbound-server',
+        { command: 'looks-like-stdio' },
+        arbitraryClient,
+        cfgWithResources(),
+      );
+      const context: InvocationContextV1 = {
+        version: 1,
+        sessionId: 'session-1',
+        promptId: 'prompt-1',
+      };
+
+      await runWithInvocationContext(context, () =>
+        unboundTool
+          .build({ param: 'test' })
+          .execute(new AbortController().signal),
+      );
+
+      expect(Object.hasOwn(callTool.mock.calls[0][0], '_meta')).toBe(false);
+    });
+
+    it.each([
+      ['Streamable HTTP', { httpUrl: 'http://example.test/mcp' }],
+      ['SSE', { url: 'http://example.test/sse' }],
+    ])(
+      'denies invocation context for %s transport clients',
+      async (_transportName, serverConfig) => {
+        const callTool = vi.fn().mockResolvedValue({
+          content: [{ type: 'text', text: 'ok' }],
+        });
+        const mockedClient = {
+          connect: vi.fn(),
+          registerCapabilities: vi.fn(),
+          setRequestHandler: vi.fn(),
+          getServerCapabilities: vi.fn().mockReturnValue({}),
+          listTools: vi.fn().mockResolvedValue({ tools: [] }),
+          getInstructions: vi.fn(),
+          callTool,
+        };
+        vi.mocked(ClientLib.Client).mockReturnValue(
+          mockedClient as unknown as ClientLib.Client,
+        );
+        vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+          () =>
+            ({
+              getCredentials: vi.fn().mockResolvedValue(null),
+            }) as unknown as MCPOAuthTokenStorage,
+        );
+        vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+          tool: () =>
+            Promise.resolve({
+              functionDeclarations: [{ name: 'remote-tool' }],
+            }),
+        } as unknown as GenAiLib.CallableTool);
+        const client = new McpClient(
+          'remote-server',
+          serverConfig,
+          {} as ToolRegistry,
+          {} as PromptRegistry,
+          {} as WorkspaceContext,
+          false,
+        );
+        await client.connect();
+        const { tools } = await client.discoverAndReturn(cfgWithResources());
+        const context: InvocationContextV1 = {
+          version: 1,
+          sessionId: 'session-1',
+          promptId: 'prompt-1',
+        };
+
+        await runWithInvocationContext(context, () =>
+          tools[0]
+            .build({ param: 'test' })
+            .execute(new AbortController().signal),
+        );
+
+        expect(Object.hasOwn(callTool.mock.calls[0][0], '_meta')).toBe(false);
+      },
+    );
+
     it('discoverAndReturn with { applyConfigFilters: false } ignores config filters and trust for shared pool snapshots', async () => {
       const mockedClient = {
         connect: vi.fn(),
@@ -2370,6 +2519,27 @@ describe('mcp-client', () => {
         env: expect.objectContaining({ FOO: 'bar' }),
         stderr: 'pipe',
       });
+    });
+
+    it('strips Qwen-internal daemon secrets from the stdio child env (#6601)', async () => {
+      process.env = {
+        ...ORIGINAL_ENV,
+        QWEN_SERVER_TOKEN: 'serve-secret',
+        QWEN_DAEMON_TOKEN: 'daemon-secret',
+        GH_TOKEN: 'gh-abc',
+      };
+      const mockedTransport = vi
+        .spyOn(SdkClientStdioLib, 'StdioClientTransport')
+        .mockReturnValue({} as SdkClientStdioLib.StdioClientTransport);
+
+      await createTransport('test-server', { command: 'test-command' }, false);
+
+      const transportEnv = mockedTransport.mock.calls[0]?.[0]?.env ?? {};
+      // Internal daemon secrets must never reach an agent-launched stdio server.
+      expect(transportEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
+      expect(transportEnv['QWEN_DAEMON_TOKEN']).toBeUndefined();
+      // Third-party credentials the server may legitimately need are preserved.
+      expect(transportEnv['GH_TOKEN']).toBe('gh-abc');
     });
 
     it('should normalize PATH-like env keys on Windows for stdio transport', async () => {

@@ -3,8 +3,10 @@ import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import {
   addChannelMemoryEntries,
   clearChannelMemory,
+  getChannelMemoryRevision,
   listChannelMemoryEntries,
   readChannelMemory,
+  recordChannelMemoryRecallMetrics,
   removeChannelMemoryEntries,
   updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
@@ -51,10 +53,12 @@ import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { resolveProxyUrl } from './proxy.js';
 import {
   createChannel,
+  daemonObservedContactsPath,
   daemonSessionRoutesPath,
   loadChannelsConfig,
   loadChannelsFromExtensions,
   parseConfiguredChannels,
+  registerBackgroundResponseRelay,
   registerPermissionRelay,
   registerSessionCleanup,
   registerToolCallDispatch,
@@ -62,6 +66,7 @@ import {
   type ParsedChannel,
 } from './runtime.js';
 import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
+import { ObservedChannelContactStore } from './observed-contact-store.js';
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
@@ -420,6 +425,9 @@ export async function runChannelDaemonWorker(
   );
   validateChannelWorkspaces(parsed, daemonWorkspace);
   const modelServiceId = selectFirstModel(parsed, 'Daemon worker');
+  const observedContacts = new ObservedChannelContactStore(
+    daemonObservedContactsPath(daemonWorkspace),
+  );
 
   const bridge = new DaemonChannelBridge({
     cwd: daemonWorkspace,
@@ -488,6 +496,7 @@ export async function runChannelDaemonWorker(
             router: createdRouter,
             channelMemory: {
               readChannelMemory,
+              getChannelMemoryRevision,
               listChannelMemoryEntries,
               addChannelMemoryEntries,
               updateChannelMemoryEntry,
@@ -498,12 +507,19 @@ export async function runChannelDaemonWorker(
               bridgeFacade,
               config.cwd,
             ),
+            channelMemoryRecallObserver: recordChannelMemoryRecallMetrics,
+            observedContacts: {
+              observe: (channelName, observation) => {
+                observedContacts.observe(channelName, observation);
+              },
+            },
           }),
           startupSignal,
         ),
       );
     }
     registerToolCallDispatch(bridgeFacade, createdRouter, channels);
+    registerBackgroundResponseRelay(bridgeFacade, createdRouter, channels);
     registerPermissionRelay(bridgeFacade, createdRouter, channels);
     registerSessionCleanup(bridgeFacade, createdRouter, channels);
 

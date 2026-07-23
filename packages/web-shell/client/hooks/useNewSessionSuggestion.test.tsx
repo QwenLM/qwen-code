@@ -162,4 +162,96 @@ describe('useNewSessionSuggestion', () => {
 
     expect(latestSuggestion).toBeNull();
   });
+
+  // The classifier is instructed to return JSON only, but live it sometimes
+  // wraps a valid decision in prose or a code fence. These pin the extraction
+  // fallback: recover the object when one is there, stay fail-closed when not.
+  const NEW_TASK_DRAFT = '帮我写一篇新的设计文档，主题是 Web Shell 新功能方案';
+  const CONTEXT_MESSAGES = [
+    {
+      id: 'm-1',
+      role: 'user',
+      content: '先看一下当前实现',
+      timestamp: 1,
+    },
+    {
+      id: 'm-2',
+      role: 'assistant',
+      content: '这里是当前实现的说明',
+      timestamp: 2,
+    },
+  ] as Message[];
+
+  async function classify(decisionText: string) {
+    vi.useFakeTimers();
+    testState.inputText = NEW_TASK_DRAFT;
+    testState.messages = CONTEXT_MESSAGES;
+    testState.generateContent.mockImplementation(async function* () {
+      yield {
+        type: 'delta',
+        requestId: 'req-1',
+        seq: 0,
+        text: decisionText,
+      };
+      yield {
+        type: 'done',
+        requestId: 'req-1',
+        model: 'fast-model',
+        modelSource: 'fast',
+      };
+    });
+
+    await renderHost();
+    act(() => {
+      vi.advanceTimersByTime(701);
+    });
+    await flush(3);
+  }
+
+  it('recovers a positive decision wrapped in prose (observed live)', async () => {
+    // Verbatim shape from a live run: prose preamble + bare JSON.
+    await classify(
+      'The user is explicitly switching to a completely new task, which is ' +
+        'unrelated to the previous discussion. This is a clear topic change.\n\n' +
+        JSON.stringify({ shouldSuggestNewSession: true, confidence: 0.98 }),
+    );
+
+    expect(testState.generateContent).toHaveBeenCalledOnce();
+    expect(latestSuggestion).toEqual({
+      isVisible: true,
+      classifiedInput: NEW_TASK_DRAFT,
+    });
+  });
+
+  it('recovers a positive decision inside a code fence', async () => {
+    await classify(
+      '```json\n' +
+        JSON.stringify({ shouldSuggestNewSession: true, confidence: 0.95 }) +
+        '\n```',
+    );
+
+    expect(latestSuggestion).toEqual({
+      isVisible: true,
+      classifiedInput: NEW_TASK_DRAFT,
+    });
+  });
+
+  it('keeps the banner hidden for a prose-wrapped negative decision', async () => {
+    await classify(
+      'This is a follow-up on the same topic.\n\n' +
+        JSON.stringify({ shouldSuggestNewSession: false, confidence: 0.97 }),
+    );
+
+    expect(testState.generateContent).toHaveBeenCalledOnce();
+    expect(latestSuggestion).toBeNull();
+  });
+
+  it('stays fail-closed on prose with no recoverable JSON object', async () => {
+    await classify(
+      'I think {this draft} switches topics, but here is no JSON to parse.',
+    );
+
+    expect(testState.generateContent).toHaveBeenCalledOnce();
+    expect(latestSuggestion).toBeNull();
+  });
 });

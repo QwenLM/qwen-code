@@ -9,40 +9,16 @@ import { Box, Text, type DOMElement } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { RowMouseController } from './shared/RowMouseController.js';
 import { PrepareLabel, MAX_WIDTH } from './PrepareLabel.js';
-import type {
-  CommandKind,
-  CommandSource,
-  ExecutionMode,
-} from '../commands/types.js';
 import { Colors } from '../colors.js';
 import { t } from '../../i18n/index.js';
-export interface Suggestion {
-  label: string;
-  value: string;
-  description?: string;
-  matchedIndex?: number;
-  /** @deprecated Use source/sourceBadge instead. */
-  commandKind?: CommandKind;
-  source?: CommandSource;
-  sourceLabel?: string;
-  sourceBadge?: string;
-  argumentHint?: string;
-  matchedAlias?: string;
-  supportedModes?: ExecutionMode[];
-  modelInvocable?: boolean;
-  /** Whether the suggestion represents a directory path. When true, handleAutocomplete should NOT append a trailing space so the user can continue tab-completing deeper into the directory tree. */
-  isDirectory?: boolean;
-  /**
-   * When true, the input layer should submit `/<value>` immediately on
-   * Enter-accept rather than just inserting the suggestion text and
-   * waiting for a second Enter. Mirrors the `submitOnAccept` flag on the
-   * underlying SlashCommand (see `commands/types.ts`). Used for parent
-   * commands like `/skills` whose bare action just opens a dialog and
-   * takes no further argument — typing `/skil<Enter>` should land in the
-   * dialog in one keystroke.
-   */
-  submitOnAccept?: boolean;
-}
+import {
+  MAX_SUGGESTIONS_TO_SHOW,
+  type Suggestion,
+} from '../utils/suggestions.js';
+
+export { MAX_SUGGESTIONS_TO_SHOW } from '../utils/suggestions.js';
+export type { Suggestion } from '../utils/suggestions.js';
+
 interface SuggestionsDisplayProps {
   suggestions: Suggestion[];
   activeIndex: number;
@@ -60,7 +36,6 @@ interface SuggestionsDisplayProps {
   mouseEnabled?: boolean;
 }
 
-export const MAX_SUGGESTIONS_TO_SHOW = 8;
 export { MAX_WIDTH };
 
 /**

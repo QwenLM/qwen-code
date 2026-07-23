@@ -344,6 +344,38 @@ export async function listChannelMemoryEntries(
   return document.entries;
 }
 
+async function getFileRevision(filePath: string): Promise<string> {
+  try {
+    const stats = await fs.stat(filePath, { bigint: true });
+    return [
+      stats.dev,
+      stats.ino,
+      stats.size,
+      stats.mtimeNs,
+      stats.ctimeNs,
+    ].join(':');
+  } catch (error) {
+    if (isMissingFile(error)) {
+      return 'missing';
+    }
+    throw error;
+  }
+}
+
+export async function getChannelMemoryRevision(
+  target: ChannelMemoryTarget,
+): Promise<string> {
+  const [canonical, legacy] = await Promise.all([
+    getFileRevision(getChannelMemoryFilePath(target)),
+    getFileRevision(getLegacyChannelMemoryFilePath(target)),
+  ]);
+  return createHash('sha256')
+    .update(canonical)
+    .update('\0')
+    .update(legacy)
+    .digest('hex');
+}
+
 export async function addChannelMemoryEntries(
   target: ChannelMemoryTarget,
   texts: readonly string[],

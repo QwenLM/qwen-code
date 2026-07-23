@@ -42,6 +42,9 @@ type UnifiedFile = {
   path: string;
   /** Sanitized version of `path` safe to drop into a `<Text>` node. */
   displayPath: string;
+  /** Sanitized pre-rename path for renames; absent otherwise. `displayPath`
+   *  is the current (post-rename) path used to address the file. */
+  oldDisplayPath?: string;
   added: number;
   removed: number;
   isBinary: boolean;
@@ -471,7 +474,14 @@ function FileRow({
             : '';
   // Head-truncate so the basename (the part users actually read) is kept.
   // Use the sanitized displayPath — `file.path` may carry raw control bytes.
-  const path = truncatePathStart(file.displayPath, maxPathChars);
+  // For a rename, show "old → new" only when there's room for both sides
+  // (≥19 cols, so each side gets ≥8 without overflowing); otherwise fall back
+  // to the new path alone so a narrow terminal doesn't break the row layout.
+  const renameFits = !!file.oldDisplayPath && maxPathChars >= 19;
+  const pathBudget = renameFits
+    ? Math.floor((maxPathChars - 3) / 2)
+    : maxPathChars;
+  const path = truncatePathStart(file.displayPath, pathBudget);
   return (
     <Box flexDirection="row">
       <Text
@@ -479,6 +489,16 @@ function FileRow({
         bold={selected}
       >
         {pointer}
+      </Text>
+      {renameFits ? (
+        <Text color={theme.text.secondary}>
+          {truncatePathStart(file.oldDisplayPath!, pathBudget)} →{' '}
+        </Text>
+      ) : null}
+      <Text
+        color={selected ? theme.text.accent : theme.text.primary}
+        bold={selected}
+      >
         {path}
       </Text>
       <Text color={theme.text.secondary}>{tag} </Text>
@@ -623,6 +643,11 @@ function perFileToUnified(
   return {
     path,
     displayPath: sanitizeFilenameForDisplay(path),
+    // Carry the pre-rename path so the interactive viewer can show `old → new`
+    // for renames (keyed/addressed by the new path).
+    oldDisplayPath: s.oldPath
+      ? sanitizeFilenameForDisplay(s.oldPath)
+      : undefined,
     added: s.added ?? 0,
     removed: s.isUntracked ? 0 : (s.removed ?? 0),
     isBinary: !!s.isBinary,

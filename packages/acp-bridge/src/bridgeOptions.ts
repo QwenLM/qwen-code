@@ -143,6 +143,7 @@ export interface BridgeTelemetry {
     attributes: BridgeTelemetryAttributes,
     fn: () => Promise<T>,
   ): Promise<T>;
+  setActiveSpanAttributes?(attributes: BridgeTelemetryAttributes): void;
   event(name: string, attributes: BridgeTelemetryAttributes): void;
   injectPromptContext<T extends object>(request: T): T;
   metrics?: BridgeTelemetryMetrics;

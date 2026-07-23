@@ -23,6 +23,10 @@ import {
 } from '../server/request-helpers.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import { requireSessionRuntime } from './session-runtime.js';
+import {
+  parseVirtualSubagentSessionId,
+  type VirtualSubagentSessions,
+} from '../virtual-subagent-sessions.js';
 
 let activeSseCount = 0;
 
@@ -36,6 +40,7 @@ interface RegisterSseEventsRoutesDeps {
   daemonLog?: DaemonLogger;
   writerIdleTimeoutMs?: number;
   sendBridgeError: SendBridgeError;
+  virtualSubagentSessions?: VirtualSubagentSessions;
 }
 
 type OmitId<T> = Omit<T, 'id'>;
@@ -82,7 +87,7 @@ export function registerSseEventsRoutes(
   const { workspaceRegistry, daemonLog, sendBridgeError, writerIdleTimeoutMs } =
     deps;
 
-  app.get('/session/:id/events', (req, res) => {
+  app.get('/session/:id/events', async (req, res) => {
     const sessionId = req.params['id'];
     const lastEventId = parseLastEventId(req.headers['last-event-id']);
     const maxQueued = parseMaxQueuedQuery(req.query['maxQueued'], res);
@@ -95,8 +100,9 @@ export function registerSseEventsRoutes(
     let iter: AsyncIterator<BridgeEvent> | undefined;
     const abort = new AbortController();
     try {
+      const virtualKey = parseVirtualSubagentSessionId(sessionId);
       const runtime = requireSessionRuntime({
-        sessionId,
+        sessionId: virtualKey?.parentSessionId ?? sessionId,
         route: 'GET /session/:id/events',
         res,
         workspaceRegistry,
@@ -104,12 +110,26 @@ export function registerSseEventsRoutes(
       });
       if (!runtime) return;
       const snapshot = req.query['snapshot'] === '1';
-      const iterable = runtime.bridge.subscribeEvents(sessionId, {
-        signal: abort.signal,
-        lastEventId,
-        ...(maxQueued !== undefined ? { maxQueued } : {}),
-        ...(snapshot ? { snapshot: true } : {}),
-      });
+      const iterable = virtualKey
+        ? await deps.virtualSubagentSessions?.subscribe(runtime, sessionId, {
+            signal: abort.signal,
+            lastEventId,
+            ...(maxQueued !== undefined ? { maxQueued } : {}),
+          })
+        : runtime.bridge.subscribeEvents(sessionId, {
+            signal: abort.signal,
+            lastEventId,
+            ...(maxQueued !== undefined ? { maxQueued } : {}),
+            ...(snapshot ? { snapshot: true } : {}),
+          });
+      if (!iterable) {
+        res.status(404).json({
+          error: 'Subagent session not found',
+          code: 'session_not_found',
+          sessionId,
+        });
+        return;
+      }
       iter = iterable[Symbol.asyncIterator]();
     } catch (err) {
       // `EventBus` throws `SubscriberLimitExceededError` when the

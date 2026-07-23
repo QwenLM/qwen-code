@@ -7,6 +7,7 @@
  * Handles bidirectional sync between VSCode Settings and ~/.qwen/settings.json.
  */
 
+import { logger } from '../utils/logger.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
@@ -190,7 +191,7 @@ function readSettings(): Record<string, unknown> {
     // caller's catch will see this; refusing to overwrite a malformed file
     // is the whole point — better than silently destroying user state by
     // treating it as `{}`.
-    console.error(
+    logger.error(
       `[settingsWriter] Failed to parse ${settingsPath}; refusing to overwrite a malformed file.`,
       err,
     );
@@ -568,7 +569,7 @@ export function snapshotSettingsForRollback(): Record<string, unknown> | null {
     // Log only the error's class name (not its message) — consistent with the
     // providerMatchesCredentials guard, so the security stance holds even
     // though this catch is filesystem errors rather than user-defined fns.
-    console.warn(
+    logger.warn(
       '[settingsWriter] snapshotSettingsForRollback failed; credential rollback disabled:',
       err instanceof Error ? err.constructor.name : typeof err,
     );
@@ -604,7 +605,7 @@ export function readQwenSettingsForVSCode(): QwenSettingsForVSCode | null {
   try {
     settings = readSettings();
   } catch (error) {
-    console.error(
+    logger.error(
       '[settingsWriter] readQwenSettingsForVSCode failed; returning null:',
       error,
     );
@@ -723,7 +724,7 @@ export function clearPersistedAuth(): void {
 
     writeSettings(settings);
   } catch (error) {
-    console.error(
+    logger.error(
       '[settingsWriter] Failed to clear persisted auth credentials:',
       error,
     );

@@ -155,6 +155,10 @@ class Session {
     debugLogger.debug('[Session] Initializing config');
 
     try {
+      // gemini.tsx has already emitted warnings known before stream-json
+      // initialization starts. Keep that snapshot so only warnings produced
+      // by the deferred initialize() call are written here.
+      const emittedWarnings = new Set(this.config.getWarnings());
       // Bracket `config.initialize()` with the same profiler checkpoints
       // the non-stream-json branch in `gemini.tsx` uses so the
       // `config_initialize_dur` derived phase shows up in stream-json
@@ -166,6 +170,11 @@ class Session {
       profileCheckpoint('config_initialize_start');
       await this.config.initialize(options);
       profileCheckpoint('config_initialize_end');
+      for (const warning of this.config.getWarnings()) {
+        if (emittedWarnings.has(warning)) continue;
+        emittedWarnings.add(warning);
+        process.stderr.write(`${warning}\n`);
+      }
       // Stream-json sessions feed prompts straight to the model after init.
       // Under progressive MCP availability `initialize()` returns before
       // MCP servers settle, so we must explicitly await discovery here —

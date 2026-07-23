@@ -10,6 +10,14 @@ const daemonProxy: ProxyOptions = {
   changeOrigin: true,
   bypass: (req) => {
     if (req.url?.startsWith('/api/')) return undefined;
+    // `/extensions/*` is both a daemon API and a client source directory.
+    if (
+      req.method === 'GET' &&
+      req.url?.startsWith('/extensions/') &&
+      /\.(?:[cm]?[jt]sx?|css|map)(?:\?|$)/.test(req.url)
+    ) {
+      return req.url;
+    }
     const fetchMode = req.headers['sec-fetch-mode'];
     const fetchDest = req.headers['sec-fetch-dest'];
     const accept = req.headers.accept ?? '';
@@ -77,6 +85,7 @@ export default defineConfig(({ command }) => ({
       '/session': daemonProxy,
       '/permission': daemonProxy,
       '/workspace': daemonProxy,
+      '/extensions': daemonProxy,
       '/file': daemonProxy,
       '/stat': daemonProxy,
       '/list': daemonProxy,
@@ -86,6 +95,9 @@ export default defineConfig(({ command }) => ({
       // without it the SPA fallback returns index.html in dev and the dialog
       // fails JSON parsing / reports an HTTP error on open.
       '/scheduled-tasks': daemonProxy,
+      // Goals page (`GET /goals`). Without it the SPA fallback returns
+      // index.html in dev and the page fails JSON parsing on open.
+      '/goals': daemonProxy,
       // Token-usage dashboard (Daemon Status "统计" tab). Same reason as the
       // routes above — without it the SPA fallback returns index.html in dev and
       // the tab fails JSON parsing on `GET /usage/dashboard`.

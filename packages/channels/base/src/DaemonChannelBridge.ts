@@ -653,6 +653,16 @@ export class DaemonChannelBridge
           break;
         }
         const text = getTextContent(update['content']);
+        if (meta?.['qwenDiscreteMessage'] === true) {
+          if (
+            meta['source'] === 'background_notification_response' &&
+            meta['rewritten'] !== true &&
+            text
+          ) {
+            this.emit('backgroundResponse', sessionId, text);
+          }
+          break;
+        }
         if (text) {
           this.emit(
             meta?.['source'] === 'slash_command'

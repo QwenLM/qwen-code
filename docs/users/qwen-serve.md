@@ -66,7 +66,7 @@ qwen serve
 
 The default bind is `127.0.0.1:4170`. Bearer auth is **off** on loopback so local development "just works". The daemon registers the current working directory as its primary workspace; use an absolute `--workspace /path/to/dir` to override it, and repeat the flag to register additional isolated runtimes.
 
-**Open the Web Shell UI.** Browse to `http://127.0.0.1:4170/` (or start the daemon with `qwen serve --open` to launch it automatically) for the full browser terminal — chat, diffs, tool calls, and permission prompts. The UI is served at the daemon root on the same origin as the API. The rest of this guide uses raw HTTP so you can script against the API directly.
+**Open the Web Shell UI.** Browse to `http://127.0.0.1:4170/` (or start the daemon with `qwen serve --open` to launch it automatically) for the full browser terminal — chat, diffs, commit history, tool calls, and permission prompts. The UI is served at the daemon root on the same origin as the API. The rest of this guide uses raw HTTP so you can script against the API directly.
 
 ### 2. Sanity-check it
 
@@ -277,6 +277,42 @@ curl -X POST http://127.0.0.1:4170/session/$SESSION_ID/prompt \
 
 The `curl -N` from step 4 will print frames as they arrive.
 
+### Optional Todo Stop Guard
+
+Long-running daemon clients can opt into a bounded continuation when the
+current work chain successfully writes a top-level Todo list and then stops
+with items still pending or in progress. Add this to `settings.json` and
+restart the daemon:
+
+```json
+{
+  "experimental": {
+    "todoStopGuard": true
+  }
+}
+```
+
+The guard adds at most two consecutive primary-model calls without new user
+input. A mid-turn user message runs first and starts a fresh two-attempt stage;
+retry/continue and related background results retain the current stage's
+budget. Every call and the final exhaustion state appear as replayable
+`session_update` events with `_meta.source: "todo_stop_guard"`; the metadata
+includes the attempt and unfinished count but never Todo text. A queued full
+prompt also runs first, and existing permission/cancellation rules are
+unchanged.
+
+While an armed chain waits on related background work, unrelated cron/loop
+fires and old-task notifications are deferred. Recurring work is bounded and
+coalesced per task until the chain yields.
+
+The option defaults to `false`, requires restart, and is forced off in safe
+mode, bare mode, and Approval `plan` mode. It is in-memory only: loading Todo
+state from disk or restarting the daemon does not arm it. A new ordinary prompt
+must successfully run its own top-level `todo_write`; retry/continue and live
+client reattach keep the current in-memory work chain. Successfully changing
+the session working directory clears it so an old Todo cannot resume in a new
+workspace.
+
 ## Authentication
 
 For anything beyond loopback, you **must** pass a bearer token:
@@ -361,6 +397,7 @@ Notes:
 | `--mcp-client-budget <n>`               | —               | Positive integer cap on live MCP clients. When `mcp_workspace_pool` is advertised, the cap and transports are shared per workspace runtime; when the tag is absent, the legacy per-session manager enforces it. Combine with `--mcp-budget-mode`. When unset, no accounting-driven enforcement (but `GET /workspace/mcp` still reports `clientCount`). Distinct from claude-code's `MCP_SERVER_CONNECTION_BATCH_SIZE`, which gates startup concurrency rather than total live clients. Pre-flight `caps.features.mcp_guardrails` and `caps.features.mcp_workspace_pool`.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `--mcp-budget-mode <m>`                 | `warn` / `off`  | How `--mcp-client-budget` is enforced. `warn` (default when budget set): no refusal, snapshot's `budgets[0].status` flips to `warning` at ≥75% of budget. `enforce`: connects past the cap are refused, per-server cell shows `disabledReason: 'budget'`, deterministic by `mcpServers` declaration order. `off` (default when budget unset): pure observability. Boot rejects `enforce` without a budget.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `--http-bridge`                         | `true`          | Stage 1 mode: production attempts to preheat one primary `qwen --acp` child for compatibility and retries on first use after failure, while each trusted secondary can start one child on demand. Sessions targeting a runtime multiplex onto its child via ACP `newSession()`; untrusted secondaries cannot start ACP. Stage 2 native in-process becomes available later.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `--initialize-timeout-ms <n>`           | `10000`         | ACP child request timeout, including the `initialize` handshake (ms). Must be a positive integer up to `2147483647`. Values above the JS timer ceiling (`2^31-1`) are rejected at boot because Node silently compresses them to 1 ms. Cold-container deployments that need extra headroom for child startup can raise this; the same value governs `newSession`, workspace-status polls, and other ACP ext-method deadlines.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | `--allow-origin <pat>`                  | —               | T2.4 ([#4514](https://github.com/QwenLM/qwen-code/issues/4514)). Cross-origin allowlist for browser webui clients. Repeatable. Each value is `*` (any origin — boot refuses if no bearer token is configured; `--require-auth` on loopback is recommended so `/health` and `/demo` are also bearer-gated, since both are pre-auth on loopback by default) or a canonical URL origin (`<scheme>://<host>[:<port>]`, no trailing slash / path / userinfo / query). **Subdomain wildcards (`https://*.example.com`) are intentionally unsupported** — list each subdomain explicitly, or use `*` with a configured token (and `--require-auth` for full hardening). Matched origins receive CORS response headers (`Access-Control-Allow-Origin`, `Vary: Origin`, methods, headers, max-age, and exposed `Retry-After`); unmatched origins still get a 403 with the same envelope as today's wall. `Origin: null` (sandboxed iframes, file:// docs) is always rejected, even under `*`. Pre-flight via `caps.features.allow_origin`. Loopback self-origin hits are unaffected. |
 | `--web` / `--no-web`                    | `true`          | Serve the built Web Shell SPA at the daemon root (`GET /`, `/assets/*`, and SPA deep-link fallback). The static shell is registered **before** the bearer-auth gate — a browser can't attach a token to a `<script>` subresource or an address-bar navigation, the shell carries no secrets, and every API route stays token-gated regardless. On non-loopback binds a one-line stderr warning notes the UI is reachable without auth. Use `--no-web` for an API-only daemon. No effect when the build omits the Web Shell assets (the daemon logs a breadcrumb and runs API-only).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `--open`                                | `false`         | After the listener is up, open the Web Shell in your default browser at the daemon URL (with `#token=` appended as a URL fragment when a token is configured — a fragment is never sent to the server, keeping the token out of access logs and Referer headers). No-op with `--no-web`, or in headless / CI / SSH environments where no browser is available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
@@ -676,15 +713,47 @@ const result = await flow.awaitCompletion({ signal: abortCtrl.signal });
 
 ## Daemon log file
 
-`qwen serve` writes a per-process diagnostic log to:
+`qwen serve` appends diagnostic records across normal restarts at the stable
+active path:
 
 ```
-${QWEN_RUNTIME_DIR or ~/.qwen}/debug/daemon/serve-<pid>-<workspaceHash>.log
+${QWEN_RUNTIME_DIR or ~/.qwen}/debug/daemon/daemon.log
 ```
 
-A `latest` symlink in the same directory always points at the current process's log, so `tail -f ~/.qwen/debug/daemon/latest` will follow whichever daemon is running.
+Every file record includes a random per-start `runId` and the daemon PID. A
+successful stable owner also updates `debug/daemon/latest` to `daemon.log` on
+platforms that support symlinks. On macOS/Linux, follow rotation with:
+
+```bash
+tail -F ~/.qwen/debug/daemon/daemon.log
+```
+
+On other platforms, configure the viewer to reopen the pathname after it is
+replaced. A viewer that keeps only the old file handle will remain on the
+archive after rotation.
 
 The log captures lifecycle messages, route errors (with `route=` and `sessionId=` context), ACP child stderr, and — when `QWEN_SERVE_DEBUG=1` is set — extra bridge breadcrumbs. Lines that go to stderr today still go to stderr; the file log is **additive**, not a replacement.
+
+The active file rotates before it would exceed 10 MiB. Each family retains
+four archives under `archive/`, and each file record is capped at 256 KiB. The
+in-memory queue accepts at most 4 MiB of unsettled file payload. Queue pressure,
+rotation failures, or filesystem failures can therefore drop file copies;
+`GET /daemon/status?detail=full` exposes logger health, issues, and dropped
+record/byte counters.
+
+Only one daemon may own the stable family in a log namespace. A concurrent
+daemon writes to `debug/daemon/runs/run-<runId>/daemon.log`; the startup banner
+and full status contain the authoritative path. `runs/recent-fallback` is a
+best-effort locator for a recent fallback family and may point to one that is
+still live. A healthy namespace converges to roughly 100 MiB: about 50 MiB for
+stable plus one inactive fallback family. Live or not-yet-stale fallback
+families are retained, so concurrent daemons or crash/restart storms can
+temporarily use more.
+
+One runtime directory is one ownership and retention namespace. Use distinct
+`QWEN_RUNTIME_DIR` values when daemons need independent history. New daemon log
+directories are private to the user (`0700`) and new files use `0600` on POSIX.
+There is no age-based expiry.
 
 ### Disabling
 
@@ -694,9 +763,14 @@ Set `QWEN_DAEMON_LOG_FILE=0` (or `false`/`off`/`no`) to skip file logging entire
 
 Session-scoped debug logs (`~/.qwen/debug/<sessionId>.txt` and the `~/.qwen/debug/latest` symlink) are independent. The daemon log lives in a sibling `daemon/` subdirectory; per-session debug semantics are unchanged by this feature.
 
-### No rotation
+### External rotation
 
-The daemon log appends indefinitely. Rotate manually if it grows large. A future enhancement may add automatic rotation; track via [#4548](https://github.com/QwenLM/qwen-code/issues/4548) follow-ups.
+Do not point an external logrotate rule at the active `daemon.log`. The daemon
+is the sole supported writer and rotator; external rename, deletion, or
+truncation invalidates its size model. Copying or shipping records without
+mutating the family is safe. Older `serve-<pid>.log` and
+`serve-<pid>-<workspaceHash>.log` files are left untouched and are not counted
+by the new retention policy.
 
 ## Runtime MCP server management (issue [#4514](https://github.com/QwenLM/qwen-code/issues/4514))
 

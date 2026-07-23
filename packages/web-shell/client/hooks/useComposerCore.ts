@@ -70,12 +70,14 @@ import {
   getComposerTagIconUrl,
   getComposerTagSerialized,
   isBuiltinComposerTagIconUrl,
+  parseUserMessageContentSafely,
 } from '../utils/composerTag';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import { isSafeImageSrc } from '../components/messages/Markdown';
 import type {
   ComposerTagClickHandler,
   ComposerTagRenderer,
+  UserMessageContentParser,
   WebShellComposerApi,
   WebShellComposerInput,
   WebShellComposerTag,
@@ -85,6 +87,7 @@ import type {
   WebShellBuiltinAtProvidersConfig,
   WebShellAtProvider,
 } from '../customization';
+import { useWebShellPortalRoot } from '../portalRoot';
 
 // ---- Large paste handling (shared utilities) ----
 
@@ -299,12 +302,22 @@ const TOOLTIP_STYLES = `
 }
 `;
 
-function ensureTooltipStyles() {
-  if (document.getElementById(TOOLTIP_STYLE_ID)) return;
-  const style = document.createElement('style');
+function ensureTooltipStyles(root: Document | ShadowRoot) {
+  if (root.getElementById(TOOLTIP_STYLE_ID)) return;
+  const ownerDocument = root instanceof Document ? root : root.ownerDocument;
+  const style = ownerDocument.createElement('style');
   style.id = TOOLTIP_STYLE_ID;
   style.textContent = TOOLTIP_STYLES;
-  document.head.appendChild(style);
+  if (root instanceof Document) {
+    root.head.appendChild(style);
+  } else {
+    root.appendChild(style);
+  }
+}
+
+function getTooltipStyleRoot(parent: HTMLElement): Document | ShadowRoot {
+  const root = parent.getRootNode();
+  return root instanceof ShadowRoot ? root : parent.ownerDocument;
 }
 
 /**
@@ -1064,6 +1077,7 @@ export interface UseComposerCoreOptions {
   atProviders?: readonly WebShellAtProvider[];
   atWorkspaceCwd?: string;
   composerTagIcons?: WebShellComposerTagIconMap;
+  parseUserMessageContent?: UserMessageContentParser;
   renderComposerTag?: ComposerTagRenderer;
   renderComposerTagTooltip?: ComposerTagRenderer;
   onComposerTagClick?: ComposerTagClickHandler;
@@ -1081,6 +1095,7 @@ export interface SearchState {
   openHistorySearch: () => void;
   closeSearch: (restoreDraft: boolean, keepFocus?: boolean) => void;
   submitSearchMatch: (match: string) => void;
+  restoreSearchMatch?: (match: string) => void;
   handleSearchKeyDown: (e: React.KeyboardEvent<HTMLInputElement>) => void;
   handleSearchInput: (e: React.ChangeEvent<HTMLInputElement>) => void;
   handleSearchCompositionEnd: (
@@ -1213,6 +1228,7 @@ export function useComposerCore(
     atProviders,
     atWorkspaceCwd,
     composerTagIcons,
+    parseUserMessageContent,
     renderComposerTag,
     renderComposerTagTooltip,
     onComposerTagClick,
@@ -1221,8 +1237,10 @@ export function useComposerCore(
 
   const workspace = useOptionalWorkspace();
   const { language, t } = useI18n();
+  const portalRoot = useWebShellPortalRoot();
   const containerRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<EditorView | null>(null);
+  const tooltipPortalRef = useRef<HTMLDivElement | null>(null);
   const onSubmitRef = useRef(onSubmit);
   onSubmitRef.current = onSubmit;
   const onInputTextChangeRef = useRef(onInputTextChange);
@@ -1301,6 +1319,8 @@ export function useComposerCore(
   }
   const composerTagIconsRef = useRef(composerTagIcons);
   composerTagIconsRef.current = composerTagIcons;
+  const parseUserMessageContentRef = useRef(parseUserMessageContent);
+  parseUserMessageContentRef.current = parseUserMessageContent;
   const renderComposerTagRef = useRef(renderComposerTag);
   renderComposerTagRef.current = renderComposerTag;
   const renderComposerTagTooltipRef = useRef(renderComposerTagTooltip);
@@ -1410,6 +1430,102 @@ export function useComposerCore(
   const [composerTags, setComposerTags] = useState<WebShellComposerTag[]>([]);
   const composerTagsRef = useRef<WebShellComposerTag[]>([]);
   composerTagsRef.current = composerTags;
+  const historyDraftComposerTagsRef = useRef<WebShellComposerTag[] | null>(
+    null,
+  );
+  const rememberPromptHistoryDraftTags = useCallback(() => {
+    if (historyDraftComposerTagsRef.current !== null) return;
+    historyDraftComposerTagsRef.current = [...composerTagsRef.current];
+  }, []);
+  const restorePromptHistoryDraftTags = useCallback(() => {
+    const tags = historyDraftComposerTagsRef.current;
+    if (tags === null) return;
+    historyDraftComposerTagsRef.current = null;
+    const restoredTags = [...tags];
+    composerTagsRef.current = restoredTags;
+    setComposerTags(restoredTags);
+  }, []);
+  const clearPromptHistoryDraftTags = useCallback(() => {
+    historyDraftComposerTagsRef.current = null;
+  }, []);
+  const clearRestoredComposerTags = useCallback(() => {
+    composerTagsRef.current = [];
+    setComposerTags([]);
+  }, []);
+  const restoreRawHistoryEntry = useCallback(
+    (view: EditorView, text: string) => {
+      clearRestoredComposerTags();
+      view.dispatch({
+        changes: { from: 0, to: view.state.doc.length, insert: text },
+        effects: clearInlineTagsEffect.of(),
+        selection: { anchor: text.length },
+      });
+    },
+    [clearRestoredComposerTags],
+  );
+  const restorePromptHistoryEntry = useCallback(
+    (view: EditorView, text: string) => {
+      const parts = parseUserMessageContentSafely(
+        text,
+        parseUserMessageContentRef.current,
+        '[WebShell] failed to parse composer history content',
+        { requireSourcePreservation: true },
+      );
+      const hasTags = parts?.some((part) => part.type === 'tag') ?? false;
+      if (!parts || !hasTags) {
+        restoreRawHistoryEntry(view, text);
+        return;
+      }
+
+      const effects: StateEffect<unknown>[] = [clearInlineTagsEffect.of()];
+      let restoredText = '';
+      for (const part of parts) {
+        if (part.type === 'text') {
+          restoredText += part.text;
+          continue;
+        }
+        const serialized = getComposerTagSerialized(part.tag);
+        const from = restoredText.length;
+        restoredText += serialized;
+        effects.push(
+          addInlineTagEffect.of({
+            from,
+            to: restoredText.length,
+            tag: resolveComposerTagIcon(part.tag),
+          }),
+        );
+      }
+      clearRestoredComposerTags();
+      view.dispatch({
+        changes: {
+          from: 0,
+          to: view.state.doc.length,
+          insert: restoredText,
+        },
+        effects,
+        selection: { anchor: restoredText.length },
+      });
+    },
+    [clearRestoredComposerTags, resolveComposerTagIcon, restoreRawHistoryEntry],
+  );
+  const restoreHistoryEntry = useCallback(
+    (view: EditorView, text: string) => {
+      if (shellModeRef.current) {
+        restoreRawHistoryEntry(view, text);
+        return;
+      }
+      restorePromptHistoryEntry(view, text);
+    },
+    [restorePromptHistoryEntry, restoreRawHistoryEntry],
+  );
+  const restoreSelectedHistoryMatch = useCallback(
+    (text: string) => {
+      const view = viewRef.current;
+      if (!view) return;
+      restoreHistoryEntry(view, text);
+    },
+    [restoreHistoryEntry],
+  );
   const composerInputRef = useRef(composerInput);
   composerInputRef.current = composerInput;
   const submitTextRef = useRef<
@@ -1417,6 +1533,7 @@ export function useComposerCore(
       view: EditorView,
       textOverride?: string,
       tagsOverride?: readonly WebShellComposerTag[],
+      suppressFollowupCompletion?: boolean,
     ) => boolean
   >(() => true);
   const autoTriggerRef = useRef<{ text: string; from: number } | null>(null);
@@ -1675,13 +1792,13 @@ export function useComposerCore(
     const current = view.state.doc.toString();
     const prev = history.navigateUp(current);
     if (prev !== null) {
-      view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: prev },
-        selection: { anchor: prev.length },
-      });
+      if (!shellModeRef.current) {
+        rememberPromptHistoryDraftTags();
+      }
+      restoreHistoryEntry(view, prev);
     }
     view.focus();
-  }, []);
+  }, [rememberPromptHistoryDraftTags, restoreHistoryEntry]);
 
   const navigateNextHistory = useCallback(() => {
     if (disabledRef.current) return;
@@ -1701,20 +1818,24 @@ export function useComposerCore(
       : historyActionsRef.current;
     const next = history.navigateDown();
     if (next !== null) {
-      view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: next },
-        selection: { anchor: next.length },
-      });
+      const returningToPromptDraft =
+        !shellModeRef.current && !history.isNavigating();
+      restoreHistoryEntry(view, next);
+      if (returningToPromptDraft) {
+        restorePromptHistoryDraftTags();
+      }
     }
     view.focus();
-  }, []);
+  }, [restoreHistoryEntry, restorePromptHistoryDraftTags]);
 
   // ---- Create CodeMirror EditorView ----
   useEffect(() => {
     if (!containerRef.current) return;
 
-    ensureTooltipStyles();
+    const tooltipParent = portalRoot ?? document.body;
+    ensureTooltipStyles(getTooltipStyleRoot(tooltipParent));
     const tooltipPortal = document.createElement('div');
+    tooltipPortalRef.current = tooltipPortal;
     tooltipPortal.setAttribute('data-web-shell-tooltip-portal', '');
     tooltipPortal.style.position = 'fixed';
     tooltipPortal.style.inset = '0';
@@ -1757,7 +1878,7 @@ export function useComposerCore(
       }
     };
     syncTheme();
-    document.body.appendChild(tooltipPortal);
+    tooltipParent.appendChild(tooltipPortal);
 
     const observer = new MutationObserver(syncTheme);
     let el: Element | null = containerRef.current;
@@ -1774,6 +1895,7 @@ export function useComposerCore(
       view: EditorView,
       textOverride?: string,
       tagsOverride?: readonly WebShellComposerTag[],
+      suppressFollowupCompletion = false,
     ) => {
       const inlineTags =
         tagsOverride === undefined ? getInlineComposerTagPlacements(view) : [];
@@ -1781,6 +1903,7 @@ export function useComposerCore(
       const followup = followupStateRef.current;
       const followupCompletion =
         textOverride === undefined &&
+        !suppressFollowupCompletion &&
         inlineTags.length === 0 &&
         followup?.isVisible
           ? getFollowupCompletion(editorText, followup.suggestion)
@@ -1840,6 +1963,7 @@ export function useComposerCore(
           historyActionsRef.current.reset();
         }
         historyBrowseActiveRef.current = false;
+        clearPromptHistoryDraftTags();
         setComposerTags([]);
         setPastedImages([]);
         view.dispatch({
@@ -2035,10 +2159,7 @@ export function useComposerCore(
             const prev = history.navigateUp(current);
             if (prev === null) return true;
             historyBrowseActiveRef.current = true;
-            view.dispatch({
-              changes: { from: 0, to: view.state.doc.length, insert: prev },
-              selection: { anchor: prev.length },
-            });
+            restoreHistoryEntry(view, prev);
             return true;
           }
           if (queuedMessagesRef.current.length > 0) {
@@ -2049,11 +2170,9 @@ export function useComposerCore(
           const current = view.state.doc.toString();
           const prev = history.navigateUp(current);
           if (prev === null) return false;
+          rememberPromptHistoryDraftTags();
           historyBrowseActiveRef.current = true;
-          view.dispatch({
-            changes: { from: 0, to: view.state.doc.length, insert: prev },
-            selection: { anchor: prev.length },
-          });
+          restoreHistoryEntry(view, prev);
           return true;
         },
       },
@@ -2088,21 +2207,19 @@ export function useComposerCore(
             const next = history.navigateDown();
             if (next === null) return true;
             historyBrowseActiveRef.current = history.isNavigating();
-            view.dispatch({
-              changes: { from: 0, to: view.state.doc.length, insert: next },
-              selection: { anchor: next.length },
-            });
+            restoreHistoryEntry(view, next);
             return true;
           }
           const next = history.navigateDown();
           if (next === null) {
             return onFocusFooterRef.current?.() ?? false;
           }
-          historyBrowseActiveRef.current = history.isNavigating();
-          view.dispatch({
-            changes: { from: 0, to: view.state.doc.length, insert: next },
-            selection: { anchor: next.length },
-          });
+          const returningToPromptDraft = !history.isNavigating();
+          historyBrowseActiveRef.current = !returningToPromptDraft;
+          restoreHistoryEntry(view, next);
+          if (returningToPromptDraft) {
+            restorePromptHistoryDraftTags();
+          }
           return true;
         },
       },
@@ -2459,8 +2576,17 @@ export function useComposerCore(
       viewRef.current = null;
       observer.disconnect();
       tooltipPortal.remove();
+      tooltipPortalRef.current = null;
     };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    const tooltipPortal = tooltipPortalRef.current;
+    if (!tooltipPortal) return;
+    const tooltipParent = portalRoot ?? document.body;
+    ensureTooltipStyles(getTooltipStyleRoot(tooltipParent));
+    tooltipParent.appendChild(tooltipPortal);
+  }, [portalRoot]);
 
   // ---- Reactions to prop changes ----
 
@@ -3050,30 +3176,29 @@ export function useComposerCore(
       const view = viewRef.current;
       if (!view) return;
       closeSearch(false);
+      if (!shellModeRef.current) {
+        restoreSelectedHistoryMatch(match);
+        submitTextRef.current(view, undefined, undefined, true);
+        return;
+      }
       const text = match.trim();
       if (!text) return;
       const images = pastedImagesRef.current;
-      const isShellMode = shellModeRef.current;
       const accepted = onSubmitRef.current(
-        isShellMode ? `!${text}` : text,
+        `!${text}`,
         images.length > 0 ? [...images] : undefined,
       );
       if (accepted === false) {
-        replaceEditorText(match);
+        restoreSelectedHistoryMatch(match);
         return;
       }
       onDismissFollowupRef.current?.();
-      if (isShellMode) {
-        shellHistoryActionsRef.current.push(text);
-        shellHistoryActionsRef.current.reset();
-      } else {
-        historyActionsRef.current.push(text);
-        historyActionsRef.current.reset();
-      }
+      shellHistoryActionsRef.current.push(text);
+      shellHistoryActionsRef.current.reset();
       setPastedImages([]);
       replaceEditorText('');
     },
-    [closeSearch, replaceEditorText],
+    [closeSearch, replaceEditorText, restoreSelectedHistoryMatch],
   );
 
   const handleSearchKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -3087,7 +3212,7 @@ export function useComposerCore(
       e.preventDefault();
       const match = searchMatches[searchActiveIndex];
       if (match) {
-        replaceEditorText(match);
+        restoreSelectedHistoryMatch(match);
       }
       closeSearch(false);
     } else if (e.key === 'Enter') {
@@ -3219,6 +3344,7 @@ export function useComposerCore(
       openHistorySearch,
       closeSearch,
       submitSearchMatch,
+      restoreSearchMatch: restoreSelectedHistoryMatch,
       handleSearchKeyDown,
       handleSearchInput,
       handleSearchCompositionEnd,

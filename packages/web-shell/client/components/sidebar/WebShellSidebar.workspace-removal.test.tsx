@@ -166,6 +166,8 @@ function renderSidebar(
     selectedWorkspaceCwd?: string;
     onSelectWorkspace?: (cwd: string | undefined) => void;
     onError?: (error: unknown, message: string) => void;
+    onOpenGoals?: () => void;
+    onOpenAddWorkspace?: () => void;
     lockedWorkspaceCwd?: string;
     lockedWorkspace?: {
       render?: (workspace: DaemonWorkspaceCapability) => ReactNode;
@@ -181,6 +183,7 @@ function renderSidebar(
           onOpenSettings={() => {}}
           onOpenDaemonStatus={() => {}}
           onOpenScheduledTasks={() => {}}
+          onOpenGoals={overrides.onOpenGoals ?? (() => {})}
           onOpenSessions={() => {}}
           onOpenSplitView={() => {}}
           onNewSession={() => false}
@@ -188,6 +191,7 @@ function renderSidebar(
           onError={overrides.onError ?? (() => {})}
           selectedWorkspaceCwd={overrides.selectedWorkspaceCwd}
           onSelectWorkspace={overrides.onSelectWorkspace}
+          onOpenAddWorkspace={overrides.onOpenAddWorkspace}
           lockedWorkspaceCwd={overrides.lockedWorkspaceCwd}
           lockedWorkspace={overrides.lockedWorkspace}
         />
@@ -359,6 +363,8 @@ beforeEach(() => {
   }));
   workspaceActions.removeWorkspace.mockReset();
   workspaceActions.removeWorkspace.mockResolvedValue({ removed: true });
+  workspaceActions.addWorkspace.mockReset();
+  workspaceActions.addWorkspace.mockResolvedValue({ persisted: true });
   active.reload.mockReset();
   active.reload.mockResolvedValue(undefined);
   archived.reload.mockReset();
@@ -376,6 +382,19 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar workspace removal', () => {
+  it('delegates Add workspace to the App-owned dialog', () => {
+    const onOpenAddWorkspace = vi.fn();
+    renderSidebar({ onOpenAddWorkspace });
+
+    const addButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Add workspace"]',
+    );
+    expect(addButton).not.toBeNull();
+    act(() => click(addButton!));
+
+    expect(onOpenAddWorkspace).toHaveBeenCalledOnce();
+  });
+
   it('scopes pinned and archived sessions to a locked secondary workspace', async () => {
     connection.capabilities = {
       ...capabilities,
@@ -532,8 +551,17 @@ describe('WebShellSidebar workspace removal', () => {
   it('exposes removal for an untrusted removable workspace', () => {
     renderSidebar();
 
-    expect(workspaceAction('/tmp/danger')).toBeDefined();
+    const trigger = workspaceAction('/tmp/danger');
+    expect(trigger).toBeDefined();
     expect(workspaceAction('/tmp/project')).toBeUndefined();
+
+    act(() => click(trigger!));
+    const item = document.body.querySelector(
+      '[aria-label="Remove workspace: /tmp/danger"]',
+    );
+    const menu = item?.closest('[data-slot="dropdown-menu-content"]');
+    expect(menu?.classList.contains('w-auto')).toBe(true);
+    expect(menu?.classList.contains('min-w-40')).toBe(true);
   });
 
   it('removes the selected workspace and falls back to primary', async () => {
@@ -964,6 +992,19 @@ describe('WebShellSidebar non-primary archive', () => {
       });
       await archiveSessionsData.mock.results.at(-1)?.value;
     });
+  });
+});
+
+describe('WebShellSidebar goals entry', () => {
+  it('renders the Goals footer button and invokes onOpenGoals', () => {
+    const onOpenGoals = vi.fn();
+    renderSidebar({ onOpenGoals });
+    const button = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Goals"]',
+    );
+    expect(button).not.toBeNull();
+    click(button!);
+    expect(onOpenGoals).toHaveBeenCalledTimes(1);
   });
 });
 

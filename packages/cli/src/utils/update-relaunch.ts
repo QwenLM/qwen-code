@@ -8,18 +8,19 @@ import type { LoadedSettings } from '../config/settings.js';
 import { writeStderrLine } from './stdioHelpers.js';
 
 const UPDATE_CHECK_FAILED_MESSAGE =
-  'Failed to check for updates. Please check your network or registry configuration.';
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.';
 const UPDATE_FAILED_MESSAGE =
   'Automatic update failed. Please try updating manually.';
 
 export async function updateBeforeRelaunch(
   settings: LoadedSettings,
   projectRoot: string,
+  relaunchOnFailure: boolean,
 ): Promise<boolean> {
   let translate = (message: string) => message;
   try {
     const [
-      { checkForUpdatesDetailed },
+      { checkForUpdatesDetailed, describeUpdateCheckFailure },
       { handleAutoUpdate },
       { getInstallationInfo },
       { performStandaloneUpdate },
@@ -56,19 +57,13 @@ export async function updateBeforeRelaunch(
           installationInfo.updateMessage ??
             t('Manual update required. Please reinstall Qwen Code.'),
         );
-        return false;
+        return relaunchOnFailure;
       }
-      const updateProcess = handleAutoUpdate(
+      const success = await handleAutoUpdate(
         result.info,
         settings,
         projectRoot,
       );
-      const success = updateProcess
-        ? await new Promise<boolean>((resolve) => {
-            updateProcess.once('close', (code) => resolve(code === 0));
-            updateProcess.once('error', () => resolve(false));
-          })
-        : false;
       writeStderrLine(
         t(
           success
@@ -76,12 +71,16 @@ export async function updateBeforeRelaunch(
             : UPDATE_FAILED_MESSAGE,
         ),
       );
-      return success;
+      return success || relaunchOnFailure;
     } else if (result.status === 'error') {
-      writeStderrLine(t(UPDATE_CHECK_FAILED_MESSAGE));
+      writeStderrLine(
+        t(UPDATE_CHECK_FAILED_MESSAGE, {
+          reason: describeUpdateCheckFailure(result.error),
+        }),
+      );
     }
   } catch {
     writeStderrLine(translate(UPDATE_FAILED_MESSAGE));
   }
-  return false;
+  return relaunchOnFailure;
 }

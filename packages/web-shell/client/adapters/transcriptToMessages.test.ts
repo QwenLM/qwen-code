@@ -200,6 +200,79 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it.each([
+    ['completed', 'completed'],
+    ['failed', 'failed'],
+    ['cancelled', 'completed'],
+  ] as const)(
+    'projects a background agent %s notification onto its tool',
+    (notificationStatus, expectedStatus) => {
+      const messages = transcriptBlocksToDaemonMessages([
+        toolBlock('agent-block', 'agent-call', 'completed', 1, {
+          toolName: 'agent',
+          rawInput: { run_in_background: true },
+          rawOutput: { type: 'task_execution', status: 'background' },
+        }),
+        textBlock(
+          'agent-terminal',
+          'assistant',
+          'background agent finished',
+          2,
+          false,
+          {
+            meta: {
+              source: 'background_notification',
+              qwenDiscreteMessage: true,
+              backgroundTask: {
+                kind: 'agent',
+                status: notificationStatus,
+                taskId: 'agent-task',
+                toolUseId: 'agent-call',
+              },
+            },
+          },
+        ),
+      ]);
+
+      expect(messages).toHaveLength(1);
+      expect(messages[0]).toMatchObject({
+        role: 'tool_group',
+        tools: [{ callId: 'agent-call', status: expectedStatus, endTime: 2 }],
+      });
+      if (notificationStatus === 'cancelled') {
+        expect(
+          messages[0]?.role === 'tool_group'
+            ? messages[0].tools[0]?.rawOutput
+            : undefined,
+        ).toMatchObject({ status: 'cancelled' });
+      }
+    },
+  );
+
+  it('does not apply a non-agent background notification to an agent tool', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      toolBlock('agent-block', 'agent-call', 'completed', 1, {
+        toolName: 'agent',
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+      textBlock('shell-terminal', 'assistant', 'shell completed', 2, false, {
+        meta: {
+          source: 'background_notification',
+          qwenDiscreteMessage: true,
+          backgroundTask: {
+            kind: 'shell',
+            status: 'completed',
+            toolUseId: 'agent-call',
+          },
+        },
+      }),
+    ]);
+
+    expect(messages).toMatchObject([
+      { role: 'tool_group', tools: [{ status: 'pending' }] },
+    ]);
+  });
+
   it('renders daemon plan status blocks as plan messages', () => {
     const plan = {
       sessionUpdate: 'plan',

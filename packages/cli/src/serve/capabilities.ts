@@ -72,6 +72,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_mcp: { since: 'v1' },
   workspace_skills: { since: 'v1' },
   workspace_providers: { since: 'v1' },
+  workspace_acp_preheat: { since: 'v1' },
+  workspace_acp_status: { since: 'v1' },
   auth_provider_install: { since: 'v1' },
   // Workspace memory CRUD (`GET/POST /workspace/memory`). Daemon exposes
   // hierarchical QWEN.md state and accepts append/replace writes scoped
@@ -202,6 +204,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // `POST /session/:id/generate` streams a stateless, tool-free model call.
   // The ACP child prefers fastModel and falls back to the main session model.
   session_generation: { since: 'v1' },
+  // `POST /workspace/generate` runs the same stateless, tool-free generation
+  // protocol against the resolved workspace runtime without a live session.
+  workspace_generation: { since: 'v1' },
   // Side question (/btw) against the session's conversation context.
   // Single-turn, tool-free LLM call via runForkedAgent (cache path).
   session_btw: { since: 'v1' },
@@ -284,6 +289,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Runtime GET/PUT/DELETE control for daemon-managed channel selection.
   // The route exists even when no selection was supplied at daemon boot.
   channel_control: { since: 'v1' },
+  // Read-only workspace graph of recently observed channel contacts.
+  workspace_channel_observed_contacts: { since: 'v1' },
   // Multi-workspace session routing. Advertised only when one daemon hosts
   // more than one registered workspace runtime.
   multi_workspace_sessions: { since: 'v1' },
@@ -291,7 +298,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   multi_workspace_session_rewind: { since: 'v1' },
   // Singular session shell routes resolve the owning live workspace runtime.
   multi_workspace_session_shell: { since: 'v1' },
+  dynamic_workspace_registration: { since: 'v1' },
   persistent_workspace_registration: { since: 'v1' },
+  // Optional presentation-only names and updates to those names for workspace
+  // runtimes. Workspace ids and canonical paths remain the routing identities.
+  workspace_display_name: { since: 'v1' },
+  scratch_workspace_registration: { since: 'v1' },
   workspace_runtime_removal: { since: 'v1' },
   // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
   // Covers core file/status/permissions/trust/lifecycle/MCP/tool, memory,
@@ -381,6 +393,7 @@ export interface AdvertiseFeatureToggles {
   sessionShellCommandEnabled?: boolean;
   sessionArtifactsPersistenceAvailable?: boolean;
   sessionGenerationAvailable?: boolean;
+  workspaceGenerationAvailable?: boolean;
   rateLimit?: boolean;
   reloadAvailable?: boolean;
   /**
@@ -406,7 +419,9 @@ export interface AdvertiseFeatureToggles {
   browserAutomationMcpAvailable?: boolean;
   voiceWsAvailable?: boolean;
   multiWorkspaceSessionsEnabled?: boolean;
+  dynamicWorkspaceRegistrationAvailable?: boolean;
   persistentWorkspaceRegistrationAvailable?: boolean;
+  scratchWorkspaceRegistrationAvailable?: boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
   /**
    * Whether the HTTP ACP surface is enabled (default on; opts out via
@@ -485,6 +500,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     'session_generation',
     (toggles) => toggles.sessionGenerationAvailable === true,
   ],
+  [
+    'workspace_generation',
+    (toggles) => toggles.workspaceGenerationAvailable === true,
+  ],
   ['rate_limit', (toggles) => toggles.rateLimit === true],
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
   ['channel_reload', (toggles) => toggles.channelReloadAvailable === true],
@@ -504,8 +523,16 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
       toggles.sessionShellCommandEnabled === true,
   ],
   [
+    'dynamic_workspace_registration',
+    (toggles) => toggles.dynamicWorkspaceRegistrationAvailable === true,
+  ],
+  [
     'persistent_workspace_registration',
     (toggles) => toggles.persistentWorkspaceRegistrationAvailable === true,
+  ],
+  [
+    'scratch_workspace_registration',
+    (toggles) => toggles.scratchWorkspaceRegistrationAvailable === true,
   ],
   [
     'workspace_runtime_removal',

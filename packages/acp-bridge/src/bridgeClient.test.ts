@@ -57,6 +57,7 @@ import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import type {
   BridgePendingInteraction,
   MidTurnQueueEntry,
+  PendingPromptEntry,
 } from './bridgeTypes.js';
 import type { ClientMcpMessageSender } from './bridgeOptions.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
@@ -2273,13 +2274,18 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       | {
           sessionId: string;
           midTurnMessageQueue: MidTurnQueueEntry[];
+          pendingPromptList?: PendingPromptEntry[];
           events: { publish: ReturnType<typeof vi.fn> };
           activePromptId?: string;
         }
       | undefined,
   ): BridgeClient {
+    const resolvedEntry = entry
+      ? { ...entry, pendingPromptList: entry.pendingPromptList ?? [] }
+      : undefined;
     return new BridgeClient(
-      ((sid: string) => (sid === sessionId ? entry : undefined)) as never,
+      ((sid: string) =>
+        sid === sessionId ? resolvedEntry : undefined) as never,
       thrower as never,
       { request: thrower } as never,
       0,
@@ -2301,7 +2307,10 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       sessionId: 'sess:drain',
     });
 
-    expect(result).toEqual({ messages: ['first', 'second'] });
+    expect(result).toEqual({
+      messages: ['first', 'second'],
+      hasQueuedPrompt: false,
+    });
     // Queue emptied so the same messages can't be re-injected on the next batch.
     expect(entry.midTurnMessageQueue).toEqual([]);
     // Exactly one SSE frame carrying the drained text for the browser to dedupe.
@@ -2337,7 +2346,10 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     const result = await client.extMethod('craft/drainMidTurnQueue', {
       sessionId: 'sess:multi',
     });
-    expect(result).toEqual({ messages: ['a', 'b', 'c'] });
+    expect(result).toEqual({
+      messages: ['a', 'b', 'c'],
+      hasQueuedPrompt: false,
+    });
     expect(entry.midTurnMessageQueue).toEqual([]);
 
     // One frame per originator: client-1 gets ['a','c'], client-2 gets ['b'].
@@ -2381,7 +2393,10 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       });
 
       // (a) the child still receives the message despite the dropped echo.
-      expect(result).toEqual({ messages: ['still-delivered'] });
+      expect(result).toEqual({
+        messages: ['still-delivered'],
+        hasQueuedPrompt: false,
+      });
       expect(entry.midTurnMessageQueue).toEqual([]);
       // (b) the dropped-echo degradation is logged.
       const logged = stderr.mock.calls.map((c) => String(c[0])).join('');
@@ -2404,7 +2419,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       sessionId: 'sess:empty',
     });
 
-    expect(result).toEqual({ messages: [] });
+    expect(result).toEqual({ messages: [], hasQueuedPrompt: false });
     expect(publish).not.toHaveBeenCalled();
   });
 
@@ -2413,7 +2428,7 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     const result = await client.extMethod('craft/drainMidTurnQueue', {
       sessionId: 'sess:absent',
     });
-    expect(result).toEqual({ messages: [] });
+    expect(result).toEqual({ messages: [], hasQueuedPrompt: false });
   });
 
   it('short-circuits to an empty drain when no sessionId is supplied', async () => {
@@ -2433,7 +2448,45 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       Infinity,
     );
     const result = await client.extMethod('craft/drainMidTurnQueue', {});
-    expect(result).toEqual({ messages: [] });
+    expect(result).toEqual({ messages: [], hasQueuedPrompt: false });
+  });
+
+  it('reports only complete, non-aborted queued prompts', async () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const queued = {
+      promptId: 'queued',
+      queuedAt: Date.now(),
+      text: 'next',
+      state: 'queued' as const,
+      abortController: new AbortController(),
+    };
+    const running = {
+      promptId: 'running',
+      queuedAt: Date.now(),
+      text: 'current',
+      state: 'running' as const,
+      abortController: new AbortController(),
+    };
+    const entry = {
+      sessionId: 'sess:queued',
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      pendingPromptList: [running, queued],
+      events: { publish },
+    };
+    const client = makeClientWithEntry('sess:queued', entry);
+
+    await expect(
+      client.extMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sess:queued',
+      }),
+    ).resolves.toEqual({ messages: [], hasQueuedPrompt: true });
+
+    queued.abortController.abort();
+    await expect(
+      client.extMethod('craft/drainMidTurnQueue', {
+        sessionId: 'sess:queued',
+      }),
+    ).resolves.toEqual({ messages: [], hasQueuedPrompt: false });
   });
 
   it('rejects an unknown ext-method with JSON-RPC methodNotFound (-32601)', async () => {

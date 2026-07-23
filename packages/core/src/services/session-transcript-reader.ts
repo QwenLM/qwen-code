@@ -8,12 +8,18 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
-import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import { Storage } from '../config/storage.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
 import type { ChatRecord } from './chatRecordingService.js';
+import {
+  aggregateTranscriptRecordFragments,
+  isTranscriptConversationRecord,
+  type TranscriptRecordInput,
+  validateTranscriptRecord,
+  walkTranscriptUuidChain,
+} from '../utils/transcript-records.js';
 
 export const SESSION_TRANSCRIPT_DEFAULT_LIMIT = 100;
 export const SESSION_TRANSCRIPT_MAX_LIMIT = 500;
@@ -79,6 +85,8 @@ export interface SessionTranscriptReadPageOptions {
   cursor?: string;
   /** Start a newest-to-oldest snapshot immediately before this active record. */
   beforeRecordId?: string;
+  /** Start at the persisted tail and page newest-to-oldest. */
+  direction?: 'backward';
   limit?: number;
   maxBytes?: number;
 }
@@ -111,7 +119,7 @@ interface RecordSegment {
 interface UuidIndexEntry {
   parentUuid: string | null;
   type: ChatRecord['type'];
-  subtype?: ChatRecord['subtype'];
+  subtype?: TranscriptRecordInput['subtype'];
   segments: RecordSegment[];
 }
 
@@ -630,21 +638,6 @@ function pruneCache(now = Date.now()): void {
   }
 }
 
-function isChatRecord(value: unknown): value is ChatRecord {
-  if (!isObjectRecord(value)) return false;
-  const type = value['type'];
-  return (
-    typeof value['uuid'] === 'string' &&
-    (typeof value['parentUuid'] === 'string' || value['parentUuid'] === null) &&
-    typeof value['sessionId'] === 'string' &&
-    typeof value['timestamp'] === 'string' &&
-    (type === 'user' ||
-      type === 'assistant' ||
-      type === 'tool_result' ||
-      type === 'system')
-  );
-}
-
 async function forEachLineInSnapshot(
   filePath: string,
   snapshotSize: number,
@@ -723,8 +716,13 @@ async function readSegmentRecords(
   const line = buffer.toString('utf8').trim();
   if (line.length === 0) return [];
   const records = jsonl
-    .parseLineTolerant<ChatRecord>(line, filePath)
-    .filter((record) => isChatRecord(record));
+    .parseLineTolerant<unknown>(line, filePath)
+    .flatMap((value): ChatRecord[] => {
+      const record = validateTranscriptRecord(value).record;
+      return record && isTranscriptConversationRecord(record)
+        ? [record as unknown as ChatRecord]
+        : [];
+    });
   const anomalySessionId = path.basename(filePath, '.jsonl');
   const record = records[segment.fragmentIndex];
   if (!record) {
@@ -748,50 +746,6 @@ async function readSegmentRecords(
   return [record];
 }
 
-function aggregateRecords(records: ChatRecord[]): ChatRecord {
-  if (records.length === 0) {
-    throw new Error('Cannot aggregate empty transcript record array');
-  }
-
-  const base = { ...records[0] };
-
-  // Match SessionService.aggregateRecords so paged replay and /load restore
-  // interpret append-only same-uuid fragments identically: message parts are
-  // appended, latest usage/timestamp win, and stable identity/result fields
-  // keep their first populated value.
-  for (let i = 1; i < records.length; i++) {
-    const record = records[i];
-    if (record.message !== undefined) {
-      if (base.message === undefined) {
-        base.message = record.message;
-      } else {
-        base.message = {
-          role: base.message.role,
-          parts: [
-            ...(base.message.parts ?? []),
-            ...(record.message.parts ?? []),
-          ],
-        };
-      }
-    }
-    if (record.usageMetadata) {
-      base.usageMetadata =
-        record.usageMetadata as GenerateContentResponseUsageMetadata;
-    }
-    if (record.toolCallResult && !base.toolCallResult) {
-      base.toolCallResult = record.toolCallResult;
-    }
-    if (record.model && !base.model) {
-      base.model = record.model;
-    }
-    if (record.timestamp > base.timestamp) {
-      base.timestamp = record.timestamp;
-    }
-  }
-
-  return base;
-}
-
 async function readAggregatedRecords(
   index: TranscriptIndex,
   uuids: string[],
@@ -809,7 +763,7 @@ async function readAggregatedRecords(
         );
       }
       if (physicalRecords.length > 0) {
-        records.push(aggregateRecords(physicalRecords));
+        records.push(aggregateTranscriptRecordFragments(physicalRecords));
       }
     }
     return records;
@@ -852,12 +806,12 @@ async function buildIndex(params: {
       const text = line.toString('utf8').trim();
       if (text.length === 0) return;
       let fragmentIndex = 0;
-      for (const record of jsonl.parseLineTolerant<ChatRecord>(
-        text,
-        filePath,
-      )) {
-        if (!isChatRecord(record)) continue;
-        startTime ??= record.timestamp;
+      for (const value of jsonl.parseLineTolerant<unknown>(text, filePath)) {
+        const record = validateTranscriptRecord(value).record;
+        if (!record || !isTranscriptConversationRecord(record)) {
+          continue;
+        }
+        if (record.timestamp) startTime ??= record.timestamp;
         leafUuid = record.uuid;
         const existing = byUuid.get(record.uuid);
         const segment = {
@@ -883,46 +837,33 @@ async function buildIndex(params: {
     },
   );
 
-  if (!leafUuid || !startTime) {
+  if (!leafUuid) {
     debugLogger.warn(
       `index build failed: no transcript records session=${sessionId}`,
     );
     throw new SessionTranscriptSnapshotUnavailableError(sessionId);
   }
+  startTime ??= lastUpdated;
 
-  const activeUuids: string[] = [];
-  const gaps: HistoryGap[] = [];
-  const visited = new Set<string>();
-  let currentUuid: string | null = leafUuid;
-  while (currentUuid && !visited.has(currentUuid)) {
-    visited.add(currentUuid);
-    const entry = byUuid.get(currentUuid);
-    if (!entry) {
-      debugLogger.debug(
-        `active chain terminated: missing uuid session=${sessionId} ` +
-          `uuid=${currentUuid}`,
-      );
-      break;
-    }
-    activeUuids.push(currentUuid);
-    const parentUuid = entry.parentUuid;
-    if (!parentUuid) break;
-    if (!byUuid.has(parentUuid)) {
-      gaps.push({ childUuid: currentUuid, missingParentUuid: parentUuid });
-      debugLogger.debug(
-        `active chain gap session=${sessionId} child=${currentUuid} ` +
-          `missingParent=${parentUuid}`,
-      );
-      break;
-    }
-    currentUuid = parentUuid;
-  }
-  if (currentUuid && visited.has(currentUuid)) {
+  const chain = walkTranscriptUuidChain(leafUuid, (uuid) => {
+    const entry = byUuid.get(uuid);
+    return entry
+      ? {
+          uuid,
+          parentUuid: entry.parentUuid,
+          sessionId,
+          timestamp: startTime,
+          type: 'system',
+        }
+      : undefined;
+  });
+  const activeUuids = [...chain.uuids];
+  const gaps: HistoryGap[] = [...chain.gaps];
+  if (chain.cycleUuid) {
     debugLogger.debug(
-      `active chain terminated: cycle session=${sessionId} uuid=${currentUuid}`,
+      `active chain terminated: cycle session=${sessionId} uuid=${chain.cycleUuid}`,
     );
   }
-  activeUuids.reverse();
 
   debugLogger.debug(
     `index build complete session=${sessionId} records=${byUuid.size} ` +
@@ -1037,7 +978,10 @@ export class SessionTranscriptReader {
         ? (this.cursorCodec?.decode(options.cursor) ??
           decodeSessionTranscriptCursor(options.cursor, this.workspaceCwd))
         : undefined;
-    if (cursor && options.beforeRecordId !== undefined) {
+    if (
+      cursor &&
+      (options.beforeRecordId !== undefined || options.direction !== undefined)
+    ) {
       throw new InvalidSessionTranscriptCursorError();
     }
     if (cursor && cursor.sessionId !== sessionId) {
@@ -1081,8 +1025,11 @@ export class SessionTranscriptReader {
 
     const direction =
       cursor?.direction ??
+      options.direction ??
       (options.beforeRecordId !== undefined ? 'backward' : 'forward');
-    let position = cursor?.position ?? 0;
+    let position =
+      cursor?.position ??
+      (direction === 'backward' ? index.activeUuids.length : 0);
     if (!cursor && options.beforeRecordId !== undefined) {
       if (options.beforeRecordId.length === 0) {
         throw new InvalidSessionTranscriptCursorError();

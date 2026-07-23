@@ -1,8 +1,10 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  daemonObservedContactsPath,
   daemonSessionRoutesPath,
   parseConfiguredChannels,
+  registerBackgroundResponseRelay,
   registerPermissionRelay,
   registerSessionCleanup,
   sessionsPath,
@@ -40,6 +42,16 @@ it('isolates daemon route stores by workspace hash', () => {
     '/tmp/qwen/channels/daemon/other-hash/routes.json',
   );
   expect(daemonSessionRoutesPath('/workspace')).not.toBe(sessionsPath());
+});
+
+it('isolates observed contact stores beside daemon routes', () => {
+  expect(daemonObservedContactsPath('/workspace')).toBe(
+    '/tmp/qwen/channels/daemon/workspace-hash/observed-contacts.json',
+  );
+  expect(daemonObservedContactsPath('/other')).toBe(
+    '/tmp/qwen/channels/daemon/other-hash/observed-contacts.json',
+  );
+  expect(daemonObservedContactsPath('/workspace')).not.toBe(sessionsPath());
 });
 
 describe('parseConfiguredChannels', () => {
@@ -294,6 +306,137 @@ describe('registerPermissionRelay', () => {
       requestId: 'req-1',
       outcome: { outcome: 'cancelled' },
     });
+  });
+});
+
+describe('registerBackgroundResponseRelay', () => {
+  it('routes the final background response without joining the active prompt', async () => {
+    const bridge = new EventEmitter();
+    const router = {
+      getTarget: vi.fn(() => ({
+        channelName: 'telegram',
+        chatId: 'chat1',
+      })),
+    };
+    const channel = {
+      dispatchBackgroundResponse: vi.fn().mockResolvedValue(undefined),
+    };
+
+    registerBackgroundResponseRelay(
+      bridge as never,
+      router as never,
+      new Map([['telegram', channel as never]]),
+    );
+    bridge.emit('backgroundResponse', 'session-1', 'Background final answer.');
+
+    await vi.waitFor(() => {
+      expect(channel.dispatchBackgroundResponse).toHaveBeenCalledWith(
+        'session-1',
+        'Background final answer.',
+      );
+    });
+  });
+
+  it('logs when no route exists for the background response', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const bridge = new EventEmitter();
+    const router = { getTarget: vi.fn() };
+
+    try {
+      registerBackgroundResponseRelay(
+        bridge as never,
+        router as never,
+        new Map(),
+      );
+      bridge.emit(
+        'backgroundResponse',
+        'session-1',
+        'Background final answer.',
+      );
+
+      await vi.waitFor(() => {
+        expect(stderr.mock.calls.join('')).toContain(
+          'No route for background response from session session-1',
+        );
+      });
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('logs when the channel is not found for the background response', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const bridge = new EventEmitter();
+    const router = {
+      getTarget: vi.fn(() => ({
+        channelName: 'telegram',
+        chatId: 'chat1',
+      })),
+    };
+
+    try {
+      registerBackgroundResponseRelay(
+        bridge as never,
+        router as never,
+        new Map(),
+      );
+      bridge.emit(
+        'backgroundResponse',
+        'session-1',
+        'Background final answer.',
+      );
+
+      await vi.waitFor(() => {
+        expect(stderr.mock.calls.join('')).toContain(
+          'No channel "telegram" for background response from session session-1',
+        );
+      });
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('logs when dispatchBackgroundResponse rejects', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const bridge = new EventEmitter();
+    const router = {
+      getTarget: vi.fn(() => ({
+        channelName: 'telegram',
+        chatId: 'chat1',
+      })),
+    };
+    const channel = {
+      dispatchBackgroundResponse: vi
+        .fn()
+        .mockRejectedValue(new Error('network down')),
+    };
+
+    try {
+      registerBackgroundResponseRelay(
+        bridge as never,
+        router as never,
+        new Map([['telegram', channel as never]]),
+      );
+      bridge.emit(
+        'backgroundResponse',
+        'session-1',
+        'Background final answer.',
+      );
+
+      await vi.waitFor(() => {
+        expect(stderr.mock.calls.join('')).toContain(
+          'Background response relay failed for session session-1',
+        );
+      });
+    } finally {
+      stderr.mockRestore();
+    }
   });
 });
 

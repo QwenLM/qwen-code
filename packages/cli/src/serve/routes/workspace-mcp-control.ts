@@ -36,6 +36,55 @@ interface RegisterWorkspaceMcpControlRoutesDeps {
   ) => string | undefined | null;
 }
 
+interface McpReloadOptions {
+  forceReconnectAll?: boolean;
+  forceReconnectWhich?: string[];
+}
+
+function parseMcpReloadOptions(
+  body: Record<string, unknown>,
+  res: Response,
+): McpReloadOptions | null {
+  const forceReconnectAll = body['forceReconnectAll'];
+  if (
+    forceReconnectAll !== undefined &&
+    typeof forceReconnectAll !== 'boolean'
+  ) {
+    res.status(400).json({
+      error: '`forceReconnectAll` must be a boolean',
+      code: 'invalid_force_reconnect_all_flag',
+    });
+    return null;
+  }
+  const forceReconnectWhich = body['forceReconnectWhich'];
+  if (
+    forceReconnectWhich !== undefined &&
+    (!Array.isArray(forceReconnectWhich) ||
+      forceReconnectWhich.some(
+        (serverName) =>
+          typeof serverName !== 'string' || serverName.length === 0,
+      ))
+  ) {
+    res.status(400).json({
+      error: '`forceReconnectWhich` must be an array of server names',
+      code: 'invalid_force_reconnect_which',
+    });
+    return null;
+  }
+  if (forceReconnectAll === true && forceReconnectWhich !== undefined) {
+    res.status(400).json({
+      error:
+        '`forceReconnectAll` and `forceReconnectWhich` cannot be used together',
+      code: 'conflicting_force_reconnect_options',
+    });
+    return null;
+  }
+  return {
+    forceReconnectAll,
+    forceReconnectWhich,
+  };
+}
+
 export function registerWorkspaceMcpControlRoutes(
   app: Application,
   deps: RegisterWorkspaceMcpControlRoutesDeps,
@@ -67,9 +116,11 @@ export function registerWorkspaceMcpControlRoutes(
   app.post(
     '/workspace/mcp/reload',
     mutate({ strict: true }),
-    async (_req, res) => {
+    async (req, res) => {
+      const options = parseMcpReloadOptions(safeBody(req), res);
+      if (!options) return;
       try {
-        const result = await bridge.reloadWorkspaceMcp();
+        const result = await bridge.reloadWorkspaceMcp(options);
         res.status(202).json(result);
       } catch (err) {
         sendBridgeError(res, err, { route: 'POST /workspace/mcp/reload' });
@@ -305,9 +356,11 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
         res,
       );
       if (!runtime) return;
+      const options = parseMcpReloadOptions(deps.safeBody(req), res);
+      if (!options) return;
       const route = 'POST /workspaces/:workspace/mcp/reload';
       try {
-        const result = await runtime.bridge.reloadWorkspaceMcp();
+        const result = await runtime.bridge.reloadWorkspaceMcp(options);
         res.status(202).json(result);
       } catch (err) {
         deps.sendBridgeError(res, err, { route });

@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-base",
-  "version": "0.19.11",
+  "version": "0.20.1",
   "description": "Base channel infrastructure for Qwen Code",
   "type": "module",
   "main": "dist/index.js",
@@ -15,7 +15,9 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc --build"
+    "build": "tsc --build",
+    "test": "vitest run",
+    "test:ci": "vitest run"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1"

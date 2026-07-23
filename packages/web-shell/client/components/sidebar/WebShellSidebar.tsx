@@ -41,6 +41,7 @@ import {
   ArchiveRestoreIcon,
   DownloadIcon,
   FolderInputIcon,
+  GitForkIcon,
   PencilIcon,
   PinIcon,
   Trash2Icon,
@@ -52,6 +53,7 @@ import {
   SettingsIcon,
   SquarePenIcon,
   SunIcon,
+  TargetIcon,
 } from 'lucide-react';
 import { WebShellThemeId, type WebShellTheme } from '../../themeContext';
 import { useI18n } from '../../i18n';
@@ -78,7 +80,6 @@ import {
 } from '../ui/dropdown-menu';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
-import { AddWorkspaceDialog } from '../dialogs/AddWorkspaceDialog';
 import { WorkspaceSection } from './WorkspaceSection';
 import { SessionGroupSection } from './SessionGroupSection';
 import {
@@ -122,7 +123,6 @@ export type WebShellSidebarFooterItem =
   | 'settings'
   | 'version'
   | 'theme'
-  | 'scheduledTasks'
   | 'sessionsOverview'
   | 'splitView'
   | 'daemonStatus'
@@ -143,21 +143,76 @@ export interface WebShellSidebarLockedWorkspace {
   ) => ReactNode;
 }
 
+export type WebShellSidebarPrimaryNavItem =
+  | 'newTask'
+  | 'plugins'
+  | 'scheduledTasks'
+  | 'goals';
+
+export interface WebShellSidebarPrimaryNavOptions {
+  /** Built-in primary nav entries to show. Defaults to all. */
+  items?: readonly WebShellSidebarPrimaryNavItem[];
+  /** Additional custom content rendered after the built-in nav buttons. */
+  render?: () => ReactNode;
+}
+
 export interface WebShellSidebarFooterOptions {
   /** Built-in footer entries to expose. Entries use the canonical footer order. */
   items?: readonly WebShellSidebarFooterItem[];
+  /** Additional custom content rendered before the built-in footer items (left side). */
+  render?: () => ReactNode;
 }
 
 const DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] = [
   'settings',
   'version',
   'theme',
-  'scheduledTasks',
   'sessionsOverview',
   'splitView',
   'daemonStatus',
   'collapse',
 ];
+
+const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[] = [
+  'newTask',
+  'plugins',
+  'scheduledTasks',
+  'goals',
+];
+
+export type WebShellSidebarSessionActionItem =
+  | 'details'
+  | 'rename'
+  | 'group'
+  | 'export'
+  | 'delete'
+  | 'pin'
+  | 'archive';
+
+/** Subset of action items that have working inline (hover-button) handlers. */
+export type WebShellSidebarSessionInlineActionItem =
+  | 'pin'
+  | 'archive'
+  | 'rename'
+  | 'export'
+  | 'delete';
+
+export interface WebShellSidebarSessionActionsOptions {
+  /** Session action items to show. Defaults to all. */
+  items?: readonly WebShellSidebarSessionActionItem[];
+  /**
+   * Which items appear as inline buttons (on hover). Defaults to ['pin', 'archive'].
+   * Only items that also pass their built-in visibility condition are rendered.
+   * Only items with working inline handlers are accepted (details/group are dropdown-only).
+   */
+  inlineItems?: readonly WebShellSidebarSessionInlineActionItem[];
+}
+
+const DEFAULT_SESSION_ACTION_ITEMS: readonly WebShellSidebarSessionActionItem[] =
+  ['details', 'rename', 'group', 'export', 'delete', 'pin', 'archive'];
+
+const DEFAULT_INLINE_ACTION_ITEMS: readonly WebShellSidebarSessionInlineActionItem[] =
+  ['pin', 'archive'];
 
 /**
  * Palette order for the quick color-grouping buckets. Mirrors core's
@@ -208,6 +263,7 @@ interface WebShellSidebarProps {
   onOpenPlugins: () => void;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
+  onOpenGoals: () => void;
   onOpenSessions: () => void;
   /**
    * Whether to offer the Session Overview entry point. Gated to large screens
@@ -235,10 +291,25 @@ interface WebShellSidebarProps {
    */
   selectedWorkspaceCwd?: string;
   onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
+  /**
+   * Open the working-tree Changes dialog for a workspace. Forwarded to each
+   * trusted workspace's folder header, where a live git chip fires it on click.
+   */
+  onOpenGitDiff?: (workspaceCwd: string) => void;
+  /**
+   * Opens the shared App-owned Add Workspace dialog. Omit this callback when
+   * registration is unavailable; locked workspaces hide the action separately.
+   */
+  onOpenAddWorkspace?: () => void;
   workspaces?: DaemonWorkspaceCapability[];
   lockedWorkspaceCwd?: string;
   lockedWorkspace?: WebShellSidebarLockedWorkspace;
   branding?: false | WebShellSidebarBranding;
+  primaryNav?: WebShellSidebarPrimaryNavOptions;
+  /** Whether to hide the "Projects" header row (with search and add workspace). Defaults to false (shown). */
+  hideProjectHeader?: boolean;
+  /** Customize which action buttons appear on session rows. */
+  sessionActions?: WebShellSidebarSessionActionsOptions;
   footer?: false | WebShellSidebarFooterOptions;
 }
 
@@ -408,6 +479,7 @@ export function WebShellSidebar({
   onOpenPlugins,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
+  onOpenGoals,
   onOpenSessions,
   canOpenSessionsOverview,
   onOpenSplitView,
@@ -422,10 +494,15 @@ export function WebShellSidebar({
   sessionListReloadToken,
   selectedWorkspaceCwd,
   onSelectWorkspace,
+  onOpenGitDiff,
+  onOpenAddWorkspace,
   workspaces: providedWorkspaces,
   lockedWorkspaceCwd,
   lockedWorkspace: lockedWorkspaceOptions,
   branding,
+  primaryNav: primaryNavOptions,
+  hideProjectHeader,
+  sessionActions: sessionActionsOptions,
   footer,
 }: WebShellSidebarProps) {
   const { t } = useI18n();
@@ -437,6 +514,21 @@ export function WebShellSidebar({
     () =>
       new Set(footer === false ? [] : (footer?.items ?? DEFAULT_FOOTER_ITEMS)),
     [footer],
+  );
+  const primaryNavItems = useMemo(
+    () => new Set(primaryNavOptions?.items ?? DEFAULT_PRIMARY_NAV_ITEMS),
+    [primaryNavOptions?.items],
+  );
+  const sessionActionItems = useMemo(
+    () => new Set(sessionActionsOptions?.items ?? DEFAULT_SESSION_ACTION_ITEMS),
+    [sessionActionsOptions?.items],
+  );
+  const inlineActionItems = useMemo(
+    () =>
+      new Set(
+        sessionActionsOptions?.inlineItems ?? DEFAULT_INLINE_ACTION_ITEMS,
+      ),
+    [sessionActionsOptions?.inlineItems],
   );
   const shouldRenderBrand =
     branding !== false && !(mobileOpen && (branding?.hideWhenCompact ?? true));
@@ -597,7 +689,6 @@ export function WebShellSidebar({
   const [projectExpanded, setProjectExpanded] = useState(false);
   const [projectsExpanded, setProjectsExpanded] = useState(true);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(false);
   const [workspaceRemovalCandidate, setWorkspaceRemovalCandidate] =
     useState<DaemonWorkspaceCapability | null>(null);
   const [workspaceRemovalActivity, setWorkspaceRemovalActivity] =
@@ -1170,31 +1261,6 @@ export function WebShellSidebar({
       return changed ? next : current;
     });
   }, [currentSessionIdentity, getIdentityForSession, sessions]);
-
-  const handleAddWorkspace = useCallback(
-    async (cwd: string, persist: boolean) => {
-      const result = await workspaceActions.addWorkspace(cwd, { persist });
-      if (persist && result.persisted !== true) {
-        throw new Error(t('sidebar.addWorkspacePersistenceError'));
-      }
-      // Force a fresh capabilities fetch so the new workspace appears
-      // immediately. Best-effort: registration already succeeded, so a
-      // refresh failure must not surface as an add-workspace error — the
-      // next reload reconciles. (The former `getCapabilities?.()` was a
-      // no-op: it returns a cached promise and never updates state.)
-      try {
-        await workspace.refreshCapabilities?.();
-      } catch {
-        // ignore — the workspace is registered; the list reconciles on reload
-      }
-    },
-    [t, workspaceActions, workspace],
-  );
-
-  const handleSuggestWorkspacePaths = useCallback(
-    (prefix: string) => workspaceActions.suggestWorkspacePaths(prefix),
-    [workspaceActions],
-  );
 
   const reconcileRemovedWorkspace = useCallback(
     async (removed: DaemonWorkspaceCapability) => {
@@ -2541,7 +2607,17 @@ export function WebShellSidebar({
                 </form>
               ) : (
                 <>
-                  <span className={styles.sessionText}>{label}</span>
+                  <span className={styles.sessionText}>
+                    {session.worktree && (
+                      <GitForkIcon
+                        size={11}
+                        strokeWidth={1.5}
+                        className={styles.sessionBadgeIcon}
+                        aria-label={t('sidebar.newWorktreeTask')}
+                      />
+                    )}
+                    {label}
+                  </span>
                   <div className={styles.sessionMetaSlot}>
                     {attentionLabel && (
                       <span
@@ -2562,59 +2638,14 @@ export function WebShellSidebar({
                     ) : !attentionLabel ? (
                       <span className={styles.sessionTime}>{time}</span>
                     ) : null}
-                    {readOnly && canMutateSessionArchive(session) && (
-                      <div
-                        className={styles.sessionActions}
-                        onClick={(event) => event.stopPropagation()}
-                        onKeyDown={(event) => event.stopPropagation()}
-                      >
-                        <button
-                          className={styles.sessionActionButton}
-                          type="button"
-                          disabled={busy || isCurrent}
-                          aria-label={t('sidebar.archive')}
-                          title={
-                            isCurrent
-                              ? t('sidebar.archiveCurrentDisabled')
-                              : t('sidebar.archive')
-                          }
-                          onClick={() => handleArchive(session)}
+                    {readOnly &&
+                      canMutateSessionArchive(session) &&
+                      sessionActionItems.has('archive') && (
+                        <div
+                          className={styles.sessionActions}
+                          onClick={(event) => event.stopPropagation()}
+                          onKeyDown={(event) => event.stopPropagation()}
                         >
-                          <ArchiveIcon />
-                        </button>
-                      </div>
-                    )}
-                    {!readOnly && (
-                      <div
-                        className={styles.sessionActions}
-                        onClick={(event) => event.stopPropagation()}
-                        onKeyDown={(event) => event.stopPropagation()}
-                      >
-                        {organizationEnabled && (
-                          <button
-                            className={cx(
-                              styles.sessionActionButton,
-                              session.isPinned &&
-                                styles.activeSessionActionButton,
-                            )}
-                            type="button"
-                            disabled={busy}
-                            aria-label={
-                              session.isPinned
-                                ? t('sidebar.unpin')
-                                : t('sidebar.pin')
-                            }
-                            title={
-                              session.isPinned
-                                ? t('sidebar.unpin')
-                                : t('sidebar.pin')
-                            }
-                            onClick={() => handleTogglePin(session)}
-                          >
-                            <PinIcon />
-                          </button>
-                        )}
-                        {canMutateSessionArchive(session) && (
                           <button
                             className={styles.sessionActionButton}
                             type="button"
@@ -2629,91 +2660,274 @@ export function WebShellSidebar({
                           >
                             <ArchiveIcon />
                           </button>
-                        )}
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <button
-                              className={styles.sessionActionButton}
-                              type="button"
-                              aria-label={t('sidebar.moreActions')}
-                              title={t('sidebar.moreActions')}
+                        </div>
+                      )}
+                    {!readOnly && (
+                      <div
+                        className={styles.sessionActions}
+                        onClick={(event) => event.stopPropagation()}
+                        onKeyDown={(event) => event.stopPropagation()}
+                      >
+                        {(() => {
+                          const inlineActions: Array<{
+                            key: WebShellSidebarSessionInlineActionItem;
+                            icon?: ReactNode;
+                            label: string;
+                            disabled?: boolean;
+                            title?: string;
+                            active?: boolean;
+                            destructive?: boolean;
+                            visible: boolean;
+                            onClick: () => void;
+                          }> = [
+                            {
+                              key: 'pin',
+                              icon: <PinIcon size={16} strokeWidth={1.2} />,
+                              label: session.isPinned
+                                ? t('sidebar.unpin')
+                                : t('sidebar.pin'),
+                              disabled: busy,
+                              active: session.isPinned,
+                              visible:
+                                organizationEnabled &&
+                                sessionActionItems.has('pin') &&
+                                inlineActionItems.has('pin'),
+                              onClick: () => handleTogglePin(session),
+                            },
+                            {
+                              key: 'archive',
+                              icon: <ArchiveIcon size={16} strokeWidth={1.2} />,
+                              label: t('sidebar.archive'),
+                              disabled: busy || isCurrent,
+                              title: isCurrent
+                                ? t('sidebar.archiveCurrentDisabled')
+                                : t('sidebar.archive'),
+                              visible:
+                                canMutateSessionArchive(session) &&
+                                sessionActionItems.has('archive') &&
+                                inlineActionItems.has('archive'),
+                              onClick: () => handleArchive(session),
+                            },
+                            {
+                              key: 'rename',
+                              icon: <PencilIcon size={16} strokeWidth={1.2} />,
+                              label: t('sidebar.rename'),
+                              disabled: !isCurrent,
+                              title: !isCurrent
+                                ? t('sidebar.renameCurrentOnly')
+                                : undefined,
+                              visible:
+                                sessionActionItems.has('rename') &&
+                                inlineActionItems.has('rename'),
+                              onClick: () => handleRenameFromMenu(session),
+                            },
+                            {
+                              key: 'export',
+                              icon: (
+                                <DownloadIcon size={16} strokeWidth={1.2} />
+                              ),
+                              label: t('sidebar.export'),
+                              disabled: exporting,
+                              visible:
+                                canExportSessions &&
+                                sessionActionItems.has('export') &&
+                                inlineActionItems.has('export'),
+                              onClick: () => handleExportSession(session),
+                            },
+                            {
+                              key: 'delete',
+                              icon: <Trash2Icon size={16} strokeWidth={1.2} />,
+                              label: t('sidebar.delete'),
+                              disabled: isCurrent,
+                              destructive: true,
+                              title: isCurrent
+                                ? t('sidebar.currentDeleteDisabled')
+                                : undefined,
+                              visible:
+                                sessionActionItems.has('delete') &&
+                                inlineActionItems.has('delete'),
+                              onClick: () => handleDeleteSession(session),
+                            },
+                          ];
+                          return inlineActions
+                            .filter((a) => a.visible)
+                            .map((action) => (
+                              <button
+                                key={action.key}
+                                className={cx(
+                                  styles.sessionActionButton,
+                                  action.active &&
+                                    styles.activeSessionActionButton,
+                                )}
+                                type="button"
+                                disabled={action.disabled}
+                                aria-label={action.label}
+                                title={action.title ?? action.label}
+                                onClick={action.onClick}
+                                style={
+                                  action.destructive && !action.disabled
+                                    ? {
+                                        color: 'var(--destructive, #dc2626)',
+                                      }
+                                    : undefined
+                                }
+                              >
+                                {action.icon ?? (
+                                  <span style={{ fontSize: 12 }}>
+                                    {action.label}
+                                  </span>
+                                )}
+                              </button>
+                            ));
+                        })()}
+                        {(organizationEnabled &&
+                          sessionActionItems.has('pin') &&
+                          !inlineActionItems.has('pin')) ||
+                        (canMutateSessionArchive(session) &&
+                          sessionActionItems.has('archive') &&
+                          !inlineActionItems.has('archive')) ||
+                        sessionActionItems.has('details') ||
+                        (sessionActionItems.has('rename') &&
+                          !inlineActionItems.has('rename')) ||
+                        (organizationEnabled &&
+                          sessionActionItems.has('group')) ||
+                        (canExportSessions &&
+                          sessionActionItems.has('export') &&
+                          !inlineActionItems.has('export')) ||
+                        (sessionActionItems.has('delete') &&
+                          !inlineActionItems.has('delete')) ? (
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <button
+                                className={styles.sessionActionButton}
+                                type="button"
+                                aria-label={t('sidebar.moreActions')}
+                                title={t('sidebar.moreActions')}
+                              >
+                                <EllipsisVerticalIcon />
+                              </button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent
+                              align="end"
+                              className="w-auto min-w-40"
+                              onPointerDownOutside={() => {
+                                sessionMenuPointerDismissRef.current = true;
+                              }}
+                              onCloseAutoFocus={(event) => {
+                                if (!sessionMenuPointerDismissRef.current)
+                                  return;
+                                sessionMenuPointerDismissRef.current = false;
+                                event.preventDefault();
+                              }}
                             >
-                              <EllipsisVerticalIcon />
-                            </button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent
-                            align="end"
-                            className="w-auto min-w-40"
-                            onPointerDownOutside={() => {
-                              sessionMenuPointerDismissRef.current = true;
-                            }}
-                            onCloseAutoFocus={(event) => {
-                              if (!sessionMenuPointerDismissRef.current) return;
-                              sessionMenuPointerDismissRef.current = false;
-                              event.preventDefault();
-                            }}
-                          >
-                            <DropdownMenuGroup>
-                              <DropdownMenuSub>
-                                <DropdownMenuSubTrigger>
-                                  <InfoIcon />
-                                  {t('sidebar.details')}
-                                </DropdownMenuSubTrigger>
-                                <DropdownMenuSubContent className="min-w-64 p-3">
-                                  {details}
-                                </DropdownMenuSubContent>
-                              </DropdownMenuSub>
-                              <DropdownMenuItem
-                                disabled={!isCurrent}
-                                title={
-                                  !isCurrent
-                                    ? t('sidebar.renameCurrentOnly')
-                                    : undefined
-                                }
-                                onSelect={() => handleRenameFromMenu(session)}
-                              >
-                                <PencilIcon />
-                                {t('sidebar.rename')}
-                              </DropdownMenuItem>
-                              {organizationEnabled && (
-                                <DropdownMenuItem
-                                  disabled={busy}
-                                  onSelect={(event) =>
-                                    openGroupMenuFromAnchor(
-                                      event.currentTarget as HTMLElement,
-                                      session,
-                                    )
-                                  }
-                                >
-                                  <FolderInputIcon />
-                                  {t('sidebar.sessionGroup')}
-                                </DropdownMenuItem>
-                              )}
-                              {canExportSessions && (
-                                <DropdownMenuItem
-                                  disabled={exporting}
-                                  onSelect={() => handleExportSession(session)}
-                                >
-                                  <DownloadIcon />
-                                  {t('sidebar.export')}
-                                </DropdownMenuItem>
-                              )}
-                              <DropdownMenuItem
-                                variant="destructive"
-                                disabled={isCurrent}
-                                title={
-                                  isCurrent
-                                    ? t('sidebar.currentDeleteDisabled')
-                                    : undefined
-                                }
-                                onSelect={() => handleDeleteSession(session)}
-                              >
-                                <Trash2Icon />
-                                {t('sidebar.delete')}
-                              </DropdownMenuItem>
-                            </DropdownMenuGroup>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
+                              <DropdownMenuGroup>
+                                {organizationEnabled &&
+                                  sessionActionItems.has('pin') &&
+                                  !inlineActionItems.has('pin') && (
+                                    <DropdownMenuItem
+                                      disabled={busy}
+                                      onSelect={() => handleTogglePin(session)}
+                                    >
+                                      <PinIcon />
+                                      {session.isPinned
+                                        ? t('sidebar.unpin')
+                                        : t('sidebar.pin')}
+                                    </DropdownMenuItem>
+                                  )}
+                                {canMutateSessionArchive(session) &&
+                                  sessionActionItems.has('archive') &&
+                                  !inlineActionItems.has('archive') && (
+                                    <DropdownMenuItem
+                                      disabled={busy || isCurrent}
+                                      title={
+                                        isCurrent
+                                          ? t('sidebar.archiveCurrentDisabled')
+                                          : undefined
+                                      }
+                                      onSelect={() => handleArchive(session)}
+                                    >
+                                      <ArchiveIcon />
+                                      {t('sidebar.archive')}
+                                    </DropdownMenuItem>
+                                  )}
+                                {sessionActionItems.has('details') && (
+                                  <DropdownMenuSub>
+                                    <DropdownMenuSubTrigger>
+                                      <InfoIcon />
+                                      {t('sidebar.details')}
+                                    </DropdownMenuSubTrigger>
+                                    <DropdownMenuSubContent className="min-w-64 p-3">
+                                      {details}
+                                    </DropdownMenuSubContent>
+                                  </DropdownMenuSub>
+                                )}
+                                {sessionActionItems.has('rename') &&
+                                  !inlineActionItems.has('rename') && (
+                                    <DropdownMenuItem
+                                      disabled={!isCurrent}
+                                      title={
+                                        !isCurrent
+                                          ? t('sidebar.renameCurrentOnly')
+                                          : undefined
+                                      }
+                                      onSelect={() =>
+                                        handleRenameFromMenu(session)
+                                      }
+                                    >
+                                      <PencilIcon />
+                                      {t('sidebar.rename')}
+                                    </DropdownMenuItem>
+                                  )}
+                                {organizationEnabled &&
+                                  sessionActionItems.has('group') && (
+                                    <DropdownMenuItem
+                                      disabled={busy}
+                                      onSelect={(event) =>
+                                        openGroupMenuFromAnchor(
+                                          event.currentTarget as HTMLElement,
+                                          session,
+                                        )
+                                      }
+                                    >
+                                      <FolderInputIcon />
+                                      {t('sidebar.sessionGroup')}
+                                    </DropdownMenuItem>
+                                  )}
+                                {canExportSessions &&
+                                  sessionActionItems.has('export') &&
+                                  !inlineActionItems.has('export') && (
+                                    <DropdownMenuItem
+                                      disabled={exporting}
+                                      onSelect={() =>
+                                        handleExportSession(session)
+                                      }
+                                    >
+                                      <DownloadIcon />
+                                      {t('sidebar.export')}
+                                    </DropdownMenuItem>
+                                  )}
+                                {sessionActionItems.has('delete') &&
+                                  !inlineActionItems.has('delete') && (
+                                    <DropdownMenuItem
+                                      variant="destructive"
+                                      disabled={isCurrent}
+                                      title={
+                                        isCurrent
+                                          ? t('sidebar.currentDeleteDisabled')
+                                          : undefined
+                                      }
+                                      onSelect={() =>
+                                        handleDeleteSession(session)
+                                      }
+                                    >
+                                      <Trash2Icon />
+                                      {t('sidebar.delete')}
+                                    </DropdownMenuItem>
+                                  )}
+                              </DropdownMenuGroup>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        ) : null}
                       </div>
                     )}
                   </div>
@@ -2747,6 +2961,8 @@ export function WebShellSidebar({
       openGroupMenuFromAnchor,
       organizationEnabled,
       saveRename,
+      sessionActionItems,
+      inlineActionItems,
       startRename,
       t,
     ],
@@ -3342,32 +3558,36 @@ export function WebShellSidebar({
           </div>
         )}
         <div className={styles.primaryNav}>
-          <button
-            className={styles.newChatButton}
-            type="button"
-            title={t('sidebar.newTask')}
-            aria-label={t('sidebar.newTask')}
-            disabled={newSessionDisabled}
-            onClick={() => handleNewSession()}
-          >
-            <span className={styles.navIcon}>
-              <SquarePenIcon size={16} strokeWidth={1.2} />
-            </span>
-            {!collapsed && <span>{t('sidebar.newTask')}</span>}
-          </button>
-          <button
-            className={styles.pluginButton}
-            type="button"
-            title={t('sidebar.plugins')}
-            aria-label={t('sidebar.plugins')}
-            onClick={onOpenPlugins}
-          >
-            <span className={styles.navIcon}>
-              <BlocksIcon size={16} strokeWidth={1.2} />
-            </span>
-            {!collapsed && <span>{t('sidebar.plugins')}</span>}
-          </button>
-          {footerItems.has('scheduledTasks') && (
+          {primaryNavItems.has('newTask') && (
+            <button
+              className={styles.newChatButton}
+              type="button"
+              title={t('sidebar.newTask')}
+              aria-label={t('sidebar.newTask')}
+              disabled={newSessionDisabled}
+              onClick={() => handleNewSession()}
+            >
+              <span className={styles.navIcon}>
+                <SquarePenIcon size={16} strokeWidth={1.2} />
+              </span>
+              {!collapsed && <span>{t('sidebar.newTask')}</span>}
+            </button>
+          )}
+          {primaryNavItems.has('plugins') && (
+            <button
+              className={styles.pluginButton}
+              type="button"
+              title={t('sidebar.plugins')}
+              aria-label={t('sidebar.plugins')}
+              onClick={onOpenPlugins}
+            >
+              <span className={styles.navIcon}>
+                <BlocksIcon size={16} strokeWidth={1.2} />
+              </span>
+              {!collapsed && <span>{t('sidebar.plugins')}</span>}
+            </button>
+          )}
+          {primaryNavItems.has('scheduledTasks') && (
             <button
               className={styles.pluginButton}
               type="button"
@@ -3381,6 +3601,21 @@ export function WebShellSidebar({
               {!collapsed && <span>{t('sidebar.scheduledTasks')}</span>}
             </button>
           )}
+          {primaryNavItems.has('goals') && (
+            <button
+              className={styles.pluginButton}
+              type="button"
+              title={t('sidebar.goals')}
+              aria-label={t('sidebar.goals')}
+              onClick={onOpenGoals}
+            >
+              <span className={styles.navIcon}>
+                <TargetIcon size={16} strokeWidth={1.2} />
+              </span>
+              {!collapsed && <span>{t('sidebar.goals')}</span>}
+            </button>
+          )}
+          {primaryNavOptions?.render?.()}
         </div>
         <div className={styles.body}>
           <div className={styles.sessionList}>
@@ -3404,7 +3639,7 @@ export function WebShellSidebar({
                 )}
               </>
             )}
-            {!collapsed && (
+            {!collapsed && !hideProjectHeader && (
               <div className={styles.projectsHeader}>
                 <button
                   className={styles.projectsHeaderToggle}
@@ -3431,15 +3666,13 @@ export function WebShellSidebar({
                   >
                     <SearchIcon />
                   </button>
-                  {!lockedWorkspaceCwd && (
+                  {!lockedWorkspaceCwd && onOpenAddWorkspace && (
                     <button
                       className={styles.projectsHeaderAction}
                       type="button"
                       title={t('sidebar.addWorkspace')}
                       aria-label={t('sidebar.addWorkspace')}
-                      onClick={() => {
-                        setShowAddWorkspaceDialog(true);
-                      }}
+                      onClick={onOpenAddWorkspace}
                     >
                       <PlusIcon />
                     </button>
@@ -3447,7 +3680,7 @@ export function WebShellSidebar({
                 </div>
               </div>
             )}
-            {searchOpen && !collapsed && (
+            {searchOpen && !collapsed && !hideProjectHeader && (
               <div className={styles.projectSearch}>
                 <SearchIcon aria-hidden="true" />
                 <Input
@@ -3498,6 +3731,7 @@ export function WebShellSidebar({
                             deleteGroupLabel={t('sidebar.groupDelete')}
                             groupActionsDisabled={groupBusy}
                             excludePinned
+                            onOpenGitDiff={onOpenGitDiff}
                             formatTime={(iso) => formatRelativeTime(iso, t)}
                             searchQuery={searchQuery}
                             expanded={ws.primary ? projectExpanded : undefined}
@@ -3532,6 +3766,7 @@ export function WebShellSidebar({
                                 !ws.primary &&
                                 ws.removable === true;
                               if (!ws.trusted && !canRemove) return null;
+                              const wsCwd = ws.primary ? undefined : ws.cwd;
                               return (
                                 <div
                                   className={styles.workspaceHeaderActions}
@@ -3565,9 +3800,7 @@ export function WebShellSidebar({
                                         onClick={(event) => {
                                           event.preventDefault();
                                           event.stopPropagation();
-                                          handleNewSession(
-                                            ws.primary ? undefined : ws.cwd,
-                                          );
+                                          handleNewSession(wsCwd);
                                         }}
                                       >
                                         <SquarePenIcon
@@ -3600,7 +3833,10 @@ export function WebShellSidebar({
                                           />
                                         </button>
                                       </DropdownMenuTrigger>
-                                      <DropdownMenuContent align="end">
+                                      <DropdownMenuContent
+                                        align="end"
+                                        className="w-auto min-w-40"
+                                      >
                                         <DropdownMenuItem
                                           variant="destructive"
                                           aria-label={`${t(
@@ -3646,6 +3882,7 @@ export function WebShellSidebar({
             )}
           >
             <div className={styles.footerPrimary}>
+              {footer && typeof footer === 'object' && footer.render?.()}
               {footerItems.has('settings') && (
                 <button
                   className={styles.footerButton}
@@ -3769,13 +4006,6 @@ export function WebShellSidebar({
           onPointerDown={handleResizePointerDown}
         />
       </aside>
-      {!lockedWorkspaceCwd && showAddWorkspaceDialog && (
-        <AddWorkspaceDialog
-          onClose={() => setShowAddWorkspaceDialog(false)}
-          onAdd={handleAddWorkspace}
-          onSuggest={handleSuggestWorkspacePaths}
-        />
-      )}
     </>
   );
 }

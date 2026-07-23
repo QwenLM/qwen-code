@@ -26,6 +26,7 @@ import {
   type SchemaComplianceMode,
 } from '../../utils/schemaConverter.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { normalizeMcpToolName } from '../../utils/tool-name-utils.js';
 
 type AnthropicMessageParam = Anthropic.MessageParam;
 // `scope: 'global'` is sent under the `prompt-caching-scope-2026-01-05` beta
@@ -435,7 +436,7 @@ export class AnthropicContentConverter {
           contentBlocks.push({
             type: 'tool_use',
             id: part.functionCall.id || `tool_${toolCallIndex}`,
-            name: part.functionCall.name || '',
+            name: normalizeMcpToolName(part.functionCall.name || ''),
             input: (part.functionCall.args as Record<string, unknown>) || {},
           });
           toolCallIndex += 1;

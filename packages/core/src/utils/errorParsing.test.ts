@@ -100,6 +100,34 @@ describe('parseAndFormatApiError', () => {
     expect(parseAndFormatApiError(error)).toBe(expected);
   });
 
+  it('should include the underlying cause of an Error', () => {
+    const cause = Object.assign(new Error('fetch failed'), {
+      code: 'ECONNREFUSED',
+    });
+    const error = new Error('Connection error.', { cause });
+
+    expect(parseAndFormatApiError(error)).toBe(
+      '[API Error: Connection error. (cause: ECONNREFUSED: fetch failed)]',
+    );
+  });
+
+  it('should preserve a plain Error message when there is no cause', () => {
+    expect(parseAndFormatApiError(new Error('Connection error.'))).toBe(
+      '[API Error: Connection error.]',
+    );
+  });
+
+  it('should include details from an AggregateError cause', () => {
+    const cause = Object.assign(new Error('connect failed'), {
+      code: 'ECONNREFUSED',
+    });
+    const error = new Error('Connection error.', {
+      cause: new AggregateError([cause]),
+    });
+
+    expect(parseAndFormatApiError(error)).toContain('ECONNREFUSED');
+  });
+
   it('should format a 429 StructuredError with the vertex message', () => {
     const error: StructuredError = {
       message: 'Rate limit exceeded',
@@ -114,6 +142,15 @@ describe('parseAndFormatApiError', () => {
     const error = 12345;
     const expected = '[API Error: An unknown error occurred.]';
     expect(parseAndFormatApiError(error)).toBe(expected);
+  });
+
+  it.each([
+    'Qwen OAuth quota exceeded: retry after 12:00 UTC',
+    'Qwen OAuth free tier has been discontinued for this model',
+  ])('should return Qwen quota messages unchanged: %s', (message) => {
+    const error: StructuredError = { message, status: 429 };
+
+    expect(parseAndFormatApiError(error)).toBe(message);
   });
 
   // Idempotency — added after a customer report where a 4xx in non-interactive

@@ -806,7 +806,142 @@ describe('DingtalkChannel prompt reactions', () => {
     }
   });
 
+  it('retries transient emotion failures before succeeding', async () => {
+    vi.useFakeTimers();
+    const channel = createChannel();
+    let emotionAttempts = 0;
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                errcode: 0,
+                access_token: 'proactive-token',
+                expires_in: 7200,
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        emotionAttempts++;
+        return Promise.resolve(
+          new Response('{}', { status: emotionAttempts < 3 ? 500 : 200 }),
+        );
+      });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    try {
+      const request = (
+        channel as unknown as {
+          attachReaction(msgId: string, conversationId: string): Promise<void>;
+        }
+      ).attachReaction('msg-1', 'cid-123');
+      await vi.runAllTimersAsync();
+      await request;
+
+      expect(emotionAttempts).toBe(3);
+      expect(stderr).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      stderr.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('does not retry non-transient emotion failures', async () => {
+    const channel = createChannel();
+    let emotionAttempts = 0;
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                errcode: 0,
+                access_token: 'proactive-token',
+                expires_in: 7200,
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        emotionAttempts++;
+        return Promise.resolve(new Response('{}', { status: 400 }));
+      });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    try {
+      await (
+        channel as unknown as {
+          attachReaction(msgId: string, conversationId: string): Promise<void>;
+        }
+      ).attachReaction('msg-1', 'cid-123');
+
+      expect(emotionAttempts).toBe(1);
+    } finally {
+      stderr.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('retries 429 rate-limit responses before succeeding', async () => {
+    vi.useFakeTimers();
+    const channel = createChannel();
+    let emotionAttempts = 0;
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                errcode: 0,
+                access_token: 'proactive-token',
+                expires_in: 7200,
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        emotionAttempts++;
+        return Promise.resolve(
+          new Response('{}', { status: emotionAttempts < 2 ? 429 : 200 }),
+        );
+      });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    try {
+      const request = (
+        channel as unknown as {
+          attachReaction(msgId: string, conversationId: string): Promise<void>;
+        }
+      ).attachReaction('msg-1', 'cid-123');
+      await vi.runAllTimersAsync();
+      await request;
+
+      expect(emotionAttempts).toBe(2);
+      expect(stderr).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+      stderr.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
   it('sanitizes failed emotion response details before logging', async () => {
+    vi.useFakeTimers();
     const channel = createChannel();
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
@@ -833,16 +968,20 @@ describe('DingtalkChannel prompt reactions', () => {
       .mockImplementation(() => true);
 
     try {
-      await (
+      const request = (
         channel as unknown as {
           attachReaction(msgId: string, conversationId: string): Promise<void>;
         }
       ).attachReaction('msg-1', 'cid-123');
+      await vi.runAllTimersAsync();
+      await request;
 
       const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(stderr).toHaveBeenCalledOnce();
       expect(logged).toContain('bad\\n[DingTalk:fake] forged');
       expect(logged).not.toContain('bad\n');
     } finally {
+      vi.useRealTimers();
       stderr.mockRestore();
       fetchSpy.mockRestore();
     }
@@ -1002,6 +1141,38 @@ describe('DingtalkChannel unroutable-message logging', () => {
 });
 
 describe('DingtalkChannel parsed-message logging', () => {
+  it('forwards the inbound conversation title as the group name', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'group-name-m1',
+        conversationType: '2',
+        conversationId: 'cid123',
+        conversationTitle: 'Project Group',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: true,
+        text: { content: '@qwen-code hello' },
+      }),
+      headers: { messageId: 'group-name-m1' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        chatId: 'cid123',
+        chatName: 'Project Group',
+        isGroup: true,
+      }),
+    );
+  });
+
   it('logs debug payloads when enabled for the channel', () => {
     const oldDebugPayload = process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'];
     process.env['QWEN_CHANNEL_DEBUG_PAYLOAD'] = 'test-dingtalk';
@@ -1017,6 +1188,9 @@ describe('DingtalkChannel parsed-message logging', () => {
         senderStaffId: 'staff-1',
         senderId: 'sender-1',
         isInAtList: true,
+        atUsers: [
+          { dingtalkId: 'private-dingtalk-id', staffId: 'private-staff-id' },
+        ],
         text: { content: '@qwen-code hello' },
       }),
       headers: { messageId: 'debug-m1' },
@@ -1044,6 +1218,10 @@ describe('DingtalkChannel parsed-message logging', () => {
     expect(logged).toContain('"msgId":"debug-m1"');
     expect(logged).toContain('"sessionWebhook":"[redacted]"');
     expect(logged).not.toContain('access_token=token');
+    expect(logged).toContain('"dingtalkId":"[redacted]"');
+    expect(logged).toContain('"staffId":"[redacted]"');
+    expect(logged).not.toContain('private-dingtalk-id');
+    expect(logged).not.toContain('private-staff-id');
   });
 
   it('logs parsed routing and sender fields for routable group messages', () => {
@@ -1395,6 +1573,285 @@ describe('DingtalkChannel sender attribution', () => {
       expect.objectContaining({
         text: '\u200b查看记忆',
         isGroup: true,
+        isMentioned: true,
+      }),
+    );
+  });
+
+  it('preserves @ in git URLs and emails when stripping bot mention (#7402)', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'm1',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: true,
+        text: {
+          content: '@qwen-code 重复： git@example.com:group/repo.git',
+        },
+      }),
+      headers: { messageId: 'm1' },
+    } as unknown as DWClientDownStream;
+
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+    writeSpy.mockRestore();
+
+    const handleInbound = (
+      channel as unknown as {
+        handleInbound: ReturnType<typeof vi.fn>;
+      }
+    ).handleInbound;
+
+    expect(handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: '重复： git@example.com:group/repo.git',
+        isMentioned: true,
+      }),
+    );
+  });
+
+  it('does not strip @ in URLs when bot mention is absent from text (#7402)', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'm2',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: true,
+        text: {
+          content: '重复： git@example.com:group/repo.git',
+        },
+      }),
+      headers: { messageId: 'm2' },
+    } as unknown as DWClientDownStream;
+
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+    writeSpy.mockRestore();
+
+    const handleInbound = (
+      channel as unknown as {
+        handleInbound: ReturnType<typeof vi.fn>;
+      }
+    ).handleInbound;
+
+    // When the bot @mention is not in the text (DingTalk already stripped it),
+    // the regex must NOT eat the @ in the git URL.
+    expect(handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: '重复： git@example.com:group/repo.git',
+        isMentioned: true,
+      }),
+    );
+  });
+
+  it('preserves non-bot mentions when DingTalk removes names from text', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'structured-mentions',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-user',
+        isInAtList: true,
+        atUsers: [
+          { dingtalkId: 'bot-user' },
+          { dingtalkId: 'member-user', staffId: 'member-staff' },
+          { dingtalkId: 'member-user', staffId: 'member-staff' },
+        ],
+        text: { content: 'please review this' },
+      }),
+      headers: { messageId: 'structured-mentions' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: '[Mentioned 1 other group member]\nplease review this',
+        isMentioned: true,
+      }),
+    );
+  });
+
+  it('does not add mention context when only the bot was mentioned', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'bot-only-mention',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-user',
+        isInAtList: true,
+        atUsers: [{ dingtalkId: 'bot-user' }],
+        text: { content: 'hello' },
+      }),
+      headers: { messageId: 'bot-only-mention' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({ text: 'hello', isMentioned: true }),
+    );
+  });
+
+  it('uses plural label when multiple distinct non-bot members are mentioned', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'plural-mentions',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-user',
+        isInAtList: true,
+        atUsers: [
+          { dingtalkId: 'bot-user' },
+          { dingtalkId: 'user-a' },
+          { dingtalkId: 'user-b' },
+        ],
+        text: { content: 'please review this' },
+      }),
+      headers: { messageId: 'plural-mentions' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: '[Mentioned 2 other group members]\nplease review this',
+        isMentioned: true,
+      }),
+    );
+  });
+
+  it('falls back to staffId when dingtalkId is absent', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'staffid-fallback',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-user',
+        isInAtList: true,
+        atUsers: [{ dingtalkId: 'bot-user' }, { staffId: 'only-staff' }],
+        text: { content: 'hello' },
+      }),
+      headers: { messageId: 'staffid-fallback' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: '[Mentioned 1 other group member]\nhello',
+        isMentioned: true,
+      }),
+    );
+  });
+
+  it('returns text unchanged when chatbotUserId is absent', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'no-chatbot-id',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: true,
+        atUsers: [{ dingtalkId: 'user-a' }],
+        text: { content: 'hello' },
+      }),
+      headers: { messageId: 'no-chatbot-id' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({ text: 'hello', isMentioned: true }),
+    );
+  });
+
+  it('returns context only when text is empty after mention stripping', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'empty-text-mention',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-user',
+        isInAtList: true,
+        atUsers: [{ dingtalkId: 'bot-user' }, { dingtalkId: 'user-a' }],
+        text: { content: '' },
+      }),
+      headers: { messageId: 'empty-text-mention' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: '[Mentioned 1 other group member]',
         isMentioned: true,
       }),
     );
