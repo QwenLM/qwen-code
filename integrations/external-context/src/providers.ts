@@ -10,24 +10,21 @@ import type {
   ExternalContextProvider,
   GenericHttpProviderConfig,
   Mem0ProviderConfig,
-  ProviderBinding,
   ProviderConfig,
 } from './types.js';
 
 const MEM0_BASE_URL = new URL('https://api.mem0.ai/');
 const MAX_PROVIDER_ITEMS = 5;
 
-export function createProvider(config: ProviderConfig): ProviderBinding {
+export function createProvider(
+  config: ProviderConfig,
+): ExternalContextProvider {
   switch (config.type) {
-    case 'mem0-platform-v3': {
-      const adapter = new Mem0PlatformV3Adapter(config);
-      return { type: config.type, provider: adapter };
-    }
+    case 'mem0-platform-v3':
+      return new Mem0PlatformV3Adapter(config);
     case 'generic-http-search-v1':
-      return {
-        type: config.type,
-        provider: new GenericHttpSearchV1Adapter(config),
-      };
+      return new GenericHttpSearchV1Adapter(config);
+    // no default
   }
 }
 

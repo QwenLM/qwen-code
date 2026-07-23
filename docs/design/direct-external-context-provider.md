@@ -44,7 +44,7 @@ client-provided metadata into authorization.
 - Retrieve repository-shared context without changing Qwen Core.
 - Keep provider and corpus selection outside model-controlled tool arguments.
 - Support both Mem0 and a minimal, provider-neutral search contract.
-- Bound requests, responses, returned context, timeouts, and operational logs.
+- Bound requests, responses, returned context, and timeouts.
 - Return stable MCP errors without exposing provider response details.
 - Keep the implementation private to the qwen-code monorepo until its
   deployment model is proven.
@@ -79,12 +79,15 @@ Direct Profile is not a lower-cost implementation of the same guarantees.
 ## Architecture
 
 The implementation lives in the private
-`integrations/external-context/` workspace and is packaged as a Qwen extension.
-It does not import or modify Qwen Core.
+`integrations/external-context/` workspace and includes a Qwen extension
+manifest for local trials. Managed deployments run the same MCP entry point
+through an administrator-pinned command-line MCP configuration. The
+implementation does not import or modify Qwen Core.
 
 ```mermaid
 flowchart LR
-    U["User or model chooses query"] --> Q["Qwen Code"]
+    A["Managed launcher"] -->|"pins --mcp-config + provider env"| Q["Qwen Code"]
+    U["User or model chooses query"] --> Q
     Q -->|"context_search(query)"| M["External Context MCP process"]
     M --> C["Immutable config + explicit adapter"]
     C --> P["Credential-bound provider corpus"]
@@ -172,9 +175,10 @@ The default search timeout is 5000 milliseconds. Administrators may configure
 cached. Client cancellation is combined with the provider timeout and aborts
 the in-flight provider request.
 
-Operational stderr logs contain only provider type, operation, status, elapsed
-milliseconds, and item count. They omit queries, content, titles, URIs,
-credentials, and complete provider errors.
+Phase 1 emits no local per-request audit record. It does not write queries,
+results, credentials, provider errors, or operation metadata to `stderr`.
+Operators may use provider-side access logs where available, but those logs are
+outside this integration and are not a tamper-resistant compliance audit.
 
 ## Configuration and process binding
 
@@ -206,13 +210,34 @@ starting a new one with a new, separately restricted configuration path.
 This is an operational one-session/one-corpus contract, not a binding enforced
 by Qwen Core.
 
-Workspace-scoped extension enablement is only an operational guard against
-accidental use; it is not authorization. In the current CLI, a user-scope
-disable is represented by paths under the OS user home, so a workspace outside
-that tree must not be assumed disabled. Operators must inspect
-`qwen extensions list` from the intended path and representative unrelated
-paths, and explicitly disable or isolate any path not covered by the user
-scope. The provider credential remains the isolation boundary.
+The extension manifest alone is not a managed process binding. Qwen merges MCP
+servers by name; a same-named server from settings, project configuration, or
+`--mcp-config` can replace the manifest contribution while preserving the
+permission-rule name. Managed deployments therefore pin the reviewed MCP
+command with an administrator-owned `--mcp-config`, which has higher precedence
+than user, project, workspace, and system MCP settings. The Phase 1 launcher
+constructs the complete Qwen argument vector and does not pass through arbitrary
+caller arguments, so an end-of-options marker cannot suppress the managed
+flag. Runtime MCP injection in `qwen serve` and ACP remains outside Phase 1.
+
+The launcher also constructs an administrator-approved environment rather than
+inheriting caller-controlled values. Qwen can subsequently load values from the
+repository's `.env` and `.qwen/.env` files, so Phase 1 requires the repository,
+those files, and same-UID code to be trusted. The absolute Node executable,
+checkout, dependency tree, MCP configuration, provider configuration, and
+credential binding are administrator-controlled and cannot be modified by the
+CLI user. These measures prevent same-name MCP configuration collisions; they
+do not create a process sandbox. Use the Governed Profile when repository
+inputs may be hostile.
+
+Workspace-scoped extension enablement is a convenience for local trusted
+trials only. It is not authorization and is not sufficient for the documented
+managed permission rule.
+
+The managed settings disable Qwen's `/cd` command to reduce accidental
+workspace/corpus mismatch. This does not strengthen the provider credential or
+prevent every same-UID action; switching repositories still requires
+terminating Qwen and starting a new managed process.
 
 ## Provider adapters
 
@@ -305,7 +330,7 @@ are not hidden behind this interface.
 | Provider result trust         | Explicitly untrusted; prompt-injection risk remains             |
 | Explicit mutations            | No write MCP or hook path; credential capabilities still matter |
 | Provider read effects         | Search may record audit, access, or ranking metadata            |
-| Audit                         | Metadata-only local logs, not tamper-resistant compliance audit |
+| Audit                         | No local audit; provider-side logs may exist                    |
 
 MCP annotations are descriptive hints, not authorization. The extension omits
 `readOnlyHint` because it cannot guarantee that every provider search is free
@@ -315,10 +340,9 @@ must treat the tool as an outbound data channel.
 
 ## Deployment
 
-Phase 1 is linked from a built qwen-code checkout, so runtime dependencies
-resolve from the monorepo installation. A copied directory or npm tarball is
-not a supported standalone artifact unless an operator packages its
-dependencies.
+Phase 1 runs from a built qwen-code checkout, so runtime dependencies resolve
+from the monorepo installation. A copied directory or npm tarball is not a
+supported standalone artifact unless an operator packages its dependencies.
 
 Administrators should:
 
@@ -327,23 +351,32 @@ Administrators should:
 2. Store the configuration outside the repository and inject both the
    immutable, session-unique configuration path and credential through a
    managed launcher.
-3. Link the extension, disable its default user-scope enablement, enable it only
-   for the intended workspace, and verify status from both the intended path
-   and representative unrelated paths. Explicitly disable or use a separate
-   Qwen home for workspaces outside the OS user-home path scope.
-4. Add the exact tool rule to `permissions.allow` when search should bypass
+3. Build the private workspace and place an administrator-owned MCP
+   configuration outside the repository. Pin absolute `command`, `args`, and
+   `cwd` values for an administrator-controlled Node executable, reviewed
+   checkout, and dependency tree that the CLI user cannot modify, with
+   `includeTools` containing only `context_search`.
+4. Do not accept arbitrary Qwen arguments. Construct the full argument vector
+   and a positive-allowlist environment inside the managed launcher, change to
+   the intended repository, and invoke Qwen with the administrator-owned
+   `--mcp-config` value.
+5. Point `QWEN_CODE_SYSTEM_SETTINGS_PATH` at the managed settings only inside
+   this launcher; do not globally install its automatic allow rule for
+   unrelated Qwen sessions. The settings disable `/cd` and add the exact tool
+   rule to `permissions.allow` when search should bypass
    confirmation, or to `permissions.ask` for interactive non-YOLO confirmation.
    This rule is not an allowlist for other Qwen tools and is not an
    authorization boundary. Phase 1 cannot enforce a hard confirmation
    requirement across approval-mode changes; use the Governed Profile for that
    requirement.
-5. Validate search quality, provenance, latency, and provider-side access
+6. Validate search quality, provenance, latency, and provider-side access
    controls before wider rollout.
 
-Disabling or removing the extension rolls back the Qwen integration. Phase 1
-does not call explicit mutation, migration, or deletion APIs. Provider search
-may retain logs or update access metadata, and rollback does not remove that
-provider-side state.
+Removing the pinned MCP configuration from the managed launcher rolls back the
+Qwen integration. Local trials can instead disable or remove the extension.
+Phase 1 does not call explicit mutation, migration, or deletion APIs. Provider
+search may retain logs or update access metadata, and rollback does not remove
+that provider-side state.
 
 ## Deferred phases
 

@@ -72,7 +72,10 @@ export default tseslint.config(
   },
   {
     // General overrides and rules for the project (TS/TSX files)
-    files: ['packages/**/src/**/*.{ts,tsx}'], // Target TS/TSX in all packages (including nested)
+    files: [
+      'packages/**/src/**/*.{ts,tsx}',
+      'integrations/**/src/**/*.{ts,tsx}',
+    ],
     plugins: {
       import: importPlugin,
     },
@@ -266,7 +269,11 @@ export default tseslint.config(
     },
   },
   {
-    files: ['packages/*/src/**/*.test.{ts,tsx}', 'packages/**/test/**/*.test.{ts,tsx}'],
+    files: [
+      'packages/*/src/**/*.test.{ts,tsx}',
+      'packages/**/test/**/*.test.{ts,tsx}',
+      'integrations/**/src/**/*.test.{ts,tsx}',
+    ],
     plugins: {
       vitest,
     },

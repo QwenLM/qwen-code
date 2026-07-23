@@ -14,12 +14,14 @@ import {
 } from './context.js';
 import { loadConfig } from './config.js';
 import { createProvider } from './providers.js';
-import { observeProviderOperation, withProviderTimeout } from './runtime.js';
-import type { ExternalContextConfig, ProviderBinding } from './types.js';
+import type {
+  ExternalContextConfig,
+  ExternalContextProvider,
+} from './types.js';
 
 interface ToolRuntime {
   config: ExternalContextConfig;
-  binding: ProviderBinding;
+  provider: ExternalContextProvider;
 }
 
 export function createExternalContextMcpServer(
@@ -52,21 +54,13 @@ export function createExternalContextMcpServer(
     async ({ query }, extra) => {
       try {
         const normalizedQuery = normalizeSearchQuery(query);
-        const items = await observeProviderOperation({
-          binding: runtime.binding,
-          operation: 'search',
-          execute: () =>
-            withProviderTimeout(
-              runtime.config.timeoutMs,
-              extra.signal,
-              (signal) =>
-                runtime.binding.provider.search({
-                  query: normalizedQuery,
-                  limit: 5,
-                  signal,
-                }),
-            ),
-          count: (result) => result.length,
+        const items = await runtime.provider.search({
+          query: normalizedQuery,
+          limit: 5,
+          signal: AbortSignal.any([
+            extra.signal,
+            AbortSignal.timeout(runtime.config.timeoutMs),
+          ]),
         });
         return textResult(renderExternalContext(items));
       } catch {
@@ -80,8 +74,8 @@ export function createExternalContextMcpServer(
 
 export async function runMcp(): Promise<void> {
   const config = await loadConfig();
-  const binding = createProvider(config.provider);
-  const server = createExternalContextMcpServer({ config, binding });
+  const provider = createProvider(config.provider);
+  const server = createExternalContextMcpServer({ config, provider });
   await server.connect(new StdioServerTransport());
 }
 

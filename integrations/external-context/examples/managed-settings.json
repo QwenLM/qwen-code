@@ -1,4 +1,7 @@
 {
+  "slashCommands": {
+    "disabled": ["cd"]
+  },
   "permissions": {
     "allow": ["mcp__external-context__context_search"]
   }

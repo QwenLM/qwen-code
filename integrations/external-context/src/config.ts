@@ -107,6 +107,7 @@ function resolveProvider(
       const token = readCredential(env, provider.tokenEnv);
       return { ...provider, token };
     }
+    // no default
   }
 }
 

@@ -8,7 +8,10 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createExternalContextMcpServer } from './mcp.js';
-import type { ExternalContextConfig, ProviderBinding } from './types.js';
+import type {
+  ExternalContextConfig,
+  ExternalContextProvider,
+} from './types.js';
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -21,7 +24,7 @@ describe('external context MCP server', () => {
   it('registers only a provider-bound retrieval tool', async () => {
     const client = await connect({
       config: config(),
-      binding: searchBinding(),
+      provider: searchProvider(),
     });
     const tools = await client.listTools();
     expect(tools.tools.map((tool) => tool.name)).toEqual(['context_search']);
@@ -44,10 +47,7 @@ describe('external context MCP server', () => {
       .mockResolvedValue([{ id: 'one', content: 'repository policy' }]);
     const client = await connect({
       config: config(),
-      binding: {
-        type: 'generic-http-search-v1',
-        provider: { search },
-      },
+      provider: { search },
     });
 
     const result = await client.callTool({
@@ -79,10 +79,7 @@ describe('external context MCP server', () => {
     const search = vi.fn().mockResolvedValue([]);
     const client = await connect({
       config: config(),
-      binding: {
-        type: 'generic-http-search-v1',
-        provider: { search },
-      },
+      provider: { search },
     });
     const acceptedQuery = '🙂'.repeat(2000);
 
@@ -126,10 +123,7 @@ describe('external context MCP server', () => {
     );
     const client = await connect({
       config: config(),
-      binding: {
-        type: 'generic-http-search-v1',
-        provider: { search },
-      },
+      provider: { search },
     });
     const controller = new AbortController();
 
@@ -151,13 +145,10 @@ describe('external context MCP server', () => {
   it('returns stable errors without provider details', async () => {
     const client = await connect({
       config: config(),
-      binding: {
-        type: 'generic-http-search-v1',
-        provider: {
-          search: vi
-            .fn()
-            .mockRejectedValue(new Error('secret upstream response body')),
-        },
+      provider: {
+        search: vi
+          .fn()
+          .mockRejectedValue(new Error('secret upstream response body')),
       },
     });
 
@@ -184,16 +175,15 @@ function config(): ExternalContextConfig {
   };
 }
 
-function searchBinding(): ProviderBinding {
+function searchProvider(): ExternalContextProvider {
   return {
-    type: 'generic-http-search-v1',
-    provider: { search: vi.fn().mockResolvedValue([]) },
+    search: vi.fn().mockResolvedValue([]),
   };
 }
 
 async function connect(runtime: {
   config: ExternalContextConfig;
-  binding: ProviderBinding;
+  provider: ExternalContextProvider;
 }): Promise<Client> {
   const server = createExternalContextMcpServer(runtime);
   const client = new Client({ name: 'test-client', version: '1.0.0' });

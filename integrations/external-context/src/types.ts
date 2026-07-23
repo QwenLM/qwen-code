@@ -21,11 +21,6 @@ export interface ExternalContextItem {
   updatedAt?: string;
 }
 
-export interface ProviderBinding {
-  type: ProviderConfig['type'];
-  provider: ExternalContextProvider;
-}
-
 export interface ExternalContextConfig {
   version: 1;
   timeoutMs: number;

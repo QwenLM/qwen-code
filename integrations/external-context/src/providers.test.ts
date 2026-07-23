@@ -378,7 +378,14 @@ async function startServer(
       response.destroy();
     });
   });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error) => reject(error);
+    server.once('error', onError);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', onError);
+      resolve();
+    });
+  });
   closeServers.push(
     () =>
       new Promise<void>((resolve, reject) => {
