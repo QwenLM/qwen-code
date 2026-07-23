@@ -136,6 +136,7 @@ import {
 } from './channel-delivery-ipc.js';
 import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 import {
+  normalizeWorkerDiagnostic,
   sanitizeWorkerDiagnostic,
   type WorkerDiagnosticRedactionOptions,
 } from './channel-worker-diagnostics.js';
@@ -182,6 +183,27 @@ const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
 const DAEMON_LOG_FORCED_FLUSH_BUDGET_MS = 250;
 
+function channelDeliveryPublicError(
+  code: Extract<ChannelDeliveryHostResult, { status: 'failed' }>['code'],
+): string {
+  switch (code) {
+    case 'channel_worker_unavailable':
+      return 'Channel worker is unavailable.';
+    case 'channel_delivery_timeout':
+      return 'Channel delivery timed out.';
+    case 'channel_delivery_invalid':
+      return 'Channel delivery is invalid.';
+    case 'channel_delivery_rejected':
+      return 'Channel delivery was rejected.';
+    case 'channel_delivery_queue_full':
+      return 'Channel delivery queue is full.';
+    case 'channel_delivery_failed':
+      return 'Channel delivery failed.';
+    default:
+      return 'Channel delivery failed.';
+  }
+}
+
 export function createBoundChannelDeliveryHandler(
   boundWorkspace: string,
   getManager: () => ChannelWorkerManager | undefined,
@@ -205,12 +227,17 @@ export function createBoundChannelDeliveryHandler(
             diagnostic instanceof Error
               ? diagnostic.message
               : String(diagnostic);
-          diagnosticText = sanitizeWorkerDiagnostic(
-            info.target.id.length > 0
-              ? message.replaceAll(info.target.id, '<redacted>')
-              : message,
+          const sanitized = sanitizeWorkerDiagnostic(
+            message,
             512,
             diagnosticRedaction,
+          );
+          const targetId = normalizeWorkerDiagnostic(info.target.id);
+          diagnosticText = sanitizeLogText(
+            targetId.length > 0
+              ? sanitized.replaceAll(targetId, '<redacted>')
+              : sanitized,
+            512,
           );
         }
         daemonLog.warn('channel delivery failed', {
@@ -250,7 +277,7 @@ export function createBoundChannelDeliveryHandler(
       return { status: 'delivered' };
     } catch (err) {
       if (isChannelDeliveryError(err)) {
-        return failed(err.code, err.message);
+        return failed(err.code, channelDeliveryPublicError(err.code), err);
       }
       return failed('channel_delivery_failed', 'Channel delivery failed.', err);
     }

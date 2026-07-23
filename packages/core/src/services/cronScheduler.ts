@@ -175,6 +175,23 @@ function computeJitter(
   return 0;
 }
 
+function cronJitterWindowMinutes(jitterMs: number): number {
+  return Math.ceil(Math.abs(jitterMs) / 60_000);
+}
+
+function isCronSlotVisibleToTick(
+  slotMinuteMs: number,
+  currentMs: number,
+  jitterMs: number,
+): boolean {
+  const currentMinute = new Date(currentMs);
+  currentMinute.setSeconds(0, 0);
+  return (
+    Math.abs(currentMinute.getTime() - slotMinuteMs) <=
+    cronJitterWindowMinutes(jitterMs) * 60_000
+  );
+}
+
 // Single id scheme, shared with the daemon's scheduled-tasks route via
 // cronTasksFile so route-created and tool-created durable tasks are
 // indistinguishable on disk.
@@ -825,22 +842,22 @@ export class CronScheduler {
         // same slot a second time. (A catch-up merely buffered then dropped is
         // NOT in this set, so it still re-detects from disk — intended recovery.)
         if (this.firePersistPending.has(t.id)) continue;
-        // A live scheduler may reload after another one-shot rewrites the shared
-        // tasks file but before this armed job's next 1s tick. Leave it to that
-        // tick; treating the sub-second gap as downtime would replace its real
-        // delivery with a synthetic missed-task confirmation.
-        if (
-          !t.recurring &&
-          this.timer !== null &&
-          this.armedDurableOneShots.has(t.id)
-        )
-          continue;
         const jitter = computeJitter(t.id, t.cron, t.recurring);
         const anchor = t.recurring
           ? (t.lastFiredAt ?? t.createdAt)
           : t.createdAt;
         const nextFire = computeNextFireMs(t.cron, anchor, jitter);
         if (nextFire === null || nextFire >= now) continue;
+        // A live scheduler may reload after another one-shot rewrites the shared
+        // tasks file but before this armed job's next 1s tick. Leave that brief
+        // handoff to the tick, but recover it as missed once the slot is stale.
+        if (
+          !t.recurring &&
+          this.timer !== null &&
+          this.armedDurableOneShots.has(t.id) &&
+          isCronSlotVisibleToTick(nextFire - jitter, now, jitter)
+        )
+          continue;
         if (!t.recurring) {
           // Missed one-shots are delivered as one batched confirm-first
           // notification: the task file is project-controlled, and
@@ -1477,8 +1494,7 @@ export class CronScheduler {
     currentDate: Date,
     currentMs: number,
   ): 'fired' | 'fired-final' | 'none' {
-    const absJitter = Math.abs(job.jitterMs);
-    const windowMinutes = Math.ceil(absJitter / 60_000);
+    const windowMinutes = cronJitterWindowMinutes(job.jitterMs);
 
     const nowMinuteStart = new Date(currentDate);
     nowMinuteStart.setSeconds(0, 0);

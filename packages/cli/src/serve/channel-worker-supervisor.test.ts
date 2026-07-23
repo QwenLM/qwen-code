@@ -10,6 +10,7 @@ import { CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS } from './channel-worker-env.js';
 import { MAX_CHANNEL_STARTUP_FAILURES } from './channel-worker-startup-ipc.js';
 import {
   CHANNEL_DELIVERY_IPC_TIMEOUT_MS,
+  MAX_CHANNEL_DELIVERIES_IN_FLIGHT,
   type ChannelDeliveryRequest,
 } from './channel-delivery-ipc.js';
 
@@ -2448,6 +2449,54 @@ describe('createChannelWorkerSupervisor', () => {
     });
 
     await expect(delivered).resolves.toEqual({ delivered: true });
+  });
+
+  it('rejects channel delivery when the supervisor is full', async () => {
+    const child = new FakeChild(false);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const pending = Array.from(
+      { length: MAX_CHANNEL_DELIVERIES_IN_FLIGHT },
+      () => supervisor.deliverChannelMessage!(deliveryRequest),
+    );
+    const overflow = supervisor.deliverChannelMessage!(deliveryRequest).catch(
+      (error: unknown) => error,
+    );
+
+    expect(child.send).toHaveBeenCalledTimes(MAX_CHANNEL_DELIVERIES_IN_FLIGHT);
+    await expect(overflow).resolves.toMatchObject({
+      code: 'channel_delivery_queue_full',
+      message: 'Channel delivery queue is full.',
+    });
+
+    const first = child.send.mock.calls[0]![0] as { id: string };
+    child.emit('message', {
+      type: 'channel_delivery_result',
+      id: first.id,
+      ok: true,
+    });
+    await expect(pending[0]).resolves.toEqual({ delivered: true });
+
+    const replacement = supervisor.deliverChannelMessage!(deliveryRequest);
+    expect(child.send).toHaveBeenCalledTimes(
+      MAX_CHANNEL_DELIVERIES_IN_FLIGHT + 1,
+    );
+    child.emit('exit', 1, null);
+    await Promise.allSettled([...pending.slice(1), replacement]);
   });
 
   it('rejects channel delivery when the worker is not running', async () => {

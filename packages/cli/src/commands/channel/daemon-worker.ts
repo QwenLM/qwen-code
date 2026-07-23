@@ -44,6 +44,7 @@ import {
   ChannelDeliveryError,
   isChannelDeliveryError,
   isChannelDeliveryMessage,
+  MAX_CHANNEL_DELIVERIES_IN_FLIGHT,
   type ChannelDeliveryErrorCode,
   type ChannelDeliveryRequest,
 } from '../../serve/channel-delivery-ipc.js';
@@ -78,7 +79,6 @@ import { ObservedChannelContactStore } from './observed-contact-store.js';
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
-const MAX_ACTIVE_CHANNEL_DELIVERIES = 16;
 const WORKER_SHUTDOWN_DRAIN_MS = 10_000;
 
 interface DaemonCapabilitiesLike {
@@ -874,7 +874,9 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
             });
             return;
           }
-          if (activeChannelDeliveries.size >= MAX_ACTIVE_CHANNEL_DELIVERIES) {
+          if (
+            activeChannelDeliveries.size >= MAX_CHANNEL_DELIVERIES_IN_FLIGHT
+          ) {
             sendChannelDeliveryResult(message.id, {
               ok: false,
               code: 'channel_delivery_queue_full',

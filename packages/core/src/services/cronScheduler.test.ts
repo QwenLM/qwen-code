@@ -1449,6 +1449,83 @@ describe('CronScheduler', () => {
       }
     });
 
+    it('classifies an armed one-shot as missed after its live tick window expires', async () => {
+      vi.useFakeTimers();
+      try {
+        const createdAt = new Date(2025, 0, 15, 10, 14, 0).getTime();
+        vi.setSystemTime(new Date(2025, 0, 15, 10, 14, 30));
+        await writeCronTasks(tmpDir, [
+          {
+            id: 'staleArmedOneShot',
+            cron: '15 10 * * *',
+            prompt: 'armed prompt',
+            recurring: false,
+            createdAt,
+            lastFiredAt: null,
+            sessionId: 'sess-A',
+          },
+        ]);
+        const fired: CronJob[] = [];
+        scheduler.start((job) => fired.push(job));
+        await scheduler.enableDurable('sess-A');
+
+        vi.setSystemTime(new Date(2025, 0, 15, 10, 16, 30));
+        await (
+          scheduler as unknown as {
+            loadFileTasks(handleMissed: boolean): Promise<void>;
+          }
+        ).loadFileTasks(true);
+
+        expect(fired).toHaveLength(1);
+        expect(fired[0]).toMatchObject({ missed: true });
+        await (
+          scheduler as unknown as {
+            pendingPersist: Promise<void>;
+          }
+        ).pendingPersist;
+        expect(await readCronTasks(tmpDir)).toHaveLength(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('leaves an early-jittered armed one-shot to tick while its cron slot is still visible', async () => {
+      vi.useFakeTimers();
+      try {
+        const createdAt = new Date(2025, 0, 15, 9, 58, 0).getTime();
+        vi.setSystemTime(new Date(2025, 0, 15, 9, 58, 30));
+        await writeCronTasks(tmpDir, [
+          {
+            id: 'jitter-10',
+            cron: '0 10 * * *',
+            prompt: 'jittered prompt',
+            recurring: false,
+            createdAt,
+            lastFiredAt: null,
+            sessionId: 'sess-A',
+          },
+        ]);
+        const fired: CronJob[] = [];
+        scheduler.start((job) => fired.push(job));
+        await scheduler.enableDurable('sess-A');
+
+        vi.setSystemTime(new Date(2025, 0, 15, 10, 0, 30));
+        await (
+          scheduler as unknown as {
+            loadFileTasks(handleMissed: boolean): Promise<void>;
+          }
+        ).loadFileTasks(true);
+
+        expect(fired).toHaveLength(0);
+        scheduler.tick();
+        expect(fired).toHaveLength(1);
+        expect(fired[0]).toMatchObject({ id: 'jitter-10' });
+        expect(fired[0]!.missed).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('a non-owner session catches up its own overdue bound task', async () => {
       const createdAt = Date.now() - 3 * 60 * 60_000; // 3h overdue
       await writeCronTasks(tmpDir, [

@@ -721,7 +721,7 @@ export function createChannelWorkerGroup(
       const deliver = entry?.supervisor.deliverChannelMessage;
       if (!entry || drainingWorkspaces.has(entry.workspaceCwd) || !deliver) {
         const hint = workspaceCwd
-          ? `No channel worker for workspace "${workspaceCwd}" owns channel "${request.channelName}".`
+          ? `No channel worker for the selected workspace owns channel "${request.channelName}".`
           : `No channel worker owns channel "${request.channelName}".`;
         throw new ChannelDeliveryError('channel_worker_unavailable', hint);
       }

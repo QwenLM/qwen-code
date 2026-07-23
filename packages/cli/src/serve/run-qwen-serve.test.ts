@@ -51,6 +51,7 @@ import type {
 } from '../commands/channel/pidfile.js';
 import { LARGE_PIPE_FRAME_THRESHOLD_BYTES } from './large-pipe-frame-observer.js';
 import type { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
+import { ChannelDeliveryError } from './channel-delivery-ipc.js';
 import {
   workspaceRegistrationId,
   type WorkspaceRegistrationStore,
@@ -346,6 +347,62 @@ describe('createBoundChannelDeliveryHandler', () => {
       });
       expect(JSON.stringify({ result, calls: warn.mock.calls })).not.toMatch(
         /worker-secret|daemon-secret|user-1/u,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('sanitizes typed delivery failures before returning them', async () => {
+    vi.stubEnv('CHANNEL_DELIVERY_TEST_API_KEY', 'abcdworkerxyz');
+    const collidingInfo = {
+      ...info,
+      target: { ...info.target, id: 'worker' },
+    };
+    const deliverChannelMessage = vi
+      .fn()
+      .mockRejectedValue(
+        new ChannelDeliveryError(
+          'channel_worker_unavailable',
+          'Channel worker is not running. abcdworkerxyz daemon-secret /canonical',
+        ),
+      );
+    const warn = vi.fn();
+    const authorizations = new ChannelDeliveryAuthorizationStore();
+    authorizations.authorizePrompt('/canonical', {
+      sessionId: collidingInfo.sessionId,
+      deliveryId: collidingInfo.deliveryId,
+      target: collidingInfo.target,
+    });
+    const handler = createBoundChannelDeliveryHandler(
+      '/canonical',
+      () => ({ deliverChannelMessage }) as never,
+      authorizations,
+      { warn } as never,
+      {
+        daemonToken: 'daemon-secret',
+        workerEnv: process.env,
+      },
+    );
+
+    try {
+      const result = await handler(collidingInfo);
+      expect(result).toEqual({
+        status: 'failed',
+        code: 'channel_worker_unavailable',
+        error: 'Channel worker is unavailable.',
+      });
+      expect(warn).toHaveBeenCalledWith('channel delivery failed', {
+        sessionId: collidingInfo.sessionId,
+        deliveryId: collidingInfo.deliveryId,
+        source: collidingInfo.source,
+        channelName: collidingInfo.target.channelName,
+        code: 'channel_worker_unavailable',
+        diagnostic:
+          'Channel <redacted> is not running. <redacted> <redacted> /canonical',
+      });
+      expect(JSON.stringify({ result, calls: warn.mock.calls })).not.toMatch(
+        /abcdworkerxyz|abcd|xyz|daemon-secret/u,
       );
     } finally {
       vi.unstubAllEnvs();

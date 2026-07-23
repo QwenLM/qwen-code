@@ -32,6 +32,7 @@ import {
   ChannelDeliveryError,
   createChannelDeliveryMessage,
   isChannelDeliveryResultMessage,
+  MAX_CHANNEL_DELIVERIES_IN_FLIGHT,
   type ChannelDeliveryAccepted,
   type ChannelDeliveryErrorCode,
   type ChannelDeliveryRequest,
@@ -1208,6 +1209,12 @@ export function createChannelWorkerSupervisor(
         throw new ChannelDeliveryError(
           'channel_worker_unavailable',
           'Channel worker IPC send failed.',
+        );
+      }
+      if (pendingChannelDeliveries.size >= MAX_CHANNEL_DELIVERIES_IN_FLIGHT) {
+        throw new ChannelDeliveryError(
+          'channel_delivery_queue_full',
+          'Channel delivery queue is full.',
         );
       }
       const message = createChannelDeliveryMessage(request);

@@ -193,9 +193,11 @@ describe('createChannelWorkerGroup', () => {
       shared,
     });
 
-    await expect(
-      group.deliverChannelMessage(deliveryRequest, SECONDARY),
-    ).rejects.toMatchObject({ code: 'channel_worker_unavailable' });
+    const error = await group
+      .deliverChannelMessage(deliveryRequest, SECONDARY)
+      .catch((value: unknown) => value);
+    expect(error).toMatchObject({ code: 'channel_worker_unavailable' });
+    expect((error as Error).message).not.toContain(SECONDARY);
     expect(
       recorded[0]!.supervisor.deliverChannelMessage,
     ).not.toHaveBeenCalled();
