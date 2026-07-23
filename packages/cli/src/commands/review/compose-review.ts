@@ -207,7 +207,15 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // The coverage-derived disclosures, kept STRUCTURAL ({subject, reason})
   // from the site that knows the boundary — reparsing the rendered prose for
   // it was the bug. `unreviewed` above stays what the caller wrote, verbatim.
-  const coverageEntries: Array<{ subject: string; reason: string }> = [];
+  // The `public*` fields are the body's register (`Brief.publicLabel`, a
+  // path-free reason); `subject`/`reason` stay the internal keys every dedup
+  // and certification check below matches on.
+  const coverageEntries: Array<{
+    subject: string;
+    reason: string;
+    publicSubject?: string;
+    publicReason?: string;
+  }> = [];
   // The fixes for the gaps above, for stderr — never for the body. The gap says
   // what the review cannot certify, to the PR author; the remediation names the
   // command that repairs it, to the orchestrator. #7012's public body was fourteen
@@ -678,29 +686,38 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // cause would tell the author "no agent was launched" about an agent that
   // demonstrably ran.
   const seenSubjects = new Set<string>();
-  const byReason = new Map<string, string[]>();
-  for (const { subject, reason } of covEntries) {
-    if (seenSubjects.has(subject)) continue;
-    seenSubjects.add(subject);
-    const subjects = byReason.get(reason) ?? [];
-    subjects.push(subject);
-    byReason.set(reason, subjects);
+  const byReason = new Map<
+    string,
+    Array<{ subject: string; publicSubject?: string }>
+  >();
+  for (const e of covEntries) {
+    if (seenSubjects.has(e.subject)) continue;
+    seenSubjects.add(e.subject);
+    // Keyed on the reason the body will PRINT — public over internal. Two
+    // unread briefs differ internally only by their brief paths; grouped on
+    // those, the path-free public sentence would render once per role, which
+    // is the per-subject repetition this map exists to kill.
+    const key = e.publicReason ?? e.reason;
+    const group = byReason.get(key) ?? [];
+    group.push({ subject: e.subject, publicSubject: e.publicSubject });
+    byReason.set(key, group);
   }
-  for (const [reason, subjects] of byReason) {
+  for (const [reason, entries] of byReason) {
     // Chunk subjects leave in the author's units, not the run's. `chunk 28`
     // is bookkeeping — the id selects a rebuild command on stderr, and
     // nothing on the PR page maps it to code. #7268's posted body enumerated
     // all 49 of them, unsorted, across two of these sentences; the author's
     // units are their files and, at the limit, the diff itself, which is what
-    // `describeChunkGap` renders. Role labels stay verbatim: they were
-    // written to be read (`roleLabel`), and reworking them here would fork
-    // the register the stderr twin shares.
+    // `describeChunkGap` renders. Role subjects ride their `publicSubject`
+    // (`Brief.publicLabel`) — the codename stays on stderr, where it is the
+    // selector — and the partition below keys on the INTERNAL subject, so a
+    // public phrase can never shadow a chunk id out of the chunk collapse.
     const chunkIds: number[] = [];
     const named: string[] = [];
-    for (const s of subjects) {
-      const m = /^chunk (\d+)$/.exec(s);
+    for (const e of entries) {
+      const m = /^chunk (\d+)$/.exec(e.subject);
       if (m) chunkIds.push(Number(m[1]));
-      else named.push(s);
+      else named.push(e.publicSubject ?? e.subject);
     }
     const shown = [
       ...(chunkIds.length > 0

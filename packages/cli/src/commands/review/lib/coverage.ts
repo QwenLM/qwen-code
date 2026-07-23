@@ -150,7 +150,24 @@ export interface CoverageFromTranscripts {
    * can carry anything), so a subject/reason boundary recovered from rendered
    * prose garbles exactly the entries it matters for.
    */
-  disclosures: Array<{ subject: string; reason: string }>;
+  disclosures: Array<{
+    subject: string;
+    reason: string;
+    /**
+     * The subject, said in the POSTED body's register (`Brief.publicLabel`) —
+     * absent when the internal subject already is that register (`chunk N`
+     * is translated downstream by `describeChunkGap`; `every dimension`,
+     * `coverage` and the Step 4/5 subjects are plain English). The internal
+     * `subject` stays the dedup and certification key, and the stderr twin
+     * keeps it: the codename is the selector an operator acts on.
+     */
+    publicSubject?: string;
+    /**
+     * The reason for the POSTED body, when the internal one carries something
+     * only an operator can use — today, the unread brief's filesystem path.
+     */
+    publicReason?: string;
+  }>;
   /**
    * Every planned chunk with the source files it covers, in plan order — the
    * body renderer's translation table. A chunk id is the run's own
@@ -280,6 +297,20 @@ function roleLabel(req: RequiredAgent): string {
   return req.file ? `${base} — ${req.file}` : base;
 }
 
+/**
+ * The same requirement, named for the PR author — or undefined when the
+ * internal label already is that register. A chunk requirement stays `chunk N`
+ * here on purpose: the body renderer translates chunk ids collectively
+ * (`describeChunkGap`), and a public subject would hide the id from that
+ * partition. The invariant agents' file rides `on`, not ` — `: in the posted
+ * sentence an em-dash reads as the subject/reason boundary.
+ */
+function publicRoleLabel(req: RequiredAgent): string | undefined {
+  if (req.role === 'chunk') return undefined;
+  const base = BRIEFS[req.role].publicLabel;
+  return req.file ? `${base} on ${req.file}` : base;
+}
+
 /** Something a reader can act on. `agentName` is `general-purpose` for all of them. */
 function label(rec: AgentRecord, chunk: number | null): string {
   if (chunk !== null) return `chunk ${chunk}`;
@@ -312,13 +343,25 @@ export function coverageFromTranscripts(
   const idleAgents: string[] = [];
   const unopenedAgents: string[] = [];
   const rewrittenPrompts: string[] = [];
-  const disclosures: Array<{ subject: string; reason: string }> = [];
+  const disclosures: CoverageFromTranscripts['disclosures'] = [];
   // The one source for both registers: the structural entry feeds the posted
   // body (compose-review), and the returned prose feeds the stderr arrays —
   // maintained as a pair, an edit to one and not the other would silently
-  // diverge what the operator reads from what the author was told.
-  const disclose = (subject: string, reason: string): string => {
-    disclosures.push({ subject, reason });
+  // diverge what the operator reads from what the author was told. `pub`
+  // carries the body-register variants; the returned prose always keeps the
+  // internal subject and reason, because stderr is where the codename and the
+  // path are the things a reader acts on.
+  const disclose = (
+    subject: string,
+    reason: string,
+    pub?: { subject?: string; reason?: string },
+  ): string => {
+    disclosures.push({
+      subject,
+      reason,
+      publicSubject: pub?.subject,
+      publicReason: pub?.reason,
+    });
     return `${subject} — ${reason}`;
   };
   const covered = new Set<number>();
@@ -596,6 +639,7 @@ export function coverageFromTranscripts(
             roleLabel(req),
             'no record shows its brief reaching an agent, so this dimension ' +
               'was reviewed, if at all, from a prompt the run wrote for itself',
+            { subject: publicRoleLabel(req) },
           ),
         );
       }
@@ -617,6 +661,7 @@ export function coverageFromTranscripts(
                 'transcript cannot certify two dimensions'
             : 'its prompt was built, but no agent on record was launched ' +
                 'with it',
+          { subject: publicRoleLabel(req) },
         ),
       );
       missingRoleSelectors.push(selectorOf(req));
@@ -646,11 +691,20 @@ export function coverageFromTranscripts(
       a.includes(JSON.stringify(brief)),
     );
     if (!opened) {
+      // The brief PATH is the operator's — it names the file to make the agent
+      // open. The author's copy drops it: a filesystem path in a posted PR
+      // body is the same register leak as a chunk id.
       unreadBriefs.push(
         disclose(
           roleLabel(req),
           `never opened its brief (${brief}), so it reviewed without the ` +
             'instructions it was launched to follow',
+          {
+            subject: publicRoleLabel(req),
+            reason:
+              'never opened its brief, so it reviewed without the ' +
+              'instructions it was launched to follow',
+          },
         ),
       );
     }
@@ -839,6 +893,39 @@ const VERIFY_GAP: GapText = {
   },
 };
 
+/**
+ * Both steps down the same way is ONE failure with two subjects, not two
+ * paragraphs. #7268's posted body carried the verify and reverse-audit
+ * `rewritten` sentences back to back, near-identical but for the tail — the
+ * same repetition the chunk grouping exists to kill, one layer up. Merged only
+ * on an EXACT shape match: mixed shapes have different mechanisms and
+ * different fixes, and a sentence vague enough to cover both would misname
+ * one of them. Each text keeps both steps' consequences and both honesty
+ * limits of its per-role twins: `not-built`/`not-launched` may not claim
+ * nobody ran, `rewritten` may not claim the brief never arrived. The
+ * remediation stays per-role — the two rebuild commands differ.
+ */
+const COMBINED_STEP45_GAP: Record<Exclude<Delivery, 'ok'>, string> = {
+  'not-built':
+    'neither the verifier nor the reverse auditor was launched with a prompt ' +
+    'this skill builds — the posted findings were ruled on, and the misses ' +
+    'the rest of the review left were hunted, if at all, without the briefs ' +
+    'this skill certifies against',
+  'not-launched':
+    'both prompts were built, but no agent was launched with either — the ' +
+    'posted findings cannot be counted as verified, and the pass that hunts ' +
+    'what the rest of the review missed cannot be certified',
+  rewritten:
+    'each ran and opened its brief, but neither was launched with the prompt ' +
+    'the CLI built — the launches were written by hand, so the posted ' +
+    'findings cannot be counted as verified, and what the agents were ' +
+    'actually asked is not what this skill certifies',
+  'brief-unread':
+    'each was launched with its built prompt and never opened its brief, so ' +
+    'the findings were ruled on without the verdict bar, and the audit ran ' +
+    'without the gaps-only method it was launched to follow',
+};
+
 export interface VerificationReport {
   /** True when every required Step 4/5 agent ran and read its brief. */
   ok: boolean;
@@ -962,7 +1049,6 @@ export function verificationGaps(
   );
   const reverse = bestDelivery(reverseKeys);
   if (reverse !== 'ok') {
-    gaps.push(`reverse audit — ${REVERSE_AUDIT_GAP[reverse].gap}`);
     // The fix template carries `--plan <plan>`; a literal `<plan>` pasted into a
     // POSIX shell parses as input redirection, so the one repair round Step 6
     // prescribes could never run. This function is handed the real path.
@@ -982,6 +1068,7 @@ export function verificationGaps(
   // findings, which are pre-confirmed and skip verification by design. A review that
   // confirmed nothing has nothing to verify.
   let unverifiedFindings = false;
+  let verify: Delivery | null = null;
   if (opts.postsFindings) {
     // The whole key family: `verify--<digest>` per shard (the record now folds
     // the findings in, so a launch that dropped them matches nothing), plus the
@@ -989,10 +1076,9 @@ export function verificationGaps(
     const verifyKeys = [...built.keys()].filter(
       (k) => k === 'verify' || k.startsWith('verify--'),
     );
-    const verify = bestDelivery(verifyKeys);
+    verify = bestDelivery(verifyKeys);
     if (verify !== 'ok') {
       unverifiedFindings = true;
-      gaps.push(`verification — ${VERIFY_GAP[verify].gap}`);
       remediation.push(
         `verification: ${VERIFY_GAP[verify].fix.replace(
           '--plan <plan>',
@@ -1001,6 +1087,24 @@ export function verificationGaps(
           () => `--plan ${shellQuotePath(planPath)}`,
         )}`,
       );
+    }
+  }
+
+  // The gaps, after both shapes are known: both steps failing the SAME way is
+  // one sentence with two subjects (see COMBINED_STEP45_GAP); anything else
+  // keeps its own precise text. The remediation above stays per-role either
+  // way — the two rebuild commands differ, and the combined sentence lands in
+  // the posted body while the fixes land on stderr.
+  if (reverse !== 'ok' && verify !== null && verify === reverse) {
+    gaps.push(
+      `verification and reverse audit — ${COMBINED_STEP45_GAP[reverse]}`,
+    );
+  } else {
+    if (reverse !== 'ok') {
+      gaps.push(`reverse audit — ${REVERSE_AUDIT_GAP[reverse].gap}`);
+    }
+    if (verify !== null && verify !== 'ok') {
+      gaps.push(`verification — ${VERIFY_GAP[verify].gap}`);
     }
   }
 

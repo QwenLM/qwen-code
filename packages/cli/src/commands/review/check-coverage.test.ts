@@ -1607,4 +1607,53 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
       /verification — its prompt was built, but no agent was launched with it/,
     );
   });
+
+  it('merges both steps into one gap when they failed the same way', () => {
+    // #7268: the posted body carried the verify and reverse-audit `rewritten`
+    // sentences back to back, near-identical but for the tail. One shape, one
+    // sentence, two subjects — and still both consequences and both honesty
+    // limits (each demonstrably RAN and opened its brief).
+    const p = plan();
+    step45(p, 'reverse-audit', { rewritten: true });
+    step45(p, 'verify', { rewritten: true });
+    const r = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(r.ok).toBe(false);
+    expect(r.gaps).toHaveLength(1);
+    const gap = r.gaps[0];
+    expect(gap).toMatch(/^verification and reverse audit — /);
+    expect(gap).toMatch(/each ran and opened its brief/);
+    expect(gap).toMatch(/written by hand/);
+    expect(gap).toMatch(/cannot be counted as verified/);
+    // The remediation stays per-role: the two rebuild commands differ.
+    const fix = r.remediation.join(' ');
+    expect(fix).toContain('--role reverse-audit');
+    expect(fix).toContain('--role verify');
+    expect(r.unverifiedFindings).toBe(true);
+  });
+
+  it('keeps two precise gaps when the steps failed differently', () => {
+    // Mixed shapes have different mechanisms and different fixes; a sentence
+    // vague enough to cover both would misname one of them.
+    const p = plan();
+    step45(p, 'reverse-audit', { rewritten: true });
+    step45(p, 'verify', { launch: false });
+    const r = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(r.gaps).toHaveLength(2);
+    expect(r.gaps.join(' ')).toMatch(
+      /reverse audit — an auditor ran and opened its brief/,
+    );
+    expect(r.gaps.join(' ')).toMatch(
+      /verification — its prompt was built, but no agent was launched with it/,
+    );
+    expect(r.gaps.join(' ')).not.toMatch(/verification and reverse audit/);
+  });
+
+  it('does not merge when the review posts no findings — verify was never owed', () => {
+    // A zero-finding review with the reverse audit skipped keeps the solo
+    // reverse-audit text: there is no verify failure to share a sentence with.
+    const p = plan(); // neither step on record
+    const r = verificationGaps(p, { postsFindings: false }, ENV);
+    expect(r.gaps).toHaveLength(1);
+    expect(r.gaps[0]).toMatch(/^reverse audit — /);
+  });
 });
