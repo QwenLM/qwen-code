@@ -1061,8 +1061,8 @@ class DaemonSessionClientTest {
             exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
             exchange.sendResponseHeaders(200, 0);
             byte[] bytes = terminalEvent(1).getBytes(StandardCharsets.UTF_8);
-            for (int offset = 0; offset < bytes.length; offset += 20) {
-                int count = Math.min(20, bytes.length - offset);
+            for (int offset = 0; offset < bytes.length; offset += 8) {
+                int count = Math.min(8, bytes.length - offset);
                 exchange.getResponseBody().write(bytes, offset, count);
                 exchange.getResponseBody().flush();
                 sleep(50);
@@ -1071,8 +1071,11 @@ class DaemonSessionClientTest {
         });
         server.createContext("/session/session-1/detach", noContent());
 
+        // The event needs about a second of 50ms steps to arrive, so a watchdog
+        // that only saw whole frames would still expire well inside the run.
         try (DaemonClient daemon = clientBuilder()
-                .sseIdleTimeout(Duration.ofMillis(150)).build();
+                .promptObservationTimeout(Duration.ofSeconds(15))
+                .sseIdleTimeout(Duration.ofMillis(500)).build();
                 DaemonSessionClient session = daemon.createSession()) {
             assertEquals(PromptTerminal.Kind.COMPLETE,
                     session.promptText("go").getTerminal().getKind());
