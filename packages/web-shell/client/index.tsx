@@ -192,6 +192,8 @@ export type {
   WebShellComposerTextOptions,
   WelcomeFooterRenderer,
   WelcomeHeaderRenderer,
+  ChatHeaderRenderer,
+  ChatHeaderRenderInfo,
   WebShellFooterRenderInfo,
   FooterRenderer,
   LoadingPhrasesResolver,
