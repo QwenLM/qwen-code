@@ -13324,6 +13324,44 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('POST /session/:id/cd', () => {
+    it('returns 503 when the generation closes during changeSessionCwd', async () => {
+      const generationGuard = createWorkspaceGenerationGuard();
+      const bridge = fakeBridge({
+        changeSessionCwdImpl: async (sessionId, req) => {
+          generationGuard.close();
+          return {
+            sessionId,
+            previousCwd: '/fake/previous',
+            newCwd: req.path,
+            warnings: [],
+          };
+        },
+      });
+      const runtime = makeWorkspaceRuntimeForTest({
+        workspaceId: 'cd-primary',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge,
+        generationGuard,
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { workspaceRegistry: createWorkspaceRegistry([runtime]) },
+      );
+
+      const res = await request(app)
+        .post('/session/cd-session/cd')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ path: `${WS_BOUND}/subdir` });
+
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe('workspace_runtime_unavailable');
+      expect(bridge.changeSessionCwdCalls).toHaveLength(1);
+    });
+  });
+
   describe('POST /session/:id/language', () => {
     it('200 with language result on success', async () => {
       const bridge = fakeBridge();
