@@ -121,7 +121,16 @@ export function registerWorkspaceModelsRoutes(
     async (req: Request, res: Response) => {
       const assertGenerationOpen =
         deps.captureGenerationAssertion?.() ?? (() => {});
-      assertGenerationOpen();
+      try {
+        assertGenerationOpen();
+      } catch {
+        res.set('Retry-After', '1');
+        res.status(503).json({
+          error: 'Workspace runtime is not active.',
+          code: 'workspace_runtime_unavailable',
+        });
+        return;
+      }
       const parsed = parseTarget(safeBody(req));
       if ('error' in parsed) {
         res.status(400).json({ error: parsed.error, code: parsed.code });

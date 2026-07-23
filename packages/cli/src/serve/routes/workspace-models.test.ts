@@ -122,6 +122,25 @@ describe('DELETE /workspace/models', () => {
     expect(broadcastSettingsChanged).not.toHaveBeenCalled();
   });
 
+  it('returns 503 when the generation is already closed at route entry', async () => {
+    writeUserSettings({ modelProviders: { openai: [{ id: 'gpt-4o' }] } });
+    const { app, persistSettings, broadcastSettingsChanged } = makeApp({
+      captureGenerationAssertion: () => () => {
+        throw new WorkspaceGenerationClosedError();
+      },
+    });
+
+    const res = await request(app)
+      .delete('/workspace/models')
+      .send({ authType: 'openai', modelId: 'gpt-4o' });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+    expect(res.headers['retry-after']).toBe('1');
+    expect(persistSettings).not.toHaveBeenCalled();
+    expect(broadcastSettingsChanged).not.toHaveBeenCalled();
+  });
+
   it('removes a model from ~/.qwen/settings.json and keeps siblings', async () => {
     writeUserSettings({
       modelProviders: {

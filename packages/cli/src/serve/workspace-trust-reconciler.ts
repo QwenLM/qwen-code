@@ -301,7 +301,9 @@ export function createWorkspaceTrustReconciler(
 
     for (const item of planned) {
       if (item.decrease) {
-        options.registry.beginReplacement(item.entry, snapshot.revision);
+        if (!options.registry.beginReplacement(item.entry, snapshot.revision)) {
+          continue;
+        }
       }
     }
     for (const item of planned) {
