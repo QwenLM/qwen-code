@@ -232,36 +232,85 @@ Policy rules let you auto-approve safe actions, require confirmation for
 risky ones, and outright deny dangerous ones — without manually approving
 every tool call from a remote client.
 
-Create `~/.config/qwen-rc/policy.yaml`:
+**Upgrading from an earlier version? Read this before you rely on an
+existing policy file.** Rule matching was previously broken against real
+permission frames, so `tool:` and `pathGlob:` rules never matched anything —
+only `defaults.action` ever actually fired, regardless of what individual
+rules said. This release fixes matching, which means **`deny` rules begin
+blocking and `allow` rules begin auto-approving for the first time** the
+moment you upgrade. Before you trust an existing file, run
+`qwen-rc policy lint <file>` — it reports how many `allow` rules are newly
+effective and warns on any that were written against a tool name (e.g.
+`write_file`) whose ACP kind also covers other tools (e.g. `edit`) it wasn't
+written to cover. The gateway only ever sees a call's ACP kind, never its
+tool name, so a rule naming one of those shared-kind tools cannot
+distinguish it from the others remotely — `allow` on `write_file` also
+allows `edit`.
+
+Create `~/.qwen/rc/policy.yaml` (per-user; applies across every workspace
+unless overridden below):
 
 ```yaml
+defaults:
+  action: prompt
 rules:
-  - match:
-      tool: read_file
+  # `tool` is the ACP kind: read | search | edit | execute | fetch | other.
+  # A known tool name (e.g. run_shell_command) is accepted and mapped to its
+  # kind — note that mapping is lossy: write_file and edit share `edit`.
+  - id: allow-reads
+    match: { tool: read }
     action: allow
-  - match:
-      tool: write_file
-    action: prompt
-  - match:
-      tool: run_shell_command
+
+  # pathGlob matches every path the call touches, INCLUDING paths a shell
+  # command reads or writes, so this also blocks `cat .env`.
+  - id: deny-dotenv
+    match: { pathGlob: ['**/.env*'] }
+    action: deny
+    reason: secrets
+
+  # operation narrows to read | write | execute.
+  - id: deny-writes-to-config
+    match: { pathGlob: ['**/config/**'], operation: write }
     action: deny
 ```
 
-This example auto-approves read-only tools, prompts the operator before
-file writes, and denies shell command execution outright.
+This example auto-approves read-only calls (kind `read`, e.g. `read_file`,
+`grep_search`), denies any call that touches a `.env*` file anywhere under
+the project root — including one reached through a shell command — and
+denies writes anywhere under `config/`. Anything no rule matches falls
+through to `defaults.action`, `prompt` here, so the operator is asked.
+`pathGlob` patterns are always anchored to the project root, regardless of
+the tool call's own working directory, and an unrecognized `tool` value (not
+a known kind or tool name) is a load error rather than a silent no-op.
 
-Lint the file for syntax and rule-shape errors:
+For a per-project override, create `<workspaceCwd>/.qwen/policy.yaml` in the
+directory the `qwen serve` daemon is running against. Its rules are
+prepended ahead of the user-scope rules, so a workspace rule wins any tie in
+specificity against a user rule; its `defaults` block, if present, is
+ignored — only the user-scope file controls the fallback action.
+
+`originScope` and `sessionTag` are accepted by the schema but are never
+populated by the running gateway, so a rule that matches on either of them
+can never match.
+
+Lint the file for syntax and rule-shape errors, and see the
+newly-effective-rule advisories described above:
 
 ```bash
-npx qwen-rc policy lint policy.yaml
+npx qwen-rc policy lint ~/.qwen/rc/policy.yaml
 ```
 
-See a human-readable explanation of what the policy will do for a given
-tool call:
+Dry-run the effective, layered policy against a single simulated call,
+without a running gateway:
 
 ```bash
-npx qwen-rc policy explain policy.yaml
+npx qwen-rc policy explain read --path=src/index.ts
 ```
+
+Pass the ACP kind (e.g. `read`, `execute`) as the argument, plus any of
+`--args=`, `--path=`, `--scope=`, `--tag=` to shape the simulated call. The
+output lists each rule in evaluation order as matched, skipped, or
+not-reached, followed by the resulting decision.
 
 The policy engine watches the file and hot-reloads it on change — no
 gateway restart needed after editing rules.
