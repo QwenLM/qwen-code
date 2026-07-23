@@ -44,6 +44,22 @@ export const ACP_PERMISSION_RESPONSE_TIMEOUT_MS = 5 * 60 * 1000;
 const ACP_EVENT_LOOP_STALL_RE =
   /^\[perf\] acp agent event loop stall: max=(\d+(?:\.\d+)?)ms/m;
 
+function isNotCurrentlyGeneratingCancelError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const maybe = error as { message?: unknown; data?: unknown };
+  if (isNotCurrentlyGeneratingText(maybe.message)) return true;
+  if (!maybe.data || typeof maybe.data !== 'object') return false;
+  return isNotCurrentlyGeneratingText(
+    (maybe.data as { details?: unknown }).details,
+  );
+}
+
+function isNotCurrentlyGeneratingText(value: unknown): boolean {
+  return (
+    typeof value === 'string' && /\bnot currently generating\b/i.test(value)
+  );
+}
+
 /**
  * Read a command's aliases off a raw wire `available_commands_update` entry. ACP
  * carries them in `_meta` (its only extension point); a top-level `altNames` is
@@ -264,6 +280,10 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     const conn = this.ensureConnection();
     try {
       await conn.cancel({ sessionId });
+    } catch (error) {
+      if (!isNotCurrentlyGeneratingCancelError(error)) {
+        throw error;
+      }
     } finally {
       this.resolvePendingPermissions(sessionId);
     }

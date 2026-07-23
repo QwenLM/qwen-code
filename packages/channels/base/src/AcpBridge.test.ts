@@ -110,6 +110,18 @@ type TestableAcpBridge = AcpBridge & {
   resolveChannelLoopToolHandler(sessionId: string): ChannelLoopToolHandler;
 };
 
+function requestPermission(sessionId: string, toolCallId: string) {
+  return child.clients[0]!.requestPermission({
+    sessionId,
+    toolCall: {
+      toolCallId,
+      kind: 'shell',
+      title: 'Run command',
+    },
+    options: [{ optionId: 'cancel', name: 'Deny' }],
+  });
+}
+
 describe('AcpBridge', () => {
   beforeEach(() => {
     child.instances.length = 0;
@@ -869,24 +881,8 @@ describe('AcpBridge', () => {
     bridge.on('permissionResolved', permissionResolved);
 
     await bridge.start();
-    const first = child.clients[0]!.requestPermission({
-      sessionId: 'session-1',
-      toolCall: {
-        toolCallId: 'tool-1',
-        kind: 'shell',
-        title: 'Run command',
-      },
-      options: [{ optionId: 'cancel', name: 'Deny' }],
-    });
-    const second = child.clients[0]!.requestPermission({
-      sessionId: 'session-2',
-      toolCall: {
-        toolCallId: 'tool-2',
-        kind: 'shell',
-        title: 'Run command',
-      },
-      options: [{ optionId: 'cancel', name: 'Deny' }],
-    });
+    const first = requestPermission('session-1', 'tool-1');
+    const second = requestPermission('session-2', 'tool-2');
     await Promise.resolve();
 
     const firstEvent = permissionRequest.mock.calls[0]![0];
@@ -915,6 +911,84 @@ describe('AcpBridge', () => {
       bridge.respondToPermission(secondEvent.requestId, response),
     ).resolves.toBe(true);
     await expect(second).resolves.toEqual(response);
+  });
+
+  it('treats an idle agent cancellation as successful', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+    const permissionRequest = vi.fn();
+    const permissionResolved = vi.fn();
+    bridge.on('permissionRequest', permissionRequest);
+    bridge.on('permissionResolved', permissionResolved);
+
+    await bridge.start();
+    const pending = requestPermission('session-1', 'tool-1');
+    await Promise.resolve();
+    const event = permissionRequest.mock.calls[0]![0];
+    child.connections[0]!.cancel.mockRejectedValueOnce({
+      code: -32603,
+      message: 'Internal error',
+      data: { details: 'Not currently generating' },
+    });
+
+    await expect(bridge.cancelSession('session-1')).resolves.toBeUndefined();
+
+    await expect(pending).resolves.toEqual({
+      outcome: { outcome: 'cancelled' },
+    });
+    expect(permissionResolved).toHaveBeenCalledWith({
+      requestId: event.requestId,
+      outcome: { outcome: 'cancelled' },
+    });
+  });
+
+  it('treats an idle agent cancellation message as successful', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+
+    await bridge.start();
+    child.connections[0]!.cancel.mockRejectedValueOnce({
+      code: -32603,
+      message: 'Not currently generating (session idle)',
+    });
+
+    await expect(bridge.cancelSession('session-1')).resolves.toBeUndefined();
+  });
+
+  it('propagates non-idle cancellation errors after resolving permissions', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+    const permissionRequest = vi.fn();
+    const permissionResolved = vi.fn();
+    bridge.on('permissionRequest', permissionRequest);
+    bridge.on('permissionResolved', permissionResolved);
+
+    await bridge.start();
+    const pending = requestPermission('session-1', 'tool-1');
+    await Promise.resolve();
+    const event = permissionRequest.mock.calls[0]![0];
+    const error = {
+      code: -32603,
+      message: 'Internal error',
+      data: { details: 'Different server failure' },
+    };
+    child.connections[0]!.cancel.mockRejectedValueOnce(error);
+
+    await expect(bridge.cancelSession('session-1')).rejects.toBe(error);
+
+    await expect(pending).resolves.toEqual({
+      outcome: { outcome: 'cancelled' },
+    });
+    expect(permissionResolved).toHaveBeenCalledWith({
+      requestId: event.requestId,
+      outcome: { outcome: 'cancelled' },
+    });
   });
 
   it('resolves pending permissions as cancelled after the response timeout', async () => {
