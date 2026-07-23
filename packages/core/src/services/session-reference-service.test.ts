@@ -100,6 +100,25 @@ describe('SessionReferenceService', () => {
     expect(res.text).toContain('[tool: write_file — error]');
   });
 
+  it('marks a cancelled tool call as cancelled, not ok', async () => {
+    const svc = makeSvc(
+      fakeResumed([
+        {
+          type: 'tool_result',
+          toolCallResult: { callId: 'c1', status: 'cancelled' },
+          message: {
+            role: 'user',
+            parts: [{ functionResponse: { name: 'read_file', response: {} } }],
+          },
+        },
+      ]),
+    );
+    const res = await svc.resolve('s1');
+    if ('notFound' in res) throw new Error('unexpected');
+    expect(res.text).toContain('[tool: read_file — cancelled]');
+    expect(res.text).not.toContain('[tool: read_file — ok]');
+  });
+
   it('surfaces an error tool_result that has no functionResponse parts', async () => {
     const svc = makeSvc(
       fakeResumed([

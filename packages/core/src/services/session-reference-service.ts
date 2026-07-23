@@ -25,8 +25,7 @@ export interface SlimmedSessionReference {
   truncated: boolean;
 }
 
-interface FunctionCallPart {
-  functionCall?: { name?: string };
+interface FunctionResponsePart {
   functionResponse?: { name?: string };
 }
 
@@ -146,7 +145,9 @@ export class SessionReferenceService {
       // (functionCall on the assistant record) is intentionally NOT summarized
       // to avoid a duplicate, always-"ok" line. Never includes result bodies.
       for (const name of this.functionResponseNames(rec.message)) {
-        const status = rec.toolCallResult?.error ? 'error' : 'ok';
+        const status = rec.toolCallResult?.error
+          ? 'error'
+          : (rec.toolCallResult?.status ?? 'ok');
         out.push(`[tool: ${name} — ${status}]`);
       }
       // system records contribute nothing
@@ -197,7 +198,7 @@ export class SessionReferenceService {
   private functionResponseNames(message?: Content): string[] {
     if (!message?.parts) return [];
     return message.parts
-      .map((p: Part) => (p as FunctionCallPart).functionResponse?.name)
+      .map((p: Part) => (p as FunctionResponsePart).functionResponse?.name)
       .filter(
         (name): name is string => typeof name === 'string' && name.length > 0,
       );
