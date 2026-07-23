@@ -15,6 +15,8 @@ export type SessionGitIntent =
   | { mode: 'branch'; name: string }
   | { mode: 'worktree'; slug?: string };
 
+// UX-only validation; the server re-validates in POST /session (session.ts).
+// Keep the two predicates in sync.
 function validateBranchName(name: string): boolean {
   if (!name) return false;
   return !(
@@ -223,8 +225,8 @@ export function GitModePopover({
                       className={styles.branchStatus}
                       style={{
                         color: branchValid
-                          ? 'var(--web-shell-git-mode-valid, #3ddc97)'
-                          : 'var(--web-shell-git-mode-invalid, #ff6b6b)',
+                          ? 'var(--git-mode-valid)'
+                          : 'var(--git-mode-invalid)',
                       }}
                     >
                       {branchValid ? '✓' : '✗'}
@@ -239,9 +241,11 @@ export function GitModePopover({
                   ? t('gitMode.branchInvalidName')
                   : t('gitMode.branchHint')}
               </div>
-              <div className={styles.branchHint}>
-                {t('gitMode.branchConflictWarning')}
-              </div>
+              {branchName && branchValid && (
+                <div className={styles.branchHint}>
+                  {t('gitMode.branchConflictWarning')}
+                </div>
+              )}
             </div>
           )}
 

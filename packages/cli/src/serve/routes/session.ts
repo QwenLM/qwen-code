@@ -110,9 +110,10 @@ const execFileAsync = promisify(execFile);
 // `inFlightBranchWorkspaces`. Mirrors GitWorktreeService's 30s bound.
 const GIT_BRANCH_TIMEOUT_MS = 30_000;
 
-// `HEAD` is the canonical ref name git refuses to create as a branch; the
-// surrounding predicate handles the other reserved forms. Compared
-// case-insensitively because ref storage is case-folding on macOS/Windows.
+// `HEAD` is the most prominent ref name git rejects as a branch name.
+// The surrounding predicate covers the remaining reserved forms (`@`, `-`,
+// `..`, `.lock` suffixes, etc.). Compared case-insensitively because ref
+// storage is case-folding on macOS/Windows.
 const GIT_RESERVED_BRANCH = 'HEAD';
 
 interface RegisterSessionRoutesDeps {
@@ -1256,6 +1257,7 @@ export function registerSessionRoutes(
         return;
       }
       // Validate git branch name characters and reserved names.
+      // Mirrors validateBranchName in GitModePopover.tsx; keep in sync.
       if (
         /[^\p{L}\p{N}._/-]/u.test(branchName) ||
         branchName.includes('..') ||
@@ -1296,7 +1298,16 @@ export function registerSessionRoutes(
           activeBranchSessions.delete(workspaceCwd);
         }
       }
-      const wtService = new GitWorktreeService(workspaceCwd);
+      let wtService: GitWorktreeService;
+      try {
+        wtService = new GitWorktreeService(workspaceCwd);
+      } catch {
+        res.status(500).json({
+          error: 'Failed to initialize git service',
+          code: 'branch_init_failed',
+        });
+        return;
+      }
       if (!(await wtService.isGitRepository())) {
         res.status(400).json({
           error: 'Branch creation requires a git repository',

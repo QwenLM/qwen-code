@@ -404,6 +404,11 @@
   --scrollbar-track: transparent;
   --scrollbar-thumb: #3a3a3a;
   --scrollbar-thumb-hover: #525252;
+  --git-mode-current: #3ddc97;
+  --git-mode-branch: #f5a623;
+  --git-mode-worktree: #b48eff;
+  --git-mode-valid: #48bb78;
+  --git-mode-invalid: #fc8181;
 }
 
 .themeLight {
@@ -472,6 +477,11 @@
   --scrollbar-track: transparent;
   --scrollbar-thumb: #c7c9cc;
   --scrollbar-thumb-hover: #aeb1b5;
+  --git-mode-current: #1a7a4a;
+  --git-mode-branch: #9a6a00;
+  --git-mode-worktree: #6b3fa0;
+  --git-mode-valid: #1f7a3a;
+  --git-mode-invalid: #c0362c;
 }
 
 .content {

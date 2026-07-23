@@ -9,15 +9,16 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-family: var(--web-shell-font-mono, 'JetBrains Mono', monospace);
+  font-family: 'JetBrains Mono', monospace;
   font-size: 11.5px;
   font-weight: 500;
   padding: 3px 9px;
   border-radius: 20px;
   cursor: pointer;
-  border: 1px solid rgba(61, 220, 151, 0.2);
-  background: rgba(61, 220, 151, 0.1);
-  color: var(--web-shell-git-mode-current, #3ddc97);
+  border: 1px solid
+    color-mix(in srgb, var(--git-mode-current) 20%, transparent);
+  background: color-mix(in srgb, var(--git-mode-current) 10%, transparent);
+  color: var(--git-mode-current);
   transition:
     border-color 0.2s,
     background 0.2s,
@@ -27,28 +28,28 @@
 }
 .chip:hover,
 .chip:focus-visible {
-  border-color: rgba(61, 220, 151, 0.45);
-  background: rgba(61, 220, 151, 0.16);
+  border-color: color-mix(in srgb, var(--git-mode-current) 45%, transparent);
+  background: color-mix(in srgb, var(--git-mode-current) 16%, transparent);
 }
 .chipBranch {
-  color: var(--web-shell-git-mode-branch, #f5a623);
-  background: rgba(245, 166, 35, 0.1);
-  border-color: rgba(245, 166, 35, 0.22);
+  color: var(--git-mode-branch);
+  background: color-mix(in srgb, var(--git-mode-branch) 10%, transparent);
+  border-color: color-mix(in srgb, var(--git-mode-branch) 22%, transparent);
 }
 .chipBranch:hover,
 .chipBranch:focus-visible {
-  border-color: rgba(245, 166, 35, 0.45);
-  background: rgba(245, 166, 35, 0.16);
+  border-color: color-mix(in srgb, var(--git-mode-branch) 45%, transparent);
+  background: color-mix(in srgb, var(--git-mode-branch) 16%, transparent);
 }
 .chipWorktree {
-  color: var(--web-shell-git-mode-worktree, #b48eff);
-  background: rgba(180, 142, 255, 0.1);
-  border-color: rgba(180, 142, 255, 0.22);
+  color: var(--git-mode-worktree);
+  background: color-mix(in srgb, var(--git-mode-worktree) 10%, transparent);
+  border-color: color-mix(in srgb, var(--git-mode-worktree) 22%, transparent);
 }
 .chipWorktree:hover,
 .chipWorktree:focus-visible {
-  border-color: rgba(180, 142, 255, 0.45);
-  background: rgba(180, 142, 255, 0.16);
+  border-color: color-mix(in srgb, var(--git-mode-worktree) 45%, transparent);
+  background: color-mix(in srgb, var(--git-mode-worktree) 16%, transparent);
 }
 .chipCompact {
   padding: 3px 7px;
@@ -85,7 +86,7 @@
   width: 16px;
   height: 16px;
   border: none;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--subtle-bg-strong);
   color: inherit;
   border-radius: 50%;
   font-size: 9px;
@@ -96,7 +97,7 @@
 }
 .clearBtn:hover,
 .clearBtn:focus-visible {
-  background: rgba(255, 255, 255, 0.18);
+  background: color-mix(in srgb, var(--foreground) 18%, transparent);
 }
 
 /* ── popover ──────────────────────────────── */
@@ -111,7 +112,7 @@
   font-weight: 600;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: var(--web-shell-text-dim, #5c6478);
+  color: var(--muted-foreground);
   padding: 6px 10px 4px;
 }
 
@@ -134,10 +135,10 @@
 }
 .option:hover,
 .option:focus-visible {
-  background: var(--web-shell-bg-hover, rgba(255, 255, 255, 0.05));
+  background: var(--subtle-bg);
 }
 .optionSelected {
-  background: var(--web-shell-bg-hover, rgba(255, 255, 255, 0.05));
+  background: var(--subtle-bg);
 }
 
 .optionIcon {
@@ -156,19 +157,19 @@
   height: 15px;
 }
 .iconCurrent {
-  background: rgba(61, 220, 151, 0.1);
-  color: var(--web-shell-git-mode-current, #3ddc97);
-  border-color: rgba(61, 220, 151, 0.18);
+  background: color-mix(in srgb, var(--git-mode-current) 10%, transparent);
+  color: var(--git-mode-current);
+  border-color: color-mix(in srgb, var(--git-mode-current) 18%, transparent);
 }
 .iconBranch {
-  background: rgba(245, 166, 35, 0.1);
-  color: var(--web-shell-git-mode-branch, #f5a623);
-  border-color: rgba(245, 166, 35, 0.18);
+  background: color-mix(in srgb, var(--git-mode-branch) 10%, transparent);
+  color: var(--git-mode-branch);
+  border-color: color-mix(in srgb, var(--git-mode-branch) 18%, transparent);
 }
 .iconWorktree {
-  background: rgba(180, 142, 255, 0.1);
-  color: var(--web-shell-git-mode-worktree, #b48eff);
-  border-color: rgba(180, 142, 255, 0.18);
+  background: color-mix(in srgb, var(--git-mode-worktree) 10%, transparent);
+  color: var(--git-mode-worktree);
+  border-color: color-mix(in srgb, var(--git-mode-worktree) 18%, transparent);
 }
 
 .optionText {
@@ -185,7 +186,7 @@
 }
 .optionDesc {
   font-size: 11px;
-  color: var(--web-shell-text-secondary, #8b93a8);
+  color: var(--muted-foreground);
   line-height: 1.4;
 }
 
@@ -199,20 +200,20 @@
   font-weight: 700;
 }
 .checkCurrent {
-  color: var(--web-shell-git-mode-current, #3ddc97);
+  color: var(--git-mode-current);
 }
 .checkBranch {
-  color: var(--web-shell-git-mode-branch, #f5a623);
+  color: var(--git-mode-branch);
 }
 .checkWorktree {
-  color: var(--web-shell-git-mode-worktree, #b48eff);
+  color: var(--git-mode-worktree);
 }
 
 /* ── branch input ─────────────────────────── */
 .branchBox {
   margin: 2px 4px 4px;
-  background: var(--web-shell-bg-deep, rgba(0, 0, 0, 0.2));
-  border: 1px solid var(--web-shell-border, rgba(255, 255, 255, 0.08));
+  background: var(--subtle-bg-strong);
+  border: 1px solid var(--border);
   border-radius: 8px;
   padding: 8px 10px;
 }
@@ -224,7 +225,7 @@
 .branchLabel {
   font-size: 11px;
   font-weight: 600;
-  color: var(--web-shell-text-dim, #5c6478);
+  color: var(--muted-foreground);
   flex-shrink: 0;
 }
 .branchInputWrap {
@@ -234,11 +235,11 @@
 .branchInput {
   width: 100%;
   padding: 6px 26px 6px 9px;
-  background: var(--web-shell-bg-surface, rgba(255, 255, 255, 0.04));
-  border: 1px solid var(--web-shell-border, rgba(255, 255, 255, 0.08));
+  background: var(--subtle-bg);
+  border: 1px solid var(--border);
   border-radius: 6px;
-  color: var(--web-shell-text-primary, #e8ecf4);
-  font-family: var(--web-shell-font-mono, 'JetBrains Mono', monospace);
+  color: var(--popover-foreground);
+  font-family: 'JetBrains Mono', monospace;
   font-size: 12px;
   outline: none;
   transition:
@@ -246,19 +247,21 @@
     box-shadow 0.2s;
 }
 .branchInput::placeholder {
-  color: var(--web-shell-text-dim, #5c6478);
+  color: var(--muted-foreground);
 }
 .branchInput:focus {
-  border-color: var(--web-shell-git-mode-branch, #f5a623);
-  box-shadow: 0 0 0 2px rgba(245, 166, 35, 0.1);
+  border-color: var(--git-mode-branch);
+  box-shadow: 0 0 0 2px
+    color-mix(in srgb, var(--git-mode-branch) 10%, transparent);
 }
 .branchInputInvalid {
-  border-color: var(--web-shell-git-mode-invalid, #ff6b6b);
-  box-shadow: 0 0 0 2px rgba(255, 107, 107, 0.08);
+  border-color: var(--error-color);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--error-color) 8%, transparent);
 }
 .branchInputValid {
-  border-color: var(--web-shell-git-mode-valid, #3ddc97);
-  box-shadow: 0 0 0 2px rgba(61, 220, 151, 0.08);
+  border-color: var(--git-mode-valid);
+  box-shadow: 0 0 0 2px
+    color-mix(in srgb, var(--git-mode-valid) 8%, transparent);
 }
 .branchStatus {
   position: absolute;
@@ -271,11 +274,11 @@
 .branchHint {
   margin-top: 6px;
   font-size: 10.5px;
-  color: var(--web-shell-text-dim, #5c6478);
+  color: var(--muted-foreground);
   line-height: 1.45;
 }
 .branchHintError {
-  color: var(--web-shell-git-mode-invalid, #ff6b6b);
+  color: var(--error-color);
 }
 
 /* ── footer ───────────────────────────────── */
@@ -285,13 +288,13 @@
   justify-content: space-between;
   gap: 8px;
   padding: 6px 10px 6px;
-  border-top: 1px solid var(--web-shell-border, rgba(255, 255, 255, 0.08));
+  border-top: 1px solid var(--border);
   margin-top: 4px;
 }
 .cmd {
-  font-family: var(--web-shell-font-mono, 'JetBrains Mono', monospace);
+  font-family: 'JetBrains Mono', monospace;
   font-size: 10.5px;
-  color: var(--web-shell-text-dim, #5c6478);
+  color: var(--muted-foreground);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -313,12 +316,12 @@
   flex-shrink: 0;
 }
 .confirmBranch {
-  background: var(--web-shell-git-mode-branch, #f5a623);
-  color: #1a1200;
+  background: var(--git-mode-branch);
+  color: var(--background);
 }
 .confirmWorktree {
-  background: var(--web-shell-git-mode-worktree, #b48eff);
-  color: #140a24;
+  background: var(--git-mode-worktree);
+  color: var(--background);
 }
 .confirmBranch:hover,
 .confirmBranch:focus-visible,

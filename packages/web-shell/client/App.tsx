@@ -2984,7 +2984,9 @@ export function App({
     mode: 'current',
   });
   const gitModeIntentRef = useRef(gitModeIntent);
-  gitModeIntentRef.current = gitModeIntent;
+  useEffect(() => {
+    gitModeIntentRef.current = gitModeIntent;
+  }, [gitModeIntent]);
   const newSessionSuggestionSubmitTokenRef = useRef(0);
   const pendingNewSessionSuggestionSubmitRef = useRef<{
     token: number;
@@ -3239,6 +3241,11 @@ export function App({
   const gitModeEligible =
     !connection.sessionId &&
     workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)?.trusted;
+  useEffect(() => {
+    if (!gitModeEligible) {
+      setGitModeIntent({ mode: 'current' });
+    }
+  }, [gitModeEligible]);
   const dialogOpen =
     showResumeDialog ||
     showDeleteDialog ||
