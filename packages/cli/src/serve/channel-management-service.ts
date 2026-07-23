@@ -354,6 +354,7 @@ export function createChannelManagementService(
       return resultFor(name, persisted);
     },
     async remove(name, request) {
+      assertManageableInstanceName(name);
       const current = opts.store.snapshot();
       assertExpectedRevision(current, request.expectedRevision);
       if (!isAllChannelSelectionName(name)) {

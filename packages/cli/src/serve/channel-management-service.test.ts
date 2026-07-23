@@ -351,6 +351,11 @@ describe('createChannelManagementService', () => {
     async (name) => {
       const { service, store, manager } = setup({ committedNames: [] });
 
+      await expect(
+        service.remove(name, { expectedRevision: 'rev-1' }),
+      ).rejects.toMatchObject({
+        code: 'invalid_channel_instance_name',
+      });
       await expect(service.start(name)).rejects.toMatchObject({
         code: 'invalid_channel_instance_name',
       });
@@ -361,6 +366,7 @@ describe('createChannelManagementService', () => {
         }),
       ).rejects.toMatchObject({ code: 'invalid_channel_instance_name' });
 
+      expect(store.remove).not.toHaveBeenCalled();
       expect(store.setStartupNames).not.toHaveBeenCalled();
       expect(manager.committedChannelNames).not.toHaveBeenCalled();
       expect(manager.setChannelEnabled).not.toHaveBeenCalled();
