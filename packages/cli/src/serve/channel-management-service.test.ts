@@ -79,7 +79,9 @@ function setup(options: {
   };
   let names = options.committedNames ?? [];
   const manager: ChannelManagementWorkerManager & {
+    reload: ReturnType<typeof vi.fn>;
     reloadWorkspace: ReturnType<typeof vi.fn>;
+    setChannelEnabled: ReturnType<typeof vi.fn>;
   } = {
     committedChannelNames: vi.fn(() => [...names]),
     state: vi.fn(() => ({
@@ -106,11 +108,12 @@ function setup(options: {
             ]
           : [],
     })),
-    setSelection: vi.fn(async (selection) => {
-      names = [...selection.names];
-    }),
-    stopSelection: vi.fn(async () => {
-      names = [];
+    setChannelEnabled: vi.fn(async ({ name }, enabled) => {
+      names = enabled
+        ? names.includes(name)
+          ? names
+          : [...names, name]
+        : names.filter((item) => item !== name);
     }),
     reload: vi.fn(async () => ({
       enabled: true,
@@ -231,10 +234,10 @@ describe('createChannelManagementService', () => {
 
     expect(store.upsert).toHaveBeenCalledBefore(manager.reloadWorkspace);
     expect(persisted().channels['bot']).not.toHaveProperty('clientSecret');
-    expect(manager.setSelection).toHaveBeenCalledWith({
-      mode: 'names',
-      names: ['other'],
-    });
+    expect(manager.setChannelEnabled).toHaveBeenCalledWith(
+      { name: 'bot', workspaceCwd: WORKSPACE },
+      false,
+    );
     expect(result.instance.runtime).toEqual({
       state: 'error',
       lastError: 'invalid token clientSecret=<redacted>',
@@ -247,7 +250,7 @@ describe('createChannelManagementService', () => {
     const { service, store, manager, persisted } = setup({
       committedNames: ['bot'],
     });
-    vi.mocked(manager.stopSelection).mockRejectedValueOnce(
+    vi.mocked(manager.setChannelEnabled).mockRejectedValueOnce(
       Object.assign(new Error('stop unconfirmed'), {
         code: 'channel_worker_stop_failed',
       }),
@@ -269,11 +272,10 @@ describe('createChannelManagementService', () => {
     ).rejects.toMatchObject({ code: 'channel_settings_conflict' });
 
     expect(store.remove).not.toHaveBeenCalled();
-    expect(manager.stopSelection).not.toHaveBeenCalled();
-    expect(manager.setSelection).not.toHaveBeenCalled();
+    expect(manager.setChannelEnabled).not.toHaveBeenCalled();
   });
 
-  it('starts and stops from the manager committed order without persisting startup names', async () => {
+  it('delegates starts and stops to the manager atomic mutation lane', async () => {
     const { service, store, manager } = setup({
       committedNames: ['first', 'second'],
       snapshot: settingsSnapshot({
@@ -286,20 +288,18 @@ describe('createChannelManagementService', () => {
     });
 
     await service.start('bot');
-    expect(manager.setSelection).toHaveBeenNthCalledWith(
+    expect(manager.setChannelEnabled).toHaveBeenNthCalledWith(
       1,
-      {
-        mode: 'names',
-        names: ['first', 'second', 'bot'],
-      },
       { name: 'bot', workspaceCwd: WORKSPACE },
+      true,
     );
 
     await service.stop('second');
-    expect(manager.setSelection).toHaveBeenNthCalledWith(2, {
-      mode: 'names',
-      names: ['first', 'bot'],
-    });
+    expect(manager.setChannelEnabled).toHaveBeenNthCalledWith(
+      2,
+      { name: 'second', workspaceCwd: WORKSPACE },
+      false,
+    );
     expect(store.upsert).not.toHaveBeenCalled();
     expect(store.remove).not.toHaveBeenCalled();
   });
@@ -317,7 +317,7 @@ describe('createChannelManagementService', () => {
     });
     expect(result.instance.startsWithServe).toBe(true);
     expect(result.instance.runtime.state).toBe('connected');
-    expect(manager.setSelection).not.toHaveBeenCalled();
+    expect(manager.setChannelEnabled).not.toHaveBeenCalled();
     expect(manager.reloadWorkspace).not.toHaveBeenCalled();
   });
 
@@ -363,7 +363,7 @@ describe('createChannelManagementService', () => {
 
       expect(store.setStartupNames).not.toHaveBeenCalled();
       expect(manager.committedChannelNames).not.toHaveBeenCalled();
-      expect(manager.setSelection).not.toHaveBeenCalled();
+      expect(manager.setChannelEnabled).not.toHaveBeenCalled();
     },
   );
 
@@ -380,8 +380,7 @@ describe('createChannelManagementService', () => {
       });
 
       expect(manager.committedChannelNames).not.toHaveBeenCalled();
-      expect(manager.setSelection).not.toHaveBeenCalled();
-      expect(manager.stopSelection).not.toHaveBeenCalled();
+      expect(manager.setChannelEnabled).not.toHaveBeenCalled();
     },
   );
 
@@ -399,7 +398,7 @@ describe('createChannelManagementService', () => {
 
   it('rejects an inactive cross-workspace start before lifecycle mutation', async () => {
     const { service, manager } = setup({ committedNames: [] });
-    vi.mocked(manager.setSelection).mockRejectedValueOnce(
+    vi.mocked(manager.setChannelEnabled).mockRejectedValueOnce(
       Object.assign(new Error('owner mismatch'), {
         code: 'channel_runtime_owner_mismatch',
       }),
@@ -409,9 +408,9 @@ describe('createChannelManagementService', () => {
       code: 'channel_runtime_owner_mismatch',
     });
 
-    expect(manager.setSelection).toHaveBeenCalledWith(
-      { mode: 'names', names: ['bot'] },
+    expect(manager.setChannelEnabled).toHaveBeenCalledWith(
       { name: 'bot', workspaceCwd: WORKSPACE },
+      true,
     );
     expect(manager.reload).not.toHaveBeenCalled();
     expect(manager.reloadWorkspace).not.toHaveBeenCalled();
@@ -438,10 +437,13 @@ describe('createChannelManagementService', () => {
     });
     const stopping = service.stop('bot');
 
-    expect(manager.stopSelection).not.toHaveBeenCalled();
+    expect(manager.setChannelEnabled).not.toHaveBeenCalled();
     finishReload();
     await restarting;
     await stopping;
-    expect(manager.stopSelection).toHaveBeenCalledOnce();
+    expect(manager.setChannelEnabled).toHaveBeenCalledWith(
+      { name: 'bot', workspaceCwd: WORKSPACE },
+      false,
+    );
   });
 });

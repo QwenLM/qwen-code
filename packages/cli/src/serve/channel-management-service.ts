@@ -22,7 +22,6 @@ import type {
   ChannelWorkerRequiredOwner,
 } from './channel-worker-manager.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
-import type { ServeChannelSelection } from './types.js';
 
 export interface ChannelRuntimeState {
   state: 'stopped' | 'starting' | 'connected' | 'partial' | 'error';
@@ -102,12 +101,10 @@ interface ChannelManagementSettingsStore {
 export interface ChannelManagementWorkerManager {
   committedChannelNames(): string[];
   state(): ChannelWorkerControlState;
-  setSelection(
-    selection: ServeChannelSelection,
-    requiredOwner?: ChannelWorkerRequiredOwner,
+  setChannelEnabled(
+    owner: ChannelWorkerRequiredOwner,
+    enabled: boolean,
   ): Promise<unknown>;
-  stopSelection(): Promise<unknown>;
-  reload(): Promise<ChannelWorkerSnapshot>;
   reloadWorkspace(
     workspaceCwd: string,
     name: string,
@@ -320,18 +317,11 @@ export function createChannelManagementService(
     return { snapshot, instance };
   };
 
-  const stopFromNames = async (
-    name: string,
-    committedNames: readonly string[],
-  ): Promise<void> => {
-    const next = committedNames.filter((item) => item !== name);
-    if (next.length === committedNames.length) return;
-    if (next.length === 0) {
-      await opts.manager.stopSelection();
-    } else {
-      await opts.manager.setSelection({ mode: 'names', names: next });
-    }
-  };
+  const stopChannel = (name: string): Promise<unknown> =>
+    opts.manager.setChannelEnabled(
+      { name, workspaceCwd: opts.workspaceCwd },
+      false,
+    );
 
   const assertManageableInstanceName = (name: string): void => {
     if (isAllChannelSelectionName(name)) {
@@ -357,7 +347,7 @@ export function createChannelManagementService(
         try {
           await opts.manager.reloadWorkspace(opts.workspaceCwd, name);
         } catch (error) {
-          await stopFromNames(name, committedNames);
+          await stopChannel(name);
           diagnostics.set(name, diagnostic(error));
         }
       }
@@ -370,7 +360,7 @@ export function createChannelManagementService(
         const committedNames = opts.manager.committedChannelNames();
         if (committedNames.includes(name)) {
           assertOwnedRuntime(name);
-          await stopFromNames(name, committedNames);
+          await stopChannel(name);
         }
       }
       const persisted = await opts.store.remove(name, request);
@@ -414,18 +404,10 @@ export function createChannelManagementService(
           `Channel "${name}" is not configured in this workspace.`,
         );
       }
-      const committedNames = opts.manager.committedChannelNames();
-      if (!committedNames.includes(name)) {
-        await opts.manager.setSelection(
-          {
-            mode: 'names',
-            names: [...committedNames, name],
-          },
-          { name, workspaceCwd: opts.workspaceCwd },
-        );
-      } else {
-        assertOwnedRuntime(name);
-      }
+      await opts.manager.setChannelEnabled(
+        { name, workspaceCwd: opts.workspaceCwd },
+        true,
+      );
       diagnostics.delete(name);
       return resultFor(name, persisted);
     },
@@ -438,9 +420,10 @@ export function createChannelManagementService(
           `Channel "${name}" is not configured in this workspace.`,
         );
       }
-      const committedNames = opts.manager.committedChannelNames();
-      if (committedNames.includes(name)) assertOwnedRuntime(name);
-      await stopFromNames(name, committedNames);
+      await opts.manager.setChannelEnabled(
+        { name, workspaceCwd: opts.workspaceCwd },
+        false,
+      );
       diagnostics.delete(name);
       return resultFor(name, persisted);
     },

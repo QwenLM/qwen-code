@@ -19,11 +19,47 @@ import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type { ServeChannelSelection } from './types.js';
 
 const PRIMARY = '/ws/primary';
+const SECONDARY = '/ws/secondary';
 
 function workspaceGroups(
   selection: ServeChannelSelection,
 ): ChannelWorkspaceGroup[] {
   return [{ workspaceCwd: PRIMARY, selection }];
+}
+
+function splitWorkspaceGroups(
+  selection: ServeChannelSelection,
+): ChannelWorkspaceGroup[] {
+  if (selection.mode === 'all') {
+    return [
+      { workspaceCwd: PRIMARY, selection },
+      { workspaceCwd: SECONDARY, selection },
+    ];
+  }
+  const primary = selection.names.filter(
+    (name) => !name.startsWith('secondary-'),
+  );
+  const secondary = selection.names.filter((name) =>
+    name.startsWith('secondary-'),
+  );
+  return [
+    ...(primary.length > 0
+      ? [
+          {
+            workspaceCwd: PRIMARY,
+            selection: { mode: 'names' as const, names: primary },
+          },
+        ]
+      : []),
+    ...(secondary.length > 0
+      ? [
+          {
+            workspaceCwd: SECONDARY,
+            selection: { mode: 'names' as const, names: secondary },
+          },
+        ]
+      : []),
+  ];
 }
 
 function workerSnapshot(
@@ -112,6 +148,54 @@ describe('createChannelWorkerManager', () => {
       'telegram',
       'feishu',
     ]);
+  });
+
+  it('serializes concurrent owner-scoped channel starts', async () => {
+    const test = setup();
+    const manager = test.manager;
+    test.resolveGroups.mockImplementation(async (selection) =>
+      splitWorkspaceGroups(selection),
+    );
+    await manager.setSelection({ mode: 'names', names: ['telegram'] });
+
+    await Promise.all([
+      manager.setChannelEnabled(
+        { name: 'primary-bot', workspaceCwd: PRIMARY },
+        true,
+      ),
+      manager.setChannelEnabled(
+        { name: 'secondary-bot', workspaceCwd: SECONDARY },
+        true,
+      ),
+    ]);
+
+    expect(manager.committedChannelNames()).toEqual([
+      'telegram',
+      'primary-bot',
+      'secondary-bot',
+    ]);
+  });
+
+  it('serializes an owner-scoped start with a concurrent stop', async () => {
+    const test = setup();
+    const manager = test.manager;
+    test.resolveGroups.mockImplementation(async (selection) =>
+      splitWorkspaceGroups(selection),
+    );
+    await manager.setSelection({ mode: 'names', names: ['telegram'] });
+
+    await Promise.all([
+      manager.setChannelEnabled(
+        { name: 'secondary-bot', workspaceCwd: SECONDARY },
+        true,
+      ),
+      manager.setChannelEnabled(
+        { name: 'telegram', workspaceCwd: PRIMARY },
+        false,
+      ),
+    ]);
+
+    expect(manager.committedChannelNames()).toEqual(['secondary-bot']);
   });
 
   it('enables a disabled manager and makes an equal healthy PUT idempotent', async () => {
