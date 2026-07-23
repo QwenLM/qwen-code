@@ -36,13 +36,11 @@ fixing is a valid, silent outcome.
   `npm run typecheck`, `npm run lint`, focused Vitest runs for touched
   packages, and `npm run generate:settings-schema` when a settings source
   changed (see the generated-artifact rule below). Do **not** batch multiple
-  fixes without intermediate verification. If any command fails after a fix:
-  1. `git checkout -- .` to discard the broken change.
-  2. Move that finding to the `reportOnly` array in `findings.json`.
-  3. Continue with the next finding immediately.
-     Do **not** attempt to fix the typecheck error — a different angle or a
-     broader edit is almost always more expensive than the time budget allows,
-     and repeated edits to the same file are what trigger loop detection.
+  fixes without intermediate verification. If any command fails, fix the cause
+  and rerun it; if you cannot make the checks pass confidently, write
+  `<workdir>/failure.md` and do not commit.
+- Never re-issue a tool call with identical arguments. If you need the same
+  information again, use what you already have from the previous call.
 - Regenerate committed generated artifacts when you change their source. If
   you edit `packages/cli/src/config/settingsSchema.ts` (or `settings.ts`), run
   `npm run generate:settings-schema` and commit the regenerated
