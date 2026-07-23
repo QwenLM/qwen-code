@@ -761,6 +761,25 @@ describe('ToolCallEmitter', () => {
 
         expect(sendUpdateSpy).not.toHaveBeenCalled();
       });
+
+      it('does not promote a subagent TodoWrite as the session plan', async () => {
+        await emitter.emitResult({
+          toolName: ToolNames.TODO_WRITE,
+          callId: 'call-subagent-todo',
+          success: true,
+          message: [],
+          resultDisplay: {
+            type: 'todo_list',
+            todos: [{ id: '1', content: 'Child task', status: 'pending' }],
+          },
+          subagentMeta: {
+            parentToolCallId: 'parent-agent',
+            subagentType: 'explore',
+          },
+        });
+
+        expect(sendUpdateSpy).not.toHaveBeenCalled();
+      });
     });
   });
 

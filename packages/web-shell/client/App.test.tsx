@@ -179,6 +179,10 @@ const {
       latestAddWorkspaceDialogProps: null as AddWorkspaceDialogTestProps | null,
       latestToolApprovalKeyboardActive: null as boolean | null,
       latestAskUserQuestionKeyboardActive: null as boolean | null,
+      latestTodoPanelTodos: [] as Array<{
+        id: string;
+        blockedBy?: string[];
+      }>,
       latestScheduledTasksProps: null as {
         onRunPrompt?: (
           prompt: string,
@@ -626,7 +630,17 @@ function mockComponent(path: string, exportName: string): void {
 mockComponent('./components/StatusBar', 'StatusBar');
 mockComponent('./components/StreamingStatus', 'StreamingStatus');
 mockComponent('./components/ToastHost', 'ToastHost');
-mockComponent('./components/panels/TodoPanel', 'TodoPanel');
+vi.doMock('./components/panels/TodoPanel', async () => {
+  const React = await import('react');
+  return {
+    TodoPanel: (props: {
+      todos: Array<{ id: string; blockedBy?: string[] }>;
+    }) => {
+      testState.latestTodoPanelTodos = props.todos;
+      return React.createElement('div');
+    },
+  };
+});
 mockComponent('./components/WelcomeHeader', 'WelcomeHeader');
 mockComponent('./components/dialogs/ApprovalModeDialog', 'ApprovalModeDialog');
 mockComponent('./components/dialogs/ResumeDialog', 'ResumeDialog');
@@ -1023,6 +1037,7 @@ beforeEach(() => {
   testState.latestAddWorkspaceDialogProps = null;
   testState.latestToolApprovalKeyboardActive = null;
   testState.latestAskUserQuestionKeyboardActive = null;
+  testState.latestTodoPanelTodos = [];
   testState.latestScheduledTasksProps = null;
   testState.latestGoalsProps = null;
   sidebarTokens.length = 0;
@@ -1093,6 +1108,50 @@ afterEach(() => {
   }
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe('App plan todos', () => {
+  it('refreshes dependencies when only blockedBy changes', async () => {
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'plan',
+        todos: [
+          { id: 'prepare', content: 'Prepare', status: 'completed' },
+          {
+            id: 'ship',
+            content: 'Ship',
+            status: 'pending',
+            blockedBy: ['prepare'],
+          },
+        ],
+      },
+    ];
+    const { rerender } = renderApp();
+    await flush();
+
+    expect(testState.latestTodoPanelTodos[1]?.blockedBy).toEqual(['prepare']);
+
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'plan',
+        todos: [
+          { id: 'prepare', content: 'Prepare', status: 'completed' },
+          {
+            id: 'ship',
+            content: 'Ship',
+            status: 'pending',
+            blockedBy: [],
+          },
+        ],
+      },
+    ];
+    rerender();
+    await flush();
+
+    expect(testState.latestTodoPanelTodos[1]?.blockedBy).toEqual([]);
+  });
 });
 
 describe('App session callbacks', () => {

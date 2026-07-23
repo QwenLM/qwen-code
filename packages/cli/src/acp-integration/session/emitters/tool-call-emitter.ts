@@ -164,6 +164,7 @@ export class ToolCallEmitter extends BaseEmitter {
   async emitResult(params: ToolCallResultParams): Promise<void> {
     // Handle TodoWriteTool specially - send plan update instead
     if (this.isTodoWriteTool(params.toolName)) {
+      if (params.subagentMeta) return;
       if (!params.success) return;
       const plan = this.planEmitter.extractPlan(
         params.resultDisplay,

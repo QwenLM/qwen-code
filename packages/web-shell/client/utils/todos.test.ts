@@ -558,6 +558,18 @@ describe('extractTodosFromToolCall', () => {
     );
     expect(todos).toBeUndefined();
   });
+
+  it('does not treat an empty output from another tool as a plan clear', () => {
+    expect(
+      extractTodosFromToolCall(
+        toolCall({
+          toolName: 'mcp__example__list',
+          kind: 'other',
+          rawOutput: { entries: [] },
+        }),
+      ),
+    ).toBeUndefined();
+  });
 });
 
 describe('getTodoStatusIcon', () => {

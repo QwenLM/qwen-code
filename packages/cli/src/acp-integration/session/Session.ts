@@ -7335,10 +7335,10 @@ export class Session implements SessionContext {
           }
 
           // Handle TodoWriteTool: extract todos and send plan update
-          if (isTodoWriteTool && succeeded) {
+          if (isTodoWriteTool) {
             const plan = this.planEmitter.extractPlan(
               toolResult.returnDisplay,
-              args,
+              succeeded ? args : undefined,
             );
 
             // Match original logic: emit plan if todos.length > 0 OR if args had todos

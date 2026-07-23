@@ -132,6 +132,22 @@ describe('daemon selectors', () => {
     expect(selectDaemonActiveTodoList([active, cleared])).toBeUndefined();
   });
 
+  it('ignores an empty output from a non-todo tool', () => {
+    const other = block({
+      kind: 'tool',
+      id: 'other',
+      toolCallId: 'other-call',
+      title: 'List records',
+      status: 'completed',
+      toolName: 'mcp__example__list',
+      toolKind: 'other',
+      rawOutput: { entries: [] },
+    });
+
+    expect(extractDaemonTodosFromToolBlock(asToolBlock(other))).toBeUndefined();
+    expect(selectDaemonTodoLists([other])).toEqual([]);
+  });
+
   it('does not resurrect stale active todos after the latest list completes', () => {
     const active = block({
       kind: 'tool',

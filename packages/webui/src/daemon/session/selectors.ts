@@ -76,28 +76,38 @@ export function extractDaemonTodosFromToolBlock(
 ): DaemonTodoItem[] | undefined {
   const toolName = (block.toolName ?? '').toLowerCase();
   const toolKind = (block.toolKind ?? '').toLowerCase();
-  if (
-    toolName !== 'todowrite' &&
-    toolName !== 'todo_write' &&
-    toolKind !== 'updated_plan' &&
-    toolKind !== 'todo' &&
-    toolKind !== 'other'
-  ) {
+  const isTodoTool =
+    toolName === 'todowrite' ||
+    toolName === 'todo_write' ||
+    toolKind === 'updated_plan' ||
+    toolKind === 'todo';
+  if (!isTodoTool && toolKind !== 'other') {
     return undefined;
   }
 
+  const rawOutput = getRecord(block.rawOutput);
+  const hasPlanMetadata = getRecord(rawOutput?.['plan']) !== undefined;
   const rawInput = getRecord(block.rawInput);
   const inputTodos = getTodoArray(rawInput);
-  if (inputTodos) return parseDaemonTodoItemsFromEntries(inputTodos);
+  if (inputTodos) {
+    const todos = parseDaemonTodoItemsFromEntries(inputTodos);
+    return todos.length > 0 || isTodoTool ? todos : undefined;
+  }
 
-  const rawOutput = getRecord(block.rawOutput);
   const outputTodos = getTodoArray(rawOutput);
-  if (outputTodos) return parseDaemonTodoItemsFromEntries(outputTodos);
+  if (outputTodos) {
+    const todos = parseDaemonTodoItemsFromEntries(outputTodos);
+    return todos.length > 0 || isTodoTool || hasPlanMetadata
+      ? todos
+      : undefined;
+  }
 
   const entries = Array.isArray(rawOutput?.['entries'])
     ? rawOutput['entries']
     : undefined;
-  return entries ? parseDaemonTodoItemsFromEntries(entries) : undefined;
+  if (!entries) return undefined;
+  const todos = parseDaemonTodoItemsFromEntries(entries);
+  return todos.length > 0 || isTodoTool || hasPlanMetadata ? todos : undefined;
 }
 
 export function parseDaemonTodoItemsFromEntries(

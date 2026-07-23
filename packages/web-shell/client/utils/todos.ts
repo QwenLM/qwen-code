@@ -38,25 +38,33 @@ export function parseTodoItemsFromEntries(
 export function extractTodosFromToolCall(
   tool: ACPToolCall,
 ): TodoItem[] | undefined {
-  if (!isTodoWriteToolName(tool.toolName) && tool.kind !== 'other') {
+  const isTodoTool = isTodoWriteToolName(tool.toolName);
+  if (!isTodoTool && tool.kind !== 'other') {
     return undefined;
   }
 
+  const rawOutput = getRecord(tool.rawOutput);
+  const hasPlanMetadata = getRecord(rawOutput?.['plan']) !== undefined;
   const argsTodos = getTodoArray(tool.args);
   if (argsTodos) {
-    return parseTodoItemsFromEntries(argsTodos);
+    const todos = parseTodoItemsFromEntries(argsTodos);
+    return todos.length > 0 || isTodoTool ? todos : undefined;
   }
 
-  const rawOutput = getRecord(tool.rawOutput);
   const outputTodos = getTodoArray(rawOutput);
   if (outputTodos) {
-    return parseTodoItemsFromEntries(outputTodos);
+    const todos = parseTodoItemsFromEntries(outputTodos);
+    return todos.length > 0 || isTodoTool || hasPlanMetadata
+      ? todos
+      : undefined;
   }
 
   const entries = Array.isArray(rawOutput?.['entries'])
     ? rawOutput['entries']
     : undefined;
-  return entries ? parseTodoItemsFromEntries(entries) : undefined;
+  if (!entries) return undefined;
+  const todos = parseTodoItemsFromEntries(entries);
+  return todos.length > 0 || isTodoTool || hasPlanMetadata ? todos : undefined;
 }
 
 export function hasActiveTodos(todos: readonly TodoItem[]): boolean {

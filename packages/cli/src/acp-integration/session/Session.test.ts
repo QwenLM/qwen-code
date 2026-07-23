@@ -13885,6 +13885,50 @@ describe('Session', () => {
       };
     }
 
+    it('publishes a persisted Todo plan when cancellation races completion', async () => {
+      const controller = new AbortController();
+      const execute = vi.fn().mockImplementation(async () => {
+        controller.abort();
+        return {
+          llmContent: 'updated',
+          returnDisplay: {
+            type: 'todo_list',
+            planId: 'plan-1',
+            todos: [{ id: '1', content: 'Ship', status: 'pending' }],
+          },
+        };
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(core.ToolNames.TODO_WRITE, execute),
+      );
+
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        controller.signal,
+        'prompt-cancelled-todo',
+        [
+          {
+            id: 'todo-call',
+            name: core.ToolNames.TODO_WRITE,
+            args: { todos: [{ id: '1', content: 'Ship', status: 'pending' }] },
+          },
+        ],
+      );
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'plan',
+            entries: [
+              expect.objectContaining({
+                content: 'Ship',
+                _meta: { qwenTodo: { id: '1' } },
+              }),
+            ],
+          }),
+        }),
+      );
+    });
+
     it('isolates enter_plan_mode from executable ACP siblings while preserving duplicate responses', async () => {
       const writeExecute = vi.fn().mockResolvedValue({
         llmContent: 'wrote',

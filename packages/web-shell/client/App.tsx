@@ -2210,9 +2210,6 @@ export function App({
     () => getFloatingTodos(messages),
     [messages],
   );
-  const planAgentTools = useMemo(() => {
-    return getAgentToolsForPlan(messages, floatingTodosState);
-  }, [floatingTodosState, messages]);
   // Keep the timeline Map referentially stable across streaming ticks that
   // don't touch any todo snapshot. The Map is a context value, so a fresh
   // reference would re-render every todo/plan row regardless of memoization;
@@ -2248,9 +2245,8 @@ export function App({
     todoDetailRef.current = { signature, details };
     return details;
   }, [messages]);
-  const floatingTodos = useStableArray(
-    floatingTodosState.todos,
-    (t) => `${t.id}:${t.status}:${t.content}`,
+  const floatingTodos = useStableArray(floatingTodosState.todos, (todo) =>
+    JSON.stringify([todo.id, todo.status, todo.content, todo.blockedBy ?? []]),
   );
   const floatingTodosAllCompleted = floatingTodosState.allCompleted;
   const [todoPanelMode, setTodoPanelMode] = useState<'hidden' | 'active'>(
@@ -2945,6 +2941,13 @@ export function App({
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [tasksDialogMessage, setTasksDialogMessage] =
     useState<SerializedTasksMessage | null>(null);
+  const planAgentTools = useMemo(
+    () =>
+      tasksDialogMessage
+        ? getAgentToolsForPlan(messages, floatingTodosState)
+        : [],
+    [floatingTodosState, messages, tasksDialogMessage],
+  );
   const [selectedTheme, setSelectedTheme] = useState<WebShellTheme>(
     providedTheme ?? WebShellThemeId.Dark,
   );
