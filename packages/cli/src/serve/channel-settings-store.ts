@@ -82,6 +82,16 @@ function assertSafeChannelName(name: string): void {
   }
 }
 
+function assertUpsertChannelName(name: string): void {
+  assertSafeChannelName(name);
+  if (isAllStartupName(name)) {
+    throw new ChannelSettingsError(
+      'channel_settings_invalid_name',
+      `Channel name ${JSON.stringify(name)} is reserved for startup selection.`,
+    );
+  }
+}
+
 function isAllStartupName(name: string): boolean {
   return name.trim() === 'all';
 }
@@ -328,7 +338,7 @@ export class WorkspaceChannelSettingsStore {
     name: string,
     options: ChannelSettingsUpsertOptions,
   ): Promise<ChannelSettingsSnapshot> {
-    assertSafeChannelName(name);
+    assertUpsertChannelName(name);
     const secretUpdates: unknown =
       options.secrets === undefined ? {} : options.secrets;
     assertValidChannelSecretUpdates(secretUpdates);

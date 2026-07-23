@@ -505,6 +505,24 @@ describe('WorkspaceChannelSettingsStore', () => {
     }
   });
 
+  it('rejects names reserved for the all startup sentinel without writing', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+
+    for (const name of ['all', ' all ']) {
+      await expect(
+        store.upsert(name, {
+          expectedRevision: store.snapshot().revision,
+          config: {
+            type: 'management-validation-test',
+            clientId: 'client-id',
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_name' });
+      expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+    }
+  });
+
   it('writes startup names separately while preserving settings and formatting', async () => {
     const store = new WorkspaceChannelSettingsStore(workspace);
 
