@@ -329,6 +329,32 @@ describe('SessionTranscriptReader', () => {
     });
   });
 
+  it('includes leading session metadata with the first backward page', async () => {
+    const sessionSource = {
+      ...record('source', null, 'session source'),
+      type: 'system' as const,
+      subtype: 'session_source' as const,
+    };
+    await writeRecords([
+      sessionSource,
+      record('u1', 'source', 'first prompt'),
+      record('a1', 'u1', 'first answer'),
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { direction: 'backward', limit: 100 },
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual([
+      'source',
+      'u1',
+      'a1',
+    ]);
+    expect(page.hasMore).toBe(false);
+    expect(page.nextCursorState).toBeUndefined();
+  });
+
   it('keeps backward pages within a normal user turn boundary', async () => {
     const toolCall = record('a-tool', 'u1', 'call tool');
     const toolResult = {

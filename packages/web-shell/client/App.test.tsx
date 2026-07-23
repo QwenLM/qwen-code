@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, createRef } from 'react';
+import { act, createRef, type CSSProperties } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import type { WebShellApi } from './App';
+import type { Message } from './adapters/types';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 
 type StreamingState = 'idle' | 'responding';
@@ -823,7 +824,7 @@ mockComponent(
   'ReleaseSessionDialog',
 );
 mockComponent('./components/dialogs/RewindDialog', 'RewindDialog');
-mockComponent('./components/messages/AgentsMessage', 'AgentsMessage');
+mockComponent('./components/agents/AgentsManagerPage', 'AgentsManagerPage');
 mockComponent('./components/messages/MemoryMessage', 'MemoryMessage');
 mockComponent('./components/messages/AuthMessage', 'AuthMessage');
 // Record keyboardActive so app-level tests can assert the overlay is told to
@@ -854,13 +855,42 @@ mockComponent('./components/messages/TasksStatusMessage', 'TasksStatusMessage');
 mockComponent('./components/messages/BtwMessage', 'BtwMessage');
 mockComponent('./components/QueuedPromptDisplay', 'QueuedPromptDisplay');
 
-const { App } = await import('./App');
+const { App, getBackgroundTaskActivityKey } = await import('./App');
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
+
+describe('background task activity key', () => {
+  it('includes background shells and excludes background agents', () => {
+    const messages = [
+      {
+        id: 'tools',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'shell-call',
+            toolName: 'shell',
+            status: 'in_progress',
+            args: { is_background: true },
+          },
+          {
+            callId: 'agent-call',
+            toolName: 'agent',
+            status: 'pending',
+            args: { run_in_background: true },
+          },
+        ],
+      },
+    ] satisfies Message[];
+
+    expect(getBackgroundTaskActivityKey(messages)).toBe(
+      'shell-call:in_progress',
+    );
+  });
+});
 
 function renderApp(props: React.ComponentProps<typeof App> = {}): {
   container: HTMLElement;
@@ -3466,6 +3496,7 @@ describe('App session callbacks', () => {
       'Extensions',
       'MCP',
       'Skills',
+      'Agents',
     ]);
     expect(extensionsTab?.getAttribute('aria-selected')).toBe('true');
     expect(document.activeElement).toBe(extensionsTab);
@@ -3480,6 +3511,130 @@ describe('App session callbacks', () => {
         ?.querySelectorAll<HTMLButtonElement>('button[role="tab"]')[2]
         ?.getAttribute('aria-selected'),
     ).toBe('true');
+  });
+
+  it('shadow-isolates the unified plugin manager body when plugins is enabled', async () => {
+    const { container } = renderApp({
+      shadowDom: {
+        plugins: true,
+        portals: false,
+        styles: '.plugin-shadow-content { color: rebeccapurple; }',
+      },
+    });
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-plugins"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    const panel = container.querySelector('[data-testid="inline-panel"]');
+    const host = panel?.querySelector<HTMLElement>(
+      '[data-web-shell-shadow-host="plugins"]',
+    );
+    const extensionsTab =
+      host?.shadowRoot?.querySelector<HTMLButtonElement>('button[role="tab"]');
+    expect(host?.shadowRoot).not.toBeNull();
+    expect(host?.shadowRoot?.firstElementChild?.tagName).toBe('STYLE');
+    expect(panel?.querySelector('button[role="tab"]')).toBeNull();
+    expect(extensionsTab?.textContent).toBe('Extensions');
+    expect(host?.shadowRoot?.activeElement).toBe(extensionsTab);
+    expect(
+      document.querySelector('[data-web-shell-portal-root]'),
+    ).not.toBeNull();
+  });
+
+  it.each([
+    ['/extensions manage', 'Manage Extensions'],
+    ['/mcp', 'MCP Servers'],
+    ['/skills details', 'Skills'],
+  ])(
+    'shadow-isolates the %s compatibility page when plugins is enabled',
+    async (command, panelLabel) => {
+      mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
+        initialized: true,
+        discoveryState: 'completed',
+        servers: [],
+      });
+      const { container } = renderApp({
+        shadowDom: {
+          plugins: true,
+          portals: false,
+        },
+      });
+      await flush();
+
+      testState.prompt = command;
+      await clickSubmit(container);
+      await flush();
+
+      const panel = container.querySelector('[data-testid="inline-panel"]');
+      const host = panel?.querySelector<HTMLElement>(
+        '[data-web-shell-shadow-host="plugins"]',
+      );
+      expect(panel?.getAttribute('aria-label')).toBe(panelLabel);
+      expect(host?.shadowRoot).not.toBeNull();
+      expect(
+        host?.shadowRoot?.querySelector(
+          '[data-web-shell-shadow-root="plugins"]',
+        ),
+      ).not.toBeNull();
+      expect(panel?.querySelector('button')).toBeNull();
+    },
+  );
+
+  it('uses one shadow root for all portals without moving plugin content', async () => {
+    const { container } = renderApp({
+      shadowDom: {
+        plugins: false,
+        portals: true,
+        styles: '.consumer-shadow-content { color: rebeccapurple; }',
+      },
+      style: {
+        '--web-shell-portal-root-z-index': '2345',
+      } as CSSProperties,
+    });
+    await flush();
+
+    const portalHost = document.querySelector<HTMLElement>(
+      '[data-web-shell-shadow-host="portals"]',
+    );
+    const portalRoot = portalHost?.shadowRoot?.querySelector(
+      '[data-web-shell-portal-root]',
+    );
+    expect(portalRoot).not.toBeNull();
+    expect(portalHost?.style.zIndex).toBe(
+      'var(--web-shell-portal-root-z-index, 1000)',
+    );
+    expect(portalHost?.style.getPropertyPriority('z-index')).toBe('important');
+    expect(
+      portalHost?.style.getPropertyValue('--web-shell-portal-root-z-index'),
+    ).toBe('2345');
+    expect(portalHost?.shadowRoot?.firstElementChild?.tagName).toBe('STYLE');
+    expect(portalHost?.shadowRoot?.lastElementChild).toBe(portalRoot);
+    expect(document.querySelector('[data-web-shell-portal-root]')).toBeNull();
+    expect(
+      Array.from(portalHost?.shadowRoot?.querySelectorAll('style') ?? []).some(
+        (style) => style.textContent?.includes('.consumer-shadow-content'),
+      ),
+    ).toBe(true);
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-plugins"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    await flush();
+
+    const panel = container.querySelector('[data-testid="inline-panel"]');
+    expect(panel?.querySelector('button[role="tab"]')).not.toBeNull();
+    expect(
+      panel?.querySelector('[data-web-shell-shadow-host="plugins"]'),
+    ).toBeNull();
   });
 
   it('only shows server startup progress during MCP discovery', async () => {
