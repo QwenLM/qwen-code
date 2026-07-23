@@ -121,6 +121,7 @@ import {
 } from './utils/goalCondition';
 import { ExtensionsManagerPage } from './components/extensions/ExtensionsManagerPage';
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
+import { ShadowDomBoundary } from './components/ShadowDomBoundary';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
@@ -132,6 +133,11 @@ import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog'
 import { RewindDialog } from './components/dialogs/RewindDialog';
 import { AddWorkspaceDialog } from './components/dialogs/AddWorkspaceDialog';
 import { Button } from './components/ui/button';
+import {
+  installWebShellShadowStyles,
+  resolveWebShellShadowDom,
+  type WebShellShadowDom,
+} from './shadowDom';
 import {
   WebShellSidebar,
   type WebShellSidebarBranding,
@@ -511,6 +517,8 @@ export interface WebShellProps {
   className?: string;
   /** Inline styles applied to the root element. */
   style?: React.CSSProperties;
+  /** Optional Shadow DOM isolation for plugin content and/or all portals. */
+  shadowDom?: WebShellShadowDom;
   /** Maximum chat content width in regular mode. Defaults to 1000px. */
   chatMaxWidth?: number;
   /** Optional workspace sidebar. Disabled by default. */
@@ -1048,6 +1056,7 @@ export function App({
   onLanguageChange,
   className: externalClassName,
   style: externalStyle,
+  shadowDom,
   onConnectionChange,
   onStreamingStateChange,
   onError,
@@ -1112,6 +1121,10 @@ export function App({
         : normalizeLanguage(providedLanguage),
   );
   const t = useMemo(() => getTranslator(selectedLanguage), [selectedLanguage]);
+  const shadowDomOptions = useMemo(
+    () => resolveWebShellShadowDom(shadowDom),
+    [shadowDom],
+  );
   const sidebarOptions = useMemo(
     () => resolveSidebarOptions(sidebar),
     [sidebar],
@@ -6553,20 +6566,55 @@ export function App({
   }, [isChatEmptyState]);
 
   useLayoutEffect(() => {
+    const host = shadowDomOptions.portals
+      ? document.createElement('div')
+      : null;
+    const shadowRoot = host?.attachShadow({ mode: 'open' }) ?? null;
     const root = document.createElement('div');
     root.dataset.webShellPortalRoot = '';
     root.dataset.webShellShadcn = '';
-    document.body.appendChild(root);
-    setPortalRoot(root);
-    return () => {
-      root.remove();
-      setPortalRoot(null);
-    };
-  }, []);
+    if (host && shadowRoot) {
+      host.dataset.webShellShadowHost = 'portals';
+      host.style.setProperty('all', 'initial', 'important');
+      host.style.setProperty('position', 'fixed', 'important');
+      host.style.setProperty('inset', '0', 'important');
+      host.style.setProperty('width', '0', 'important');
+      host.style.setProperty('height', '0', 'important');
+      host.style.setProperty(
+        'z-index',
+        'var(--web-shell-portal-root-z-index, 1000)',
+        'important',
+      );
+      const removeStyles = installWebShellShadowStyles(
+        shadowRoot,
+        shadowDomOptions.styles,
+      );
+      shadowRoot.appendChild(root);
+      document.body.appendChild(host);
+      setPortalRoot(root);
+      return () => {
+        host.remove();
+        removeStyles();
+        setPortalRoot(null);
+      };
+    } else {
+      document.body.appendChild(root);
+      setPortalRoot(root);
+      return () => {
+        root.remove();
+        setPortalRoot(null);
+      };
+    }
+  }, [shadowDomOptions.portals, shadowDomOptions.styles]);
 
   useLayoutEffect(() => {
     const root = appRootRef.current;
     if (!root || !portalRoot) return;
+    const portalRootNode = portalRoot.getRootNode();
+    const portalHost =
+      portalRootNode instanceof ShadowRoot
+        ? (portalRootNode.host as HTMLElement)
+        : null;
     let frameId: number | null = null;
     const syncVariables = () => {
       frameId = null;
@@ -6582,13 +6630,15 @@ export function App({
         const name = computedStyle[index];
         if (!name.startsWith('--')) continue;
         nextNames.add(name);
-        portalRoot.style.setProperty(
-          name,
-          computedStyle.getPropertyValue(name),
-        );
+        const value = computedStyle.getPropertyValue(name);
+        portalRoot.style.setProperty(name, value);
+        portalHost?.style.setProperty(name, value);
       }
       for (const name of portalRootVariableNamesRef.current) {
-        if (!nextNames.has(name)) portalRoot.style.removeProperty(name);
+        if (!nextNames.has(name)) {
+          portalRoot.style.removeProperty(name);
+          portalHost?.style.removeProperty(name);
+        }
       }
       portalRootVariableNamesRef.current = nextNames;
     };
@@ -7226,20 +7276,37 @@ export function App({
                         onUseSkill={handleUseSkill}
                       />
                     ) : activePanel === 'plugins' ? (
-                      <PluginManagerPage
-                        mcpMessage={mcpDialogMessage}
-                        loadMcpMessage={async () => {
-                          try {
-                            await loadMcpManagerMessage();
-                          } catch (error) {
-                            reportError(error, 'Failed to load MCP status');
-                            throw error;
-                          }
-                        }}
-                        onClose={closePanel}
-                        onUseSkill={handleUseSkill}
+                      <ShadowDomBoundary
+                        enabled={shadowDomOptions.plugins}
+                        language={selectedLanguage}
+                        themeClassName={[
+                          selectedTheme === WebShellThemeId.Light
+                            ? styles.themeLight
+                            : styles.themeDark,
+                          selectedTheme === WebShellThemeId.Dark
+                            ? 'dark'
+                            : undefined,
+                        ]
+                          .filter(Boolean)
+                          .join(' ')}
+                        styles={shadowDomOptions.styles}
                         initialFocusRef={pluginTabRef}
-                      />
+                      >
+                        <PluginManagerPage
+                          mcpMessage={mcpDialogMessage}
+                          loadMcpMessage={async () => {
+                            try {
+                              await loadMcpManagerMessage();
+                            } catch (error) {
+                              reportError(error, 'Failed to load MCP status');
+                              throw error;
+                            }
+                          }}
+                          onClose={closePanel}
+                          onUseSkill={handleUseSkill}
+                          initialFocusRef={pluginTabRef}
+                        />
+                      </ShadowDomBoundary>
                     ) : (
                       <SessionOverviewPanel
                         onOpenSession={handleOpenSessionFromOverview}

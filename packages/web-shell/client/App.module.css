@@ -305,32 +305,6 @@
   overflow-y: auto;
 }
 
-.app,
-.app * {
-  box-sizing: border-box;
-  scrollbar-width: thin;
-  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
-}
-
-.app *::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-.app *::-webkit-scrollbar-track {
-  background: var(--scrollbar-track);
-}
-
-.app *::-webkit-scrollbar-thumb {
-  border: 2px solid var(--scrollbar-track);
-  border-radius: 999px;
-  background: var(--scrollbar-thumb);
-}
-
-.app *::-webkit-scrollbar-thumb:hover {
-  background: var(--scrollbar-thumb-hover);
-}
-
 .themeDark {
   --background: #0d0d0d;
   --foreground: #fafafa;
