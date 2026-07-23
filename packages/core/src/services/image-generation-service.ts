@@ -10,7 +10,6 @@ import {
   resolveNetworkTarget,
   type ResolvedNetworkTarget,
 } from '../extension/network-policy.js';
-import { Agent } from 'undici';
 
 const GENERATION_TIMEOUT_MS = 240_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
@@ -248,9 +247,11 @@ async function downloadPng(
     redirectCount <= MAX_DOWNLOAD_REDIRECTS;
     redirectCount++
   ) {
-    const dispatcher = currentTarget.lookup
-      ? new Agent({ connect: { lookup: currentTarget.lookup } })
-      : undefined;
+    let dispatcher: import('undici').Dispatcher | undefined;
+    if (currentTarget.lookup) {
+      const { Agent } = await import('undici');
+      dispatcher = new Agent({ connect: { lookup: currentTarget.lookup } });
+    }
     let response: Response;
     try {
       response = await fetchFn(currentTarget.url.toString(), {
