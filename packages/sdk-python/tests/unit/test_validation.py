@@ -40,6 +40,40 @@ def test_rejects_invalid_resume() -> None:
         validate_query_options(QueryOptions(resume="not-a-uuid"))
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "{12345678-1234-4234-8234-123456781234}",
+        "urn:uuid:12345678-1234-4234-8234-123456781234",
+        "12345678123442348234123456781234",
+    ],
+)
+def test_rejects_non_canonical_session_id(value: str) -> None:
+    # uuid.UUID() accepts these spellings, but the value is passed to the CLI
+    # verbatim as --session-id, so only the canonical 8-4-4-4-12 form works.
+    with pytest.raises(ValidationError, match="canonical"):
+        validate_query_options(QueryOptions(session_id=value))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "{12345678-1234-4234-8234-123456781234}",
+        "urn:uuid:12345678-1234-4234-8234-123456781234",
+        "12345678123442348234123456781234",
+    ],
+)
+def test_rejects_non_canonical_resume(value: str) -> None:
+    with pytest.raises(ValidationError, match="canonical"):
+        validate_query_options(QueryOptions(resume=value))
+
+
+def test_accepts_canonical_session_id_in_either_case() -> None:
+    # Case is not part of canonical form; an uppercase UUID is valid input.
+    validate_query_options(QueryOptions(session_id=VALID_UUID))
+    validate_query_options(QueryOptions(session_id=VALID_UUID.upper()))
+
+
 def test_rejects_invalid_permission_mode() -> None:
     with pytest.raises(ValidationError, match="Invalid permission_mode"):
         validate_query_options(
