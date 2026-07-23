@@ -183,7 +183,7 @@ export async function fetchGlobalNpmUpdateInfo(
       name: packageName,
     };
   }
-  // npm ≤10 prints the field as a bare JSON string ("0.20.1"); npm 11+ wraps
+  // npm ≤11 prints the field as a bare JSON string ("0.20.1"); npm 12+ wraps
   // single `view` field results in an array (["0.20.1"]). Accept both.
   const parsed: unknown = JSON.parse(output);
   const latest =
