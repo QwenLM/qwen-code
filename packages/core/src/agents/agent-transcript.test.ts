@@ -445,6 +445,22 @@ describe('agent-transcript', () => {
       });
     });
 
+    it('drops ROUND_TEXT with no text, thought, or usage', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath);
+
+      emitter.emit(AgentEventType.ROUND_TEXT, {
+        subagentId: 'agent-x',
+        round: 1,
+        text: '',
+        thoughtText: '',
+        timestamp: Date.now(),
+      });
+      cleanup();
+
+      expect(fs.existsSync(jsonlPath)).toBe(false);
+    });
+
     it('writes TOOL_CALL events as assistant records with functionCall parts', () => {
       const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
       const { emitter, cleanup } = makeWriter(jsonlPath);
