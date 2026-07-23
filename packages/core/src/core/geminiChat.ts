@@ -17,7 +17,8 @@ import type {
   Tool,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
-import { createUserContent, FinishReason } from '@google/genai';
+import { createUserContent, FinishReason } from './genai-compat.js';
+import { enforceFunctionResponseBudget } from '../utils/tool-response-finalizer.js';
 import {
   retryWithBackoff,
   isUnattendedMode,
@@ -95,7 +96,10 @@ import {
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
 import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
-import { isSystemReminderContent } from '../utils/environmentContext.js';
+import {
+  getStartupContextLength,
+  isSystemReminderContent,
+} from '../utils/environmentContext.js';
 import type { SessionStartSource } from '../hooks/types.js';
 import { getCustomSystemPrompt } from './prompts.js';
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
@@ -1973,7 +1977,30 @@ export class GeminiChat {
       // the upcoming prompt — closes the "first send after inherited history"
       // gap where `lastPromptTokenCount === 0` and the gate would otherwise
       // see only the stale prior-turn count (0).
-      const userContent = createUserContent(params.message);
+      let userContent = createUserContent(params.message);
+      const toolOutputBudget = this.config.getToolOutputBatchBudget?.();
+      if (
+        toolOutputBudget !== undefined &&
+        Number.isFinite(toolOutputBudget) &&
+        userContent.parts
+      ) {
+        const [guarded] = enforceFunctionResponseBudget(
+          [
+            {
+              callId: 'send-boundary',
+              toolName: 'tool-response-batch',
+              responseParts: userContent.parts,
+            },
+          ],
+          toolOutputBudget,
+        );
+        if (guarded.responseParts !== userContent.parts) {
+          debugLogger.warn(
+            `Tool response send guard reduced an unfinalized batch to ${toolOutputBudget} characters.`,
+          );
+          userContent = { ...userContent, parts: guarded.responseParts };
+        }
+      }
 
       // Hard-tier rescue: when the estimated prompt size is at or above the
       // hard threshold (effectiveWindow - HARD_BUFFER), force compaction in
@@ -3393,6 +3420,11 @@ export class GeminiChat {
       ? extractCuratedHistory(this.history)
       : this.history;
     return history.map(copyContentContainer);
+  }
+
+  getHistoryForForkWindow(): Content[] {
+    const history = this.history.slice(getStartupContextLength(this.history));
+    return extractCuratedHistory(history).map(copyContentContainer);
   }
 
   /**

@@ -118,6 +118,10 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
   };
 });
 
+vi.mock('../voice/VoiceButton', () => ({
+  VoiceButton: () => <span data-testid="voice-button" />,
+}));
+
 const mounted: Array<{
   root: Root;
   container: HTMLDivElement;
@@ -198,6 +202,24 @@ function renderChatEditor(props: {
 
   return container;
 }
+
+describe('ChatEditor voice toolbar integration', () => {
+  it('mounts voice only when the host toolbar allows it', () => {
+    expect(
+      renderChatEditor({}).querySelector('[data-testid="voice-button"]'),
+    ).not.toBeNull();
+    expect(
+      renderChatEditor({
+        visibleToolbarActions: ['voice'],
+      }).querySelector('[data-testid="voice-button"]'),
+    ).not.toBeNull();
+    expect(
+      renderChatEditor({
+        visibleToolbarActions: [],
+      }).querySelector('[data-testid="voice-button"]'),
+    ).toBeNull();
+  });
+});
 
 describe('ChatEditor composer tag icons', () => {
   it('renders built-in icons for top composer tags', () => {

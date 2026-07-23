@@ -1133,7 +1133,7 @@ describe('gemini.tsx main function', () => {
     );
 
     vi.mocked(cleanupModule.cleanupCheckpoints).mockResolvedValue(undefined);
-    vi.mocked(cleanupModule.registerCleanup).mockImplementation(() => {});
+    vi.mocked(cleanupModule.registerCleanup).mockImplementation(() => () => {});
     const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
     runExitCleanupMock.mockResolvedValue(undefined);
     vi.spyOn(initializerModule, 'initializeApp').mockResolvedValue({
@@ -2205,6 +2205,7 @@ describe('startInteractiveUI', () => {
   vi.mock('./ui/utils/kittyProtocolDetector.js', () => ({
     detectAndEnableKittyProtocol: vi.fn(() => Promise.resolve(true)),
     disableKittyProtocol: vi.fn(),
+    pushKittyProtocolFlags: vi.fn(),
   }));
 
   vi.mock('./utils/cleanup.js', () => ({

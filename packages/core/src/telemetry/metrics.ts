@@ -9,7 +9,12 @@ import { diag, metrics, ValueType } from '@opentelemetry/api';
 import { SERVICE_NAME, EVENT_CHAT_COMPRESSION } from './constants.js';
 import type { Config } from '../config/config.js';
 import type { TelemetryRuntimeConfig } from './runtime-config.js';
-import type { ModelSlashCommandEvent } from './types.js';
+import type {
+  ModelSlashCommandEvent,
+  MemoryRecallDeliveryPhase,
+  MemoryRecallDeliveryPoint,
+  MemoryRecallDiscardReason,
+} from './types.js';
 
 const TOOL_CALL_COUNT = `${SERVICE_NAME}.tool.call.count`;
 const TOOL_CALL_LATENCY = `${SERVICE_NAME}.tool.call.latency`;
@@ -55,6 +60,11 @@ const MEMORY_DREAM_COUNT = `${SERVICE_NAME}.memory.dream.count`;
 const MEMORY_DREAM_DURATION = `${SERVICE_NAME}.memory.dream.duration`;
 const MEMORY_RECALL_COUNT = `${SERVICE_NAME}.memory.recall.count`;
 const MEMORY_RECALL_DURATION = `${SERVICE_NAME}.memory.recall.duration`;
+const CHANNEL_MEMORY_RECALL_COUNT = `${SERVICE_NAME}.channel.memory.recall.count`;
+const CHANNEL_MEMORY_RECALL_DURATION = `${SERVICE_NAME}.channel.memory.recall.duration`;
+const CHANNEL_MEMORY_RECALL_SELECTED_COUNT = `${SERVICE_NAME}.channel.memory.recall.selected_count`;
+const MEMORY_RECALL_DELIVERY_COUNT = `${SERVICE_NAME}.memory.recall.delivery.count`;
+const MEMORY_RECALL_DELIVERY_LATENCY = `${SERVICE_NAME}.memory.recall.delivery.latency`;
 
 const baseMetricDefinition = {
   // session.id on metrics is opt-in: each session is a new value, so
@@ -400,6 +410,11 @@ let memoryDreamCounter: Counter | undefined;
 let memoryDreamDurationHistogram: Histogram | undefined;
 let memoryRecallCounter: Counter | undefined;
 let memoryRecallDurationHistogram: Histogram | undefined;
+let channelMemoryRecallCounter: Counter | undefined;
+let channelMemoryRecallDurationHistogram: Histogram | undefined;
+let channelMemoryRecallSelectedCountHistogram: Histogram | undefined;
+let memoryRecallDeliveryCounter: Counter | undefined;
+let memoryRecallDeliveryLatencyHistogram: Histogram | undefined;
 
 let isMetricsInitialized = false;
 let isPerformanceMonitoringEnabled = false;
@@ -501,6 +516,49 @@ export function initializeMetrics(config: TelemetryRuntimeConfig): void {
     MEMORY_RECALL_DURATION,
     {
       description: 'Duration of auto-memory recall operations in milliseconds.',
+      unit: 'ms',
+      valueType: ValueType.INT,
+    },
+  );
+  channelMemoryRecallCounter = meter.createCounter(
+    CHANNEL_MEMORY_RECALL_COUNT,
+    {
+      description:
+        'Counts channel memory recall attempts by cache path and bounded result.',
+      valueType: ValueType.INT,
+    },
+  );
+  channelMemoryRecallDurationHistogram = meter.createHistogram(
+    CHANNEL_MEMORY_RECALL_DURATION,
+    {
+      description: 'Duration of channel memory recall attempts.',
+      unit: 'ms',
+      valueType: ValueType.DOUBLE,
+      advice: {
+        explicitBucketBoundaries: [0.1, 0.5, 1, 2, 5, 10, 25, 50, 100, 250],
+      },
+    },
+  );
+  channelMemoryRecallSelectedCountHistogram = meter.createHistogram(
+    CHANNEL_MEMORY_RECALL_SELECTED_COUNT,
+    {
+      description: 'Number of channel memory entries selected per attempt.',
+      valueType: ValueType.INT,
+    },
+  );
+  memoryRecallDeliveryCounter = meter.createCounter(
+    MEMORY_RECALL_DELIVERY_COUNT,
+    {
+      description:
+        'Counts auto-memory recall delivery outcomes, tagged by phase and delivery point.',
+      valueType: ValueType.INT,
+    },
+  );
+  memoryRecallDeliveryLatencyHistogram = meter.createHistogram(
+    MEMORY_RECALL_DELIVERY_LATENCY,
+    {
+      description:
+        'Latency from auto-memory recall prefetch start to delivery or discard.',
       unit: 'ms',
       valueType: ValueType.INT,
     },
@@ -1032,4 +1090,49 @@ export function recordMemoryRecallMetrics(
     ...common,
     strategy: attrs.strategy,
   });
+}
+
+export function recordChannelMemoryRecallMetrics(observation: {
+  durationMs: number;
+  cache: 'hit' | 'miss' | 'bypass';
+  result: 'selected' | 'empty' | 'stale' | 'read_error' | 'revision_unstable';
+  selectedCount: number;
+}): void {
+  if (!isMetricsInitialized) return;
+  const attributes = {
+    cache: observation.cache,
+    result: observation.result,
+  };
+  channelMemoryRecallCounter?.add(1, attributes);
+  channelMemoryRecallDurationHistogram?.record(
+    observation.durationMs,
+    attributes,
+  );
+  channelMemoryRecallSelectedCountHistogram?.record(
+    observation.selectedCount,
+    attributes,
+  );
+}
+
+export function recordMemoryRecallDeliveryMetrics(
+  config: Config,
+  latencyMs: number,
+  attrs: {
+    phase: MemoryRecallDeliveryPhase;
+    delivery_point: MemoryRecallDeliveryPoint;
+    discard_reason?: MemoryRecallDiscardReason;
+    strategy: 'none' | 'heuristic' | 'model';
+  },
+): void {
+  if (!isMetricsInitialized) return;
+  const common = baseMetricDefinition.getCommonAttributes(config);
+  const metricAttributes = {
+    ...common,
+    phase: attrs.phase,
+    delivery_point: attrs.delivery_point,
+    strategy: attrs.strategy,
+    ...(attrs.discard_reason ? { discard_reason: attrs.discard_reason } : {}),
+  };
+  memoryRecallDeliveryCounter?.add(1, metricAttributes);
+  memoryRecallDeliveryLatencyHistogram?.record(latencyMs, metricAttributes);
 }

@@ -1142,7 +1142,7 @@ describe('runQwenServe telemetry validation', () => {
     tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-tv-')));
     const initializeTelemetry = vi
       .spyOn(qwenCore, 'initializeTelemetry')
-      .mockImplementation(() => {});
+      .mockResolvedValue(undefined);
     vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
       enabled: false,
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
@@ -1170,6 +1170,46 @@ describe('runQwenServe telemetry validation', () => {
       expect(runtimeConfig.getTelemetryResourceAttributes()).toMatchObject({
         'service.instance.id': `daemon:${process.pid}`,
       });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('awaits telemetry initialization before daemon metrics', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-tm-')));
+    const callOrder: string[] = [];
+    vi.spyOn(qwenCore, 'initializeTelemetry').mockImplementation(async () => {
+      callOrder.push('telemetry-start');
+      await Promise.resolve();
+      callOrder.push('telemetry-resolved');
+    });
+    vi.spyOn(qwenCore, 'initializeDaemonMetrics').mockImplementation(() => {
+      callOrder.push('daemon-metrics');
+    });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: true,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      expect(callOrder).toEqual([
+        'telemetry-start',
+        'telemetry-resolved',
+        'daemon-metrics',
+      ]);
     } finally {
       await handle.close();
     }
@@ -1276,6 +1316,156 @@ describe('runQwenServe permissionResponseTimeoutMs validation', () => {
         path.join(tmpDir, 'debug', 'daemon', '.stable-writer.lock'),
       ),
     ).toBe(false);
+  });
+});
+
+describe('runQwenServe initializeTimeoutMs validation', () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    if (tmpDir) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a non-positive initializeTimeoutMs', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-it-')));
+    const fakeBridge = {
+      spawnOrAttach: vi.fn(),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      killAllSync: vi.fn(),
+    } as unknown as HttpAcpBridge;
+
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            maxSessions: 1,
+            initializeTimeoutMs: 0,
+          },
+          { bridge: fakeBridge },
+        ),
+      ).rejects.toThrow(/initializeTimeoutMs/);
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) {
+        process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+    }
+  });
+
+  it('rejects a non-finite initializeTimeoutMs', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-it-')));
+    const fakeBridge = {
+      spawnOrAttach: vi.fn(),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      killAllSync: vi.fn(),
+    } as unknown as HttpAcpBridge;
+
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            maxSessions: 1,
+            initializeTimeoutMs: Number.NaN,
+          },
+          { bridge: fakeBridge },
+        ),
+      ).rejects.toThrow(/initializeTimeoutMs/);
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) {
+        process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+    }
+  });
+
+  it('rejects an initializeTimeoutMs above the JS timer ceiling', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-it-')));
+    const fakeBridge = {
+      spawnOrAttach: vi.fn(),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      killAllSync: vi.fn(),
+    } as unknown as HttpAcpBridge;
+
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            maxSessions: 1,
+            initializeTimeoutMs: 2_147_483_648,
+          },
+          { bridge: fakeBridge },
+        ),
+      ).rejects.toThrow(/initializeTimeoutMs/);
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) {
+        process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+    }
+  });
+
+  it('propagates a valid initializeTimeoutMs to the bridge options', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-it-')));
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          initializeTimeoutMs: 30_000,
+          serveWebShell: false,
+        },
+        { resolveOnListen: true },
+      );
+      try {
+        await handle.runtimeReady;
+        expect(createBridge.mock.calls[0]?.[0]).toMatchObject({
+          initializeTimeoutMs: 30_000,
+        });
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) {
+        process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+    }
   });
 });
 
@@ -2500,6 +2690,7 @@ describe('runQwenServe runtime startup failures', () => {
       .spyOn(acpBridge, 'createAcpSessionBridge')
       .mockImplementation(() => makeRuntimeBridge());
     let restoredCwds: string[] = [];
+    let restoredDisplayNames: Array<string | undefined> = [];
     let restoredRemovable: Array<boolean | undefined> = [];
     let restoredRegistrationIds: Array<readonly string[] | undefined> = [];
     let advertisedMaxTotalSessions: number | undefined;
@@ -2509,6 +2700,10 @@ describe('runQwenServe runtime startup failures', () => {
           deps?.workspaceRegistry
             ?.list()
             .map((runtime) => runtime.workspaceCwd) ?? [];
+        restoredDisplayNames =
+          deps?.workspaceRegistry
+            ?.list()
+            .map((runtime) => runtime.displayName) ?? [];
         restoredRemovable =
           deps?.workspaceRegistry?.list().map((runtime) => runtime.removable) ??
           [];
@@ -2531,6 +2726,14 @@ describe('runQwenServe runtime startup failures', () => {
           restoredSecondaryAlias,
           canonicalRestoredSecondary,
         ],
+        displayNames: {
+          [workspaceRegistrationId(canonicalExplicitSecondary)]:
+            'Explicit workspace',
+          [workspaceRegistrationId(restoredSecondaryAlias)]:
+            'Restored workspace',
+          [workspaceRegistrationId(canonicalRestoredSecondary)]:
+            'Later alias name',
+        },
       }),
     } as unknown as WorkspaceRegistrationStore;
 
@@ -2557,6 +2760,11 @@ describe('runQwenServe runtime startup failures', () => {
         canonicalPrimary,
         canonicalExplicitSecondary,
         canonicalRestoredSecondary,
+      ]);
+      expect(restoredDisplayNames).toEqual([
+        undefined,
+        'Explicit workspace',
+        'Restored workspace',
       ]);
       expect(restoredRemovable).toEqual([false, false, true]);
       expect(restoredRegistrationIds).toEqual([
@@ -7693,17 +7901,15 @@ describe('runQwenServe channel worker supervisor', () => {
       listen: vi.fn((port, _host, cb) => {
         portsAttempted.push(port);
         const srv = createServer();
+        if (typeof cb === 'function') {
+          srv.once('error', cb);
+        }
         if (portsAttempted.length === 1) {
           const err = new Error('address in use') as NodeJS.ErrnoException;
           err.code = 'EADDRINUSE';
           setImmediate(() => srv.emit('error', err));
         } else {
-          srv.listen(0, '127.0.0.1', () => {
-            setImmediate(() => {
-              srv.emit('listening');
-              if (typeof cb === 'function') cb();
-            });
-          });
+          srv.listen(0, '127.0.0.1', cb);
         }
         return srv;
       }),
@@ -7726,8 +7932,12 @@ describe('runQwenServe channel worker supervisor', () => {
     try {
       stderrSpy.mockRestore();
       expect(portsAttempted).toEqual([4170, 4171]);
+      expect(handle.server.listening).toBe(true);
       expect(handle.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
       expect(handle.url).not.toContain(':4170');
+      expect(new URL(handle.url).port).toBe(
+        String((handle.server.address() as AddressInfo).port),
+      );
       expect(
         stderrWrites.some((w) =>
           w.includes('port 4170 is in use, trying 4171'),

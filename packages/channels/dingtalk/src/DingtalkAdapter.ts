@@ -50,6 +50,11 @@ interface DingTalkRepliedMsg {
   };
 }
 
+interface DingTalkAtUser {
+  dingtalkId?: string;
+  staffId?: string;
+}
+
 interface DingTalkMessageData {
   msgId?: string;
   msgtype?: string;
@@ -62,6 +67,7 @@ interface DingTalkMessageData {
   senderNick?: string;
   chatbotUserId?: string;
   isInAtList?: boolean;
+  atUsers?: DingTalkAtUser[];
   text?: {
     content?: string;
     isReplyMsg?: boolean;
@@ -88,6 +94,8 @@ const ACK_REACTION_NAME = '👀';
 const ACK_EMOTION_ID = '2659900';
 const ACK_EMOTION_BG_ID = 'im_bg_1';
 const EMOTION_API = 'https://api.dingtalk.com/v1.0/robot/emotion';
+const EMOTION_MAX_ATTEMPTS = 3;
+const EMOTION_RETRY_BASE_DELAY_MS = 250;
 const GROUP_MSG_API = 'https://api.dingtalk.com/v1.0/robot/groupMessages/send';
 const DIRECT_MSG_API =
   'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend';
@@ -100,6 +108,32 @@ const mentionTarget = Symbol('mentionTarget');
 type MentionTargetEnvelope = Envelope & {
   [mentionTarget]?: string;
 };
+
+function withNonBotMentionContext(
+  data: DingTalkMessageData,
+  text: string,
+): string {
+  if (!Array.isArray(data.atUsers) || typeof data.chatbotUserId !== 'string') {
+    return text;
+  }
+
+  const mentions = new Set<string>();
+  for (const user of data.atUsers) {
+    if (!user) continue;
+    const dingtalkId =
+      typeof user.dingtalkId === 'string' ? user.dingtalkId : undefined;
+    // DingTalk Stream always sets dingtalkId for the bot entry; staffId-only bot entries are not expected.
+    if (dingtalkId === data.chatbotUserId) continue;
+    const staffId = typeof user.staffId === 'string' ? user.staffId : undefined;
+    const stableId = dingtalkId || staffId;
+    if (stableId) mentions.add(stableId);
+  }
+
+  if (mentions.size === 0) return text;
+  const memberLabel = mentions.size === 1 ? 'member' : 'members';
+  const context = `[Mentioned ${mentions.size} other group ${memberLabel}]`;
+  return text ? `${context}\n${text}` : context;
+}
 
 interface DingTalkTokenResponse {
   errcode?: number;
@@ -677,31 +711,43 @@ export class DingtalkChannel extends ChannelBase {
         ? await this.getProactiveToken()
         : this.getAccessToken();
       if (!token) return;
-      const resp = await fetch(`${EMOTION_API}/${endpoint}`, {
-        method: 'POST',
-        headers: {
-          'x-acs-dingtalk-access-token': token,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          robotCode,
-          openMsgId: msgId,
-          openConversationId: conversationId,
-          emotionType: 2,
-          emotionName: ACK_REACTION_NAME,
-          textEmotion: {
-            emotionId: ACK_EMOTION_ID,
-            emotionName: ACK_REACTION_NAME,
-            text: ACK_REACTION_NAME,
-            backgroundId: ACK_EMOTION_BG_ID,
+      for (let attempt = 0; attempt < EMOTION_MAX_ATTEMPTS; attempt++) {
+        const resp = await fetch(`${EMOTION_API}/${endpoint}`, {
+          method: 'POST',
+          headers: {
+            'x-acs-dingtalk-access-token': token,
+            'Content-Type': 'application/json',
           },
-        }),
-      });
-      if (!resp.ok) {
+          body: JSON.stringify({
+            robotCode,
+            openMsgId: msgId,
+            openConversationId: conversationId,
+            emotionType: 2,
+            emotionName: ACK_REACTION_NAME,
+            textEmotion: {
+              emotionId: ACK_EMOTION_ID,
+              emotionName: ACK_REACTION_NAME,
+              text: ACK_REACTION_NAME,
+              backgroundId: ACK_EMOTION_BG_ID,
+            },
+          }),
+        });
+        if (resp.ok) return;
+
+        const isTransient = resp.status === 429 || resp.status >= 500;
+        if (isTransient && attempt < EMOTION_MAX_ATTEMPTS - 1) {
+          await resp.body?.cancel();
+          await new Promise((resolve) =>
+            setTimeout(resolve, EMOTION_RETRY_BASE_DELAY_MS * 2 ** attempt),
+          );
+          continue;
+        }
+
         const detail = sanitizeLogText(await resp.text().catch(() => ''), 500);
         process.stderr.write(
-          `[DingTalk:${this.name}] emotion/${endpoint} failed: ${resp.status} ${detail}\n`,
+          `[DingTalk:${this.name}] emotion/${endpoint} failed after ${attempt + 1}/${EMOTION_MAX_ATTEMPTS} attempts: ${resp.status} ${detail}\n`,
         );
+        return;
       }
     } catch {
       // best-effort, don't break message flow
@@ -1293,9 +1339,11 @@ export class DingtalkChannel extends ChannelBase {
       const content = this.extractContent(data);
       let cleanText = content.text;
 
-      // Strip first @mention (the bot) from text, keep other @mentions intact
+      // Strip first @mention (the bot) from text, keep other @mentions intact.
+      // Anchor to start-of-string so @ symbols inside URLs or emails
+      // (e.g. git@host:path) are not accidentally stripped (#7402).
       if (isMentioned) {
-        cleanText = cleanText.replace(/@[^\s\p{Cf}]+/u, '').trim();
+        cleanText = cleanText.replace(/^\s*@[^\s\p{Cf}]+/u, '').trim();
       }
 
       // Extract quoted message context
@@ -1306,7 +1354,10 @@ export class DingtalkChannel extends ChannelBase {
       // After stripping the bot @mention, cleanText may legitimately be empty
       // (user pinged the bot with no other text). Don't fall back to the
       // original text in that case — it would re-introduce the @mention.
-      const envelopeText = isMentioned ? cleanText : cleanText || content.text;
+      const messageText = isMentioned ? cleanText : cleanText || content.text;
+      const envelopeText = isGroup
+        ? withNonBotMentionContext(data, messageText)
+        : messageText;
       const senderId = senderStaffId || senderIdValue || '';
       const senderName = senderNick || senderId || 'Unknown';
 

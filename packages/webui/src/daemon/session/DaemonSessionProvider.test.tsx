@@ -3679,7 +3679,11 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
-  it('renders bounded replay truncation from the loaded snapshot without resync', async () => {
+  it('uses bounded replay truncation to enable history pagination without rendering it', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
     const session = createMockSession({
       replaySnapshot: {
         compactedReplay: [
@@ -3702,6 +3706,88 @@ describe('DaemonSessionProvider', () => {
               update: {
                 sessionUpdate: 'agent_message_chunk',
                 content: { type: 'text', text: 'retained replay' },
+                _meta: { 'qwen.session.recordId': 'record-retained' },
+              },
+            },
+          },
+        ],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: session.sessionId,
+      events: [],
+      hasMore: false,
+    });
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let awaitingResync = false;
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      awaitingResync = useDaemonTranscriptState().awaitingResync;
+      history = useDaemonTranscriptHistory();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+      historyPageSize: 25,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(awaitingResync).toBe(false);
+    expect(blocks).toEqual([
+      expect.objectContaining({
+        kind: 'assistant',
+        text: 'retained replay',
+      }),
+    ]);
+    expect(history?.hasMore).toBe(true);
+    await act(async () => history?.loadMore());
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledWith(
+      session.sessionId,
+      {
+        beforeRecordId: 'record-retained',
+        limit: 25,
+        clientId: session.clientId,
+      },
+    );
+  });
+
+  it('renders bounded replay truncation when no pagination anchor is available', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const session = createMockSession({
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            v: 1,
+            type: 'history_truncated',
+            data: {
+              reason: 'replay_window_exceeded',
+              truncatedEvents: 4,
+              retainedEvents: 1,
+              maxBytes: 512,
+              fullTranscriptAvailable: true,
+            },
+          },
+          {
+            id: 5,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'retained replay' },
               },
             },
           },
@@ -3711,33 +3797,28 @@ describe('DaemonSessionProvider', () => {
     });
     sdkMocks.sessions.push(session);
     let blocks: readonly DaemonTranscriptBlock[] = [];
-    let awaitingResync = false;
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
 
     function Harness() {
       blocks = useDaemonTranscriptBlocks();
-      awaitingResync = useDaemonTranscriptState().awaitingResync;
+      history = useDaemonTranscriptHistory();
       return null;
     }
 
     await renderWithProvider(<Harness />, {
       autoConnect: true,
-      reconnectDelayMs: 1,
-      maxReconnectDelayMs: 1,
+      historyPageSize: 25,
     });
     await act(async () => {
       await flushPromises();
     });
 
-    expect(awaitingResync).toBe(false);
+    expect(history?.hasMore).toBe(false);
     expect(blocks).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           kind: 'status',
           text: expect.stringContaining('History truncated'),
-        }),
-        expect.objectContaining({
-          kind: 'assistant',
-          text: 'retained replay',
         }),
       ]),
     );
@@ -6248,6 +6329,53 @@ describe('DaemonSessionProvider', () => {
       await flushPromises();
     });
     expect(blocks).toEqual([]);
+  });
+
+  it('keeps the current transcript when a same-session reload is aborted', async () => {
+    const replacement = createDeferred<MockSession>();
+    const currentSession = createMockSession({
+      sessionId: 'session-a',
+      replaySnapshot: createTextReplaySnapshot('current transcript'),
+    });
+    sdkMocks.sessions.push(currentSession);
+    let actions: DaemonSessionActions | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      actions = useDaemonActions();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+    sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+      async () => replacement.promise,
+    );
+    const controller = new AbortController();
+    const reload = requireActions(actions).reloadSession(controller.signal);
+    await act(async () => {
+      await flushPromises();
+    });
+
+    controller.abort();
+    const refreshedSession = createMockSession({
+      sessionId: 'session-a',
+      replaySnapshot: createTextReplaySnapshot('replacement transcript'),
+    });
+    replacement.resolve(refreshedSession);
+    await act(async () => {
+      await expect(reload).rejects.toMatchObject({ name: 'AbortError' });
+      await flushPromises();
+    });
+
+    expect(blocks).toMatchObject([
+      { kind: 'assistant', text: 'current transcript' },
+    ]);
+    expect(currentSession.detach).not.toHaveBeenCalled();
+    expect(refreshedSession.detach).toHaveBeenCalledOnce();
   });
 
   it('clears transcript immediately for default session switches', async () => {

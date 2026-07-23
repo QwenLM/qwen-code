@@ -259,6 +259,16 @@ jobs:
             echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: 'Inject model name into triage signature'
+        shell: 'bash'
+        env:
+          OPENAI_MODEL: '${{ vars.QWEN_TRIAGE_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+        run: |-
+          set -euo pipefail
+          if [ -n "${OPENAI_MODEL:-}" ]; then
+            sed -i "s/qwen3\.7-max/${OPENAI_MODEL}/g" .qwen/skills/triage/references/pr-workflow.md
+          fi
+
       - name: 'Run Qwen Triage'
         id: 'triage'
         uses: 'QwenLM/qwen-code-action@6d08e91aa807257b9c8af60edb5bb6bb2d7d951f'
@@ -295,10 +305,25 @@ jobs:
         shell: 'bash'
         env:
           RESPONSE: '${{ steps.triage.outputs.summary }}'
+          # Tells the two no-response causes apart. They need OPPOSITE
+          # responses, and the old message ("check the step stderr") pointed at
+          # diagnostics that do not exist: the action installs the CLI with
+          # `npm --silent`, so an install failure prints nothing but an exit
+          # code. Observed on a PR whose triage died at exit 243 during that
+          # install, with the error telling the maintainer to read an empty log.
+          TRIAGE_OUTCOME: '${{ steps.triage.outcome }}'
         run: |-
           set -uo pipefail
           if [[ -z "${RESPONSE}" || "${RESPONSE}" == "null" ]]; then
-            echo "::error title=Triage silent failure::Qwen Code exited without a response. Check the 'Run Qwen Triage' step stderr above for diagnostics."
+            if [[ "${TRIAGE_OUTCOME}" != 'success' ]]; then
+              # The action itself failed: no model call was ever made, so
+              # nothing about this PR can explain it. Retry is the fix.
+              echo "::error title=Triage did not start::The Qwen Code action failed before producing any response, so no triage ran. The usual cause is the global CLI install, which runs under \`npm --silent\` and prints nothing on failure. This is infrastructure, not this PR — re-run the failed job."
+            else
+              # The action succeeded but returned nothing: the agent ran and
+              # produced no summary. That IS worth reading the step output for.
+              echo "::error title=Triage silent failure::Qwen Code ran to completion but returned an empty response — a model or prompt problem, not an install one. Check the 'Run Qwen Triage' step output above."
+            fi
             exit 1
           fi
           echo "Triage response received (${#RESPONSE} chars)."

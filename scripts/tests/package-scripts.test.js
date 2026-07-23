@@ -506,7 +506,9 @@ describe('package scripts', () => {
       expect(verifyStep).toContain(
         'npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests',
       );
-      expect(verifyStep).toContain("grep -oE '^packages/[^/]+'");
+      expect(verifyStep).toContain(
+        'bash "${RUNNER_TEMP}/resolve-owning-packages.sh"',
+      );
       expect(verifyStep).toContain('pkg.scripts?.test');
       expect(verifyStep).toContain('!= *vitest*');
       expect(verifyStep).not.toContain(

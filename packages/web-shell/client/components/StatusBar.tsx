@@ -10,6 +10,7 @@ import {
 import type { DaemonSessionTaskStatus } from '@qwen-code/sdk/daemon';
 import { useConnection } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../i18n';
+import { isComposerTask } from '../utils/composerTasks';
 import styles from './StatusBar.module.css';
 
 const GOAL_PILL_INTERVAL_MS = 1000;
@@ -98,9 +99,10 @@ export function getTaskPillLabel(
   tasks: readonly DaemonSessionTaskStatus[],
   t: ReturnType<typeof useI18n>['t'],
 ): string {
-  if (tasks.length === 0) return '';
+  const composerTasks = tasks.filter(isComposerTask);
+  if (composerTasks.length === 0) return '';
 
-  const running = tasks.filter((task) => task.status === 'running');
+  const running = composerTasks.filter((task) => task.status === 'running');
   if (running.length > 0) {
     const counts = { agent: 0, shell: 0, monitor: 0 };
     for (const task of running) {
@@ -130,7 +132,7 @@ export function getTaskPillLabel(
     return parts.join(', ');
   }
 
-  const pausedAgents = tasks.filter(
+  const pausedAgents = composerTasks.filter(
     (task) => task.kind === 'agent' && task.status === 'paused',
   );
   if (pausedAgents.length > 0) {
@@ -142,9 +144,12 @@ export function getTaskPillLabel(
     );
   }
 
-  return t(tasks.length === 1 ? 'tasks.pill.done' : 'tasks.pill.doneMany', {
-    count: tasks.length,
-  });
+  return t(
+    composerTasks.length === 1 ? 'tasks.pill.done' : 'tasks.pill.doneMany',
+    {
+      count: composerTasks.length,
+    },
+  );
 }
 
 function formatGoalElapsed(ms: number): string {

@@ -2120,8 +2120,14 @@ export default {
   'A new version of Qwen Code is available! {{current}} → {{latest}}':
     'Доступна новая версия Qwen Code! {{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} актуален!',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    'Не удалось проверить обновления. Проверьте сеть или настройки registry.',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    'Не удалось проверить обновления ({{reason}}). Проверьте сеть или настройки registry.',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    'Проверка обновлений пропущена ({{reason}}) — выполните /update для повторной попытки.',
+  'registry did not respond within {{seconds}}s':
+    'registry не ответил за {{seconds}} с',
+  'registry unreachable': 'registry недоступен',
+  'registry error': 'ошибка registry',
   'Unable to check for updates: {{reason}}':
     'Невозможно проверить обновления: {{reason}}',
   'Update successful! The new version will be used on your next run.':

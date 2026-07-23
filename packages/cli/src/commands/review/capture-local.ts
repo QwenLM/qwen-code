@@ -9,7 +9,7 @@
 // The local counterpart of `fetch-pr`.
 //
 // This used to be a `git diff` command line typed out in the skill prompt, with
-// ten flags to pin and a redirect to dodge the 30 000-char shell cap. Two things
+// ten flags to pin and a redirect to dodge Shell model-output truncation. Two things
 // were wrong with that. The flags drifted from the ones `fetch-pr` pins (they
 // now live in `lib/diff-flags.ts`, shared). And the command it told the model to
 // run — `git diff HEAD` — cannot see an untracked file, so every brand-new file
