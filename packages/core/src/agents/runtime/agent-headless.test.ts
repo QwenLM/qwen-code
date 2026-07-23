@@ -42,6 +42,7 @@ import {
 import {
   AgentEventEmitter,
   AgentEventType,
+  type AgentRoundTextEvent,
   type AgentStreamTextEvent,
   type AgentToolCallEvent,
   type AgentToolResultEvent,
@@ -2079,6 +2080,59 @@ describe('subagent.ts', () => {
         expect(events[0]!.thought).toBe(true);
         expect(events[1]!.text).toBe('Here is the answer.');
         expect(events[1]!.thought).toBe(false);
+      });
+
+      it('should emit usage for a tool-call-only model round', async () => {
+        const { config } = await createMockConfig();
+        const usageMetadata = {
+          promptTokenCount: 100,
+          candidatesTokenCount: 10,
+          cachedContentTokenCount: 5,
+          totalTokenCount: 110,
+        };
+        mockSendMessageStream.mockImplementation(async () =>
+          (async function* () {
+            yield {
+              type: 'chunk',
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-1',
+                    name: 'missing_tool',
+                    args: {},
+                  },
+                ],
+                usageMetadata,
+              },
+            };
+          })(),
+        );
+
+        const eventEmitter = new AgentEventEmitter();
+        const events: AgentRoundTextEvent[] = [];
+        eventEmitter.on(AgentEventType.ROUND_TEXT, (event) => {
+          events.push(event);
+        });
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          { ...defaultRunConfig, max_turns: 1 },
+          undefined,
+          eventEmitter,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(events).toEqual([
+          expect.objectContaining({
+            round: 1,
+            text: '',
+            thoughtText: '',
+            usageMetadata,
+          }),
+        ]);
       });
 
       it('should exclude thought text from finalText', async () => {

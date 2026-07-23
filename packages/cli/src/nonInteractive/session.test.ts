@@ -60,6 +60,7 @@ interface ConfigOverrides {
 let mockMonitorRegistry: {
   setNotificationCallback: ReturnType<typeof vi.fn>;
   setRegisterCallback: ReturnType<typeof vi.fn>;
+  get: ReturnType<typeof vi.fn>;
   abortAll: ReturnType<typeof vi.fn>;
 };
 let mockBackgroundShellRegistry: {
@@ -190,6 +191,7 @@ describe('runNonInteractiveStreamJson', () => {
     mockMonitorRegistry = {
       setNotificationCallback: vi.fn(),
       setRegisterCallback: vi.fn(),
+      get: vi.fn().mockReturnValue({ status: 'running' }),
       abortAll: vi.fn(),
     };
     mockBackgroundShellRegistry = {
@@ -835,6 +837,65 @@ describe('runNonInteractiveStreamJson', () => {
         captureMonitorNotifications: false,
         captureMonitorRegistrations: false,
       }),
+    );
+  });
+
+  it('drops a queued running monitor event after cancellation', async () => {
+    const initRequest = createControlRequest('initialize');
+    const userMessage = createUserMessage('Start then stop a monitor');
+    let closeInput: (() => void) | undefined;
+    let monitorCallback:
+      | ((
+          displayText: string,
+          modelText: string,
+          meta: {
+            monitorId: string;
+            toolUseId?: string;
+            status: string;
+          },
+        ) => void)
+      | undefined;
+    let monitorStatus = 'running';
+
+    mockMonitorRegistry.get.mockImplementation(() => ({
+      status: monitorStatus,
+    }));
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      monitorCallback = cb;
+    });
+    runNonInteractiveMock.mockImplementationOnce(async () => {
+      monitorCallback?.(
+        'Monitor "logs" event #1: ready',
+        '<task-notification>running</task-notification>',
+        {
+          monitorId: 'mon_1',
+          toolUseId: 'tool_mon_1',
+          status: 'running',
+        },
+      );
+      monitorStatus = 'cancelled';
+    });
+
+    mockInputReader.read = async function* () {
+      yield initRequest;
+      yield userMessage;
+      await new Promise<void>((resolve) => {
+        closeInput = resolve;
+      });
+    };
+
+    const sessionPromise = runNonInteractiveStreamJson(config, '');
+    await vi.waitFor(() => {
+      expect(runNonInteractiveMock).toHaveBeenCalledTimes(1);
+    });
+    closeInput?.();
+    await sessionPromise;
+
+    expect(runNonInteractiveMock).toHaveBeenCalledTimes(1);
+    expect(mockOutputAdapter.emitUserMessage).not.toHaveBeenCalled();
+    expect(mockOutputAdapter.emitSystemMessage).not.toHaveBeenCalledWith(
+      'task_notification',
+      expect.anything(),
     );
   });
 

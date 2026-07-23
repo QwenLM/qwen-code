@@ -517,24 +517,38 @@ function selectBackwardPageUuids(
       break;
     }
   }
-  if (!alignedToReplayBoundary) {
+  let expandedSelection = false;
+  if (alignedToReplayBoundary && selectedStart > 0) {
+    let previousTurnStart = selectedStart - 1;
+    while (
+      previousTurnStart >= 0 &&
+      !isReplayTurnStart(index, index.activeUuids[previousTurnStart]!)
+    ) {
+      previousTurnStart--;
+    }
+    if (previousTurnStart < 0) {
+      selectedStart = 0;
+      expandedSelection = true;
+    }
+  } else if (!alignedToReplayBoundary) {
     while (
       selectedStart > 0 &&
       !isReplayTurnStart(index, index.activeUuids[selectedStart]!)
     ) {
       selectedStart--;
     }
-    if (maxBytes !== undefined) {
-      const alignedBytes = index.activeUuids
-        .slice(selectedStart, position)
-        .reduce((total, uuid) => total + recordSegmentBytes(index, uuid), 0);
-      if (alignedBytes > maxBytes) {
-        throw new SessionTranscriptPageTooLargeError(
-          sessionId,
-          alignedBytes,
-          maxBytes,
-        );
-      }
+    expandedSelection = true;
+  }
+  if (expandedSelection && maxBytes !== undefined) {
+    const alignedBytes = index.activeUuids
+      .slice(selectedStart, position)
+      .reduce((total, uuid) => total + recordSegmentBytes(index, uuid), 0);
+    if (alignedBytes > maxBytes) {
+      throw new SessionTranscriptPageTooLargeError(
+        sessionId,
+        alignedBytes,
+        maxBytes,
+      );
     }
   }
 

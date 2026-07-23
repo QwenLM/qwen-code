@@ -162,6 +162,10 @@ import {
   runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,
 } from '../agents/runtime/agent-context.js';
+import {
+  getInvocationContext,
+  runWithInvocationContext,
+} from '../utils/invocation-context.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 
@@ -2310,8 +2314,8 @@ export class CoreToolScheduler {
         // Phase 2). Every cancel/error path below — and the existing
         // success path in executeSingleToolCall — must call
         // finalizeToolSpan(callId, ...) to avoid leaking spans.
-        // `tool.name` is set automatically by startToolSpan from the first
-        // arg; only namespaced extras go in attrs. `call_id` (non-namespaced)
+        // `gen_ai.tool.name` is set automatically by startToolSpan from the
+        // first arg; only call-id aliases go in attrs. `call_id` (non-namespaced)
         // is dual-emitted for one release as a backwards-compat shim for
         // pre-Phase-2 dashboards/alerts that grep the old key — drop after
         // operators migrate (#4321 review). `tool_name` is dual-emitted on
@@ -2320,6 +2324,7 @@ export class CoreToolScheduler {
         // matching during the rollout.
         const toolSpan = startToolSpan(canonicalName, {
           'tool.call_id': reqInfo.callId,
+          'gen_ai.tool.call.id': reqInfo.providerCallId ?? reqInfo.callId,
           call_id: reqInfo.callId,
           tool_name: canonicalName,
         });
@@ -3011,6 +3016,7 @@ export class CoreToolScheduler {
             }
 
             const originalOnConfirm = confirmationDetails.onConfirm;
+            const invocationContext = getInvocationContext();
             let planShellResponseClaimed = false;
             const wrappedConfirmationDetails: ToolCallConfirmationDetails = {
               ...confirmationDetails,
@@ -3023,45 +3029,46 @@ export class CoreToolScheduler {
               onConfirm: async (
                 outcome: ToolConfirmationOutcome,
                 payload?: ToolConfirmationPayload,
-              ) => {
-                if (planShellDecision.classification !== 'not-applicable') {
-                  if (planShellResponseClaimed) return;
-                  planShellResponseClaimed = true;
-                  const currentCall = this.toolCalls.find(
-                    (call) =>
-                      call.request.callId === reqInfo.callId &&
-                      call.status === 'awaiting_approval',
-                  ) as WaitingToolCall | undefined;
-                  if (!currentCall) return;
-                  const approval = await validatePlanModeShellApproval({
-                    config: this.config,
-                    decision: planShellDecision,
-                    requestArgs: currentCall.request.args,
-                    invocationParams: currentCall.invocation.params as Record<
-                      string,
-                      unknown
-                    >,
-                    signal,
-                    outcome,
-                    payload,
-                  });
+              ) =>
+                runWithInvocationContext(invocationContext, async () => {
+                  if (planShellDecision.classification !== 'not-applicable') {
+                    if (planShellResponseClaimed) return;
+                    planShellResponseClaimed = true;
+                    const currentCall = this.toolCalls.find(
+                      (call) =>
+                        call.request.callId === reqInfo.callId &&
+                        call.status === 'awaiting_approval',
+                    ) as WaitingToolCall | undefined;
+                    if (!currentCall) return;
+                    const approval = await validatePlanModeShellApproval({
+                      config: this.config,
+                      decision: planShellDecision,
+                      requestArgs: currentCall.request.args,
+                      invocationParams: currentCall.invocation.params as Record<
+                        string,
+                        unknown
+                      >,
+                      signal,
+                      outcome,
+                      payload,
+                    });
+                    await this.handleConfirmationResponse(
+                      reqInfo.callId,
+                      originalOnConfirm,
+                      approval.outcome,
+                      signal,
+                      approval.payload,
+                    );
+                    return;
+                  }
                   await this.handleConfirmationResponse(
                     reqInfo.callId,
                     originalOnConfirm,
-                    approval.outcome,
+                    outcome,
                     signal,
-                    approval.payload,
+                    payload,
                   );
-                  return;
-                }
-                await this.handleConfirmationResponse(
-                  reqInfo.callId,
-                  originalOnConfirm,
-                  outcome,
-                  signal,
-                  payload,
-                );
-              },
+                }),
             };
             this.setStatusInternal(
               reqInfo.callId,
@@ -3694,6 +3701,7 @@ export class CoreToolScheduler {
       const canonical = canonicalToolName(toolName);
       toolSpan = startToolSpan(canonical, {
         'tool.call_id': callId,
+        'gen_ai.tool.call.id': scheduledCall.request.providerCallId ?? callId,
         call_id: callId, // legacy alias — see _schedule for context
         tool_name: canonical, // legacy alias — see _schedule for context
       });
