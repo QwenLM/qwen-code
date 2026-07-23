@@ -442,6 +442,7 @@ jobs:
         run: |-
           MODEL_DISPLAY="${MODEL:-default}"
           BRANCH="${{ steps.branch.outputs.name }}"
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
           git push origin "${BRANCH}"
 
           if [[ -s "${WORKDIR}/pr-body.md" ]]; then
