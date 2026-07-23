@@ -4069,6 +4069,93 @@ describe('qwen-autofix workflow', () => {
     ).toContain('attempt 3/5');
   });
 
+  it('retries a skipped-Prepare (base/infra failure) instead of stranding it terminal', () => {
+    // NEWEST empty has two meanings, and the fix is to stop conflating them:
+    //   - Prepare RAN but the agent crashed/timed out before reading → terminal
+    //   - Prepare was SKIPPED because an earlier step failed (base install/
+    //     build) → infra/base, transient → RETRY.
+    // Observed: a web-shell TS break on `main` failed the trusted-base build
+    // across a whole scan batch, skipping Prepare, and the old code stranded
+    // SIX healthy PRs (one at round 11) terminally at round=100.
+    // End at the decision block's own closing `fi`, anchored on the
+    // consecutive-failure block that follows (not the report `{`): that block
+    // was inserted between this decision and the `{`, and it calls `gh api`, so
+    // a `{`-anchored match over-captures it and fails when gh is unstubbed.
+    const block = reviewAddressReportStep.match(
+      /(GATE_CRASHED=false\n[\s\S]*?\n {12}fi)\n\n {12}# Consecutive-failure/,
+    )?.[1];
+    expect(block).toBeTruthy();
+    const script = block.replace(/^ {12}/gm, '');
+    const SENTINEL = '9999-12-31T23:59:59Z';
+    const run = (env) => {
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -uo pipefail\n${script}\nprintf '%s|%s|%s' "$MARK_TS" "$MARK_ROUND" "$HEADLINE"`,
+        ],
+        {
+          env: {
+            ...process.env,
+            NEWEST: '',
+            WATERMARK: '2026-07-20T09:00:00Z',
+            ROUND: '3',
+            MAX_ROUNDS: '100',
+            OUTCOME: '',
+            JOB_STATUS: 'failure',
+            DETAIL_FILE: '',
+            API_ERROR_DETAIL: '',
+            API_ERROR_KIND: '',
+            API_AUTH_MAX_ROUNDS: '3',
+            PREPARE_OUTCOME: 'skipped',
+            RETRY_COMMAND: '@qwen-code /retry',
+            ...env,
+          },
+          encoding: 'utf8',
+        },
+      );
+      const [ts, round, headline] = out.split('|');
+      return { ts, round, terminal: round === '100', headline };
+    };
+
+    // Prepare skipped, early round → retry: sentinel ts (feedback stays live),
+    // round increments, NOT terminal, and the headline names infra/base.
+    const early = run({ PREPARE_OUTCOME: 'skipped', ROUND: '3' });
+    expect(early).toMatchObject({ ts: SENTINEL, round: '4', terminal: false });
+    expect(early.headline).toContain('setup step');
+    expect(early.headline).toContain('retry on the next scan');
+    // A PERSISTENTLY broken base is still bounded: at the cap it goes terminal
+    // (so it cannot loop forever) but keeps the sentinel ts so /retry recovers.
+    const persistent = run({ PREPARE_OUTCOME: 'skipped', ROUND: '99' });
+    expect(persistent).toMatchObject({ ts: SENTINEL, terminal: true });
+    expect(persistent.headline).toContain('/retry');
+    // A CANCELLED job (concurrency/manual cancel) is a DISTINCT outcome value
+    // from 'skipped', and a job stopped before Prepare enters the step context
+    // reports outcome ''. Both are pre-agent and transient, so both must also
+    // retry — matching only 'skipped' sent them to the terminal branch.
+    const cancelled = run({ PREPARE_OUTCOME: 'cancelled', ROUND: '3' });
+    expect(cancelled).toMatchObject({
+      ts: SENTINEL,
+      round: '4',
+      terminal: false,
+    });
+    const emptyOutcome = run({ PREPARE_OUTCOME: '', ROUND: '3' });
+    expect(emptyOutcome).toMatchObject({
+      ts: SENTINEL,
+      round: '4',
+      terminal: false,
+    });
+    // Prepare RAN to a verdict (success/failure) and produced no feedback → a
+    // genuine pre-read agent crash: unchanged terminal behaviour. Both real-run
+    // outcomes stay terminal; only they do.
+    for (const outcome of ['success', 'failure']) {
+      const crashed = run({ PREPARE_OUTCOME: outcome, ROUND: '3' });
+      expect(crashed).toMatchObject({ terminal: true });
+      expect(crashed.headline).toContain('crashed or timed out before reading');
+      expect(crashed.headline).not.toContain('setup step');
+    }
+  });
+
   it('stops a PR that fails to push for CONSECUTIVE_FAILURE_CAP rounds in a row', () => {
     // The total round cap bounds productive iteration; this bounds an UNBROKEN
     // run of failures under takeover, where the strict cap does not apply.
@@ -4084,7 +4171,7 @@ describe('qwen-autofix workflow', () => {
     expect(cap).toBeLessThan(takeoverCap);
 
     const block = reviewAddressReportStep.match(
-      /if \[\[ "\$\{MARK_ROUND\}" != "\$\{MAX_ROUNDS\}" \]\] && \{ \[\[ -z "\$\{API_ERROR_DETAIL\}" \]\] \|\| \[\[ "\$\{API_ERROR_KIND\}" == 'auth' \]\]; \}; then\n {14}CONSEC_FAIL=1\n[\s\S]*?\n {14}fi\n {12}fi\n/,
+      /if \[\[ "\$\{MARK_ROUND\}" != "\$\{MAX_ROUNDS\}" \]\] && \[\[ "\$\{PREPARE_OUTCOME\}" == 'success' \|\| "\$\{PREPARE_OUTCOME\}" == 'failure' \]\] && \{ \[\[ -z "\$\{API_ERROR_DETAIL\}" \]\] \|\| \[\[ "\$\{API_ERROR_KIND\}" == 'auth' \]\]; \}; then\n {14}CONSEC_FAIL=1\n[\s\S]*?\n {14}fi\n {12}fi\n/,
     )?.[0];
     expect(block).toBeTruthy();
     const script = block.replace(/^ {12}/gm, '');
@@ -4094,10 +4181,22 @@ describe('qwen-autofix workflow', () => {
     const FAIL_TIMEOUT = '🤖 AutoFix could not reach the model (attempt 2/3)';
     const PUSH = '🤖 Addressed the latest review feedback (round 2/100).';
     const NOOP = '🤖 Reviewed the latest feedback — no changes needed.';
+    const INFRA_FAIL =
+      '🤖 AutoFix could not start — a setup step failed (or the run was cancelled) before the agent ran.';
+    const INFRA_FAIL_CAP =
+      '🤖 AutoFix could not start — reached the round cap (100) because a setup step (base install/build) kept failing.';
+    const CRASH_TERMINAL =
+      '🤖 AutoFix could not start evaluation — it crashed or timed out before reading the feedback.';
 
     const run = (
       priorHeadlines,
-      { window, markRound = 7, apiErrorDetail = '', apiErrorKind = '' } = {},
+      {
+        window,
+        markRound = 7,
+        apiErrorDetail = '',
+        apiErrorKind = '',
+        prepareOutcome = 'success',
+      } = {},
     ) => {
       const dir = mkdtempSync(join(tmpdir(), 'consec-'));
       const bin = join(dir, 'bin');
@@ -4125,7 +4224,7 @@ describe('qwen-autofix workflow', () => {
         'bash',
         [
           '-c',
-          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\n${script}\nprintf '%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE"`,
+          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\n${script}\nprintf '%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE"`,
         ],
         {
           env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
@@ -4184,6 +4283,39 @@ describe('qwen-autofix workflow', () => {
         apiErrorKind: 'auth',
       }),
     ).toMatchObject({ consec: cap, terminal: true });
+    // A skipped-Prepare (pre-agent infra failure) is exempt from the breaker —
+    // same failure class as transient 429/5xx: not the PR's fault, self-heals,
+    // hits the whole scan batch. The round cap + sentinel-ts /retry already
+    // bounds a persistently broken base; the breaker must not override that
+    // and re-introduce the mass-stranding this retry path exists to prevent.
+    expect(
+      run(Array(cap - 1).fill(FAIL), { prepareOutcome: 'skipped' }),
+    ).toMatchObject({ terminal: false, headline: 'orig' });
+    expect(
+      run(Array(cap - 1).fill(FAIL), { prepareOutcome: 'cancelled' }),
+    ).toMatchObject({ terminal: false, headline: 'orig' });
+    expect(
+      run(Array(cap - 1).fill(FAIL), { prepareOutcome: '' }),
+    ).toMatchObject({ terminal: false, headline: 'orig' });
+    // Prior infra-failure headlines reset the streak too — a broken base
+    // build is not the PR's fault, same class as the current-round exemption
+    // above. Without this, 3 real failures + 3 infra rounds + 1 more real
+    // failure would trip the cap-5 breaker even though only 4 rounds were the
+    // PR's fault.
+    expect(run([FAIL, FAIL, INFRA_FAIL, FAIL, FAIL])).toMatchObject({
+      consec: 3,
+      terminal: false,
+    });
+    expect(run([FAIL, FAIL, INFRA_FAIL_CAP, FAIL, FAIL])).toMatchObject({
+      consec: 3,
+      terminal: false,
+    });
+    // The genuine agent-crash headline must NOT reset the streak — it is a
+    // real failure, not infra.
+    expect(run([FAIL, FAIL, CRASH_TERMINAL, FAIL])).toMatchObject({
+      consec: cap,
+      terminal: true,
+    });
     // Already-terminal rounds skip the circuit breaker entirely.
     expect(run(Array(cap).fill(FAIL), { markRound: 100 })).toMatchObject({
       terminal: true,
@@ -4202,6 +4334,25 @@ describe('qwen-autofix workflow', () => {
     );
     expect(noopEmit).toBeTruthy();
     expect(noopEmit[1]).toContain('no changes needed');
+    // The infra-failure reset strings must match the actual retry/cap
+    // headlines emitted in this same step, so a reword breaks this test,
+    // not silently the streak reset.
+    const infraRetryEmit = reviewAddressReportStep.match(
+      /HEADLINE="(🤖 AutoFix could not start — [^"]*)"/,
+    );
+    expect(infraRetryEmit).toBeTruthy();
+    expect(infraRetryEmit[1]).toContain('AutoFix could not start —');
+    const infraCapEmit = reviewAddressReportStep.match(
+      /HEADLINE="(🤖 AutoFix could not start — reached the round cap[^"]*)"/,
+    );
+    expect(infraCapEmit).toBeTruthy();
+    expect(infraCapEmit[1]).toContain('AutoFix could not start —');
+    // The crash headline must NOT match the infra reset patterns.
+    const crashEmit = reviewAddressReportStep.match(
+      /HEADLINE="(🤖 AutoFix could not start evaluation[^"]*)"/,
+    );
+    expect(crashEmit).toBeTruthy();
+    expect(crashEmit[1]).not.toContain('AutoFix could not start —');
     // Window filtering: pre-re-arm failures don't count after a re-arm.
     expect(
       run(
@@ -4909,12 +5060,21 @@ describe('qwen-autofix workflow', () => {
     expect(runMark({ NEWEST: '2026-07-16T00:00:00Z', DETAIL_FILE: '' })).toBe(
       `${SENTINEL}|3`,
     );
-    // 3. Crash before prepare (NEWEST empty): terminal round so the scan skips
+    // 3. NEWEST empty but Prepare RAN to a verdict (outcome success/failure)
+    //    and the agent crashed before reading: terminal round so the scan skips
     //    instead of re-handing-off forever; ts falls back to WATERMARK/sentinel.
-    expect(runMark({ NEWEST: '', WATERMARK: '2026-07-10T00:00:00Z' })).toBe(
-      '2026-07-10T00:00:00Z|5',
-    );
-    expect(runMark({ NEWEST: '', WATERMARK: '' })).toBe(`${SENTINEL}|5`);
+    //    (An empty/skipped/cancelled Prepare — the agent never ran — now retries
+    //    instead; that is the dedicated skipped-Prepare test above.)
+    expect(
+      runMark({
+        NEWEST: '',
+        WATERMARK: '2026-07-10T00:00:00Z',
+        PREPARE_OUTCOME: 'success',
+      }),
+    ).toBe('2026-07-10T00:00:00Z|5');
+    expect(
+      runMark({ NEWEST: '', WATERMARK: '', PREPARE_OUTCOME: 'failure' }),
+    ).toBe(`${SENTINEL}|5`);
 
     // The no-output-crash HEADLINE must only promise a retry when one will
     // actually happen: at the final attempt (MARK_ROUND == MAX_ROUNDS) the
