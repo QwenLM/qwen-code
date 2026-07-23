@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, it, expect } from 'vitest';
+import { Storage } from '@qwen-code/qwen-code-core';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { TipHistory } from './tipHistory.js';
 
 const tempPaths: string[] = [];
@@ -21,9 +22,19 @@ function tmpPath(): string {
   return p;
 }
 
+function tmpDir(): string {
+  const dir = join(
+    tmpdir(),
+    `test-tip-history-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  );
+  tempPaths.push(dir);
+  return dir;
+}
+
 afterEach(() => {
+  vi.restoreAllMocks();
   for (const p of tempPaths) {
-    rmSync(p, { force: true });
+    rmSync(p, { force: true, recursive: true });
   }
   tempPaths.length = 0;
 });
@@ -127,6 +138,34 @@ describe('TipHistory', () => {
     it('exposes sessionCount from data', () => {
       const history = createHistory(42);
       expect(history.sessionCount).toBe(42);
+    });
+  });
+
+  describe('load', () => {
+    it('retains a seen version across loads', () => {
+      const globalQwenDir = tmpDir();
+      vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(globalQwenDir);
+
+      const history = TipHistory.load();
+      expect(history.markVersionSeen('0.20.1')).toBe(true);
+
+      const reloaded = TipHistory.load();
+      expect(reloaded.hasSeenVersion('0.20.1')).toBe(true);
+    });
+
+    it('loads histories that predate lastSeenVersion', () => {
+      const globalQwenDir = tmpDir();
+      vi.spyOn(Storage, 'getGlobalQwenDir').mockReturnValue(globalQwenDir);
+      mkdirSync(globalQwenDir, { recursive: true });
+      writeFileSync(
+        join(globalQwenDir, 'tip_history.json'),
+        JSON.stringify({ sessionCount: 3, tips: {} }),
+      );
+
+      const history = TipHistory.load();
+
+      expect(history.sessionCount).toBe(4);
+      expect(history.hasSeenVersion('0.20.1')).toBe(false);
     });
   });
 
