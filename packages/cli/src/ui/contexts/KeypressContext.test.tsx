@@ -528,6 +528,41 @@ describe('KeypressContext - Kitty Protocol', () => {
       expect(pasteEvent?.[0]?.sequence).toBe('hi\x1b[20');
     });
 
+    it('reassembles paste content delivered across three or more stdin chunks', async () => {
+      // Large pastes arrive in many small stdin data events. The raw-level
+      // interceptor (handleStdinData) must accumulate content across all
+      // chunks and broadcast a single paste event with the complete text —
+      // the core optimization this PR adds.
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: true }),
+      });
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      // Deliver paste-start + content across three separate data events,
+      // with the paste-end marker intact in the final chunk.
+      act(() => {
+        stdin.emit('data', Buffer.from('\x1b[200~chunk1'));
+        stdin.emit('data', Buffer.from('chunk2'));
+        stdin.emit('data', Buffer.from('chunk3\x1b[201~'));
+      });
+
+      await waitFor(() => {
+        expect(keyHandler).toHaveBeenCalledTimes(1);
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          paste: true,
+          sequence: 'chunk1chunk2chunk3',
+        }),
+      );
+    });
+
     it('does not intercept a paste-start split immediately after its ESC byte (documented tradeoff)', async () => {
       // partialMarkerTailLength uses minLen=2 on the prefix path, so a lone
       // trailing ESC (0x1b) is never held back: holding it would delay every
@@ -1396,6 +1431,52 @@ describe('KeypressContext - Kitty Protocol', () => {
             sequence: 'hello world',
           }),
         );
+      });
+
+      it('Ctrl+C escapes a stuck paste in passthrough mode', () => {
+        // The keypress-level Ctrl+C escape hatch (passthrough mode:
+        // pasteWorkaround / Windows / Node < 20) must clear paste state and
+        // dispatch the Ctrl+C keypress so the user can recover from a stuck
+        // paste (paste-start without paste-end) without restarting the
+        // terminal — the legacy counterpart of the raw-level idle timeout.
+        const keyHandler = vi.fn();
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper: ({ children }) =>
+            wrapper({ children, pasteWorkaround: true }),
+        });
+        act(() => {
+          result.current.subscribe(keyHandler);
+        });
+
+        // Enter paste mode via raw data (how passthrough mode feeds the
+        // keypress-level state machine: stdin data → handleRawKeypress →
+        // keypressStream → readline → handleKeypress). Send paste-start
+        // with one character of content, but NO paste-end.
+        act(() => {
+          stdin.emit('data', Buffer.from('\x1b[200~a'));
+        });
+
+        // Ctrl+C must escape the stuck paste...
+        act(() => {
+          stdin.emit('data', Buffer.from('\x03'));
+        });
+
+        // ...dispatching the Ctrl+C keypress to the handler...
+        const ctrlC = keyHandler.mock.calls.find(
+          (c) => c[0]?.ctrl === true && c[0]?.name === 'c',
+        );
+        expect(ctrlC).toBeDefined();
+
+        // ...and clearing paste state so normal typing resumes.
+        act(() => {
+          stdin.emit('data', Buffer.from('z'));
+        });
+
+        const zKey = keyHandler.mock.calls.find(
+          (c) => c[0]?.sequence === 'z' && c[0]?.paste !== true,
+        );
+        expect(zKey).toBeDefined();
       });
     });
 
