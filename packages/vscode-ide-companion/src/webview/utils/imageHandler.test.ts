@@ -155,7 +155,26 @@ describe('buildPromptBlocks', () => {
         type: 'resource_link',
         name: 'pasted image.png',
         mimeType: 'image/png',
-        uri: 'file:///tmp/My Images/pasted image.png',
+        uri: 'file:///tmp/My%20Images/pasted%20image.png',
+      },
+    ]);
+  });
+
+  it('builds valid file URIs from Windows image paths', () => {
+    expect(
+      buildPromptBlocks('', [
+        {
+          path: 'C:\\Users\\Me\\Pictures\\screen shot.png',
+          name: 'screen shot.png',
+          mimeType: 'image/png',
+        },
+      ]),
+    ).toEqual([
+      {
+        type: 'resource_link',
+        name: 'screen shot.png',
+        mimeType: 'image/png',
+        uri: 'file:///C:/Users/Me/Pictures/screen%20shot.png',
       },
     ]);
   });

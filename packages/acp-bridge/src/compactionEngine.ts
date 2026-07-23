@@ -55,6 +55,14 @@ type CompactedSlot =
       lastEventId: number;
       lastMeta: unknown;
       lastEnvelopeMeta?: Record<string, unknown>;
+      /**
+       * Top-level prompt/originator attribution of the most recent chunk.
+       * Preserved onto the merged event so resync consumers can still do
+       * prompt correlation and originator filtering after compaction.
+       */
+      lastTurn?: Pick<BridgeEvent, 'promptId' | 'originatorClientId'>;
+      /** `data.sessionId` of the most recent chunk, same rationale. */
+      lastSessionId?: string;
     }
   | { kind: 'tool'; toolCallId: string; event: BridgeEvent }
   | { kind: 'misc'; event: BridgeEvent }
@@ -338,6 +346,8 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         if (event.id !== undefined) slot.lastEventId = event.id;
         slot.lastMeta = meta ?? slot.lastMeta;
         slot.lastEnvelopeMeta = event._meta ?? slot.lastEnvelopeMeta;
+        slot.lastTurn = captureTurnFields(event, slot.lastTurn);
+        slot.lastSessionId = captureSessionId(event) ?? slot.lastSessionId;
       } else {
         entries.push({ sourceRecordIds, index: this.slots.length });
         this.textSlotIndex[kind].set(parentToolCallId, entries);
@@ -349,6 +359,8 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
           lastEventId: event.id ?? 0,
           lastMeta: meta,
           lastEnvelopeMeta: event._meta,
+          lastTurn: captureTurnFields(event),
+          lastSessionId: captureSessionId(event),
         });
       }
     } else {
@@ -366,6 +378,9 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         if (event.id !== undefined) lastSlot.lastEventId = event.id;
         lastSlot.lastMeta = meta ?? lastSlot.lastMeta;
         lastSlot.lastEnvelopeMeta = event._meta ?? lastSlot.lastEnvelopeMeta;
+        lastSlot.lastTurn = captureTurnFields(event, lastSlot.lastTurn);
+        lastSlot.lastSessionId =
+          captureSessionId(event) ?? lastSlot.lastSessionId;
       } else {
         this.slots.push({
           kind,
@@ -375,6 +390,8 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
           lastEventId: event.id ?? 0,
           lastMeta: meta,
           lastEnvelopeMeta: event._meta,
+          lastTurn: captureTurnFields(event),
+          lastSessionId: captureSessionId(event),
         });
       }
     }
@@ -396,6 +413,8 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
               slot.lastEventId,
               slot.lastMeta,
               slot.lastEnvelopeMeta,
+              slot.lastTurn,
+              slot.lastSessionId,
             ),
           );
           break;
@@ -530,13 +549,24 @@ function makeMergedSessionUpdateEvent(
   eventId: number,
   meta: unknown,
   envelopeMeta: Record<string, unknown> | undefined,
+  turn?: Pick<BridgeEvent, 'promptId' | 'originatorClientId'>,
+  sessionId?: string,
 ): BridgeEvent {
   return {
     id: eventId || undefined,
     v: EVENT_SCHEMA_VERSION,
     type: 'session_update',
+    // Re-stamp prompt/originator attribution captured from the source
+    // chunks — clients rebuilding state from a compacted snapshot need
+    // them for prompt correlation and originator filtering. Present only
+    // when the source events carried them ("present only if set" style).
+    ...(turn?.promptId !== undefined ? { promptId: turn.promptId } : {}),
+    ...(turn?.originatorClientId !== undefined
+      ? { originatorClientId: turn.originatorClientId }
+      : {}),
     ...(envelopeMeta !== undefined ? { _meta: envelopeMeta } : {}),
     data: {
+      ...(sessionId !== undefined ? { sessionId } : {}),
       update: {
         sessionUpdate,
         content: { type: 'text', text },
@@ -544,6 +574,35 @@ function makeMergedSessionUpdateEvent(
       },
     },
   };
+}
+
+/**
+ * Field-level merge of `promptId`/`originatorClientId` from an incoming
+ * event with an earlier capture. Each field falls back independently so a
+ * chunk carrying only one field does not silently drop the other from the
+ * previous capture (mirrors the tool_call path's per-field `??` merge).
+ */
+function captureTurnFields(
+  event: BridgeEvent,
+  previous?: Pick<BridgeEvent, 'promptId' | 'originatorClientId'>,
+): Pick<BridgeEvent, 'promptId' | 'originatorClientId'> | undefined {
+  const promptId = event.promptId ?? previous?.promptId;
+  const originatorClientId =
+    event.originatorClientId ?? previous?.originatorClientId;
+  if (promptId === undefined && originatorClientId === undefined) {
+    return undefined;
+  }
+  return {
+    ...(promptId !== undefined ? { promptId } : {}),
+    ...(originatorClientId !== undefined ? { originatorClientId } : {}),
+  };
+}
+
+/** `data.sessionId` of an event when present and a string. */
+function captureSessionId(event: BridgeEvent): string | undefined {
+  const sessionId = (event.data as { sessionId?: unknown } | undefined)
+    ?.sessionId;
+  return typeof sessionId === 'string' ? sessionId : undefined;
 }
 
 function normalizeToolCallType(event: BridgeEvent): BridgeEvent {
@@ -626,11 +685,19 @@ function mergeToolCallEvent(
     existing._meta || incoming._meta
       ? { ...(existing._meta ?? {}), ...(incoming._meta ?? {}) }
       : undefined;
+  // Latest-wins attribution, mirroring `id`: the folded tool_call keeps
+  // the most recent prompt/originator stamp so resync consumers can still
+  // correlate it to its turn ("present only if set" style).
+  const promptId = incoming.promptId ?? existing.promptId;
+  const originatorClientId =
+    incoming.originatorClientId ?? existing.originatorClientId;
 
   return {
     id: incoming.id ?? existing.id,
     v: EVENT_SCHEMA_VERSION,
     type: 'session_update',
+    ...(promptId !== undefined ? { promptId } : {}),
+    ...(originatorClientId !== undefined ? { originatorClientId } : {}),
     ...(mergedMeta ? { _meta: mergedMeta } : {}),
     data: {
       ...existingData,

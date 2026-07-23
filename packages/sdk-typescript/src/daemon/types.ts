@@ -637,6 +637,12 @@ export interface DaemonSession {
   createdAt?: string;
   /** True while the live session has an in-flight prompt. */
   hasActivePrompt?: boolean;
+  /**
+   * Epoch token of the session's event bus. Newer daemons stamp it on the
+   * create/attach response; older daemons omit it and the first subscription
+   * learns it from the `X-Qwen-Event-Epoch` response header.
+   */
+  eventEpoch?: string;
   /** Immutable creator attribution, absent on legacy/unattributed sessions. */
   sourceType?: string;
   /** Optional source-specific identifier paired with `sourceType`. */
@@ -684,6 +690,21 @@ export interface DaemonRestoredSession extends DaemonSession {
   historyHasMore?: boolean;
   /** Event bus watermark — used as initial SSE cursor. */
   lastEventId?: number;
+  /**
+   * Epoch token of the event bus that produced `lastEventId`. Pass it back
+   * as `SubscribeOptions.epoch` alongside the cursor so a daemon restart
+   * between this response and the subscription is detected (forces a
+   * `state_resync_required` with reason `epoch_reset`). Absent on older
+   * daemons — the bus falls back to its numeric stale-cursor heuristic.
+   */
+  eventEpoch?: string;
+  /**
+   * True when the compaction engine failed at least once for this session
+   * (load only): `compactedReplay`/`liveJournal` may lag behind live
+   * events. Clients should prefer the full transcript (see
+   * `fullTranscriptAvailable`) over the degraded snapshot.
+   */
+  replayDegraded?: boolean;
 }
 
 export interface BranchSessionRequest {
@@ -1700,10 +1721,17 @@ export interface DaemonWorkspaceAgentSummary {
   level: DaemonAgentLevel;
   isBuiltin: boolean;
   hasTools: boolean;
+  tools?: string[];
+  disallowedTools?: string[];
   model?: string;
   color?: string;
   background?: boolean;
   approvalMode?: string;
+  permissionMode?: string;
+  maxTurns?: number;
+  mcpServerNames?: string[];
+  hookEvents?: string[];
+  runConfig?: { max_time_minutes?: number; max_turns?: number };
   extensionName?: string;
   filePath?: string;
 }
@@ -1711,9 +1739,8 @@ export interface DaemonWorkspaceAgentSummary {
 export interface DaemonWorkspaceAgentDetail
   extends DaemonWorkspaceAgentSummary {
   systemPrompt: string;
-  tools?: string[];
-  disallowedTools?: string[];
-  runConfig?: { max_time_minutes?: number; max_turns?: number };
+  mcpServers?: Record<string, unknown>;
+  hooks?: Record<string, unknown>;
 }
 
 export interface DaemonWorkspaceAgentsStatus {
@@ -1739,6 +1766,10 @@ export interface DaemonCreateAgentRequest {
   runConfig?: { max_time_minutes?: number; max_turns?: number };
   color?: string;
   approvalMode?: string;
+  permissionMode?: string;
+  maxTurns?: number;
+  mcpServers?: Record<string, unknown>;
+  hooks?: Record<string, unknown>;
   background?: boolean;
 }
 
@@ -1747,6 +1778,9 @@ export interface DaemonGeneratedAgentContent {
   description: string;
   systemPrompt: string;
 }
+
+/** Stateless generation events emitted by the resolved workspace runtime. */
+export type DaemonWorkspaceGenerationEvent = DaemonSessionGenerationEvent;
 
 /**
  * Body of `POST /workspace/agents/:agentType`. `name` / `level` /
@@ -1759,10 +1793,14 @@ export interface DaemonUpdateAgentRequest {
   systemPrompt?: string;
   tools?: string[];
   disallowedTools?: string[];
-  model?: string;
+  model?: string | null;
   runConfig?: { max_time_minutes?: number; max_turns?: number };
-  color?: string;
-  approvalMode?: string;
+  color?: string | null;
+  approvalMode?: string | null;
+  permissionMode?: string | null;
+  maxTurns?: number | null;
+  mcpServers?: Record<string, unknown>;
+  hooks?: Record<string, unknown>;
   background?: boolean;
 }
 
