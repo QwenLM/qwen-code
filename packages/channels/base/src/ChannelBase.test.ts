@@ -26,6 +26,10 @@ import type {
   ChannelWebhookTask,
 } from './ChannelWebhookTask.js';
 import { SessionRouter } from './SessionRouter.js';
+import {
+  ChannelProactiveDeliveryError,
+  isChannelProactiveDeliveryError,
+} from './ChannelProactiveDeliveryError.js';
 
 // Concrete test implementation
 class TestChannel extends ChannelBase {
@@ -352,6 +356,139 @@ describe('ChannelBase', () => {
       options,
     );
   }
+
+  describe('proactive delivery boundary', () => {
+    it('recognizes typed delivery errors across module instances', () => {
+      expect(
+        isChannelProactiveDeliveryError({
+          code: 'channel_proactive_delivery_error',
+          disposition: 'permanent',
+          message: 'invalid recipient',
+        }),
+      ).toBe(true);
+      expect(
+        isChannelProactiveDeliveryError({
+          code: 'channel_proactive_delivery_error',
+          disposition: 'unknown',
+          message: 'invalid recipient',
+        }),
+      ).toBe(false);
+    });
+
+    it('derives chat and user session targets', async () => {
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+      ch.proactiveTargetSupported = true;
+
+      await ch.deliverProactive(
+        { channelName: 'test-chan', type: 'chat', id: 'group-1' },
+        'group result',
+      );
+      await ch.deliverProactive(
+        { channelName: 'test-chan', type: 'user', id: 'user-1' },
+        'user result',
+      );
+
+      expect(ch.proactiveTargets).toEqual([
+        {
+          channelName: 'test-chan',
+          senderId: 'group-1',
+          chatId: 'group-1',
+          isGroup: true,
+        },
+        {
+          channelName: 'test-chan',
+          senderId: 'user-1',
+          chatId: 'user-1',
+          isGroup: false,
+        },
+      ]);
+    });
+
+    it('rejects invalid and unsupported proactive targets', async () => {
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'test-chan', type: 'user', id: '  ' },
+          'result',
+        ),
+      ).rejects.toThrow('invalid proactive target');
+
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'test-chan', type: 'user', id: 'user-1' },
+          '  ',
+        ),
+      ).rejects.toThrow('empty proactive text');
+
+      ch.proactiveTargetSupported = false;
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'test-chan', type: 'chat', id: 'group-1' },
+          'result',
+        ),
+      ).rejects.toThrow('does not support this proactive target');
+    });
+
+    it('rejects delivery owned by another channel or without send support', async () => {
+      const ch = createChannel();
+      ch.proactiveTargetSupported = true;
+
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'other', type: 'user', id: 'user-1' },
+          'result',
+        ),
+      ).rejects.toThrow('does not own delivery target');
+
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'test-chan', type: 'user', id: 'user-1' },
+          'result',
+        ),
+      ).rejects.toThrow('does not support proactive delivery');
+    });
+
+    it('normalizes untyped adapter failures as transient delivery errors', async () => {
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+      ch.proactiveTargetSupported = true;
+      const cause = new Error('provider request failed');
+      ch.proactiveError = cause;
+
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'test-chan', type: 'user', id: 'user-1' },
+          'result',
+        ),
+      ).rejects.toMatchObject({
+        code: 'channel_proactive_delivery_error',
+        disposition: 'transient',
+        message: 'provider request failed',
+        cause,
+      });
+    });
+
+    it('preserves typed adapter delivery errors', async () => {
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+      ch.proactiveTargetSupported = true;
+      const error = new ChannelProactiveDeliveryError(
+        'permanent',
+        'recipient rejected',
+      );
+      ch.proactiveError = error;
+
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'test-chan', type: 'user', id: 'user-1' },
+          'result',
+        ),
+      ).rejects.toBe(error);
+    });
+  });
 
   describe('gate integration', () => {
     it('silently drops group messages when groupPolicy=disabled', async () => {

@@ -6,6 +6,10 @@
 
 import type { ChannelWebhookTask } from '@qwen-code/channel-base';
 import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
+import {
+  ChannelDeliveryError,
+  type ChannelDeliveryRequest,
+} from './channel-delivery-ipc.js';
 import type {
   ChannelWorkerGroup,
   ChannelWorkerGroupSnapshot,
@@ -113,6 +117,10 @@ export interface ChannelWorkerManager {
   enqueueWebhookTask(
     task: ChannelWebhookTask,
   ): ReturnType<ChannelWorkerGroup['enqueueWebhookTask']>;
+  deliverChannelMessage(
+    workspaceCwd: string,
+    request: ChannelDeliveryRequest,
+  ): ReturnType<ChannelWorkerGroup['deliverChannelMessage']>;
   beginWorkspaceDrain(workspaceCwd: string): void;
   cancelWorkspaceDrain(workspaceCwd: string): void;
   workspaceActivity(workspaceCwd: string): number;
@@ -494,6 +502,19 @@ export function createChannelWorkerManager(
         ) as ReturnType<ChannelWorkerGroup['enqueueWebhookTask']>;
       }
       return group.enqueueWebhookTask(task);
+    },
+    deliverChannelMessage(workspaceCwd, request) {
+      if (!group || draining) {
+        return Promise.reject(
+          new ChannelDeliveryError(
+            'channel_worker_unavailable',
+            draining
+              ? 'Daemon is shutting down.'
+              : 'Channel worker is not running.',
+          ),
+        ) as ReturnType<ChannelWorkerGroup['deliverChannelMessage']>;
+      }
+      return group.deliverChannelMessage(request, workspaceCwd);
     },
     beginWorkspaceDrain(workspaceCwd) {
       workspaceDrains.add(workspaceCwd);
