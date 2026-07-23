@@ -401,6 +401,124 @@ describe('qwen-autofix workflow', () => {
     expect(run([{ ...llm, name: 'resolve-pr' }])).toBe('true');
   });
 
+  it('auto-reruns a check that died on infrastructure, once, guarded by run_attempt', () => {
+    // A self-hosted runner losing the server (or the disk filling) reds a check
+    // for a reason unrelated to the PR; it clears on a rerun (#7490's E2E:
+    // "runner lost communication" → green on the rerun). The scan reruns such a
+    // failed job ONCE, and run_attempt is the guard: a run already at attempt 2
+    // and still infra-failing is persistent and left alone — no infinite loop.
+    const block = reviewScanJob.match(
+      /( {12}PR_HEAD_OID="\$\(jq -r '\.headRefOid[\s\S]*?\n {12}fi\n)\n {12}# startedAt is the only staleness/,
+    )?.[1];
+    expect(block).toBeTruthy();
+    const script = block.replace(/^ {12}/gm, '');
+
+    const run = ({ checks, annotations, attempt = 1, rerunOk = true }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'infra-'));
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      // Stubbed gh: check-runs → one failed run-1 check-run with annotations;
+      // annotations → the given message; runs/{id} → run_attempt; POST
+      // rerun-failed-jobs → success/fail. Records the rerun POST.
+      // The workflow calls check-runs with a --jq filter that yields, per
+      // failed check-run WITH annotations, a `<id>\t<details_url>` line; the
+      // stub emits what that filter would produce (a single line when there is
+      // an annotation, nothing otherwise) rather than raw JSON the stub can't
+      // filter.
+      const crTsv = annotations
+        ? '42\thttps://github.com/o/r/actions/runs/9001/job/5\n'
+        : '';
+      writeFileSync(
+        join(bin, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          `echo "$*" >> ${JSON.stringify(join(dir, 'calls.log'))}`,
+          'args="$*"',
+          `case "$args" in`,
+          // %b so the \t/\n in the stubbed tsv become a real tab/newline (the
+          // filter's @tsv output), which `IFS=$'\\t' read` then splits.
+          `  *"/commits/"*"/check-runs"*) printf '%b' ${JSON.stringify(crTsv)}; exit 0;;`,
+          `  *"/check-runs/42/annotations"*) printf '%s' ${JSON.stringify(annotations || '')}; exit 0;;`,
+          `  *"/actions/runs/9001"*"rerun-failed-jobs"*) exit ${rerunOk ? 0 : 1};;`,
+          `  *"/actions/runs/9001"*) printf '${attempt}'; exit 0;;`,
+          'esac',
+          'exit 0',
+        ].join('\n'),
+      );
+      chmodSync(join(bin, 'gh'), 0o755);
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -uo pipefail\nfleet_row(){ :; }\nfor _ in x; do\n${script}\nprintf 'FELL_THROUGH'\ndone`,
+        ],
+        {
+          env: {
+            ...process.env,
+            REPO: 'o/r',
+            PR: '1',
+            PR_META: JSON.stringify({ headRefOid: 'headSHA' }),
+            CHECKS_JSON: JSON.stringify(checks),
+            INFRA_FAILURE_SIGNATURES:
+              'lost communication with the server|No space left on device',
+            PATH: `${bin}:${process.env.PATH}`,
+          },
+          encoding: 'utf8',
+        },
+      );
+      const calls = existsSync(join(dir, 'calls.log'))
+        ? readFileSync(join(dir, 'calls.log'), 'utf8')
+        : '';
+      rmSync(dir, { recursive: true, force: true });
+      return {
+        reran: /rerun-failed-jobs/.test(calls),
+        continued: !out.includes('FELL_THROUGH'),
+      };
+    };
+    const FAIL = { name: 'E2E', conclusion: 'FAILURE' };
+    const OK = { name: 'E2E', conclusion: 'SUCCESS' };
+
+    // Infra death (runner lost the server) on attempt 1 → rerun & skip.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations:
+          'The self-hosted runner lost communication with the server',
+      }),
+    ).toEqual({ reran: true, continued: true });
+    // A REAL failure (no infra signature in the annotation) → never rerun; the
+    // agent/human handles it. This is the gate that stops masking real bugs.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: 'Expected 1 argument but got 2 — src/foo.ts:10',
+      }),
+    ).toEqual({ reran: false, continued: false });
+    // Already reran once (attempt 2) and still infra-failing → persistent, do
+    // not loop.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: 'No space left on device',
+        attempt: 2,
+      }),
+    ).toEqual({ reran: false, continued: false });
+    // No failed check at all → the block is skipped entirely.
+    expect(run({ checks: [OK], annotations: '' })).toEqual({
+      reran: false,
+      continued: false,
+    });
+    // Infra signature but the rerun POST fails (e.g. PAT lacks actions:write) →
+    // no crash, falls through to normal processing.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: 'No space left on device',
+        rerunOk: false,
+      }),
+    ).toEqual({ reran: true, continued: false });
+  });
+
   it('keeps a still-red check visible, but only once per head', () => {
     // A red check is a STATE, not the instant it turned red. Counting only
     // "failed since the watermark" made a still-failing PR invisible the
