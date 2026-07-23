@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly CONFIG=/srv/qwen-benchmark/config/benchmark.env
+
+set -a
+source "$CONFIG"
+set +a
+
+submit=(
+  /srv/qwen-benchmark/venv/bin/qwen-benchmark-submit
+  "$@"
+)
+
+if [[ "$(id -u)" -eq 0 ]]; then
+  exec runuser -u ecs-user -- env \
+    "BENCHMARK_DATABASE_PATH=${BENCHMARK_DATABASE_PATH:?}" \
+    "BENCHMARK_ALLOWED_REPOSITORY=${BENCHMARK_ALLOWED_REPOSITORY:-QwenLM/qwen-code}" \
+    "${submit[@]}"
+fi
+
+exec "${submit[@]}"

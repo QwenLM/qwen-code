@@ -1,0 +1,87 @@
+name: 'Dispatch SWE-bench Verified Benchmark'
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      qwen_ref:
+        description: 'Qwen Code release tag to benchmark.'
+        required: true
+        type: 'string'
+      suite:
+        description: 'Allowlisted benchmark suite.'
+        required: true
+        type: 'choice'
+        default: 'swebench_verified_harbor_smoke'
+        options:
+          - 'swebench_verified_harbor_smoke'
+          - 'swebench_verified_gold_smoke'
+          - 'swebench_verified_qwen_smoke'
+      release_id:
+        description: 'Optional existing prerelease ID to update after a manual test.'
+        required: false
+        type: 'string'
+
+jobs:
+  dispatch:
+    name: 'Submit benchmark run'
+    if: '${{ github.event_name != ''release'' || github.event.release.prerelease == false }}'
+    runs-on: [self-hosted, Linux, X64, qwen-benchmark]
+    timeout-minutes: 10
+    permissions:
+      contents: 'read'
+
+    steps:
+      - name: 'Resolve immutable release commit'
+        id: 'revision'
+        shell: 'bash'
+        env:
+          QWEN_REF: '${{ github.event.release.tag_name || inputs.qwen_ref }}'
+          GH_TOKEN: '${{ github.token }}'
+        run: |-
+          set -euo pipefail
+          object="$(curl --fail --silent --show-error \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/git/ref/tags/${QWEN_REF}")"
+          object_type="$(jq -r '.object.type' <<<"${object}")"
+          object_sha="$(jq -r '.object.sha' <<<"${object}")"
+          while [[ "${object_type}" == 'tag' ]]; do
+            object="$(curl --fail --silent --show-error \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/git/tags/${object_sha}")"
+            object_type="$(jq -r '.object.type' <<<"${object}")"
+            object_sha="$(jq -r '.object.sha' <<<"${object}")"
+          done
+          [[ "${object_type}" == 'commit' && "${object_sha}" =~ ^[0-9a-f]{40}$ ]]
+          echo "commit=${object_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Submit benchmark request to local ECS queue'
+        env:
+          QWEN_REF: '${{ github.event.release.tag_name || inputs.qwen_ref }}'
+          QWEN_COMMIT: '${{ steps.revision.outputs.commit }}'
+          SUITE: "${{ inputs.suite || 'swebench_verified_harbor_smoke' }}"
+          RELEASE_ID: '${{ github.event.release.id || inputs.release_id }}'
+          TRIGGER: '${{ github.event_name }}'
+        run: |-
+          set -euo pipefail
+          args=(
+            --repository "${GITHUB_REPOSITORY}"
+            --qwen-ref "${QWEN_REF}"
+            --qwen-commit "${QWEN_COMMIT}"
+            --suite "${SUITE}"
+            --trigger "${TRIGGER}"
+            --github-run-id "${GITHUB_RUN_ID}"
+            --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+          )
+          if [[ -n "${RELEASE_ID}" ]]; then
+            args+=(--release-id "${RELEASE_ID}")
+          fi
+          response="$(sudo -n /usr/local/sbin/qwen-benchmark-dispatch "${args[@]}")"
+          echo "${response}" | jq .
+          echo "### Benchmark queued" >> "$GITHUB_STEP_SUMMARY"
+          echo "${response}" | jq -r '"- Run ID: `" + .run_id + "`\n- Status: `" + .status + "`"' >> "$GITHUB_STEP_SUMMARY"

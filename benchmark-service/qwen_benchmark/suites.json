@@ -1,0 +1,33 @@
+{
+  "swebench_verified_gold_smoke": {
+    "dataset": "princeton-nlp/SWE-bench_Verified",
+    "dataset_revision": "c104f840cc67f8b6eec6f759ebc8b2693d585d4a",
+    "instance_ids": ["sympy__sympy-20590"],
+    "runner_mode": "gold",
+    "grader_concurrency": 1,
+    "instance_timeout_seconds": 3600,
+    "publish": false
+  },
+  "swebench_verified_qwen_smoke": {
+    "dataset": "princeton-nlp/SWE-bench_Verified",
+    "dataset_revision": "c104f840cc67f8b6eec6f759ebc8b2693d585d4a",
+    "instance_ids": ["sympy__sympy-20590"],
+    "runner_mode": "qwen",
+    "grader_concurrency": 1,
+    "instance_timeout_seconds": 3600,
+    "publish": false
+  },
+  "swebench_verified_harbor_smoke": {
+    "dataset": "swe-bench/swe-bench-verified",
+    "dataset_revision": "2",
+    "harbor_dataset": "swe-bench/swe-bench-verified",
+    "harbor_dataset_version": "2",
+    "harbor_task_prefix": "swe-bench/",
+    "instance_ids": ["sympy__sympy-20590"],
+    "runner_mode": "harbor",
+    "grader_concurrency": 1,
+    "instance_timeout_seconds": 7200,
+    "harbor_max_turns": 200,
+    "publish": true
+  }
+}

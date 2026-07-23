@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "qwen-code-benchmark-service"
+version = "0.1.0"
+description = "Single-node Qwen Code SWE-bench Verified benchmark service"
+requires-python = ">=3.12"
+dependencies = [
+  "httpx>=0.27,<1",
+  "pydantic>=2.7,<3",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8,<9"]
+
+[project.scripts]
+qwen-benchmark-submit = "qwen_benchmark.submit:main"
+qwen-benchmark-worker = "qwen_benchmark.worker:main"
+
+[tool.setuptools.package-data]
+qwen_benchmark = ["suites.json"]
+
+[tool.setuptools.packages.find]
+include = ["qwen_benchmark"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
