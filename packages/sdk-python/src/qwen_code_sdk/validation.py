@@ -226,3 +226,14 @@ def validate_session_id(value: str, param_name: str) -> None:
         raise ValidationError(
             f"Invalid {param_name}: {value!r}. UUID variant must be RFC 4122."
         )
+
+    # UUID() also accepts braced, urn:uuid: and dash-less spellings, but the
+    # value is forwarded to the CLI verbatim as --session-id/--resume, so
+    # anything but the canonical 8-4-4-4-12 form produces a malformed id
+    # downstream. Case is not part of canonical form: UUID() lowercases, and
+    # an all-uppercase spelling is still valid input.
+    if str(parsed) != value.lower():
+        raise ValidationError(
+            f"Invalid {param_name}: {value!r}. Must be a UUID in canonical "
+            f"8-4-4-4-12 form (got the equivalent of {str(parsed)!r})."
+        )
