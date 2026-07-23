@@ -20,6 +20,7 @@ import { randomUUID } from 'node:crypto';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reportError } from '../../utils/errorReporting.js';
 import { subagentNameContext } from '../../utils/subagentNameContext.js';
+import { runWithInvocationContext } from '../../utils/invocation-context.js';
 import type { Config } from '../../config/config.js';
 import {
   getCurrentAgentDepth,
@@ -57,7 +58,7 @@ import {
   finalizeToolResponses,
   type ToolResponseBudgetEntry,
 } from '../../utils/tool-response-finalizer.js';
-import { FinishReason } from '@google/genai';
+import { FinishReason } from '../../core/genai-compat.js';
 import type {
   Content,
   Part,
@@ -142,6 +143,7 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,
   ToolNames.CRON_DELETE,
+  ToolNames.LIST_AGENTS,
   ToolNames.TASK_STOP,
   ToolNames.SEND_MESSAGE,
   ToolNames.TEAM_CREATE,
@@ -175,6 +177,7 @@ const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,
   ToolNames.CRON_DELETE,
+  ToolNames.LIST_AGENTS,
   ToolNames.TASK_STOP,
   ToolNames.TEAM_CREATE,
   ToolNames.TEAM_DELETE,
@@ -230,6 +233,8 @@ export interface ReasoningLoopOptions {
   maxTimeMinutes?: number;
   /** Start time in ms (for timeout calculation). Defaults to Date.now(). */
   startTimeMs?: number;
+  /** Rounds already completed in the same logical turn. */
+  roundOffset?: number;
   /**
    * Optional callback to drain external messages between model rounds.
    * Returned inputs are appended to the next model request as user-role
@@ -297,6 +302,7 @@ export interface ExecutionStats {
  * or final result interpretation — those are the caller's responsibility.
  */
 export class AgentCore {
+  private promptOrdinal = 0;
   readonly subagentId: string;
   readonly name: string;
   readonly runtimeContext: Config;
@@ -662,7 +668,9 @@ export class AgentCore {
         abortController,
         options,
       );
-    return this.runInAgentFrames(inner);
+    return runWithInvocationContext(undefined, () =>
+      this.runInAgentFrames(inner),
+    );
   }
 
   /**
@@ -759,6 +767,7 @@ export class AgentCore {
     options?: ReasoningLoopOptions,
   ): Promise<ReasoningLoopResult> {
     const startTime = options?.startTimeMs ?? Date.now();
+    const runId = randomUUID();
     let currentMessages = initialMessages;
     let turnCounter = 0;
     let finalText = '';
@@ -809,7 +818,8 @@ export class AgentCore {
       const roundAbortController = createChildAbortController(abortController);
 
       try {
-        const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${turnCounter++}`;
+        const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${this.promptOrdinal++}`;
+        turnCounter += 1;
 
         const messageParams = {
           message: currentMessages[0]?.parts || [],
@@ -912,6 +922,7 @@ export class AgentCore {
               if (txt)
                 this.eventEmitter?.emit(AgentEventType.STREAM_TEXT, {
                   subagentId: this.subagentId,
+                  runId,
                   round: turnCounter,
                   text: txt,
                   thought: isThought,
@@ -994,18 +1005,21 @@ export class AgentCore {
           break;
         }
 
-        if (roundText || roundThoughtText) {
+        if (roundText || roundThoughtText || lastUsage) {
           this.eventEmitter?.emit(AgentEventType.ROUND_TEXT, {
             subagentId: this.subagentId,
+            runId,
             round: turnCounter,
             text: roundText,
             thoughtText: roundThoughtText,
+            usageMetadata: lastUsage,
             timestamp: Date.now(),
           } as AgentRoundTextEvent);
         }
 
-        this.executionStats.rounds = turnCounter;
-        this.stats.setRounds(turnCounter);
+        const cumulativeRounds = (options?.roundOffset ?? 0) + turnCounter;
+        this.executionStats.rounds = cumulativeRounds;
+        this.stats.setRounds(cumulativeRounds);
 
         durationMin = (Date.now() - startTime) / (1000 * 60);
         if (options?.maxTimeMinutes && durationMin >= options.maxTimeMinutes) {
@@ -1905,6 +1919,22 @@ export class AgentCore {
   }
 
   // ─── Stats & Events ───────────────────────────────────────
+
+  resetExecutionStats(): void {
+    this.executionStats = {
+      startTimeMs: 0,
+      totalDurationMs: 0,
+      rounds: 0,
+      totalToolCalls: 0,
+      successfulToolCalls: 0,
+      failedToolCalls: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+    };
+    this.toolUsage.clear();
+    this.stats.reset();
+  }
 
   getEventEmitter(): AgentEventEmitter {
     return this.eventEmitter;

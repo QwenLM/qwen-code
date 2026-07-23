@@ -1071,27 +1071,60 @@ export class AnthropicContentGenerator implements ContentGenerator {
     stream: AsyncIterable<RawMessageStreamEvent>,
   ): AsyncGenerator<GenerateContentResponse> {
     let messageId: string | undefined;
-    let model = this.contentGeneratorConfig.model;
+    let model: string | undefined;
     let cachedTokens = 0;
     let cacheCreationTokens = 0;
+    let cachedTokensReported = false;
+    let cacheCreationTokensReported = false;
     let promptTokens = 0;
+    let promptTokensReported = false;
     let completionTokens = 0;
+    let completionTokensReported = false;
     let finishReason: string | undefined;
 
     const blocks = new Map<number, StreamingBlockState>();
     const collectedResponses: GenerateContentResponse[] = [];
+    let messageStartUsagePending = false;
+    const takePendingMessageStartUsage = () => {
+      if (!messageStartUsagePending) return undefined;
+      messageStartUsagePending = false;
+      return buildAnthropicUsageMetadata({
+        inputTokens: promptTokens,
+        cacheReadTokens: cachedTokens,
+        cacheCreationTokens,
+        outputTokens: completionTokensReported ? completionTokens : undefined,
+        cacheReadTokensReported: cachedTokensReported,
+        cacheCreationTokensReported,
+      });
+    };
 
     for await (const event of stream) {
       switch (event.type) {
         case 'message_start': {
           messageId = event.message.id ?? messageId;
           model = event.message.model ?? model;
+          promptTokensReported ||=
+            typeof event.message.usage?.input_tokens === 'number';
+          completionTokensReported ||=
+            typeof event.message.usage?.output_tokens === 'number';
+          cachedTokensReported ||=
+            typeof event.message.usage?.cache_read_input_tokens === 'number';
+          cacheCreationTokensReported ||=
+            typeof event.message.usage?.cache_creation_input_tokens ===
+            'number';
           cachedTokens =
             event.message.usage?.cache_read_input_tokens ?? cachedTokens;
           cacheCreationTokens =
             event.message.usage?.cache_creation_input_tokens ??
             cacheCreationTokens;
           promptTokens = event.message.usage?.input_tokens ?? promptTokens;
+          completionTokens =
+            event.message.usage?.output_tokens ?? completionTokens;
+          messageStartUsagePending =
+            promptTokensReported ||
+            completionTokensReported ||
+            cachedTokensReported ||
+            cacheCreationTokensReported;
           break;
         }
         case 'content_block_start': {
@@ -1126,7 +1159,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
             typeof name === 'string' &&
             name.length > 0
           ) {
-            const chunk = this.buildGeminiChunk(undefined, messageId, model);
+            const chunk = this.buildGeminiChunk(
+              undefined,
+              messageId,
+              model,
+              undefined,
+              takePendingMessageStartUsage(),
+            );
             setToolCallPreparations(chunk, [{ callId: id, toolName: name }]);
             collectedResponses.push(chunk);
             yield chunk;
@@ -1141,7 +1180,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
           if (deltaType === 'text_delta') {
             const text = 'text' in event.delta ? event.delta.text : '';
             if (text) {
-              const chunk = this.buildGeminiChunk({ text }, messageId, model);
+              const chunk = this.buildGeminiChunk(
+                { text },
+                messageId,
+                model,
+                undefined,
+                takePendingMessageStartUsage(),
+              );
               collectedResponses.push(chunk);
               yield chunk;
             }
@@ -1153,6 +1198,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 { text: thinking, thought: true },
                 messageId,
                 model,
+                undefined,
+                takePendingMessageStartUsage(),
               );
               collectedResponses.push(chunk);
               yield chunk;
@@ -1166,6 +1213,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 { thought: true, thoughtSignature: signature },
                 messageId,
                 model,
+                undefined,
+                takePendingMessageStartUsage(),
               );
               collectedResponses.push(chunk);
               yield chunk;
@@ -1194,6 +1243,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
               },
               messageId,
               model,
+              undefined,
+              takePendingMessageStartUsage(),
             );
             collectedResponses.push(chunk);
             yield chunk;
@@ -1218,27 +1269,32 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
           if (event.usage?.output_tokens !== undefined) {
             completionTokens = event.usage.output_tokens;
+            completionTokensReported = true;
           }
           if (usageRecord?.['input_tokens'] !== undefined) {
             const inputTokens = usageRecord['input_tokens'];
             if (typeof inputTokens === 'number') {
               promptTokens = inputTokens;
+              promptTokensReported = true;
             }
           }
           if (usageRecord?.['cache_read_input_tokens'] !== undefined) {
             const cacheRead = usageRecord['cache_read_input_tokens'];
             if (typeof cacheRead === 'number') {
               cachedTokens = cacheRead;
+              cachedTokensReported = true;
             }
           }
           if (usageRecord?.['cache_creation_input_tokens'] !== undefined) {
             const cacheCreate = usageRecord['cache_creation_input_tokens'];
             if (typeof cacheCreate === 'number') {
               cacheCreationTokens = cacheCreate;
+              cacheCreationTokensReported = true;
             }
           }
 
           if (finishReason || event.usage) {
+            messageStartUsagePending = false;
             const chunk = this.buildGeminiChunk(
               undefined,
               messageId,
@@ -1248,7 +1304,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 inputTokens: promptTokens,
                 cacheReadTokens: cachedTokens,
                 cacheCreationTokens,
-                outputTokens: completionTokens,
+                outputTokens: completionTokensReported
+                  ? completionTokens
+                  : undefined,
+                cacheReadTokensReported: cachedTokensReported,
+                cacheCreationTokensReported,
               }),
             );
             collectedResponses.push(chunk);
@@ -1257,7 +1317,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
           break;
         }
         case 'message_stop': {
-          if (promptTokens || completionTokens) {
+          if (
+            promptTokensReported ||
+            completionTokensReported ||
+            cachedTokensReported ||
+            cacheCreationTokensReported
+          ) {
+            messageStartUsagePending = false;
             const chunk = this.buildGeminiChunk(
               undefined,
               messageId,
@@ -1267,7 +1333,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 inputTokens: promptTokens,
                 cacheReadTokens: cachedTokens,
                 cacheCreationTokens,
-                outputTokens: completionTokens,
+                outputTokens: completionTokensReported
+                  ? completionTokens
+                  : undefined,
+                cacheReadTokensReported: cachedTokensReported,
+                cacheCreationTokensReported,
               }),
             );
             collectedResponses.push(chunk);
@@ -1349,7 +1419,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const response = new GenerateContentResponse();
     response.responseId = responseId;
     response.createTime = Date.now().toString();
-    response.modelVersion = model || this.contentGeneratorConfig.model;
+    response.modelVersion = model || undefined;
     response.promptFeedback = { safetyRatings: [] };
 
     const candidateParts = part ? [part as unknown as Part] : [];

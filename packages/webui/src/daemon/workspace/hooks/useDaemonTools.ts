@@ -28,6 +28,7 @@ export function useDaemonTools(options: DaemonResourceOptions = {}) {
     ...result,
     status: result.data,
     tools: result.data?.tools ?? [],
+    preheat: workspaceActions.preheatAcp,
     setEnabled: workspaceActions.setWorkspaceToolEnabled,
   };
 }

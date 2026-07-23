@@ -1,0 +1,119 @@
+name: 'SDK Java'
+
+on:
+  pull_request:
+    branches:
+      - 'main'
+      - 'release/**'
+    paths:
+      - 'packages/sdk-java/**'
+      - 'packages/cli/src/commands/serve.ts'
+      - 'packages/cli/src/serve/**'
+      - 'packages/cli/src/acp-integration/**'
+      - 'packages/acp-bridge/**'
+      - 'integration-tests/fake-openai-server.ts'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'docs/developers/sdk-java.md'
+      - 'docs/design/java-daemon-sdk-alpha.md'
+      - 'scripts/run-java-daemon-sdk-e2e.ts'
+      - '.github/workflows/sdk-java.yml'
+      - '.github/workflows/release-sdk-java.yml'
+  push:
+    branches:
+      - 'main'
+      - 'release/**'
+    paths:
+      - 'packages/sdk-java/**'
+      - 'packages/cli/src/commands/serve.ts'
+      - 'packages/cli/src/serve/**'
+      - 'packages/cli/src/acp-integration/**'
+      - 'packages/acp-bridge/**'
+      - 'integration-tests/fake-openai-server.ts'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'docs/developers/sdk-java.md'
+      - 'docs/design/java-daemon-sdk-alpha.md'
+      - 'scripts/run-java-daemon-sdk-e2e.ts'
+      - '.github/workflows/sdk-java.yml'
+      - '.github/workflows/release-sdk-java.yml'
+
+permissions:
+  contents: 'read'
+
+jobs:
+  test:
+    name: '${{ matrix.os }} / Java ${{ matrix.java }}'
+    runs-on: '${{ matrix.os }}'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: 'ubuntu-latest'
+            java: '11'
+          - os: 'ubuntu-latest'
+            java: '17'
+          - os: 'ubuntu-latest'
+            java: '21'
+          - os: 'macos-latest'
+            java: '21'
+          - os: 'windows-latest'
+            java: '21'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+
+      - name: 'Set up Java'
+        uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
+        with:
+          distribution: 'temurin'
+          java-version: '${{ matrix.java }}'
+          cache: 'maven'
+          cache-dependency-path: 'packages/sdk-java/qwencode/pom.xml'
+
+      - name: 'Run Java SDK tests'
+        working-directory: 'packages/sdk-java/qwencode'
+        run: 'mvn --batch-mode --no-transfer-progress clean test'
+
+      - name: 'Run Java SDK Checkstyle'
+        if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"
+        working-directory: 'packages/sdk-java/qwencode'
+        run: 'mvn --batch-mode --no-transfer-progress checkstyle:check'
+
+      - name: 'Build release artifacts'
+        if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"
+        working-directory: 'packages/sdk-java/qwencode'
+        run: 'mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true package'
+
+  daemon-e2e:
+    name: 'Real daemon E2E / Java 11'
+    runs-on: 'ubuntu-latest'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+
+      - name: 'Set up Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22'
+          cache: 'npm'
+
+      - name: 'Set up Java'
+        uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+          cache: 'maven'
+          cache-dependency-path: 'packages/sdk-java/qwencode/pom.xml'
+
+      - name: 'Install Node.js dependencies'
+        run: 'npm ci --prefer-offline --no-audit --progress=false'
+
+      - name: 'Build Qwen Code'
+        run: 'npm run build'
+
+      - name: 'Bundle Qwen Code'
+        run: 'npm run bundle'
+
+      - name: 'Run Java daemon E2E'
+        run: 'npx tsx scripts/run-java-daemon-sdk-e2e.ts'

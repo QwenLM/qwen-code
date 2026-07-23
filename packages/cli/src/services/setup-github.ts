@@ -6,7 +6,6 @@
 
 import { promises as fsp } from 'node:fs';
 import * as path from 'node:path';
-import { ProxyAgent } from 'undici';
 
 import {
   getGitHubRepoInfoAsync,
@@ -15,6 +14,7 @@ import {
   isGitHubRepositoryAsync,
 } from '../utils/gitUtils.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { loadUndici } from '../utils/load-undici.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 
 const debugLogger = createDebugLogger('SETUP_GITHUB');
@@ -339,8 +339,10 @@ async function downloadWorkflows(options: {
 }): Promise<Array<{ sourcePath: string; content: string }>> {
   const internalAbort = new AbortController();
   try {
+    // Lazy-load undici so it stays out of the eager startup closure
+    // (issue #7264).
     const dispatcher = options.proxy
-      ? new ProxyAgent(options.proxy)
+      ? new (await loadUndici()).ProxyAgent(options.proxy)
       : undefined;
     return await Promise.all(
       GITHUB_WORKFLOW_PATHS.map(async (workflow) => {

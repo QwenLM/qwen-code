@@ -32,6 +32,14 @@ function sseResponse(frames: string): Response {
   });
 }
 
+// Like sseResponse but stamps the daemon's bus epoch response header so
+// tests can exercise the DAEMON-001 epoch learning path.
+function sseResponseWithEpoch(frames: string, epoch: string): Response {
+  const res = sseResponse(frames);
+  res.headers.set('x-qwen-event-epoch', epoch);
+  return res;
+}
+
 function pendingSseResponse(
   onCancel: () => void,
   onStart?: (controller: ReadableStreamDefaultController<Uint8Array>) => void,
@@ -330,6 +338,33 @@ describe('DaemonSessionClient', () => {
     });
 
     expect(session.hasActivePrompt).toBe(true);
+    // Absent on the response → defaults to a trustworthy snapshot.
+    expect(session.replayDegraded).toBe(false);
+  });
+
+  it('surfaces replayDegraded from the load response', async () => {
+    const { fetch } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/load')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-1',
+          state: {},
+          compactedReplay: [],
+          liveJournal: [],
+          replayDegraded: true,
+        });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const session = await DaemonSessionClient.load(client, 's-1', {
+      workspaceCwd: '/work/a',
+    });
+
+    expect(session.replayDegraded).toBe(true);
   });
 
   it('resumes an existing daemon session using server watermark', async () => {
@@ -1303,6 +1338,152 @@ describe('DaemonSessionClient', () => {
 
     expect(calls[0]?.headers['last-event-id']).toBeUndefined();
     expect(calls[1]?.headers['last-event-id']).toBe('5');
+  });
+
+  it('sends the load-seeded eventEpoch alongside the resume cursor (DAEMON-001)', async () => {
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/load')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: false,
+          clientId: 'client-1',
+          state: {},
+          lastEventId: 42,
+          eventEpoch: 'epoch-load',
+          compactedReplay: [],
+          liveJournal: [],
+        });
+      }
+      if (req.url.endsWith('/session/s-1/events')) {
+        return sseResponse('');
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const session = await DaemonSessionClient.load(client, 's-1', {
+      workspaceCwd: '/work/a',
+    });
+    for await (const _event of session.events()) {
+      /* empty */
+    }
+
+    expect(calls[1]?.headers['last-event-id']).toBe('42');
+    expect(calls[1]?.headers['x-qwen-event-epoch']).toBe('epoch-load');
+  });
+
+  it('sends the resume-seeded eventEpoch alongside the resume cursor (DAEMON-001)', async () => {
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/resume')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-1',
+          state: {},
+          lastEventId: 99,
+          eventEpoch: 'epoch-resume',
+        });
+      }
+      if (req.url.endsWith('/session/s-1/events')) {
+        return sseResponse('');
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const session = await DaemonSessionClient.resume(client, 's-1');
+    for await (const _event of session.events()) {
+      /* empty */
+    }
+
+    expect(calls[1]?.headers['last-event-id']).toBe('99');
+    expect(calls[1]?.headers['x-qwen-event-epoch']).toBe('epoch-resume');
+  });
+
+  it('learns the bus epoch from the response header and echoes it on reconnect (DAEMON-001)', async () => {
+    let eventCallCount = 0;
+    const { fetch, calls } = recordingFetch((req) => {
+      if (!req.url.endsWith('/session/s-1/events')) {
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      }
+      eventCallCount++;
+      if (eventCallCount === 1) {
+        // Old daemons never stamp `eventEpoch` on create responses, so the
+        // first (live) subscription is the only place to learn the epoch.
+        return sseResponseWithEpoch(
+          'id: 4\nevent: session_update\ndata: {"id":4,"v":1,"type":"session_update","data":"a"}\n\n',
+          'epoch-live',
+        );
+      }
+      return sseResponse('');
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+      },
+    });
+
+    for await (const _event of session.events()) {
+      /* empty */
+    }
+    for await (const _event of session.events()) {
+      /* empty */
+    }
+
+    // First subscription is live: no cursor, so no epoch header either.
+    expect(calls[0]?.headers['last-event-id']).toBeUndefined();
+    expect(calls[0]?.headers['x-qwen-event-epoch']).toBeUndefined();
+    // Reconnect pairs the tracked cursor with the learned epoch.
+    expect(calls[1]?.headers['last-event-id']).toBe('4');
+    expect(calls[1]?.headers['x-qwen-event-epoch']).toBe('epoch-live');
+  });
+
+  it('a header-learned epoch supersedes the seeded one (DAEMON-001)', async () => {
+    let eventCallCount = 0;
+    const { fetch, calls } = recordingFetch((req) => {
+      if (!req.url.endsWith('/session/s-1/events')) {
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      }
+      eventCallCount++;
+      if (eventCallCount === 1) {
+        return sseResponseWithEpoch(
+          'id: 7\nevent: session_update\ndata: {"id":7,"v":1,"type":"session_update","data":"a"}\n\n',
+          'epoch-new',
+        );
+      }
+      return sseResponse('');
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+      },
+      lastEventId: 1,
+      eventEpoch: 'epoch-old',
+    });
+
+    for await (const _event of session.events()) {
+      /* empty */
+    }
+    for await (const _event of session.events()) {
+      /* empty */
+    }
+
+    // First subscription echoes the seeded pair.
+    expect(calls[0]?.headers['last-event-id']).toBe('1');
+    expect(calls[0]?.headers['x-qwen-event-epoch']).toBe('epoch-old');
+    // Reconnect uses the epoch learned from the response header.
+    expect(calls[1]?.headers['last-event-id']).toBe('7');
+    expect(calls[1]?.headers['x-qwen-event-epoch']).toBe('epoch-new');
   });
 
   it('does not overwrite replay state for events without SSE ids', async () => {

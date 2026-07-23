@@ -565,7 +565,7 @@ export const startCommand: CommandModule<object, { name?: string }> = {
     }),
   handler: async (argv) => {
     const settings = loadSettings(process.cwd());
-    const proxy = resolveProxy(
+    const proxy = await resolveProxy(
       (argv as Record<string, unknown>)['proxy'] as string | undefined,
       settings.merged.proxy as string | undefined,
     );

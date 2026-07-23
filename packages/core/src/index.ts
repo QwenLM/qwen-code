@@ -338,6 +338,7 @@ export * from './services/usageHistoryService.js';
 export * from './services/usage-dashboard-service.js';
 export * from './utils/bareMode.js';
 export * from './utils/safe-mode.js';
+export * from './utils/sanitize-child-env.js';
 export * from './utils/toolResultDisplayCompaction.js';
 
 // ============================================================================
@@ -505,6 +506,7 @@ export * from './utils/gitDirect.js';
 export * from './utils/gitIgnoreParser.js';
 export * from './utils/gitUtils.js';
 export * from './utils/ignorePatterns.js';
+export * from './utils/invocation-context.js';
 export {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
   QwenIgnoreParser,
@@ -540,6 +542,7 @@ export {
   detectRuntime,
   getOrCreateSharedDispatcher,
   isTlsVerificationDisabled,
+  preloadRuntimeFetchModule,
   redactProxyCredentials,
 } from './utils/runtimeFetchOptions.js';
 export * from './utils/runtimeStatus.js';

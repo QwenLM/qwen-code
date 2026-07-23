@@ -75,6 +75,7 @@ import {
   mountWorkspaceAgentsRoutes,
   mountWorkspaceQualifiedAgentsRoutes,
 } from './workspace-agents.js';
+import { mountWorkspaceGenerationRoutes } from './workspace-generation.js';
 import { registerDaemonStatusRoutes } from './routes/daemon-status.js';
 import { createHealthDemoRoutes } from './routes/health-demo.js';
 import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
@@ -139,6 +140,7 @@ import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.j
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import { setRateLimiter } from './rate-limit.js';
 import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
+import { VirtualSubagentSessions } from './virtual-subagent-sessions.js';
 import {
   createTotalSessionAdmissionController,
   type TotalSessionAdmissionSnapshot,
@@ -173,6 +175,11 @@ import {
   type WorkspaceRuntime,
   type WorkspaceRuntimeEnvMetadata,
 } from './workspace-registry.js';
+import {
+  isScratchRootCompatible,
+  type ManagedScratchRoot,
+  type WorkspaceRuntimeProvenance,
+} from './managed-scratch-workspace.js';
 import {
   isPortableAbsolutePath,
   resolveRegisteredWorkspaceRuntimeByPathSelector,
@@ -227,10 +234,8 @@ export {
   resolveBoundWorkspacesFromIdeEnv,
   resolveBridgeFsFactory,
 } from './server/fs-factory.js';
-export {
-  PromptDeadlineExceededError,
-  resolvePromptDeadlineMs,
-} from './server/prompt-deadline.js';
+export { PromptDeadlineExceededError } from './acp-session-bridge.js';
+export { resolvePromptDeadlineMs } from './server/prompt-deadline.js';
 export { detectFromLoopback } from './server/request-helpers.js';
 export {
   InvalidCursorError,
@@ -478,7 +483,11 @@ export interface ServeAppDeps {
    */
   clientMcpSenderRegistry?: ClientMcpSenderRegistry;
   workspaceRegistry?: WorkspaceRegistry;
-  createWorkspaceRuntime?: (cwd: string) => Promise<WorkspaceRuntime>;
+  createWorkspaceRuntime?: (
+    cwd: string,
+    options: { provenance: WorkspaceRuntimeProvenance },
+  ) => Promise<WorkspaceRuntime>;
+  managedScratchRoot?: ManagedScratchRoot;
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
   workspaceRuntimeRemoval?: WorkspaceRuntimeRemovalController;
   primaryWorkspaceTrusted?: boolean;
@@ -699,6 +708,8 @@ export function createServeApp(
           )
         );
       },
+      workspaceGenerationAvailable: () =>
+        primaryBridge.generateWorkspaceContent !== undefined,
       // Registry injection supplies the primary workspace service through the
       // runtime, so it has the same reload surface as legacy deps.workspace.
       reloadAvailable:
@@ -725,8 +736,24 @@ export function createServeApp(
       },
       sessionShellCommandEnabled,
       multiWorkspaceSessionsEnabled: () => workspaceRegistry.list().length > 1,
+      dynamicWorkspaceRegistrationAvailable:
+        deps.createWorkspaceRuntime !== undefined,
       persistentWorkspaceRegistrationAvailable:
         deps.workspaceRegistrationStore !== undefined,
+      // Scratch creation is advertised only while every managed runtime still
+      // respects the root boundary and a complete disposal owner is present.
+      scratchWorkspaceRegistrationAvailable: () =>
+        deps.createWorkspaceRuntime !== undefined &&
+        deps.managedScratchRoot !== undefined &&
+        deps.workspaceRuntimeRemoval !== undefined &&
+        workspaceRegistry
+          .listManaged()
+          .every((runtime) =>
+            isScratchRootCompatible(
+              runtime.workspaceCwd,
+              deps.managedScratchRoot!.canonicalRoot,
+            ),
+          ),
       workspaceRuntimeRemovalAvailable:
         deps.workspaceRuntimeRemoval !== undefined,
       ...(primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {}),
@@ -1213,6 +1240,12 @@ export function createServeApp(
     parseClientId: parseClientIdHeader,
     safeBody,
   });
+  mountWorkspaceGenerationRoutes(app, {
+    bridge: primaryBridge,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+  });
   mountWorkspaceQualifiedAgentsRoutes(app, {
     workspaceRegistry,
     mutate,
@@ -1294,6 +1327,7 @@ export function createServeApp(
     mutate,
     safeBody,
     createWorkspaceRuntime: deps.createWorkspaceRuntime,
+    managedScratchRoot: deps.managedScratchRoot,
     workspaceRegistrationStore: deps.workspaceRegistrationStore,
     getAcpHandle: () => acpHandleRef.current,
     runtimeRemoval: deps.workspaceRuntimeRemoval,
@@ -1425,6 +1459,8 @@ export function createServeApp(
     installAuthProvider: deps.installAuthProvider,
   });
 
+  const virtualSubagentSessions = new VirtualSubagentSessions();
+
   registerSessionRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
@@ -1436,6 +1472,7 @@ export function createServeApp(
     promptDeadlineMs: opts.promptDeadlineMs,
     sessionShellCommandEnabled,
     languageCodes,
+    virtualSubagentSessions,
   });
 
   registerWorkspaceMcpControlRoutes(app, {
@@ -1699,6 +1736,7 @@ export function createServeApp(
     daemonLog,
     writerIdleTimeoutMs: opts.writerIdleTimeoutMs,
     sendBridgeError,
+    virtualSubagentSessions,
   });
 
   // Official ACP Streamable HTTP transport (RFD #721) mounted at `/acp`

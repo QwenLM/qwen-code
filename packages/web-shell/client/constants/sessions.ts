@@ -10,8 +10,11 @@
  */
 export const SESSION_LIST_PAGE_SIZE = 1000;
 export const SESSION_ORGANIZATION_FEATURE = 'session_organization';
+export const SESSION_TRANSCRIPT_PAGINATION_FEATURE =
+  'session_transcript_pagination';
 export const WEB_SHELL_SESSION_SOURCE_TYPE = 'default';
 export const WEB_SHELL_HISTORY_PAGE_SIZE = 100;
+export const WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS = 500;
 
 /**
  * Upper bound on transcript blocks retained in memory per Web Shell session

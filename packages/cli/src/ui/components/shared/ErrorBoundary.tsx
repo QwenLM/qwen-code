@@ -9,6 +9,13 @@ import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
 import { sanitizeTerminalText } from '../../utils/textUtils.js';
 
+function normalizeError(error: unknown): Error {
+  if (error instanceof Error) {
+    return error;
+  }
+  return new Error(String(error));
+}
+
 interface ErrorBoundaryProps {
   children: ReactNode;
   /**
@@ -38,12 +45,12 @@ export class ErrorBoundary extends Component<
 > {
   override state: ErrorBoundaryState = { error: null };
 
-  static getDerivedStateFromError(error: Error): ErrorBoundaryState {
-    return { error };
+  static getDerivedStateFromError(error: unknown): ErrorBoundaryState {
+    return { error: normalizeError(error) };
   }
 
-  override componentDidCatch(error: Error, info: ErrorInfo): void {
-    this.props.onError?.(error, info);
+  override componentDidCatch(error: unknown, info: ErrorInfo): void {
+    this.props.onError?.(normalizeError(error), info);
   }
 
   private readonly reset = () => {

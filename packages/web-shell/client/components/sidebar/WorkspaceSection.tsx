@@ -223,12 +223,13 @@ export function WorkspaceSection({
   // Undefined when `cwd` is not a real path (synthetic fallback workspace), so
   // the poll — which qualifies the route with the cwd — is skipped entirely.
   const gitPollCwd = isAbsolutePath(workspace.cwd) ? workspace.cwd : undefined;
+  const gitStatusEnabled = Boolean(onOpenGitDiff);
 
   // Log a poll failure only on the success→failure transition, not on every
   // 60s/focus tick, so an unreachable workspace doesn't spam a long-lived tab.
   const gitPollFailed = useRef(false);
   const loadGitStatus = useCallback(async () => {
-    if (!onOpenGitDiff || !workspace.trusted || !gitPollCwd) return;
+    if (!gitStatusEnabled || !workspace.trusted || !gitPollCwd) return;
     try {
       const status = await client.workspaceByCwd(gitPollCwd).workspaceGit();
       gitPollFailed.current = false;
@@ -242,7 +243,7 @@ export function WorkspaceSection({
         gitPollFailed.current = true;
       }
     }
-  }, [client, gitPollCwd, onOpenGitDiff, workspace.trusted]);
+  }, [client, gitPollCwd, gitStatusEnabled, workspace.trusted]);
 
   // The git chip lives in the always-visible folder header, so it polls
   // independently of session expansion: on mount/trust, on window focus, and on
@@ -250,7 +251,7 @@ export function WorkspaceSection({
   // per call, so the cadence stays gentle). Skipped entirely when no diff
   // handler is wired, since the chip — its only consumer — would not render.
   useEffect(() => {
-    if (!onOpenGitDiff || !workspace.trusted || !gitPollCwd) {
+    if (!gitStatusEnabled || !workspace.trusted || !gitPollCwd) {
       setGitStatus(undefined);
       return;
     }
@@ -266,8 +267,8 @@ export function WorkspaceSection({
     };
   }, [
     gitPollCwd,
+    gitStatusEnabled,
     loadGitStatus,
-    onOpenGitDiff,
     reloadToken,
     workspace.trusted,
   ]);

@@ -112,32 +112,32 @@ This type of action can be used to invoke a general-purpose, conversational Qwen
 
 <!-- BEGIN_AUTOGEN_INPUTS -->
 
-- <a name="__input_qwen_api_key"></a><a href="#user-content-__input_qwen_api_key"><code>qwen_api_key</code></a>: _(Optional)_ The API key for the Qwen API.
+- <a name="__input_qwen_api_key"></a><a href="#user-content-__input_qwen_api_key"><code>qwen*api_key</code></a>: *(Optional)\_ The API key for the Qwen API.
 
-- <a name="__input_qwen_cli_version"></a><a href="#user-content-__input_qwen_cli_version"><code>qwen_cli_version</code></a>: _(Optional, default: `latest`)_ The version of the Qwen Code CLI to install. Can be "latest", "preview", "nightly", a specific version number, or a git branch, tag, or commit. For more information, see [Qwen Code CLI releases](https://github.com/QwenLM/qwen-code-action/blob/main/docs/releases.md).
+- <a name="__input_qwen_cli_version"></a><a href="#user-content-__input_qwen_cli_version"><code>qwen*cli_version</code></a>: *(Optional, default: `latest`)\_ The version of the Qwen Code CLI to install. Can be "latest", "preview", "nightly", a specific version number, or a git branch, tag, or commit. For more information, see [Qwen Code CLI releases](https://github.com/QwenLM/qwen-code-action/blob/main/docs/releases.md).
 
-- <a name="__input_qwen_debug"></a><a href="#user-content-__input_qwen_debug"><code>qwen_debug</code></a>: _(Optional)_ Enable debug logging and output streaming.
+- <a name="__input_qwen_debug"></a><a href="#user-content-__input_qwen_debug"><code>qwen*debug</code></a>: *(Optional)\_ Enable debug logging and output streaming.
 
-- <a name="__input_qwen_model"></a><a href="#user-content-__input_qwen_model"><code>qwen_model</code></a>: _(Optional)_ The model to use with Qwen Code.
+- <a name="__input_qwen_model"></a><a href="#user-content-__input_qwen_model"><code>qwen*model</code></a>: *(Optional)\_ The model to use with Qwen Code.
 
 - <a name="__input_prompt"></a><a href="#user-content-__input_prompt"><code>prompt</code></a>: _(Optional, default: `You are a helpful assistant.`)_ A string passed to the Qwen Code CLI's [`--prompt` argument](https://github.com/QwenLM/qwen-code-action/blob/main/docs/cli/configuration.md#command-line-arguments).
 
 - <a name="__input_settings"></a><a href="#user-content-__input_settings"><code>settings</code></a>: _(Optional)_ A JSON string written to `.qwen/settings.json` to configure the CLI's _project_ settings.
   For more details, see the documentation on [settings files](https://github.com/QwenLM/qwen-code-action/blob/main/docs/cli/configuration.md#settings-files).
 
-- <a name="__input_use_qwen_code_assist"></a><a href="#user-content-__input_use_qwen_code_assist"><code>use_qwen_code_assist</code></a>: _(Optional, default: `false`)_ Whether to use Code Assist for Qwen Code model access instead of the default Qwen Code API key.
+- <a name="__input_use_qwen_code_assist"></a><a href="#user-content-__input_use_qwen_code_assist"><code>use*qwen_code_assist</code></a>: *(Optional, default: `false`)\_ Whether to use Code Assist for Qwen Code model access instead of the default Qwen Code API key.
   For more information, see the [Qwen Code CLI documentation](https://github.com/QwenLM/qwen-code-action/blob/main/docs/cli/authentication.md).
 
-- <a name="__input_use_vertex_ai"></a><a href="#user-content-__input_use_vertex_ai"><code>use_vertex_ai</code></a>: _(Optional, default: `false`)_ Whether to use Vertex AI for Qwen Code model access instead of the default Qwen Code API key.
+- <a name="__input_use_vertex_ai"></a><a href="#user-content-__input_use_vertex_ai"><code>use*vertex_ai</code></a>: *(Optional, default: `false`)\_ Whether to use Vertex AI for Qwen Code model access instead of the default Qwen Code API key.
   For more information, see the [Qwen Code CLI documentation](https://github.com/QwenLM/qwen-code-action/blob/main/docs/cli/authentication.md).
 
 - <a name="__input_extensions"></a><a href="#user-content-__input_extensions"><code>extensions</code></a>: _(Optional)_ A list of Qwen Code CLI extensions to install.
 
-- <a name="__input_upload_artifacts"></a><a href="#user-content-__input_upload_artifacts"><code>upload_artifacts</code></a>: _(Optional, default: `false`)_ Whether to upload artifacts to the github action.
+- <a name="__input_upload_artifacts"></a><a href="#user-content-__input_upload_artifacts"><code>upload*artifacts</code></a>: *(Optional, default: `false`)\_ Whether to upload artifacts to the github action.
 
-- <a name="__input_use_pnpm"></a><a href="#user-content-__input_use_pnpm"><code>use_pnpm</code></a>: _(Optional, default: `false`)_ Whether or not to use pnpm instead of npm to install qwen-code-cli
+- <a name="__input_use_pnpm"></a><a href="#user-content-__input_use_pnpm"><code>use*pnpm</code></a>: *(Optional, default: `false`)\_ Whether or not to use pnpm instead of npm to install qwen-code-cli
 
-- <a name="__input_workflow_name"></a><a href="#user-content-__input_workflow_name"><code>workflow_name</code></a>: _(Optional, default: `${{ github.workflow }}`)_ The GitHub workflow name, used for telemetry purposes.
+- <a name="__input_workflow_name"></a><a href="#user-content-__input_workflow_name"><code>workflow*name</code></a>: *(Optional, default: `${{ github.workflow }}`)\_ The GitHub workflow name, used for telemetry purposes.
 
 <!-- END_AUTOGEN_INPUTS -->
 

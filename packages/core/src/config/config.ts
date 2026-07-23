@@ -11,9 +11,6 @@ import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import process from 'node:process';
 
-// External dependencies
-import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
-
 // Types
 import type {
   ContentGenerator,
@@ -168,6 +165,7 @@ import { WorkspaceContext } from '../utils/workspaceContext.js';
 import { type ToolName } from '../utils/tool-utils.js';
 import { FatalConfigError, getErrorMessage } from '../utils/errors.js';
 import { normalizeProxyUrl } from '../utils/proxyUtils.js';
+import { loadUndici, redactProxyError } from '../utils/runtimeFetchOptions.js';
 
 // Local config modules
 import type { FileFilteringOptions } from './constants.js';
@@ -214,12 +212,15 @@ import {
 } from '../utils/debugLogger.js';
 import {
   getAutoMemoryRoot,
+  getAutoMemoryIndexPath,
   getTeamAutoMemoryRoot,
+  getUserAutoMemoryIndexPath,
   getUserAutoMemoryRoot,
 } from '../memory/paths.js';
 import {
-  readAutoMemoryIndex,
-  readUserAutoMemoryIndex,
+  type AutoMemoryIndexRead,
+  readAutoMemoryIndexWithStats,
+  readUserAutoMemoryIndexWithStats,
 } from '../memory/store.js';
 import {
   rebuildTeamAutoMemoryIndex,
@@ -913,6 +914,12 @@ export interface ConfigParameters {
    */
   disabledSkillNamesProvider?: () => ReadonlySet<string>;
   /**
+   * Additional directories to scan for skills (SKILL.md files).
+   * Sourced from `settings.skills.directories`. Paths are raw
+   * (unexpanded); `SkillManager.getSkillsBaseDirs` handles `~` expansion.
+   */
+  customSkillDirs?: readonly string[];
+  /**
    * Tool names hidden from the registry at construction time. Unlike
    * `permissions.deny` (which keeps the tool registered and rejects
    * invocation), tools listed here are not registered at all and never
@@ -1605,6 +1612,7 @@ export class Config {
    * process exit (which dies with the process — no leak).
    */
   private pendingStartupWorktreeNotice: string | null = null;
+  private pendingRecoveredAgentsNotice: string | null = null;
   private debugLogger: DebugLogger;
   private toolRegistry!: ToolRegistry;
   /**
@@ -1675,6 +1683,7 @@ export class Config {
   private readonly disabledSkillNamesProvider:
     | (() => ReadonlySet<string>)
     | null;
+  private readonly customSkillDirs: readonly string[];
   //   `disabledTools` is set at construction
   // time but can be re-synced by the daemon mutation surface
   // (`setWorkspaceToolEnabled` propagates through ACP) so a subsequent
@@ -1845,6 +1854,7 @@ export class Config {
     rule: string,
   ) => Promise<void>;
   private initialized: boolean = false;
+  private proxyDispatcherReady?: Promise<void>;
   storage: Storage;
   private runtimeStatusWrite: Promise<void> = Promise.resolve();
   private readonly fileExclusions: FileExclusions;
@@ -1940,6 +1950,7 @@ export class Config {
       ...(params.disabledSlashCommands ?? []),
     ]);
     this.disabledSkillNamesProvider = params.disabledSkillNamesProvider ?? null;
+    this.customSkillDirs = Object.freeze([...(params.customSkillDirs ?? [])]);
     this.disabledTools = new Set(params.disabledTools ?? []);
     this.visibleTools = new Set(
       (params.visibleTools ?? []).filter(
@@ -2236,9 +2247,32 @@ export class Config {
       // `--proxy` / `settings.proxy` value (resolved by `getProxy()`)
       // overrides env `http(s)_proxy`; `NO_PROXY` continues to come from the
       // environment. See issue #3696 (local MCP + corporate proxy).
-      setGlobalDispatcher(
-        new EnvHttpProxyAgent({ httpProxy: proxyUrl, httpsProxy: proxyUrl }),
-      );
+      //
+      // undici loads behind a dynamic import to keep it out of the eager
+      // startup closure (issue #7264); initialize() awaits this promise so
+      // the dispatcher is installed before any network activity.
+      this.proxyDispatcherReady = loadUndici()
+        .then(({ EnvHttpProxyAgent, setGlobalDispatcher }) => {
+          setGlobalDispatcher(
+            new EnvHttpProxyAgent({
+              httpProxy: proxyUrl,
+              httpsProxy: proxyUrl,
+            }),
+          );
+        })
+        .catch((error) => {
+          // Redact before logging: the error can embed the proxy URL with
+          // credentials. Rethrow so initialize() fails loudly, matching the
+          // old synchronous constructor behavior.
+          this.debugLogger.error(
+            'Failed to install proxy dispatcher:',
+            redactProxyError(error),
+          );
+          throw error;
+        });
+      // Swallow an early rejection so it cannot become an unhandledRejection
+      // before initialize() awaits (and surfaces) the stored promise.
+      this.proxyDispatcherReady.catch(() => {});
     }
     this.geminiClient = new GeminiClient(this);
     this.chatRecordingService = this.chatRecordingEnabled
@@ -2331,6 +2365,7 @@ export class Config {
     options?: ConfigInitializeOptions,
   ): Promise<void> {
     this.debugLogger.info('Config initialization started');
+    await this.proxyDispatcherReady;
     if (options?.skipFileCheckpointing === true) {
       this.fileCheckpointingEnabled = false;
       this.fileHistoryService = undefined;
@@ -3122,10 +3157,22 @@ export class Config {
           }
         }
       }
-      const [managedAutoMemoryIndex, userAutoMemoryIndex] = await Promise.all([
-        readAutoMemoryIndex(this.getProjectRoot()),
-        readUserAutoMemoryIndex().catch(() => null),
-      ]);
+      const [managedAutoMemoryIndexRead, userAutoMemoryIndexRead] =
+        await Promise.all([
+          readAutoMemoryIndexWithStats(this.getProjectRoot()),
+          readUserAutoMemoryIndexWithStats().catch(() => null),
+        ]);
+      this.recordAutoMemoryIndexRead(
+        getAutoMemoryIndexPath(this.getProjectRoot()),
+        managedAutoMemoryIndexRead,
+      );
+      this.recordAutoMemoryIndexRead(
+        getUserAutoMemoryIndexPath(),
+        userAutoMemoryIndexRead,
+      );
+      const managedAutoMemoryIndex =
+        managedAutoMemoryIndexRead?.content ?? null;
+      const userAutoMemoryIndex = userAutoMemoryIndexRead?.content ?? null;
       // Always surface the user-level section so the main assistant knows the
       // dir exists and can route ad-hoc "remember this cross-project" saves
       // there. When empty the prompt builder emits a "MEMORY.md is currently
@@ -3156,6 +3203,20 @@ export class Config {
       conditionalRules,
       projectRoot,
     );
+  }
+
+  private recordAutoMemoryIndexRead(
+    indexPath: string,
+    indexRead: AutoMemoryIndexRead | null,
+  ): void {
+    if (indexRead === null || this.getFileReadCacheDisabled()) {
+      return;
+    }
+
+    this.getFileReadCache().recordRead(indexPath, indexRead.stats, {
+      full: true,
+      cacheable: true,
+    });
   }
 
   private buildMemoryContextWarning(memoryContent: string): string | undefined {
@@ -3407,6 +3468,7 @@ export class Config {
       process.env['QWEN_CODE_SESSION_ID'] = this.sessionId;
     }
     this.sessionData = sessionData;
+    this.pendingRecoveredAgentsNotice = null;
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
     this.chatRecordingService = this.chatRecordingEnabled
@@ -4276,6 +4338,7 @@ export class Config {
       this.chatRecordingService?.resetStoragePaths();
     }
 
+    this.backgroundTaskRegistry.disposeResidentAgents();
     this.targetDir = expected;
     this.cwd = expected;
     await this.refreshCurrentRuntimeStatus(expected);
@@ -4518,6 +4581,15 @@ export class Config {
    */
   getDisabledSkillNames(): ReadonlySet<string> {
     return this.disabledSkillNamesProvider?.() ?? EMPTY_DISABLED_SKILL_NAMES;
+  }
+
+  /**
+   * Returns additional skill directories from `settings.skills.directories`.
+   * Paths are raw (unexpanded); consumers must handle `~` expansion
+   * (see `SkillManager.getSkillsBaseDirs`).
+   */
+  getCustomSkillDirs(): readonly string[] {
+    return this.customSkillDirs;
   }
 
   /**
@@ -6482,9 +6554,36 @@ export class Config {
   async loadPausedBackgroundAgents(
     sessionId: string = this.getSessionId(),
   ): Promise<ReadonlyArray<import('../agents/background-tasks.js').AgentTask>> {
-    return this.getBackgroundAgentResumeService().loadPausedBackgroundAgents(
-      sessionId,
-    );
+    if (sessionId !== this.getSessionId()) {
+      this.debugLogger.warn(
+        `Refusing to restore background agents for non-current session ${sessionId}.`,
+      );
+      return [];
+    }
+    const service = this.getBackgroundAgentResumeService();
+    let recovered: ReadonlyArray<
+      import('../agents/background-tasks.js').AgentTask
+    >;
+    try {
+      recovered = await service.loadPausedBackgroundAgents(sessionId);
+    } catch (error) {
+      this.debugLogger.warn(
+        `Background agent restore failed for session ${sessionId}; continuing without restored agents.`,
+        error,
+      );
+      return [];
+    }
+    if (recovered.length > 0 && !this.getBareMode()) {
+      this.pendingRecoveredAgentsNotice =
+        service.buildRecoveredBackgroundAgentsModelNotice(recovered.length);
+    }
+    return recovered;
+  }
+
+  consumePendingRecoveredAgentsNotice(): string | null {
+    const notice = this.pendingRecoveredAgentsNotice;
+    this.pendingRecoveredAgentsNotice = null;
+    return notice;
   }
 
   async resumeBackgroundAgent(
@@ -6772,6 +6871,10 @@ export class Config {
     await registerLazy(ToolNames.AGENT, async () => {
       const { AgentTool } = await import('../tools/agent/agent.js');
       return new AgentTool(this);
+    });
+    await registerLazy(ToolNames.LIST_AGENTS, async () => {
+      const { ListAgentsTool } = await import('../tools/list-agents.js');
+      return new ListAgentsTool(this);
     });
     await registerLazy(ToolNames.TASK_STOP, async () => {
       const { TaskStopTool } = await import('../tools/task-stop.js');

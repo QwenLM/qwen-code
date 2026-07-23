@@ -67,6 +67,12 @@ import {
   retryContext,
   type RetryAttemptContext,
 } from '../../utils/retryContext.js';
+import {
+  resolveGenAiOperationName,
+  resolveGenAiOutputType,
+  resolveGenAiProviderName,
+} from '../../telemetry/gen-ai-provider.js';
+import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 
 /**
  * Phase 4b — read the active retry context once, default attempt to 1 when
@@ -92,6 +98,40 @@ function snapshotRetryMetadata(): {
   };
 }
 
+function usageSpanMetadata(
+  usage: GenerateContentResponseUsageMetadata | undefined,
+) {
+  const provenance = getGenAiUsageProvenance(usage);
+  return {
+    inputTokens: usage?.promptTokenCount,
+    outputTokens: usage?.candidatesTokenCount,
+    cachedInputTokens: usage?.cachedContentTokenCount,
+    cachedInputTokensReported:
+      provenance?.cachedInputTokensReported ??
+      usage?.cachedContentTokenCount !== undefined,
+    cacheCreationInputTokens: provenance?.cacheCreationInputTokens,
+  };
+}
+
+function orderedFinishReasons(
+  response: GenerateContentResponse,
+): string[] | undefined {
+  const reasons = (response.candidates ?? [])
+    .map((candidate, position) => ({
+      index: candidate.index ?? position,
+      reason: candidate.finishReason
+        ? String(candidate.finishReason)
+        : undefined,
+    }))
+    .filter(
+      (entry): entry is { index: number; reason: string } =>
+        entry.reason !== undefined,
+    )
+    .sort((left, right) => left.index - right.index)
+    .map((entry) => entry.reason);
+  return reasons.length > 0 ? reasons : undefined;
+}
+
 const debugLogger = createDebugLogger('LOGGING_CONTENT_GENERATOR');
 
 const MAX_RESPONSE_TEXT_LENGTH = 4096;
@@ -107,6 +147,8 @@ export class LoggingContentGenerator implements ContentGenerator {
   private splitToolMedia?: boolean;
   private toolResultContentFormat?: ContentGeneratorConfig['toolResultContentFormat'];
   private readonly generatorAuthType: ContentGeneratorConfig['authType'];
+  private readonly genAiProviderName: string;
+  private readonly genAiOperationName: 'chat' | 'generate_content';
 
   constructor(
     private readonly wrapped: ContentGenerator,
@@ -117,6 +159,13 @@ export class LoggingContentGenerator implements ContentGenerator {
     this.splitToolMedia = generatorConfig.splitToolMedia;
     this.toolResultContentFormat = generatorConfig.toolResultContentFormat;
     this.generatorAuthType = generatorConfig.authType;
+    this.genAiProviderName = resolveGenAiProviderName(
+      generatorConfig,
+      process.env['DASHSCOPE_PROXY_BASE_URL'],
+    );
+    this.genAiOperationName = resolveGenAiOperationName(
+      generatorConfig.authType,
+    );
 
     // Extract fields needed for initialization from passed config
     // (config.getContentGeneratorConfig() may not be available yet during refreshAuth)
@@ -248,7 +297,11 @@ export class LoggingContentGenerator implements ContentGenerator {
     // await. ALS frame from `retryWithBackoff` is guaranteed to be active here.
     const retrySnapshot = snapshotRetryMetadata();
 
-    const llmSpan = startLLMRequestSpan(req.model, userPromptId);
+    const llmSpan = startLLMRequestSpan(req.model, userPromptId, {
+      operationName: this.genAiOperationName,
+      providerName: this.genAiProviderName,
+      outputType: resolveGenAiOutputType(this.generatorAuthType, req.config),
+    });
     try {
       llmSpan.setAttribute('llm_request.stream', false);
     } catch {
@@ -327,13 +380,11 @@ export class LoggingContentGenerator implements ContentGenerator {
       });
       endLLMRequestSpan(llmSpan, {
         success: true,
-        inputTokens: response.usageMetadata?.promptTokenCount,
-        outputTokens: response.usageMetadata?.candidatesTokenCount,
-        cachedInputTokens: response.usageMetadata?.cachedContentTokenCount,
+        ...usageSpanMetadata(response.usageMetadata),
         durationMs: Date.now() - startTime,
         responseId: response.responseId || undefined,
-        finishReason:
-          (response.candidates?.[0]?.finishReason as string) || undefined,
+        responseModel: response.modelVersion || undefined,
+        finishReasons: orderedFinishReasons(response),
         thoughtsTokenCount: response.usageMetadata?.thoughtsTokenCount,
         subagentName: subagentNameContext.getStore() || undefined,
         ...retrySnapshot,
@@ -390,7 +441,11 @@ export class LoggingContentGenerator implements ContentGenerator {
     // endLLMRequestSpan callsites (success / error / idle-timeout / abort).
     const retrySnapshot = snapshotRetryMetadata();
 
-    const llmSpan = startLLMRequestSpan(req.model, userPromptId);
+    const llmSpan = startLLMRequestSpan(req.model, userPromptId, {
+      operationName: this.genAiOperationName,
+      providerName: this.genAiProviderName,
+      outputType: resolveGenAiOutputType(this.generatorAuthType, req.config),
+    });
     try {
       llmSpan.setAttribute('llm_request.stream', true);
     } catch {
@@ -541,7 +596,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     let firstModelVersion = '';
     let lastUsageMetadata: GenerateContentResponseUsageMetadata | undefined;
     let errorOccurred = false;
-    let lastFinishReason: string | undefined;
+    const finishReasons = new Map<number, string>();
     let lastError: unknown;
     const subagentName = subagentNameContext.getStore();
 
@@ -582,9 +637,17 @@ export class LoggingContentGenerator implements ContentGenerator {
             }
             endLLMRequestSpan(span, {
               success: false,
+              ...usageSpanMetadata(lastUsageMetadata),
               durationMs: Date.now() - startTime,
               error: 'Stream span timed out (idle)',
               responseId: firstResponseId || undefined,
+              responseModel: firstModelVersion || undefined,
+              finishReasons:
+                finishReasons.size > 0
+                  ? [...finishReasons.entries()]
+                      .sort(([left], [right]) => left - right)
+                      .map(([, reason]) => reason)
+                  : undefined,
               subagentName: subagentName || undefined,
               ...retrySnapshot,
               config: this.config,
@@ -617,8 +680,15 @@ export class LoggingContentGenerator implements ContentGenerator {
         if (response.usageMetadata) {
           lastUsageMetadata = response.usageMetadata;
         }
-        if (candidate?.finishReason) {
-          lastFinishReason = candidate.finishReason as string;
+        for (const [position, responseCandidate] of (
+          response.candidates ?? []
+        ).entries()) {
+          if (responseCandidate.finishReason) {
+            finishReasons.set(
+              responseCandidate.index ?? position,
+              String(responseCandidate.finishReason),
+            );
+          }
         }
         // Capture TTFT on the first stream chunk that contains user-visible
         // content. hasUserVisibleContent skips role-only / usageMetadata-only
@@ -733,9 +803,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         const aborted = abortSignal?.aborted ?? false;
         endLLMRequestSpan(span, {
           success: !errorOccurred,
-          inputTokens: lastUsageMetadata?.promptTokenCount,
-          outputTokens: lastUsageMetadata?.candidatesTokenCount,
-          cachedInputTokens: lastUsageMetadata?.cachedContentTokenCount,
+          ...usageSpanMetadata(lastUsageMetadata),
           ttftMs,
           durationMs: Date.now() - startTime,
           error: errorOccurred
@@ -744,7 +812,13 @@ export class LoggingContentGenerator implements ContentGenerator {
               : API_CALL_FAILED_SPAN_STATUS_MESSAGE
             : undefined,
           responseId: firstResponseId || undefined,
-          finishReason: lastFinishReason,
+          responseModel: firstModelVersion || undefined,
+          finishReasons:
+            finishReasons.size > 0
+              ? [...finishReasons.entries()]
+                  .sort(([left], [right]) => left - right)
+                  .map(([, reason]) => reason)
+              : undefined,
           thoughtsTokenCount: lastUsageMetadata?.thoughtsTokenCount,
           subagentName: subagentName || undefined,
           errorType: lastError ? getErrorType(lastError) : undefined,

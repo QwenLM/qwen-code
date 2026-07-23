@@ -1174,6 +1174,46 @@ describe('runQwenServe telemetry validation', () => {
       await handle.close();
     }
   });
+
+  it('awaits telemetry initialization before daemon metrics', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-tm-')));
+    const callOrder: string[] = [];
+    vi.spyOn(qwenCore, 'initializeTelemetry').mockImplementation(async () => {
+      callOrder.push('telemetry-start');
+      await Promise.resolve();
+      callOrder.push('telemetry-resolved');
+    });
+    vi.spyOn(qwenCore, 'initializeDaemonMetrics').mockImplementation(() => {
+      callOrder.push('daemon-metrics');
+    });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: true,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      expect(callOrder).toEqual([
+        'telemetry-start',
+        'telemetry-resolved',
+        'daemon-metrics',
+      ]);
+    } finally {
+      await handle.close();
+    }
+  });
 });
 
 /**
@@ -7861,17 +7901,15 @@ describe('runQwenServe channel worker supervisor', () => {
       listen: vi.fn((port, _host, cb) => {
         portsAttempted.push(port);
         const srv = createServer();
+        if (typeof cb === 'function') {
+          srv.once('error', cb);
+        }
         if (portsAttempted.length === 1) {
           const err = new Error('address in use') as NodeJS.ErrnoException;
           err.code = 'EADDRINUSE';
           setImmediate(() => srv.emit('error', err));
         } else {
-          srv.listen(0, '127.0.0.1', () => {
-            setImmediate(() => {
-              srv.emit('listening');
-              if (typeof cb === 'function') cb();
-            });
-          });
+          srv.listen(0, '127.0.0.1', cb);
         }
         return srv;
       }),
@@ -7894,8 +7932,12 @@ describe('runQwenServe channel worker supervisor', () => {
     try {
       stderrSpy.mockRestore();
       expect(portsAttempted).toEqual([4170, 4171]);
+      expect(handle.server.listening).toBe(true);
       expect(handle.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
       expect(handle.url).not.toContain(':4170');
+      expect(new URL(handle.url).port).toBe(
+        String((handle.server.address() as AddressInfo).port),
+      );
       expect(
         stderrWrites.some((w) =>
           w.includes('port 4170 is in use, trying 4171'),
