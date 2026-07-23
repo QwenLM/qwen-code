@@ -892,7 +892,19 @@ export class EventBus {
   close(): void {
     if (this.closed) return;
     this.closed = true;
-    for (const sub of this.subs) sub.queue.close();
+    for (const sub of this.subs) {
+      sub.queue.close();
+      // Dispose, not just close: `dispose()` also detaches the
+      // AbortSignal listener that `subscribe()` registered. Without it a
+      // subscriber that never started iterating kept its abort listener
+      // (and the queue + sub closures it captures) alive for as long as
+      // the caller's signal, long after the bus was gone — the same
+      // retention bug the eviction path fixed (see publish()) showing up
+      // on the close() path (DAEMON-010). Dispose is idempotent, and
+      // mutating `this.subs` mid-iteration is safe for Sets when only
+      // deleting the current element.
+      sub.dispose();
+    }
     this.subs.clear();
     this.compactionEngine?.close();
   }

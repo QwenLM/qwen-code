@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getEventListeners } from 'node:events';
 import {
   DEFAULT_MAX_QUEUED_BYTES,
   EventBus,
@@ -861,6 +862,27 @@ describe('EventBus', () => {
     }
     expect(events).toEqual([]);
     expect(bus.subscriberCount).toBe(0);
+  });
+
+  it('disposes never-iterated subscribers on bus.close(), detaching their abort listeners (DAEMON-010)', async () => {
+    const bus = new EventBus();
+    const abort = new AbortController();
+    // Subscribe but never iterate — the subscriber's abort listener is
+    // the only external reference keeping its queue + closures alive.
+    const iter = bus.subscribe({ signal: abort.signal });
+    expect(getEventListeners(abort.signal, 'abort')).toHaveLength(1);
+
+    bus.close();
+
+    // close() must dispose (not just close the queue): the listener is
+    // gone even though the consumer never called next().
+    expect(getEventListeners(abort.signal, 'abort')).toHaveLength(0);
+    expect(bus.subscriberCount).toBe(0);
+
+    // Idempotent, and a late iteration attempt unwinds immediately.
+    bus.close();
+    const first = await iter[Symbol.asyncIterator]().next();
+    expect(first.done).toBe(true);
   });
 
   it('force-pushes replay events past maxQueued so Last-Event-ID is honored', async () => {
