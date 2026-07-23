@@ -1174,6 +1174,41 @@ describe('ContentGenerationPipeline', () => {
       expect(apiCall.reasoning).toBeUndefined();
     });
 
+    it('should preserve reasoning_effort none when thinking is disabled', async () => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        samplingParams: { reasoning_effort: 'none' },
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'gpt-5',
+        contents: [{ parts: [{ text: 'Classify action' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Classify action' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'response-id',
+        choices: [{ message: { content: 'safe' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'side-query:permission-classifier');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.reasoning_effort).toBe('none');
+    });
+
     it('should preserve enable_thinking when thinking is not explicitly disabled', async () => {
       // Arrange — normal request (not forked query), enable_thinking should be preserved
       (mockProvider.buildRequest as Mock).mockImplementation((req) => ({

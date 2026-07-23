@@ -74,6 +74,7 @@ import { buildTeammatePromptAddendum } from './promptAddendum.js';
 import { runWithTeammateIdentity } from './identity.js';
 import type { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { ToolConfig } from '../runtime/agent-types.js';
+import { runOutsideAgentContext } from '../runtime/agent-context.js';
 
 const debug = createDebugLogger('AGENTS_TEAM_MANAGER');
 
@@ -763,7 +764,9 @@ export class TeamManager {
   setLeaderMessageCallback(
     cb: ((message: string, display: string) => void) | null,
   ): void {
-    this.leaderMessageCallback = cb;
+    this.leaderMessageCallback = cb
+      ? (message, display) => runOutsideAgentContext(() => cb(message, display))
+      : null;
   }
 
   requestPlanApproval(

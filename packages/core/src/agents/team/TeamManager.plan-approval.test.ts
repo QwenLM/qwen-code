@@ -11,6 +11,12 @@ import { Storage } from '../../config/storage.js';
 import { AgentStatus } from '../runtime/agent-types.js';
 import { ApprovalMode } from '../../config/config.js';
 import { PermissionMode } from '../../hooks/types.js';
+import {
+  getCurrentAgentId,
+  getRuntimeContentGenerator,
+  runWithAgentContext,
+  runWithRuntimeContentGenerator,
+} from '../runtime/agent-context.js';
 
 vi.mock('../../config/storage.js', async (importOriginal) => {
   const original =
@@ -131,6 +137,53 @@ describe('TeamManager plan approval requests', () => {
       targetMode: ApprovalMode.DEFAULT,
       message: 'Proceed.',
     });
+  });
+
+  it('delivers plan approval requests outside the teammate agent context', async () => {
+    const h = await createHarness();
+    await h.teamManager.spawnTeammate({
+      name: 'planner',
+      cwd: h.tmpDir,
+      planModeRequired: true,
+    });
+
+    let callbackAgentId: string | null = 'unset';
+    let callbackRuntimeView: unknown = 'unset';
+    let approvalMessage = '';
+    h.teamManager.setLeaderMessageCallback((message) => {
+      approvalMessage = message;
+      callbackAgentId = getCurrentAgentId();
+      callbackRuntimeView = getRuntimeContentGenerator();
+    });
+
+    let pending:
+      | ReturnType<typeof h.teamManager.requestPlanApproval>
+      | undefined;
+    const teammateView = {
+      contentGenerator: {},
+      contentGeneratorConfig: { model: 'teammate-model' },
+    } as never;
+    await runWithAgentContext('planner-agent', () =>
+      runWithRuntimeContentGenerator(teammateView, async () => {
+        pending = h.teamManager.requestPlanApproval({
+          teammateName: 'planner',
+          plan: 'Inspect and patch',
+        });
+      }),
+    );
+
+    const requestId = approvalMessage.match(/request_id="([^"]+)"/)?.[1];
+    expect(requestId).toBeDefined();
+    h.teamManager.resolvePlanApprovalRequest(requestId!, {
+      action: 'reject',
+      message: 'Done testing.',
+    });
+    await expect(pending).resolves.toEqual({
+      action: 'reject',
+      message: 'Done testing.',
+    });
+    expect(callbackAgentId).toBeNull();
+    expect(callbackRuntimeView).toBeUndefined();
   });
 
   it('frames teammate-authored plan payload as untrusted data', async () => {

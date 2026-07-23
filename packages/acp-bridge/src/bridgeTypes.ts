@@ -558,6 +558,9 @@ export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
 export const TODO_STOP_GUARD_QUEUE_RELEASE_METHOD =
   'craft/todoStopGuardQueueReleased';
 
+/** Parent-to-agent request that acknowledges prompt cancellation handling. */
+export const PROMPT_CANCEL_METHOD = 'craft/cancelPendingPrompt';
+
 /**
  * Reverse tool channel marker (issue #5626, Phase 2). The parent serve process
  * stamps this boolean on a client-hosted (extension) MCP server's
@@ -614,6 +617,14 @@ export interface PendingPromptEntry {
    * later publish attempts for the same prompt are suppressed.
    */
   terminalPublished?: boolean;
+  /** Cancellation handshake; duplicate callers await rather than resend it. */
+  cancelForwardInitial?: Promise<void>;
+  /** Full cancellation handshake, used to fence the next FIFO dispatch. */
+  cancelForwardDrain?: Promise<void>;
+  /** Releases the cancellation fence when the prompt deadline expires. */
+  cancelForwardDeadline?: Promise<void>;
+  /** True after the prompt request has been handed to the ACP connection. */
+  dispatched?: boolean;
   /**
    * Set when `removePendingPrompt` cancels a RUNNING prompt. The entry
    * stays on `pendingPromptList` (hidden from `getPendingPrompts`) until

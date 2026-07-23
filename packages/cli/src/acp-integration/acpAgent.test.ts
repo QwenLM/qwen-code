@@ -854,6 +854,7 @@ import { buildAuthMethods } from './authMethods.js';
 import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
+  PROMPT_CANCEL_METHOD,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
@@ -1588,9 +1589,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         rewindToTurn: ReturnType<typeof vi.fn>;
         getRewindableUserTurnCount: ReturnType<typeof vi.fn>;
         clearTodoStopGuardTrust: ReturnType<typeof vi.fn>;
-        releaseTodoStopGuardQueuedPromptWait: ReturnType<typeof vi.fn>;
-        prompt: ReturnType<typeof vi.fn>;
         cancelPendingPrompt: ReturnType<typeof vi.fn>;
+        prompt: ReturnType<typeof vi.fn>;
+        releaseTodoStopGuardQueuedPromptWait: ReturnType<typeof vi.fn>;
       }
     | undefined;
   let processExitSpy: MockInstance<typeof process.exit>;
@@ -1792,6 +1793,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         _meta: { keep: true },
       },
       invocation,
+      expect.any(AbortSignal),
     );
     mockConnectionState.resolve();
     await agentPromise;
@@ -1875,6 +1877,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         _meta: { keep: true },
       },
       undefined,
+      expect.any(AbortSignal),
     );
     mockConnectionState.resolve();
     await agentPromise;
@@ -2938,6 +2941,58 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(
       lastSessionMock?.releaseTodoStopGuardQueuedPromptWait,
     ).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('acknowledges prompt cancellation after the tracked prompt settles', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    let finishPrompt: ((value: unknown) => void) | undefined;
+    lastSessionMock?.prompt.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishPrompt = resolve;
+        }),
+    );
+    const prompt = agent.prompt({ sessionId, prompt: [] });
+
+    await vi.waitFor(() => expect(lastSessionMock?.prompt).toHaveBeenCalled());
+    const cancellationSignal = lastSessionMock?.prompt.mock.calls[0]?.[2] as
+      | AbortSignal
+      | undefined;
+
+    let cancellationSettled = false;
+    const cancellation = agent
+      .extMethod(PROMPT_CANCEL_METHOD, { sessionId })
+      .finally(() => {
+        cancellationSettled = true;
+      });
+    await vi.waitFor(() => expect(cancellationSignal?.aborted).toBe(true));
+    expect(cancellationSettled).toBe(false);
+    expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
+
+    finishPrompt?.({ stopReason: 'cancelled' });
+    await expect(cancellation).resolves.toEqual({ cancelled: true });
+    await prompt;
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('acknowledges cancellation as a no-op when no prompt call is active', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(PROMPT_CANCEL_METHOD, { sessionId }),
+    ).resolves.toEqual({ cancelled: false });
+    expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -4633,6 +4688,100 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each([
+    {
+      description: 'hide discontinued qwen-oauth for other auth types',
+      authType: 'openai',
+      model: 'qwen3.6-27b',
+      expectedCurrent: 'qwen3.6-27b(openai)',
+      expectedModels: ['qwen3.6-27b(openai)'],
+    },
+    {
+      description: 'keep qwen-oauth for existing qwen-oauth sessions',
+      authType: 'qwen-oauth',
+      model: 'coder-model',
+      expectedCurrent: 'coder-model(qwen-oauth)',
+      expectedModels: ['coder-model(qwen-oauth)', 'qwen3.6-27b(openai)'],
+    },
+  ])(
+    'session model selectors $description',
+    async ({ authType, model, expectedCurrent, expectedModels }) => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      const innerConfig = await setupSessionMocks(sessionId);
+      Object.assign(innerConfig, {
+        getModel: vi.fn().mockReturnValue(model),
+        getAuthType: vi.fn().mockReturnValue(authType),
+        getAllConfiguredModels: vi.fn().mockReturnValue([
+          {
+            id: 'coder-model',
+            label: 'coder-model',
+            authType: 'qwen-oauth',
+          },
+          {
+            id: 'qwen3.6-27b',
+            label: 'Qwen3.6-27B Local',
+            authType: 'openai',
+          },
+        ]),
+      });
+
+      const agentPromise = runAcpAgent(
+        mockConfig,
+        makeSessionSettings(),
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      const session = (await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+      })) as {
+        models: {
+          currentModelId: string;
+          availableModels: Array<{ modelId: string }>;
+        };
+        configOptions: Array<{
+          id: string;
+          currentValue: string;
+          options: Array<{ value: string }>;
+        }>;
+      };
+      const context = (await agent.extMethod(
+        SERVE_STATUS_EXT_METHODS.sessionContext,
+        { sessionId },
+      )) as {
+        state: {
+          models: {
+            currentModelId: string;
+            availableModels: Array<{ modelId: string }>;
+          };
+        };
+      };
+      const modelOption = session.configOptions.find(
+        (option) => option.id === 'model',
+      );
+
+      expect(session.models.currentModelId).toBe(expectedCurrent);
+      expect(
+        session.models.availableModels.map((option) => option.modelId),
+      ).toEqual(expectedModels);
+      expect(modelOption?.currentValue).toBe(expectedCurrent);
+      expect(modelOption?.options.map((option) => option.value)).toEqual(
+        expectedModels,
+      );
+      expect(context.state.models).toMatchObject(session.models);
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   it('session model selectors distinguish the same model id on different endpoints', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
