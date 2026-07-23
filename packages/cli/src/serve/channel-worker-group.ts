@@ -13,6 +13,7 @@ import type {
   CreateChannelWorkerSupervisorOptions,
 } from './channel-worker-supervisor.js';
 import { ChannelWorkerStartupError } from './channel-worker-supervisor.js';
+import { ChannelDeliveryError } from './channel-delivery-ipc.js';
 import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
 import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
@@ -79,6 +80,12 @@ export interface ChannelWorkerGroup {
   workspaceActivity(workspaceCwd: string): number;
   removeWorkspace(workspaceCwd: string): Promise<void>;
   restoreWorkspace(workspaceCwd: string): Promise<void>;
+  deliverChannelMessage(
+    request: Parameters<
+      NonNullable<ChannelWorkerSupervisor['deliverChannelMessage']>
+    >[0],
+    workspaceCwd?: string,
+  ): ReturnType<NonNullable<ChannelWorkerSupervisor['deliverChannelMessage']>>;
   enqueueWebhookTask: ChannelWorkerSupervisor['enqueueWebhookTask'];
 }
 
@@ -377,7 +384,19 @@ export function createChannelWorkerGroup(
 
   const routeEntry = (
     channelName: string,
+    workspaceCwd?: string,
   ): ChannelWorkerGroupEntry | undefined => {
+    if (workspaceCwd !== undefined) {
+      const entry = entries.get(workspaceCwd);
+      if (
+        entry &&
+        (entry.selection.mode === 'all' ||
+          entry.selection.names.includes(channelName))
+      ) {
+        return entry;
+      }
+      return undefined;
+    }
     for (const entry of entries.values()) {
       if (
         entry.selection.mode === 'all' ||
@@ -696,6 +715,17 @@ export function createChannelWorkerGroup(
         detachEntry(entry);
         throw err;
       }
+    },
+    async deliverChannelMessage(request, workspaceCwd) {
+      const entry = routeEntry(request.channelName, workspaceCwd);
+      const deliver = entry?.supervisor.deliverChannelMessage;
+      if (!entry || drainingWorkspaces.has(entry.workspaceCwd) || !deliver) {
+        const hint = workspaceCwd
+          ? `No channel worker for the selected workspace owns channel "${request.channelName}".`
+          : `No channel worker owns channel "${request.channelName}".`;
+        throw new ChannelDeliveryError('channel_worker_unavailable', hint);
+      }
+      return deliver.call(entry.supervisor, request);
     },
     async enqueueWebhookTask(task) {
       const entry = routeEntry(task.channelName);

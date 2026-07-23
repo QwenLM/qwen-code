@@ -5,6 +5,7 @@ import type {
   ChannelMemoryEntry,
   ChannelMemoryIntentClassifier,
   ChannelMemoryTarget,
+  ChannelProactiveTarget,
   ChannelRuntimeIdentity,
   ChannelRuntimeMemoryScope,
   ChannelTaskCancellationReason,
@@ -17,6 +18,10 @@ import type {
   SessionTarget,
 } from './types.js';
 import { BlockStreamer } from './BlockStreamer.js';
+import {
+  ChannelProactiveDeliveryError,
+  isChannelProactiveDeliveryError,
+} from './ChannelProactiveDeliveryError.js';
 import { GroupGate } from './GroupGate.js';
 import { DmGate } from './DmGate.js';
 import { GroupHistoryStore } from './group-history-store.js';
@@ -695,6 +700,53 @@ export abstract class ChannelBase {
     };
   }
 
+  async deliverProactive(
+    target: ChannelProactiveTarget,
+    text: string,
+  ): Promise<void> {
+    if (target.channelName !== this.name) {
+      throw new ChannelProactiveDeliveryError(
+        'permanent',
+        `Channel "${this.name}" does not own delivery target.`,
+      );
+    }
+    if (!this.supportsProactiveSend()) {
+      throw new ChannelProactiveDeliveryError(
+        'permanent',
+        `Channel "${this.name}" does not support proactive delivery.`,
+      );
+    }
+    if (
+      (target.type !== 'user' && target.type !== 'chat') ||
+      typeof target.id !== 'string' ||
+      target.id.trim().length === 0
+    ) {
+      throw new ChannelProactiveDeliveryError(
+        'permanent',
+        `Channel "${this.name}" received an invalid proactive target.`,
+      );
+    }
+    if (typeof text !== 'string' || text.trim().length === 0) {
+      throw new ChannelProactiveDeliveryError(
+        'permanent',
+        `Channel "${this.name}" received empty proactive text.`,
+      );
+    }
+    const sessionTarget: SessionTarget = {
+      channelName: target.channelName,
+      senderId: target.id,
+      chatId: target.id,
+      isGroup: target.type === 'chat',
+    };
+    if (!this.supportsProactiveDeliveryTarget(sessionTarget)) {
+      throw new ChannelProactiveDeliveryError(
+        'permanent',
+        `Channel "${this.name}" does not support this proactive target.`,
+      );
+    }
+    await this.pushProactiveDelivery(sessionTarget, text);
+  }
+
   /** Built once — identity/memoryScope are frozen at construction. */
   private boundaryPrompt?: string;
 
@@ -749,6 +801,10 @@ export abstract class ChannelBase {
     return target.threadId === undefined;
   }
 
+  protected supportsProactiveDeliveryTarget(target: SessionTarget): boolean {
+    return this.supportsProactiveTarget(target);
+  }
+
   protected supportsProactiveWebhookTarget(target: SessionTarget): boolean {
     return this.supportsProactiveTarget(target);
   }
@@ -763,6 +819,24 @@ export abstract class ChannelBase {
       );
     }
     await this.sendMessage(target.chatId, text);
+  }
+
+  protected async pushProactiveDelivery(
+    target: SessionTarget,
+    text: string,
+  ): Promise<void> {
+    try {
+      await this.pushProactive(target, text);
+    } catch (error) {
+      if (isChannelProactiveDeliveryError(error)) {
+        throw error;
+      }
+      throw new ChannelProactiveDeliveryError(
+        'transient',
+        error instanceof Error ? error.message : String(error),
+        { cause: error },
+      );
+    }
   }
 
   private async prepareUnattendedSessionContext(

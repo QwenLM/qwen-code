@@ -23,6 +23,12 @@ import type {
   DaemonClientEvictedEvent,
   DaemonChannelControlState,
   DaemonChannelControlTransition,
+  DaemonChannelDelivery,
+  DaemonChannelNotifyRequest,
+  DaemonChannelNotifyResult,
+  DaemonChannelDeliveryErrorCode,
+  DaemonChannelDeliveryResultData,
+  DaemonChannelDeliveryResultEvent,
   DaemonChannelSelection,
   DaemonChannelSetResult,
   DaemonChannelStartupAttemptFailure,
@@ -211,6 +217,12 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonSessionRecordingDegradedData>().not.toBeNever();
     expectTypeOf<DaemonClientEvictedData>().not.toBeNever();
     expectTypeOf<DaemonChannelSelection>().not.toBeNever();
+    expectTypeOf<DaemonChannelDelivery>().not.toBeNever();
+    expectTypeOf<DaemonChannelNotifyRequest>().not.toBeNever();
+    expectTypeOf<DaemonChannelNotifyResult>().not.toBeNever();
+    expectTypeOf<DaemonChannelDeliveryErrorCode>().not.toBeNever();
+    expectTypeOf<DaemonChannelDeliveryResultData>().not.toBeNever();
+    expectTypeOf<DaemonChannelDeliveryResultEvent>().not.toBeNever();
     expectTypeOf<DaemonChannelControlTransition>().not.toBeNever();
     expectTypeOf<DaemonChannelControlState>().not.toBeNever();
     expectTypeOf<DaemonChannelSetResult>().not.toBeNever();

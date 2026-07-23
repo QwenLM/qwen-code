@@ -5313,6 +5313,38 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('strips spoofed delivery metadata and injects only trusted context', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const target = {
+        channelName: 'dingtalk',
+        type: 'user' as const,
+        id: 'user-1',
+      };
+
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'deliver this' }],
+          delivery: { forged: true },
+          _meta: { 'qwen.daemon.channelDelivery': { forged: true } },
+        } as PromptRequest,
+        undefined,
+        {
+          promptId: 'prompt-1',
+          channelDelivery: { deliveryId: 'prompt-1', target },
+        },
+      );
+
+      expect(handle.agent.promptCalls[0]).not.toHaveProperty('delivery');
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.channelDelivery'],
+      ).toEqual({ deliveryId: 'prompt-1', target });
+      await bridge.shutdown();
+    });
+
     it('strips both spoofed retry and continue meta keys from one prompt', async () => {
       const handle = makeChannel();
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
