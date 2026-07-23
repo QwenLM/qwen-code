@@ -30,7 +30,7 @@ describe('lintPolicyFile', () => {
   it('reports a valid file with its rule count', async () => {
     const p = await write(
       'ok.yaml',
-      `rules:\n  - id: a\n    match: { tool: bash }\n    action: allow\n  - id: b\n    match: { tool: git }\n    action: deny\n`,
+      `rules:\n  - id: a\n    match: { tool: execute }\n    action: allow\n  - id: b\n    match: { tool: read }\n    action: deny\n`,
     );
     const r = await lintPolicyFile(p);
     expect(r.ok).toBe(true);
@@ -41,7 +41,7 @@ describe('lintPolicyFile', () => {
   it('reports a malformed file as invalid with the loader error', async () => {
     const p = await write(
       'bad.yaml',
-      `rules:\n  - id: a\n    match: { tool: bash }\n    action: maybe\n`,
+      `rules:\n  - id: a\n    match: { tool: execute }\n    action: maybe\n`,
     );
     const r = await lintPolicyFile(p);
     expect(r.ok).toBe(false);
@@ -73,7 +73,7 @@ describe('lintPolicyFile', () => {
   it('lints a maxPerWindow rule clean — honored at runtime, not deferred (cycle 43)', async () => {
     const p = await write(
       'quota.yaml',
-      `rules:\n  - id: quota\n    match: { tool: bash }\n    action: allow\n    maxPerWindow: { count: 5, windowSec: 60 }\n  - id: plain\n    match: { tool: git }\n    action: allow\n`,
+      `rules:\n  - id: quota\n    match: { tool: execute }\n    action: allow\n    maxPerWindow: { count: 5, windowSec: 60 }\n  - id: plain\n    match: { tool: read }\n    action: allow\n`,
     );
     const r = await lintPolicyFile(p);
     expect(r.ok).toBe(true);
@@ -84,7 +84,7 @@ describe('lintPolicyFile', () => {
   it('rejects a malformed maxPerWindow (now validated, fail-closed)', async () => {
     const p = await write(
       'badquota.yaml',
-      `rules:\n  - id: q\n    match: { tool: bash }\n    action: allow\n    maxPerWindow: 5\n`,
+      `rules:\n  - id: q\n    match: { tool: execute }\n    action: allow\n    maxPerWindow: 5\n`,
     );
     const r = await lintPolicyFile(p);
     expect(r.ok).toBe(false);

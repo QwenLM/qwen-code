@@ -8,7 +8,7 @@ import { describe, it, expect } from 'vitest';
 import { loadPolicy, PolicyError } from './loader.js';
 
 const withMax = (body: string) =>
-  `rules:\n  - id: a\n    match: { tool: bash }\n    action: allow\n    maxPerWindow: ${body}\n`;
+  `rules:\n  - id: a\n    match: { tool: execute }\n    action: allow\n    maxPerWindow: ${body}\n`;
 
 describe('loadPolicy maxPerWindow validation (cycle 43)', () => {
   it('parses a valid { count, windowSec } into the typed shape', () => {
@@ -64,12 +64,12 @@ describe('loadPolicy maxPerWindow validation (cycle 43)', () => {
   });
 
   it('rejects duplicate rule ids (ambiguous audit/quota key)', () => {
-    const yaml = `rules:\n  - id: dup\n    match: { tool: bash }\n    action: allow\n  - id: dup\n    match: { tool: git }\n    action: deny\n`;
+    const yaml = `rules:\n  - id: dup\n    match: { tool: execute }\n    action: allow\n  - id: dup\n    match: { tool: read }\n    action: deny\n`;
     expect(() => loadPolicy(yaml)).toThrow(/duplicate rule id: dup/);
   });
 
   it('allows multiple id-less rules (only ids must be unique)', () => {
-    const yaml = `rules:\n  - match: { tool: bash }\n    action: allow\n  - match: { tool: git }\n    action: deny\n`;
+    const yaml = `rules:\n  - match: { tool: execute }\n    action: allow\n  - match: { tool: read }\n    action: deny\n`;
     expect(loadPolicy(yaml).rules).toHaveLength(2);
   });
 });

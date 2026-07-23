@@ -23,7 +23,7 @@ version: 1
 rules:
   - id: allow-tests
     match:
-      tool: bash
+      tool: execute
       argsGlob: "npm test*"
     action: allow
 `);
@@ -35,7 +35,7 @@ rules:
     expect(policy.rules).toHaveLength(1);
     expect(policy.rules[0].id).toBe('allow-tests');
     expect(policy.rules[0].action).toBe('allow');
-    expect(policy.rules[0].match.tool).toBe('bash');
+    expect(policy.rules[0].match.tool).toBe('execute');
   });
 
   it('honors explicit defaults', () => {
@@ -67,14 +67,14 @@ defaults:
   });
 
   it('throws PolicyError when a rule is missing action', () => {
-    expect(() => loadPolicy('rules:\n  - match:\n      tool: bash')).toThrow(
+    expect(() => loadPolicy('rules:\n  - match:\n      tool: execute')).toThrow(
       PolicyError,
     );
   });
 
   it('throws PolicyError on an invalid rule action', () => {
     expect(() =>
-      loadPolicy('rules:\n  - match: {tool: bash}\n    action: maybe'),
+      loadPolicy('rules:\n  - match: {tool: execute}\n    action: maybe'),
     ).toThrow(PolicyError);
   });
 
@@ -92,12 +92,94 @@ defaults:
     const policy = loadPolicy(`
 unknownTop: hello
 rules:
-  - match: {tool: bash}
+  - match: {tool: execute}
     action: allow
     futureField: 99
 `);
     expect(policy.rules).toHaveLength(1);
     expect(policy.rules[0].action).toBe('allow');
+  });
+});
+
+describe('loadPolicy — tool alias normalization and match.operation', () => {
+  it('normalizes a tool-name alias to its ACP kind', () => {
+    const p = loadPolicy(`
+rules:
+  - id: r1
+    match: { tool: run_shell_command }
+    action: deny
+defaults: { action: prompt }
+`);
+    expect(p.rules[0].match.tool).toBe('execute');
+  });
+
+  it('accepts a kind directly', () => {
+    const p = loadPolicy(`
+rules:
+  - id: r1
+    match: { tool: execute }
+    action: deny
+defaults: { action: prompt }
+`);
+    expect(p.rules[0].match.tool).toBe('execute');
+  });
+
+  it('maps write_file and edit to the same kind', () => {
+    const p = loadPolicy(`
+rules:
+  - id: a
+    match: { tool: write_file }
+    action: deny
+  - id: b
+    match: { tool: edit }
+    action: deny
+defaults: { action: prompt }
+`);
+    expect(p.rules[0].match.tool).toBe('edit');
+    expect(p.rules[1].match.tool).toBe('edit');
+  });
+
+  it('rejects an unknown tool value', () => {
+    expect(() =>
+      loadPolicy(`
+rules:
+  - id: r1
+    match: { tool: not_a_tool }
+    action: deny
+defaults: { action: prompt }
+`),
+    ).toThrow(/not_a_tool/);
+  });
+
+  it('accepts and validates match.operation', () => {
+    const p = loadPolicy(`
+rules:
+  - id: r1
+    match: { operation: write }
+    action: deny
+defaults: { action: prompt }
+`);
+    expect(p.rules[0].match.operation).toBe('write');
+    expect(() =>
+      loadPolicy(`
+rules:
+  - id: r1
+    match: { operation: delete }
+    action: deny
+defaults: { action: prompt }
+`),
+    ).toThrow(/operation/);
+  });
+
+  it('leaves the wildcard tool alone', () => {
+    const p = loadPolicy(`
+rules:
+  - id: r1
+    match: { tool: "*" }
+    action: deny
+defaults: { action: prompt }
+`);
+    expect(p.rules[0].match.tool).toBe('*');
   });
 });
 
@@ -118,7 +200,7 @@ describe('deferred-field warning', () => {
     load(`
 rules:
   - match:
-      tool: bash
+      tool: execute
       timeOfDay:
         from: "09:00"
         to: "17:00"
@@ -134,7 +216,7 @@ rules:
     load(`
 rules:
   - match:
-      tool: bash
+      tool: execute
     action: deny
     expiresAt: "2030-01-01T00:00:00Z"
 `);
@@ -149,7 +231,7 @@ rules:
     load(`
 rules:
   - match:
-      tool: bash
+      tool: execute
     action: allow
     maxPerWindow: { count: 5, windowSec: 60 }
 `);
@@ -176,7 +258,7 @@ describe('loadPolicyFile', () => {
     const path = join(dir, 'policy.yaml');
     await writeFile(
       path,
-      'rules:\n  - match: {tool: bash}\n    action: deny\n',
+      'rules:\n  - match: {tool: execute}\n    action: deny\n',
     );
     const policy = await loadPolicyFile(path);
     expect(policy).not.toBeNull();

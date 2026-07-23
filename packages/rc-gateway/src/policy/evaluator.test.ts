@@ -15,16 +15,16 @@ describe('evaluate', () => {
 rules:
   - id: allow-tests
     match:
-      tool: bash
+      tool: execute
       argsGlob: "npm test*"
     action: allow
 `);
-    const hit = evaluate(policy, { tool: 'bash', args: 'npm test' });
+    const hit = evaluate(policy, { tool: 'execute', args: 'npm test' });
     expect(hit.action).toBe('allow');
     expect(hit.ruleId).toBe('allow-tests');
     expect(hit.usedDeferredField).toBe(false);
 
-    const miss = evaluate(policy, { tool: 'bash', args: 'npm publish' });
+    const miss = evaluate(policy, { tool: 'execute', args: 'npm publish' });
     expect(miss.action).toBe('prompt');
     expect(miss.ruleId).toBeUndefined();
     expect(miss.requireScope).toBe('approve');
@@ -40,7 +40,7 @@ rules:
     reason: "force push forbidden"
 `);
     const d = evaluate(policy, {
-      tool: 'bash',
+      tool: 'execute',
       args: 'git push --force origin',
     });
     expect(d.action).toBe('deny');
@@ -52,11 +52,11 @@ rules:
 rules:
   - id: owner-only
     match:
-      tool: rm
+      tool: execute
     action: prompt
     requireScope: owner
 `);
-    const d = evaluate(policy, { tool: 'rm', args: '-rf /' });
+    const d = evaluate(policy, { tool: 'execute', args: '-rf /' });
     expect(d.action).toBe('prompt');
     expect(d.requireScope).toBe('owner');
   });
@@ -68,14 +68,14 @@ rules:
     match:
       tool: "*"
     action: prompt
-  - id: bash-allow
+  - id: execute-allow
     match:
-      tool: bash
+      tool: execute
     action: allow
 `);
-    const d = evaluate(policy, { tool: 'bash', args: 'ls' });
+    const d = evaluate(policy, { tool: 'execute', args: 'ls' });
     expect(d.action).toBe('allow');
-    expect(d.ruleId).toBe('bash-allow');
+    expect(d.ruleId).toBe('execute-allow');
   });
 
   it('priority overrides specificity', () => {
@@ -83,7 +83,7 @@ rules:
 rules:
   - id: low-specific
     match:
-      tool: bash
+      tool: execute
     action: allow
   - id: high-priority-broad
     match:
@@ -91,7 +91,7 @@ rules:
     action: deny
     priority: 100
 `);
-    const d = evaluate(policy, { tool: 'bash', args: 'ls' });
+    const d = evaluate(policy, { tool: 'execute', args: 'ls' });
     expect(d.action).toBe('deny');
     expect(d.ruleId).toBe('high-priority-broad');
   });
@@ -101,12 +101,12 @@ rules:
 rules:
   - id: auth-edits
     match:
-      tool: edit_file
+      tool: edit
       pathGlob: "src/auth/**"
     action: deny
 `);
     const hit = evaluate(policy, {
-      tool: 'edit_file',
+      tool: 'edit',
       args: { path: 'src/auth/login.ts' },
       paths: ['/proj/src/auth/login.ts'],
       projectRoot: '/proj',
@@ -115,7 +115,7 @@ rules:
     expect(hit.action).toBe('deny');
 
     const miss = evaluate(policy, {
-      tool: 'edit_file',
+      tool: 'edit',
       args: { path: 'src/util/x.ts' },
       paths: ['/proj/src/util/x.ts'],
       projectRoot: '/proj',
@@ -129,11 +129,11 @@ rules:
 rules:
   - id: needs-path
     match:
-      tool: edit_file
+      tool: edit
       pathGlob: "src/**"
     action: allow
 `);
-    const d = evaluate(policy, { tool: 'edit_file', args: 'no path here' });
+    const d = evaluate(policy, { tool: 'edit', args: 'no path here' });
     expect(d.action).toBe('prompt');
     expect(d.ruleId).toBeUndefined();
   });
@@ -143,12 +143,12 @@ rules:
 rules:
   - id: daytime-allow
     match:
-      tool: bash
+      tool: execute
       timeOfDay: "09:00-17:00"
     action: allow
     requireScope: owner
 `);
-    const d = evaluate(policy, { tool: 'bash', args: 'ls' });
+    const d = evaluate(policy, { tool: 'execute', args: 'ls' });
     expect(d.action).toBe('prompt');
     expect(d.usedDeferredField).toBe(true);
     expect(d.ruleId).toBe('daytime-allow');
@@ -160,13 +160,13 @@ rules:
 rules:
   - id: temp-deny
     match:
-      tool: bash
+      tool: execute
     action: deny
     expiresAt: "2030-01-01T00:00:00Z"
 `);
     const d = evaluate(
       policy,
-      { tool: 'bash', args: 'ls' },
+      { tool: 'execute', args: 'ls' },
       new Date('2026-06-09T12:00:00Z'),
     );
     expect(d.action).toBe('deny');
@@ -179,13 +179,13 @@ rules:
 rules:
   - id: expired-allow
     match:
-      tool: bash
+      tool: execute
     action: allow
     expiresAt: "2020-01-01T00:00:00Z"
 `);
     const d = evaluate(
       policy,
-      { tool: 'bash', args: 'ls' },
+      { tool: 'execute', args: 'ls' },
       new Date('2026-06-09T12:00:00Z'),
     );
     expect(d.action).toBe('prompt');
@@ -198,13 +198,13 @@ rules:
 rules:
   - id: future-allow
     match:
-      tool: bash
+      tool: execute
     action: allow
     expiresAt: "2026-06-09T13:00:00Z"
 `);
     const d = evaluate(
       policy,
-      { tool: 'bash', args: 'ls' },
+      { tool: 'execute', args: 'ls' },
       new Date('2026-06-09T12:00:00Z'),
     );
     expect(d.action).toBe('allow');
@@ -217,7 +217,7 @@ rules:
 rules:
   - id: daytime-allow
     match:
-      tool: bash
+      tool: execute
       timeOfDay:
         from: "09:00"
         to: "17:00"
@@ -226,7 +226,7 @@ rules:
 `);
     const d = evaluate(
       policy,
-      { tool: 'bash', args: 'ls' },
+      { tool: 'execute', args: 'ls' },
       new Date('2026-06-09T12:00:00Z'),
     );
     expect(d.action).toBe('allow');
@@ -239,7 +239,7 @@ rules:
 rules:
   - id: daytime-allow
     match:
-      tool: bash
+      tool: execute
       timeOfDay:
         from: "09:00"
         to: "17:00"
@@ -247,12 +247,12 @@ rules:
     action: allow
   - id: catch-all
     match:
-      tool: bash
+      tool: execute
     action: deny
 `);
     const d = evaluate(
       policy,
-      { tool: 'bash', args: 'ls' },
+      { tool: 'execute', args: 'ls' },
       new Date('2026-06-09T20:00:00Z'),
     );
     expect(d.action).toBe('deny');
@@ -264,7 +264,7 @@ rules:
 rules:
   - id: night-prompt
     match:
-      tool: bash
+      tool: execute
       timeOfDay:
         from: "09:00"
         to: "17:00"
@@ -274,7 +274,7 @@ rules:
 `);
     const d = evaluate(
       policy,
-      { tool: 'bash', args: 'ls' },
+      { tool: 'execute', args: 'ls' },
       new Date('2026-06-09T20:00:00Z'),
     );
     // Falls through to default prompt (requireScope 'approve'), NOT the owner
@@ -289,7 +289,7 @@ rules:
 rules:
   - id: bad-tz
     match:
-      tool: bash
+      tool: execute
       timeOfDay:
         from: "09:00"
         to: "17:00"
@@ -299,7 +299,7 @@ rules:
 `);
     const d = evaluate(
       policy,
-      { tool: 'bash', args: 'ls' },
+      { tool: 'execute', args: 'ls' },
       new Date('2026-06-09T12:00:00Z'),
     );
     expect(d.action).toBe('prompt');
@@ -313,13 +313,13 @@ rules:
 rules:
   - id: bad-expiry
     match:
-      tool: bash
+      tool: execute
     action: allow
     expiresAt: "not-a-date"
 `);
     const d = evaluate(
       policy,
-      { tool: 'bash', args: 'ls' },
+      { tool: 'execute', args: 'ls' },
       new Date('2026-06-09T12:00:00Z'),
     );
     expect(d.action).toBe('prompt');
@@ -332,7 +332,7 @@ rules:
 rules:
   - id: quota-allow
     match:
-      tool: bash
+      tool: execute
     action: allow
     maxPerWindow: { count: 5, windowSec: 60 }
 `);
@@ -340,7 +340,7 @@ rules:
     // prompt (the backward-compatible default preserved for every non-enforcer caller).
     const d = evaluate(
       policy,
-      { tool: 'bash', args: 'ls' },
+      { tool: 'execute', args: 'ls' },
       new Date('2026-06-09T12:00:00Z'),
     );
     expect(d.action).toBe('prompt');
@@ -353,7 +353,7 @@ rules:
 rules:
   - id: dead-and-malformed
     match:
-      tool: bash
+      tool: execute
       timeOfDay:
         from: "09:00"
         to: "17:00"
@@ -362,12 +362,12 @@ rules:
     expiresAt: "2020-01-01T00:00:00Z"
   - id: fallthrough
     match:
-      tool: bash
+      tool: execute
     action: deny
 `);
     const d = evaluate(
       policy,
-      { tool: 'bash', args: 'ls' },
+      { tool: 'execute', args: 'ls' },
       new Date('2026-06-09T12:00:00Z'),
     );
     expect(d.action).toBe('deny');
@@ -379,7 +379,7 @@ rules:
 rules:
   - id: malformed-expiry-out-of-window
     match:
-      tool: bash
+      tool: execute
       timeOfDay:
         from: "09:00"
         to: "17:00"
@@ -388,12 +388,12 @@ rules:
     expiresAt: "not-a-date"
   - id: fallthrough
     match:
-      tool: bash
+      tool: execute
     action: deny
 `);
     const d = evaluate(
       policy,
-      { tool: 'bash', args: 'ls' },
+      { tool: 'execute', args: 'ls' },
       new Date('2026-06-09T20:00:00Z'),
     );
     expect(d.action).toBe('deny');
@@ -408,11 +408,11 @@ rules:
 rules:
   - id: falsy-expiry
     match:
-      tool: bash
+      tool: execute
     action: allow
     expiresAt: 0
 `);
-    const d = evaluate(policy, { tool: 'bash', args: 'rm -rf /' });
+    const d = evaluate(policy, { tool: 'execute', args: 'rm -rf /' });
     expect(d.action).toBe('prompt');
     expect(d.usedDeferredField).toBe(true);
     expect(d.ruleId).toBe('falsy-expiry');
@@ -423,11 +423,11 @@ rules:
 rules:
   - id: falsy-time
     match:
-      tool: bash
+      tool: execute
       timeOfDay: ""
     action: allow
 `);
-    const d = evaluate(policy, { tool: 'bash', args: 'ls' });
+    const d = evaluate(policy, { tool: 'execute', args: 'ls' });
     expect(d.action).toBe('prompt');
     expect(d.usedDeferredField).toBe(true);
   });
@@ -442,7 +442,7 @@ rules:
     action: allow
 `);
     const hit = evaluate(policy, {
-      tool: 'bash',
+      tool: 'execute',
       args: 'ls',
       originScope: 'ci',
       sessionTag: 'nightly',
@@ -450,7 +450,7 @@ rules:
     expect(hit.action).toBe('allow');
 
     const miss = evaluate(policy, {
-      tool: 'bash',
+      tool: 'execute',
       args: 'ls',
       originScope: 'ci',
       sessionTag: 'other',
@@ -463,7 +463,7 @@ rules:
       defaults: { action: 'prompt', requireScope: 'approve' },
       rules: [],
     };
-    const d = evaluate(empty, { tool: 'bash', args: 'ls' });
+    const d = evaluate(empty, { tool: 'execute', args: 'ls' });
     expect(d.action).toBe('prompt');
     expect(d.usedDeferredField).toBe(false);
   });
@@ -472,25 +472,25 @@ rules:
     const policy = loadPolicy(`
 rules:
   - id: allow-tests
-    match: { tool: bash, argsGlob: "npm test*" }
+    match: { tool: execute, argsGlob: "npm test*" }
     action: allow
 `);
-    expect(evaluate(policy, { tool: 'bash', args: 'npm test' }).source).toBe(
+    expect(evaluate(policy, { tool: 'execute', args: 'npm test' }).source).toBe(
       'policy',
     );
     // No rule matches → the default action, sourced as 'default'.
-    expect(evaluate(policy, { tool: 'bash', args: 'npm publish' }).source).toBe(
-      'default',
-    );
+    expect(
+      evaluate(policy, { tool: 'execute', args: 'npm publish' }).source,
+    ).toBe('default');
   });
 
   it("source is 'policy' for a matched id-less rule (which ruleId alone cannot distinguish from default)", () => {
     const policy = loadPolicy(`
 rules:
-  - match: { tool: bash }
+  - match: { tool: execute }
     action: allow
 `);
-    const d = evaluate(policy, { tool: 'bash', args: 'ls' });
+    const d = evaluate(policy, { tool: 'execute', args: 'ls' });
     expect(d.action).toBe('allow');
     expect(d.ruleId).toBeUndefined(); // id-less rule
     expect(d.source).toBe('policy'); // …yet clearly rule-sourced
@@ -500,11 +500,11 @@ rules:
     const policy = loadPolicy(`
 rules:
   - id: quota-rule
-    match: { tool: bash }
+    match: { tool: execute }
     action: allow
     maxPerWindow: { count: 5, windowSec: 60 }
 `);
-    const d = evaluate(policy, { tool: 'bash', args: 'ls' });
+    const d = evaluate(policy, { tool: 'execute', args: 'ls' });
     expect(d.action).toBe('prompt'); // downgraded (maxPerWindow still deferred)
     expect(d.usedDeferredField).toBe(true);
     expect(d.source).toBe('policy'); // a rule was the cause

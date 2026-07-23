@@ -17,18 +17,20 @@ function policy(rules: Policy['rules']): Policy {
 
 describe('mergePolicies', () => {
   it('returns the user policy unchanged when there is no workspace layer', () => {
-    const user = policy([{ id: 'u', match: { tool: 'bash' }, action: 'deny' }]);
+    const user = policy([
+      { id: 'u', match: { tool: 'execute' }, action: 'deny' },
+    ]);
     expect(mergePolicies(null, user)).toBe(user);
   });
 
   it('prepends workspace rules and keeps the USER defaults (ignores workspace defaults)', () => {
     const user: Policy = {
       defaults: { action: 'prompt', requireScope: 'approve' },
-      rules: [{ id: 'u', match: { tool: 'bash' }, action: 'deny' }],
+      rules: [{ id: 'u', match: { tool: 'execute' }, action: 'deny' }],
     };
     const workspace: Policy = {
       defaults: { action: 'allow' }, // must be ignored
-      rules: [{ id: 'w', match: { tool: 'pytest' }, action: 'allow' }],
+      rules: [{ id: 'w', match: { tool: 'execute' }, action: 'allow' }],
     };
     const merged = mergePolicies(workspace, user);
     expect(merged.rules.map((r) => r.id)).toEqual(['w', 'u']);
@@ -72,7 +74,7 @@ describe('loadLayeredPolicy', () => {
   it('no workspace file → just the user policy', async () => {
     await writeFile(
       userPath,
-      `rules:\n${rule('u', 'deny', '{ tool: bash }')}`,
+      `rules:\n${rule('u', 'deny', '{ tool: execute }')}`,
       { mode: 0o600 },
     );
     const p = await loadLayeredPolicy(userPath, workspaceCwd, warn);
@@ -83,14 +85,14 @@ describe('loadLayeredPolicy', () => {
   it('spec scenario: workspace allow + user prompt (same match) → allow with the WORKSPACE ruleId', async () => {
     await writeFile(
       userPath,
-      `rules:\n${rule('safe-tests', 'prompt', '{ tool: pytest }')}`,
+      `rules:\n${rule('safe-tests', 'prompt', '{ tool: execute }')}`,
     );
     await writeFile(
       workspaceFile,
-      `rules:\n${rule('ws-allow', 'allow', '{ tool: pytest }')}`,
+      `rules:\n${rule('ws-allow', 'allow', '{ tool: execute }')}`,
     );
     const p = await loadLayeredPolicy(userPath, workspaceCwd, warn);
-    const d = evaluate(p, { tool: 'pytest' });
+    const d = evaluate(p, { tool: 'execute' });
     expect(d.action).toBe('allow');
     expect(d.ruleId).toBe('ws-allow');
   });
@@ -98,15 +100,15 @@ describe('loadLayeredPolicy', () => {
   it('a MORE-specific user deny still beats a broad workspace allow', async () => {
     await writeFile(
       userPath,
-      `rules:\n${rule('user-deny', 'deny', "{ tool: bash, argsGlob: 'git push*' }")}`,
+      `rules:\n${rule('user-deny', 'deny', "{ tool: execute, argsGlob: 'git push*' }")}`,
     );
     await writeFile(
       workspaceFile,
-      `rules:\n${rule('ws-allow', 'allow', '{ tool: bash }')}`,
+      `rules:\n${rule('ws-allow', 'allow', '{ tool: execute }')}`,
     );
     const p = await loadLayeredPolicy(userPath, workspaceCwd, warn);
     const d = evaluate(p, {
-      tool: 'bash',
+      tool: 'execute',
       args: 'git push --force origin main',
     });
     expect(d.action).toBe('deny');
@@ -116,14 +118,14 @@ describe('loadLayeredPolicy', () => {
   it('workspace supremacy: workspace allow overrides a user deny at EQUAL specificity+priority → allow', async () => {
     await writeFile(
       userPath,
-      `rules:\n${rule('user-deny', 'deny', '{ tool: bash }')}`,
+      `rules:\n${rule('user-deny', 'deny', '{ tool: execute }')}`,
     );
     await writeFile(
       workspaceFile,
-      `rules:\n${rule('ws-allow', 'allow', '{ tool: bash }')}`,
+      `rules:\n${rule('ws-allow', 'allow', '{ tool: execute }')}`,
     );
     const p = await loadLayeredPolicy(userPath, workspaceCwd, warn);
-    const d = evaluate(p, { tool: 'bash' });
+    const d = evaluate(p, { tool: 'execute' });
     expect(d.action).toBe('allow');
     expect(d.ruleId).toBe('ws-allow');
   });
@@ -135,15 +137,15 @@ describe('loadLayeredPolicy', () => {
     // a workspace rule overrides even a more-specific user deny via priority.
     await writeFile(
       userPath,
-      `rules:\n  - id: user-deny\n    match: { tool: bash, argsGlob: 'git push*' }\n    action: deny\n`,
+      `rules:\n  - id: user-deny\n    match: { tool: execute, argsGlob: 'git push*' }\n    action: deny\n`,
     );
     await writeFile(
       workspaceFile,
-      `rules:\n  - id: ws-allow\n    match: { tool: bash }\n    action: allow\n    priority: 5\n`,
+      `rules:\n  - id: ws-allow\n    match: { tool: execute }\n    action: allow\n    priority: 5\n`,
     );
     const p = await loadLayeredPolicy(userPath, workspaceCwd, warn);
     const d = evaluate(p, {
-      tool: 'bash',
+      tool: 'execute',
       args: 'git push --force origin main',
     });
     expect(d.action).toBe('allow');
@@ -154,14 +156,14 @@ describe('loadLayeredPolicy', () => {
     // The inverse: priority lets the user protect a call the workspace would allow.
     await writeFile(
       userPath,
-      `rules:\n  - id: user-deny\n    match: { tool: bash }\n    action: deny\n    priority: 10\n`,
+      `rules:\n  - id: user-deny\n    match: { tool: execute }\n    action: deny\n    priority: 10\n`,
     );
     await writeFile(
       workspaceFile,
-      `rules:\n  - id: ws-allow\n    match: { tool: bash }\n    action: allow\n    priority: 5\n`,
+      `rules:\n  - id: ws-allow\n    match: { tool: execute }\n    action: allow\n    priority: 5\n`,
     );
     const p = await loadLayeredPolicy(userPath, workspaceCwd, warn);
-    const d = evaluate(p, { tool: 'bash' });
+    const d = evaluate(p, { tool: 'execute' });
     expect(d.action).toBe('deny');
     expect(d.ruleId).toBe('user-deny');
   });
@@ -169,12 +171,12 @@ describe('loadLayeredPolicy', () => {
   it('fail-closed: a malformed workspace file is logged + ignored; the user policy stays intact', async () => {
     await writeFile(
       userPath,
-      `rules:\n${rule('user-deny', 'deny', '{ tool: bash }')}`,
+      `rules:\n${rule('user-deny', 'deny', '{ tool: execute }')}`,
     );
     await writeFile(workspaceFile, 'rules: not-a-sequence\n');
     const p = await loadLayeredPolicy(userPath, workspaceCwd, warn);
     // Workspace ignored → the user deny still governs.
-    expect(evaluate(p, { tool: 'bash' }).ruleId).toBe('user-deny');
+    expect(evaluate(p, { tool: 'execute' }).ruleId).toBe('user-deny');
     expect(warnings.some((w) => w.includes('workspace policy.yaml'))).toBe(
       true,
     );
@@ -192,7 +194,7 @@ describe('loadLayeredPolicy', () => {
   it('strictWorkspace: a malformed workspace file THROWS (reload retains previous)', async () => {
     await writeFile(
       userPath,
-      `rules:\n${rule('user-allow', 'allow', '{ tool: bash }')}`,
+      `rules:\n${rule('user-allow', 'allow', '{ tool: execute }')}`,
     );
     await writeFile(workspaceFile, 'rules: not-a-sequence\n');
     await expect(
@@ -205,28 +207,28 @@ describe('loadLayeredPolicy', () => {
   it('strictWorkspace: an ABSENT workspace file still resolves to user-only (intended removal)', async () => {
     await writeFile(
       userPath,
-      `rules:\n${rule('user-deny', 'deny', '{ tool: bash }')}`,
+      `rules:\n${rule('user-deny', 'deny', '{ tool: execute }')}`,
     );
     // workspaceFile not written → ENOENT.
     const p = await loadLayeredPolicy(userPath, workspaceCwd, warn, {
       strictWorkspace: true,
     });
-    expect(evaluate(p, { tool: 'bash' }).ruleId).toBe('user-deny');
+    expect(evaluate(p, { tool: 'execute' }).ruleId).toBe('user-deny');
   });
 
   it('strictWorkspace: a VALID workspace file still layers normally', async () => {
     await writeFile(
       userPath,
-      `rules:\n${rule('user-prompt', 'prompt', '{ tool: bash }')}`,
+      `rules:\n${rule('user-prompt', 'prompt', '{ tool: execute }')}`,
     );
     await writeFile(
       workspaceFile,
-      `rules:\n${rule('ws-allow', 'allow', '{ tool: bash }')}`,
+      `rules:\n${rule('ws-allow', 'allow', '{ tool: execute }')}`,
     );
     const p = await loadLayeredPolicy(userPath, workspaceCwd, warn, {
       strictWorkspace: true,
     });
     // Workspace prepended → wins the equal-specificity tie.
-    expect(evaluate(p, { tool: 'bash' }).ruleId).toBe('ws-allow');
+    expect(evaluate(p, { tool: 'execute' }).ruleId).toBe('ws-allow');
   });
 });

@@ -30,6 +30,15 @@ export interface PolicyRule {
   priority?: number;
   /** Per-rule rolling-window rate limit (cycle 43): at most `count` per `windowSec`. */
   maxPerWindow?: { count: number; windowSec: number };
+  /**
+   * Set ONLY when `match.tool` was written as a tool NAME (e.g.
+   * `run_shell_command`) and normalized at load to its ACP kind (e.g.
+   * `execute`). Absent when `match.tool` was already a kind, a wildcard, or
+   * omitted. Lets `policy lint` (Task 6) warn precisely about ALLOW rules
+   * whose tool-name alias widens beyond what was written, without
+   * substring-searching the source text.
+   */
+  aliasedTool?: string;
   // Deferred (parsed, not evaluated this cycle):
   expiresAt?: unknown;
 }
@@ -49,6 +58,53 @@ export class PolicyError extends Error {
 }
 
 const ACTIONS: readonly PolicyAction[] = ['allow', 'deny', 'prompt'];
+
+/** ACP kinds a rule's `tool` may name. */
+export const POLICY_KINDS = [
+  'read',
+  'search',
+  'edit',
+  'execute',
+  'fetch',
+  'other',
+] as const;
+
+/**
+ * Tool-name → ACP kind. The permission frame carries only a kind, so a rule
+ * naming a tool is normalized to that tool's kind at load.
+ *
+ * The mapping is LOSSY and widening: `write_file` and `edit` share `edit`, so a
+ * rule naming one also matches the other. For `deny` that is safe; for `allow`
+ * it grants more than written — `policy lint` warns (Task 6).
+ */
+export const TOOL_ALIAS_TO_KIND: Record<string, string> = {
+  read_file: 'read',
+  grep_search: 'search',
+  glob: 'search',
+  list_directory: 'search',
+  ripGrep: 'search',
+  write_file: 'edit',
+  edit: 'edit',
+  run_shell_command: 'execute',
+  web_fetch: 'fetch',
+  agent: 'other',
+  task: 'other',
+  lsp: 'other',
+};
+
+export const POLICY_OPERATIONS = ['read', 'write', 'execute'] as const;
+
+function normalizeTool(raw: string, ruleRef: string): string {
+  if (raw === '*' || raw.includes('*')) return raw; // globs pass through
+  if ((POLICY_KINDS as readonly string[]).includes(raw)) return raw;
+  const mapped = TOOL_ALIAS_TO_KIND[raw];
+  if (mapped) return mapped;
+  throw new PolicyError(
+    `${ruleRef}: unknown tool '${raw}'. The permission frame carries only an ` +
+      `ACP kind, so use one of ${POLICY_KINDS.join(' | ')} (or a known tool ` +
+      `name, which is mapped to its kind).`,
+  );
+}
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
   return typeof v === 'object' && v !== null && !Array.isArray(v);
@@ -143,10 +199,49 @@ export function loadPolicy(text: string): Policy {
       );
     }
     const match = raw['match'] as Record<string, unknown>;
+
+    // Normalize a tool NAME (e.g. `run_shell_command`) to its ACP kind (e.g.
+    // `execute`) — the permission frame carries only a kind, never a tool
+    // name. Wildcards pass through untouched. Fail-closed on an unknown value.
+    let originalTool: string | undefined;
+    let normalizedTool: string | undefined;
+    if (typeof match['tool'] === 'string') {
+      originalTool = match['tool'];
+      normalizedTool = normalizeTool(originalTool, `rule[${i}]`);
+      match['tool'] = normalizedTool;
+    }
+
+    // match.operation: a single op or a list, each one of POLICY_OPERATIONS.
+    const operationRaw = match['operation'];
+    if (operationRaw !== undefined) {
+      const list = Array.isArray(operationRaw) ? operationRaw : [operationRaw];
+      for (const o of list) {
+        if (
+          typeof o !== 'string' ||
+          !(POLICY_OPERATIONS as readonly string[]).includes(o)
+        ) {
+          throw new PolicyError(
+            `rule[${i}].match.operation must be one of ` +
+              `${POLICY_OPERATIONS.join(' | ')} (or a list of them)`,
+          );
+        }
+      }
+    }
+
     const rule: PolicyRule = {
       match: match as PolicyRuleMatch,
       action: raw['action'],
     };
+    // Remember that this rule was WRITTEN as a tool-name alias (not a kind),
+    // so lint (Task 6) can warn precisely instead of substring-searching the
+    // source text.
+    if (
+      originalTool !== undefined &&
+      normalizedTool !== undefined &&
+      normalizedTool !== originalTool
+    ) {
+      rule.aliasedTool = originalTool;
+    }
     if (raw['id'] !== undefined) rule.id = String(raw['id']);
     if (raw['requireScope'] !== undefined) {
       rule.requireScope = String(raw['requireScope']);

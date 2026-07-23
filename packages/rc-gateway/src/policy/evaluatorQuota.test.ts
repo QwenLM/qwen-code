@@ -19,7 +19,7 @@ const quotaPolicy = (extra = '') =>
   loadPolicy(`
 rules:
   - id: q
-    match: { tool: bash }
+    match: { tool: execute }
     action: allow
     maxPerWindow: { count: 5, windowSec: 60 }
 ${extra}`);
@@ -28,7 +28,7 @@ describe('evaluate with a quota oracle (cycle 43)', () => {
   it('room → the rule applies with its real action (allow), not deferred', () => {
     const d = evaluate(
       quotaPolicy(),
-      { tool: 'bash', args: 'ls' },
+      { tool: 'execute', args: 'ls' },
       NOW,
       oracleOf('room'),
     );
@@ -40,7 +40,7 @@ describe('evaluate with a quota oracle (cycle 43)', () => {
   it('exhausted → the rule does NOT match → falls through to the default', () => {
     const d = evaluate(
       quotaPolicy(),
-      { tool: 'bash', args: 'ls' },
+      { tool: 'execute', args: 'ls' },
       NOW,
       oracleOf('exhausted'),
     );
@@ -53,18 +53,18 @@ describe('evaluate with a quota oracle (cycle 43)', () => {
     const policy = loadPolicy(`
 rules:
   - id: q
-    match: { tool: bash }
+    match: { tool: execute }
     action: allow
     priority: 10
     maxPerWindow: { count: 5, windowSec: 60 }
   - id: lower
-    match: { tool: bash }
+    match: { tool: execute }
     action: deny
     priority: 1
 `);
     const d = evaluate(
       policy,
-      { tool: 'bash', args: 'ls' },
+      { tool: 'execute', args: 'ls' },
       NOW,
       oracleOf('exhausted'),
     );
@@ -75,7 +75,7 @@ rules:
   it('untracked → downgrades allow to prompt', () => {
     const d = evaluate(
       quotaPolicy(),
-      { tool: 'bash', args: 'ls' },
+      { tool: 'execute', args: 'ls' },
       NOW,
       oracleOf('untracked'),
     );
@@ -86,13 +86,13 @@ rules:
   it('an id-less maxPerWindow rule + oracle still downgrades to prompt (untrackable)', () => {
     const policy = loadPolicy(`
 rules:
-  - match: { tool: bash }
+  - match: { tool: execute }
     action: allow
     maxPerWindow: { count: 5, windowSec: 60 }
 `);
     const d = evaluate(
       policy,
-      { tool: 'bash', args: 'ls' },
+      { tool: 'execute', args: 'ls' },
       NOW,
       oracleOf('room'), // oracle present, but no id → can't be tracked
     );
@@ -101,7 +101,7 @@ rules:
   });
 
   it('NO oracle → maxPerWindow still downgrades to prompt (backward compatible)', () => {
-    const d = evaluate(quotaPolicy(), { tool: 'bash', args: 'ls' }, NOW);
+    const d = evaluate(quotaPolicy(), { tool: 'execute', args: 'ls' }, NOW);
     expect(d.action).toBe('prompt');
     expect(d.usedDeferredField).toBe(true);
   });
@@ -110,12 +110,12 @@ rules:
     const policy = loadPolicy(`
 rules:
   - id: plain
-    match: { tool: bash }
+    match: { tool: execute }
     action: allow
 `);
     const d = evaluate(
       policy,
-      { tool: 'bash', args: 'ls' },
+      { tool: 'execute', args: 'ls' },
       NOW,
       oracleOf('exhausted'),
     );
@@ -127,14 +127,14 @@ rules:
     const policy = loadPolicy(`
 rules:
   - id: q
-    match: { tool: bash }
+    match: { tool: execute }
     action: allow
     expiresAt: "not-a-date"
     maxPerWindow: { count: 5, windowSec: 60 }
 `);
     const d = evaluate(
       policy,
-      { tool: 'bash', args: 'ls' },
+      { tool: 'execute', args: 'ls' },
       NOW,
       oracleOf('room'),
     );
@@ -147,14 +147,14 @@ rules:
     const policy = loadPolicy(`
 rules:
   - id: q
-    match: { tool: bash }
+    match: { tool: execute }
     action: allow
     expiresAt: "not-a-date"
     maxPerWindow: { count: 5, windowSec: 60 }
 `);
     const d = evaluate(
       policy,
-      { tool: 'bash', args: 'ls' },
+      { tool: 'execute', args: 'ls' },
       NOW,
       oracleOf('exhausted'),
     );
