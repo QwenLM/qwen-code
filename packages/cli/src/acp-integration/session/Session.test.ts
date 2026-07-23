@@ -15108,6 +15108,38 @@ describe('Session', () => {
       );
     });
 
+    it('passes the transcript call id to monitor invocations', async () => {
+      const setCallId = vi.fn();
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'monitor started',
+        returnDisplay: 'monitor started',
+      });
+      const tool = mockAllowedTool(core.ToolNames.MONITOR, execute);
+      tool.build.mockReturnValue({
+        ...tool.build(),
+        setCallId,
+      });
+      mockToolRegistry.getTool.mockReturnValue(tool);
+
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        'prompt-monitor-correlation',
+        [
+          {
+            id: 'monitor-call',
+            name: core.ToolNames.MONITOR,
+            args: { command: 'tail -f app.log' },
+          },
+        ],
+      );
+
+      expect(setCallId).toHaveBeenCalledWith('monitor-call');
+      expect(execute).toHaveBeenCalledOnce();
+      expect(setCallId.mock.invocationCallOrder[0]!).toBeLessThan(
+        execute.mock.invocationCallOrder[0]!,
+      );
+    });
+
     it('does not fail ACP tool execution when telemetry helpers throw', async () => {
       const execute = vi.fn().mockResolvedValue({
         llmContent: 'read',

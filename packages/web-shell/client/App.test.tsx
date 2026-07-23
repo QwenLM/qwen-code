@@ -4,6 +4,7 @@ import { act, createRef, type CSSProperties } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonInputAnnotation,
+  DaemonSessionMonitorTaskStatus,
   DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
 import type { WebShellApi } from './App';
@@ -138,6 +139,12 @@ const {
       forkSession: vi.fn().mockResolvedValue({ launched: false }),
       sendShellCommand: vi.fn().mockResolvedValue(undefined),
       getStats: vi.fn().mockResolvedValue({}),
+      getTasks: vi.fn().mockResolvedValue({
+        v: 1,
+        sessionId: 'session-1',
+        now: 1,
+        tasks: [],
+      }),
       loadArtifacts: vi.fn().mockResolvedValue({ artifacts: [] }),
       loadSession: vi.fn().mockResolvedValue(undefined),
       reloadSession: vi.fn().mockResolvedValue(undefined),
@@ -198,6 +205,17 @@ const {
       latestAddWorkspaceDialogProps: null as AddWorkspaceDialogTestProps | null,
       latestToolApprovalKeyboardActive: null as boolean | null,
       latestAskUserQuestionKeyboardActive: null as boolean | null,
+      latestBackgroundTasksRefreshTrigger: null as number | null,
+      latestMonitorDetailsOnOpen: null as
+        | ((tool: {
+            callId: string;
+            toolName: string;
+            status: 'completed';
+          }) => Promise<boolean>)
+        | null,
+      latestTasksStatusProps: null as {
+        onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
+      } | null,
       latestScheduledTasksProps: null as {
         onRunPrompt?: (
           prompt: string,
@@ -286,7 +304,15 @@ vi.mock('./hooks/useMessages', () => ({
 }));
 
 vi.mock('./hooks/useBackgroundTasks', () => ({
-  useBackgroundTasks: () => [],
+  useBackgroundTasks: (
+    _sessionId: string | undefined,
+    _taskActivityKey: string,
+    _connected: boolean,
+    refreshTrigger = 0,
+  ) => {
+    testState.latestBackgroundTasksRefreshTrigger = refreshTrigger;
+    return [];
+  },
 }));
 
 vi.mock('./hooks/useAnimationFrameValue', () => ({
@@ -871,11 +897,39 @@ vi.doMock('./components/messages/AskUserQuestion', async () => {
     },
   };
 });
-mockComponent('./components/messages/TasksStatusMessage', 'TasksStatusMessage');
+vi.doMock('./components/messages/TasksStatusMessage', async () => {
+  const React = await import('react');
+  return {
+    TasksStatusMessage: (props: {
+      onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
+    }) => {
+      testState.latestTasksStatusProps = props;
+      return React.createElement('div');
+    },
+    MonitorTaskDetail: () => React.createElement('div'),
+  };
+});
+vi.doMock('./monitorDetailsContext', async () => {
+  const React = await import('react');
+  return {
+    MonitorDetailsProvider: (props: {
+      onOpen: (tool: {
+        callId: string;
+        toolName: string;
+        status: 'completed';
+      }) => Promise<boolean>;
+      children: React.ReactNode;
+    }) => {
+      testState.latestMonitorDetailsOnOpen = props.onOpen;
+      return React.createElement(React.Fragment, null, props.children);
+    },
+  };
+});
 mockComponent('./components/messages/BtwMessage', 'BtwMessage');
 mockComponent('./components/QueuedPromptDisplay', 'QueuedPromptDisplay');
 
-const { App, getBackgroundTaskActivityKey } = await import('./App');
+const { App, getBackgroundTaskActivityKey, mergeMonitorTaskSnapshot } =
+  await import('./App');
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -884,7 +938,7 @@ const { App, getBackgroundTaskActivityKey } = await import('./App');
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 
 describe('background task activity key', () => {
-  it('includes background shells and excludes background agents', () => {
+  it('includes background shells and monitors but excludes background agents', () => {
     const messages = [
       {
         id: 'tools',
@@ -902,13 +956,213 @@ describe('background task activity key', () => {
             status: 'pending',
             args: { run_in_background: true },
           },
+          {
+            callId: 'monitor-call',
+            toolName: 'monitor',
+            status: 'completed',
+            args: {},
+          },
         ],
       },
     ] satisfies Message[];
 
     expect(getBackgroundTaskActivityKey(messages)).toBe(
-      'shell-call:in_progress',
+      'shell-call:in_progress|monitor-call:completed',
     );
+  });
+
+  it('does not regress a terminal monitor to a stale running snapshot', () => {
+    const running: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-1',
+      label: 'monitor-label',
+      description: 'watch server log',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 5_000,
+      command: 'tail -f server.log',
+      eventCount: 3,
+      lastEventTime: 5_000,
+      droppedLines: 0,
+    };
+    const cancelled: DaemonSessionMonitorTaskStatus = {
+      ...running,
+      status: 'cancelled',
+      endTime: 6_000,
+    };
+
+    expect(mergeMonitorTaskSnapshot(cancelled, running)).toBe(cancelled);
+    expect(mergeMonitorTaskSnapshot(running, cancelled)).toBe(cancelled);
+  });
+
+  it('keeps the legacy inline behavior when monitor correlation is unsupported', async () => {
+    renderApp();
+    await flush();
+
+    expect(testState.latestMonitorDetailsOnOpen).toBeNull();
+    expect(mockSessionActions.getTasks).not.toHaveBeenCalled();
+  });
+
+  it('restarts shared task polling when a monitor opens from the task dialog', async () => {
+    const task: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-1',
+      label: 'monitor-label',
+      description: 'watch server log',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 5_000,
+      command: 'tail -f server.log',
+      eventCount: 3,
+      lastEventTime: 5_000,
+      droppedLines: 0,
+    };
+    mockSessionActions.getTasks.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      now: 6_000,
+      tasks: [task],
+    });
+    const { container } = renderApp();
+    await flush();
+    expect(testState.latestBackgroundTasksRefreshTrigger).toBe(0);
+
+    testState.prompt = '/tasks';
+    await clickSubmit(container);
+    await flush();
+    expect(testState.latestTasksStatusProps?.onOpenMonitor).toBeTypeOf(
+      'function',
+    );
+
+    act(() => {
+      testState.latestTasksStatusProps?.onOpenMonitor?.(task);
+    });
+
+    expect(testState.latestBackgroundTasksRefreshTrigger).toBe(1);
+  });
+
+  it('opens a monitor tool from the transcript in the right panel', async () => {
+    const task: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-1',
+      label: 'monitor-label',
+      description: 'watch server log',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 5_000,
+      command: 'tail -f server.log',
+      eventCount: 3,
+      lastEventTime: 5_000,
+      droppedLines: 0,
+      toolUseId: 'monitor-call',
+    };
+    mockSessionActions.getTasks.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      now: 6_000,
+      tasks: [task],
+    });
+    mockConnection.capabilities.features = ['session_monitor_tool_correlation'];
+    const { container } = renderApp();
+    await flush();
+    expect(testState.latestMonitorDetailsOnOpen).toBeTypeOf('function');
+
+    let opened = false;
+    await act(async () => {
+      opened =
+        (await testState.latestMonitorDetailsOnOpen?.({
+          callId: 'monitor-call',
+          toolName: 'monitor',
+          status: 'completed',
+        })) ?? false;
+    });
+    await flush();
+
+    expect(opened).toBe(true);
+    expect(mockSessionActions.getTasks).toHaveBeenCalled();
+    expect(
+      container.querySelector('button[title="watch server log"]'),
+    ).not.toBeNull();
+    expect(testState.latestBackgroundTasksRefreshTrigger).toBe(1);
+  });
+
+  it('returns to inline behavior when a capable daemon has no matching task', async () => {
+    mockConnection.capabilities.features = ['session_monitor_tool_correlation'];
+    renderApp();
+    await flush();
+
+    let opened = true;
+    await act(async () => {
+      opened =
+        (await testState.latestMonitorDetailsOnOpen?.({
+          callId: 'monitor-call',
+          toolName: 'monitor',
+          status: 'completed',
+        })) ?? true;
+    });
+
+    expect(opened).toBe(false);
+    expect(mockSessionActions.getTasks).toHaveBeenCalled();
+  });
+
+  it('ignores a monitor task response after switching sessions', async () => {
+    let resolveTasks:
+      | ((snapshot: {
+          v: 1;
+          sessionId: string;
+          now: number;
+          tasks: DaemonSessionMonitorTaskStatus[];
+        }) => void)
+      | undefined;
+    mockSessionActions.getTasks.mockReturnValue(
+      new Promise((resolve) => {
+        resolveTasks = resolve;
+      }),
+    );
+    mockConnection.capabilities.features = ['session_monitor_tool_correlation'];
+    const { container, rerender } = renderApp();
+    await flush();
+    const openMonitor = testState.latestMonitorDetailsOnOpen;
+    expect(openMonitor).toBeTypeOf('function');
+
+    const openedPromise = openMonitor?.({
+      callId: 'monitor-call',
+      toolName: 'monitor',
+      status: 'completed',
+    });
+    mockConnection.sessionId = 'session-2';
+    rerender();
+    await flush();
+
+    await act(async () => {
+      resolveTasks?.({
+        v: 1,
+        sessionId: 'session-1',
+        now: 6_000,
+        tasks: [
+          {
+            kind: 'monitor',
+            id: 'monitor-1',
+            label: 'monitor-label',
+            description: 'watch old session',
+            status: 'running',
+            startTime: 1_000,
+            runtimeMs: 5_000,
+            command: 'tail -f old.log',
+            eventCount: 3,
+            lastEventTime: 5_000,
+            droppedLines: 0,
+            toolUseId: 'monitor-call',
+          },
+        ],
+      });
+      expect(await openedPromise).toBe(false);
+    });
+
+    expect(
+      container.querySelector('button[title="watch old session"]'),
+    ).toBeNull();
+    expect(testState.latestBackgroundTasksRefreshTrigger).toBe(0);
   });
 });
 
@@ -1025,6 +1279,10 @@ beforeEach(() => {
   mockConnection.skills = [];
   mockConnection.loadingTranscript = false;
   mockConnection.catchingUp = false;
+  mockConnection.capabilities = {
+    qwenCodeVersion: '1.2.3',
+    features: [],
+  };
   mockConnection.gitBranch = undefined;
   mockConnection.gitStatus = undefined;
   mockWorkspace.capabilities = {
@@ -1045,6 +1303,9 @@ beforeEach(() => {
   testState.latestAddWorkspaceDialogProps = null;
   testState.latestToolApprovalKeyboardActive = null;
   testState.latestAskUserQuestionKeyboardActive = null;
+  testState.latestBackgroundTasksRefreshTrigger = null;
+  testState.latestMonitorDetailsOnOpen = null;
+  testState.latestTasksStatusProps = null;
   testState.latestScheduledTasksProps = null;
   testState.latestGoalsProps = null;
   sidebarTokens.length = 0;
@@ -1078,6 +1339,12 @@ beforeEach(() => {
   mockSessionActions.forkSession.mockResolvedValue({ launched: false });
   mockSessionActions.sendShellCommand.mockResolvedValue(undefined);
   mockSessionActions.getStats.mockResolvedValue({});
+  mockSessionActions.getTasks.mockResolvedValue({
+    v: 1,
+    sessionId: 'session-1',
+    now: 1,
+    tasks: [],
+  });
   mockSessionActions.loadSession.mockResolvedValue(undefined);
   mockStore.reset.mockClear();
   mockStore.dispatch.mockClear();
