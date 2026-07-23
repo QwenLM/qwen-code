@@ -1730,7 +1730,7 @@ jobs:
           if [[ -n "${MAIN_HEAD}" ]]; then
             MAIN_GREEN_CHECKS="$(gh api --paginate "repos/${REPO}/commits/${MAIN_HEAD}/check-runs" \
               --jq '[.check_runs[] | select(.conclusion == "success") | .name]' 2> /dev/null \
-              | jq -c -s 'add // []' || echo '[]')"
+              | jq -c -s 'add // []')" || MAIN_GREEN_CHECKS='[]'
           fi
 
           # PRs whose review-address is already RUNNING OR QUEUED in any live
