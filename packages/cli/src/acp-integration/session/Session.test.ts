@@ -780,6 +780,32 @@ describe('Session', () => {
     });
   });
 
+  it('cancels an admitted call without cancelling a background turn', async () => {
+    let releaseAdmission!: () => void;
+    const admission = new Promise<void>((resolve) => {
+      releaseAdmission = resolve;
+    });
+    mockConfig.assertCanStartTurn = vi.fn().mockReturnValue(admission);
+    const cancellation = new AbortController();
+
+    const prompt = session.prompt(
+      {
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      },
+      undefined,
+      cancellation.signal,
+    );
+    await vi.waitFor(() =>
+      expect(mockConfig.assertCanStartTurn).toHaveBeenCalledOnce(),
+    );
+    cancellation.abort();
+    releaseAdmission();
+
+    await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+    expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+  });
+
   it('pins durable cron startup, prompt restart, and stop to the session runtime', async () => {
     const runtimeDir = path.resolve('runtime', 'cron-session');
     const observedStarts: string[] = [];
@@ -16481,6 +16507,54 @@ describe('Session', () => {
         prompt: [{ type: 'text', text: 'finish everything' }],
       });
     }
+
+    it('cleans up an admitted retry cancelled during previous-turn drain', async () => {
+      rebuildSessionWithGuard();
+      let releasePreviousTurn!: () => void;
+      const previousTurn = new Promise<void>((resolve) => {
+        releasePreviousTurn = resolve;
+      });
+      const cancellation = new AbortController();
+      const internals = session as unknown as {
+        pendingPrompt: AbortController | null;
+        pendingPromptCompletion: Promise<void> | null;
+        todoStopGuard: {
+          hasTrustedUnfinishedState: boolean;
+          isHardSuspended: boolean;
+          observeTodoWrite(resultDisplay: unknown, allowArm: boolean): boolean;
+        };
+      };
+      internals.todoStopGuard.observeTodoWrite(
+        { type: 'todo_list', todos: pendingTodos },
+        true,
+      );
+      expect(internals.todoStopGuard.hasTrustedUnfinishedState).toBe(true);
+      internals.pendingPromptCompletion = previousTurn;
+
+      const prompt = session.prompt(
+        {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'retry after cancellation' }],
+          _meta: { 'qwen.daemon.retry': true },
+        } as Parameters<typeof session.prompt>[0],
+        undefined,
+        cancellation.signal,
+      );
+      await vi.waitFor(() => {
+        expect(internals.pendingPrompt).not.toBeNull();
+        expect(internals.todoStopGuard.isHardSuspended).toBe(false);
+      });
+
+      cancellation.abort();
+      releasePreviousTurn();
+
+      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      expect(internals.pendingPrompt).toBeNull();
+      expect(internals.todoStopGuard.isHardSuspended).toBe(true);
+      await expect(session.cancelPendingPrompt()).rejects.toThrow(
+        'Not currently generating',
+      );
+    });
 
     function createDeferredAbortStream() {
       let markStarted!: () => void;
