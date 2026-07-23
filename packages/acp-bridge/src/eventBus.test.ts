@@ -550,7 +550,7 @@ describe('EventBus', () => {
     abort.abort();
   });
 
-  it('does not size events that are delivered directly to a waiting subscriber', async () => {
+  it('rejects an unserializable event without throwing, even with a waiting subscriber', async () => {
     const bus = new EventBus(100, undefined, undefined, {
       maxQueuedBytes: 1,
     });
@@ -561,16 +561,21 @@ describe('EventBus', () => {
     const circular: Record<string, unknown> = {};
     circular['self'] = circular;
 
+    // never-throws holds; the circular event is rejected at the
+    // serializability gate (DAEMON-011) instead of being delivered
+    // with a fake 0-byte weight.
     expect(() => bus.publish({ type: 'foo', data: circular })).not.toThrow();
+    expect(bus.publish({ type: 'foo', data: 'tail' })?.id).toBe(1);
 
     const delivered = await next;
     expect(delivered.done).toBe(false);
-    expect(delivered.value.type).toBe('foo');
+    expect(delivered.value.data).toBe('tail');
+    expect(bus.subscriberCount).toBe(1);
     await it.return?.();
     abort.abort();
   });
 
-  it('does not poison queued bytes when buffered event sizing fails', async () => {
+  it('rejects a buffered unserializable event and keeps the queue healthy', async () => {
     const bus = new EventBus(100, undefined, undefined, {
       maxQueuedBytes: 256,
     });
@@ -593,13 +598,12 @@ describe('EventBus', () => {
       });
     }).not.toThrow();
 
+    // The unserializable event is rejected at the gate (DAEMON-011);
+    // only the healthy tail event reaches the buffered queue.
     const first = await it.next();
-    const second = await it.next();
     expect(first.done).toBe(false);
-    expect(first.value.type).toBe('foo');
-    expect(second.done).toBe(false);
-    expect(second.value.type).toBe('foo');
-    expect(second.value.data).toBe('tail');
+    expect(first.value.data).toBe('tail');
+    expect(first.value.id).toBe(1);
     expect(process.stderr.write).toHaveBeenCalledWith(
       expect.stringContaining(
         'qwen serve: EventBus event sizing failed {"type":"foo"}',
@@ -1207,6 +1211,68 @@ describe('EventBus', () => {
       expect(out[0]?.type).toBe('foo');
       expect(out.some((e) => e.type === 'state_resync_required')).toBe(false);
       abort.abort();
+    });
+  });
+
+  describe('serializability gate (DAEMON-011)', () => {
+    it('rejects an unserializable event without burning an id', async () => {
+      const bus = new EventBus();
+      const abort = new AbortController();
+      const iter = bus.subscribe({ signal: abort.signal });
+
+      const ok1 = bus.publish({ type: 'foo', data: 1 });
+      const rejected = bus.publish({
+        type: 'bad',
+        data: { big: BigInt(1) },
+      });
+      const ok2 = bus.publish({ type: 'foo', data: 2 });
+
+      expect(ok1?.id).toBe(1);
+      expect(rejected).toBeUndefined();
+      // The rejected event must not burn an id — a gap would be misread
+      // as ring eviction by resume logic.
+      expect(ok2?.id).toBe(2);
+      expect(process.stderr.write).toHaveBeenCalledWith(
+        expect.stringContaining('EventBus event sizing failed'),
+      );
+
+      // Live fanout skips the rejected event entirely.
+      const collected = await collect(iter, 2);
+      expect(collected.map((e) => e.data)).toEqual([1, 2]);
+      abort.abort();
+
+      // Replay (ring) never saw it either.
+      const replayAbort = new AbortController();
+      const replayed = await collect(
+        bus.subscribe({ lastEventId: 0, signal: replayAbort.signal }),
+        3,
+      );
+      expect(replayed.map((e) => e.type)).toEqual([
+        'foo',
+        'foo',
+        'replay_complete',
+      ]);
+      replayAbort.abort();
+    });
+
+    it('does not ingest a rejected event into the compaction engine', () => {
+      const ingested: BridgeEvent[] = [];
+      const engine = {
+        ingest(event: BridgeEvent) {
+          ingested.push(event);
+        },
+        seedReplayEvents() {},
+        snapshot() {
+          return { compactedTurns: [], liveJournal: [], lastEventId: 0 };
+        },
+        close() {},
+      };
+      const bus = new EventBus(100, undefined, engine);
+
+      bus.publish({ type: 'ok', data: 1 });
+      bus.publish({ type: 'bad', data: { big: BigInt(1) } });
+
+      expect(ingested.map((e) => e.type)).toEqual(['ok']);
     });
   });
 

@@ -445,7 +445,10 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
   private addReplaySegment(events: BridgeEvent[], turnCount: number): void {
     if (events.length === 0) return;
     const bytes = events.reduce(
-      (sum, event) => sum + serializedBridgeEventByteLength(event),
+      // Compacted events are folded from events that already passed the
+      // publish-time serializability gate, so sizing here cannot fail in
+      // practice; `?? 0` keeps the sum total-ordered if it ever does.
+      (sum, event) => sum + (serializedBridgeEventByteLength(event) ?? 0),
       0,
     );
     this.replaySegments.push({ events: events.slice(), bytes, turnCount });

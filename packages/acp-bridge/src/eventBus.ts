@@ -35,7 +35,13 @@ export interface SessionReplaySnapshot {
 }
 
 export interface CompactionEngine {
-  ingest(event: BridgeEvent): void;
+  /**
+   * `byteLength` is the serialized size the bus already computed for the
+   * event (publish's eager sizing gate) so implementations that track
+   * byte budgets don't have to re-stringify. Optional — seeding paths
+   * and older callers may omit it and implementations self-compute.
+   */
+  ingest(event: BridgeEvent, byteLength?: number): void;
   seedReplayEvents(events: BridgeEvent[]): void;
   snapshot(): SessionReplaySnapshot;
   close(): void;
@@ -161,14 +167,20 @@ function normalizeMaxQueuedBytes(value: number | undefined): number {
   return value;
 }
 
-export function serializedBridgeEventByteLength(event: BridgeEvent): number {
+export function serializedBridgeEventByteLength(
+  event: BridgeEvent,
+): number | undefined {
   try {
     const serialized = JSON.stringify(event);
-    if (serialized === undefined) return 0;
+    // `undefined` (a bare non-JSON value) and throws (BigInt, circular
+    // references) both mean the event cannot survive the SSE wire —
+    // report that to the caller instead of pretending it weighs 0 bytes
+    // (which let unserializable events bypass every byte cap and then
+    // fail at send time — DAEMON-011).
+    if (serialized === undefined) return undefined;
     return Buffer.byteLength(serialized, 'utf8');
   } catch {
-    logEventSizingFailed(event.type);
-    return 0;
+    return undefined;
   }
 }
 
@@ -391,7 +403,11 @@ export class EventBus {
     if (this.closed) return undefined;
     const existingMeta = input._meta;
     const event: BridgeEvent = {
-      id: this.nextId++,
+      // Read WITHOUT incrementing: a rejected event must not burn an id —
+      // other subscribers would see a sequence gap (3 → 5) that resume
+      // logic misreads as ring eviction. `nextId` advances only after the
+      // event has passed the serializability gate below.
+      id: this.nextId,
       v: EVENT_SCHEMA_VERSION,
       ...input,
       _meta: {
@@ -399,9 +415,23 @@ export class EventBus {
         serverTimestamp: getServerTimestamp(existingMeta),
       },
     };
+    // Eager sizing doubles as the serializability gate (DAEMON-011): an
+    // event JSON.stringify cannot represent would bypass every byte cap
+    // at weight 0 and then fail at SSE send time anyway. Reject it here —
+    // no ring entry, no compaction ingest, no fanout — so "in the ring"
+    // implies "serializable" for the replay and journal byte accounting.
+    // The SSE route stringifies every delivered frame regardless, so this
+    // only moves that cost earlier (once per publish, memoized for all
+    // subscribers).
+    const eventBytes = serializedBridgeEventByteLength(event);
+    if (eventBytes === undefined) {
+      logEventSizingFailed(event.type);
+      return undefined;
+    }
+    this.nextId += 1;
     this.ring.push(event);
     try {
-      this.compactionEngine?.ingest(event);
+      this.compactionEngine?.ingest(event, eventBytes);
     } catch (err) {
       // CompactionEngine is best-effort; a throw must not break the
       // publish() never-throws contract (never-throws). Mark the snapshot
@@ -416,11 +446,7 @@ export class EventBus {
     // profiling actually flags it, or the operator bumps
     // `--event-ring-size` to an order of magnitude larger.
     if (this.ring.length > this.ringSize) this.ring.shift();
-    let eventBytes: number | undefined;
-    const getEventBytes = () => {
-      eventBytes ??= serializedBridgeEventByteLength(event);
-      return eventBytes;
-    };
+    const getEventBytes = () => eventBytes;
     // Snapshot the subscribers so an in-loop `this.subs.delete(sub)`
     // (the new immediate-eviction cleanup below) doesn't mutate the
     // Set we're iterating.
