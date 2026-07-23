@@ -134,6 +134,7 @@ import { RewindDialog } from './components/dialogs/RewindDialog';
 import { AddWorkspaceDialog } from './components/dialogs/AddWorkspaceDialog';
 import { Button } from './components/ui/button';
 import {
+  isPluginShadowPanel,
   installWebShellShadowStyles,
   resolveWebShellShadowDom,
   type WebShellShadowDom,
@@ -7189,7 +7190,32 @@ export function App({
                     </div>
                   )}
                   <div className={styles.panelBody} key={activePanel}>
-                    {activePanel === 'settings' ? (
+                    <ShadowDomBoundary
+                      enabled={
+                        shadowDomOptions.plugins &&
+                        isPluginShadowPanel(activePanel)
+                      }
+                      language={selectedLanguage}
+                      themeClassName={[
+                        selectedTheme === WebShellThemeId.Light
+                          ? styles.themeLight
+                          : styles.themeDark,
+                        selectedTheme === WebShellThemeId.Dark
+                          ? 'dark'
+                          : undefined,
+                      ]
+                        .filter(Boolean)
+                        .join(' ')}
+                      styles={shadowDomOptions.styles}
+                      initialFocusRef={
+                        activePanel === 'plugins'
+                          ? pluginTabRef
+                          : activePanel === 'extensions'
+                            ? panelHeadingRef
+                            : undefined
+                      }
+                    >
+                      {activePanel === 'settings' ? (
                       <SettingsMessage
                         settingsState={workspaceSettingsState}
                         embedded
@@ -7277,37 +7303,20 @@ export function App({
                         onUseSkill={handleUseSkill}
                       />
                     ) : activePanel === 'plugins' ? (
-                      <ShadowDomBoundary
-                        enabled={shadowDomOptions.plugins}
-                        language={selectedLanguage}
-                        themeClassName={[
-                          selectedTheme === WebShellThemeId.Light
-                            ? styles.themeLight
-                            : styles.themeDark,
-                          selectedTheme === WebShellThemeId.Dark
-                            ? 'dark'
-                            : undefined,
-                        ]
-                          .filter(Boolean)
-                          .join(' ')}
-                        styles={shadowDomOptions.styles}
+                      <PluginManagerPage
+                        mcpMessage={mcpDialogMessage}
+                        loadMcpMessage={async () => {
+                          try {
+                            await loadMcpManagerMessage();
+                          } catch (error) {
+                            reportError(error, 'Failed to load MCP status');
+                            throw error;
+                          }
+                        }}
+                        onClose={closePanel}
+                        onUseSkill={handleUseSkill}
                         initialFocusRef={pluginTabRef}
-                      >
-                        <PluginManagerPage
-                          mcpMessage={mcpDialogMessage}
-                          loadMcpMessage={async () => {
-                            try {
-                              await loadMcpManagerMessage();
-                            } catch (error) {
-                              reportError(error, 'Failed to load MCP status');
-                              throw error;
-                            }
-                          }}
-                          onClose={closePanel}
-                          onUseSkill={handleUseSkill}
-                          initialFocusRef={pluginTabRef}
-                        />
-                      </ShadowDomBoundary>
+                      />
                     ) : (
                       <SessionOverviewPanel
                         onOpenSession={handleOpenSessionFromOverview}
@@ -7316,6 +7325,7 @@ export function App({
                         workspaceCwd={lockedWorkspaceCwd}
                       />
                     )}
+                    </ShadowDomBoundary>
                   </div>
                 </section>
               )}
