@@ -252,10 +252,48 @@ describe('SessionReferenceService', () => {
     );
     const res = await svc.resolve('s1', { title: 'Test' });
     if ('notFound' in res) throw new Error('unexpected');
-    // approxTokens must account for the header + omission marker overhead,
-    // not just the body lines.
+    // approxTokens must account for the header overhead, not just the body.
     const bodyOnly = svc['estimate'](['User: hello']);
     expect(res.meta.approxTokens).toBeGreaterThan(bodyOnly);
+  });
+
+  it('excludes omission marker cost from approxTokens when not truncated', async () => {
+    const svc = makeSvc(
+      fakeResumed([
+        {
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+        },
+      ]),
+    );
+    const res = await svc.resolve('s1', { title: 'Test' });
+    if ('notFound' in res) throw new Error('unexpected');
+    expect(res.truncated).toBe(false);
+    const header = '--- Referenced session "Test" (slimmed, read-only) ---';
+    const expected =
+      svc['estimate'](['User: hello']) + svc['estimate']([header]);
+    expect(res.meta.approxTokens).toBe(expected);
+  });
+
+  it('includes omission marker cost in approxTokens when truncated', async () => {
+    const many = Array.from({ length: 50 }, (_, i) => ({
+      type: 'user',
+      message: {
+        role: 'user',
+        parts: [{ text: `turn ${i} ` + 'x'.repeat(400) }],
+      },
+    }));
+    const svc = makeSvc(fakeResumed(many));
+    const res = await svc.resolve('s1', { budgetTokens: 200, title: 's1' });
+    if ('notFound' in res) throw new Error('unexpected');
+    expect(res.truncated).toBe(true);
+    const header = '--- Referenced session "s1" (slimmed, read-only) ---';
+    const overhead = svc['estimate']([header, '[earlier turns omitted]']);
+    const kept = res.text
+      .replace(header + '\n', '')
+      .replace('[earlier turns omitted]\n', '')
+      .split('\n');
+    expect(res.meta.approxTokens).toBe(svc['estimate'](kept) + overhead);
   });
 });
 

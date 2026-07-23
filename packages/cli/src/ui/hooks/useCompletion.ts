@@ -115,6 +115,11 @@ export function useCompletion(
         ? suggestions.length - 1
         : prev,
     );
+    setVisibleStartIndex((prev) =>
+      prev >= suggestions.length
+        ? Math.max(0, suggestions.length - MAX_SUGGESTIONS_TO_SHOW)
+        : prev,
+    );
   }, [suggestions.length]);
 
   const switchCategory = useCallback(

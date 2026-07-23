@@ -337,5 +337,26 @@ describe('useCompletion', () => {
       });
       expect(result.current.activeSuggestionIndex).toBe(0);
     });
+
+    it('clamps visibleStartIndex when the suggestion list shrinks', () => {
+      const { result } = renderHook(() => useCompletion());
+      const many = Array.from({ length: 12 }, (_, i) => ({
+        label: `f${i}`,
+        value: `f${i}`,
+        category: 'file' as const,
+      }));
+      act(() => {
+        result.current.setSuggestions(many);
+        result.current.setVisibleStartIndex(8);
+        result.current.setActiveSuggestionIndex(10);
+      });
+      expect(result.current.visibleStartIndex).toBe(8);
+
+      act(() => {
+        result.current.setSuggestions(many.slice(0, 2));
+      });
+      expect(result.current.activeSuggestionIndex).toBe(1);
+      expect(result.current.visibleStartIndex).toBe(0);
+    });
   });
 });

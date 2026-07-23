@@ -111,7 +111,9 @@ export class SessionReferenceService {
         sessionId,
         title,
         messageCount: records.length,
-        approxTokens: this.estimate(kept) + overhead,
+        approxTokens:
+          this.estimate(kept) +
+          (truncated ? overhead : this.estimate([header])),
       },
       truncated,
     };

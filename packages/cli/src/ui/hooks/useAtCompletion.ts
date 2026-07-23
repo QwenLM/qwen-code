@@ -448,6 +448,8 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
       // the disk listing never delays the file-search loading timer below;
       // awaited only when assembling the final payload. A listing failure
       // yields [] so it never blocks file/MCP/extension completion.
+      // Merge order invariant: sessions are always appended LAST in every
+      // SEARCH_SUCCESS dispatch path (mcp → file → session).
       const sessionPromise = getSessionSuggestions(cwd, state.pattern);
 
       if (!fileSearch.current) {
