@@ -814,10 +814,17 @@ export interface ServeWorkspaceAgentSummary {
   isBuiltin: boolean;
   /** Whether this agent restricts the tool set via `tools:` frontmatter. */
   hasTools: boolean;
+  tools?: string[];
+  disallowedTools?: string[];
   model?: string;
   color?: string;
   background?: boolean;
   approvalMode?: string;
+  permissionMode?: string;
+  maxTurns?: number;
+  mcpServerNames?: string[];
+  hookEvents?: string[];
+  runConfig?: { max_time_minutes?: number; max_turns?: number };
   extensionName?: string;
   /** Absolute path to the file backing this agent (or sentinel for built-ins). */
   filePath?: string;
@@ -825,9 +832,8 @@ export interface ServeWorkspaceAgentSummary {
 
 export interface ServeWorkspaceAgentDetail extends ServeWorkspaceAgentSummary {
   systemPrompt: string;
-  tools?: string[];
-  disallowedTools?: string[];
-  runConfig?: { max_time_minutes?: number; max_turns?: number };
+  mcpServers?: Record<string, unknown>;
+  hooks?: Record<string, unknown>;
 }
 
 export interface ServeWorkspaceAgentsStatus {

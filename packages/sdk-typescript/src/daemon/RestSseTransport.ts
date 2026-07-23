@@ -98,6 +98,13 @@ export class RestSseTransport implements DaemonTransport {
       }
       if (opts.lastEventId !== undefined) {
         headers['Last-Event-ID'] = String(opts.lastEventId);
+        // Pair the resume cursor with the epoch of the bus that produced
+        // it so a restarted daemon (new epoch) forces a resync instead of
+        // resuming from a stale cursor (DAEMON-001). Meaningless without
+        // a cursor, hence nested.
+        if (opts.epoch !== undefined) {
+          headers['X-Qwen-Event-Epoch'] = opts.epoch;
+        }
       }
 
       const fetchSignal = opts.signal
@@ -180,6 +187,13 @@ export class RestSseTransport implements DaemonTransport {
 
       if (!res.body) {
         throw new Error('No SSE body');
+      }
+
+      // Learn the daemon's current bus epoch so the caller can pair it
+      // with its resume cursor on the next reconnect (DAEMON-001).
+      const responseEpoch = res.headers.get('x-qwen-event-epoch');
+      if (responseEpoch) {
+        opts.onEpoch?.(responseEpoch);
       }
 
       yield* parseSseStream(res.body, fetchSignal);
