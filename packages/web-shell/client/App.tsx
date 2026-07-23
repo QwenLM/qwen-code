@@ -259,6 +259,7 @@ import {
   type ComposerToolbarEndRenderer,
   type ComposerToolbarRightRenderer,
   type ComposerHeaderRenderer,
+  type ChatHeaderRenderer,
   type FooterRenderer,
   type LoadingPhrasesResolver,
   type MarkdownTableMode,
@@ -608,6 +609,11 @@ export interface WebShellProps {
   renderComposerToolbarRight?: ComposerToolbarRightRenderer;
   /** Custom renderer shown directly above the chat composer input. */
   renderComposerHeader?: ComposerHeaderRenderer;
+  /**
+   * Custom renderer shown at the top of the chat view, above the message list.
+   * Only rendered when a session is active (not in the welcome/empty state).
+   */
+  renderChatHeader?: ChatHeaderRenderer;
   /** Custom component for the footer area below the Editor. Replaces the built-in StatusBar. */
   renderFooter?: FooterRenderer;
   /** Extra status items shown in the floating bottom panel beside the TODO summary. */
@@ -1082,6 +1088,7 @@ export function App({
   renderComposerToolbarEnd,
   renderComposerToolbarRight,
   renderComposerHeader,
+  renderChatHeader,
   renderFooter,
   bottomStatusItems,
   chatMaxWidth,
@@ -7729,14 +7736,27 @@ export function App({
                                 </div>
                               );
                             }
+                            const chatHeader =
+                              !isChatEmptyState && renderChatHeader ? (
+                                <div className={styles.chatHeader}>
+                                  {renderChatHeader({
+                                    sessionId: connection.sessionId,
+                                    sessionName: sessionDisplayName,
+                                    workspaceCwd: connection.workspaceCwd,
+                                  })}
+                                </div>
+                              ) : null;
                             return (
-                              <div
-                                style={contentStyle}
-                                className={contentClassName}
-                              >
-                                {messageList}
-                                {btwPanel}
-                              </div>
+                              <>
+                                {chatHeader}
+                                <div
+                                  style={contentStyle}
+                                  className={contentClassName}
+                                >
+                                  {messageList}
+                                  {btwPanel}
+                                </div>
+                              </>
                             );
                           })()}
                         </InteractionBlockContext.Provider>
