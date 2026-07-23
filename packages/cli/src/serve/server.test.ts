@@ -428,6 +428,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_mcp_restart' &&
       f !== 'session_recap' &&
       f !== 'session_generation' &&
+      f !== 'workspace_generation' &&
       f !== 'session_btw' &&
       f !== 'auth_device_flow' &&
       f !== 'permission_mediation' &&
@@ -457,6 +458,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_mcp_restart',
   'session_recap',
   'session_generation',
+  'workspace_generation',
   'session_btw',
   'session_shell_command',
   'mcp_workspace_pool',
@@ -2404,6 +2406,22 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'workspace_generation') {
+          expect(predicate({ workspaceGenerationAvailable: true })).toBe(true);
+          expect(predicate({ workspaceGenerationAvailable: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              workspaceGenerationAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'workspace_reload') {
           expect(predicate({ reloadAvailable: true })).toBe(true);
           expect(predicate({ reloadAvailable: false })).toBe(false);
@@ -3070,6 +3088,25 @@ describe('createServeApp', () => {
       expect(unsupported.body.features).not.toContain('session_generation');
     });
 
+    it('advertises workspace generation only when the primary bridge supports it', async () => {
+      const supportedBridge = fakeBridge();
+      supportedBridge.generateWorkspaceContent = async function* () {};
+      const supported = await request(
+        createServeApp(baseOpts, undefined, { bridge: supportedBridge }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(supported.body.features).toContain('workspace_generation');
+
+      delete supportedBridge.generateWorkspaceContent;
+      const unsupported = await request(
+        createServeApp(baseOpts, undefined, { bridge: supportedBridge }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(unsupported.body.features).not.toContain('workspace_generation');
+    });
+
     it('returns the v1 envelope', async () => {
       const previousQwenHome = process.env['QWEN_HOME'];
       const tempHome = await fsp.mkdtemp(
@@ -3098,6 +3135,7 @@ describe('createServeApp', () => {
             mcpPoolActive: true,
             sessionArtifactsPersistenceAvailable: true,
             sessionGenerationAvailable: true,
+            workspaceGenerationAvailable: true,
           }),
         );
         expect(res.body.modelServices).toEqual([]);

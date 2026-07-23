@@ -149,6 +149,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceMcpInitialize: 'qwen/control/workspace/mcp/initialize',
   workspaceMcpReload: 'qwen/control/workspace/mcp/reload',
   workspaceAgentGenerate: 'qwen/control/workspace/agents/generate',
+  workspaceGenerationStart: 'qwen/control/workspace/generation/start',
+  workspaceGenerationCancel: 'qwen/control/workspace/generation/cancel',
   workspaceMemoryRememberAvailability:
     'qwen/control/workspace/memory/remember/availability',
   workspaceMemoryRemember: 'qwen/control/workspace/memory/remember',

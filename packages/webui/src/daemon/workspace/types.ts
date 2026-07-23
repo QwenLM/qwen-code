@@ -15,6 +15,7 @@ import type {
   DaemonCapabilities,
   DaemonClient,
   DaemonCreateAgentRequest,
+  DaemonWorkspaceGenerationEvent,
   DaemonGeneratedAgentContent,
   DaemonDeviceFlowStartResult,
   DaemonDeviceFlowState,
@@ -415,6 +416,11 @@ export interface DaemonWorkspaceActions {
   loadMemoryStatus(): Promise<DaemonWorkspaceMemoryStatus>;
   readWorkspaceFile(filePath: string): Promise<DaemonWorkspaceFile>;
   writeMemory(req: DaemonWriteMemoryRequest): Promise<DaemonWriteMemoryResult>;
+
+  generateContent(
+    prompt: string,
+    opts?: { signal?: AbortSignal },
+  ): AsyncGenerator<DaemonWorkspaceGenerationEvent>;
 
   // Agents (CRUD)
   listAgents(): Promise<DaemonWorkspaceAgentsStatus>;
