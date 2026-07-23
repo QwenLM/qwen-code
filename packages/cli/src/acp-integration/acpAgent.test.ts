@@ -196,6 +196,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
       ? payload
       : undefined,
   ),
+  initializeTelemetry: vi.fn().mockResolvedValue(undefined),
   createDebugLogger: () => mockDebugLogger,
   extractDaemonTraceContext: mockExtractDaemonTraceContext,
   withDaemonSpan: mockWithDaemonSpan,
@@ -800,6 +801,7 @@ import {
   MCPServerStatus,
   getMCPDiscoveryState,
   getMCPServerStatus,
+  initializeTelemetry,
   tokenLimit,
   McpBudgetWouldExceedError,
   buildInstallPlan,
@@ -820,6 +822,7 @@ import {
   mcpServerRequiresOAuth,
   APPROVAL_MODES,
 } from '@qwen-code/qwen-code-core';
+import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import type {
   LoadSessionResponse,
   McpServer,
@@ -943,6 +946,82 @@ describe('runAcpAgent shutdown cleanup', () => {
     processOffSpy.mockRestore();
   });
 
+  it('starts telemetry only after a matching successful initialize response is sent', async () => {
+    const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
+    await vi.waitFor(() => expect(ndJsonStream).toHaveBeenCalledOnce());
+
+    const hooks = vi.mocked(ndJsonStream).mock.calls[0]?.[2];
+    expect(hooks?.onMessageObserved).toEqual(expect.any(Function));
+    expect(initializeTelemetry).not.toHaveBeenCalled();
+
+    hooks?.onMessageObserved?.({
+      direction: 'received',
+      bytes: 1,
+      message: {
+        jsonrpc: '2.0',
+        id: 7,
+        method: 'initialize',
+        params: {},
+      },
+    });
+    hooks?.onMessageObserved?.({
+      direction: 'sent',
+      bytes: 1,
+      message: {
+        jsonrpc: '2.0',
+        id: 7,
+        method: 'session/request_permission',
+        params: {},
+      },
+    });
+    expect(initializeTelemetry).not.toHaveBeenCalled();
+
+    hooks?.onMessageObserved?.({
+      direction: 'sent',
+      bytes: 1,
+      message: { jsonrpc: '2.0', id: 8, result: {} },
+    });
+    expect(initializeTelemetry).not.toHaveBeenCalled();
+
+    hooks?.onMessageObserved?.({
+      direction: 'sent',
+      bytes: 1,
+      message: {
+        jsonrpc: '2.0',
+        id: 7,
+        error: { code: -32602, message: 'invalid params' },
+      },
+    });
+    expect(initializeTelemetry).not.toHaveBeenCalled();
+
+    hooks?.onMessageObserved?.({
+      direction: 'received',
+      bytes: 1,
+      message: {
+        jsonrpc: '2.0',
+        id: null,
+        method: 'initialize',
+        params: {},
+      },
+    });
+    hooks?.onMessageObserved?.({
+      direction: 'sent',
+      bytes: 1,
+      message: { jsonrpc: '2.0', id: null, result: {} },
+    });
+    hooks?.onMessageObserved?.({
+      direction: 'sent',
+      bytes: 1,
+      message: { jsonrpc: '2.0', id: null, result: {} },
+    });
+
+    expect(initializeTelemetry).toHaveBeenCalledOnce();
+    expect(initializeTelemetry).toHaveBeenCalledWith(mockConfig);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('calls runExitCleanup and process.exit on SIGTERM', async () => {
     // Start runAcpAgent (it will await connection.closed)
     const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
@@ -1044,14 +1123,42 @@ describe('runAcpAgent shutdown cleanup', () => {
       snapshot,
       dispose,
     });
+    let resolveTelemetryInitialization: () => void = () => {};
+    vi.mocked(initializeTelemetry).mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveTelemetryInitialization = resolve;
+        }),
+    );
 
     const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
+    await vi.waitFor(() => expect(ndJsonStream).toHaveBeenCalledOnce());
+    const hooks = vi.mocked(ndJsonStream).mock.calls[0]?.[2];
 
-    await vi.waitFor(() => {
+    expect(registerAcpEventLoopLagGauge).not.toHaveBeenCalled();
+    hooks?.onMessageObserved?.({
+      direction: 'received',
+      bytes: 1,
+      message: {
+        jsonrpc: '2.0',
+        id: 0,
+        method: 'initialize',
+        params: {},
+      },
+    });
+    hooks?.onMessageObserved?.({
+      direction: 'sent',
+      bytes: 1,
+      message: { jsonrpc: '2.0', id: 0, result: {} },
+    });
+    expect(registerAcpEventLoopLagGauge).not.toHaveBeenCalled();
+
+    resolveTelemetryInitialization();
+    await vi.waitFor(() =>
       expect(registerAcpEventLoopLagGauge).toHaveBeenCalledWith(
         expect.any(Function),
-      );
-    });
+      ),
+    );
     const readGauge = vi.mocked(registerAcpEventLoopLagGauge).mock.calls[0]![0];
     expect(readGauge()).toEqual({
       meanMs: 0,

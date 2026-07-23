@@ -38,6 +38,7 @@ import {
   tokenLimit,
   getMCPDiscoveryState,
   getMCPServerStatus,
+  initializeTelemetry,
   MCPDiscoveryState,
   MCPServerStatus,
   McpTransportPool,
@@ -2709,7 +2710,35 @@ export async function runAcpAgent(
     console.info = console.error;
     console.debug = console.error;
 
-    const stream = ndJsonStream(stdout, stdin);
+    let initializeRequestId: string | number | null | undefined;
+    const stream = ndJsonStream(stdout, stdin, {
+      onMessageObserved: ({ direction, message }) => {
+        if (
+          direction === 'received' &&
+          'id' in message &&
+          'method' in message &&
+          message.method === 'initialize'
+        ) {
+          initializeRequestId = message.id;
+          return;
+        }
+        if (
+          direction !== 'sent' ||
+          initializeRequestId === undefined ||
+          !('id' in message) ||
+          'method' in message ||
+          message.id !== initializeRequestId
+        ) {
+          return;
+        }
+        initializeRequestId = undefined;
+        if ('result' in message) {
+          void initializeTelemetry(config).then(() => {
+            registerAcpEventLoopLagGauge(() => eventLoopMonitor.snapshot());
+          });
+        }
+      },
+    });
     connection = new AgentSideConnection((conn) => {
       acpConnection = conn;
       agentInstance = new QwenAgent(
@@ -2726,7 +2755,6 @@ export async function runAcpAgent(
     eventLoopMonitor.dispose();
     throw err;
   }
-  registerAcpEventLoopLagGauge(() => eventLoopMonitor.snapshot());
 
   // Both the SIGTERM handler and the IDE-initiated close path need
   // to drain the MCP pool before runExitCleanup. Single helper
