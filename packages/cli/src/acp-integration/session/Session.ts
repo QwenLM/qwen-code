@@ -1985,11 +1985,15 @@ export class Session implements SessionContext {
   async prompt(
     params: PromptRequest,
     invocationContext?: InvocationContextV1,
+    admissionCancellation?: AbortSignal,
   ): Promise<PromptResponse> {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
     await this.assertCanStartTurn();
+    if (admissionCancellation?.aborted) {
+      return { stopReason: 'cancelled' };
+    }
     const todoStopGuardPreparation =
       this.#prepareTodoStopGuardForPrompt(params);
     // After writer admission, install this prompt's AbortController before
@@ -1997,7 +2001,20 @@ export class Session implements SessionContext {
     // targets us. A cancel during admission cannot target this pending prompt.
     this.pendingPrompt?.abort();
     const pendingSend = new AbortController();
+    const cancelPendingSend = () => pendingSend.abort(USER_CANCEL_ABORT_REASON);
+    if (admissionCancellation) {
+      admissionCancellation.addEventListener('abort', cancelPendingSend, {
+        once: true,
+      });
+      if (admissionCancellation.aborted) cancelPendingSend();
+    }
     this.pendingPrompt = pendingSend;
+    const releasePendingSend = () => {
+      admissionCancellation?.removeEventListener('abort', cancelPendingSend);
+      if (this.pendingPrompt === pendingSend) {
+        this.pendingPrompt = null;
+      }
+    };
 
     // Abort the previous turn's in-flight follow-up suggestion
     // generation (if any). Mirrors `pendingPrompt?.abort()` above —
@@ -2051,6 +2068,8 @@ export class Session implements SessionContext {
 
     // Cancelled while waiting for the previous prompt to finish.
     if (pendingSend.signal.aborted) {
+      releasePendingSend();
+      this.todoStopGuard.suspend();
       return { stopReason: 'cancelled' };
     }
 
@@ -2075,7 +2094,7 @@ export class Session implements SessionContext {
         pendingSend,
         invocationContext,
       );
-      this.pendingPrompt = null;
+      releasePendingSend();
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
@@ -2089,7 +2108,7 @@ export class Session implements SessionContext {
       }
       throw error;
     } finally {
-      this.pendingPrompt = null;
+      releasePendingSend();
       const shouldDrainAutomaticQueues =
         todoStopGuardPreparation.drainSupersededAutomaticQueues ||
         this.todoStopGuardDrainAutomaticQueuesWhenIdle ||
@@ -6361,6 +6380,7 @@ export class Session implements SessionContext {
 
     const toolSpan = startToolSpan(policyToolName, {
       'tool.call_id': callId,
+      'gen_ai.tool.call.id': getProviderToolCallId(fc) ?? callId,
       // Dual-emit the legacy call_id/tool_name aliases like CoreToolScheduler
       // (coreToolScheduler.ts) so pre-Phase-2 dashboards keyed off call_id keep
       // matching daemon/ACP tool spans during the migration window.

@@ -1005,7 +1005,7 @@ export class AgentCore {
           break;
         }
 
-        if (roundText || roundThoughtText) {
+        if (roundText || roundThoughtText || lastUsage) {
           this.eventEmitter?.emit(AgentEventType.ROUND_TEXT, {
             subagentId: this.subagentId,
             runId,
