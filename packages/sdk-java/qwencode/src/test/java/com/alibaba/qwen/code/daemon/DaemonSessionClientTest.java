@@ -509,6 +509,34 @@ class DaemonSessionClientTest {
     }
 
     @Test
+    void failsClosedOnDuplicateSseResponseEpochHeaders() {
+        server.createContext("/session/session-1/prompt", exchange ->
+                sendJson(exchange, 202,
+                        "{\"promptId\":\"prompt-1\",\"lastEventId\":0}"));
+        server.createContext("/session/session-1/events", exchange -> {
+            byte[] bytes = ("retry: 0\n\n" + terminalEvent(1))
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type",
+                    "text/event-stream");
+            exchange.getResponseHeaders().add("X-Qwen-Event-Epoch", "epoch-a");
+            exchange.getResponseHeaders().add("X-Qwen-Event-Epoch", "epoch-b");
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.createContext("/session/session-1/detach", noContent());
+
+        try (DaemonClient daemon = newClient();
+                DaemonSessionClient session = daemon.createSession()) {
+            PromptOutcomeIndeterminateException failure = assertThrows(
+                    PromptOutcomeIndeterminateException.class,
+                    () -> session.promptText("go"));
+            assertTrue(failure.getMessage()
+                    .contains("multiple event epoch headers"));
+        }
+    }
+
+    @Test
     void rejectsMalformedAdmissionEpochAsUnknownAdmission() {
         server.createContext("/session/session-1/prompt", exchange ->
                 sendJson(exchange, 202,
