@@ -12,7 +12,7 @@ const { state } = vi.hoisted(() => ({
     config: {
       getContentGeneratorConfig: () => undefined,
       getModelDisplayName: () => 'model',
-      getScreenReader: () => false,
+      getScreenReader: (): boolean => false,
       getTargetDir: () => 'workspace',
     },
     configReadCount: 0,
