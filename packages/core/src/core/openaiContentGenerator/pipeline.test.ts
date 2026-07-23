@@ -33,6 +33,10 @@ import {
   QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
 } from './constants.js';
 import { logProtocolTagSanitized } from '../../telemetry/loggers.js';
+import {
+  getGenAiUsageProvenance,
+  setGenAiUsageProvenance,
+} from '../../telemetry/gen-ai-usage.js';
 import { setToolCallPreparations } from '../tool-call-preparation.js';
 
 // Mock dependencies
@@ -3084,6 +3088,7 @@ describe('ContentGenerationPipeline', () => {
       ];
 
       const mockFinishResponse = new GenerateContentResponse();
+      mockFinishResponse.modelVersion = 'actual-provider-model';
       mockFinishResponse.candidates = [
         {
           content: { parts: [], role: 'model' },
@@ -3098,6 +3103,9 @@ describe('ContentGenerationPipeline', () => {
         candidatesTokenCount: 20,
         totalTokenCount: 30,
       };
+      setGenAiUsageProvenance(mockUsageResponse.usageMetadata, {
+        cachedInputTokensReported: false,
+      });
 
       // Expected merged response (finishReason + usageMetadata combined)
       const mockMergedResponse = new GenerateContentResponse();
@@ -3143,6 +3151,10 @@ describe('ContentGenerationPipeline', () => {
         promptTokenCount: 10,
         candidatesTokenCount: 20,
         totalTokenCount: 30,
+      });
+      expect(lastResult.modelVersion).toBe('actual-provider-model');
+      expect(getGenAiUsageProvenance(lastResult.usageMetadata)).toEqual({
+        cachedInputTokensReported: false,
       });
     });
 

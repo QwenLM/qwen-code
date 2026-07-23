@@ -401,6 +401,226 @@ describe('qwen-autofix workflow', () => {
     expect(run([{ ...llm, name: 'resolve-pr' }])).toBe('true');
   });
 
+  it('auto-reruns a check that died on infrastructure, once, guarded by run_attempt', () => {
+    // A self-hosted runner losing the server (or the disk filling) reds a check
+    // for a reason unrelated to the PR; it clears on a rerun (#7490's E2E:
+    // "runner lost communication" → green on the rerun). The scan reruns such a
+    // failed job ONCE, and run_attempt is the guard: a run already at attempt 2
+    // and still infra-failing is persistent and left alone — no infinite loop.
+    const block = reviewScanJob.match(
+      /( {12}PR_HEAD_OID="\$\(jq -r '\.headRefOid[\s\S]*?\n {12}fi\n)\n {12}# startedAt is the only staleness/,
+    )?.[1];
+    expect(block).toBeTruthy();
+    const script = block.replace(/^ {12}/gm, '');
+
+    // Single-source the signature list from the workflow rather than re-typing
+    // it here, so the production value and this test can never drift out of
+    // sync (same extract-from-source idiom as NON_BLOCKING_CHECKS above). The
+    // toContain guard fails loudly if the env is renamed or the regex breaks —
+    // otherwise an empty pattern would match every line and silently pass.
+    const INFRA_SIGNATURES =
+      workflow.match(/INFRA_FAILURE_SIGNATURES: '([^']*)'/)?.[1] ?? '';
+    expect(INFRA_SIGNATURES).toContain('lost communication with the server');
+
+    const run = ({
+      checks,
+      annotations,
+      attempt = 1,
+      rerunOk = true,
+      crName = 'E2E',
+      wfName = 'CI',
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'infra-'));
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      // Stubbed gh: check-runs → one failed run-1 check-run with annotations;
+      // annotations → the given message; runs/{id} → run_attempt; POST
+      // rerun-failed-jobs → success/fail. Records the rerun POST.
+      // The workflow calls check-runs with a --jq filter that yields, per
+      // failed check-run WITH annotations, a `<id>\t<details_url>\t<name>`
+      // line; the stub emits what that filter would produce (a single line
+      // when there is an annotation, nothing otherwise) rather than raw JSON
+      // the stub can't filter.
+      const crTsv = annotations
+        ? `42\thttps://github.com/o/r/actions/runs/9001/job/5\t${crName}\n`
+        : '';
+      writeFileSync(
+        join(bin, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          `echo "$*" >> ${JSON.stringify(join(dir, 'calls.log'))}`,
+          'args="$*"',
+          `case "$args" in`,
+          // %b so the \t/\n in the stubbed tsv become a real tab/newline (the
+          // filter's @tsv output), which `IFS=$'\\t' read` then splits.
+          `  *"/commits/"*"/check-runs"*) printf '%b' ${JSON.stringify(crTsv)}; exit 0;;`,
+          `  *"/check-runs/42/annotations"*) printf '%s' ${JSON.stringify(annotations || '')}; exit 0;;`,
+          `  *"/actions/runs/9001"*"rerun-failed-jobs"*) exit ${rerunOk ? 0 : 1};;`,
+          `  *"/actions/runs/9001"*) printf '${attempt}\\t${wfName}'; exit 0;;`,
+          'esac',
+          'exit 0',
+        ].join('\n'),
+      );
+      chmodSync(join(bin, 'gh'), 0o755);
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -uo pipefail\nfleet_row(){ :; }\nfor _ in x; do\n${script}\nprintf 'FELL_THROUGH'\ndone`,
+        ],
+        {
+          env: {
+            ...process.env,
+            REPO: 'o/r',
+            PR: '1',
+            PR_META: JSON.stringify({ headRefOid: 'headSHA' }),
+            CHECKS_JSON: JSON.stringify(checks),
+            INFRA_FAILURE_SIGNATURES: INFRA_SIGNATURES,
+            PATH: `${bin}:${process.env.PATH}`,
+          },
+          encoding: 'utf8',
+        },
+      );
+      const calls = existsSync(join(dir, 'calls.log'))
+        ? readFileSync(join(dir, 'calls.log'), 'utf8')
+        : '';
+      rmSync(dir, { recursive: true, force: true });
+      return {
+        reran: /rerun-failed-jobs/.test(calls),
+        continued: !out.includes('FELL_THROUGH'),
+      };
+    };
+    const FAIL = { name: 'E2E', conclusion: 'FAILURE' };
+    const OK = { name: 'E2E', conclusion: 'SUCCESS' };
+
+    // Infra death (runner lost the server) on attempt 1 → rerun & skip.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations:
+          'The self-hosted runner lost communication with the server',
+      }),
+    ).toEqual({ reran: true, continued: true });
+    // A REAL failure (no infra signature in the annotation) → never rerun; the
+    // agent/human handles it. This is the gate that stops masking real bugs.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: 'Expected 1 argument but got 2 — src/foo.ts:10',
+      }),
+    ).toEqual({ reran: false, continued: false });
+    // Already reran once (attempt 2) and still infra-failing → persistent, do
+    // not loop.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: 'No space left on device',
+        attempt: 2,
+      }),
+    ).toEqual({ reran: false, continued: false });
+    // No failed check at all → the block is skipped entirely.
+    expect(run({ checks: [OK], annotations: '' })).toEqual({
+      reran: false,
+      continued: false,
+    });
+    // Infra signature but the rerun POST fails (e.g. PAT lacks actions:write) →
+    // no crash, falls through to normal processing.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: 'No space left on device',
+        rerunOk: false,
+      }),
+    ).toEqual({ reran: true, continued: false });
+    // Each remaining production signature also triggers a rerun.
+    for (const msg of [
+      'ENOSPC',
+      'The runner has received a shutdown signal',
+      'The runner has received an unexpected signal',
+      'Failed to initialize container for job',
+      'The runner was lost',
+      'The runner was terminated',
+      'The runner has been lost',
+      'The runner has been terminated',
+      'fatal: fetch-pack: invalid index-pack output',
+      'error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly: CANCEL (err 8)',
+    ]) {
+      expect(run({ checks: [FAIL], annotations: msg })).toEqual({
+        reran: true,
+        continued: true,
+      });
+    }
+    // #6506: a git fetch died mid-checkout, then hung the job into the 20m
+    // limit. The bare timeout line is deliberately NOT a signature (it can be a
+    // real regression), but the transport death IS — and one matching line
+    // classifies the whole run, so the co-present timeout does not block it.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: [
+          'The job has exceeded the maximum execution time of 20m0s',
+          'fatal: fetch-pack: invalid index-pack output',
+          'error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly: CANCEL (err 8)',
+        ].join('\n'),
+      }),
+    ).toEqual({ reran: true, continued: true });
+    // A BARE job timeout with no transport/infra signature is NOT rerun — it
+    // can be a real regression (a test hanging on the PR's own code).
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: 'The job has exceeded the maximum execution time of 20m0s',
+      }),
+    ).toEqual({ reran: false, continued: false });
+    // Self-trigger guard: a "Qwen Autofix" workflow's own failed check must NOT
+    // be rerun (prevents the autofix from re-triggering itself), UNLESS the
+    // check is a review-address job (the exception carved out in the jq filter).
+    const AUTOFIX_CHECK = {
+      name: 'E2E',
+      conclusion: 'FAILURE',
+      workflowName: 'Qwen Autofix',
+    };
+    expect(
+      run({ checks: [AUTOFIX_CHECK], annotations: 'No space left on device' }),
+    ).toEqual({ reran: false, continued: false });
+    expect(
+      run({
+        checks: [
+          {
+            name: 'review-address issue-123',
+            conclusion: 'FAILURE',
+            workflowName: 'Qwen Autofix',
+          },
+        ],
+        annotations: 'No space left on device',
+      }),
+    ).toEqual({ reran: true, continued: true });
+    // In-loop self-trigger guard: the gate above blocks a PR whose ONLY
+    // failed check is Qwen Autofix, but when a non-Autofix check ALSO failed
+    // the gate passes and FAILED_CRS returns ALL failed check-runs — the
+    // in-loop filter must skip the Autofix run so it cannot consume the
+    // single rerun slot.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: 'No space left on device',
+        wfName: 'Qwen Autofix',
+      }),
+    ).toEqual({ reran: false, continued: false });
+    // …but a review-address job from the Autofix workflow IS rerun (the
+    // exception carved out in both the gate and the in-loop filter).
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: 'No space left on device',
+        crName: 'review-address issue-123',
+        wfName: 'Qwen Autofix',
+      }),
+    ).toEqual({ reran: true, continued: true });
+    // Spawn-heavy: each run() forks bash + a stubbed gh. The default 5s per-test
+    // budget is tight for this many cases, so give it a comfortable margin.
+  }, 20000);
+
   it('keeps a still-red check visible, but only once per head', () => {
     // A red check is a STATE, not the instant it turned red. Counting only
     // "failed since the watermark" made a still-failing PR invisible the

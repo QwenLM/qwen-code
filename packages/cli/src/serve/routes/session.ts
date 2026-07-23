@@ -2527,6 +2527,10 @@ export function registerSessionRoutes(
         delete forwardedBody['delivery'];
 
         const lastEventId = ownerBridge.getSessionLastEventId(sessionId);
+        // Epoch token paired with the cursor above: a client that seeds its
+        // SSE resume position from this 202 must also learn the bus epoch so
+        // a daemon restart in between is detected (DAEMON-001).
+        const eventEpoch = ownerBridge.getSessionEventEpoch(sessionId);
         addDaemonRequestAttribute('qwen-code.prompt_id', promptId);
 
         const abort = new AbortController();
@@ -2647,7 +2651,7 @@ export function registerSessionRoutes(
         if (daemonLog) {
           daemonLog.info('prompt enqueued', { sessionId, promptId, clientId });
         }
-        res.status(202).json({ promptId, lastEventId });
+        res.status(202).json({ promptId, lastEventId, eventEpoch });
       },
     ),
   );
