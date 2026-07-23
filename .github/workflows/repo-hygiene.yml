@@ -16,20 +16,6 @@ on:
         required: false
         type: 'boolean'
         default: false
-      phase:
-        description: 'both (default), scan-only, fix-only (needs scan_run_id)'
-        required: false
-        type: 'choice'
-        options:
-          - 'both'
-          - 'scan'
-          - 'fix'
-        default: 'both'
-      scan_run_id:
-        description: 'Run ID of a previous scan run (required for fix-only)'
-        required: false
-        type: 'string'
-        default: ''
 
 defaults:
   run:
@@ -50,9 +36,7 @@ jobs:
   # ── Phase 1: Scan (read-only, no code changes) ──────────────────────────
   scan:
     name: 'Scan'
-    if: |
-      github.repository == 'ZijianZhang989/qwen-code' &&
-      (github.event_name != 'workflow_dispatch' || inputs.phase != 'fix')
+    if: "${{ github.repository == 'ZijianZhang989/qwen-code' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 60
     permissions:
@@ -175,10 +159,7 @@ jobs:
   # ── Phase 2: Fix (write code, push PR) ──────────────────────────────────
   fix:
     name: 'Fix'
-    if: |
-      github.repository == 'ZijianZhang989/qwen-code' &&
-      (github.event_name != 'workflow_dispatch' || inputs.phase != 'scan') &&
-      (needs.scan.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.phase == 'fix'))
+    if: "${{ github.repository == 'ZijianZhang989/qwen-code' && needs.scan.result == 'success' }}"
     needs: 'scan'
     runs-on: 'ubuntu-latest'
     timeout-minutes: 90
@@ -209,21 +190,6 @@ jobs:
         with:
           name: 'scan-findings'
           path: '${{ env.WORKDIR }}'
-        if: "${{ github.event_name != 'workflow_dispatch' || inputs.phase != 'fix' }}"
-
-      - name: 'Download scan findings from previous run'
-        if: "${{ github.event_name == 'workflow_dispatch' && inputs.phase == 'fix' }}"
-        env:
-          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
-        run: |-
-          SCAN_RUN_ID="${{ inputs.scan_run_id }}"
-          if [[ -z "${SCAN_RUN_ID}" ]]; then
-            echo '::error::scan_run_id is required for fix-only mode.'
-            exit 1
-          fi
-          echo "Downloading findings from run ${SCAN_RUN_ID}..."
-          gh run download "${SCAN_RUN_ID}" --repo "${REPO}" -D "${WORKDIR}/dl"
-          cp "${WORKDIR}/dl/scan-findings/findings.json" "${WORKDIR}/findings.json"
 
       - name: 'Validate findings'
         run: |-
