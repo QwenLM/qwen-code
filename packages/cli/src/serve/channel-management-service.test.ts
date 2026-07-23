@@ -246,6 +246,34 @@ describe('createChannelManagementService', () => {
     expect(manager.reloadWorkspace).toHaveBeenCalledWith(WORKSPACE, 'bot');
   });
 
+  it('retains the reload diagnostic when stopping the failed replacement also fails', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    manager.reloadWorkspace.mockRejectedValueOnce(
+      new Error('invalid token clientSecret=start-secret'),
+    );
+    manager.setChannelEnabled.mockRejectedValueOnce(
+      new Error('stop failed clientSecret=stop-secret'),
+    );
+
+    const result = await service.upsert('bot', {
+      expectedRevision: 'rev-1',
+      config: {
+        type: 'dingtalk',
+        clientId: 'client-id',
+        senderPolicy: 'pairing',
+      },
+    });
+
+    expect(result.instance.runtime).toEqual({
+      state: 'error',
+      lastError: 'invalid token clientSecret=<redacted>',
+    });
+    expect(manager.setChannelEnabled).toHaveBeenCalledWith(
+      { name: 'bot', workspaceCwd: WORKSPACE },
+      false,
+    );
+  });
+
   it('clears a stale runtime diagnostic after a successful replacement', async () => {
     const { service, manager } = setup({ committedNames: ['bot'] });
     manager.reloadWorkspace.mockRejectedValueOnce(new Error('stale failure'));

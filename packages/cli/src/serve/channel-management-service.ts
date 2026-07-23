@@ -347,8 +347,12 @@ export function createChannelManagementService(
         try {
           await opts.manager.reloadWorkspace(opts.workspaceCwd, name);
         } catch (error) {
-          await stopChannel(name);
           diagnostics.set(name, diagnostic(error));
+          try {
+            await stopChannel(name);
+          } catch {
+            // Keep the reload diagnostic when best-effort cleanup also fails.
+          }
         }
       }
       return resultFor(name, persisted);
