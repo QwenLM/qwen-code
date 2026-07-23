@@ -81,10 +81,30 @@ function canonicalArgString(args: unknown): string {
 /**
  * Path matching via core's picomatch-backed matcher: real `**` depth semantics
  * and path normalization, so an equivalent spelling (`./x`, `a/../x`) cannot
- * bypass a deny that the old hand-rolled glob would have missed. `filePath` is
- * resolved against `cwd` first — `matchesPathPattern` normalizes the PATTERN
- * (via `path.join` internally) but only forward-slashes the candidate, never
- * collapsing `.`/`..` segments in it — so that collapsing must happen here.
+ * bypass a deny that the old hand-rolled glob would have missed.
+ *
+ * `filePath` is resolved against `cwd` first — `matchesPathPattern` normalizes
+ * the PATTERN (via `path.join` internally) but only forward-slashes the
+ * candidate, never collapsing `.`/`..` segments in it — so that collapsing
+ * must happen here. Using the call's `cwd` for THIS resolution is correct: for
+ * `run_shell_command` the daemon really does execute in `directory`, so a
+ * relative candidate must resolve against it to name the file actually
+ * touched.
+ *
+ * Pattern ANCHORING is a separate concern and MUST use `projectRoot`, never
+ * `cwd`, as the 4th (anchor) argument to `matchesPathPattern`: `cwd` here
+ * ultimately traces back to `rawInput.directory`/`rawInput.cwd` in
+ * `frameToContext` — fields the MODEL supplies in its own tool call. If an
+ * unprefixed pattern (e.g. `**\/.env*`) anchored to that model-controlled
+ * value, the model could move the anchor and make a literal, unobfuscated
+ * deny target silently mismatch (`path-mismatch`) on a call whose `directory`
+ * simply differs from `projectRoot` — no path obfuscation needed. A policy
+ * author writing `**\/.env*` means "anywhere in the project"; `src/auth/**`
+ * means "relative to the project" — neither should move because the model
+ * claimed a different working directory. `projectRoot` comes from the
+ * daemon's own trusted capabilities, not from call arguments, so anchoring to
+ * it cannot be steered by the model.
+ *
  * A pattern picomatch rejects yields `false` — never an accidental match.
  */
 function pathMatchesAny(
@@ -98,7 +118,10 @@ function pathMatchesAny(
   const patterns = Array.isArray(spec) ? spec : [spec];
   for (const pattern of patterns) {
     try {
-      if (matchesPathPattern(pattern, resolved, projectRoot, cwd)) return true;
+      // Anchor is ALWAYS projectRoot (trusted) — never the model-supplied cwd.
+      if (matchesPathPattern(pattern, resolved, projectRoot, projectRoot)) {
+        return true;
+      }
     } catch {
       // Unusable pattern → not a match.
     }

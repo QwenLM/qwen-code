@@ -558,4 +558,42 @@ rules:
     expect(d.action).toBe('prompt'); // falls through to the default
     expect(d.source).toBe('default');
   });
+
+  it('SECURITY: an unprefixed pattern anchors to projectRoot, not a model-supplied cwd', () => {
+    // The model controls `directory`/`cwd` in its own tool call (via
+    // frameToContext). If pattern anchoring used that value, the model could
+    // move the anchor for an unprefixed pattern like `**/.env*` and make a
+    // literal, unobfuscated deny target silently mismatch.
+    const d = evaluate(denyEnv, {
+      tool: 'edit',
+      args: {},
+      paths: ['/proj/.env'],
+      projectRoot: '/proj',
+      cwd: '/proj/somewhere/else',
+    });
+    expect(d.action).toBe('deny');
+    expect(d.ruleId).toBe('deny-env');
+  });
+
+  it('a project-relative pattern still matches when the call cwd diverges from projectRoot', () => {
+    const policy: Policy = {
+      defaults: { action: 'prompt' as const },
+      rules: [
+        {
+          id: 'deny-auth',
+          match: { pathGlob: ['src/auth/**'] },
+          action: 'deny' as const,
+        },
+      ],
+    };
+    const d = evaluate(policy, {
+      tool: 'edit',
+      args: {},
+      paths: ['/proj/src/auth/x.ts'],
+      projectRoot: '/proj',
+      cwd: '/tmp',
+    });
+    expect(d.action).toBe('deny');
+    expect(d.ruleId).toBe('deny-auth');
+  });
 });
