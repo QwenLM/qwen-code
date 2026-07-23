@@ -453,6 +453,32 @@ describe('SendMessageTool — background-task mode', () => {
     expect(result.llmContent).toContain('could not be revived');
   });
 
+  it('reports the retained-state reason without attempting continuation', async () => {
+    registry.register({
+      agentId: 'agent-1',
+      description: 'unsafe restored agent',
+      status: 'completed',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
+      metaPath: '/tmp/test.meta.json',
+      resumeBlockedReason: 'Background task transcript is missing.',
+    });
+
+    const result = await tool.validateBuildAndExecute(
+      { task_id: 'agent-1', message: 'try again' },
+      new AbortController().signal,
+    );
+
+    expect(result.error?.type).toBe(ToolErrorType.SEND_MESSAGE_NOT_RUNNING);
+    expect(result.llmContent).toContain(
+      'Background task transcript is missing.',
+    );
+    expect(reviveCompletedBackgroundAgent).not.toHaveBeenCalled();
+    expect(resumeBackgroundAgent).not.toHaveBeenCalled();
+  });
+
   it('includes task description in success display', async () => {
     registry.register({
       agentId: 'agent-1',

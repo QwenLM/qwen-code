@@ -401,6 +401,226 @@ describe('qwen-autofix workflow', () => {
     expect(run([{ ...llm, name: 'resolve-pr' }])).toBe('true');
   });
 
+  it('auto-reruns a check that died on infrastructure, once, guarded by run_attempt', () => {
+    // A self-hosted runner losing the server (or the disk filling) reds a check
+    // for a reason unrelated to the PR; it clears on a rerun (#7490's E2E:
+    // "runner lost communication" → green on the rerun). The scan reruns such a
+    // failed job ONCE, and run_attempt is the guard: a run already at attempt 2
+    // and still infra-failing is persistent and left alone — no infinite loop.
+    const block = reviewScanJob.match(
+      /( {12}PR_HEAD_OID="\$\(jq -r '\.headRefOid[\s\S]*?\n {12}fi\n)\n {12}# startedAt is the only staleness/,
+    )?.[1];
+    expect(block).toBeTruthy();
+    const script = block.replace(/^ {12}/gm, '');
+
+    // Single-source the signature list from the workflow rather than re-typing
+    // it here, so the production value and this test can never drift out of
+    // sync (same extract-from-source idiom as NON_BLOCKING_CHECKS above). The
+    // toContain guard fails loudly if the env is renamed or the regex breaks —
+    // otherwise an empty pattern would match every line and silently pass.
+    const INFRA_SIGNATURES =
+      workflow.match(/INFRA_FAILURE_SIGNATURES: '([^']*)'/)?.[1] ?? '';
+    expect(INFRA_SIGNATURES).toContain('lost communication with the server');
+
+    const run = ({
+      checks,
+      annotations,
+      attempt = 1,
+      rerunOk = true,
+      crName = 'E2E',
+      wfName = 'CI',
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'infra-'));
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      // Stubbed gh: check-runs → one failed run-1 check-run with annotations;
+      // annotations → the given message; runs/{id} → run_attempt; POST
+      // rerun-failed-jobs → success/fail. Records the rerun POST.
+      // The workflow calls check-runs with a --jq filter that yields, per
+      // failed check-run WITH annotations, a `<id>\t<details_url>\t<name>`
+      // line; the stub emits what that filter would produce (a single line
+      // when there is an annotation, nothing otherwise) rather than raw JSON
+      // the stub can't filter.
+      const crTsv = annotations
+        ? `42\thttps://github.com/o/r/actions/runs/9001/job/5\t${crName}\n`
+        : '';
+      writeFileSync(
+        join(bin, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          `echo "$*" >> ${JSON.stringify(join(dir, 'calls.log'))}`,
+          'args="$*"',
+          `case "$args" in`,
+          // %b so the \t/\n in the stubbed tsv become a real tab/newline (the
+          // filter's @tsv output), which `IFS=$'\\t' read` then splits.
+          `  *"/commits/"*"/check-runs"*) printf '%b' ${JSON.stringify(crTsv)}; exit 0;;`,
+          `  *"/check-runs/42/annotations"*) printf '%s' ${JSON.stringify(annotations || '')}; exit 0;;`,
+          `  *"/actions/runs/9001"*"rerun-failed-jobs"*) exit ${rerunOk ? 0 : 1};;`,
+          `  *"/actions/runs/9001"*) printf '${attempt}\\t${wfName}'; exit 0;;`,
+          'esac',
+          'exit 0',
+        ].join('\n'),
+      );
+      chmodSync(join(bin, 'gh'), 0o755);
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -uo pipefail\nfleet_row(){ :; }\nfor _ in x; do\n${script}\nprintf 'FELL_THROUGH'\ndone`,
+        ],
+        {
+          env: {
+            ...process.env,
+            REPO: 'o/r',
+            PR: '1',
+            PR_META: JSON.stringify({ headRefOid: 'headSHA' }),
+            CHECKS_JSON: JSON.stringify(checks),
+            INFRA_FAILURE_SIGNATURES: INFRA_SIGNATURES,
+            PATH: `${bin}:${process.env.PATH}`,
+          },
+          encoding: 'utf8',
+        },
+      );
+      const calls = existsSync(join(dir, 'calls.log'))
+        ? readFileSync(join(dir, 'calls.log'), 'utf8')
+        : '';
+      rmSync(dir, { recursive: true, force: true });
+      return {
+        reran: /rerun-failed-jobs/.test(calls),
+        continued: !out.includes('FELL_THROUGH'),
+      };
+    };
+    const FAIL = { name: 'E2E', conclusion: 'FAILURE' };
+    const OK = { name: 'E2E', conclusion: 'SUCCESS' };
+
+    // Infra death (runner lost the server) on attempt 1 → rerun & skip.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations:
+          'The self-hosted runner lost communication with the server',
+      }),
+    ).toEqual({ reran: true, continued: true });
+    // A REAL failure (no infra signature in the annotation) → never rerun; the
+    // agent/human handles it. This is the gate that stops masking real bugs.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: 'Expected 1 argument but got 2 — src/foo.ts:10',
+      }),
+    ).toEqual({ reran: false, continued: false });
+    // Already reran once (attempt 2) and still infra-failing → persistent, do
+    // not loop.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: 'No space left on device',
+        attempt: 2,
+      }),
+    ).toEqual({ reran: false, continued: false });
+    // No failed check at all → the block is skipped entirely.
+    expect(run({ checks: [OK], annotations: '' })).toEqual({
+      reran: false,
+      continued: false,
+    });
+    // Infra signature but the rerun POST fails (e.g. PAT lacks actions:write) →
+    // no crash, falls through to normal processing.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: 'No space left on device',
+        rerunOk: false,
+      }),
+    ).toEqual({ reran: true, continued: false });
+    // Each remaining production signature also triggers a rerun.
+    for (const msg of [
+      'ENOSPC',
+      'The runner has received a shutdown signal',
+      'The runner has received an unexpected signal',
+      'Failed to initialize container for job',
+      'The runner was lost',
+      'The runner was terminated',
+      'The runner has been lost',
+      'The runner has been terminated',
+      'fatal: fetch-pack: invalid index-pack output',
+      'error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly: CANCEL (err 8)',
+    ]) {
+      expect(run({ checks: [FAIL], annotations: msg })).toEqual({
+        reran: true,
+        continued: true,
+      });
+    }
+    // #6506: a git fetch died mid-checkout, then hung the job into the 20m
+    // limit. The bare timeout line is deliberately NOT a signature (it can be a
+    // real regression), but the transport death IS — and one matching line
+    // classifies the whole run, so the co-present timeout does not block it.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: [
+          'The job has exceeded the maximum execution time of 20m0s',
+          'fatal: fetch-pack: invalid index-pack output',
+          'error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly: CANCEL (err 8)',
+        ].join('\n'),
+      }),
+    ).toEqual({ reran: true, continued: true });
+    // A BARE job timeout with no transport/infra signature is NOT rerun — it
+    // can be a real regression (a test hanging on the PR's own code).
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: 'The job has exceeded the maximum execution time of 20m0s',
+      }),
+    ).toEqual({ reran: false, continued: false });
+    // Self-trigger guard: a "Qwen Autofix" workflow's own failed check must NOT
+    // be rerun (prevents the autofix from re-triggering itself), UNLESS the
+    // check is a review-address job (the exception carved out in the jq filter).
+    const AUTOFIX_CHECK = {
+      name: 'E2E',
+      conclusion: 'FAILURE',
+      workflowName: 'Qwen Autofix',
+    };
+    expect(
+      run({ checks: [AUTOFIX_CHECK], annotations: 'No space left on device' }),
+    ).toEqual({ reran: false, continued: false });
+    expect(
+      run({
+        checks: [
+          {
+            name: 'review-address issue-123',
+            conclusion: 'FAILURE',
+            workflowName: 'Qwen Autofix',
+          },
+        ],
+        annotations: 'No space left on device',
+      }),
+    ).toEqual({ reran: true, continued: true });
+    // In-loop self-trigger guard: the gate above blocks a PR whose ONLY
+    // failed check is Qwen Autofix, but when a non-Autofix check ALSO failed
+    // the gate passes and FAILED_CRS returns ALL failed check-runs — the
+    // in-loop filter must skip the Autofix run so it cannot consume the
+    // single rerun slot.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: 'No space left on device',
+        wfName: 'Qwen Autofix',
+      }),
+    ).toEqual({ reran: false, continued: false });
+    // …but a review-address job from the Autofix workflow IS rerun (the
+    // exception carved out in both the gate and the in-loop filter).
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: 'No space left on device',
+        crName: 'review-address issue-123',
+        wfName: 'Qwen Autofix',
+      }),
+    ).toEqual({ reran: true, continued: true });
+    // Spawn-heavy: each run() forks bash + a stubbed gh. The default 5s per-test
+    // budget is tight for this many cases, so give it a comfortable margin.
+  }, 20000);
+
   it('keeps a still-red check visible, but only once per head', () => {
     // A red check is a STATE, not the instant it turned red. Counting only
     // "failed since the watermark" made a still-failing PR invisible the
@@ -1188,6 +1408,15 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain('trigger_label=${label_is_trigger}');
     expect(workflow).toContain('trigger_label=false label=');
     expect(workflow).toContain('sender_trusted=${sender_is_trusted}');
+    expect(workflow).toContain(
+      '_late_ready="$(jq -r --arg l "${READY_FOR_AGENT_LABEL}"',
+    );
+    expect(workflow).toContain(
+      '_late_approved="$(jq -r --arg l "${AUTOFIX_APPROVED_LABEL}"',
+    );
+    expect(workflow).toContain(
+      'if [[ "${ISSUE_STATE}" == \'open\' && "${_late_ready}" == \'true\' && "${_late_approved}" == \'true\' && "${sender_is_trusted}" == \'true\' ]]; then',
+    );
     expect(issueAutofixJob).toContain(
       "group: 'qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.run_id }}'",
     );
@@ -2544,6 +2773,36 @@ describe('qwen-autofix workflow', () => {
     const skill = readAutofixSkill();
     expect(skill).toContain('never');
     expect(skill).toContain('drop one silently');
+  });
+
+  it('requires the address path to run verification and record it as evidence', () => {
+    // Observed: #7408 committed a fix with a TS error the gate then rejected,
+    // while its summary claimed "verified all 3 commits". A soft "run the
+    // checks" instruction let a bare assertion stand in for actually running
+    // them. The contract now demands the real commands AND their results in a
+    // Verification section, so a claim the gate contradicts is visible.
+    // Prose wraps at ~78 cols, so match across the wrap with \s+.
+    const flat = readAutofixSkill().replace(/\s+/g, ' ');
+    // Actually run — not assert from the diff — the deterministic checks.
+    expect(flat).toContain('actually run them, do not assert them');
+    expect(flat).toContain('any of these commands fails, DO NOT commit');
+    // The summary must carry a Verification section listing commands + results,
+    // and a bare "verified" is explicitly rejected.
+    expect(flat).toContain('## Verification');
+    expect(flat).toContain('command you ran and its result');
+    expect(flat).toContain('a bare "verified" is not acceptable');
+    // The rationale is structural, not etiquette: the gate re-runs the same
+    // commands, so skipping them only moves the rejection later. Pin that
+    // framing so the requirement is not softened back into "please verify".
+    expect(flat).toMatch(/gate re-runs these (?:same|exact) commands/);
+    // The develop-issue mode must also require a Verification section in its
+    // e2e-report, not just address-review — same regression, different mode.
+    expect(flat).toContain(
+      'section that lists each command you ran and its result (see Shared Rules)',
+    );
+    // The Verification section ends the English body, before the collapsed
+    // Chinese translation — not after it.
+    expect(flat).toContain('before the collapsed Chinese translation');
   });
 
   it('requires bilingual bodies for files posted verbatim as PR comments', () => {
@@ -3915,14 +4174,38 @@ describe('qwen-autofix workflow', () => {
     // judged the work at all; advancing there strands a fix the agent had
     // already written, which is exactly how the nested-package ENOENT stranded
     // #7329/#7336 until a human deleted the marker.
+    // Ends at the crash decision's own closing `fi`; the consecutive-failure
+    // block that follows is a separate unit with its own test, so anchor on it
+    // rather than the report `{` (which it now sits before).
     const decision = reviewAddressReportStep.match(
-      /(GATE_CRASHED=false\n[\s\S]*?\n {12}fi)\n {12}\{/,
+      /(GATE_CRASHED=false\n[\s\S]*?\n {12}fi)\n\n {12}# Consecutive-failure/,
     )?.[1];
     expect(decision).toBeTruthy();
     const SENTINEL = '9999-12-31T23:59:59Z';
     const NEWEST = '2026-07-20T10:00:00Z';
-    const run = (env) =>
-      execFileSync(
+    const run = (env) => {
+      // The gate-rejection branch (OUTCOME=failed, no crash/timeout) now probes
+      // whether the PR is behind main and, if so, updates the base — so stub gh:
+      // commits/<main> → a SHA, compare → CMP_STATUS_STUB (default 'ahead', i.e.
+      // NOT behind, so the existing rejection cases still hand off), and
+      // update-branch → UPDATE_OK_STUB (default success).
+      const dir = mkdtempSync(join(tmpdir(), 'decision-'));
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          'for a in "$@"; do case "$a" in',
+          "  */commits/main) printf 'mainsha123'; exit 0;;",
+          '  */compare/*) printf \'%s\' "${CMP_STATUS_STUB:-ahead}"; exit 0;;',
+          '  */update-branch) [ "${UPDATE_OK_STUB:-1}" = 1 ] && exit 0 || exit 1;;',
+          'esac; done',
+          'exit 0',
+        ].join('\n'),
+      );
+      chmodSync(join(bin, 'gh'), 0o755);
+      const out = execFileSync(
         'bash',
         [
           '-c',
@@ -3931,6 +4214,10 @@ describe('qwen-autofix workflow', () => {
         {
           env: {
             ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            REPO: 'o/r',
+            PR: '1',
+            REPORT_HEAD: 'prhead123',
             NEWEST,
             WATERMARK: '2026-07-20T09:00:00Z',
             ROUND: '1',
@@ -3944,11 +4231,40 @@ describe('qwen-autofix workflow', () => {
           encoding: 'utf8',
         },
       );
+      rmSync(dir, { recursive: true, force: true });
+      return out;
+    };
 
-    // Declared rejection: the agent was judged -> advance the watermark.
+    // Declared rejection, PR up to date ('ahead') -> a genuine fix failure ->
+    // advance the watermark and hand off to a human.
     const rejected = run({ OUTCOME: 'failed' });
     expect(rejected.split('|')[0]).toBe(NEWEST);
     expect(rejected).toContain('Could not address the latest feedback');
+
+    // #7471: the gate rejected the fix, but the PR was BEHIND main — the build
+    // failed on a stale base (a dependency main already removed), not the fix.
+    // Update the base and retry (sentinel keeps the feedback live) instead of
+    // advancing to a human handoff.
+    const staleBehind = run({ OUTCOME: 'failed', CMP_STATUS_STUB: 'behind' });
+    expect(staleBehind.split('|')[0]).toBe(SENTINEL);
+    expect(staleBehind).toContain('updated a stale base');
+    expect(staleBehind).toContain('will retry on the next scan');
+    // 'diverged' (ahead AND behind) also merges main in.
+    const staleDiverged = run({
+      OUTCOME: 'failed',
+      CMP_STATUS_STUB: 'diverged',
+    });
+    expect(staleDiverged.split('|')[0]).toBe(SENTINEL);
+    expect(staleDiverged).toContain('updated a stale base');
+    // Behind but update-branch FAILS (a merge conflict) -> no retry; fall
+    // through to the human handoff so the conflict is not silently swallowed.
+    const staleConflict = run({
+      OUTCOME: 'failed',
+      CMP_STATUS_STUB: 'behind',
+      UPDATE_OK_STUB: '0',
+    });
+    expect(staleConflict.split('|')[0]).toBe(NEWEST);
+    expect(staleConflict).toContain('Could not address the latest feedback');
 
     // Gate crash (no verdict): keep the feedback live and retry.
     const crashed = run({ OUTCOME: '' });
@@ -3963,6 +4279,27 @@ describe('qwen-autofix workflow', () => {
     const noOutput = run({ OUTCOME: '', DETAIL_FILE: '' });
     expect(noOutput.split('|')[0]).toBe(SENTINEL);
     expect(noOutput).toContain('crashed before it could evaluate the feedback');
+
+    // A TIMEOUT evaluated nothing → retry (sentinel), not an evaluated advance
+    // that would strand the unaddressed feedback. Even with OUTCOME=failed set
+    // by the gate (so GATE_CRASHED is false), the agent-timeout signal wins.
+    const timedOut = run({
+      OUTCOME: 'failed',
+      AGENT_TIMEOUT: 'timeout (3000000ms)',
+    });
+    expect(timedOut.split('|')[0]).toBe(SENTINEL);
+    expect(timedOut).toContain('ran out of time before finishing');
+    expect(timedOut).toContain('it will retry on the next scan');
+    // At the cap it names the real fix instead of promising a refused retry.
+    const timedOutCapped = run({
+      OUTCOME: 'failed',
+      AGENT_TIMEOUT: 'timeout (3000000ms)',
+      ROUND: '4',
+    });
+    expect(timedOutCapped).toContain('this was the last automatic attempt');
+    expect(timedOutCapped).toContain(
+      'split the PR or raise the agent time budget',
+    );
 
     // At the cap the gate crash names the operator fix rather than promising a
     // retry the scan's round gate would refuse.
@@ -4025,6 +4362,345 @@ describe('qwen-autofix workflow', () => {
         ROUND: '2',
       }),
     ).toContain('attempt 3/5');
+  });
+
+  it('retries a skipped-Prepare (base/infra failure) instead of stranding it terminal', () => {
+    // NEWEST empty has two meanings, and the fix is to stop conflating them:
+    //   - Prepare RAN but the agent crashed/timed out before reading → terminal
+    //   - Prepare was SKIPPED because an earlier step failed (base install/
+    //     build) → infra/base, transient → RETRY.
+    // Observed: a web-shell TS break on `main` failed the trusted-base build
+    // across a whole scan batch, skipping Prepare, and the old code stranded
+    // SIX healthy PRs (one at round 11) terminally at round=100.
+    // End at the decision block's own closing `fi`, anchored on the
+    // consecutive-failure block that follows (not the report `{`): that block
+    // was inserted between this decision and the `{`, and it calls `gh api`, so
+    // a `{`-anchored match over-captures it and fails when gh is unstubbed.
+    const block = reviewAddressReportStep.match(
+      /(GATE_CRASHED=false\n[\s\S]*?\n {12}fi)\n\n {12}# Consecutive-failure/,
+    )?.[1];
+    expect(block).toBeTruthy();
+    const script = block.replace(/^ {12}/gm, '');
+    const SENTINEL = '9999-12-31T23:59:59Z';
+    const run = (env) => {
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -uo pipefail\n${script}\nprintf '%s|%s|%s' "$MARK_TS" "$MARK_ROUND" "$HEADLINE"`,
+        ],
+        {
+          env: {
+            ...process.env,
+            NEWEST: '',
+            WATERMARK: '2026-07-20T09:00:00Z',
+            ROUND: '3',
+            MAX_ROUNDS: '100',
+            OUTCOME: '',
+            JOB_STATUS: 'failure',
+            DETAIL_FILE: '',
+            API_ERROR_DETAIL: '',
+            API_ERROR_KIND: '',
+            API_AUTH_MAX_ROUNDS: '3',
+            PREPARE_OUTCOME: 'skipped',
+            RETRY_COMMAND: '@qwen-code /retry',
+            ...env,
+          },
+          encoding: 'utf8',
+        },
+      );
+      const [ts, round, headline] = out.split('|');
+      return { ts, round, terminal: round === '100', headline };
+    };
+
+    // Prepare skipped, early round → retry: sentinel ts (feedback stays live),
+    // round increments, NOT terminal, and the headline names infra/base.
+    const early = run({ PREPARE_OUTCOME: 'skipped', ROUND: '3' });
+    expect(early).toMatchObject({ ts: SENTINEL, round: '4', terminal: false });
+    expect(early.headline).toContain('setup step');
+    expect(early.headline).toContain('retry on the next scan');
+    // A PERSISTENTLY broken base is still bounded: at the cap it goes terminal
+    // (so it cannot loop forever) but keeps the sentinel ts so /retry recovers.
+    const persistent = run({ PREPARE_OUTCOME: 'skipped', ROUND: '99' });
+    expect(persistent).toMatchObject({ ts: SENTINEL, terminal: true });
+    expect(persistent.headline).toContain('/retry');
+    // A CANCELLED job (concurrency/manual cancel) is a DISTINCT outcome value
+    // from 'skipped', and a job stopped before Prepare enters the step context
+    // reports outcome ''. Both are pre-agent and transient, so both must also
+    // retry — matching only 'skipped' sent them to the terminal branch.
+    const cancelled = run({ PREPARE_OUTCOME: 'cancelled', ROUND: '3' });
+    expect(cancelled).toMatchObject({
+      ts: SENTINEL,
+      round: '4',
+      terminal: false,
+    });
+    const emptyOutcome = run({ PREPARE_OUTCOME: '', ROUND: '3' });
+    expect(emptyOutcome).toMatchObject({
+      ts: SENTINEL,
+      round: '4',
+      terminal: false,
+    });
+    // Prepare RAN to a verdict (success/failure) and produced no feedback → a
+    // genuine pre-read agent crash: unchanged terminal behaviour. Both real-run
+    // outcomes stay terminal; only they do.
+    for (const outcome of ['success', 'failure']) {
+      const crashed = run({ PREPARE_OUTCOME: outcome, ROUND: '3' });
+      expect(crashed).toMatchObject({ terminal: true });
+      expect(crashed.headline).toContain('crashed or timed out before reading');
+      expect(crashed.headline).not.toContain('setup step');
+    }
+  });
+
+  it('stops a PR that fails to push for CONSECUTIVE_FAILURE_CAP rounds in a row', () => {
+    // The total round cap bounds productive iteration; this bounds an UNBROKEN
+    // run of failures under takeover, where the strict cap does not apply.
+    // Observed on #6723: 7 straight failed rounds (3 timeouts, 4 gate
+    // rejections) heading for round 100, each ~50 min. Any push or legitimate
+    // no-op resets the streak; only consecutive failures count.
+    const cap = Number(workflow.match(/CONSECUTIVE_FAILURE_CAP: '(\d+)'/)?.[1]);
+    expect(cap).toBeGreaterThan(0);
+    // The sub-cap must be below the takeover cap or it never binds there.
+    const takeoverCap = Number(
+      workflow.match(/TAKEOVER_MAX_ROUNDS: '(\d+)'/)?.[1],
+    );
+    expect(cap).toBeLessThan(takeoverCap);
+
+    const block = reviewAddressReportStep.match(
+      /if \[\[ "\$\{MARK_ROUND\}" != "\$\{MAX_ROUNDS\}" \]\] && \[\[ "\$\{PREPARE_OUTCOME\}" == 'success' \|\| "\$\{PREPARE_OUTCOME\}" == 'failure' \]\] && \[\[ "\$\{STALE_BASE_RETRY:-false\}" != 'true' \]\] && \{ \[\[ -z "\$\{API_ERROR_DETAIL\}" \]\] \|\| \[\[ "\$\{API_ERROR_KIND\}" == 'auth' \]\]; \}; then\n {14}CONSEC_FAIL=1\n[\s\S]*?\n {14}fi\n {12}fi\n/,
+    )?.[0];
+    expect(block).toBeTruthy();
+    const script = block.replace(/^ {12}/gm, '');
+
+    const FAIL =
+      '🤖 Could not address the latest feedback automatically (round 3/100).';
+    const FAIL_TIMEOUT = '🤖 AutoFix could not reach the model (attempt 2/3)';
+    const PUSH = '🤖 Addressed the latest review feedback (round 2/100).';
+    const NOOP = '🤖 Reviewed the latest feedback — no changes needed.';
+    const INFRA_FAIL =
+      '🤖 AutoFix could not start — a setup step failed (or the run was cancelled) before the agent ran.';
+    const INFRA_FAIL_CAP =
+      '🤖 AutoFix could not start — reached the round cap (100) because a setup step (base install/build) kept failing.';
+    const CRASH_TERMINAL =
+      '🤖 AutoFix could not start evaluation — it crashed or timed out before reading the feedback.';
+    const STALE_BASE =
+      '🤖 AutoFix updated a stale base — the fix did not pass verification, but this PR was behind `main`, so it merged current main in via update-branch and will retry on the next scan.';
+
+    const run = (
+      priorHeadlines,
+      {
+        window,
+        markRound = 7,
+        apiErrorDetail = '',
+        apiErrorKind = '',
+        prepareOutcome = 'success',
+        staleBaseRetry = false,
+      } = {},
+    ) => {
+      const dir = mkdtempSync(join(tmpdir(), 'consec-'));
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      writeFileSync(
+        join(dir, 'ic.json'),
+        JSON.stringify(
+          priorHeadlines.map((h, i) => {
+            const headline = typeof h === 'string' ? h : h.headline;
+            const win = typeof h === 'string' ? undefined : h.win;
+            return {
+              user: { login: 'qwen-code-dev-bot' },
+              created_at: `2026-01-01T00:${String(i).padStart(2, '0')}:00Z`,
+              body: `${headline}\n<!-- autofix-eval ts=x acted=y round=z${win ? ` win=${win}` : ''} -->`,
+            };
+          }),
+        ),
+      );
+      writeFileSync(
+        join(bin, 'gh'),
+        `#!/usr/bin/env bash\ncat ${JSON.stringify(join(dir, 'ic.json'))}\n`,
+      );
+      chmodSync(join(bin, 'gh'), 0o755);
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\n${script}\nprintf '%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE"`,
+        ],
+        {
+          env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+          encoding: 'utf8',
+        },
+      );
+      rmSync(dir, { recursive: true, force: true });
+      const [mark, consec, headline] = out.split('|');
+      return {
+        mark,
+        consec: Number(consec),
+        terminal: mark === '100',
+        headline,
+      };
+    };
+
+    // This round alone (no prior failures) never terminates.
+    expect(run([])).toMatchObject({ consec: 1, terminal: false });
+    // cap-1 prior failures + this round = cap → terminal, with the structural
+    // handoff, not the ordinary "could not address".
+    const capped = run(Array(cap - 1).fill(FAIL));
+    expect(capped).toMatchObject({ consec: cap, terminal: true });
+    expect(capped.headline).toContain('consecutive');
+    expect(capped.headline).toContain('/retry');
+    // One short of the cap keeps retrying.
+    expect(run(Array(cap - 2).fill(FAIL))).toMatchObject({ terminal: false });
+    // A push resets the streak — failures before it do not count.
+    expect(run([FAIL, FAIL, PUSH, FAIL, FAIL])).toMatchObject({
+      consec: 3,
+      terminal: false,
+    });
+    // A legitimate no-op resets it too (the loop was caught up, not stuck).
+    expect(run([...Array(cap).fill(FAIL), NOOP, FAIL])).toMatchObject({
+      consec: 2,
+      terminal: false,
+    });
+    // Prior-round headlines are cause-agnostic: timeouts and gate rejections
+    // both count toward the streak.
+    expect(run([FAIL, FAIL_TIMEOUT, FAIL, FAIL_TIMEOUT])).toMatchObject({
+      consec: cap,
+      terminal: true,
+    });
+    // A transient (non-auth) model error on the CURRENT round skips the
+    // breaker entirely — the CAUSE_MAX logic above gives it the full budget
+    // because it self-heals, and the breaker must not override that.
+    expect(
+      run(Array(cap - 1).fill(FAIL), {
+        apiErrorDetail: 'terminated',
+        apiErrorKind: 'transient',
+      }),
+    ).toMatchObject({ terminal: false, headline: 'orig' });
+    // An auth error on the current round is NOT exempt — it never self-heals.
+    expect(
+      run(Array(cap - 1).fill(FAIL), {
+        apiErrorDetail: 'access denied',
+        apiErrorKind: 'auth',
+      }),
+    ).toMatchObject({ consec: cap, terminal: true });
+    // A skipped-Prepare (pre-agent infra failure) is exempt from the breaker —
+    // same failure class as transient 429/5xx: not the PR's fault, self-heals,
+    // hits the whole scan batch. The round cap + sentinel-ts /retry already
+    // bounds a persistently broken base; the breaker must not override that
+    // and re-introduce the mass-stranding this retry path exists to prevent.
+    expect(
+      run(Array(cap - 1).fill(FAIL), { prepareOutcome: 'skipped' }),
+    ).toMatchObject({ terminal: false, headline: 'orig' });
+    expect(
+      run(Array(cap - 1).fill(FAIL), { prepareOutcome: 'cancelled' }),
+    ).toMatchObject({ terminal: false, headline: 'orig' });
+    expect(
+      run(Array(cap - 1).fill(FAIL), { prepareOutcome: '' }),
+    ).toMatchObject({ terminal: false, headline: 'orig' });
+    // Prior infra-failure headlines reset the streak too — a broken base
+    // build is not the PR's fault, same class as the current-round exemption
+    // above. Without this, 3 real failures + 3 infra rounds + 1 more real
+    // failure would trip the cap-5 breaker even though only 4 rounds were the
+    // PR's fault.
+    expect(run([FAIL, FAIL, INFRA_FAIL, FAIL, FAIL])).toMatchObject({
+      consec: 3,
+      terminal: false,
+    });
+    expect(run([FAIL, FAIL, INFRA_FAIL_CAP, FAIL, FAIL])).toMatchObject({
+      consec: 3,
+      terminal: false,
+    });
+    // The genuine agent-crash headline must NOT reset the streak — it is a
+    // real failure, not infra.
+    expect(run([FAIL, FAIL, CRASH_TERMINAL, FAIL])).toMatchObject({
+      consec: cap,
+      terminal: true,
+    });
+    // A prior stale-base retry is not the PR's fault either (the base was
+    // updated, not the fix rejected), so it resets the streak like the infra
+    // headlines above.
+    expect(run([FAIL, FAIL, STALE_BASE, FAIL, FAIL])).toMatchObject({
+      consec: 3,
+      terminal: false,
+    });
+    // The CURRENT round being a stale-base retry is exempt from the breaker
+    // entirely — the base was just updated and the next round builds fresh, so
+    // cap-1 prior failures must not trip it.
+    expect(
+      run(Array(cap - 1).fill(FAIL), { staleBaseRetry: true }),
+    ).toMatchObject({ terminal: false, headline: 'orig' });
+    // Already-terminal rounds skip the circuit breaker entirely.
+    expect(run(Array(cap).fill(FAIL), { markRound: 100 })).toMatchObject({
+      terminal: true,
+      headline: 'orig',
+    });
+    // The reset detector keys on literal substrings; pin them to the actual
+    // "Push and report" emit lines so a reword breaks this test, not silently
+    // the streak reset in production.
+    const pushEmit = pushAndReportStep.match(
+      /echo "(🤖 Addressed the latest review feedback[^"]*)"/,
+    );
+    expect(pushEmit).toBeTruthy();
+    expect(pushEmit[1]).toContain('Addressed the latest review feedback');
+    const noopEmit = pushAndReportStep.match(
+      /echo "(🤖 Reviewed the latest feedback — no changes needed[^"]*)"/,
+    );
+    expect(noopEmit).toBeTruthy();
+    expect(noopEmit[1]).toContain('no changes needed');
+    // The infra-failure reset strings must match the actual retry/cap
+    // headlines emitted in this same step, so a reword breaks this test,
+    // not silently the streak reset.
+    const infraRetryEmit = reviewAddressReportStep.match(
+      /HEADLINE="(🤖 AutoFix could not start — [^"]*)"/,
+    );
+    expect(infraRetryEmit).toBeTruthy();
+    expect(infraRetryEmit[1]).toContain('AutoFix could not start —');
+    const infraCapEmit = reviewAddressReportStep.match(
+      /HEADLINE="(🤖 AutoFix could not start — reached the round cap[^"]*)"/,
+    );
+    expect(infraCapEmit).toBeTruthy();
+    expect(infraCapEmit[1]).toContain('AutoFix could not start —');
+    // The crash headline must NOT match the infra reset patterns.
+    const crashEmit = reviewAddressReportStep.match(
+      /HEADLINE="(🤖 AutoFix could not start evaluation[^"]*)"/,
+    );
+    expect(crashEmit).toBeTruthy();
+    expect(crashEmit[1]).not.toContain('AutoFix could not start —');
+    // Window filtering: pre-re-arm failures don't count after a re-arm.
+    expect(
+      run(
+        [
+          ...Array(cap - 1).fill({ headline: FAIL, win: 'old-window' }),
+          { headline: FAIL, win: 'current-window' },
+        ],
+        { window: 'current-window' },
+      ),
+    ).toMatchObject({ consec: 2, terminal: false });
+  });
+
+  it('posts the review-address report wrapper lines bilingually', () => {
+    // The agent's own address-summary.md / no-action.md ends with a collapsed
+    // Chinese block, but these workflow-appended wrapper lines sit OUTSIDE it —
+    // so each must carry its own inline translation (the `model/模型` footer in
+    // this same step is the idiom) or the posted comment is only half in
+    // Chinese. Pin the English↔Chinese pairs so a reword that drops the Chinese
+    // fails here. The English halves are load-bearing elsewhere too: the streak
+    // reset detector globs `*"Addressed the latest review feedback"*` and
+    // `*"no changes needed"*`, so they must stay verbatim.
+    for (const [en, zh] of [
+      ['Addressed the latest review feedback', '已处理最新评审反馈'],
+      ['Re-review when you have a moment', '有空请复审'],
+      ['Reviewed the latest feedback — no changes needed', '无需改动'],
+      ['conflicted with main — resolved in this push', '已在本次推送中解决'],
+      ['conflicts with main (no review fix needed', '合并前需 rebase/merge'],
+      ['no conflict with main', '与 main 无冲突'],
+    ]) {
+      expect(pushAndReportStep, `English anchor missing: ${en}`).toContain(en);
+      expect(pushAndReportStep, `Chinese missing for: ${en}`).toContain(zh);
+    }
+    // Every posted line in the step is either bilingual, the agent's own
+    // (already-bilingual) markdown, a structural token (---), or the footer
+    // (model/模型). Guard specifically that no Base-conflict label is emitted
+    // English-only.
+    expect(pushAndReportStep).not.toMatch(/echo "Base-conflict check:/);
   });
 
   it('makes every known gate rejection declare its verdict', () => {
@@ -4722,12 +5398,21 @@ describe('qwen-autofix workflow', () => {
     expect(runMark({ NEWEST: '2026-07-16T00:00:00Z', DETAIL_FILE: '' })).toBe(
       `${SENTINEL}|3`,
     );
-    // 3. Crash before prepare (NEWEST empty): terminal round so the scan skips
+    // 3. NEWEST empty but Prepare RAN to a verdict (outcome success/failure)
+    //    and the agent crashed before reading: terminal round so the scan skips
     //    instead of re-handing-off forever; ts falls back to WATERMARK/sentinel.
-    expect(runMark({ NEWEST: '', WATERMARK: '2026-07-10T00:00:00Z' })).toBe(
-      '2026-07-10T00:00:00Z|5',
-    );
-    expect(runMark({ NEWEST: '', WATERMARK: '' })).toBe(`${SENTINEL}|5`);
+    //    (An empty/skipped/cancelled Prepare — the agent never ran — now retries
+    //    instead; that is the dedicated skipped-Prepare test above.)
+    expect(
+      runMark({
+        NEWEST: '',
+        WATERMARK: '2026-07-10T00:00:00Z',
+        PREPARE_OUTCOME: 'success',
+      }),
+    ).toBe('2026-07-10T00:00:00Z|5');
+    expect(
+      runMark({ NEWEST: '', WATERMARK: '', PREPARE_OUTCOME: 'failure' }),
+    ).toBe(`${SENTINEL}|5`);
 
     // The no-output-crash HEADLINE must only promise a retry when one will
     // actually happen: at the final attempt (MARK_ROUND == MAX_ROUNDS) the
@@ -5340,6 +6025,16 @@ describe('qwen-autofix workflow', () => {
       expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
         'timeout (100ms)',
       );
+      // A timeout drops the agent-timeout signal so the handoff routes it to a
+      // RETRY (sentinel ts), not an evaluated advance that strands the feedback
+      // the agent never finished addressing.
+      expect(existsSync(join(dir, 'agent-timeout'))).toBe(true);
+      expect(readFileSync(join(dir, 'agent-timeout'), 'utf8')).toContain(
+        'timeout (100ms)',
+      );
+      // It is NOT an API error — the api-error signal must stay absent so the
+      // model-key handoff is not shown for a budget timeout.
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
     });
   });
 

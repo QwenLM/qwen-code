@@ -326,6 +326,7 @@ export type {
   DaemonAgentLevel,
   DaemonAgentMutationResult,
   DaemonGeneratedAgentContent,
+  DaemonWorkspaceGenerationEvent,
   DaemonApprovalMode,
   DaemonApprovalModeResult,
   DaemonGithubSetupGitignoreResult,

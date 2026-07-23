@@ -370,6 +370,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_mcp_restart',
       'session_recap',
       'session_generation',
+      'workspace_generation',
       'session_btw',
       'mcp_workspace_pool',
       'mcp_pool_restart',

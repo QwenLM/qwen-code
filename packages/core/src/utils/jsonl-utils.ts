@@ -323,13 +323,16 @@ export function writeLineSync(filePath: string, data: unknown): void {
  * Each object will be written as a separate line.
  */
 export function write(filePath: string, data: unknown[]): void {
-  const lines = data.map((item) => JSON.stringify(item)).join('\n');
+  // Terminate each record rather than joining with separators: joining an
+  // empty array yields '' and the trailing newline then writes a 1-byte file
+  // that read() reports as empty but exists() reports as non-empty.
+  const lines = data.map((item) => `${JSON.stringify(item)}\n`).join('');
   // Ensure directory exists before writing
   const dir = path.dirname(filePath);
   if (!fs.existsSync(dir)) {
     fs.mkdirSync(dir, { recursive: true });
   }
-  atomicWriteFileSync(filePath, `${lines}\n`, { encoding: 'utf8' });
+  atomicWriteFileSync(filePath, lines, { encoding: 'utf8' });
 }
 
 /**

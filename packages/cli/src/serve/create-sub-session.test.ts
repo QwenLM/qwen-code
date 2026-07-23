@@ -81,6 +81,7 @@ function makeFakeBridge(opts?: {
       return metadata;
     },
     getSessionLastEventId: () => 0,
+    getSessionEventEpoch: () => 'fake-epoch',
     sendPrompt: (
       sessionId: string,
       req: { prompt: Array<{ type: string; text?: string }> },
