@@ -707,6 +707,37 @@ export type BridgeGenerationNotificationEvent = Exclude<
   { type: 'done' }
 >;
 
+export type BridgeWorkspaceGenerationStreamEvent =
+  | {
+      type: 'started';
+      requestId: string;
+      model: string;
+      modelSource: BridgeGenerationModelSource;
+    }
+  | {
+      type: 'thinking';
+      requestId: string;
+    }
+  | {
+      type: 'delta';
+      requestId: string;
+      seq: number;
+      text: string;
+    }
+  | {
+      type: 'done';
+      requestId: string;
+      model: string;
+      modelSource: BridgeGenerationModelSource;
+      inputTokens?: number;
+      outputTokens?: number;
+    };
+
+export type BridgeWorkspaceGenerationNotificationEvent = Exclude<
+  BridgeWorkspaceGenerationStreamEvent,
+  { type: 'done' }
+>;
+
 export interface AcpSessionBridge {
   /** Read-only daemon diagnostics for status endpoints. */
   getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot;
@@ -1370,6 +1401,13 @@ export interface AcpSessionBridge {
     description: string;
     systemPrompt: string;
   }>;
+
+  /** Run stateless, tool-free generation in the resolved workspace runtime. */
+  generateWorkspaceContent?(
+    prompt: string,
+    signal: AbortSignal,
+    originatorClientId: string | undefined,
+  ): AsyncIterable<BridgeWorkspaceGenerationStreamEvent>;
 
   /**
    * Tear down a session — kill the child, drop from maps, publish
