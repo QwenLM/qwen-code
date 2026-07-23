@@ -64,14 +64,10 @@ jobs:
           PR_NUMBER: '${{ github.event.pull_request.number }}'
           REVIEWERS: '${{ steps.classify.outputs.reviewers }}'
           REASON: '${{ steps.classify.outputs.reason }}'
-          MAINTAINERS: '${{ steps.classify.outputs.maintainers }}'
         run: |-
           set -euo pipefail
           api="repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/requested_reviewers"
-          # Maintainer list comes from the classifier output (the canonical
-          # source) so the reconciliation below cannot drift from the routing
-          # decision above when the roster changes.
-          maintainers="$MAINTAINERS"
+          marker='<!-- core-review-router:managed'
 
           # Compute the desired managed set from the routing decision.
           if [ -n "$REVIEWERS" ]; then
@@ -85,39 +81,70 @@ jobs:
           # a review, so without this they would be re-added (and re-pinged)
           # on every subsequent synchronize push — exactly the notification
           # churn this router exists to remove.
-          reviewed="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100" --jq '[.[].user.login]')"
+          reviewed="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100" --jq '.[].user.login' | jq -R . | jq -sc '.')"
           desired="$(jq -cn --argjson d "$desired" --argjson r "$reviewed" '$d - $r | sort')"
 
           current="$(gh api "$api" --jq '[.users[].login]')"
-          managed="$(echo "$current" | jq -c --argjson m "$maintainers" '[.[] | select(. as $l | $m | index($l))] | sort')"
 
-          # This step reconciles the managed maintainer set (requested
-          # reviewers who are core maintainers) toward `desired`, treating
-          # those four maintainers as router-owned: a maintainer a human
-          # manually added but the classifier did not select is removed on
-          # the next event. Non-maintainer reviewers are never touched.
+          # Only treat reviewers as router-managed if this workflow
+          # previously requested them (recorded in a marker comment).
+          # CODEOWNERS-assigned or manually-added maintainers are never
+          # removed by the reconciliation below.
+          prev_desired="$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" \
+            --arg marker "$marker" \
+            --jq '[.[] | select(.body | startswith($marker))] | last | .body // "" | split("\n") | .[1] // "[]" | fromjson? // []' \
+            2>/dev/null)" || prev_desired='[]'
+          [ -z "$prev_desired" ] && prev_desired='[]'
+
+          managed="$(echo "$current" | jq -c --argjson p "$prev_desired" \
+            '[.[] | select(. as $l | $p | index($l))] | sort')"
+
+          # Reconcile the router-managed set toward `desired`. Non-managed
+          # reviewers (CODEOWNERS-assigned, manually added) are untouched.
           #
-          # Diff guard: skip all API calls when the set is unchanged so a
-          # stable synchronize push does not re-notify reviewers.
-          if [ "$managed" = "$desired" ]; then
+          # Diff guard: skip reviewer API calls when the set is unchanged so
+          # a stable synchronize push does not re-notify reviewers.
+          if [ "$managed" != "$desired" ]; then
+            # Remove maintainers that should no longer be requested.
+            to_remove="$(jq -cn --argjson a "$managed" --argjson b "$desired" '$a - $b')"
+            if [ "$to_remove" != "[]" ]; then
+              echo "$to_remove" | jq '{reviewers: .}' \
+                | gh api --method DELETE "$api" --input - > /dev/null \
+                || echo "::warning::Failed to remove reviewers: $to_remove"
+            fi
+
+            # Add maintainers that should be newly requested.
+            to_add="$(jq -cn --argjson a "$desired" --argjson b "$managed" '$a - $b')"
+            if [ "$to_add" != "[]" ]; then
+              echo "$to_add" | jq '{reviewers: .}' \
+                | gh api --method POST "$api" --input - > /dev/null \
+                || echo "::warning::Failed to add reviewers: $to_add"
+            fi
+
+            echo "Applied: $REVIEWERS ($REASON)"
+          else
             echo "Reviewer set unchanged ($REVIEWERS) — skipping ($REASON)"
-            exit 0
           fi
 
-          # Remove maintainers that should no longer be requested.
-          to_remove="$(jq -cn --argjson a "$managed" --argjson b "$desired" '$a - $b')"
-          if [ "$to_remove" != "[]" ]; then
-            echo "$to_remove" | jq '{reviewers: .}' \
-              | gh api --method DELETE "$api" --input - > /dev/null \
-              || echo "::warning::Failed to remove reviewers: $to_remove"
+          # Persist the desired set in a marker comment so the next run
+          # can distinguish router-added reviewers from CODEOWNERS or
+          # manually-added ones.
+          marker_body="${marker} -->
+          ${desired}
+          -->"
+          comment_id="$(gh api --paginate \
+            "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" \
+            --arg marker "$marker" \
+            --jq '[.[] | select(.body | startswith($marker))] | last | .id // empty' \
+            2>/dev/null)" || comment_id=""
+          if [ -n "$comment_id" ]; then
+            gh api --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" \
+              -f body="$marker_body" > /dev/null \
+              || echo "::warning::Failed to update marker comment"
+          else
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              -f body="$marker_body" > /dev/null \
+              || echo "::warning::Failed to create marker comment"
           fi
-
-          # Add maintainers that should be newly requested.
-          to_add="$(jq -cn --argjson a "$desired" --argjson b "$managed" '$a - $b')"
-          if [ "$to_add" != "[]" ]; then
-            echo "$to_add" | jq '{reviewers: .}' \
-              | gh api --method POST "$api" --input - > /dev/null \
-              || echo "::warning::Failed to add reviewers: $to_add"
-          fi
-
-          echo "Applied: $REVIEWERS ($REASON)"
