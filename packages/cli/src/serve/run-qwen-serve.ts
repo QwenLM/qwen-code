@@ -135,6 +135,10 @@ import {
   isChannelDeliveryError,
 } from './channel-delivery-ipc.js';
 import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
+import {
+  sanitizeWorkerDiagnostic,
+  type WorkerDiagnosticRedactionOptions,
+} from './channel-worker-diagnostics.js';
 import { channelSelectionNames } from './channel-selection.js';
 import {
   resolveChannelWorkspaceGroups,
@@ -183,21 +187,41 @@ export function createBoundChannelDeliveryHandler(
   getManager: () => ChannelWorkerManager | undefined,
   authorizations: ChannelDeliveryAuthorizationStore,
   daemonLog?: Pick<DaemonLogger, 'warn'>,
+  diagnosticRedaction: WorkerDiagnosticRedactionOptions = {
+    workerEnv: process.env,
+  },
 ): ChannelDeliveryHandler {
   return async (info): Promise<ChannelDeliveryHostResult> => {
     const failed = (
       code: Extract<ChannelDeliveryHostResult, { status: 'failed' }>['code'],
       error: string,
+      diagnostic?: unknown,
     ): ChannelDeliveryHostResult => {
-      writeDaemonLifecycleBestEffort(() =>
-        daemonLog?.warn('channel delivery failed', {
+      writeDaemonLifecycleBestEffort(() => {
+        if (!daemonLog) return;
+        let diagnosticText: string | undefined;
+        if (diagnostic !== undefined) {
+          const message =
+            diagnostic instanceof Error
+              ? diagnostic.message
+              : String(diagnostic);
+          diagnosticText = sanitizeWorkerDiagnostic(
+            info.target.id.length > 0
+              ? message.replaceAll(info.target.id, '<redacted>')
+              : message,
+            512,
+            diagnosticRedaction,
+          );
+        }
+        daemonLog.warn('channel delivery failed', {
           sessionId: info.sessionId,
           deliveryId: info.deliveryId,
           source: info.source,
           channelName: info.target.channelName,
           code,
-        }),
-      );
+          ...(diagnosticText ? { diagnostic: diagnosticText } : {}),
+        });
+      });
       return { status: 'failed', code, error };
     };
     if (!authorizations.consume(boundWorkspace, info)) {
@@ -228,7 +252,7 @@ export function createBoundChannelDeliveryHandler(
       if (isChannelDeliveryError(err)) {
         return failed(err.code, err.message);
       }
-      return failed('channel_delivery_failed', 'Channel delivery failed.');
+      return failed('channel_delivery_failed', 'Channel delivery failed.', err);
     }
   };
 }
@@ -1892,6 +1916,10 @@ async function runQwenServeImpl(
     typeof rawToken === 'string' && rawToken.trim().length > 0
       ? rawToken.trim()
       : undefined;
+  const channelDeliveryDiagnosticRedaction: WorkerDiagnosticRedactionOptions = {
+    workerEnv: daemonRuntimeBaseEnv,
+    ...(token ? { daemonToken: token } : {}),
+  };
   const sessionShellCommandEnabled =
     optsIn.enableSessionShell === true && token !== undefined;
   if (optsIn.enableSessionShell === true && token === undefined) {
@@ -3450,6 +3478,7 @@ async function runQwenServeImpl(
           () => channelWorkerManager,
           channelDeliveryAuthorizations,
           daemonLog,
+          channelDeliveryDiagnosticRedaction,
         ),
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
@@ -3771,6 +3800,7 @@ async function runQwenServeImpl(
           () => channelWorkerManager,
           channelDeliveryAuthorizations,
           daemonLog,
+          channelDeliveryDiagnosticRedaction,
         ),
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
@@ -4165,6 +4195,7 @@ async function runQwenServeImpl(
             () => channelWorkerManager,
             channelDeliveryAuthorizations,
             daemonLog,
+            channelDeliveryDiagnosticRedaction,
           ),
           maxSessions: opts.maxSessions,
           freshSessionAdmission: totalSessionAdmission.admit,

@@ -8,6 +8,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import {
   ChannelBase,
   ChannelProactiveDeliveryError,
+  isChannelProactiveDeliveryError,
   isTerminalTaskLifecycleType,
 } from '@qwen-code/channel-base';
 import { buildCardContent, extractTitle, splitChunks } from './markdown.js';
@@ -690,12 +691,23 @@ export class FeishuChannel extends ChannelBase {
     target: SessionTarget,
     text: string,
   ): Promise<void> {
-    await this.sendMessageInternal(
-      target.chatId,
-      text,
-      true,
-      target.isGroup === false ? 'open_id' : 'chat_id',
-    );
+    try {
+      await this.sendMessageInternal(
+        target.chatId,
+        text,
+        true,
+        target.isGroup === false ? 'open_id' : 'chat_id',
+      );
+    } catch (error) {
+      if (isChannelProactiveDeliveryError(error)) {
+        throw error;
+      }
+      throw new ChannelProactiveDeliveryError(
+        'transient',
+        error instanceof Error ? error.message : String(error),
+        { cause: error },
+      );
+    }
   }
 
   private async sendMessageInternal(

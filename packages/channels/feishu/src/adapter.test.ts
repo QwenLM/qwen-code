@@ -1403,6 +1403,27 @@ describe('FeishuChannel', () => {
         }),
       );
     });
+
+    it('classifies unexpected proactive delivery failures as transient', async () => {
+      const channel = createTestableChannel();
+      const failure = new Error('unexpected token lookup failure');
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        getTenantAccessToken: vi.fn().mockRejectedValue(failure),
+      });
+
+      await expect(
+        channel.deliverProactive(
+          { channelName: 'test', type: 'user', id: 'ou_user' },
+          'direct result',
+        ),
+      ).rejects.toEqual(
+        expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+          disposition: 'transient',
+          message: 'unexpected token lookup failure',
+          cause: failure,
+        }),
+      );
+    });
   });
 
   describe('onPromptEnd: error recovery branches', () => {

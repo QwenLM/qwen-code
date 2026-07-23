@@ -305,6 +305,80 @@ describe('createBoundChannelDeliveryHandler', () => {
       code: 'channel_delivery_invalid',
     });
   });
+
+  it('logs a sanitized diagnostic for unexpected delivery failures', async () => {
+    vi.stubEnv('CHANNEL_DELIVERY_TEST_API_KEY', 'worker-secret');
+    const deliverChannelMessage = vi
+      .fn()
+      .mockRejectedValue(new Error('EPIPE worker-secret daemon-secret user-1'));
+    const warn = vi.fn();
+    const authorizations = new ChannelDeliveryAuthorizationStore();
+    authorizations.authorizePrompt('/canonical', {
+      sessionId: info.sessionId,
+      deliveryId: info.deliveryId,
+      target: info.target,
+    });
+    const handler = createBoundChannelDeliveryHandler(
+      '/canonical',
+      () => ({ deliverChannelMessage }) as never,
+      authorizations,
+      { warn } as never,
+      {
+        daemonToken: 'daemon-secret',
+        workerEnv: process.env,
+      },
+    );
+
+    try {
+      const result = await handler(info);
+      expect(result).toEqual({
+        status: 'failed',
+        code: 'channel_delivery_failed',
+        error: 'Channel delivery failed.',
+      });
+      expect(warn).toHaveBeenCalledWith('channel delivery failed', {
+        sessionId: info.sessionId,
+        deliveryId: info.deliveryId,
+        source: info.source,
+        channelName: info.target.channelName,
+        code: 'channel_delivery_failed',
+        diagnostic: 'EPIPE <redacted> <redacted> <redacted>',
+      });
+      expect(JSON.stringify({ result, calls: warn.mock.calls })).not.toMatch(
+        /worker-secret|daemon-secret|user-1/u,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('keeps diagnostic formatting failures out of the delivery result path', async () => {
+    const diagnosticFailure = {
+      toString: () => {
+        throw new Error('diagnostic formatting failed');
+      },
+    };
+    const deliverChannelMessage = vi.fn().mockRejectedValue(diagnosticFailure);
+    const warn = vi.fn();
+    const authorizations = new ChannelDeliveryAuthorizationStore();
+    authorizations.authorizePrompt('/canonical', {
+      sessionId: info.sessionId,
+      deliveryId: info.deliveryId,
+      target: info.target,
+    });
+    const handler = createBoundChannelDeliveryHandler(
+      '/canonical',
+      () => ({ deliverChannelMessage }) as never,
+      authorizations,
+      { warn } as never,
+    );
+
+    await expect(handler(info)).resolves.toEqual({
+      status: 'failed',
+      code: 'channel_delivery_failed',
+      error: 'Channel delivery failed.',
+    });
+  });
 });
 
 function makeRuntimeBridge(): HttpAcpBridge {
