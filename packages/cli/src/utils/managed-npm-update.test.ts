@@ -371,6 +371,10 @@ describe('managed npm update', () => {
     );
     const versionDir = path.join(versionsDir, '1.0.0');
     const unknownDir = path.join(versionsDir, 'unrelated');
+    const nonSemverDir = path.join(
+      versionsDir,
+      `.not-semver-${missingPid}-abc123`,
+    );
     const stagingSymlink = path.join(
       versionsDir,
       `.2.3.0-${missingPid}-abcdef`,
@@ -379,6 +383,7 @@ describe('managed npm update', () => {
     fs.writeFileSync(activeTemporaryFile, 'active');
     fs.mkdirSync(versionDir);
     fs.mkdirSync(unknownDir);
+    fs.mkdirSync(nonSemverDir);
     fs.symlinkSync(
       versionDir,
       stagingSymlink,
@@ -402,6 +407,7 @@ describe('managed npm update', () => {
       expect(fs.existsSync(activeTemporaryFile)).toBe(true);
       expect(fs.existsSync(versionDir)).toBe(true);
       expect(fs.existsSync(unknownDir)).toBe(true);
+      expect(fs.existsSync(nonSemverDir)).toBe(true);
       expect(fs.existsSync(stagingSymlink)).toBe(true);
     } finally {
       kill.mockRestore();
