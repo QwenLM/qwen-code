@@ -91,8 +91,9 @@ independent and is always enforced by the SDK.
 ## Wire flow
 
 1. Send one non-retried `POST /session/:id/prompt`.
-2. Require `202` and validate `{promptId,lastEventId}`.
-3. Open `GET /session/:id/events` with `Last-Event-ID` set to the watermark.
+2. Require `202` and validate `{promptId,lastEventId,eventEpoch?}`.
+3. Open `GET /session/:id/events` with `Last-Event-ID` set to the watermark
+   and `X-Qwen-Event-Epoch` set when the daemon supplied an epoch.
 4. Replay and observe only events correlated with that prompt, while treating
    session-level failure frames as fatal.
 5. Stop only on matching `turn_complete` or `turn_error`.
@@ -107,7 +108,11 @@ The JDK `HttpClient` uses HTTP/1.1 and never follows redirects. Every request
 sends JSON or event-stream `Accept` headers, bearer authentication when
 configured, and the daemon-issued `X-Qwen-Client-Id` after session creation.
 SSE additionally sends `Accept-Encoding: identity`, `Cache-Control: no-cache`,
-and `Last-Event-ID`.
+and `Last-Event-ID`. When available, `X-Qwen-Event-Epoch` travels with that
+cursor. The client seeds it from the prompt admission, learns it from a
+validated SSE response header for compatibility, retains a known value when a
+response omits the header, and fails closed if the value changes during prompt
+observation.
 
 Finite JSON and error bodies are consumed by a bounded subscriber and raced
 against the request deadline through `sendAsync`; receiving response headers
@@ -166,10 +171,11 @@ provider because Logback is test-only.
 
 The compatible daemon is the qwen-code build released from the same source
 revision as the SDK. It contains the per-client detach ledger from #7386, the
-per-epoch terminal guarantee from #7400, and this release's acknowledged
-admission cancellation plus FIFO cancel-drain fence. The #7400 commit alone can
-still acknowledge cancel before agent dispatch without stopping the admitted
-prompt, or let an unacknowledged session-scoped cancel reach a queued successor.
+per-epoch terminal guarantee from #7400, restart-safe event cursor epochs from
+#7458, and this release's acknowledged admission cancellation plus FIFO
+cancel-drain fence. The #7400 commit alone can still acknowledge cancel before
+agent dispatch without stopping the admitted prompt, or let an unacknowledged
+session-scoped cancel reach a queued successor.
 The bundled ACP child handles the daemon's internal cancellation request through
 one acknowledged admission-aware handshake. A custom standards-compliant ACP
 child that does not implement that extension receives one standard
@@ -187,7 +193,8 @@ outcome unknown and the session unusable. Reclaiming a wedged shared ACP child
 without terminating sibling sessions requires stronger runtime isolation and is
 outside this alpha.
 
-The alpha does not promise exactly-once execution across daemon restarts,
+The alpha detects an event-epoch change during an observed prompt and fails
+closed, but does not promise exactly-once execution across daemon restarts,
 automatic epoch recovery, snapshot/resync, persisted cursors, or true
 prompt-ID-targeted cancellation. It also does not expose creation-time model
 selection until the daemon can return a definitive result or the SDK owns a
@@ -200,8 +207,9 @@ reaping. Those cases require stronger daemon contracts.
 Unit tests use an in-process HTTP server to inject SSE fragmentation, slow
 single-line delivery, replay, duplicates, gaps, conflicting prompt IDs,
 opaque future event data, watermark replay, disconnects, compressed responses,
-stalled finite bodies, resync, observer failures, terminal absence, and
-ambiguous mutation responses. Lifecycle tests cover one-local-prompt admission,
+stalled finite bodies, event-epoch propagation and mismatch, resync, observer
+failures, terminal absence, and ambiguous mutation responses. Lifecycle tests
+cover one-local-prompt admission,
 admission/close serialization, deadline terminal followed by session reuse,
 cancelled completion, teardown terminal ordering, bounded text, automatic
 heartbeat, idempotent close, detach client identity, detach-once, and explicit
