@@ -3767,6 +3767,7 @@ export const useGeminiStream = (
       displayText: string;
       modelText: string;
       sendMessageType: SendMessageType;
+      monitor?: { id: string; status: string };
       onDelivered?: () => void;
       onDeliveryFailed?: () => void;
     }>
@@ -3926,6 +3927,7 @@ export const useGeminiStream = (
         displayText,
         modelText,
         sendMessageType: SendMessageType.Notification,
+        monitor: { id: meta.monitorId, status: meta.status },
       });
       setNotificationTrigger((n) => n + 1);
     });
@@ -3957,6 +3959,19 @@ export const useGeminiStream = (
       // triggered the commit.
       runOutsideAgentContext(() => {
         const queue = notificationQueueRef.current;
+        const monitorRegistry = config.getMonitorRegistry();
+        for (let i = queue.length - 1; i >= 0; i--) {
+          const monitor = queue[i]!.monitor;
+          if (
+            monitor?.status === 'running' &&
+            monitorRegistry.get(monitor.id)?.status === 'cancelled'
+          ) {
+            queue.splice(i, 1);
+          }
+        }
+        if (queue.length === 0) {
+          return;
+        }
         const targetType = queue[0]!.sendMessageType;
 
         // Cron prompts must run as individual turns — each needs its own
@@ -4001,7 +4016,7 @@ export const useGeminiStream = (
         });
       });
     }
-  }, [streamingState, submitQuery, notificationTrigger, addItem]);
+  }, [streamingState, submitQuery, notificationTrigger, addItem, config]);
 
   // ─── Teammate message integration ─────────────────────────
   // Each entry carries the full nonce-tagged envelope (`modelText`,
