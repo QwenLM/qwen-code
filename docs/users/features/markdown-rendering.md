@@ -1,3 +1,7 @@
+---
+description: "Render Markdown, Mermaid diagrams, tables, task lists, and LaTeX directly in the Qwen Code terminal UI with raw/render mode controls."
+---
+
 # Markdown Rendering
 
 Qwen Code renders common Markdown structures directly in the TUI so model

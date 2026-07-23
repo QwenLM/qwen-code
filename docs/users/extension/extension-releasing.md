@@ -1,3 +1,7 @@
+---
+description: "Publish Qwen Code extensions via Git, GitHub Releases, or npm. Choose the best distribution method for your team and users."
+---
+
 # Extension Releasing
 
 There are three primary ways of releasing extensions to users:

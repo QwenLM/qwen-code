@@ -1,3 +1,7 @@
+---
+description: "Qwen Code tools overview. Discover built-in tools that let the AI agent interact with your environment, access info, and perform actions."
+---
+
 # Qwen Code tools
 
 Qwen Code includes built-in tools that the model uses to interact with your local environment, access information, and perform actions. These tools enhance the CLI's capabilities, enabling it to go beyond text generation and assist with a wide range of tasks.

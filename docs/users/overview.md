@@ -1,3 +1,7 @@
+---
+description: "Learn what Qwen Code does, how to install it, start your first AI coding session, and use it for code understanding, debugging, automation, and IDE workflows."
+---
+
 # Qwen Code overview
 
 [![@qwen-code/qwen-code downloads](https://img.shields.io/npm/dw/@qwen-code/qwen-code.svg)](https://npm-compare.com/@qwen-code/qwen-code)

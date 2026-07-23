@@ -1,3 +1,7 @@
+---
+description: "Qwen Code memory diagnostics reference design. Add /doctor memory snapshots for heap, handles, file descriptors, and leak hints."
+---
+
 # Memory Diagnostics Reference Design
 
 ## Context

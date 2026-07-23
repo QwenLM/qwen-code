@@ -1,3 +1,7 @@
+---
+description: "Set up a Qwen Code channel on WeChat via iLink Bot API. Connect your AI coding agent to 微信 for chat-based code assistance."
+---
+
 # WeChat (Weixin)
 
 This guide covers setting up a Qwen Code channel on WeChat via the official iLink Bot API.

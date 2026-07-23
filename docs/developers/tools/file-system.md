@@ -1,3 +1,7 @@
+---
+description: "Qwen Code file system tools reference. Read, write, list, search and modify files with the AI coding agent's comprehensive file operations."
+---
+
 # Qwen Code file system tools
 
 Qwen Code provides a comprehensive suite of tools for interacting with the local file system. These tools allow the model to read from, write to, list, search, and modify files and directories, all under your control and typically with confirmation for sensitive operations.

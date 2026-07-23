@@ -1,3 +1,7 @@
+---
+description: "Qwen Code banner customization design. Replace brand chrome while preserving operational startup details for debugging and trust."
+---
+
 # Customize Banner Area Design
 
 > Allow users to replace the QWEN ASCII art, replace the brand title, and

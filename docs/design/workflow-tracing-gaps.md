@@ -1,3 +1,7 @@
+---
+description: "Analyze Qwen Code workflow tracing gaps and identify missing span boundaries for clearer agent execution observability."
+---
+
 # Workflow 级 Span 粒度不足分析 (P1)
 
 > 基于 2026-05-13 对 qwen-code origin/main 的复核

@@ -1,3 +1,7 @@
+---
+description: "Qwen Code Compact Mode design analysis. Compare with Claude Code, review implementation, and discover optimization recommendations for better UX."
+---
+
 # Compact Mode Design: Competitive Analysis & Optimization
 
 > Ctrl+O compact/verbose mode toggle — competitive analysis with Claude Code, current implementation review, and optimization recommendations.

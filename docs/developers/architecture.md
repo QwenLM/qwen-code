@@ -1,3 +1,7 @@
+---
+description: "Understand Qwen Code architecture. Explore core components, module structure, and how the AI coding agent works under the hood."
+---
+
 # Qwen Code Architecture Overview
 
 This document provides a high-level overview of Qwen Code's architecture.

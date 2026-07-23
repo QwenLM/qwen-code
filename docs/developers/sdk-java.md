@@ -1,3 +1,7 @@
+---
+description: "Use Qwen Code Java SDK. Integrate AI coding capabilities into Java applications with this experimental SDK for programmatic access."
+---
+
 # Qwen Code Java SDK
 
 The Qwen Code Java SDK is a minimum experimental SDK for programmatic access to Qwen Code functionality. It provides a Java interface to interact with the Qwen Code CLI, allowing developers to integrate Qwen Code capabilities into their Java applications.

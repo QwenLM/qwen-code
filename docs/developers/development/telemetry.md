@@ -1,3 +1,7 @@
+---
+description: "Set up OpenTelemetry for Qwen Code. Enable observability, trace AI coding sessions, and debug performance with comprehensive telemetry."
+---
+
 # Observability with OpenTelemetry
 
 Learn how to enable and setup OpenTelemetry for Qwen Code.

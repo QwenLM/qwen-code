@@ -1,3 +1,7 @@
+---
+description: "Constrain Qwen Code headless responses with JSON Schema using --json-schema for validated machine-readable automation output."
+---
+
 # Structured Output (`--json-schema`)
 
 Constrain the model's final answer to a JSON Schema you supply. Qwen

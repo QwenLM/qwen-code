@@ -1,3 +1,7 @@
+---
+description: "Qwen Code Channels design spec. Build messaging integrations for Telegram, WeChat, DingTalk and more to chat with your AI coding agent."
+---
+
 # Channels Design
 
 > External messaging integrations for Qwen Code — interact with an agent from Telegram, WeChat, and more.
