@@ -331,6 +331,8 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
+      loadPausedBackgroundAgents: vi.fn().mockResolvedValue(undefined),
+      consumePendingRecoveredAgentsNotice: vi.fn().mockReturnValue(null),
       getSessionService: vi.fn().mockReturnValue(mockSessionService),
       getWorkspaceContext: vi.fn().mockReturnValue({
         getDirectories: vi.fn().mockReturnValue([]),
