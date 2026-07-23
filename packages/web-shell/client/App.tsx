@@ -656,6 +656,7 @@ export interface WebShellProps {
 }
 
 interface AppProps extends WebShellProps {
+  initialSelectedWorkspaceCwd?: string;
   lockedWorkspaceCwd?: string;
   lockedWorkspaceCapability?: DaemonWorkspaceCapability;
   restartSseOnPrompt?: boolean;
@@ -1112,6 +1113,7 @@ export function App({
   onSubmitBefore,
   restartSseOnPrompt,
   historyPageSize,
+  initialSelectedWorkspaceCwd,
   lockedWorkspaceCwd,
   lockedWorkspaceCapability,
 }: AppProps = {}) {
@@ -1392,7 +1394,7 @@ export function App({
   // so the ensureSessionForPrompt callback must read the latest value.
   const [selectedWorkspaceCwd, setSelectedWorkspaceCwd] = useState<
     string | undefined
-  >(undefined);
+  >(initialSelectedWorkspaceCwd);
   const selectedWorkspaceCwdRef = useRef(selectedWorkspaceCwd);
   selectedWorkspaceCwdRef.current = selectedWorkspaceCwd;
   const [selectedWorkspaceGitStatus, setSelectedWorkspaceGitStatus] = useState<
