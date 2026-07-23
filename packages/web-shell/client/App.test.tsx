@@ -4,6 +4,7 @@ import { act, createRef, type CSSProperties } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
 import type { WebShellApi } from './App';
+import type { Message } from './adapters/types';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 
 type StreamingState = 'idle' | 'responding';
@@ -854,13 +855,42 @@ mockComponent('./components/messages/TasksStatusMessage', 'TasksStatusMessage');
 mockComponent('./components/messages/BtwMessage', 'BtwMessage');
 mockComponent('./components/QueuedPromptDisplay', 'QueuedPromptDisplay');
 
-const { App } = await import('./App');
+const { App, getBackgroundTaskActivityKey } = await import('./App');
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
+
+describe('background task activity key', () => {
+  it('includes background shells and excludes background agents', () => {
+    const messages = [
+      {
+        id: 'tools',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'shell-call',
+            toolName: 'shell',
+            status: 'in_progress',
+            args: { is_background: true },
+          },
+          {
+            callId: 'agent-call',
+            toolName: 'agent',
+            status: 'pending',
+            args: { run_in_background: true },
+          },
+        ],
+      },
+    ] satisfies Message[];
+
+    expect(getBackgroundTaskActivityKey(messages)).toBe(
+      'shell-call:in_progress',
+    );
+  });
+});
 
 function renderApp(props: React.ComponentProps<typeof App> = {}): {
   container: HTMLElement;

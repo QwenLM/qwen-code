@@ -207,7 +207,17 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // The coverage-derived disclosures, kept STRUCTURAL ({subject, reason})
   // from the site that knows the boundary — reparsing the rendered prose for
   // it was the bug. `unreviewed` above stays what the caller wrote, verbatim.
-  const coverageEntries: Array<{ subject: string; reason: string }> = [];
+  // The `public*` fields are the body's register (`Brief.publicLabel`, a
+  // path-free reason); `subject`/`reason` stay the internal keys every dedup
+  // and certification check below matches on.
+  const coverageEntries: Array<{
+    subject: string;
+    reason: string;
+    publicSubject?: string;
+    publicReason?: string;
+    subjectZh?: string;
+    reasonZh?: string;
+  }> = [];
   // The fixes for the gaps above, for stderr — never for the body. The gap says
   // what the review cannot certify, to the PR author; the remediation names the
   // command that repairs it, to the orchestrator. #7012's public body was fourteen
@@ -274,6 +284,8 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       reason:
         'no plan was given, so this run cannot show that any of the diff ' +
         'was read',
+      subjectZh: '覆盖情况',
+      reasonZh: '未提供 plan，本次运行无法证明 diff 的任何部分被读过',
     });
     criticalsUnverified = criticalsNeedingVerify >= 1;
   } else {
@@ -297,6 +309,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
         coverageEntries.push({
           subject: label,
           reason: 'the agent made no tool call: it read nothing',
+          reasonZh: '该 agent 未发起任何工具调用：它什么都没读',
         });
       }
       if (cov.idleAgents.length > 0) {
@@ -319,6 +332,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
           reason:
             'launched with a prompt that never named the diff file, so it ' +
             'could not have read it',
+          reasonZh: '启动 prompt 从未提到 diff 文件，它不可能读过 diff',
         });
       }
       if (cov.blindAgents.length > 0) {
@@ -339,6 +353,8 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
           reason:
             'pointed at diff lines it never opened: it made tool calls, but ' +
             'none of them read the diff',
+          reasonZh:
+            '它被指向 diff 的行却从未打开：有工具调用，但没有一次读取 diff',
         });
       }
       if (cov.unopenedAgents.length > 0) {
@@ -403,9 +419,15 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
         err instanceof TranscriptsUnavailableError
           ? `could not read the agents' transcripts (${err.message})`
           : `the plan could not be used (${(err as Error).message})`;
+      const whyZh =
+        err instanceof TranscriptsUnavailableError
+          ? `无法读取 agent 的运行记录（${err.message}）`
+          : `plan 无法使用（${(err as Error).message}）`;
       coverageEntries.push({
         subject: 'coverage',
         reason: `${why}, so this run cannot show that any of the diff was read`,
+        subjectZh: '覆盖情况',
+        reasonZh: `${whyZh}，本次运行无法证明 diff 的任何部分被读过`,
       });
     }
 
@@ -428,18 +450,15 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
         { postsFindings: findingsToVerify > 0 },
         input.env,
       );
+      // Structural, both languages — no boundary is recovered from rendered
+      // prose (reparsing was the bug the disclosure entries already fixed).
       for (const gap of verification.gaps) {
-        // The machine's own two subjects ('verification', 'reverse audit'),
-        // dash-free by construction — the first separator is the boundary.
-        const cut = gap.indexOf(' — ');
-        coverageEntries.push(
-          cut === -1
-            ? { subject: gap, reason: '' }
-            : {
-                subject: gap.slice(0, cut),
-                reason: gap.slice(cut + ' — '.length),
-              },
-        );
+        coverageEntries.push({
+          subject: gap.subject,
+          reason: gap.reason,
+          subjectZh: gap.subjectZh,
+          reasonZh: gap.reasonZh,
+        });
       }
       remediation.push(...verification.remediation);
       criticalsUnverified =
@@ -450,6 +469,8 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
         reason:
           `could not check that Step 4 and Step 5 ran ` +
           `(${(err as Error).message})`,
+        subjectZh: '验证',
+        reasonZh: `无法检查步骤 4 与步骤 5 是否运行（${(err as Error).message}）`,
       });
       // Fail closed: a verification that cannot be CHECKED is not a
       // verification that happened.
@@ -564,13 +585,30 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   }
 
   const footer = `_— ${modelId} via Qwen Code /review_`;
-  const finish = (text: string): string =>
-    text === '' ? '' : `${text}\n\n${footer}`;
+  // Bilingual rendering: when the plan (fetch-pr's report) says the PR
+  // description contains Han characters, the posted body carries the complete
+  // Chinese version collapsed under the English one — the shape this repo's
+  // own PR descriptions use, decided by the plan the CLI wrote, never by the
+  // caller. Fragments with no deterministic translation (model-written
+  // findings, caller echoes, error interpolations) ride verbatim in both
+  // halves. The footer stays outside the fold, once. A `zh === en` body has
+  // nothing translated, so no empty fold is published.
+  const bilingual = bilingualFromPlan(input.planPath);
+  const render = (parts: Bi[], sep: string): string => {
+    const en = parts.map((p) => p.en).join(sep);
+    if (en === '') return '';
+    const zh = parts.map((p) => p.zh).join(sep);
+    const text =
+      bilingual && zh !== en
+        ? `${en}\n\n<details>\n<summary>中文说明</summary>\n\n${zh}\n\n</details>`
+        : en;
+    return `${text}\n\n${footer}`;
+  };
 
   // Clause 6 — scope nobody reviewed. Legal on COMMENT and (alongside body
   // Criticals) on REQUEST_CHANGES: the blocker must not squeeze out the
   // disclosure of what was never read.
-  const notReviewedParts: string[] = [];
+  const notReviewedParts: Bi[] = [];
   if (missingReceipts.length > 0) {
     // One block for both channels, so an edit cannot touch the disclosure and
     // miss its repair (or vice versa) — the drift the rest of this file exists
@@ -601,9 +639,10 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     if (unexplainedReceipts.length > 0) {
       const gap = describeChunkGap(unexplainedReceipts, plannedChunks);
       const pron = gap.plural ? 'them' : 'it';
-      notReviewedParts.push(
-        `Not reviewed: ${gap.phrase} — no agent reported covering ${pron}; nobody read ${pron}.`,
-      );
+      notReviewedParts.push({
+        en: `Not reviewed: ${gap.phrase} — no agent reported covering ${pron}; nobody read ${pron}.`,
+        zh: `未审查：${gap.phraseZh}——没有 agent 报告覆盖过这部分，也没有人读过它。`,
+      });
     }
   }
   if (uncoverable.length > 0) {
@@ -619,15 +658,14 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       if (m) bareIds.push(Number(m[1]));
       else callerNamed.push(e);
     }
-    const shown = [
-      ...(bareIds.length > 0
-        ? [describeChunkGap(bareIds, plannedChunks).phrase]
-        : []),
-      ...callerNamed,
-    ];
-    notReviewedParts.push(
-      `Not reviewed: ${shown.join(', ')} — a line there exceeds the read limit.`,
-    );
+    const bareGap =
+      bareIds.length > 0 ? describeChunkGap(bareIds, plannedChunks) : null;
+    const shown = [...(bareGap ? [bareGap.phrase] : []), ...callerNamed];
+    const shownZh = [...(bareGap ? [bareGap.phraseZh] : []), ...callerNamed];
+    notReviewedParts.push({
+      en: `Not reviewed: ${shown.join(', ')} — a line there exceeds the read limit.`,
+      zh: `未审查：${shownZh.join('、')}——其中有一行超出单次读取上限。`,
+    });
   }
   // One disclosure per subject, one sentence per cause — structurally, not by
   // reparsing prose. The first cut recovered a subject/reason boundary from
@@ -659,12 +697,17 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   const whiffedDimensions = callerLeft.filter((d) => !d.includes(' — '));
   const explainedCaller = callerLeft.filter((d) => d.includes(' — '));
   if (whiffedDimensions.length > 0) {
-    notReviewedParts.push(
-      `Not reviewed: ${whiffedDimensions.join(', ')} — the agent returned no evidence of its walk twice.`,
-    );
+    notReviewedParts.push({
+      en: `Not reviewed: ${whiffedDimensions.join(', ')} — the agent returned no evidence of its walk twice.`,
+      zh: `未审查：${whiffedDimensions.join('、')}——该 agent 连续两次未返回任何检查过程的证据。`,
+    });
   }
   for (const d of explainedCaller) {
-    notReviewedParts.push(`Not reviewed: ${d}.`);
+    // Caller prose, untranslatable by construction — quoted as-is in both.
+    notReviewedParts.push({
+      en: `Not reviewed: ${d}.`,
+      zh: `未审查：${d}。`,
+    });
   }
   // Same cause, one sentence: forty-three chunks launched with rewritten
   // prompts are one failure with forty-three subjects, not forty-three
@@ -678,59 +721,93 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // cause would tell the author "no agent was launched" about an agent that
   // demonstrably ran.
   const seenSubjects = new Set<string>();
-  const byReason = new Map<string, string[]>();
-  for (const { subject, reason } of covEntries) {
-    if (seenSubjects.has(subject)) continue;
-    seenSubjects.add(subject);
-    const subjects = byReason.get(reason) ?? [];
-    subjects.push(subject);
-    byReason.set(reason, subjects);
+  const byReason = new Map<
+    string,
+    Array<{ subject: string; publicSubject?: string; subjectZh?: string }>
+  >();
+  const reasonZhOf = new Map<string, string>();
+  for (const e of covEntries) {
+    if (seenSubjects.has(e.subject)) continue;
+    seenSubjects.add(e.subject);
+    // Keyed on the reason the body will PRINT — public over internal. Two
+    // unread briefs differ internally only by their brief paths; grouped on
+    // those, the path-free public sentence would render once per role, which
+    // is the per-subject repetition this map exists to kill.
+    const key = e.publicReason ?? e.reason;
+    const group = byReason.get(key) ?? [];
+    group.push({
+      subject: e.subject,
+      publicSubject: e.publicSubject,
+      subjectZh: e.subjectZh,
+    });
+    byReason.set(key, group);
+    // One printed reason, one translation: entries sharing the printed
+    // English reason share the Chinese one by construction (both derive from
+    // the same source string). Entries with none fall back to the English.
+    if (e.reasonZh !== undefined && !reasonZhOf.has(key)) {
+      reasonZhOf.set(key, e.reasonZh);
+    }
   }
-  for (const [reason, subjects] of byReason) {
+  for (const [reason, entries] of byReason) {
     // Chunk subjects leave in the author's units, not the run's. `chunk 28`
     // is bookkeeping — the id selects a rebuild command on stderr, and
     // nothing on the PR page maps it to code. #7268's posted body enumerated
     // all 49 of them, unsorted, across two of these sentences; the author's
     // units are their files and, at the limit, the diff itself, which is what
-    // `describeChunkGap` renders. Role labels stay verbatim: they were
-    // written to be read (`roleLabel`), and reworking them here would fork
-    // the register the stderr twin shares.
+    // `describeChunkGap` renders. Role subjects ride their `publicSubject`
+    // (`Brief.publicLabel`) — the codename stays on stderr, where it is the
+    // selector — and the partition below keys on the INTERNAL subject, so a
+    // public phrase can never shadow a chunk id out of the chunk collapse.
     const chunkIds: number[] = [];
     const named: string[] = [];
-    for (const s of subjects) {
-      const m = /^chunk (\d+)$/.exec(s);
+    const namedZh: string[] = [];
+    for (const e of entries) {
+      const m = /^chunk (\d+)$/.exec(e.subject);
       if (m) chunkIds.push(Number(m[1]));
-      else named.push(s);
+      else {
+        named.push(e.publicSubject ?? e.subject);
+        namedZh.push(e.subjectZh ?? e.publicSubject ?? e.subject);
+      }
     }
-    const shown = [
-      ...(chunkIds.length > 0
-        ? [describeChunkGap(chunkIds, plannedChunks).phrase]
-        : []),
-      ...named,
-    ];
-    notReviewedParts.push(
-      reason
+    const gap =
+      chunkIds.length > 0 ? describeChunkGap(chunkIds, plannedChunks) : null;
+    const shown = [...(gap ? [gap.phrase] : []), ...named];
+    const shownZh = [...(gap ? [gap.phraseZh] : []), ...namedZh];
+    const reasonZh = reasonZhOf.get(reason) ?? reason;
+    notReviewedParts.push({
+      en: reason
         ? `Not reviewed: ${shown.join(', ')} — ${reason}.`
         : `Not reviewed: ${shown.join(', ')}.`,
-    );
+      zh: reason
+        ? `未审查：${shownZh.join('、')}——${reasonZh}。`
+        : `未审查：${shownZh.join('、')}。`,
+    });
   }
 
   // Clause 5 — blockers the review could neither confirm nor clear. They
   // survive every event shape: erasing one is how a review approves the
   // very thing it is asking about.
-  const cannotTellBlock =
+  const cannotTellBlock: Bi[] =
     cannotTell.length === 0
       ? []
       : [
-          `Unresolved, please confirm: ${cannotTell
-            .map((l) => withMarker(l))
-            .join(' ')}`,
+          {
+            en: `Unresolved, please confirm: ${cannotTell
+              .map((l) => withMarker(l))
+              .join(' ')}`,
+            zh: `未决，请确认：${cannotTell.map((l) => withMarker(l)).join(' ')}`,
+          },
         ];
 
-  const bodyCriticalBlock = bodyCriticals.map((l) => withMarker(l));
+  // Model-written blockers: quoted as-is in both halves.
+  const bodyCriticalBlock: Bi[] = bodyCriticals
+    .map((l) => withMarker(l))
+    .map((l) => ({ en: l, zh: l }));
 
-  const contextUnavailableClause =
-    'Reviewed diff-only — the PR’s existing discussion could not be fetched, so this is not an approval and not a no-blockers claim.';
+  const contextUnavailableClause: Bi = {
+    en: 'Reviewed diff-only — the PR’s existing discussion could not be fetched, so this is not an approval and not a no-blockers claim.',
+    zh: '仅审查了 diff——无法获取 PR 已有的讨论，因此这不构成批准，也不构成"无阻断问题"的结论。',
+  };
 
   if (event === 'REQUEST_CHANGES') {
     // Empty body, except the disclosures: every clause whose state holds
@@ -745,7 +822,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     ];
     return {
       event,
-      body: finish(parts.join('\n\n')),
+      body: render(parts, '\n\n'),
       baseEvent,
       cappedBy,
       downgraded,
@@ -757,7 +834,10 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   if (event === 'APPROVE') {
     return {
       event,
-      body: finish('No issues found. LGTM! ✅'),
+      body: render(
+        [{ en: 'No issues found. LGTM! ✅', zh: '未发现问题。LGTM！✅' }],
+        ' ',
+      ),
       baseEvent,
       cappedBy,
       downgraded,
@@ -768,14 +848,16 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
 
   // COMMENT: ordered clause composition — each clause present iff its
   // condition holds, nothing else.
-  const clauses: string[] = [];
+  const clauses: Bi[] = [];
 
   // 1. Downgrade sentence (only when a presubmit flag changed the event).
   if (downgraded && downgradedFrom) {
     const reasons = downgradeReasons.join('; ');
-    clauses.push(
-      `⚠️ Downgraded from ${downgradedFrom} to Comment${reasons ? `: ${reasons}` : ''}.`,
-    );
+    const fromZh = downgradedFrom === 'Approve' ? '批准' : '请求修改';
+    clauses.push({
+      en: `⚠️ Downgraded from ${downgradedFrom} to Comment${reasons ? `: ${reasons}` : ''}.`,
+      zh: `⚠️ 已从${fromZh}降级为评论${reasons ? `：${reasons}` : ''}。`,
+    });
   }
 
   // 2. Context-unavailable clause — when present, it opens the body and no
@@ -822,10 +904,13 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
         coveredChunks.every((id) => disclosedChunkIds.has(id)));
     clauses.push(
       nothingCertified
-        ? '⚠️ This run could not certify that any of this diff was reviewed.'
+        ? {
+            en: '⚠️ This run could not certify that any of this diff was reviewed.',
+            zh: '⚠️ 本次运行无法证明这个 diff 的任何部分经过了审查。',
+          }
         : canCertify
-          ? 'Reviewed — no blockers.'
-          : 'Reviewed.',
+          ? { en: 'Reviewed — no blockers.', zh: '已审查——无阻断问题。' }
+          : { en: 'Reviewed.', zh: '已审查。' },
     );
   }
 
@@ -834,17 +919,23 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   //    the discarded sentence says the opposite is the round-6 collision
   //    this module exists to kill. (`s` stays right for the event — see
   //    above.)
-  if (suggestionsInline > 0) clauses.push('Suggestions are inline.');
+  if (suggestionsInline > 0) {
+    clauses.push({ en: 'Suggestions are inline.', zh: '建议见行内评论。' });
+  }
   if (suggestionsDiscarded > 0) {
     // Self-contained: this lands in the posted body, and "see the terminal
     // output" pointed the PR author at a terminal only the operator has —
     // eight hours of real bot reviews carried that dead reference on five
     // different pull requests.
-    clauses.push(
-      `${suggestionsDiscarded} Suggestion-level finding(s) could not be ` +
+    clauses.push({
+      en:
+        `${suggestionsDiscarded} Suggestion-level finding(s) could not be ` +
         `anchored to a changed line and were dropped; nothing further to act ` +
         `on here.`,
-    );
+      zh:
+        `${suggestionsDiscarded} 条建议级发现无法锚定到改动行，已丢弃；` +
+        `此处无需进一步处理。`,
+    });
   }
 
   // 5. Unresolved existing Criticals.
@@ -863,7 +954,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
 
   return {
     event,
-    body: finish(clauses.join(' ')),
+    body: render(clauses, ' '),
     baseEvent,
     cappedBy,
     downgraded,
@@ -892,16 +983,17 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
  * caller-echo dedup and the certification test all key on `chunk <id>` — and
  * in the stderr remediation, where the id is the selector a reader can act
  * on. `plural` is the phrase's grammatical number, for the one caller whose
- * sentence carries a pronoun.
+ * sentence carries a pronoun; `phraseZh` is the same phrase for the Chinese
+ * half of a bilingual body.
  */
 export function describeChunkGap(
   ids: readonly number[],
   planned: ReadonlyArray<{ id: number; files: string[] }>,
-): { phrase: string; plural: boolean } {
+): { phrase: string; phraseZh: string; plural: boolean } {
   const uniq = [...new Set(ids)].sort((a, b) => a - b);
   const inGap = new Set(uniq);
   if (planned.length > 0 && planned.every((p) => inGap.has(p.id))) {
-    return { phrase: 'the entire diff', plural: false };
+    return { phrase: 'the entire diff', phraseZh: '整个 diff', plural: false };
   }
   // The union of the gap's files, in plan order. One unknown chunk poisons
   // the list: naming three files over a gap that also covers a fourth,
@@ -919,6 +1011,7 @@ export function describeChunkGap(
   if (allKnown && files.length <= 4) {
     return {
       phrase: `the diff ${uniq.length === 1 ? 'section' : 'sections'} covering ${files.join(', ')}`,
+      phraseZh: `涉及 ${files.join('、')} 的 diff 片段`,
       plural: uniq.length > 1,
     };
   }
@@ -927,8 +1020,45 @@ export function describeChunkGap(
       planned.length > 0
         ? `${uniq.length} of the diff's ${planned.length} sections`
         : `${uniq.length} ${uniq.length === 1 ? 'section' : 'sections'} of the diff`,
+    phraseZh:
+      planned.length > 0
+        ? `diff ${planned.length} 个片段中的 ${uniq.length} 个`
+        : `diff 中的 ${uniq.length} 个片段`,
     plural: uniq.length > 1,
   };
+}
+
+/**
+ * One body fragment, in the two languages a posted body can carry.
+ *
+ * `zh` renders only when `bilingualFromPlan` says the PR author writes
+ * Chinese; a fragment with no deterministic translation — a model-written
+ * finding, a caller echo, an interpolated error — carries the same text in
+ * both, and the Chinese section quotes it as it is.
+ */
+interface Bi {
+  en: string;
+  zh: string;
+}
+
+/**
+ * Whether the posted body carries the collapsed Chinese version: the plan
+ * (fetch-pr's report) recorded Han characters in the PR description. The
+ * signal is the CLI's own — never the caller's, who could otherwise toggle
+ * the register of a certified body. A local plan has no such field, and a
+ * plan that cannot be read defaults to English-only: the language must never
+ * take the review down.
+ */
+function bilingualFromPlan(planPath: string | undefined): boolean {
+  if (!planPath) return false;
+  try {
+    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
+      prDescriptionHasHan?: unknown;
+    };
+    return plan?.prDescriptionHasHan === true;
+  } catch {
+    return false;
+  }
 }
 
 interface ComposeReviewCliArgs {
