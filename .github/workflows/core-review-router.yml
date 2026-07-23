@@ -52,8 +52,10 @@ jobs:
           result="$(node .github/scripts/core-review-router.mjs --files "$FILES" --author "$AUTHOR" --pr "$PR_NUMBER")"
           reviewers="$(echo "$result" | jq -r '.reviewers | join(",")')"
           reason="$(echo "$result" | jq -r '.reason')"
+          maintainers="$(echo "$result" | jq -c '.maintainers')"
           echo "reviewers=$reviewers" >> "$GITHUB_OUTPUT"
           echo "reason=$reason" >> "$GITHUB_OUTPUT"
+          echo "maintainers=$maintainers" >> "$GITHUB_OUTPUT"
           echo "Routing decision: reviewers=[$reviewers] reason=$reason"
 
       - name: 'Apply review requests'
@@ -62,22 +64,41 @@ jobs:
           PR_NUMBER: '${{ github.event.pull_request.number }}'
           REVIEWERS: '${{ steps.classify.outputs.reviewers }}'
           REASON: '${{ steps.classify.outputs.reason }}'
+          MAINTAINERS: '${{ steps.classify.outputs.maintainers }}'
         run: |-
           set -euo pipefail
           api="repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/requested_reviewers"
-          maintainers='["wenshao","tanzhenxin","yiliang114","LaZzyMan"]'
+          # Maintainer list comes from the classifier output (the canonical
+          # source) so the reconciliation below cannot drift from the routing
+          # decision above when the roster changes.
+          maintainers="$MAINTAINERS"
 
-          # Compute desired and current managed sets.
+          # Compute the desired managed set from the routing decision.
           if [ -n "$REVIEWERS" ]; then
             desired="$(echo "$REVIEWERS" | tr ',' '\n' | jq -R . | jq -sc 'sort')"
           else
             desired="[]"
           fi
+
+          # Do not re-request maintainers who already reviewed this PR.
+          # GitHub drops a reviewer from requested_reviewers once they submit
+          # a review, so without this they would be re-added (and re-pinged)
+          # on every subsequent synchronize push — exactly the notification
+          # churn this router exists to remove.
+          reviewed="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100" --jq '[.[].user.login]')"
+          desired="$(jq -cn --argjson d "$desired" --argjson r "$reviewed" '$d - $r | sort')"
+
           current="$(gh api "$api" --jq '[.users[].login]')"
           managed="$(echo "$current" | jq -c --argjson m "$maintainers" '[.[] | select(. as $l | $m | index($l))] | sort')"
 
-          # Diff guard: skip API calls when the set is unchanged
-          # (avoids re-notifying reviewers on every synchronize push).
+          # This step reconciles the managed maintainer set (requested
+          # reviewers who are core maintainers) toward `desired`, treating
+          # those four maintainers as router-owned: a maintainer a human
+          # manually added but the classifier did not select is removed on
+          # the next event. Non-maintainer reviewers are never touched.
+          #
+          # Diff guard: skip all API calls when the set is unchanged so a
+          # stable synchronize push does not re-notify reviewers.
           if [ "$managed" = "$desired" ]; then
             echo "Reviewer set unchanged ($REVIEWERS) — skipping ($REASON)"
             exit 0

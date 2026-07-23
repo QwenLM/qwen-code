@@ -1,5 +1,13 @@
+/**
+ * @license
+ * Copyright 2025 Qwen
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { classify } from './core-review-router.mjs';
 
 describe('classify', () => {
@@ -90,6 +98,22 @@ describe('classify', () => {
       'someone',
     );
     assert.ok(result.reviewers.includes('wenshao'));
+  });
+
+  it('routes services/ compaction files to LaZzyMan (compound regex)', () => {
+    const result = classify(
+      ['packages/core/src/services/compactionService.ts'],
+      'someone',
+    );
+    assert.ok(result.reviewers.includes('LaZzyMan'));
+  });
+
+  it('routes utils/ truncation files to LaZzyMan (compound regex)', () => {
+    const result = classify(
+      ['packages/core/src/utils/truncation.ts'],
+      'someone',
+    );
+    assert.ok(result.reviewers.includes('LaZzyMan'));
   });
 
   it('excludes the PR author from reviewers', () => {
@@ -218,5 +242,33 @@ describe('classify', () => {
     );
     assert.equal(result.reviewers.length, 0);
     assert.match(result.reason, /no core files/);
+  });
+
+  it('CLI emits the canonical maintainer list alongside the decision', () => {
+    const script = fileURLToPath(
+      new URL('./core-review-router.mjs', import.meta.url),
+    );
+    const proc = spawnSync(
+      process.execPath,
+      [
+        script,
+        '--files',
+        JSON.stringify(['packages/core/src/tools/grep.ts']),
+        '--author',
+        'someone',
+        '--pr',
+        '0',
+      ],
+      { encoding: 'utf8' },
+    );
+    assert.equal(proc.status, 0, proc.stderr);
+    const out = JSON.parse(proc.stdout);
+    assert.deepEqual(out.maintainers, [
+      'wenshao',
+      'tanzhenxin',
+      'yiliang114',
+      'LaZzyMan',
+    ]);
+    assert.ok(Array.isArray(out.reviewers));
   });
 });
