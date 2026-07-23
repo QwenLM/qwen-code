@@ -141,7 +141,7 @@ describe('daemon selectors', () => {
       status: 'completed',
       toolName: 'mcp__example__list',
       toolKind: 'other',
-      rawOutput: { entries: [] },
+      rawOutput: { entries: [], plan: {} },
     });
 
     expect(extractDaemonTodosFromToolBlock(asToolBlock(other))).toBeUndefined();

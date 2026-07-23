@@ -86,7 +86,8 @@ export function extractDaemonTodosFromToolBlock(
   }
 
   const rawOutput = getRecord(block.rawOutput);
-  const hasPlanMetadata = getRecord(rawOutput?.['plan']) !== undefined;
+  const hasPlanMetadata =
+    getString(getRecord(rawOutput?.['plan']), 'id') !== undefined;
   const rawInput = getRecord(block.rawInput);
   const inputTodos = getTodoArray(rawInput);
   if (inputTodos) {

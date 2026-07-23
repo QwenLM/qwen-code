@@ -44,7 +44,8 @@ export function extractTodosFromToolCall(
   }
 
   const rawOutput = getRecord(tool.rawOutput);
-  const hasPlanMetadata = getRecord(rawOutput?.['plan']) !== undefined;
+  const hasPlanMetadata =
+    getString(getRecord(rawOutput?.['plan']), 'id') !== undefined;
   const argsTodos = getTodoArray(tool.args);
   if (argsTodos) {
     const todos = parseTodoItemsFromEntries(argsTodos);

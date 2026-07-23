@@ -565,7 +565,7 @@ describe('extractTodosFromToolCall', () => {
         toolCall({
           toolName: 'mcp__example__list',
           kind: 'other',
-          rawOutput: { entries: [] },
+          rawOutput: { entries: [], plan: {} },
         }),
       ),
     ).toBeUndefined();
