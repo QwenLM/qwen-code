@@ -16,6 +16,8 @@ import {
   extractBase64Binary,
   detectExtensionFromMagic,
   getMimeExtension,
+  formatBytes,
+  MAX_DOWNLOAD_SIZE,
 } from '../binary-detection.ts';
 import { guardLargeResult } from '../large-response.ts';
 
@@ -423,5 +425,47 @@ describe('getMimeExtension', () => {
 
   test('returns empty for unknown MIME and no buffer', () => {
     expect(getMimeExtension('application/x-something')).toBe('');
+  });
+});
+
+// ============================================================
+// formatBytes
+// ============================================================
+
+describe('formatBytes', () => {
+  test('formats within the byte/KB/MB/GB range', () => {
+    expect(formatBytes(0)).toBe('0 B');
+    expect(formatBytes(512)).toBe('512 B');
+    expect(formatBytes(1024)).toBe('1.0 KB');
+    expect(formatBytes(5 * 1024)).toBe('5.0 KB');
+    expect(formatBytes(1024 * 1024)).toBe('1.0 MB');
+    expect(formatBytes(2 * 1024 * 1024 * 1024)).toBe('2.0 GB');
+  });
+
+  test('reports the 500MB download limit unchanged', () => {
+    expect(formatBytes(MAX_DOWNLOAD_SIZE)).toBe('500.0 MB');
+  });
+
+  test('scales past GB instead of overflowing to "undefined"', () => {
+    // A remote Content-Length in the terabytes reaches formatBytes via the
+    // "Response too large" guard in api-tools; it must not read as "undefined".
+    const tb = 1024 ** 4;
+    expect(formatBytes(2 * tb)).toBe('2.0 TB');
+    expect(formatBytes(3 * 1024 ** 5)).toBe('3.0 PB');
+    expect(formatBytes(4 * 1024 ** 6)).toBe('4.0 EB');
+    expect(formatBytes(tb)).not.toContain('undefined');
+  });
+
+  test('clamps absurdly large inputs to the last unit', () => {
+    const result = formatBytes(1024 ** 8);
+    expect(result).toContain('EB');
+    expect(result).not.toContain('undefined');
+  });
+
+  test('renders non-positive and non-finite inputs as "0 B"', () => {
+    expect(formatBytes(-1)).toBe('0 B');
+    expect(formatBytes(0.5)).toBe('0 B');
+    expect(formatBytes(NaN)).toBe('0 B');
+    expect(formatBytes(Infinity)).toBe('0 B');
   });
 });
