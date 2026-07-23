@@ -71,10 +71,7 @@ import {
   type ModelDialogMode,
 } from './components/dialogs/ModelDialog';
 import { ModelFallbacksDialog } from './components/dialogs/ModelFallbacksDialog';
-import {
-  AgentsMessage,
-  type AgentsInitialMode,
-} from './components/messages/AgentsMessage';
+import { AgentsManagerPage } from './components/agents/AgentsManagerPage';
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
@@ -2500,6 +2497,7 @@ export function App({
     | 'mcp'
     | 'skills'
     | 'plugins'
+    | 'agents'
     | null
   >(null);
   const closePanel = useCallback(() => setActivePanel(null), []);
@@ -2528,7 +2526,8 @@ export function App({
         | 'extensions'
         | 'mcp'
         | 'skills'
-        | 'plugins',
+        | 'plugins'
+        | 'agents',
     ) => {
       setMainView('chat');
       setActivePanel(panel);
@@ -2931,8 +2930,9 @@ export function App({
   const [memoryAddScope, setMemoryAddScope] = useState<'workspace' | 'global'>(
     'workspace',
   );
-  const [agentsDialogMode, setAgentsDialogMode] =
-    useState<AgentsInitialMode | null>(null);
+  const [agentsCreateScope, setAgentsCreateScope] = useState<
+    'workspace' | 'global' | null
+  >(null);
   const [escapeHintVisible, setEscapeHintVisible] = useState(false);
   // Whether the first Esc has armed a stream cancellation; the composer's send
   // button shows an "Esc again to stop" affordance while true.
@@ -3229,7 +3229,6 @@ export function App({
     showApprovalModeDialog ||
     tasksDialogMessage !== null ||
     mcpDialogMessage !== null ||
-    agentsDialogMode !== null ||
     showMemoryDialog ||
     showAuthDialog ||
     showAddWorkspaceDialog ||
@@ -5415,23 +5414,22 @@ export function App({
           }
           if (cmd === 'agents') {
             const subCommand = text.slice(match[0].length).trim().toLowerCase();
-            let agentsMode: AgentsInitialMode = 'menu';
             if (subCommand === 'create') {
-              agentsMode = 'create';
+              setAgentsCreateScope('global');
             } else if (
               subCommand === 'create user' ||
               subCommand === 'create global'
             ) {
-              agentsMode = 'create-user';
+              setAgentsCreateScope('global');
             } else if (
               subCommand === 'create project' ||
               subCommand === 'create workspace'
             ) {
-              agentsMode = 'create-project';
-            } else if (subCommand === 'manage') {
-              agentsMode = 'manage';
+              setAgentsCreateScope('workspace');
+            } else {
+              setAgentsCreateScope(null);
             }
-            setAgentsDialogMode(agentsMode);
+            openPanel('agents');
             return true;
           }
           if (cmd === 'extensions') {
@@ -6773,26 +6771,6 @@ export function App({
               />
             </DialogShell>
           )}
-          {agentsDialogMode && (
-            <DialogShell
-              title={
-                agentsDialogMode === 'manage'
-                  ? t('agent.manage')
-                  : agentsDialogMode === 'menu'
-                    ? t('agents.title')
-                    : t('agent.create')
-              }
-              size="lg"
-              onClose={() => setAgentsDialogMode(null)}
-            >
-              <AgentsMessage
-                mode={agentsDialogMode}
-                embedded
-                onMessage={(text) => store.dispatch([{ type: 'status', text }])}
-                onClose={() => setAgentsDialogMode(null)}
-              />
-            </DialogShell>
-          )}
           {showMemoryDialog && (
             <DialogShell
               title={t('memory.menu')}
@@ -7150,6 +7128,8 @@ export function App({
                           ? t('mcp.title')
                           : activePanel === 'skills'
                             ? t('skills.title')
+                          : activePanel === 'agents'
+                              ? t('agents.title')
                           : activePanel === 'plugins'
                               ? t('plugins.title')
                               : t('sessionsOverview.title')
@@ -7158,6 +7138,7 @@ export function App({
                   {activePanel !== 'extensions' &&
                     activePanel !== 'mcp' &&
                     activePanel !== 'skills' &&
+                    activePanel !== 'agents' &&
                     activePanel !== 'plugins' && (
                     <div className={styles.panelHeader}>
                     <button
@@ -7301,6 +7282,14 @@ export function App({
                       <SkillsManagerPage
                         onClose={closePanel}
                         onUseSkill={handleUseSkill}
+                      />
+                    ) : activePanel === 'agents' ? (
+                      <AgentsManagerPage
+                        onClose={() => {
+                          setAgentsCreateScope(null);
+                          closePanel();
+                        }}
+                        initialCreateScope={agentsCreateScope}
                       />
                     ) : activePanel === 'plugins' ? (
                       <PluginManagerPage
