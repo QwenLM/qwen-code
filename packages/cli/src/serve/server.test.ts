@@ -10099,6 +10099,40 @@ describe('createServeApp', () => {
       expect(cursoredIds).not.toContain('live-only');
     });
 
+    it('includes a live-only session on an untruncated first page even if it persists to disk between the scan and the existence check', async () => {
+      // Regression test: a live session's first persisted write (e.g. a
+      // `displayName` update via the sessionTitle ext method) can land on
+      // disk between `sessionService.listSessions()` (the persisted scan)
+      // and the later `sessionService.sessionExists()` check used to avoid
+      // cross-page duplicates. That race used to silently drop the session
+      // from the response instead of merging it in.
+      const sessionExistsSpy = vi
+        .spyOn(SessionService.prototype, 'sessionExists')
+        .mockResolvedValue(true);
+      try {
+        const bridge = fakeBridge({
+          listImpl: () => [
+            {
+              sessionId: 'live-only',
+              workspaceCwd: WS_BOUND,
+              displayName: 'Integration Test Session',
+              createdAt: '2026-05-17T12:30:00.000Z',
+              clientCount: 1,
+              hasActivePrompt: false,
+            },
+          ],
+        });
+
+        const result = await listWorkspaceSessionsForResponse(bridge, WS_BOUND);
+
+        const live = result.sessions.find((s) => s.sessionId === 'live-only');
+        expect(live).toBeDefined();
+        expect(live?.displayName).toBe('Integration Test Session');
+      } finally {
+        sessionExistsSpy.mockRestore();
+      }
+    });
+
     it.each(['abc', '-1', 'Infinity', '9007199254740992', '   '])(
       '400 invalid_cursor when cursor is not valid: %s',
       async (cursor) => {
