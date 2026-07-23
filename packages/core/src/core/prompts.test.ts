@@ -322,7 +322,6 @@ describe('Core System Prompt (prompts.ts)', () => {
     const stableMarkers = [
       'Identity',
       'Use the docs index.',
-      'search_docs',
       '<available_skills>',
       `My operating system is: ${process.platform}`,
       "I'm currently working in the directory: /workspace",
@@ -335,9 +334,10 @@ describe('Core System Prompt (prompts.ts)', () => {
         parts.stable.indexOf(stableMarkers[index]!),
       );
     }
+    expect(parts.stable).not.toContain('search_docs');
     expect(parts.context).toBe('Caller message\n\nProject instructions');
     expect(parts.volatile).toMatch(
-      /^Memory snapshot\n\nUser profile\n\nGit snapshot\n\nToday's date is .+\.$/,
+      /^Memory snapshot\n\nUser profile\n\nGit snapshot\n\nThe following tools are reachable via `tool_search`\..*search_docs.*Today's date is .+\.$/s,
     );
     expect(getRecentGitStatus).toHaveBeenCalledWith('/workspace');
   });
