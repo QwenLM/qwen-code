@@ -1840,16 +1840,23 @@ jobs:
               FAILED_CRS="$(gh api --paginate "repos/${REPO}/commits/${PR_HEAD_OID}/check-runs" \
                 --jq '.check_runs[] | select(.conclusion == "failure")
                   | select(((.output.annotations_count // 0) > 0))
-                  | [(.id | tostring), (.details_url // "")] | @tsv' 2> /dev/null | sort -u || true)"
-              while IFS=$'\t' read -r CR_ID DETAILS_URL; do
+                  | [(.id | tostring), (.details_url // ""), (.name // "")] | @tsv' 2> /dev/null | sort -u || true)"
+              while IFS=$'\t' read -r CR_ID DETAILS_URL CR_NAME; do
                 [[ -n "${CR_ID}" && "${DETAILS_URL}" == *"/actions/runs/"* ]] || continue
                 RUN_ID="${DETAILS_URL#*/actions/runs/}"
                 RUN_ID="${RUN_ID%%/*}"
                 [[ "${RUN_ID}" =~ ^[0-9]+$ ]] || continue
-                ANNS="$(gh api "repos/${REPO}/check-runs/${CR_ID}/annotations" \
+                ANNS="$(gh api --paginate "repos/${REPO}/check-runs/${CR_ID}/annotations" \
                   --jq '[.[].message] | join("\n")' 2> /dev/null || true)"
                 grep -qiE "${INFRA_FAILURE_SIGNATURES}" <<< "${ANNS}" || continue
-                ATTEMPT="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}" --jq '.run_attempt // 0' 2> /dev/null || echo 0)"
+                RUN_META="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}" --jq '[(.run_attempt // 0), (.name // "")] | @tsv' 2> /dev/null || printf '0\t')"
+                ATTEMPT="${RUN_META%%$'\t'*}"
+                WF_NAME="${RUN_META#*$'\t'}"
+                # Mirror the gate's self-trigger guard: skip Qwen Autofix runs
+                # unless the check is a review-address job.
+                if [[ "${WF_NAME}" == "Qwen Autofix" && "${CR_NAME}" != review-address* ]]; then
+                  continue
+                fi
                 if [[ "${ATTEMPT}" == '1' ]]; then
                   if gh api -X POST "repos/${REPO}/actions/runs/${RUN_ID}/rerun-failed-jobs" > /dev/null 2>&1; then
                     echo "♻️ #${PR}: a check died on infrastructure (run ${RUN_ID}, attempt 1) — reran its failed jobs; not the PR's code"
