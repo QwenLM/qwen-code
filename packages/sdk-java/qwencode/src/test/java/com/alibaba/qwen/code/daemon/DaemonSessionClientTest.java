@@ -1236,6 +1236,33 @@ class DaemonSessionClientTest {
     }
 
     @Test
+    void preservesIndeterminateOutcomeWhenFinalizingBoundedPartialText() {
+        server.createContext("/session/session-1/prompt", exchange ->
+                sendJson(exchange, 202,
+                        "{\"promptId\":\"prompt-1\",\"lastEventId\":0}"));
+        server.createContext("/session/session-1/events", exchange ->
+                sendSse(exchange, textEvent(1, "a\\uD83D")
+                        + terminalEvent(3)));
+        server.createContext("/session/session-1/detach", noContent());
+
+        try (DaemonClient daemon = newClient();
+                DaemonSessionClient session = daemon.createSession()) {
+            PromptOutcomeIndeterminateException failure = assertThrows(
+                    PromptOutcomeIndeterminateException.class,
+                    () -> session.promptText(PromptRequest.text("go"), 1));
+            assertEquals("a", failure.getPartialText());
+            assertEquals(1, failure.getPartialText()
+                    .getBytes(StandardCharsets.UTF_8).length);
+            assertInstanceOf(DaemonProtocolException.class,
+                    failure.getCause().getCause());
+            assertThrows(PromptAlreadyActiveException.class,
+                    () -> session.startPrompt(
+                            PromptRequest.text("unsafe-reuse"),
+                            PromptObserver.NOOP));
+        }
+    }
+
+    @Test
     void rejectsSecondLocalPromptUntilFirstSettles() {
         server.createContext("/session/session-1/prompt", exchange ->
                 sendJson(exchange, 202,

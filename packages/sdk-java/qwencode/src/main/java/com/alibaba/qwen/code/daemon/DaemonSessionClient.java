@@ -123,13 +123,19 @@ public final class DaemonSessionClient implements AutoCloseable {
             if (cause instanceof PromptContentLimitException) {
                 throw (PromptContentLimitException) cause;
             }
-            collector.finish();
+            String partialText;
+            try {
+                collector.finish();
+                partialText = collector.getText();
+            } catch (PromptContentLimitException contentLimit) {
+                partialText = contentLimit.getPartialText();
+            }
             if (cause instanceof PromptOutcomeIndeterminateException) {
                 PromptOutcomeIndeterminateException indeterminate =
                         (PromptOutcomeIndeterminateException) cause;
                 throw new PromptOutcomeIndeterminateException(
                         indeterminate.getMessage(), indeterminate,
-                        collector.getText());
+                        partialText);
             }
             if (cause instanceof RuntimeException) {
                 throw (RuntimeException) cause;
