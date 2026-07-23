@@ -95,3 +95,46 @@ describe('frameToContext', () => {
     expect(ctx.sessionTag).toBeUndefined();
   });
 });
+
+describe('frameToContext — shell enrichment', () => {
+  it('adds paths a shell command reads', () => {
+    const ctx = frameToContext(frame('execute', { command: 'cat .env' }), {
+      projectRoot: '/proj',
+    });
+    expect(ctx.paths.some((p) => p.endsWith('.env'))).toBe(true);
+    expect(ctx.operations).toContain('read');
+    expect(ctx.operations).toContain('execute');
+  });
+
+  it('splits compound commands and collects every part', () => {
+    const ctx = frameToContext(
+      frame('execute', { command: 'npm test && cat secrets.txt' }),
+      { projectRoot: '/proj' },
+    );
+    expect(ctx.paths.some((p) => p.endsWith('secrets.txt'))).toBe(true);
+  });
+
+  it('marks a shell write as a write operation', () => {
+    const ctx = frameToContext(
+      frame('execute', { command: 'echo hi > out.txt' }),
+      { projectRoot: '/proj' },
+    );
+    expect(ctx.operations).toContain('write');
+  });
+
+  it('never throws on an unparseable command (contributes nothing)', () => {
+    const ctx = frameToContext(frame('execute', { command: '((((' }), {
+      projectRoot: '/proj',
+    });
+    expect(ctx.tool).toBe('execute');
+    expect(ctx.operations).toContain('execute');
+  });
+
+  it('does not run shell extraction for non-execute kinds', () => {
+    const ctx = frameToContext(
+      frame('edit', { file_path: 'a.ts', content: 'cat .env' }),
+      { projectRoot: '/proj' },
+    );
+    expect(ctx.paths).toEqual(['a.ts']);
+  });
+});

@@ -9,12 +9,18 @@
  * evaluator and enforcer stay frame-agnostic.
  */
 
+import {
+  extractShellOperations,
+  splitCompoundCommand,
+} from '@qwen-code/qwen-code-core';
+
 export type PolicyOperation = 'read' | 'write' | 'execute';
 
 /**
  * Parameter keys that carry a filesystem path across the tools behind each ACP
  * kind (`write_file`/`edit` use `file_path`, `notebook_edit` uses
- * `notebook_path`, shell uses `directory`, etc.). Single source of truth so the
+ * `notebook_path`, etc.). `directory` and `cwd` are handled separately for
+ * resolving the working directory context. Single source of truth so the
  * list cannot drift.
  */
 export const PATH_PARAM_KEYS = [
@@ -89,6 +95,49 @@ function collectPathParams(rawInput: Record<string, unknown>): string[] {
   return out;
 }
 
+/** core `ShellOperation.virtualTool` → policy operation. */
+function operationForVirtualTool(virtualTool: string): PolicyOperation | null {
+  switch (virtualTool) {
+    case 'read_file':
+    case 'list_directory':
+    case 'grep_search':
+    case 'web_fetch':
+      return 'read';
+    case 'edit':
+    case 'write_file':
+      return 'write';
+    default:
+      return null;
+  }
+}
+
+/**
+ * Paths + operations a shell command implies. Best-effort by construction: an
+ * unparseable command contributes nothing and NEVER throws, so a call still
+ * matches on kind/args. It can only ever ADD candidates, never remove them.
+ */
+function shellEnrichment(
+  command: string,
+  cwd: string,
+): { paths: string[]; operations: PolicyOperation[] } {
+  const paths: string[] = [];
+  const operations: PolicyOperation[] = [];
+  try {
+    for (const simple of splitCompoundCommand(command)) {
+      for (const op of extractShellOperations(simple, cwd)) {
+        if (typeof op.filePath === 'string' && op.filePath.length > 0) {
+          paths.push(op.filePath);
+        }
+        const mapped = operationForVirtualTool(op.virtualTool);
+        if (mapped) operations.push(mapped);
+      }
+    }
+  } catch {
+    // Unparseable shell → contribute nothing. Never fail open.
+  }
+  return { paths, operations };
+}
+
 export function frameToContext(
   data: unknown,
   ctx: { projectRoot: string; originScope?: string; sessionTag?: string },
@@ -105,6 +154,15 @@ export function frameToContext(
 
   const paths = collectPathParams(rawInput);
   const operations = operationsForKind(tool);
+
+  if (tool === 'execute') {
+    const command = asString(rawInput['command']);
+    if (command) {
+      const extra = shellEnrichment(command, cwd);
+      paths.push(...extra.paths);
+      operations.push(...extra.operations);
+    }
+  }
 
   return {
     tool,
