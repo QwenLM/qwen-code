@@ -98,6 +98,46 @@ function deferred<T>(): {
 }
 
 describe('createAcpSessionBridge', () => {
+  it('streams workspace content without requiring a session', async () => {
+    const completion = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      extMethodImpl: async (method, params) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.workspaceGenerationStart) {
+          expect(params).toMatchObject({
+            purpose: 'text',
+            prompt: 'say hello',
+          });
+          return await completion.promise;
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: vi.fn().mockResolvedValue(handle.channel),
+      channelIdleTimeoutMs: 1,
+    });
+    const stream = bridge.generateWorkspaceContent!(
+      'say hello',
+      new AbortController().signal,
+      undefined,
+    );
+    const first = stream[Symbol.asyncIterator]().next();
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(handle.killed).toBe(false);
+    completion.resolve({
+      model: 'qwen-plus',
+      modelSource: 'fast',
+      inputTokens: 2,
+      outputTokens: 1,
+    });
+    await expect(first).resolves.toMatchObject({
+      value: { type: 'done', requestId: expect.any(String) },
+    });
+    await vi.waitFor(() => expect(handle.killed).toBe(true));
+    await bridge.shutdown();
+  });
+
   it('starts a workspace channel for MCP management without a session', async () => {
     const handle = makeChannel({
       extMethodImpl: async (method, params) => {

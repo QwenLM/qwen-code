@@ -19,6 +19,7 @@ import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import {
   composeReview,
   composeReviewCommand,
+  describeChunkGap,
   verdictLine,
   type ComposeReviewInput,
   type ComposeReviewResult,
@@ -67,9 +68,23 @@ function plan(opts: { step45?: boolean } = {}): string {
       srcDiffLines: 5000,
       diffLines: 5000,
       files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
+      // Real plans carry each chunk's files (`DiffChunk.files`) — the body
+      // renderer names THEM, never the chunk id, so the fixture carries them
+      // too. The 3A fixture below stays file-less on purpose: it is the
+      // pre-files plan shape, and the renderer must fall back to counting.
       chunks: [
-        { id: 1, startLine: 1, endLine: 100 },
-        { id: 2, startLine: 101, endLine: 200 },
+        {
+          id: 1,
+          startLine: 1,
+          endLine: 100,
+          files: [{ path: 'src/a.ts', newStart: 1, newEnd: 80 }],
+        },
+        {
+          id: 2,
+          startLine: 101,
+          endLine: 200,
+          files: [{ path: 'src/b.ts', newStart: 1, newEnd: 90 }],
+        },
       ],
     }),
   );
@@ -1111,9 +1126,11 @@ describe('coverage is recomputed, never accepted', () => {
         'a subject only the caller noticed — the auditor returned nothing twice',
       ],
     });
-    // One clause for the shared subject — and it is the machine's sentence,
-    // not the caller's paraphrase.
-    expect(r.body.split(label)).toHaveLength(2);
+    // One clause for the shared subject — the machine's sentence, not the
+    // caller's paraphrase, and in the author's register: the internal
+    // codename stays off the posted body (it is the stderr selector).
+    expect(r.body.split('the whole-diff test-coverage check')).toHaveLength(2);
+    expect(r.body).not.toContain(label);
     expect(r.body).toContain('no record shows its brief reaching an agent');
     expect(r.body).not.toContain('described this gap in its own words');
     // A subject the coverage recomputation cannot see survives untouched.
@@ -1146,10 +1163,13 @@ describe('coverage is recomputed, never accepted', () => {
     const reason = 'launched with a prompt that is not the one the CLI built';
     // One clause for the shared cause — not one per chunk…
     expect(r.body.split(reason)).toHaveLength(2);
-    // …and both subjects ride it.
+    // …and the subjects ride it in the author's units: both chunks is the
+    // whole plan, and a chunk id is bookkeeping nothing on the PR page maps
+    // to code (#7268's body enumerated all 49 of a run's ids, unsorted).
     expect(r.body).toMatch(
-      new RegExp(`Not reviewed: [^.]*chunk 1[^.]*chunk 2[^.]*— ${reason}\\.`),
+      new RegExp(`Not reviewed: the entire diff — ${reason}\\.`),
     );
+    expect(r.body).not.toMatch(/chunk \d/);
   });
 
   it('an all-rewritten roster never claims nothing launched — precise cause, no contradicting aggregate', () => {
@@ -1174,7 +1194,7 @@ describe('coverage is recomputed, never accepted', () => {
     );
     const r = composeReview({ planPath: p, env: ENV, modelId: MODEL });
     expect(r.body).toMatch(
-      /Not reviewed: [^.]*chunk 1[^.]*chunk 2[^.]*— launched with a prompt that is not the one the CLI built\./,
+      /Not reviewed: the entire diff — launched with a prompt that is not the one the CLI built\./,
     );
     expect(r.body).not.toContain('every dimension');
     expect(r.body).not.toContain('stopped at the prompt builder');
@@ -1232,7 +1252,10 @@ describe('coverage is recomputed, never accepted', () => {
       ],
       modelId: MODEL,
     });
-    expect(r.body.split(label)).toHaveLength(2);
+    // The caller's echo (internal label) dedupes against the internal
+    // subject; the one surviving sentence prints the author's phrase.
+    expect(r.body).not.toContain(label);
+    expect(r.body.split('the whole-diff test-coverage check')).toHaveLength(2);
     expect(
       r.body.match(/no record shows its brief reaching an agent/g) ?? [],
     ).toHaveLength(1);
@@ -1252,9 +1275,11 @@ describe('coverage is recomputed, never accepted', () => {
     const r = composeReview({ planPath: p, env: ENV, modelId: MODEL });
     expect(r.cappedBy).toContain('chunk-nobody-read'); // the cap keeps the fact
     expect(r.remediation.join(' ')).toContain('chunks nobody read');
-    expect(r.body).toContain('chunk 1');
+    // The gap, named by the files it covers — the id stays on stderr.
+    expect(r.body).toContain('the diff section covering src/a.ts');
+    expect(r.body).not.toMatch(/chunk \d/);
     // …but only under its cause: no second sentence restating the consequence.
-    expect(r.body).not.toContain('nobody read them');
+    expect(r.body).not.toContain('no agent reported covering');
   });
 
   it('keeps the nobody-read sentence for a chunk with no disclosed cause', () => {
@@ -1280,8 +1305,57 @@ describe('coverage is recomputed, never accepted', () => {
     const old = new Date(2020, 0, 1);
     utimesSync(p, old, old);
     const r = composeReview({ planPath: p, env: ENV, modelId: MODEL });
-    expect(r.body).toContain('nobody read them');
-    expect(r.body).toMatch(/chunk 1, chunk 2 — no agent reported covering/);
+    // Both chunks unread is the whole plan — said as the diff, not as ids.
+    expect(r.body).toMatch(/the entire diff — no agent reported covering it/);
+    expect(r.body).toContain('nobody read it');
+    expect(r.body).not.toMatch(/chunk \d/);
+  });
+
+  it('opens with the zero-certified warning when every chunk is disclosed — never "Reviewed." above a body that denies it', () => {
+    // #7268: the posted body opened "Reviewed. Suggestions are inline." and
+    // then disclosed all 49 chunks across two Not-reviewed sentences — the
+    // first sentence certified the exact thing every following one took back.
+    // Both rewritten agents here demonstrably READ their chunks, so coverage
+    // alone is not the test: certified is covered with no disclosure against
+    // it.
+    const p = plan();
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    transcript(
+      'a1',
+      `You are reviewing chunk 1 of 2.\nread_file(file_path="${DIFF}", offset=0, limit=100)`,
+      { toolCalls: 2 },
+    );
+    transcript(
+      'a2',
+      `You are reviewing chunk 2 of 2.\nread_file(file_path="${DIFF}", offset=100, limit=100)`,
+      { toolCalls: 2 },
+    );
+    const r = composeReview({
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      suggestionsInline: 1,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toMatch(
+      /^⚠️ This run could not certify that any of this diff was reviewed\./,
+    );
+    expect(r.body).toContain('Suggestions are inline.');
+    expect(r.body).not.toContain('Reviewed.');
+  });
+
+  it('keeps the "Reviewed." opener while any chunk is certified', () => {
+    // chunk 1 built and never launched; chunk 2 reviewed properly. A partial
+    // gap is a disclosure, not a zero-certification.
+    const p = plan();
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    recordMatrix(p);
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    const r = composeReview({ planPath: p, env: ENV, modelId: MODEL });
+    expect(r.body).toContain('Reviewed.');
+    expect(r.body).not.toContain('could not certify');
   });
 
   it('does not merge two invariant files under one label — the em-dash is part of the subject', () => {
@@ -1314,6 +1388,9 @@ describe('coverage is recomputed, never accepted', () => {
     });
     expect(r.event).not.toBe('APPROVE');
     expect(r.body).toContain('no plan was given');
+    // No chunk universe to count means nothing countable was certified — the
+    // opener says so instead of "Reviewed."
+    expect(r.body).toMatch(/could not certify that any of this diff/);
   });
 
   it('caps when the agents made no tool call — whatever their prose said', () => {
@@ -1438,8 +1515,12 @@ describe('coverage is recomputed, never accepted', () => {
     expect(fixes).toMatch(/rewritten launches: re-run/);
     expect(fixes).toMatch(/unread briefs: relaunch/);
     expect(fixes).toMatch(/agents that never opened the diff: relaunch/);
-    // And none of the three disclosures drags a command into the body.
+    // And none of the three disclosures drags a command into the body —
+    // nor the unread brief's filesystem path: the path names the file an
+    // OPERATOR makes the agent open, and it stays on stderr with the fix.
     expect(r.body).not.toMatch(/agent-prompt|--roster|--chunk/);
+    expect(r.body).not.toContain('.brief.md');
+    expect(r.body).toContain('never opened its brief, so it reviewed without');
   });
 
   it('the handler prints every FIX to stderr, before the verdict, never to stdout', () => {
@@ -1556,6 +1637,29 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     expect(r.body).toMatch(
       /reverse audit — no auditor was launched with a prompt this skill builds/,
     );
+  });
+
+  it('says one sentence when verify and the reverse audit failed the same way', () => {
+    // #7268's posted body carried the two `rewritten` sentences back to back,
+    // near-identical but for the tail. Both steps down the same way is one
+    // failure with two subjects — while the stderr remediation keeps BOTH
+    // rebuild commands, which differ.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      planPath: coveredPlan([]), // neither verify nor reverse audit on record
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toMatch(
+      /Not reviewed: verification and reverse audit — neither the verifier nor the reverse auditor was launched with a prompt this skill builds/,
+    );
+    expect(r.body).not.toMatch(/reverse audit — no auditor/);
+    expect(r.body).not.toMatch(/verification — the review posts findings/);
+    const fixes = r.remediation.join(' ');
+    expect(fixes).toContain('--role reverse-audit');
+    expect(fixes).toContain('--role verify');
   });
 
   it('softens an unverified Request changes to Comment — no verifier, no blocker', () => {
@@ -1866,5 +1970,68 @@ describe('verdictLine — the terminal verdict, and its dangling colon', () => {
     expect(line({ event: 'APPROVE', baseEvent: 'APPROVE' })).toBe(
       'Verdict: Approve',
     );
+  });
+});
+
+describe('describeChunkGap — chunk ids leave in the author units', () => {
+  const planned = [
+    { id: 1, files: ['src/a.ts'] },
+    { id: 2, files: ['src/b.ts', 'src/c.ts'] },
+    { id: 3, files: ['src/d.ts'] },
+  ];
+
+  it('every planned chunk collapses to the diff itself', () => {
+    expect(describeChunkGap([2, 1, 3], planned)).toEqual({
+      phrase: 'the entire diff',
+      plural: false,
+    });
+  });
+
+  it('names the files of a narrow gap — sorted by id, deduped', () => {
+    expect(describeChunkGap([2], planned)).toEqual({
+      phrase: 'the diff section covering src/b.ts, src/c.ts',
+      plural: false,
+    });
+    expect(describeChunkGap([3, 1], planned)).toEqual({
+      phrase: 'the diff sections covering src/a.ts, src/d.ts',
+      plural: true,
+    });
+    // A subject disclosed twice is one gap.
+    expect(describeChunkGap([2, 2], planned).plural).toBe(false);
+  });
+
+  it('counts against the plan when the file list would sprawl', () => {
+    const wide = [
+      { id: 1, files: ['a.ts', 'b.ts', 'c.ts'] },
+      { id: 2, files: ['d.ts', 'e.ts'] },
+      { id: 3, files: ['f.ts'] },
+    ];
+    expect(describeChunkGap([1, 2], wide)).toEqual({
+      phrase: "2 of the diff's 3 sections",
+      plural: true,
+    });
+  });
+
+  it('one unknown chunk poisons the file list — naming the known files would overclaim the rest', () => {
+    const partial = [
+      { id: 1, files: ['src/a.ts'] },
+      { id: 2, files: [] },
+      { id: 3, files: ['src/d.ts'] },
+    ];
+    expect(describeChunkGap([1, 2], partial)).toEqual({
+      phrase: "2 of the diff's 3 sections",
+      plural: true,
+    });
+  });
+
+  it('still says something with no plan to count against', () => {
+    expect(describeChunkGap([7], [])).toEqual({
+      phrase: '1 section of the diff',
+      plural: false,
+    });
+    expect(describeChunkGap([9, 7], [])).toEqual({
+      phrase: '2 sections of the diff',
+      plural: true,
+    });
   });
 });
