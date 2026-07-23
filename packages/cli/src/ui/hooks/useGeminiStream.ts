@@ -523,6 +523,13 @@ export const useGeminiStream = (
   // `/model <id> <prompt>`. Skill-tool overrides must not clobber a user's
   // explicit choice mid-turn, so this takes precedence until the next user turn.
   const inlineModelOverrideActiveRef = useRef<boolean>(false);
+  const canUseToolResultFullTurnModel = useCallback((model: string) => {
+    const current = modelOverrideRef.current;
+    return (
+      !inlineModelOverrideActiveRef.current &&
+      (!current?.endsWith('\0') || current === model)
+    );
+  }, []);
   const handledProviderToolCallIdsRef = useRef<Set<string>>(new Set());
   // Scoped to a top-level submit and cleared below before a new user prompt.
   // Repeated duplicate provider ids within that submit are terminal/drop-only.
@@ -574,6 +581,7 @@ export const useGeminiStream = (
       config,
       getPreferredEditor,
       onEditorClose,
+      canUseToolResultFullTurnModel,
     );
 
   const pendingToolCallGroupDisplay = useMemo(

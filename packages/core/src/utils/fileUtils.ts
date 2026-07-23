@@ -933,8 +933,8 @@ export interface ProcessSingleFileContentOptions {
   pages?: string;
   /**
    * When true, keep an image inline for a text-only model instead of replacing
-   * it with an "unsupported" note. Only the interactive `@`-resolution path
-   * sets this after deciding the vision bridge should handle the image.
+   * it with an "unsupported" note. Vision Bridge callers set this only after
+   * confirming that another model can interpret the image.
    */
   preserveUnsupportedImage?: boolean;
   /**
@@ -1092,9 +1092,9 @@ export async function processSingleFileContent(
       !!modalities.image &&
       largePdfBehavior !== 'reference';
     // Text-only main model on a bridge-capable path: prepare bounded PDF page
-    // images for the caller to transcribe. `preserveUnsupportedImage` is the
-    // interactive `@` path; `preparePdfForVisionBridge` is PDF-only so enabling
-    // read_file fallback never changes ordinary image reads.
+    // images for the caller to transcribe. `preserveUnsupportedImage` also
+    // keeps ordinary images available to a bridge-capable caller, while
+    // `preparePdfForVisionBridge` changes PDF handling only.
     const renderForBridge =
       fileType === 'pdf' &&
       !modalities.image &&

@@ -146,6 +146,7 @@ import {
   hasImageParts,
   normalizeParts,
   runVisionBridge,
+  bridgeToolResultImages,
   shouldRunVisionBridge,
   formatVisionBridgeNotice,
   formatFullTurnVisionNotice,
@@ -2406,6 +2407,9 @@ export class Session implements SessionContext {
             let parts: Part[] | null;
             let fullTurnModelOverride: string | undefined;
             const onFullTurnModel = (model: string) => {
+              if (fullTurnModelOverride === model) {
+                return true;
+              }
               if (fullTurnModelOverride) {
                 return false;
               }
@@ -2793,6 +2797,7 @@ export class Session implements SessionContext {
                         promptId,
                         functionCalls,
                         toolLoopState,
+                        onFullTurnModel,
                       ),
                   );
                   if (toolRun.stopAfterPermissionCancel) {
@@ -2873,6 +2878,9 @@ export class Session implements SessionContext {
     let stopHookIterationCount = 0;
     let stopHookReasons: string[] = [];
     const onFullTurnModel = (model: string) => {
+      if (modelOverride === model) {
+        return true;
+      }
       if (modelOverride) {
         return false;
       }
@@ -3469,6 +3477,7 @@ export class Session implements SessionContext {
               toolPromptId,
               functionCalls,
               toolLoopState,
+              options.onFullTurnModel,
             ),
         );
         if (toolRun.stopAfterPermissionCancel || toolRun.loopDetected) {
@@ -5609,6 +5618,7 @@ export class Session implements SessionContext {
     promptId: string,
     functionCalls: FunctionCall[],
     toolLoopState?: DaemonToolLoopState,
+    onFullTurnModel?: (model: string) => boolean,
   ): Promise<RunToolResult> {
     const dedupedFunctionCalls = dedupeToolCallsById(functionCalls);
     const generatedCallIdBase = randomUUID();
@@ -5950,6 +5960,7 @@ export class Session implements SessionContext {
             recordSkippedToolCall,
             queueToolResultRecord,
             executionCallIds.get(calls[i]),
+            onFullTurnModel,
           );
           results[i] = r;
           if (r.loopDetected) {
@@ -5984,6 +5995,7 @@ export class Session implements SessionContext {
           recordSkippedToolCall,
           queueToolResultRecord,
           executionCallIds.get(calls[idx]),
+          onFullTurnModel,
         )
           .then((r) => {
             results[idx] = r;
@@ -6116,6 +6128,7 @@ export class Session implements SessionContext {
               recordSkippedToolCall,
               queueToolResultRecord,
               executionCallIds.get(fc),
+              onFullTurnModel,
             );
             parts.push(...r.parts);
             collectMemoryWriteCandidates(r);
@@ -6199,6 +6212,7 @@ export class Session implements SessionContext {
     ) => Promise<Part>,
     queueToolResultRecord?: QueueToolResultRecord,
     generatedCallId?: string,
+    onFullTurnModel?: (model: string) => boolean,
   ): Promise<RunToolResult> {
     const callId = fc.id ?? generatedCallId ?? `${fc.name}-${Date.now()}`;
     let args = (fc.args ?? {}) as Record<string, unknown>;
@@ -7213,7 +7227,7 @@ export class Session implements SessionContext {
           }
 
           // Create response parts first (needed for emitResult and recordToolResult)
-          const responseParts = toolResult.error
+          let responseParts = toolResult.error
             ? convertToFunctionErrorResponse(
                 toolName,
                 callId,
@@ -7333,6 +7347,13 @@ export class Session implements SessionContext {
               artifacts: failureHookResult.artifacts,
             });
           }
+
+          responseParts = await bridgeToolResultImages({
+            config: this.config,
+            responseParts,
+            signal: activeToolAbortSignal,
+            onFullTurnModel,
+          });
 
           // Handle TodoWriteTool: extract todos and send plan update
           if (isTodoWriteTool) {

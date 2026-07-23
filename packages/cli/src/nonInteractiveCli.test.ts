@@ -1272,6 +1272,78 @@ describe('runNonInteractive', () => {
     ).toHaveBeenCalled();
   });
 
+  it('uses a tool-selected full-turn model for the next request', async () => {
+    setupMetricsMock();
+    const model = 'qwen3-vl-plus\0';
+    mockCoreExecuteToolCall.mockImplementation(
+      async (_config, request, _signal, options) => {
+        if (request.callId === 'tool-image') {
+          expect(options.onToolResultFullTurnModel?.(model)).toBe(true);
+          return {
+            responseParts: [{ text: 'Tool response with image' }],
+            modelOverride: model,
+          };
+        }
+        return {
+          responseParts: [{ text: 'Skill response' }],
+          modelOverride: undefined,
+        };
+      },
+    );
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-image',
+              name: 'screenshot_tool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-tool-image',
+            },
+          },
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'skill-after-image',
+              name: 'skill_tool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-tool-image',
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Image understood' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Use the screenshot tool',
+      'prompt-tool-image',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      2,
+      [{ text: 'Tool response with image' }, { text: 'Skill response' }],
+      expect.any(AbortSignal),
+      'prompt-tool-image',
+      { type: SendMessageType.ToolResult, modelOverride: model },
+    );
+  });
+
   describe('parallel tool execution', () => {
     const finishTurn: ServerGeminiStreamEvent[] = [
       { type: GeminiEventType.Content, value: 'done' },
