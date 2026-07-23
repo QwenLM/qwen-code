@@ -50,6 +50,22 @@ adds a native CSS plan-execution section above the existing task tree:
 No graph library is added. Plans without dependency metadata keep list-style
 presentation.
 
+## Plan Mode approval
+
+Plan Mode is the opt-in execution gate for users who want to review a workflow
+before work begins. When `exit_plan_mode` requests permission, Web Shell shows
+the authoritative ACP plan body followed by the active Todo workflow in the
+existing approval panel. The Todo view is supplemental because its snapshot can
+differ from the submitted plan text. A dependency-aware workflow is rendered as
+the same DAG used by the Tasks dialog; a workflow without dependencies keeps the
+list presentation.
+
+The existing permission lifecycle remains authoritative: approving exits Plan
+Mode and starts execution, while rejecting keeps the session in Plan Mode. If
+there is no active Todo snapshot, the approval keeps its existing text-only
+presentation using the plan body carried by ACP. Sessions that do not enter
+Plan Mode are unchanged.
+
 ## Status composition
 
 Todo status remains the business source of truth. Agent state is an execution
@@ -71,5 +87,5 @@ the Todo status.
 - Agent calls without `todo_id` remain valid.
 - Empty Todo snapshots must clear active state immediately.
 - Full subagent results stay out of the three-second task polling response.
-- Strict plan-first enforcement remains out of scope because a session-level
-  existence check could accept a stale plan.
+- Strict plan-first enforcement for every session remains out of scope because
+  a session-level existence check could accept a stale plan.

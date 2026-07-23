@@ -7842,6 +7842,7 @@ export function App({
                             onConfirm={handleConfirm}
                             variant="floating"
                             keyboardActive={toolApprovalOverlayVisible}
+                            planTodos={floatingTodos}
                           />
                         </div>
                       )}

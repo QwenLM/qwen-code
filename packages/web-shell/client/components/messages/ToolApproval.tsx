@@ -8,8 +8,9 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from 'react';
 import { isAgentTool } from '@qwen-code/webui/daemon-react-sdk';
-import type { PermissionRequest } from '../../adapters/types';
+import type { PermissionRequest, TodoItem } from '../../adapters/types';
 import { useI18n } from '../../i18n';
+import { PlanExecutionView } from './PlanExecutionView';
 import { localizeToolDisplayName } from './toolFormatting';
 import styles from './ToolApproval.module.css';
 
@@ -28,6 +29,7 @@ interface ToolApprovalProps {
    * it — it just never grabs focus on its own.
    */
   keyboardActive?: boolean;
+  planTodos?: readonly TodoItem[];
 }
 
 export function parseTitle(title?: string): {
@@ -174,6 +176,7 @@ export function ToolApproval({
   onConfirm,
   variant = 'inline',
   keyboardActive = true,
+  planTodos = [],
 }: ToolApprovalProps) {
   const { t } = useI18n();
   const displayOptions = useMemo(
@@ -317,6 +320,10 @@ export function ToolApproval({
   const showsCommandBlock = Boolean(
     (isExec && command) || (contentText && contentText !== request.title),
   );
+  const isExitPlanApproval =
+    request.toolKind === 'switch_mode' &&
+    request.toolName?.toLowerCase() === 'exit_plan_mode';
+  const showsPlanWorkflow = planTodos.length > 0 && isExitPlanApproval;
   const questionText = isAgent
     ? t('approval.launchAgentQuestion')
     : isExec
@@ -327,7 +334,9 @@ export function ToolApproval({
     <div
       className={
         variant === 'floating'
-          ? `${styles.approval} ${styles.floating}`
+          ? `${styles.approval} ${styles.floating}${
+              showsPlanWorkflow ? ` ${styles.floatingWorkflow}` : ''
+            }`
           : styles.approval
       }
       data-web-shell-permission-panel
@@ -369,10 +378,22 @@ export function ToolApproval({
           </pre>
         </div>
       ) : contentText && contentText !== request.title ? (
-        <pre className={styles.content} id={commandId} title={contentText}>
+        <pre
+          className={`${styles.content}${
+            isExitPlanApproval ? ` ${styles.planContent}` : ''
+          }`}
+          id={commandId}
+          title={contentText}
+        >
           {contentText}
         </pre>
       ) : null}
+
+      {showsPlanWorkflow && (
+        <div className={styles.workflow}>
+          <PlanExecutionView todos={planTodos} tools={[]} tasks={[]} />
+        </div>
+      )}
 
       <div className={styles.question} id={questionId}>
         {questionText}

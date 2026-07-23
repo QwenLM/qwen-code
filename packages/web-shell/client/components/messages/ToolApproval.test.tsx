@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
-import type { PermissionRequest } from '../../adapters/types';
+import type { PermissionRequest, TodoItem } from '../../adapters/types';
 import { ToolApproval } from './ToolApproval';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -38,6 +38,18 @@ const execRequest: PermissionRequest = {
   },
 };
 
+const planRequest: PermissionRequest = {
+  id: 'req-plan',
+  toolKind: 'switch_mode',
+  toolName: 'exit_plan_mode',
+  title: 'Exit Plan Mode',
+  content: [{ type: 'text', text: 'Implement the approved workflow.' }],
+  options: [
+    { id: 'proceed', label: 'Proceed', kind: 'allow_once' },
+    { id: 'reject', label: 'Keep planning', kind: 'reject_once' },
+  ],
+};
+
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
 let onConfirm: ReturnType<typeof vi.fn>;
@@ -56,6 +68,7 @@ afterEach(() => {
 function rerender(
   keyboardActive?: boolean,
   req: PermissionRequest = request,
+  planTodos?: readonly TodoItem[],
 ): void {
   act(() =>
     root!.render(
@@ -64,6 +77,7 @@ function rerender(
           request={req}
           onConfirm={onConfirm}
           keyboardActive={keyboardActive}
+          planTodos={planTodos}
         />
       </I18nProvider>,
     ),
@@ -73,11 +87,12 @@ function rerender(
 function render(
   keyboardActive?: boolean,
   req: PermissionRequest = request,
+  planTodos?: readonly TodoItem[],
 ): void {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
-  rerender(keyboardActive, req);
+  rerender(keyboardActive, req, planTodos);
 }
 
 function optionButtons(): HTMLButtonElement[] {
@@ -95,6 +110,60 @@ function pressKey(target: Element, key: string): void {
 }
 
 describe('ToolApproval accessibility', () => {
+  it('shows the active Todo workflow before exiting Plan Mode', () => {
+    render(undefined, planRequest, [
+      { id: 'prepare', content: 'Prepare', status: 'completed' },
+      {
+        id: 'ship',
+        content: 'Ship',
+        status: 'pending',
+        blockedBy: ['prepare'],
+      },
+    ]);
+
+    expect(container!.querySelector('[data-plan-workflow]')).not.toBeNull();
+    expect(container!.textContent).toContain('Prepare');
+    expect(container!.textContent).toContain('Ship');
+    expect(container!.textContent).toContain(
+      'Implement the approved workflow.',
+    );
+  });
+
+  it('keeps the text-only Plan Mode approval when there are no Todos', () => {
+    render(undefined, planRequest);
+
+    expect(container!.querySelector('[data-plan-workflow]')).toBeNull();
+    expect(container!.textContent).toContain(
+      'Implement the approved workflow.',
+    );
+  });
+
+  it('shows a dependency-free Plan Mode workflow as a list', () => {
+    render(undefined, planRequest, [
+      { id: 'review', content: 'Review the change', status: 'pending' },
+    ]);
+
+    expect(container!.querySelector('[data-plan-workflow]')).toBeNull();
+    expect(container!.textContent).toContain('Review the change');
+  });
+
+  it('does not show a stale workflow for another switch-mode tool', () => {
+    render(undefined, { ...planRequest, toolName: 'enter_plan_mode' }, [
+      { id: 'old', content: 'Old plan', status: 'pending' },
+    ]);
+
+    expect(container!.querySelector('[data-plan-workflow]')).toBeNull();
+    expect(container!.textContent).not.toContain('Old plan');
+  });
+
+  it('requires a switch-mode permission before showing the workflow', () => {
+    render(undefined, { ...planRequest, toolKind: 'other' }, [
+      { id: 'unsafe', content: 'Unrelated workflow', status: 'pending' },
+    ]);
+
+    expect(container!.textContent).not.toContain('Unrelated workflow');
+  });
+
   it('exposes an alertdialog of real, focusable buttons', () => {
     render(undefined);
     const panel = container!.querySelector('[data-web-shell-permission-panel]');
