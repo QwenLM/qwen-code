@@ -5,7 +5,6 @@
  */
 
 // External dependencies
-import { createUserContent } from '@google/genai';
 import type {
   Content,
   GenerateContentConfig,
@@ -14,6 +13,7 @@ import type {
   PartListUnion,
   Tool,
 } from '@google/genai';
+import { createUserContent } from './genai-compat.js';
 import process from 'node:process';
 
 // Config
