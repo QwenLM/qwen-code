@@ -246,9 +246,31 @@ prove it fails or misaligns before the fix; how to verify after the fix.
   already past it. Report-only findings are filed as a single consolidated
   issue by the workflow after the PR is opened.
 
+## Mode: scan-only
+
+Inputs: `--workdir`.
+
+Run steps 1 and 7 from scan-and-fix only. Dispatch subagents, collect and
+deduplicate findings, write `<workdir>/findings.json` and
+`<workdir>/report-only.md`. Do NOT create a branch, edit code, run
+verification, or write PR files. This mode exists to decouple scanning from
+fixing so each phase stays within the model's tool-call budget.
+
+## Mode: fix-only
+
+Inputs: `--workdir`, `--branch`.
+
+A previous scan-only run already wrote `<workdir>/findings.json`. Read it,
+then run steps 2–6 and 8–9 from scan-and-fix (select fixes, create branch,
+fix, verify, write PR files). Do NOT re-scan — trust the existing findings.
+If `<workdir>/findings.json` is missing or empty, write
+`<workdir>/failure.md` and stop.
+
 ## Mode: scan-and-fix
 
 Inputs: `--workdir`, `--branch`.
+
+The combined mode. Runs scan-only then fix-only in a single invocation.
 
 1. Dispatch the nine partition subagents. Each subagent applies the six angles inside its partition and reports candidates. Collect, deduplicate across partitions, and write every confirmed finding to `<workdir>/findings.json`:
 
@@ -278,8 +300,8 @@ Inputs: `--workdir`, `--branch`.
    }
    ```
 
-2. Select at most 8 `fixes` entries — the most certain, lowest-risk, easiest
-   to explain. Selecting none is valid.
+2. Select `fixes` entries — the most certain, lowest-risk, easiest
+   to explain. Selecting none is valid. No cap on count.
 3. If you selected at least one fix, create the branch from current HEAD:
    `git checkout -b <branch>`.
 4. For each selected finding, one at a time:

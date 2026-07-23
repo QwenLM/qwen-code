@@ -15,6 +15,20 @@ on:
         required: false
         type: 'boolean'
         default: false
+      mode:
+        description: 'scan-and-fix (default), scan (findings only), fix (use previous scan artifact)'
+        required: false
+        type: 'choice'
+        options:
+          - 'scan-and-fix'
+          - 'scan'
+          - 'fix'
+        default: 'scan-and-fix'
+      scan_run_id:
+        description: 'Run ID of a previous scan-only run (required for fix mode)'
+        required: false
+        type: 'string'
+        default: ''
 
 defaults:
   run:
@@ -43,6 +57,7 @@ jobs:
     env:
       REPO: '${{ github.repository }}'
       DRY_RUN: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}"
+      MODE: "${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'scan-and-fix' }}"
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -155,10 +170,29 @@ jobs:
           qwen --version
 
       - name: 'Resolve branch name'
-        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        if: "${{ steps.dedup.outputs.open_prs_present == 'false' && env.MODE != 'scan' }}"
         id: 'branch'
         run: |-
           echo "name=hygiene/$(date -u +%Y%m%d-%H%M)" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Download scan findings (fix mode only)'
+        if: "${{ steps.dedup.outputs.open_prs_present == 'false' && env.MODE == 'fix' }}"
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          SCAN_RUN_ID: "${{ inputs.scan_run_id }}"
+        run: |-
+          if [[ -z "${SCAN_RUN_ID}" ]]; then
+            echo '::error::scan_run_id is required when mode=fix.'
+            exit 1
+          fi
+          echo "Downloading findings from run ${SCAN_RUN_ID}..."
+          gh run download "${SCAN_RUN_ID}" --repo "${REPO}" -D "${WORKDIR}/dl"
+          if [[ ! -s "${WORKDIR}/dl/repo-hygiene-artifacts/findings.json" ]]; then
+            echo '::error::findings.json not found in scan artifact.'
+            exit 1
+          fi
+          cp "${WORKDIR}/dl/repo-hygiene-artifacts/findings.json" "${WORKDIR}/findings.json"
+          echo "Findings downloaded. $(jq '.fixes | length' "${WORKDIR}/findings.json") fixes, $(jq '.reportOnly | length' "${WORKDIR}/findings.json") report-only."
 
       # The agent scans, selects, fixes, commits, and writes outputs. It holds
       # no GitHub token — all network writes happen in the publish step below.
@@ -212,15 +246,15 @@ jobs:
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
           rm -f "${WORKDIR}/failure.md"
           node .qwen/skills/repo-hygiene/scripts/run-agent.mjs \
-            --mode scan-and-fix \
+            --mode "${MODE}" \
             --workdir "${WORKDIR}" \
-            --branch "${{ steps.branch.outputs.name }}"
+            ${{ env.MODE != 'scan' && format('--branch {0}', steps.branch.outputs.name) || '' }}
 
       # Structural gate: decide what the agent produced and enforce limits
       # before any verification or publishing happens. failure.md or a
       # contract violation fails the run; no branch/diff is a quiet skip.
       - name: 'Gate on agent outcome'
-        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        if: "${{ steps.dedup.outputs.open_prs_present == 'false' && env.MODE != 'scan' }}"
         id: 'gate'
         run: |-
           BRANCH="${{ steps.branch.outputs.name }}"

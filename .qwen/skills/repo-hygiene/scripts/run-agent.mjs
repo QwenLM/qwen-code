@@ -27,6 +27,19 @@ const specs = {
     invocation: (o) =>
       `/repo-hygiene scan-and-fix --workdir ${o.workdir} --branch ${o.branch}`,
   },
+  'scan': {
+    inputs: [],
+    outputs: ['findings.json', 'report-only.md'],
+    required: [],
+    invocation: (o) => `/repo-hygiene scan-only --workdir ${o.workdir}`,
+  },
+  'fix': {
+    inputs: ['findings.json'],
+    outputs: ['findings.json', 'report-only.md'],
+    required: ['branch'],
+    invocation: (o) =>
+      `/repo-hygiene fix-only --workdir ${o.workdir} --branch ${o.branch}`,
+  },
 };
 
 function fail(message) {
