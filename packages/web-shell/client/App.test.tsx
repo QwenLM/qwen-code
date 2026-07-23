@@ -119,6 +119,7 @@ const {
       forkSession: vi.fn().mockResolvedValue({ launched: false }),
       sendShellCommand: vi.fn().mockResolvedValue(undefined),
       getStats: vi.fn().mockResolvedValue({}),
+      getTasks: vi.fn().mockResolvedValue({ tasks: [] }),
       loadArtifacts: vi.fn().mockResolvedValue({ artifacts: [] }),
       loadSession: vi.fn().mockResolvedValue(undefined),
       reloadSession: vi.fn().mockResolvedValue(undefined),
@@ -183,6 +184,11 @@ const {
         id: string;
         blockedBy?: string[];
       }>,
+      latestTodoPanelOnOpen: null as (() => void) | null,
+      latestTasksStatusProps: null as {
+        planTodos?: Array<{ id: string }>;
+        agentTools?: Array<{ callId: string }>;
+      } | null,
       latestScheduledTasksProps: null as {
         onRunPrompt?: (
           prompt: string,
@@ -635,8 +641,10 @@ vi.doMock('./components/panels/TodoPanel', async () => {
   return {
     TodoPanel: (props: {
       todos: Array<{ id: string; blockedBy?: string[] }>;
+      onOpen?: () => void;
     }) => {
       testState.latestTodoPanelTodos = props.todos;
+      testState.latestTodoPanelOnOpen = props.onOpen ?? null;
       return React.createElement('div');
     },
   };
@@ -865,7 +873,18 @@ vi.doMock('./components/messages/AskUserQuestion', async () => {
     },
   };
 });
-mockComponent('./components/messages/TasksStatusMessage', 'TasksStatusMessage');
+vi.doMock('./components/messages/TasksStatusMessage', async () => {
+  const React = await import('react');
+  return {
+    TasksStatusMessage: (props: {
+      planTodos?: Array<{ id: string }>;
+      agentTools?: Array<{ callId: string }>;
+    }) => {
+      testState.latestTasksStatusProps = props;
+      return React.createElement('div');
+    },
+  };
+});
 mockComponent('./components/messages/BtwMessage', 'BtwMessage');
 mockComponent('./components/QueuedPromptDisplay', 'QueuedPromptDisplay');
 
@@ -1038,6 +1057,8 @@ beforeEach(() => {
   testState.latestToolApprovalKeyboardActive = null;
   testState.latestAskUserQuestionKeyboardActive = null;
   testState.latestTodoPanelTodos = [];
+  testState.latestTodoPanelOnOpen = null;
+  testState.latestTasksStatusProps = null;
   testState.latestScheduledTasksProps = null;
   testState.latestGoalsProps = null;
   sidebarTokens.length = 0;
@@ -1071,6 +1092,7 @@ beforeEach(() => {
   mockSessionActions.forkSession.mockResolvedValue({ launched: false });
   mockSessionActions.sendShellCommand.mockResolvedValue(undefined);
   mockSessionActions.getStats.mockResolvedValue({});
+  mockSessionActions.getTasks.mockResolvedValue({ tasks: [] });
   mockSessionActions.loadSession.mockResolvedValue(undefined);
   mockStore.reset.mockClear();
   mockStore.dispatch.mockClear();
@@ -1151,6 +1173,42 @@ describe('App plan todos', () => {
     await flush();
 
     expect(testState.latestTodoPanelTodos[1]?.blockedBy).toEqual([]);
+  });
+
+  it('opens the workflow dialog with plan todos and linked agents', async () => {
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'plan',
+        todos: [{ id: 'work', content: 'Work', status: 'in_progress' }],
+      },
+      {
+        id: 'agents',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'agent-call',
+            toolName: 'Agent',
+            status: 'in_progress',
+            args: { todo_id: 'work' },
+          },
+        ],
+      },
+    ];
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestTodoPanelOnOpen?.();
+      await Promise.resolve();
+    });
+
+    expect(
+      testState.latestTasksStatusProps?.planTodos?.map((todo) => todo.id),
+    ).toEqual(['work']);
+    expect(
+      testState.latestTasksStatusProps?.agentTools?.map((tool) => tool.callId),
+    ).toEqual(['agent-call']);
   });
 });
 
