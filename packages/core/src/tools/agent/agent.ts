@@ -1786,6 +1786,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     spec: {
       agentId: string;
       subagentName: string;
+      agentDescription?: string;
       invocationKind: SubagentInvocationKind;
       isBuiltIn: boolean;
       modelOverride?: string;
@@ -1883,6 +1884,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   ): {
     agentId: string;
     subagentName: string;
+    agentDescription?: string;
     invocationKind: SubagentInvocationKind;
     isBuiltIn: boolean;
     modelOverride?: string;
@@ -1890,6 +1892,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     return {
       agentId: hookOpts.agentId,
       subagentName: hookOpts.agentType,
+      agentDescription: subagentConfig.description,
       invocationKind,
       isBuiltIn: subagentConfig.level === 'builtin',
       modelOverride: subagentConfig.model,

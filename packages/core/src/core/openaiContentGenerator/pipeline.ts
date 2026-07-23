@@ -714,6 +714,9 @@ export class ContentGenerationPipeline {
         if (response.usageMetadata) {
           pendingFinishResponse.usageMetadata = response.usageMetadata;
         }
+        if (response.modelVersion) {
+          pendingFinishResponse.modelVersion = response.modelVersion;
+        }
         setPendingFinish(pendingFinishResponse);
       } else {
         // This is a finish reason chunk
@@ -735,10 +738,14 @@ export class ContentGenerationPipeline {
       }
 
       // Copy other essential properties from the current response
-      mergedResponse.responseId = response.responseId;
-      mergedResponse.createTime = response.createTime;
-      mergedResponse.modelVersion = response.modelVersion;
-      mergedResponse.promptFeedback = response.promptFeedback;
+      mergedResponse.responseId =
+        response.responseId || pendingFinishResponse.responseId;
+      mergedResponse.createTime =
+        response.createTime || pendingFinishResponse.createTime;
+      mergedResponse.modelVersion =
+        response.modelVersion || pendingFinishResponse.modelVersion;
+      mergedResponse.promptFeedback =
+        response.promptFeedback || pendingFinishResponse.promptFeedback;
 
       setPendingFinish(mergedResponse);
       return true; // Yield the merged response
