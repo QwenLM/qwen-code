@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { type FunctionCall } from '@google/genai';
+import type { FunctionCall } from '@google/genai';
 import type {
   ToolConfirmationOutcome,
   ToolConfirmationPayload,

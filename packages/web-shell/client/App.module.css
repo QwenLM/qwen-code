@@ -85,6 +85,39 @@
   background: transparent;
 }
 
+.artifactPanelDock {
+  flex: 0 0 var(--artifact-panel-dock-width);
+  width: var(--artifact-panel-dock-width);
+  min-width: 0;
+  display: flex;
+  animation: artifactPanelDockOpen 200ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.artifactPanelClip {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+@keyframes artifactPanelDockOpen {
+  from {
+    flex-basis: 0;
+    width: 0;
+  }
+
+  to {
+    flex-basis: var(--artifact-panel-dock-width);
+    width: var(--artifact-panel-dock-width);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .artifactPanelDock {
+    animation: none;
+  }
+}
+
 /* Positioning context so the scheduled-tasks page (position:absolute) covers
    exactly the chat pane. Only applied while the page is shown, so normal chat
    layout is untouched. */
@@ -303,32 +336,6 @@
 .appChatEmpty .chatPane {
   justify-content: center;
   overflow-y: auto;
-}
-
-.app,
-.app * {
-  box-sizing: border-box;
-  scrollbar-width: thin;
-  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
-}
-
-.app *::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-.app *::-webkit-scrollbar-track {
-  background: var(--scrollbar-track);
-}
-
-.app *::-webkit-scrollbar-thumb {
-  border: 2px solid var(--scrollbar-track);
-  border-radius: 999px;
-  background: var(--scrollbar-thumb);
-}
-
-.app *::-webkit-scrollbar-thumb:hover {
-  background: var(--scrollbar-thumb-hover);
 }
 
 .themeDark {
@@ -906,6 +913,10 @@
 
 .composerHeader {
   margin-bottom: 8px;
+}
+
+.chatHeader {
+  flex-shrink: 0;
 }
 
 .customFooter {

@@ -4,16 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  FinishReason,
-  type Content,
-  type Part,
-  type PartListUnion,
-  type GenerateContentResponse,
-  type FunctionCall,
-  type FunctionDeclaration,
-  type GenerateContentResponseUsageMetadata,
+import type {
+  Content,
+  Part,
+  PartListUnion,
+  GenerateContentResponse,
+  FunctionCall,
+  FunctionDeclaration,
+  GenerateContentResponseUsageMetadata,
 } from '@google/genai';
+import { FinishReason } from './genai-compat.js';
 import type {
   ToolCallConfirmationDetails,
   ToolArtifact,
