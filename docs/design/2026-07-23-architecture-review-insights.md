@@ -294,6 +294,12 @@ npm run preflight  → clean → install → format → lint → build → typec
 
 **模式：** 回调在异步上下文 A（teammate）中注册，在上下文 B（leader）中调用时，AsyncLocalStorage 上下文可能泄漏。修复：在回调注册处包裹上下文清除。当消费者是 React effect 时，需要第二条边界（React batching 可恢复外层 frame）。
 
+### 5.17 Hook 生命周期完备性
+
+- **PR #7592**：流式循环内三个 `return turn` 提前返回路径跳过了循环后的 Stop hook 代码——loop 检测未触发 StopFailure
+
+**模式：** 当函数有多个提前返回路径（loop 检测、API 错误、正常完成）时，每条路径都必须触发适当的 hook 事件。模式：识别所有提前返回，在每个 `return` 前添加 hook 触发，使用 fire-and-forget（`.catch()`）防止 hook 失败影响主控制流。
+
 ## 六、架构演进方向
 
 基于当前 PR 趋势的观察：
