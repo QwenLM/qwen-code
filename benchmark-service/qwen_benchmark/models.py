@@ -27,30 +27,3 @@ class RunRequest(BaseModel):
         if ".." in value or "@{" in value:
             raise ValueError("qwen_ref contains unsupported revision syntax")
         return value
-
-
-class RunResponse(BaseModel):
-    run_id: str
-    status: str
-    status_url: str
-    deduplicated: bool = False
-
-
-class RunDetail(BaseModel):
-    run_id: str
-    repository: str
-    qwen_ref: str
-    qwen_commit: str | None
-    suite: str
-    dataset: str
-    dataset_revision: str
-    runner_mode: str
-    status: str
-    expected_instances: int
-    completed_instances: int
-    resolved_instances: int
-    error: str | None
-    created_at: str
-    started_at: str | None
-    finished_at: str | None
-    heartbeat_at: str | None

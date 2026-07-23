@@ -2,67 +2,21 @@
 set -euo pipefail
 
 readonly CONFIG=/srv/qwen-benchmark/config/benchmark.env
-readonly SECRET_CONFIG=/srv/qwen-benchmark/config/benchmark.secret.env
-readonly API_URL=http://127.0.0.1:8000/api/v1/runs
-
-repository=''
-qwen_ref=''
-qwen_commit=''
-suite=''
-release_id=''
-trigger='workflow_dispatch'
-github_run_id=''
-github_run_attempt=''
-
-while (($#)); do
-  case "$1" in
-    --repository|--qwen-ref|--qwen-commit|--suite|--release-id|--trigger|--github-run-id|--github-run-attempt)
-      key="${1#--}"
-      shift
-      (($#)) || { echo "missing value for --${key}" >&2; exit 2; }
-      case "$key" in
-        repository) repository="$1" ;;
-        qwen-ref) qwen_ref="$1" ;;
-        qwen-commit) qwen_commit="$1" ;;
-        suite) suite="$1" ;;
-        release-id) release_id="$1" ;;
-        trigger) trigger="$1" ;;
-        github-run-id) github_run_id="$1" ;;
-        github-run-attempt) github_run_attempt="$1" ;;
-      esac
-      ;;
-    *) echo "unknown argument: $1" >&2; exit 2 ;;
-  esac
-  shift
-done
-
-[[ "$repository" == 'QwenLM/qwen-code' ]] || { echo 'repository is not allowed' >&2; exit 2; }
-[[ "$qwen_ref" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo 'qwen-ref must be a release version' >&2; exit 2; }
-[[ "$qwen_commit" =~ ^[0-9a-f]{40}$ ]] || { echo 'qwen-commit must be a 40-character SHA' >&2; exit 2; }
-[[ "$suite" =~ ^swebench_verified_(gold_smoke|qwen_smoke|harbor_smoke)$ ]] || { echo 'suite is not allowed' >&2; exit 2; }
-[[ -z "$release_id" || "$release_id" =~ ^[0-9]+$ ]] || { echo 'release-id must be numeric' >&2; exit 2; }
-[[ "$trigger" == 'release' || "$trigger" == 'workflow_dispatch' ]] || { echo 'trigger is not allowed' >&2; exit 2; }
-[[ "$github_run_id" =~ ^[0-9]+$ && "$github_run_attempt" =~ ^[0-9]+$ ]] || { echo 'invalid GitHub run metadata' >&2; exit 2; }
 
 set -a
 source "$CONFIG"
-source "$SECRET_CONFIG"
 set +a
 
-payload="$(jq -n \
-  --arg repository "$repository" \
-  --arg qwen_ref "$qwen_ref" \
-  --arg qwen_commit "$qwen_commit" \
-  --arg suite "$suite" \
-  --arg release_id "$release_id" \
-  --arg trigger "$trigger" \
-  --arg github_run_id "$github_run_id" \
-  --arg github_run_attempt "$github_run_attempt" \
-  '{repository: $repository, qwen_ref: $qwen_ref, qwen_commit: $qwen_commit, suite: $suite, trigger: $trigger, release_id: (if $release_id == "" then null else ($release_id | tonumber) end), github_run_id: ($github_run_id | tonumber), github_run_attempt: ($github_run_attempt | tonumber)}')"
+submit=(
+  /srv/qwen-benchmark/venv/bin/qwen-benchmark-submit
+  "$@"
+)
 
-curl --fail-with-body --silent --show-error \
-  -X POST "$API_URL" \
-  -H "Authorization: Bearer ${BENCHMARK_SHARED_TOKEN:?BENCHMARK_SHARED_TOKEN is required}" \
-  -H 'Content-Type: application/json' \
-  -H "Idempotency-Key: ${repository}:${github_run_id}:${github_run_attempt}" \
-  --data "$payload"
+if [[ "$(id -u)" -eq 0 ]]; then
+  exec runuser -u ecs-user -- env \
+    "BENCHMARK_DATABASE_PATH=${BENCHMARK_DATABASE_PATH:?}" \
+    "BENCHMARK_ALLOWED_REPOSITORY=${BENCHMARK_ALLOWED_REPOSITORY:-QwenLM/qwen-code}" \
+    "${submit[@]}"
+fi
+
+exec "${submit[@]}"

@@ -28,15 +28,9 @@ class Settings:
     artifact_root: Path
     qwen_repo: Path
     swebench_python: Path
-    auth_mode: Literal["token", "oidc"]
-    shared_token: str | None
-    oidc_audience: str
     allowed_repository: str
-    allowed_repository_id: str | None
-    allowed_workflow: str | None
     poll_seconds: float
     github_token: str | None
-    release_poll_suite: str = "swebench_verified_harbor_smoke"
     harbor_binary: Path = Path("/srv/qwen-benchmark/venv/bin/harbor")
     harbor_jobs_root: Path = Path("/srv/qwen-benchmark/harbor/jobs")
     benchmark_model: str | None = None
@@ -65,19 +59,11 @@ class Settings:
             swebench_python=Path(
                 os.environ.get("BENCHMARK_SWEBENCH_PYTHON", base / "venv/bin/python")
             ),
-            auth_mode=os.environ.get("BENCHMARK_AUTH_MODE", "oidc"),  # type: ignore[arg-type]
-            shared_token=os.environ.get("BENCHMARK_SHARED_TOKEN"),
-            oidc_audience=os.environ.get("BENCHMARK_OIDC_AUDIENCE", "qwen-benchmark"),
             allowed_repository=os.environ.get(
                 "BENCHMARK_ALLOWED_REPOSITORY", "QwenLM/qwen-code"
             ),
-            allowed_repository_id=os.environ.get("BENCHMARK_ALLOWED_REPOSITORY_ID"),
-            allowed_workflow=os.environ.get("BENCHMARK_ALLOWED_WORKFLOW"),
             poll_seconds=float(os.environ.get("BENCHMARK_POLL_SECONDS", "5")),
             github_token=os.environ.get("BENCHMARK_GITHUB_TOKEN"),
-            release_poll_suite=os.environ.get(
-                "BENCHMARK_RELEASE_POLL_SUITE", "swebench_verified_harbor_smoke"
-            ),
             harbor_binary=Path(
                 os.environ.get(
                     "BENCHMARK_HARBOR_BINARY", "/srv/qwen-benchmark/venv/bin/harbor"

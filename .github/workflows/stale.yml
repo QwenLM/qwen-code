@@ -106,7 +106,7 @@ jobs:
           [[ "${object_type}" == 'commit' && "${object_sha}" =~ ^[0-9a-f]{40}$ ]]
           echo "commit=${object_sha}" >> "${GITHUB_OUTPUT}"
 
-      - name: 'Queue benchmark on local ECS service'
+      - name: 'Queue benchmark in local ECS worker'
         env:
           QWEN_REF: '${{ inputs.qwen_ref }}'
           QWEN_COMMIT: '${{ steps.revision.outputs.commit }}'
@@ -115,15 +115,19 @@ jobs:
           TRIGGER: workflow_dispatch
         run: |-
           set -euo pipefail
-          response="$(sudo -n /usr/local/sbin/qwen-benchmark-dispatch \
-            --repository "${GITHUB_REPOSITORY}" \
-            --qwen-ref "${QWEN_REF}" \
-            --qwen-commit "${QWEN_COMMIT}" \
-            --suite "${SUITE}" \
-            --release-id "${RELEASE_ID}" \
-            --trigger "${TRIGGER}" \
-            --github-run-id "${GITHUB_RUN_ID}" \
-            --github-run-attempt "${GITHUB_RUN_ATTEMPT}")"
+          args=(
+            --repository "${GITHUB_REPOSITORY}"
+            --qwen-ref "${QWEN_REF}"
+            --qwen-commit "${QWEN_COMMIT}"
+            --suite "${SUITE}"
+            --trigger "${TRIGGER}"
+            --github-run-id "${GITHUB_RUN_ID}"
+            --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+          )
+          if [[ -n "${RELEASE_ID}" ]]; then
+            args+=(--release-id "${RELEASE_ID}")
+          fi
+          response="$(sudo -n /usr/local/sbin/qwen-benchmark-dispatch "${args[@]}")"
           echo "${response}" | jq .
           echo "### Benchmark queued" >> "$GITHUB_STEP_SUMMARY"
           echo "${response}" | jq -r '"- Run ID: `" + .run_id + "`\n- Status: `" + .status + "`"' >> "$GITHUB_STEP_SUMMARY"

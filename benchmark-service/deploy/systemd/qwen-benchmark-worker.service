@@ -1,6 +1,6 @@
 [Unit]
 Description=Qwen Code benchmark worker
-After=network-online.target docker.service qwen-benchmark-api.service
+After=network-online.target docker.service
 Wants=network-online.target
 Requires=docker.service
 
