@@ -26,7 +26,10 @@ import type {
   ChannelWebhookTask,
 } from './ChannelWebhookTask.js';
 import { SessionRouter } from './SessionRouter.js';
-import { isChannelProactiveDeliveryError } from './ChannelProactiveDeliveryError.js';
+import {
+  ChannelProactiveDeliveryError,
+  isChannelProactiveDeliveryError,
+} from './ChannelProactiveDeliveryError.js';
 
 // Concrete test implementation
 class TestChannel extends ChannelBase {
@@ -446,6 +449,44 @@ describe('ChannelBase', () => {
           'result',
         ),
       ).rejects.toThrow('does not support proactive delivery');
+    });
+
+    it('normalizes untyped adapter failures as transient delivery errors', async () => {
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+      ch.proactiveTargetSupported = true;
+      const cause = new Error('provider request failed');
+      ch.proactiveError = cause;
+
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'test-chan', type: 'user', id: 'user-1' },
+          'result',
+        ),
+      ).rejects.toMatchObject({
+        code: 'channel_proactive_delivery_error',
+        disposition: 'transient',
+        message: 'provider request failed',
+        cause,
+      });
+    });
+
+    it('preserves typed adapter delivery errors', async () => {
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+      ch.proactiveTargetSupported = true;
+      const error = new ChannelProactiveDeliveryError(
+        'permanent',
+        'recipient rejected',
+      );
+      ch.proactiveError = error;
+
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'test-chan', type: 'user', id: 'user-1' },
+          'result',
+        ),
+      ).rejects.toBe(error);
     });
   });
 

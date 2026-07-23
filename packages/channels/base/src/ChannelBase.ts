@@ -18,7 +18,10 @@ import type {
   SessionTarget,
 } from './types.js';
 import { BlockStreamer } from './BlockStreamer.js';
-import { ChannelProactiveDeliveryError } from './ChannelProactiveDeliveryError.js';
+import {
+  ChannelProactiveDeliveryError,
+  isChannelProactiveDeliveryError,
+} from './ChannelProactiveDeliveryError.js';
 import { GroupGate } from './GroupGate.js';
 import { DmGate } from './DmGate.js';
 import { GroupHistoryStore } from './group-history-store.js';
@@ -816,11 +819,22 @@ export abstract class ChannelBase {
     await this.sendMessage(target.chatId, text);
   }
 
-  protected pushProactiveDelivery(
+  protected async pushProactiveDelivery(
     target: SessionTarget,
     text: string,
   ): Promise<void> {
-    return this.pushProactive(target, text);
+    try {
+      await this.pushProactive(target, text);
+    } catch (error) {
+      if (isChannelProactiveDeliveryError(error)) {
+        throw error;
+      }
+      throw new ChannelProactiveDeliveryError(
+        'transient',
+        error instanceof Error ? error.message : String(error),
+        { cause: error },
+      );
+    }
   }
 
   private async prepareUnattendedSessionContext(

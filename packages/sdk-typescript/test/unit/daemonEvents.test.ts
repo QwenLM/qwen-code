@@ -65,9 +65,23 @@ describe('daemon event schema', () => {
         error: 'Recipient rejected.',
       },
     };
+    const skipped: DaemonEvent = {
+      id: 3,
+      v: 1,
+      type: 'channel_delivery_result',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'task-1:456',
+        source: 'scheduled',
+        status: 'skipped',
+        taskId: 'task-1',
+        firedAt: 456,
+      },
+    };
 
     expect(asKnownDaemonEvent(delivered)).toBe(delivered);
     expect(asKnownDaemonEvent(failed)).toBe(failed);
+    expect(asKnownDaemonEvent(skipped)).toBe(skipped);
     expect(DAEMON_KNOWN_EVENT_TYPE_VALUES).toContain('channel_delivery_result');
   });
 
