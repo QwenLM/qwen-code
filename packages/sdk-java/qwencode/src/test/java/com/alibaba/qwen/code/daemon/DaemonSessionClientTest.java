@@ -133,6 +133,26 @@ class DaemonSessionClientTest {
     }
 
     @Test
+    void rejectsCompressedRestResponse() {
+        server.removeContext("/capabilities");
+        server.createContext("/capabilities", exchange -> {
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.getResponseHeaders().set("Content-Encoding", "gzip");
+            byte[] body = "{\"v\":1}".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+
+        try (DaemonClient daemon = newClient()) {
+            DaemonProtocolException failure = assertThrows(
+                    DaemonProtocolException.class, daemon::capabilities);
+            assertTrue(failure.getMessage().contains(
+                    "unsupported Content-Encoding"));
+        }
+    }
+
+    @Test
     void rejectsCredentialsInBaseUri() {
         IllegalArgumentException failure = assertThrows(
                 IllegalArgumentException.class,
@@ -2630,7 +2650,8 @@ class DaemonSessionClientTest {
         AtomicInteger prompts = new AtomicInteger();
         server.createContext("/session/session-1/prompt", exchange -> {
             prompts.incrementAndGet();
-            sendJson(exchange, 502, "{\"error\":\"bad gateway\"}");
+            sendEncodedJson(exchange, 502, "gzip",
+                    "{\"error\":\"bad gateway\"}");
         });
         server.createContext("/session/session-1/detach", noContent());
 
@@ -2651,6 +2672,47 @@ class DaemonSessionClientTest {
                             PromptObserver.NOOP));
         }
         assertEquals(1, prompts.get());
+    }
+
+    @Test
+    void compressedPromptAdmissionIsOutcomeUnknown() {
+        server.createContext("/session/session-1/prompt", exchange ->
+                sendEncodedJson(exchange, 202, "gzip",
+                        "{\"promptId\":\"prompt-1\",\"lastEventId\":0}"));
+        server.createContext("/session/session-1/detach", noContent());
+
+        try (DaemonClient daemon = newClient();
+                DaemonSessionClient session = daemon.createSession()) {
+            PromptCall call = session.startPrompt(PromptRequest.text("go"),
+                    PromptObserver.NOOP);
+            CompletionException failure = assertThrows(CompletionException.class,
+                    () -> call.acceptanceFuture().join());
+            PromptAdmissionUnknownException admissionFailure = assertInstanceOf(
+                    PromptAdmissionUnknownException.class, failure.getCause());
+            assertInstanceOf(DaemonProtocolException.class,
+                    admissionFailure.getCause());
+        }
+    }
+
+    @Test
+    void compressedDefinitivePromptRejectionRemainsHttpError() {
+        server.createContext("/session/session-1/prompt", exchange ->
+                sendEncodedJson(exchange, 409, "gzip",
+                        "{\"error\":\"conflict\"}"));
+        server.createContext("/session/session-1/detach", noContent());
+
+        try (DaemonClient daemon = newClient();
+                DaemonSessionClient session = daemon.createSession()) {
+            PromptCall call = session.startPrompt(PromptRequest.text("go"),
+                    PromptObserver.NOOP);
+            CompletionException failure = assertThrows(CompletionException.class,
+                    () -> call.acceptanceFuture().join());
+            DaemonHttpException cause = assertInstanceOf(DaemonHttpException.class,
+                    failure.getCause());
+            assertEquals(409, cause.getStatusCode());
+            assertTrue(cause.getResponseBody().contains(
+                    "unsupported Content-Encoding"));
+        }
     }
 
     @Test
@@ -2739,6 +2801,16 @@ class DaemonSessionClientTest {
             throws IOException {
         byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "application/json");
+        exchange.sendResponseHeaders(status, bytes.length);
+        exchange.getResponseBody().write(bytes);
+        exchange.close();
+    }
+
+    private static void sendEncodedJson(HttpExchange exchange, int status,
+            String contentEncoding, String body) throws IOException {
+        byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+        exchange.getResponseHeaders().set("Content-Type", "application/json");
+        exchange.getResponseHeaders().set("Content-Encoding", contentEncoding);
         exchange.sendResponseHeaders(status, bytes.length);
         exchange.getResponseBody().write(bytes);
         exchange.close();
