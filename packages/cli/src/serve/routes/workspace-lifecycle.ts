@@ -14,6 +14,7 @@ import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
+  sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 
@@ -51,19 +52,12 @@ export function registerWorkspaceLifecycleRoutes(
     const assertGenerationOpen = deps.captureGenerationAssertion?.();
     try {
       assertGenerationOpen?.();
-    } catch {
-      res.set('Retry-After', '1');
-      res.status(503).json({
-        error: 'Workspace runtime is not active.',
-        code: 'workspace_runtime_unavailable',
-      });
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'POST /workspace/init' });
       return;
     }
     if (deps.isWorkspaceTrusted?.() === false) {
-      res.status(403).json({
-        error: 'Workspace is not trusted.',
-        code: 'untrusted_workspace',
-      });
+      sendUntrustedWorkspaceResponse(res);
       return;
     }
     const body = safeBody(req);

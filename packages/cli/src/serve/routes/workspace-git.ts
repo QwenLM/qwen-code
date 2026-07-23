@@ -18,6 +18,7 @@ import type {
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
+  sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
 
 export function registerWorkspaceGitRoutes(
@@ -40,10 +41,7 @@ export function registerWorkspaceGitRoutes(
       return;
     }
     if (deps.isWorkspaceTrusted?.() === false) {
-      res.status(403).json({
-        error: 'Workspace is not trusted.',
-        code: 'untrusted_workspace',
-      });
+      sendUntrustedWorkspaceResponse(res);
       return;
     }
     try {
