@@ -791,7 +791,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           type: 'boolean',
           default: true,
           description:
-            'Defaults to true for top-level regular subagents. Set to false to run a regular agent in the foreground and return its result inline. Set to true for an interactive fork to receive its completion notification; headless forks always run in the background. Nested agents run in the foreground; an explicit true is rejected. Caller-owned working_dir launches default to foreground and cannot run in the background.',
+            'Defaults to true for top-level regular subagents. Set to false to run a regular agent in the foreground and return its result inline. Set to true for an interactive fork to receive its completion notification; headless forks always run in the background. Nested agents run in the foreground unless run_in_background is explicitly true, which is rejected because they cannot receive background completion notifications. Caller-owned working_dir launches default to foreground and cannot run in the background.',
         },
         ...(config.isAgentTeamEnabled()
           ? {
@@ -911,7 +911,7 @@ Usage notes:
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 - If the user asks for agents "in parallel", group independent launches in a single message with multiple Agent tool use content blocks. Do not parallelize overlapping code changes.
-- Top-level regular subagents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agent launches run in the foreground and return to their direct parent; explicitly setting \`run_in_background: true\` from a nested agent is rejected. Caller-owned \`working_dir\` launches default to foreground and cannot run in the background.
+- Top-level regular subagents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agent launches run in the foreground and return to their direct parent; an explicit \`run_in_background: true\` request is rejected because nested agents cannot receive background completion notifications. Caller-owned \`working_dir\` launches default to foreground and cannot run in the background.
 - You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result so you can review or merge them.
 ## When to fork
 
@@ -2371,9 +2371,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         );
       }
       if (this.params.run_in_background === true && !isTopLevelSession()) {
+        debugLogger.debug(
+          '[AgentTool] Explicit background request rejected because background agents do not nest.',
+        );
         return this.buildSpawnBlockedResult(
-          'Error: run_in_background: true is not supported from within a nested sub-agent. Set run_in_background: false, or omit it, to run the child inline.',
-          'Nested background agents are not supported',
+          'Error: run_in_background: true is not supported from within a sub-agent. Run this agent in the foreground by omitting run_in_background or setting it to false.',
+          'Background execution is not supported from a nested sub-agent',
         );
       }
       const isFork = isForkRequested;
@@ -2460,8 +2463,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // BackgroundTaskRegistry's single session-level notification callback
       // would inject the child's completion into the top-level conversation
       // while the launcher (typically finished by then) never hears back.
-      // Explicit background requests are rejected above. Implicit defaults
-      // downgrade to an awaited foreground run instead of orphaning results.
+      // Implicit background requests downgrade to an awaited foreground run
+      // instead of orphaning the child's results. The runtime spawn guard
+      // above rejects an explicit run_in_background: true request.
       const backgroundRequested =
         isFork && !this.config.isInteractive()
           ? true

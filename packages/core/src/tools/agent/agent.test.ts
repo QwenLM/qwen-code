@@ -394,9 +394,6 @@ describe('AgentTool', () => {
       expect(tool.description).toContain(
         'foreground regular agent returns its result inline',
       );
-      expect(tool.description).toContain(
-        'explicitly setting `run_in_background: true` from a nested agent is rejected',
-      );
     });
 
     it('explains how to continue reusable background agents', async () => {
@@ -483,7 +480,7 @@ describe('AgentTool', () => {
         'interactive fork',
       );
       expect(properties.properties.run_in_background.description).toContain(
-        'explicit true is rejected',
+        'Nested agents run in the foreground unless run_in_background is explicitly true',
       );
     });
 
@@ -1345,6 +1342,7 @@ describe('AgentTool', () => {
         description: 'Fork from a nested sub-agent',
         prompt: 'Do work',
         subagent_type: 'fork',
+        run_in_background: true,
       });
       const result = await runWithAgentContext('sub-1', () =>
         invocation.execute(new AbortController().signal),
@@ -5075,6 +5073,9 @@ describe('AgentTool', () => {
     });
 
     it('rejects an explicit background request from a nested sub-agent', async () => {
+      // Background delegation is top-level-only in v1: a nested launcher
+      // cannot honor the completion contract. Do not silently turn an
+      // explicit background request into an awaited foreground run.
       vi.mocked(config.getMaxSubagentDepth).mockReturnValue(5);
       const params: AgentParams = {
         description: 'Start monitor from a nested sub-agent',
@@ -5091,15 +5092,19 @@ describe('AgentTool', () => {
       );
 
       const llmText = partToString(result.llmContent);
-      expect(llmText).toMatch(/run_in_background.*nested sub-agent/i);
+      expect(llmText).toContain('run_in_background: true');
+      expect(llmText).toContain('not supported from within a sub-agent');
       expect(result.error?.message).toBe(llmText);
       expect(result.returnDisplay).toMatchObject({
         type: 'task_execution',
         status: 'failed',
-        terminateReason: 'Nested background agents are not supported',
+        subagentName: 'monitor',
       });
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
       expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+      expect(mockAgent.execute).not.toHaveBeenCalled();
       expect(mockRegistry.register).not.toHaveBeenCalled();
+      expect(mockRegistry.tryReserveBackgroundSlot).not.toHaveBeenCalled();
     });
 
     it('keeps an omitted background flag in the foreground for nested sub-agents', async () => {
