@@ -18,35 +18,74 @@
   font-weight: 400;
 }
 
-.dag {
-  display: flex;
-  gap: 12px;
+.dagViewport {
   overflow-x: auto;
-  padding-bottom: 4px;
+  overscroll-behavior-x: contain;
+  padding: 2px 0 6px;
+}
+
+.dagCanvas {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  gap: 56px;
+  width: max-content;
+  min-width: 100%;
+  padding: 8px 10px 32px;
+}
+
+.dagEdges {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: visible;
+}
+
+.dagEdge {
+  fill: none;
+  stroke: var(--agent-blue-500);
+  stroke-linecap: round;
+  stroke-width: 1.5;
+  opacity: 0.65;
+  vector-effect: non-scaling-stroke;
+}
+
+.edgeArrow {
+  fill: var(--agent-blue-500);
+  opacity: 0.8;
 }
 
 .flatList,
+.flatCanvas,
 .layer {
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
-.flatList .layer {
+.flatCanvas .layer {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.flatCanvas {
+  width: 100%;
 }
 
 .layer {
   min-width: 220px;
 }
 
-.dag .layer {
+.dagCanvas .layer {
+  position: relative;
+  z-index: 1;
   flex: 0 0 240px;
   min-width: 0;
 }
 
 .node {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -55,6 +94,41 @@
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--background);
+}
+
+.dagCanvas .node::before,
+.dagCanvas .node::after {
+  position: absolute;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--agent-blue-500);
+  border-radius: 999px;
+  background: var(--background);
+  content: '';
+  transform: translateY(-50%);
+}
+
+.dagCanvas .node::before {
+  left: -5px;
+}
+
+.dagCanvas .node::after {
+  right: -5px;
+}
+
+.node[data-status='running'],
+.node[data-status='completed'] {
+  border-color: color-mix(in srgb, var(--success-color) 55%, var(--border));
+}
+
+.node[data-status='blocked'],
+.node[data-status='paused'] {
+  border-color: color-mix(in srgb, var(--warning-color) 55%, var(--border));
+}
+
+.node[data-status='in_progress'] {
+  border-color: color-mix(in srgb, var(--agent-blue-500) 55%, var(--border));
 }
 
 .nodeTop {

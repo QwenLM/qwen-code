@@ -1,3 +1,4 @@
+import { useId, useLayoutEffect, useRef, useState } from 'react';
 import type { DaemonSessionTaskStatus } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { useI18n } from '../../i18n';
@@ -11,6 +12,26 @@ export type PlanNodeStatus =
   | 'blocked'
   | 'in_progress'
   | 'ready';
+
+interface PlanEdgePath {
+  from: string;
+  to: string;
+  d: string;
+}
+
+interface PlanGraphLayout {
+  width: number;
+  height: number;
+  edges: PlanEdgePath[];
+}
+
+const EMPTY_GRAPH_LAYOUT: PlanGraphLayout = {
+  width: 1,
+  height: 1,
+  edges: [],
+};
+
+const MAX_RENDERED_PLAN_EDGES = 500;
 
 export function layerPlanTodos(todos: readonly TodoItem[]): TodoItem[][] {
   const byId = new Map(todos.map((todo) => [todo.id, todo]));
@@ -180,7 +201,6 @@ export function PlanExecutionView({
   onOpenSubagent?: (tool: ACPToolCall) => void;
 }) {
   const { t } = useI18n();
-  if (todos.length === 0) return null;
 
   const knownIds = new Set(todos.map((todo) => todo.id));
   const todosById = new Map(todos.map((todo) => [todo.id, todo]));
@@ -196,10 +216,124 @@ export function PlanExecutionView({
     grouped.push(tool);
     toolsByTodo.set(todoId, grouped);
   }
-  const hasDependencies = todos.some(
-    (todo) => (todo.blockedBy?.length ?? 0) > 0,
+  const topology = todos.map((todo): [string, string[]] => [
+    todo.id,
+    [...new Set(todo.blockedBy ?? [])].filter(
+      (dependencyId) => dependencyId !== todo.id && knownIds.has(dependencyId),
+    ),
+  ]);
+  const topologyKey = JSON.stringify(topology);
+  const dependencyCount = topology.reduce(
+    (total, entry) => total + entry[1].length,
+    0,
   );
+  const hasDependencies = dependencyCount > 0;
+  const drawsDependencyEdges =
+    hasDependencies && dependencyCount <= MAX_RENDERED_PLAN_EDGES;
   const layers = hasDependencies ? layerPlanTodos(todos) : [todos.slice()];
+  const layerByTodo = new Map<string, number>();
+  layers.forEach((layer, index) => {
+    for (const todo of layer) layerByTodo.set(todo.id, index);
+  });
+  const graphId = useId().replaceAll(':', '');
+  const markerId = `plan-arrow-${graphId}`;
+  const graphRef = useRef<HTMLDivElement>(null);
+  const nodeRefs = useRef(new Map<string, HTMLElement>());
+  const topologyRef = useRef(topology);
+  topologyRef.current = topology;
+  const layerByTodoRef = useRef(layerByTodo);
+  layerByTodoRef.current = layerByTodo;
+  const graphSignatureRef = useRef('');
+  const [graph, setGraph] = useState(EMPTY_GRAPH_LAYOUT);
+
+  useLayoutEffect(() => {
+    if (!drawsDependencyEdges) return;
+    const graphElement = graphRef.current;
+    if (!graphElement) return;
+
+    const measure = () => {
+      const graphRect = graphElement.getBoundingClientRect();
+      const scaleX =
+        graphElement.offsetWidth > 0
+          ? graphRect.width / graphElement.offsetWidth
+          : 1;
+      const scaleY =
+        graphElement.offsetHeight > 0
+          ? graphRect.height / graphElement.offsetHeight
+          : 1;
+      const measuredNodes = new Map<string, DOMRect>();
+      let maxNodeBottom = 0;
+      for (const [todoId, node] of nodeRefs.current) {
+        const rect = node.getBoundingClientRect();
+        const normalizedRect = {
+          ...rect,
+          left: (rect.left - graphRect.left) / scaleX,
+          right: (rect.right - graphRect.left) / scaleX,
+          top: (rect.top - graphRect.top) / scaleY,
+          bottom: (rect.bottom - graphRect.top) / scaleY,
+          width: rect.width / scaleX,
+          height: rect.height / scaleY,
+        } as DOMRect;
+        measuredNodes.set(todoId, normalizedRect);
+        maxNodeBottom = Math.max(maxNodeBottom, normalizedRect.bottom);
+      }
+      const edges: PlanEdgePath[] = [];
+      for (const [todoId, dependencies] of topologyRef.current) {
+        const targetRect = measuredNodes.get(todoId);
+        if (!targetRect) continue;
+        for (const dependencyId of dependencies) {
+          const sourceRect = measuredNodes.get(dependencyId);
+          if (!sourceRect) continue;
+          const startX = sourceRect.right;
+          const startY = sourceRect.top + sourceRect.height / 2;
+          const endX = targetRect.left;
+          const endY = targetRect.top + targetRect.height / 2;
+          const spansLayers =
+            (layerByTodoRef.current.get(todoId) ?? 0) -
+              (layerByTodoRef.current.get(dependencyId) ?? 0) >
+            1;
+          const controlX = startX + Math.max(24, (endX - startX) / 2);
+          const routeY = maxNodeBottom + 16;
+          const d = spansLayers
+            ? `M ${startX} ${startY} H ${startX + 28} V ${routeY} H ${endX - 28} V ${endY} H ${endX}`
+            : `M ${startX} ${startY} C ${controlX} ${startY}, ${controlX} ${endY}, ${endX} ${endY}`;
+          edges.push({
+            from: dependencyId,
+            to: todoId,
+            d,
+          });
+        }
+      }
+      const next = {
+        width: Math.max(1, graphElement.scrollWidth, graphRect.width / scaleX),
+        height: Math.max(
+          1,
+          graphElement.scrollHeight,
+          graphRect.height / scaleY,
+        ),
+        edges,
+      };
+      const signature = `${next.width}:${next.height}:${edges.map((edge) => edge.d).join('|')}`;
+      if (signature === graphSignatureRef.current) return;
+      graphSignatureRef.current = signature;
+      setGraph(next);
+    };
+
+    measure();
+    window.addEventListener('resize', measure);
+    const observer =
+      typeof ResizeObserver === 'undefined'
+        ? undefined
+        : new ResizeObserver(measure);
+    observer?.observe(graphElement);
+    for (const node of nodeRefs.current.values()) observer?.observe(node);
+    return () => {
+      window.removeEventListener('resize', measure);
+      observer?.disconnect();
+    };
+  }, [drawsDependencyEdges, topologyKey]);
+
+  if (todos.length === 0) return null;
 
   const renderExecution = (tool: ACPToolCall) => {
     const status = executionStatus(tool, tasks);
@@ -241,49 +375,101 @@ export function PlanExecutionView({
         {t('planExecution.title')}{' '}
         <span className={styles.count}>({todos.length})</span>
       </div>
-      <div className={hasDependencies ? styles.dag : styles.flatList}>
-        {layers.map((layer, index) => (
-          <div className={styles.layer} key={index}>
-            {layer.map((todo) => {
-              const executions = toolsByTodo.get(todo.id) ?? [];
-              const state = getPlanNodeState(
-                todo,
-                todosById,
-                executions,
-                tasks,
-              );
-              return (
-                <article className={styles.node} key={todo.id}>
-                  <div className={styles.nodeTop}>
-                    <span className={styles.nodeId}>{todo.id}</span>
-                    <span
-                      className={`${styles.nodeStatus} ${styles[state.status]}`}
-                    >
-                      {t(statusKey(state.status))}
-                    </span>
-                    {state.attention && (
-                      <span className={styles.attention}>
-                        {t('planExecution.attention')}
+      <div
+        className={hasDependencies ? styles.dagViewport : styles.flatList}
+        {...(hasDependencies ? { 'data-plan-workflow': true } : {})}
+      >
+        <div
+          className={hasDependencies ? styles.dagCanvas : styles.flatCanvas}
+          ref={hasDependencies ? graphRef : undefined}
+        >
+          {drawsDependencyEdges && graph.edges.length > 0 && (
+            <svg
+              className={styles.dagEdges}
+              width={graph.width}
+              height={graph.height}
+              viewBox={`0 0 ${graph.width} ${graph.height}`}
+              aria-hidden="true"
+            >
+              <defs>
+                <marker
+                  id={markerId}
+                  markerWidth="7"
+                  markerHeight="7"
+                  refX="6"
+                  refY="3.5"
+                  orient="auto"
+                >
+                  <path
+                    className={styles.edgeArrow}
+                    d="M 0 0 L 7 3.5 L 0 7 z"
+                  />
+                </marker>
+              </defs>
+              {graph.edges.map((edge) => (
+                <path
+                  className={styles.dagEdge}
+                  data-plan-edge
+                  data-from={edge.from}
+                  data-to={edge.to}
+                  d={edge.d}
+                  key={JSON.stringify([edge.from, edge.to])}
+                  markerEnd={`url(#${markerId})`}
+                />
+              ))}
+            </svg>
+          )}
+          {layers.map((layer, index) => (
+            <div className={styles.layer} key={index}>
+              {layer.map((todo) => {
+                const executions = toolsByTodo.get(todo.id) ?? [];
+                const state = getPlanNodeState(
+                  todo,
+                  todosById,
+                  executions,
+                  tasks,
+                );
+                return (
+                  <article
+                    className={styles.node}
+                    data-status={state.status}
+                    key={todo.id}
+                    ref={(node) => {
+                      if (node) nodeRefs.current.set(todo.id, node);
+                      else nodeRefs.current.delete(todo.id);
+                    }}
+                  >
+                    <div className={styles.nodeTop}>
+                      <span className={styles.nodeId}>{todo.id}</span>
+                      <span
+                        className={`${styles.nodeStatus} ${styles[state.status]}`}
+                      >
+                        {t(statusKey(state.status))}
                       </span>
+                      {state.attention && (
+                        <span className={styles.attention}>
+                          {t('planExecution.attention')}
+                        </span>
+                      )}
+                    </div>
+                    <div className={styles.nodeContent}>{todo.content}</div>
+                    {(todo.blockedBy?.length ?? 0) > 0 && (
+                      <div className={styles.dependencies}>
+                        {t('planExecution.dependsOn')}{' '}
+                        {todo.blockedBy!.join(', ')}
+                      </div>
                     )}
-                  </div>
-                  <div className={styles.nodeContent}>{todo.content}</div>
-                  {(todo.blockedBy?.length ?? 0) > 0 && (
-                    <div className={styles.dependencies}>
-                      {t('planExecution.dependsOn')}{' '}
-                      {todo.blockedBy!.join(', ')}
-                    </div>
-                  )}
-                  {executions.length > 0 && (
-                    <div className={styles.executions}>
-                      {executions.map(renderExecution)}
-                    </div>
-                  )}
-                </article>
-              );
-            })}
-          </div>
-        ))}
+                    {executions.length > 0 && (
+                      <div className={styles.executions}>
+                        {executions.map(renderExecution)}
+                      </div>
+                    )}
+                  </article>
+                );
+              })}
+            </div>
+          ))}
+        </div>
       </div>
       {unassigned.length > 0 && (
         <div className={styles.unassigned}>
