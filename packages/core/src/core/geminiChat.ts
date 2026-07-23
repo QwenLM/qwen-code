@@ -17,7 +17,7 @@ import type {
   Tool,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
-import { createUserContent, FinishReason } from '@google/genai';
+import { createUserContent, FinishReason } from './genai-compat.js';
 import { enforceFunctionResponseBudget } from '../utils/tool-response-finalizer.js';
 import {
   retryWithBackoff,
