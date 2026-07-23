@@ -386,6 +386,13 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async *generateContent(prompt, opts) {
+      const client = requireClient(getClient, 'Generate content failed');
+      yield* client.generateWorkspaceContent(prompt, {
+        signal: opts?.signal,
+      });
+    },
+
     async listAgents() {
       const client = requireClient(getClient, 'List agents failed');
       return withActionTimeout(
