@@ -4054,6 +4054,20 @@ export class AcpDispatcher {
   }
 
   /**
+   * Current epoch token of the session's event bus, or `undefined` when
+   * the session is unknown (torn down between ownership check and header
+   * write). The `/acp` GET route advertises it as `X-Qwen-Event-Epoch`
+   * BEFORE `stream.open()` flushes headers (DAEMON-001).
+   */
+  getSessionEventEpoch(sessionId: string): string | undefined {
+    try {
+      return this.bridge.getSessionEventEpoch(sessionId);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Bind a session-scoped SSE stream to the bridge's event stream,
    * translating each `BridgeEvent` into a JSON-RPC frame (design §4.2).
    */
@@ -4062,6 +4076,7 @@ export class AcpDispatcher {
     sessionId: string,
     signal: AbortSignal,
     lastEventId?: number,
+    epoch?: string,
   ): Promise<void> {
     try {
       // On resume, `attachSessionStream` defers id-less buffered replies (e.g. a
@@ -4095,6 +4110,14 @@ export class AcpDispatcher {
       if (conn.hasInitialReplayPending(sessionId)) {
         const snapshot = this.bridge.getSessionReplaySnapshot(sessionId);
         if (snapshot) {
+          if (snapshot.degraded) {
+            // Compaction failed at least once for this session, so the
+            // snapshot may lag behind live events. Same operator breadcrumb
+            // the REST surface gets via the bus-level log (DAEMON-008).
+            writeStderrLine(
+              `qwen serve: /acp initial replay used a DEGRADED snapshot (compaction failure) session=${logSafe(sessionId)}; replay may be incomplete`,
+            );
+          }
           const snapshotEvents = [
             ...snapshot.compactedTurns,
             ...snapshot.liveJournal,
@@ -4138,6 +4161,7 @@ export class AcpDispatcher {
         ...(subscribeFromEventId !== undefined
           ? { lastEventId: subscribeFromEventId }
           : {}),
+        ...(epoch !== undefined ? { epoch } : {}),
       });
       for await (const event of iterable) {
         if (signal.aborted) break;

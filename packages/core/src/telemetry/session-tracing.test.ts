@@ -193,6 +193,7 @@ function createMockConfig(
 describe('session-tracing', () => {
   beforeEach(() => {
     clearSessionTracingForTesting();
+    setSessionContext(undefined);
     mockSpans.length = 0;
     mockState.sdkInitialized = true;
     mockState.throwOnSetAttributes = false;
@@ -428,7 +429,10 @@ describe('session-tracing', () => {
 
       expect(mockSpans).toHaveLength(1);
       expect(mockSpans[0]!.name).toBe('qwen-code.llm_request');
-      expect(mockSpans[0]!.attributes['qwen-code.model']).toBe('test-model');
+      expect(mockSpans[0]!.attributes['gen_ai.request.model']).toBe(
+        'test-model',
+      );
+      expect(mockSpans[0]!.attributes['qwen-code.model']).toBeUndefined();
 
       endLLMRequestSpan(span, {
         success: true,
@@ -520,17 +524,35 @@ describe('session-tracing', () => {
     });
   });
 
-  describe('LLM request spans — Phase 4a (timing decomposition + GenAI dual-emit)', () => {
-    it('startLLMRequestSpan dual-emits gen_ai.request.model alongside qwen-code.model', () => {
+  describe('LLM request spans — GenAI attributes and timing decomposition', () => {
+    it('uses only gen_ai.request.model on LLM spans', () => {
       const span = startLLMRequestSpan('test-model', 'p');
       endLLMRequestSpan(span, { success: true });
 
       const attrs = mockSpans[0]!.attributes;
-      expect(attrs['qwen-code.model']).toBe('test-model');
       expect(attrs['gen_ai.request.model']).toBe('test-model');
+      expect(attrs['qwen-code.model']).toBeUndefined();
     });
 
-    it('endLLMRequestSpan dual-emits gen_ai.usage.input_tokens / output_tokens', () => {
+    it('writes operation, provider, conversation, and output type at span creation', () => {
+      setSessionContext({} as never, 'conversation-1');
+      const span = startLLMRequestSpan('test-model', 'p', {
+        operationName: 'generate_content',
+        providerName: 'gcp.gemini',
+        outputType: 'json',
+      });
+      endLLMRequestSpan(span, { success: true });
+
+      expect(mockSpans[0]!.attributes).toMatchObject({
+        'session.id': 'conversation-1',
+        'gen_ai.conversation.id': 'conversation-1',
+        'gen_ai.operation.name': 'generate_content',
+        'gen_ai.provider.name': 'gcp.gemini',
+        'gen_ai.output.type': 'json',
+      });
+    });
+
+    it('emits only standard input and output token attributes', () => {
       const span = startLLMRequestSpan('m', 'p');
       endLLMRequestSpan(span, {
         success: true,
@@ -539,51 +561,55 @@ describe('session-tracing', () => {
       });
 
       const attrs = mockSpans[0]!.attributes;
-      expect(attrs['input_tokens']).toBe(100);
       expect(attrs['gen_ai.usage.input_tokens']).toBe(100);
-      expect(attrs['output_tokens']).toBe(50);
       expect(attrs['gen_ai.usage.output_tokens']).toBe(50);
+      expect(attrs['input_tokens']).toBeUndefined();
+      expect(attrs['output_tokens']).toBeUndefined();
     });
 
-    it('endLLMRequestSpan dual-emits gen_ai.usage.cached_tokens when present', () => {
+    it('emits standard cache-read tokens only when the provider reported them', () => {
       const span = startLLMRequestSpan('m', 'p');
       endLLMRequestSpan(span, {
         success: true,
         inputTokens: 100,
         cachedInputTokens: 40,
+        cachedInputTokensReported: true,
       });
 
       const attrs = mockSpans[0]!.attributes;
-      expect(attrs['cached_input_tokens']).toBe(40);
-      expect(attrs['gen_ai.usage.cached_tokens']).toBe(40);
+      expect(attrs['gen_ai.usage.cache_read.input_tokens']).toBe(40);
+      expect(attrs['cached_input_tokens']).toBeUndefined();
+      expect(attrs['gen_ai.usage.cached_tokens']).toBeUndefined();
     });
 
-    it('endLLMRequestSpan omits cached_input_tokens when undefined', () => {
+    it('omits cache-read tokens when the provider did not report them', () => {
       const span = startLLMRequestSpan('m', 'p');
       endLLMRequestSpan(span, { success: true, inputTokens: 100 });
 
       const attrs = mockSpans[0]!.attributes;
       expect(attrs['cached_input_tokens']).toBeUndefined();
       expect(attrs['gen_ai.usage.cached_tokens']).toBeUndefined();
+      expect(attrs['gen_ai.usage.cache_read.input_tokens']).toBeUndefined();
     });
 
-    it('endLLMRequestSpan emits cached_input_tokens === 0 (cache miss is meaningful info, not undefined)', () => {
+    it('emits an explicit standard cache-read zero', () => {
       // Providers that report 0 cached tokens are signaling an explicit cache
-      // miss. Distinct from undefined ("we don't know"). Both attribute names
-      // must propagate the literal 0.
+      // miss, which is distinct from undefined ("we don't know").
       const span = startLLMRequestSpan('m', 'p');
       endLLMRequestSpan(span, {
         success: true,
         inputTokens: 100,
         cachedInputTokens: 0,
+        cachedInputTokensReported: true,
       });
 
       const attrs = mockSpans[0]!.attributes;
-      expect(attrs['cached_input_tokens']).toBe(0);
-      expect(attrs['gen_ai.usage.cached_tokens']).toBe(0);
+      expect(attrs['gen_ai.usage.cache_read.input_tokens']).toBe(0);
+      expect(attrs['cached_input_tokens']).toBeUndefined();
+      expect(attrs['gen_ai.usage.cached_tokens']).toBeUndefined();
     });
 
-    it('endLLMRequestSpan writes ttft_ms and dual-emits gen_ai.server.time_to_first_token (in seconds)', () => {
+    it('keeps private ttft_ms without emitting the incompatible GenAI alias', () => {
       const span = startLLMRequestSpan('m', 'p');
       endLLMRequestSpan(span, {
         success: true,
@@ -593,8 +619,41 @@ describe('session-tracing', () => {
 
       const attrs = mockSpans[0]!.attributes;
       expect(attrs['ttft_ms']).toBe(234);
-      // Spec uses seconds as double — 234ms → 0.234s
-      expect(attrs['gen_ai.server.time_to_first_token']).toBeCloseTo(0.234, 6);
+      expect(attrs['gen_ai.server.time_to_first_token']).toBeUndefined();
+    });
+
+    it('omits invalid token counts', () => {
+      const invalidSpan = startLLMRequestSpan('m', 'invalid');
+      endLLMRequestSpan(invalidSpan, {
+        success: true,
+        inputTokens: -1,
+        outputTokens: 1.5,
+      });
+
+      expect(
+        mockSpans[0]!.attributes['gen_ai.usage.input_tokens'],
+      ).toBeUndefined();
+      expect(
+        mockSpans[0]!.attributes['gen_ai.usage.output_tokens'],
+      ).toBeUndefined();
+      expect(mockSpans[0]!.attributes['input_tokens']).toBeUndefined();
+      expect(mockSpans[0]!.attributes['output_tokens']).toBeUndefined();
+    });
+
+    it('retains explicit zero and cache-creation counts in standard usage', () => {
+      const span = startLLMRequestSpan('m', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheCreationInputTokens: 0,
+      });
+
+      expect(mockSpans[0]!.attributes).toMatchObject({
+        'gen_ai.usage.input_tokens': 0,
+        'gen_ai.usage.output_tokens': 0,
+        'gen_ai.usage.cache_creation.input_tokens': 0,
+      });
     });
 
     it('endLLMRequestSpan omits ttft_ms when undefined (non-streaming or aborted before first chunk)', () => {
@@ -738,7 +797,7 @@ describe('session-tracing', () => {
   });
 
   describe('LLM request spans — response metadata & error enrichment', () => {
-    it('endLLMRequestSpan dual-emits response_id / gen_ai.response.id', () => {
+    it('uses only gen_ai.response.id on LLM spans', () => {
       const span = startLLMRequestSpan('m', 'p');
       endLLMRequestSpan(span, {
         success: true,
@@ -746,11 +805,11 @@ describe('session-tracing', () => {
       });
 
       const attrs = mockSpans[0]!.attributes;
-      expect(attrs['response_id']).toBe('chatcmpl-abc123');
       expect(attrs['gen_ai.response.id']).toBe('chatcmpl-abc123');
+      expect(attrs['response_id']).toBeUndefined();
     });
 
-    it('endLLMRequestSpan omits response_id when undefined', () => {
+    it('omits response identifiers when undefined', () => {
       const span = startLLMRequestSpan('m', 'p');
       endLLMRequestSpan(span, { success: true });
 
@@ -771,6 +830,23 @@ describe('session-tracing', () => {
       expect(attrs['gen_ai.response.finish_reasons']).toEqual(['STOP']);
     });
 
+    it('emits actual response model and all ordered finish reasons', () => {
+      const span = startLLMRequestSpan('request-model', 'p');
+      endLLMRequestSpan(span, {
+        success: true,
+        responseModel: 'provider-model',
+        finishReasons: ['STOP', 'MAX_TOKENS'],
+      });
+
+      const attrs = mockSpans[0]!.attributes;
+      expect(attrs['gen_ai.response.model']).toBe('provider-model');
+      expect(attrs['finish_reason']).toBe('STOP');
+      expect(attrs['gen_ai.response.finish_reasons']).toEqual([
+        'STOP',
+        'MAX_TOKENS',
+      ]);
+    });
+
     it('endLLMRequestSpan omits finish_reason when undefined', () => {
       const span = startLLMRequestSpan('m', 'p');
       endLLMRequestSpan(span, { success: true });
@@ -780,7 +856,7 @@ describe('session-tracing', () => {
       expect(attrs['gen_ai.response.finish_reasons']).toBeUndefined();
     });
 
-    it('endLLMRequestSpan dual-emits thoughts_token_count / gen_ai.usage.reasoning_tokens', () => {
+    it('keeps private thoughts_token_count without the invalid reasoning alias', () => {
       const span = startLLMRequestSpan('m', 'p');
       endLLMRequestSpan(span, {
         success: true,
@@ -789,7 +865,7 @@ describe('session-tracing', () => {
 
       const attrs = mockSpans[0]!.attributes;
       expect(attrs['thoughts_token_count']).toBe(42);
-      expect(attrs['gen_ai.usage.reasoning_tokens']).toBe(42);
+      expect(attrs['gen_ai.usage.reasoning_tokens']).toBeUndefined();
     });
 
     it('endLLMRequestSpan emits thoughts_token_count === 0 (no reasoning is meaningful info, not undefined)', () => {
@@ -801,7 +877,7 @@ describe('session-tracing', () => {
 
       const attrs = mockSpans[0]!.attributes;
       expect(attrs['thoughts_token_count']).toBe(0);
-      expect(attrs['gen_ai.usage.reasoning_tokens']).toBe(0);
+      expect(attrs['gen_ai.usage.reasoning_tokens']).toBeUndefined();
     });
 
     it('endLLMRequestSpan omits thoughts_token_count when undefined', () => {
@@ -869,15 +945,17 @@ describe('session-tracing', () => {
       });
 
       const attrs = mockSpans[0]!.attributes;
-      expect(attrs['response_id']).toBe('resp-xyz');
       expect(attrs['gen_ai.response.id']).toBe('resp-xyz');
+      expect(attrs['response_id']).toBeUndefined();
       expect(attrs['finish_reason']).toBe('MAX_TOKENS');
       expect(attrs['gen_ai.response.finish_reasons']).toEqual(['MAX_TOKENS']);
       expect(attrs['thoughts_token_count']).toBe(30);
-      expect(attrs['gen_ai.usage.reasoning_tokens']).toBe(30);
+      expect(attrs['gen_ai.usage.reasoning_tokens']).toBeUndefined();
       expect(attrs['subagent_name']).toBe('code-reviewer');
-      expect(attrs['input_tokens']).toBe(500);
-      expect(attrs['output_tokens']).toBe(100);
+      expect(attrs['gen_ai.usage.input_tokens']).toBe(500);
+      expect(attrs['gen_ai.usage.output_tokens']).toBe(100);
+      expect(attrs['input_tokens']).toBeUndefined();
+      expect(attrs['output_tokens']).toBeUndefined();
     });
   });
 
@@ -1001,8 +1079,13 @@ describe('session-tracing', () => {
 
       expect(mockSpans).toHaveLength(1);
       expect(mockSpans[0]!.name).toBe('qwen-code.tool');
-      expect(mockSpans[0]!.attributes['tool.name']).toBe('ReadFile');
       expect(mockSpans[0]!.attributes['tool.call_id']).toBe('call-1');
+      expect(mockSpans[0]!.attributes).toMatchObject({
+        'gen_ai.operation.name': 'execute_tool',
+        'gen_ai.tool.name': 'ReadFile',
+        'gen_ai.tool.type': 'function',
+      });
+      expect(mockSpans[0]!.attributes['tool.name']).toBeUndefined();
 
       endToolSpan(span, { success: true });
 
@@ -1058,10 +1141,10 @@ describe('session-tracing', () => {
       expect(toolSpans).toHaveLength(2);
 
       const readSpan = toolSpans.find(
-        (s) => s.attributes['tool.name'] === 'Read',
+        (s) => s.attributes['gen_ai.tool.name'] === 'Read',
       );
       const bashSpan = toolSpans.find(
-        (s) => s.attributes['tool.name'] === 'Bash',
+        (s) => s.attributes['gen_ai.tool.name'] === 'Bash',
       );
 
       expect(bashSpan?.statuses[0]?.code).toBe(SpanStatusCode.OK);
@@ -1192,10 +1275,10 @@ describe('session-tracing', () => {
       );
 
       const readSpan = mockSpans.find(
-        (s) => s.attributes['tool.name'] === 'Read',
+        (s) => s.attributes['gen_ai.tool.name'] === 'Read',
       );
       const writeSpan = mockSpans.find(
-        (s) => s.attributes['tool.name'] === 'Write',
+        (s) => s.attributes['gen_ai.tool.name'] === 'Write',
       );
       expect(readSpan?.attributes['session.id']).toBe('session-A');
       expect(writeSpan?.attributes['session.id']).toBe('session-B');
@@ -1863,6 +1946,7 @@ describe('session-tracing', () => {
     const baseOpts = {
       agentId: 'Explore-abc123',
       subagentName: 'Explore',
+      agentDescription: 'Search and inspect the workspace',
       isBuiltIn: true,
       depth: 0,
       sessionId: 'session-uuid',
@@ -1878,16 +1962,18 @@ describe('session-tracing', () => {
       expect(record).toBeDefined();
       expect(record!.root).toBeUndefined();
       expect(record!.links).toBeUndefined();
-      // Dual-emit: spec + vendor keys for id and name.
-      expect(record!.attributes['gen_ai.agent.id']).toBe('Explore-abc123');
+      expect(record!.attributes['gen_ai.agent.id']).toBeUndefined();
       expect(record!.attributes['gen_ai.agent.name']).toBe('Explore');
+      expect(record!.attributes['gen_ai.agent.description']).toBe(
+        'Search and inspect the workspace',
+      );
       expect(record!.attributes['qwen-code.subagent.id']).toBe(
         'Explore-abc123',
       );
       expect(record!.attributes['qwen-code.subagent.name']).toBe('Explore');
       // Required spec attrs.
       expect(record!.attributes['gen_ai.operation.name']).toBe('invoke_agent');
-      expect(record!.attributes['gen_ai.provider.name']).toBe('qwen-code');
+      expect(record!.attributes['gen_ai.provider.name']).toBeUndefined();
       expect(record!.attributes['gen_ai.conversation.id']).toBe('session-uuid');
       // Vendor concept attrs.
       expect(record!.attributes['qwen-code.subagent.invocation_kind']).toBe(
@@ -1896,6 +1982,21 @@ describe('session-tracing', () => {
       expect(record!.attributes['qwen-code.subagent.is_built_in']).toBe(true);
       expect(record!.attributes['qwen-code.subagent.depth']).toBe(0);
 
+      endSubagentSpan(span, { status: 'completed' });
+    });
+
+    it('truncates agent descriptions without splitting surrogate pairs', () => {
+      const span = startSubagentSpan({
+        ...baseOpts,
+        agentDescription: `${'a'.repeat(1023)}😀tail`,
+        invocationKind: 'foreground',
+      });
+      const description = mockSpans.find(
+        (record) => record.name === 'qwen-code.subagent',
+      )!.attributes['gen_ai.agent.description'] as string;
+
+      expect(description).toBe(`${'a'.repeat(1023)}…[truncated]`);
+      expect(description).not.toContain('\ud83d');
       endSubagentSpan(span, { status: 'completed' });
     });
 
