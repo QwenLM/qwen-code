@@ -302,6 +302,17 @@ describe('<FleetView />', () => {
       pressKey({ name: 'return' });
       expect(onDispatch).toHaveBeenCalledWith('h');
     });
+
+    it('handles bracketed paste in dispatch input', () => {
+      const onDispatch = vi.fn();
+      const props = makeProps({ onDispatch });
+      renderFleetView(props);
+
+      pressKey({ name: 'h', sequence: 'h' });
+      pressKey({ paste: true, sequence: 'ello world' });
+      pressKey({ name: 'return' });
+      expect(onDispatch).toHaveBeenCalledWith('hello world');
+    });
   });
 
   describe('rename mode (Ctrl+R)', () => {
@@ -328,6 +339,33 @@ describe('<FleetView />', () => {
       pressKey({ name: 'r', ctrl: true });
       pressKey({ name: 'escape' });
       expect(lastFrame()!).not.toContain('enter to save');
+    });
+
+    it('saves rename on Enter', async () => {
+      const renameSession = vi.fn().mockResolvedValue(true);
+      const onRefresh = vi.fn();
+      const props = makeProps({
+        sessionService: { renameSession } as never,
+        onRefresh,
+      });
+      const { lastFrame } = renderFleetView(props);
+
+      pressKey({ name: 'r', ctrl: true });
+      pressKey({ name: 'n', sequence: 'n' });
+      pressKey({ name: 'e', sequence: 'e' });
+      pressKey({ name: 'w', sequence: 'w' });
+      pressKey({ name: 'return' });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(renameSession).toHaveBeenCalledWith(
+        'sess-1',
+        'Fix the login bugnew',
+      );
+      expect(onRefresh).toHaveBeenCalled();
+      expect(lastFrame()!).toContain('Renamed to "Fix the login bugnew"');
     });
   });
 

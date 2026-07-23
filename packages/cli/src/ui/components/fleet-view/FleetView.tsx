@@ -367,6 +367,12 @@ export const FleetView: React.FC<FleetViewProps> = ({
         return;
       }
 
+      // Handle bracketed paste in dispatch input
+      if (onDispatch && key.paste && key.sequence) {
+        setInputValue((prev) => prev + key.sequence);
+        return;
+      }
+
       // Printable chars go to dispatch input (only when dispatch is available)
       if (
         onDispatch &&
@@ -575,8 +581,8 @@ export const FleetView: React.FC<FleetViewProps> = ({
             </Text>
             <Text color={theme.text.secondary}>
               {(selectedEntry.prompt
-                ? safeText(selectedEntry.prompt, 'No recent output')
-                : 'No recent output'
+                ? safeText(selectedEntry.prompt, 'No prompt')
+                : 'No prompt'
               ).slice(0, 200)}
             </Text>
           </Box>

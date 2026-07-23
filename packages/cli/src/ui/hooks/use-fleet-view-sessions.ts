@@ -45,10 +45,10 @@ export function useFleetViewSessions(opts: {
       );
       setSessions(entries);
       setError(null);
-      hasFetchedRef.current = true;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
+      hasFetchedRef.current = true;
       setLoading(false);
     }
   }, [config, currentSessionId]);

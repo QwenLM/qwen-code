@@ -159,6 +159,29 @@ describe('useFleetViewSessions', () => {
     expect(result.current.loading).toBe(false);
   });
 
+  it('does not flash loading on retry after initial failure', async () => {
+    mockListSessions.mockRejectedValueOnce(new Error('disk error'));
+
+    const { result } = renderHook(() =>
+      useFleetViewSessions({ isOpen: true, currentSessionId: null }),
+    );
+
+    await flushPromises();
+    expect(result.current.error).toBe('disk error');
+    expect(result.current.loading).toBe(false);
+
+    mockListSessions.mockResolvedValue({
+      items: [makeSessionItem('sess-1')],
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10_000);
+    });
+
+    expect(result.current.loading).toBe(false);
+    expect(result.current.sessions).toHaveLength(1);
+  });
+
   it('refresh triggers a new fetch', async () => {
     mockListSessions.mockResolvedValue({
       items: [makeSessionItem('sess-1')],
