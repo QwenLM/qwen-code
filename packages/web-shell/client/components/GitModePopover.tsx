@@ -29,7 +29,7 @@ function validateBranchName(name: string): boolean {
     name.endsWith('.git') ||
     name.includes('@{') ||
     name.split('/').some((c) => c.startsWith('.') || c.endsWith('.lock')) ||
-    name === 'HEAD'
+    name.toUpperCase() === 'HEAD'
   );
 }
 
@@ -237,7 +237,10 @@ export function GitModePopover({
               >
                 {branchName && !branchValid
                   ? t('gitMode.branchInvalidName')
-                  : t('gitMode.branchConflictWarning')}
+                  : t('gitMode.branchHint')}
+              </div>
+              <div className={styles.branchHint}>
+                {t('gitMode.branchConflictWarning')}
               </div>
             </div>
           )}

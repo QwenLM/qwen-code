@@ -104,7 +104,15 @@ import type {
 
 const execFileAsync = promisify(execFile);
 
-/** The only ref name git refuses to create as a branch. */
+// Hard timeout for branch git operations. `git checkout -b` takes the
+// repository lock; without a bound, a stuck lock or slow hook would hang the
+// request and leave the workspace permanently reserved in
+// `inFlightBranchWorkspaces`. Mirrors GitWorktreeService's 30s bound.
+const GIT_BRANCH_TIMEOUT_MS = 30_000;
+
+// `HEAD` is the canonical ref name git refuses to create as a branch; the
+// surrounding predicate handles the other reserved forms. Compared
+// case-insensitively because ref storage is case-folding on macOS/Windows.
 const GIT_RESERVED_BRANCH = 'HEAD';
 
 interface RegisterSessionRoutesDeps {
@@ -414,7 +422,7 @@ export function registerSessionRoutes(
         'checkout',
         meta.baseBranch === 'HEAD' && baseCommit ? baseCommit : meta.baseBranch,
       ],
-      { cwd },
+      { cwd, timeout: GIT_BRANCH_TIMEOUT_MS },
     ).catch((rollbackErr) => {
       log?.warn('branch rollback checkout failed', {
         error: rollbackErr,
@@ -422,6 +430,7 @@ export function registerSessionRoutes(
     });
     await execFileAsync('git', ['branch', '-D', meta.name], {
       cwd,
+      timeout: GIT_BRANCH_TIMEOUT_MS,
     }).catch((rollbackErr) => {
       log?.warn('branch rollback delete failed', {
         error: rollbackErr,
@@ -1229,23 +1238,6 @@ export function registerSessionRoutes(
         });
         return;
       }
-      // Reject when another branch session is already active for this
-      // workspace — concurrent branch sessions conflict on HEAD.
-      const existingBranchSession = activeBranchSessions.get(workspaceCwd);
-      if (existingBranchSession) {
-        try {
-          // Throws if the session is gone, letting us clean up the stale entry.
-          runtime.bridge.getSessionSummary(existingBranchSession);
-          res.status(409).json({
-            error: 'A branch session is already active for this workspace',
-            code: 'branch_session_conflict',
-            existingSessionId: existingBranchSession,
-          });
-          return;
-        } catch {
-          activeBranchSessions.delete(workspaceCwd);
-        }
-      }
       if (typeof rawBranch !== 'object' || Array.isArray(rawBranch)) {
         res.status(400).json({
           error:
@@ -1278,13 +1270,31 @@ export function registerSessionRoutes(
         branchName
           .split('/')
           .some((c) => c.startsWith('.') || c.endsWith('.lock')) ||
-        branchName === GIT_RESERVED_BRANCH
+        branchName.toUpperCase() === GIT_RESERVED_BRANCH
       ) {
         res.status(400).json({
           error: `Invalid branch name: ${branchName}`,
           code: 'branch_invalid_name',
         });
         return;
+      }
+      // Reject when another branch session is already active for this
+      // workspace — concurrent branch sessions conflict on HEAD. Runs after
+      // shape/name validation so a malformed body gets 400, not 409.
+      const existingBranchSession = activeBranchSessions.get(workspaceCwd);
+      if (existingBranchSession) {
+        try {
+          // Throws if the session is gone, letting us clean up the stale entry.
+          runtime.bridge.getSessionSummary(existingBranchSession);
+          res.status(409).json({
+            error: 'A branch session is already active for this workspace',
+            code: 'branch_session_conflict',
+            existingSessionId: existingBranchSession,
+          });
+          return;
+        } catch {
+          activeBranchSessions.delete(workspaceCwd);
+        }
       }
       const wtService = new GitWorktreeService(workspaceCwd);
       if (!(await wtService.isGitRepository())) {
@@ -1299,7 +1309,7 @@ export function registerSessionRoutes(
         await execFileAsync(
           'git',
           ['rev-parse', '--verify', `refs/heads/${branchName}`],
-          { cwd: workspaceCwd },
+          { cwd: workspaceCwd, timeout: GIT_BRANCH_TIMEOUT_MS },
         );
         res.status(409).json({
           error: `Branch "${branchName}" already exists`,
@@ -1309,13 +1319,18 @@ export function registerSessionRoutes(
       } catch {
         // rev-parse fails → branch doesn't exist, good.
       }
-      // Check for dirty working tree.
+      // Check for dirty working tree. `--untracked-files=no` because untracked
+      // files survive a checkout, so only tracked changes make the tree dirty.
       let statusOut: string;
       try {
         ({ stdout: statusOut } = await execFileAsync(
           'git',
           ['status', '--porcelain', '--untracked-files=no'],
-          { cwd: workspaceCwd, maxBuffer: 10 * 1024 * 1024 },
+          {
+            cwd: workspaceCwd,
+            maxBuffer: 10 * 1024 * 1024,
+            timeout: GIT_BRANCH_TIMEOUT_MS,
+          },
         ));
       } catch {
         res.status(500).json({
@@ -1333,6 +1348,7 @@ export function registerSessionRoutes(
       }
       const baseCommit = await execFileAsync('git', ['rev-parse', 'HEAD'], {
         cwd: workspaceCwd,
+        timeout: GIT_BRANCH_TIMEOUT_MS,
       })
         .then(({ stdout }) => stdout.trim())
         .catch(() => undefined);
@@ -1354,6 +1370,7 @@ export function registerSessionRoutes(
       try {
         await execFileAsync('git', ['checkout', '-b', branchName], {
           cwd: workspaceCwd,
+          timeout: GIT_BRANCH_TIMEOUT_MS,
         });
       } catch (checkoutErr) {
         inFlightBranchWorkspaces.delete(workspaceCwd);

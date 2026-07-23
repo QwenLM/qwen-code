@@ -225,6 +225,7 @@ Worktree session 不受此限制（各自独立目录）。
    不在 UI 层预检测（避免与 git 实际行为脱节），统一由服务端判定。
 3. **会话恢复（resume）**：不需要 sidecar。Worktree 需要 sidecar 是因为
    工作目录与主仓库分离，resume 时必须知道 worktree 路径。Branch 会话的
-   工作目录就是原目录，`git branch` 即可知当前分支，无需额外记录。分支
-   信息已持久化在 `DaemonSessionSummary.branch` 中，resume 时仅用于
-   UI 展示（如 sidebar badge），不做强制切换。
+   工作目录就是原目录，`git branch` 即可知当前分支，无需额外记录。
+   注意：`DaemonSessionSummary.branch` 目前仅保存在内存中（bridge 映射），
+   daemon 重启后会丢失，因此 sidebar badge 与并发守卫不会跨重启保留；
+   持久化属于后续工作。
