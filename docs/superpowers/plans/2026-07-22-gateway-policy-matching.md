@@ -986,9 +986,16 @@ the `PolicyRule` is built. Use the file's existing error prefix convention,
 
 ```ts
 if (typeof match['tool'] === 'string') {
-  match['tool'] = normalizeTool(match['tool'], `rule[${i}]`);
+  const originalTool = match['tool'];
+  const normalizedTool = normalizeTool(originalTool, `rule[${i}]`);
+  match['tool'] = normalizedTool;
+  // Remember that this rule was WRITTEN as a tool-name alias, so lint (Task 6)
+  // can warn precisely instead of substring-searching the source text.
+  if (normalizedTool !== originalTool) rule.aliasedTool = originalTool;
 }
 ```
+
+Add `aliasedTool?: string;` to the `PolicyRule` interface (loader.ts:22-40), commented as "set only when `match.tool` was written as a tool name and normalized to its kind". Assign it on the `rule` object built at `loader.ts:145-148` — hold `originalTool`/`normalizedTool` in locals and assign once `rule` exists.
 
 and add operation validation in the same place:
 
@@ -1085,8 +1092,7 @@ defaults: { action: prompt }
 >
 > ```ts
 > import { loadPolicy, policyAdvisories } from './loader.js';
-> const lintWarningsFor = (yaml: string) =>
->   policyAdvisories(loadPolicy(yaml), yaml);
+> const lintWarningsFor = (yaml: string) => policyAdvisories(loadPolicy(yaml));
 > ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1116,27 +1122,26 @@ function kindsWithMultipleTools(): Set<string> {
  * 2. Matching is being fixed in this release, so every `allow` rule becomes
  *    effective for the first time. Say so once, with a count.
  */
-export function policyAdvisories(policy: Policy, rawText: string): string[] {
+export function policyAdvisories(policy: Policy): string[] {
   const out: string[] = [];
   const shared = kindsWithMultipleTools();
-  const aliasNames = new Set(Object.keys(TOOL_ALIAS_TO_KIND));
 
   for (const rule of policy.rules) {
     if (rule.action !== 'allow') continue;
+    // `aliasedTool` is set by the loader ONLY when this rule was written as a
+    // tool name (Task 5) — precise, unlike scanning the raw file text.
+    const written = rule.aliasedTool;
+    if (written === undefined) continue;
     const kind = rule.match.tool;
     if (kind === undefined || !shared.has(kind)) continue;
-    // Was it WRITTEN as an alias? Normalization already replaced it, so look
-    // for any alias name of this kind in the source text.
-    const siblings = [...aliasNames].filter(
-      (n) => TOOL_ALIAS_TO_KIND[n] === kind,
+    const siblings = Object.keys(TOOL_ALIAS_TO_KIND).filter(
+      (n) => TOOL_ALIAS_TO_KIND[n] === kind && n !== written,
     );
-    if (siblings.some((n) => rawText.includes(n))) {
-      out.push(
-        `rule '${rule.id ?? '(unnamed)'}': allow via a tool-name alias maps to ` +
-          `kind '${kind}', which also matches ${siblings.join(', ')} — this ` +
-          `allows more than written.`,
-      );
-    }
+    out.push(
+      `rule '${rule.id ?? '(unnamed)'}': allow on '${written}' maps to kind ` +
+        `'${kind}', which also matches ${siblings.join(', ')} — this allows ` +
+        `more than written.`,
+    );
   }
 
   const allowCount = policy.rules.filter((r) => r.action === 'allow').length;
@@ -1157,7 +1162,7 @@ Wire it through the existing lint result shape rather than inventing a new one.
 string[]` the same way:
 
 - In `lintPolicyFile` (`loader.ts:343`), after `policy = loadPolicy(text)`
-  succeeds, add `const warnings = policyAdvisories(policy, text);` and return it
+  succeeds, add `const warnings = policyAdvisories(policy);` and return it
   on the result object alongside `ruleCount`/`deferred`.
 - In `formatPolicyLint` (`loader.ts:370`), append one line per warning after the
   existing `deferred` note, prefixed ` warning:`.
