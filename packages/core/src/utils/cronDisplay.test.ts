@@ -6,7 +6,7 @@ describe('humanReadableCron', () => {
   it('formats common step expressions', () => {
     expect(humanReadableCron('*/15 * * * *')).toBe('Every 15 minutes');
     expect(humanReadableCron('0 */2 * * *')).toBe('Every 2 hours');
-    expect(humanReadableCron('0 0 */3 * *')).toBe('Every 3 days');
+    expect(humanReadableCron('0 0 */1 * *')).toBe('Every day');
   });
 
   it('falls back for malformed step expressions', () => {
@@ -41,8 +41,41 @@ describe('humanReadableCron', () => {
     expect(humanReadableCron('0 */7 * * *')).toBe('0 */7 * * *');
   });
 
+  it('falls back for every day-of-month step but 1', () => {
+    // The day-of-month field restarts at day 1 of a month whose length varies,
+    // so no step above 1 keeps its own interval across the rollover. Walking a
+    // non-leap year gives the shortest gap the schedule actually produces; if
+    // that is not N, "Every N days" is a false label.
+    const MONTH_LENGTHS = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    const shortestGap = (days: readonly number[]): number => {
+      const fires: number[] = [];
+      let elapsed = 0;
+      for (const length of MONTH_LENGTHS) {
+        for (const day of days) if (day <= length) fires.push(elapsed + day);
+        elapsed += length;
+      }
+      return Math.min(...fires.slice(1).map((f, i) => f - fires[i]!));
+    };
+
+    for (const [expr, step, days, gap] of [
+      ['0 0 */2 * *', 2, [1, 3, 5, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31], 1], // prettier-ignore
+      ['0 0 */3 * *', 3, [1, 4, 7, 10, 13, 16, 19, 22, 25, 28, 31], 1],
+      ['0 0 */15 * *', 15, [1, 16, 31], 1],
+      // Not a large-step problem: 16 has a *longer* shortest gap than 15, so
+      // no threshold separates the truthful labels from the false ones.
+      ['0 0 */16 * *', 16, [1, 17], 12],
+      ['0 0 */31 * *', 31, [1], 28], // day 1 only — monthly, not every 31 days
+    ] as const) {
+      expect([...parseCron(expr).dayOfMonth]).toEqual(days);
+      expect(shortestGap(days)).toBe(gap);
+      expect(gap).not.toBe(step);
+      expect(humanReadableCron(expr)).toBe(expr);
+    }
+  });
+
   it('keeps the friendly string when the step really is the interval', () => {
-    // Divisors of 60 / 24 wrap exactly, so the label is truthful.
+    // Divisors of 60 / 24 wrap exactly, so the label is truthful. On days only
+    // `*/1` qualifies, since 1 is the sole step that divides every month.
     for (const [expr, label] of [
       ['*/1 * * * *', 'Every minute'],
       ['*/20 * * * *', 'Every 20 minutes'],
@@ -51,7 +84,6 @@ describe('humanReadableCron', () => {
       ['0 */6 * * *', 'Every 6 hours'],
       ['0 */12 * * *', 'Every 12 hours'],
       ['0 0 */1 * *', 'Every day'],
-      ['0 0 */31 * *', 'Every 31 days'],
     ] as const) {
       expect(humanReadableCron(expr)).toBe(label);
     }
