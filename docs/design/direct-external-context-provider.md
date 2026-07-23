@@ -67,6 +67,15 @@ The implementation is a private workspace at
 `integrations/external-context/`. It is packaged as a Qwen extension and does
 not import Qwen Core.
 
+The v1 deployment links this directory from a built Qwen Code checkout, so its
+runtime dependencies resolve from the monorepo installation. A copied
+directory or npm tarball is not a self-contained deployment artifact unless an
+operator separately packages its runtime dependencies. Publishing or bundling
+a standalone extension is outside v1. Because a linked extension is enabled
+globally by default, administrators must disable it at user scope and enable it
+only at the intended workspace scope. The managed launcher supplies the
+configuration and credential only for that repository.
+
 ```mermaid
 flowchart LR
     U["User prompt"] --> Q["Qwen Code"]
@@ -203,9 +212,15 @@ managed file are outside this profile's trust assumptions.
 
 ### Mem0 Platform V3
 
-Each security-isolated repository uses a distinct Mem0 Project and
-project-specific API key. The configured `appId` is fixed in the adapter but is
-not treated as authorization.
+Each security-isolated repository uses a distinct Mem0 Project and an API key
+whose effective current Project is limited to that repository-only Project.
+Administrators must verify this binding and the key's effective permissions in
+the Mem0 control plane; merely configuring `appId` or selecting a current
+Project in the client is not an authorization boundary. If the available key
+can access or select another Project, Mem0 does not satisfy the Direct
+Profile's single-corpus credential invariant and the deployment must use the
+Gateway Profile. The configured `appId` is fixed in the adapter but is not
+treated as authorization.
 
 Search sends:
 
@@ -289,12 +304,14 @@ and disabled `/cd` keep the Qwen process aligned with that corpus.
 
 ## Rollout and rollback
 
-1. Deploy a repository-restricted provider credential and managed Qwen
-   settings.
-2. Enable the extension with search only and validate provenance and recall
+1. Link the extension, disable its default user-scope enablement, and enable it
+   only at the intended workspace scope.
+2. Deploy a repository-restricted provider credential and managed Qwen
+   settings through that repository's managed launcher.
+3. Enable search only and validate provenance and recall
    quality.
-3. Enable automatic recall for selected repositories.
-4. Enable writes only where shared-memory semantics and the UX confirmation
+4. Enable automatic recall for selected repositories.
+5. Enable writes only where shared-memory semantics and the UX confirmation
    boundary are acceptable.
 
 Rollback removes or disables the extension and hook. It does not delete,

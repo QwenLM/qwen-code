@@ -16,14 +16,33 @@ profile.
 
 ## Configure
 
-1. Give the repository its own provider-side project, index, or credential.
-   A Mem0 `app_id` is classification, not a security boundary.
+1. Give the repository its own provider-side project, index, or corpus, and a
+   credential restricted to it. Verify that the credential cannot access or
+   select another corpus. A Mem0 `app_id` or client-selected current Project
+   is classification, not a security boundary.
 2. Copy one file from `examples/`, set an absolute `repositoryRoot`, and name
    the environment variable that contains the credential.
 3. Export `QWEN_EXTERNAL_CONTEXT_CONFIG` with the absolute configuration path.
-4. Build the workspace and install this directory as a Qwen extension.
+4. From the Qwen Code checkout, install dependencies, build this workspace,
+   and link the built directory:
+
+   ```bash
+   npm install
+   npm run build --workspace @qwen-code/external-context
+   qwen extensions link /absolute/path/to/qwen-code/integrations/external-context
+   qwen extensions disable external-context
+   cd /absolute/path/to/repository
+   qwen extensions enable external-context --scope=workspace
+   ```
+
+   Direct Profile v1 is delivered as a private monorepo workspace. Copying the
+   directory or its npm tarball without packaging its runtime dependencies is
+   not a supported deployment. The explicit disable/enable sequence prevents
+   the linked extension from remaining enabled for unrelated workspaces.
+
 5. Deploy `examples/managed-settings.json` as administrator-controlled system
-   settings.
+   settings, and inject the configuration and credential only through the
+   target repository's managed launcher.
 
 Configuration and provider credentials are read once per hook or MCP process.
 Restart Qwen to change repository or provider bindings.

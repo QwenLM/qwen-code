@@ -9,6 +9,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { handleHookInput } from './hook.js';
+import { ProviderTimeoutError } from './http-client.js';
 import type { ExternalContextConfig, ProviderBinding } from './types.js';
 
 const temporaryDirectories: string[] = [];
@@ -141,29 +142,56 @@ describe('handleHookInput', () => {
     );
   });
 
-  it.each(['timeout', 'rate limit', 'invalid response'])(
-    'fails open for provider %s errors',
-    async () => {
-      const root = await temporaryRoot();
-      const binding: ProviderBinding = {
-        type: 'generic-http-search-v1',
-        provider: {
-          search: vi.fn().mockRejectedValue(new Error('provider detail')),
+  it('fails open and classifies provider timeouts without logging details', async () => {
+    const root = await temporaryRoot();
+    const log = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const binding: ProviderBinding = {
+      type: 'generic-http-search-v1',
+      provider: {
+        search: vi.fn().mockRejectedValue(new ProviderTimeoutError()),
+      },
+    };
+
+    await expect(
+      handleHookInput(
+        {
+          hook_event_name: 'UserPromptSubmit',
+          cwd: root,
+          prompt: 'deployment',
         },
-      };
-      await expect(
-        handleHookInput(
-          {
-            hook_event_name: 'UserPromptSubmit',
-            cwd: root,
-            prompt: 'deployment',
-          },
-          async () => config(root, true),
-          () => binding,
-        ),
-      ).resolves.toEqual({ continue: true });
-    },
-  );
+        async () => config(root, true),
+        () => binding,
+      ),
+    ).resolves.toEqual({ continue: true });
+    expect(log.mock.calls.join(' ')).toContain('status=timeout');
+    expect(log.mock.calls.join(' ')).not.toContain(
+      'External context provider request did not complete.',
+    );
+  });
+
+  it('fails open for provider errors', async () => {
+    const root = await temporaryRoot();
+    const binding: ProviderBinding = {
+      type: 'generic-http-search-v1',
+      provider: {
+        search: vi.fn().mockRejectedValue(new Error('provider detail')),
+      },
+    };
+
+    await expect(
+      handleHookInput(
+        {
+          hook_event_name: 'UserPromptSubmit',
+          cwd: root,
+          prompt: 'deployment',
+        },
+        async () => config(root, true),
+        () => binding,
+      ),
+    ).resolves.toEqual({ continue: true });
+  });
 
   it('fails open when configuration cannot be loaded', async () => {
     await expect(

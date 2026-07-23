@@ -238,11 +238,11 @@ function parseMem0WriteResult(response: unknown): RememberResult {
     throw new ProviderResponseError();
   }
   if (
-    operationId ||
     status === 'PENDING' ||
     status === 'ACCEPTED' ||
     status === 'SUCCEEDED' ||
-    status === 'COMPLETED'
+    status === 'COMPLETED' ||
+    (response['status'] === undefined && operationId !== undefined)
   ) {
     return operationId
       ? { status: 'accepted', providerOperationId: operationId }

@@ -12,7 +12,7 @@ import {
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { renderExternalContext } from './context.js';
-import { ProviderResponseError } from './http-client.js';
+import { ProviderResponseError, ProviderTimeoutError } from './http-client.js';
 import {
   GenericHttpSearchV1Adapter,
   Mem0PlatformV3Adapter,
@@ -151,10 +151,47 @@ describe('GenericHttpSearchV1Adapter', () => {
     expect(requestCount).toBe(1);
   });
 
-  it('rejects invalid JSON and respects the caller timeout', async () => {
+  it('rejects invalid JSON', async () => {
     const invalidUrl = await startServer((_request, response) => {
       response.end('{');
     });
+    const adapter = new GenericHttpSearchV1Adapter({
+      type: 'generic-http-search-v1',
+      baseUrl: invalidUrl,
+      tokenEnv: 'TOKEN',
+      token: 'credential',
+    });
+
+    await expect(
+      adapter.search({
+        query: 'query',
+        limit: 5,
+        signal: AbortSignal.timeout(1000),
+      }),
+    ).rejects.toBeInstanceOf(ProviderResponseError);
+  });
+
+  it('rejects invalid UTF-8 as a provider response error', async () => {
+    const invalidUrl = await startServer((_request, response) => {
+      response.end(Buffer.from([0xc3, 0x28]));
+    });
+    const adapter = new GenericHttpSearchV1Adapter({
+      type: 'generic-http-search-v1',
+      baseUrl: invalidUrl,
+      tokenEnv: 'TOKEN',
+      token: 'credential',
+    });
+
+    await expect(
+      adapter.search({
+        query: 'query',
+        limit: 5,
+        signal: AbortSignal.timeout(1000),
+      }),
+    ).rejects.toBeInstanceOf(ProviderResponseError);
+  });
+
+  it('preserves the caller timeout classification', async () => {
     const delayedUrl = await startServer(
       async (_request, response) =>
         new Promise<void>((resolve) => {
@@ -164,25 +201,20 @@ describe('GenericHttpSearchV1Adapter', () => {
           }, 200);
         }),
     );
+    const adapter = new GenericHttpSearchV1Adapter({
+      type: 'generic-http-search-v1',
+      baseUrl: delayedUrl,
+      tokenEnv: 'TOKEN',
+      token: 'credential',
+    });
 
-    for (const [baseUrl, timeout] of [
-      [invalidUrl, 1000],
-      [delayedUrl, 10],
-    ] as const) {
-      const adapter = new GenericHttpSearchV1Adapter({
-        type: 'generic-http-search-v1',
-        baseUrl,
-        tokenEnv: 'TOKEN',
-        token: 'credential',
-      });
-      await expect(
-        adapter.search({
-          query: 'query',
-          limit: 5,
-          signal: AbortSignal.timeout(timeout),
-        }),
-      ).rejects.toThrow();
-    }
+    await expect(
+      adapter.search({
+        query: 'query',
+        limit: 5,
+        signal: AbortSignal.timeout(10),
+      }),
+    ).rejects.toBeInstanceOf(ProviderTimeoutError);
   });
 });
 
@@ -295,6 +327,22 @@ describe('Mem0PlatformV3Adapter', () => {
       }),
     ).resolves.toEqual({ status: 'accepted' });
   });
+
+  it.each(['REJECTED', 42, null])(
+    'does not treat an unknown explicit status (%j) as accepted',
+    async (status) => {
+      const baseUrl = await startServer((_request, response) => {
+        json(response, { status, event_id: 'event-rejected' });
+      });
+
+      await expect(
+        mem0Adapter(baseUrl).remember({
+          content: 'shared decision',
+          signal: AbortSignal.timeout(1000),
+        }),
+      ).resolves.toEqual({ status: 'unknown' });
+    },
+  );
 
   it('returns unknown and does not retry an ambiguous add', async () => {
     let requestCount = 0;

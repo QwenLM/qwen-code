@@ -27,6 +27,13 @@ export class ProviderTransportError extends Error {
   }
 }
 
+export class ProviderTimeoutError extends ProviderTransportError {
+  constructor() {
+    super();
+    this.name = 'TimeoutError';
+  }
+}
+
 export function validateProviderBaseUrl(value: string): URL {
   const url = new URL(value);
   if (url.username || url.password || url.search || url.hash) {
@@ -68,13 +75,15 @@ export async function postJson(input: {
       signal: input.signal,
     });
   } catch {
-    throw new ProviderTransportError();
+    throw transportError(input.signal);
   }
 
   if (response.status >= 300 && response.status < 400) {
+    cancelResponseBody(response);
     throw new ProviderResponseError();
   }
   if (!response.ok) {
+    cancelResponseBody(response);
     throw new ProviderHttpError(response.status);
   }
 
@@ -83,6 +92,7 @@ export async function postJson(input: {
     declaredLength !== null &&
     Number.parseInt(declaredLength, 10) > MAX_RESPONSE_BYTES
   ) {
+    cancelResponseBody(response);
     throw new ProviderResponseError();
   }
 
@@ -93,7 +103,7 @@ export async function postJson(input: {
     if (error instanceof ProviderResponseError) {
       throw error;
     }
-    throw new ProviderTransportError();
+    throw transportError(input.signal);
   }
 
   try {
@@ -101,6 +111,23 @@ export async function postJson(input: {
   } catch {
     throw new ProviderResponseError();
   }
+}
+
+function transportError(signal: AbortSignal): ProviderTransportError {
+  if (
+    signal.aborted &&
+    typeof signal.reason === 'object' &&
+    signal.reason !== null &&
+    'name' in signal.reason &&
+    signal.reason.name === 'TimeoutError'
+  ) {
+    return new ProviderTimeoutError();
+  }
+  return new ProviderTransportError();
+}
+
+function cancelResponseBody(response: Response): void {
+  void response.body?.cancel().catch(() => undefined);
 }
 
 async function readBoundedBody(response: Response): Promise<string> {
@@ -124,5 +151,9 @@ async function readBoundedBody(response: Response): Promise<string> {
     body.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return new TextDecoder('utf-8', { fatal: true }).decode(body);
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(body);
+  } catch {
+    throw new ProviderResponseError();
+  }
 }
