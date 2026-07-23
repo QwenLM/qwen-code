@@ -103,6 +103,7 @@ jobs:
           # reviewed were manually dismissed — don't re-add them.
           drift="$(jq -cn --argjson p "$prev_desired" --argjson c "$current" --argjson r "$reviewed" \
             '$p - $c - $r')"
+          pre_drift_desired="$desired"
           desired="$(jq -cn --argjson d "$desired" --argjson drift "$drift" '$d - $drift | sort')"
 
           # Manage all maintainer reviewers — including CODEOWNERS-assigned
@@ -143,7 +144,7 @@ jobs:
           # can detect manually-dismissed reviewers.  The JSON is embedded
           # in the marker line itself so parsing does not depend on line
           # positions.
-          marker_body="${marker} {\"desired\":${desired}} -->"
+          marker_body="${marker} {\"desired\":${pre_drift_desired}} -->"
           comment_id="$(echo "$comments" | jq -r --arg marker "$marker" \
             '[.[] | select(.body | startswith($marker))] | last | .id // empty' \
             2>/dev/null)" || comment_id=""

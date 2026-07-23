@@ -133,6 +133,24 @@ describe('classify', () => {
     assert.equal(result.reviewers.length, 0);
   });
 
+  it('handles .spec. files as test files', () => {
+    const result = classify(
+      ['packages/core/src/tools/grep.spec.ts'],
+      'someone',
+    );
+    assert.equal(result.reviewers.length, 0);
+    assert.match(result.reason, /test-only/);
+  });
+
+  it('handles .test-utils. files as test files', () => {
+    const result = classify(
+      ['packages/core/src/tools/grep.test-utils.ts'],
+      'someone',
+    );
+    assert.equal(result.reviewers.length, 0);
+    assert.match(result.reason, /test-only/);
+  });
+
   it('assigns 1 reviewer when core ratio is low even with 1 prod file', () => {
     const files = Array.from(
       { length: 10 },
