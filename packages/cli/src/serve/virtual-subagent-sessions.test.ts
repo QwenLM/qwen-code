@@ -632,7 +632,7 @@ describe('VirtualSubagentSessions', () => {
     await iterator.return?.();
   });
 
-  it('matches legacy sidecars through the recorded launch prompt', async () => {
+  it('keeps terminal legacy sidecar status over the background launch result', async () => {
     const runtimeDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-subagent-runtime-'),
     );
@@ -677,7 +677,7 @@ describe('VirtualSubagentSessions', () => {
           status: 'success',
           resultDisplay: {
             type: 'task_execution',
-            status: 'completed',
+            status: 'background',
             tokenCount: 123,
             executionSummary: {
               totalDurationMs: 88_610,
@@ -728,7 +728,19 @@ describe('VirtualSubagentSessions', () => {
           v: 1 as const,
           sessionId: parentSessionId,
           now: Date.now(),
-          tasks: [],
+          tasks: [
+            {
+              kind: 'agent' as const,
+              id: 'general-purpose-random',
+              label: 'legacy task',
+              description: 'legacy task',
+              status: 'completed' as const,
+              startTime: Date.now(),
+              runtimeMs: 1,
+              outputFile,
+              isBackgrounded: true,
+            },
+          ],
         }),
       },
     } as unknown as WorkspaceRuntime;

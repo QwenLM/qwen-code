@@ -849,7 +849,10 @@ export class VirtualSubagentSessions {
     const metrics = findToolCallMetrics(parentRecords, toolCallId);
     return {
       ...selected,
-      status: metrics.status ?? selected.status,
+      status:
+        metrics.status === 'running' && selected.status !== 'running'
+          ? selected.status
+          : (metrics.status ?? selected.status),
       durationMs: metrics.durationMs ?? selected.durationMs,
       totalTokens: metrics.totalTokens ?? selected.totalTokens,
       inputTokens: metrics.inputTokens ?? selected.inputTokens,
