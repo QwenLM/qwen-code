@@ -27,16 +27,28 @@ interface Segment {
   dim?: boolean;
 }
 
-function toHex(r: number, g: number, b: number): string | undefined {
-  if (![r, g, b].every((v) => Number.isInteger(v) && v >= 0 && v <= 255)) {
-    return undefined;
+// The channel and index parameters are read straight out of the escape
+// sequence, so a truncated one yields `undefined` — the types say so rather
+// than asserting the value away, and the guards below are what reject it.
+function toHex(
+  r: number | undefined,
+  g: number | undefined,
+  b: number | undefined,
+): string | undefined {
+  let hex = '#';
+  for (const v of [r, g, b]) {
+    if (v === undefined || !Number.isInteger(v) || v < 0 || v > 255) {
+      return undefined;
+    }
+    hex += v.toString(16).padStart(2, '0');
   }
-  return `#${[r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+  return hex;
 }
 
 /** Resolve an xterm 256-color index to a hex string. */
-function xterm256(index: number): string | undefined {
-  if (!Number.isInteger(index) || index < 0 || index > 255) return undefined;
+function xterm256(index: number | undefined): string | undefined {
+  if (index === undefined || !Number.isInteger(index)) return undefined;
+  if (index < 0 || index > 255) return undefined;
   // 0-15 stay on the palette above, so a tool emitting `38;5;2` and one
   // emitting `32` render as the same green.
   if (index < 8) return ANSI_COLORS[30 + index];
@@ -44,9 +56,9 @@ function xterm256(index: number): string | undefined {
   if (index < 232) {
     const v = index - 16;
     return toHex(
-      CUBE_LEVELS[Math.floor(v / 36)]!,
-      CUBE_LEVELS[Math.floor(v / 6) % 6]!,
-      CUBE_LEVELS[v % 6]!,
+      CUBE_LEVELS[Math.floor(v / 36)],
+      CUBE_LEVELS[Math.floor(v / 6) % 6],
+      CUBE_LEVELS[v % 6],
     );
   }
   const level = 8 + (index - 232) * 10;
@@ -82,10 +94,10 @@ export function parseAnsi(input: string): Segment[] {
         const mode = codes[i + 1];
         let value: string | undefined;
         if (mode === 5) {
-          value = xterm256(codes[i + 2]!);
+          value = xterm256(codes[i + 2]);
           i += 2;
         } else if (mode === 2) {
-          value = toHex(codes[i + 2]!, codes[i + 3]!, codes[i + 4]!);
+          value = toHex(codes[i + 2], codes[i + 3], codes[i + 4]);
           i += 4;
         } else {
           // An unrecognized form has an unknown argument count, so there is no
@@ -95,7 +107,9 @@ export function parseAnsi(input: string): Segment[] {
         }
         // Only the foreground maps onto a Segment. Background and underline
         // color are still parsed so their arguments cannot leak into the loop.
-        if (code === 38) color = value;
+        // A malformed value leaves the current color alone: an unreadable
+        // sequence is ignored, not treated as a reset.
+        if (code === 38 && value !== undefined) color = value;
       } else if (code === 0) {
         color = undefined;
         bold = false;

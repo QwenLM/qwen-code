@@ -83,6 +83,18 @@ describe('parseAnsi', () => {
     }
   });
 
+  it('leaves an already-set color alone when the sequence is malformed', () => {
+    // An unreadable sequence is ignored, not treated as a reset: the red from
+    // code 31 has to survive it.
+    for (const seq of ['38;5;300', '38;5', '38;2;1;2', '38;7;1', '38']) {
+      expect(parseAnsi(`${ESC}31m${ESC}${seq}mtext`)).toEqual([
+        { text: 'text', color: '#fc8181', bold: false, dim: false },
+      ]);
+    }
+    // A well-formed sequence still replaces it.
+    expect(parseAnsi(`${ESC}31m${ESC}38;5;21mtext`)[0]!.color).toBe('#0000ff');
+  });
+
   it('splits text around sequences and keeps the trailing run', () => {
     expect(parseAnsi(`plain${ESC}1mbold${ESC}0mtail`)).toEqual([
       { text: 'plain', color: undefined, bold: false, dim: false },
