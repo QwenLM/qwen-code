@@ -48,7 +48,6 @@ const loggingSpanRecords = vi.hoisted(
       cachedInputTokens?: number;
       cachedInputTokensReported?: boolean;
       cacheCreationInputTokens?: number;
-      tokenCountsEstimated?: boolean;
       responseModel?: string;
       finishReasons?: string[];
       ttftMs?: number;
@@ -202,7 +201,6 @@ vi.mock('../../telemetry/index.js', () => {
           cachedInputTokens?: number;
           cachedInputTokensReported?: boolean;
           cacheCreationInputTokens?: number;
-          tokenCountsEstimated?: boolean;
           responseModel?: string;
           finishReasons?: string[];
           ttftMs?: number;
@@ -668,7 +666,6 @@ describe('LoggingContentGenerator', () => {
     };
     setGenAiUsageProvenance(usage, {
       cachedInputTokensReported: false,
-      tokenCountsEstimated: true,
     });
     const wrapped = createWrappedGenerator(
       vi
@@ -696,7 +693,6 @@ describe('LoggingContentGenerator', () => {
       inputTokens: 42,
       outputTokens: 17,
       cachedInputTokensReported: false,
-      tokenCountsEstimated: true,
     });
     expect(spanRecord.endMetadata!.durationMs).toBeGreaterThanOrEqual(0);
   });

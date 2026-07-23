@@ -552,7 +552,7 @@ describe('session-tracing', () => {
       });
     });
 
-    it('endLLMRequestSpan dual-emits gen_ai.usage.input_tokens / output_tokens', () => {
+    it('emits only standard input and output token attributes', () => {
       const span = startLLMRequestSpan('m', 'p');
       endLLMRequestSpan(span, {
         success: true,
@@ -561,10 +561,10 @@ describe('session-tracing', () => {
       });
 
       const attrs = mockSpans[0]!.attributes;
-      expect(attrs['input_tokens']).toBe(100);
       expect(attrs['gen_ai.usage.input_tokens']).toBe(100);
-      expect(attrs['output_tokens']).toBe(50);
       expect(attrs['gen_ai.usage.output_tokens']).toBe(50);
+      expect(attrs['input_tokens']).toBeUndefined();
+      expect(attrs['output_tokens']).toBeUndefined();
     });
 
     it('emits standard cache-read tokens only when the provider reported them', () => {
@@ -577,12 +577,12 @@ describe('session-tracing', () => {
       });
 
       const attrs = mockSpans[0]!.attributes;
-      expect(attrs['cached_input_tokens']).toBe(40);
       expect(attrs['gen_ai.usage.cache_read.input_tokens']).toBe(40);
+      expect(attrs['cached_input_tokens']).toBeUndefined();
       expect(attrs['gen_ai.usage.cached_tokens']).toBeUndefined();
     });
 
-    it('endLLMRequestSpan omits cached_input_tokens when undefined', () => {
+    it('omits cache-read tokens when the provider did not report them', () => {
       const span = startLLMRequestSpan('m', 'p');
       endLLMRequestSpan(span, { success: true, inputTokens: 100 });
 
@@ -592,10 +592,9 @@ describe('session-tracing', () => {
       expect(attrs['gen_ai.usage.cache_read.input_tokens']).toBeUndefined();
     });
 
-    it('endLLMRequestSpan emits cached_input_tokens === 0 (cache miss is meaningful info, not undefined)', () => {
+    it('emits an explicit standard cache-read zero', () => {
       // Providers that report 0 cached tokens are signaling an explicit cache
-      // miss. Distinct from undefined ("we don't know"). Both attribute names
-      // must propagate the literal 0.
+      // miss, which is distinct from undefined ("we don't know").
       const span = startLLMRequestSpan('m', 'p');
       endLLMRequestSpan(span, {
         success: true,
@@ -605,8 +604,8 @@ describe('session-tracing', () => {
       });
 
       const attrs = mockSpans[0]!.attributes;
-      expect(attrs['cached_input_tokens']).toBe(0);
       expect(attrs['gen_ai.usage.cache_read.input_tokens']).toBe(0);
+      expect(attrs['cached_input_tokens']).toBeUndefined();
       expect(attrs['gen_ai.usage.cached_tokens']).toBeUndefined();
     });
 
@@ -623,14 +622,7 @@ describe('session-tracing', () => {
       expect(attrs['gen_ai.server.time_to_first_token']).toBeUndefined();
     });
 
-    it('omits estimated and invalid counts from standard usage while preserving private counts', () => {
-      const estimatedSpan = startLLMRequestSpan('m', 'estimated');
-      endLLMRequestSpan(estimatedSpan, {
-        success: true,
-        inputTokens: 70,
-        outputTokens: 30,
-        tokenCountsEstimated: true,
-      });
+    it('omits invalid token counts', () => {
       const invalidSpan = startLLMRequestSpan('m', 'invalid');
       endLLMRequestSpan(invalidSpan, {
         success: true,
@@ -638,22 +630,14 @@ describe('session-tracing', () => {
         outputTokens: 1.5,
       });
 
-      expect(mockSpans[0]!.attributes['input_tokens']).toBe(70);
       expect(
         mockSpans[0]!.attributes['gen_ai.usage.input_tokens'],
       ).toBeUndefined();
-      expect(mockSpans[0]!.attributes['output_tokens']).toBe(30);
       expect(
         mockSpans[0]!.attributes['gen_ai.usage.output_tokens'],
       ).toBeUndefined();
-      expect(mockSpans[1]!.attributes['input_tokens']).toBe(-1);
-      expect(
-        mockSpans[1]!.attributes['gen_ai.usage.input_tokens'],
-      ).toBeUndefined();
-      expect(mockSpans[1]!.attributes['output_tokens']).toBe(1.5);
-      expect(
-        mockSpans[1]!.attributes['gen_ai.usage.output_tokens'],
-      ).toBeUndefined();
+      expect(mockSpans[0]!.attributes['input_tokens']).toBeUndefined();
+      expect(mockSpans[0]!.attributes['output_tokens']).toBeUndefined();
     });
 
     it('retains explicit zero and cache-creation counts in standard usage', () => {
@@ -968,8 +952,10 @@ describe('session-tracing', () => {
       expect(attrs['thoughts_token_count']).toBe(30);
       expect(attrs['gen_ai.usage.reasoning_tokens']).toBeUndefined();
       expect(attrs['subagent_name']).toBe('code-reviewer');
-      expect(attrs['input_tokens']).toBe(500);
-      expect(attrs['output_tokens']).toBe(100);
+      expect(attrs['gen_ai.usage.input_tokens']).toBe(500);
+      expect(attrs['gen_ai.usage.output_tokens']).toBe(100);
+      expect(attrs['input_tokens']).toBeUndefined();
+      expect(attrs['output_tokens']).toBeUndefined();
     });
   });
 

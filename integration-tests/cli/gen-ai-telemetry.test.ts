@@ -156,7 +156,6 @@ describeLocal('GenAI telemetry fields', () => {
       'gen_ai.usage.input_tokens': 20,
       'gen_ai.usage.output_tokens': 4,
       'gen_ai.usage.cache_read.input_tokens': 3,
-      cached_input_tokens: 3,
     });
     expect(secondLlm).toMatchObject({
       'gen_ai.operation.name': 'chat',
@@ -174,6 +173,9 @@ describeLocal('GenAI telemetry fields', () => {
     for (const attributes of [firstLlm, secondLlm]) {
       expect(attributes).not.toHaveProperty('qwen-code.model');
       expect(attributes).not.toHaveProperty('response_id');
+      expect(attributes).not.toHaveProperty('input_tokens');
+      expect(attributes).not.toHaveProperty('output_tokens');
+      expect(attributes).not.toHaveProperty('cached_input_tokens');
       expect(attributes).not.toHaveProperty('gen_ai.usage.cached_tokens');
       expect(attributes).not.toHaveProperty(
         'gen_ai.server.time_to_first_token',

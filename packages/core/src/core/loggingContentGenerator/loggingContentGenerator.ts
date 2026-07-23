@@ -110,7 +110,6 @@ function usageSpanMetadata(
       provenance?.cachedInputTokensReported ??
       usage?.cachedContentTokenCount !== undefined,
     cacheCreationInputTokens: provenance?.cacheCreationInputTokens,
-    tokenCountsEstimated: provenance?.tokenCountsEstimated,
   };
 }
 

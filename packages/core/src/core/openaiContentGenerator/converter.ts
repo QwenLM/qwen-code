@@ -1292,30 +1292,21 @@ export function convertOpenAIResponseToGemini(
       }
     }
 
-    // If we only have total tokens but no breakdown, estimate the split
-    // Typically input is ~70% and output is ~30% for most conversations
-    let finalPromptTokens = promptTokens;
-    let finalCompletionTokens = completionTokens;
-
-    const tokenCountsEstimated =
-      totalTokens > 0 && promptTokens === 0 && completionTokens === 0;
-    if (tokenCountsEstimated) {
-      // Estimate: assume 70% input, 30% output. Derive completion from the
-      // remainder so the two halves always add back up to totalTokens rather
-      // than rounding each independently (e.g. 5 would give 4 + 2 = 6).
-      finalPromptTokens = Math.round(totalTokens * 0.7);
-      finalCompletionTokens = totalTokens - finalPromptTokens;
-    }
+    const hasTokenBreakdown =
+      totalTokens === 0 || promptTokens !== 0 || completionTokens !== 0;
 
     response.usageMetadata = {
-      promptTokenCount: finalPromptTokens,
-      candidatesTokenCount: finalCompletionTokens,
+      ...(hasTokenBreakdown
+        ? {
+            promptTokenCount: promptTokens,
+            candidatesTokenCount: completionTokens,
+          }
+        : {}),
       totalTokenCount: totalTokens,
       cachedContentTokenCount: cachedTokens,
       thoughtsTokenCount: thinkingTokens,
     };
     setGenAiUsageProvenance(response.usageMetadata, {
-      tokenCountsEstimated,
       cachedInputTokensReported,
     });
   }
@@ -1784,30 +1775,21 @@ export function convertOpenAIChunkToGemini(
       typeof usage.prompt_tokens_details?.cached_tokens === 'number' ||
       typeof extendedUsage.cached_tokens === 'number';
 
-    // If we only have total tokens but no breakdown, estimate the split
-    // Typically input is ~70% and output is ~30% for most conversations
-    let finalPromptTokens = promptTokens;
-    let finalCompletionTokens = completionTokens;
-
-    const tokenCountsEstimated =
-      totalTokens > 0 && promptTokens === 0 && completionTokens === 0;
-    if (tokenCountsEstimated) {
-      // Estimate: assume 70% input, 30% output. Derive completion from the
-      // remainder so the two halves always add back up to totalTokens rather
-      // than rounding each independently (e.g. 5 would give 4 + 2 = 6).
-      finalPromptTokens = Math.round(totalTokens * 0.7);
-      finalCompletionTokens = totalTokens - finalPromptTokens;
-    }
+    const hasTokenBreakdown =
+      totalTokens === 0 || promptTokens !== 0 || completionTokens !== 0;
 
     response.usageMetadata = {
-      promptTokenCount: finalPromptTokens,
-      candidatesTokenCount: finalCompletionTokens,
+      ...(hasTokenBreakdown
+        ? {
+            promptTokenCount: promptTokens,
+            candidatesTokenCount: completionTokens,
+          }
+        : {}),
       thoughtsTokenCount: thinkingTokens,
       totalTokenCount: totalTokens,
       cachedContentTokenCount: cachedTokens,
     };
     setGenAiUsageProvenance(response.usageMetadata, {
-      tokenCountsEstimated,
       cachedInputTokensReported,
     });
   }

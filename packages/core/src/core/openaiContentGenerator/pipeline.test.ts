@@ -3104,7 +3104,6 @@ describe('ContentGenerationPipeline', () => {
         totalTokenCount: 30,
       };
       setGenAiUsageProvenance(mockUsageResponse.usageMetadata, {
-        tokenCountsEstimated: true,
         cachedInputTokensReported: false,
       });
 
@@ -3155,7 +3154,6 @@ describe('ContentGenerationPipeline', () => {
       });
       expect(lastResult.modelVersion).toBe('actual-provider-model');
       expect(getGenAiUsageProvenance(lastResult.usageMetadata)).toEqual({
-        tokenCountsEstimated: true,
         cachedInputTokensReported: false,
       });
     });

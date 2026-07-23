@@ -7,7 +7,6 @@
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 
 export interface GenAiUsageProvenance {
-  tokenCountsEstimated?: boolean;
   cachedInputTokensReported?: boolean;
   cacheCreationInputTokens?: number;
 }

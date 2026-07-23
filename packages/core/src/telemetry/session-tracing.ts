@@ -66,7 +66,6 @@ export interface LLMRequestMetadata {
   cachedInputTokens?: number;
   cacheCreationInputTokens?: number;
   cachedInputTokensReported?: boolean;
-  tokenCountsEstimated?: boolean;
   success: boolean;
   durationMs?: number;
   error?: string;
@@ -657,36 +656,28 @@ export function endLLMRequestSpan(
     const endAttributes: Attributes = { duration_ms: duration };
 
     if (metadata) {
-      if (metadata.inputTokens !== undefined) {
-        endAttributes['input_tokens'] = metadata.inputTokens;
-        if (
-          !metadata.tokenCountsEstimated &&
-          Number.isSafeInteger(metadata.inputTokens) &&
-          metadata.inputTokens >= 0
-        ) {
-          endAttributes['gen_ai.usage.input_tokens'] = metadata.inputTokens;
-        }
+      if (
+        Number.isSafeInteger(metadata.inputTokens) &&
+        metadata.inputTokens !== undefined &&
+        metadata.inputTokens >= 0
+      ) {
+        endAttributes['gen_ai.usage.input_tokens'] = metadata.inputTokens;
       }
-      if (metadata.outputTokens !== undefined) {
-        endAttributes['output_tokens'] = metadata.outputTokens;
-        if (
-          !metadata.tokenCountsEstimated &&
-          Number.isSafeInteger(metadata.outputTokens) &&
-          metadata.outputTokens >= 0
-        ) {
-          endAttributes['gen_ai.usage.output_tokens'] = metadata.outputTokens;
-        }
+      if (
+        Number.isSafeInteger(metadata.outputTokens) &&
+        metadata.outputTokens !== undefined &&
+        metadata.outputTokens >= 0
+      ) {
+        endAttributes['gen_ai.usage.output_tokens'] = metadata.outputTokens;
       }
-      if (metadata.cachedInputTokens !== undefined) {
-        endAttributes['cached_input_tokens'] = metadata.cachedInputTokens;
-        if (
-          metadata.cachedInputTokensReported &&
-          Number.isSafeInteger(metadata.cachedInputTokens) &&
-          metadata.cachedInputTokens >= 0
-        ) {
-          endAttributes['gen_ai.usage.cache_read.input_tokens'] =
-            metadata.cachedInputTokens;
-        }
+      if (
+        metadata.cachedInputTokensReported &&
+        Number.isSafeInteger(metadata.cachedInputTokens) &&
+        metadata.cachedInputTokens !== undefined &&
+        metadata.cachedInputTokens >= 0
+      ) {
+        endAttributes['gen_ai.usage.cache_read.input_tokens'] =
+          metadata.cachedInputTokens;
       }
       if (
         Number.isSafeInteger(metadata.cacheCreationInputTokens) &&
