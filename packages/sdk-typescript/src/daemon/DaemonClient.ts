@@ -1913,9 +1913,13 @@ export class DaemonClient {
 
   async getWorkspaceAgent(
     agentType: string,
+    opts: { scope?: 'workspace' | 'global' } = {},
   ): Promise<DaemonWorkspaceAgentDetail> {
+    const url = opts.scope
+      ? `${this.baseUrl}/workspace/agents/${urlEncode(agentType)}?scope=${urlEncode(opts.scope)}`
+      : `${this.baseUrl}/workspace/agents/${urlEncode(agentType)}`;
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/agents/${urlEncode(agentType)}`,
+      url,
       { headers: this.headers() },
       async (res) => {
         if (!res.ok) {

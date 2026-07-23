@@ -36,6 +36,25 @@ describe('workspace actions', () => {
     });
   });
 
+  it('preheats ACP with the requested timeout', async () => {
+    const workspaceAcpPreheat = vi.fn().mockResolvedValue({
+      ready: true,
+      channelLive: true,
+      durationMs: 2,
+    });
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ workspaceAcpPreheat }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+
+    await expect(actions.preheatAcp(5_000)).resolves.toMatchObject({
+      ready: true,
+      channelLive: true,
+    });
+    expect(workspaceAcpPreheat).toHaveBeenCalledWith(5_000);
+  });
+
   it('applies the action timeout to workspace removal', async () => {
     vi.useFakeTimers();
     const remove = vi.fn(() => new Promise<never>(() => {}));
