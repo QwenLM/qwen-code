@@ -413,6 +413,15 @@ describe('qwen-autofix workflow', () => {
     expect(block).toBeTruthy();
     const script = block.replace(/^ {12}/gm, '');
 
+    // Single-source the signature list from the workflow rather than re-typing
+    // it here, so the production value and this test can never drift out of
+    // sync (same extract-from-source idiom as NON_BLOCKING_CHECKS above). The
+    // toContain guard fails loudly if the env is renamed or the regex breaks —
+    // otherwise an empty pattern would match every line and silently pass.
+    const INFRA_SIGNATURES =
+      workflow.match(/INFRA_FAILURE_SIGNATURES: '([^']*)'/)?.[1] ?? '';
+    expect(INFRA_SIGNATURES).toContain('lost communication with the server');
+
     const run = ({
       checks,
       annotations,
@@ -466,8 +475,7 @@ describe('qwen-autofix workflow', () => {
             PR: '1',
             PR_META: JSON.stringify({ headRefOid: 'headSHA' }),
             CHECKS_JSON: JSON.stringify(checks),
-            INFRA_FAILURE_SIGNATURES:
-              'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed',
+            INFRA_FAILURE_SIGNATURES: INFRA_SIGNATURES,
             PATH: `${bin}:${process.env.PATH}`,
           },
           encoding: 'utf8',
