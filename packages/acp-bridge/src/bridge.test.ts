@@ -7134,7 +7134,16 @@ describe('createAcpSessionBridge', () => {
     });
 
     it('publishes a deadline turn_error, unlocks the FIFO, and clears active state when the agent wedges (DAEMON-003)', async () => {
-      const handle = wedgeChannel();
+      const handle = makeChannel({
+        promptImpl: async (request) => {
+          const text = (request.prompt[0] as { text?: string }).text;
+          if (text === 'wedge') {
+            return new Promise<PromptResponse>(() => {});
+          }
+          return { stopReason: 'end_turn' };
+        },
+        cancelImpl: () => new Promise<void>(() => {}),
+      });
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       const events: BridgeEvent[] = [];
@@ -7806,6 +7815,59 @@ describe('createAcpSessionBridge', () => {
       await cancel;
       await expect(second).resolves.toEqual({ stopReason: 'end_turn' });
       expect(handle.agent.promptCalls).toHaveLength(2);
+      await bridge.shutdown();
+    });
+
+    it('releases cancellation and queued work when the channel exits during the handshake', async () => {
+      const firstPromptEntered = deferred<void>();
+      const handle = makeChannel({
+        promptImpl: async (request) => {
+          const text = (request.prompt[0] as { text?: string }).text;
+          if (text === 'first') {
+            firstPromptEntered.resolve(undefined);
+            return new Promise<PromptResponse>(() => {});
+          }
+          return { stopReason: 'end_turn' };
+        },
+        cancelImpl: () => new Promise<void>(() => {}),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const first = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'first' }],
+        },
+        undefined,
+        { promptId: 'prompt-first' },
+      );
+      void first.catch(() => {});
+      await firstPromptEntered.promise;
+      const second = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'second' }],
+        },
+        undefined,
+        { promptId: 'prompt-second' },
+      );
+      void second.catch(() => {});
+
+      const cancel = bridge.cancelSession(session.sessionId);
+      await vi.waitFor(() => {
+        expect(handle.agent.extMethodCalls).toContainEqual({
+          method: PROMPT_CANCEL_METHOD,
+          params: { sessionId: session.sessionId },
+        });
+      });
+      handle.crash({ exitCode: 1, signalCode: null });
+
+      await expect(cancel).rejects.toBeInstanceOf(BridgeChannelClosedError);
+      await expect(first).rejects.toBeInstanceOf(BridgeChannelClosedError);
+      await expect(second).rejects.toBeDefined();
+      expect(handle.agent.promptCalls).toHaveLength(1);
       await bridge.shutdown();
     });
 

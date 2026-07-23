@@ -608,6 +608,8 @@ export interface PendingPromptEntry {
   cancelForwardInitial?: Promise<void>;
   /** Full cancellation handshake, used to fence the next FIFO dispatch. */
   cancelForwardDrain?: Promise<void>;
+  /** Releases the cancellation fence when the prompt deadline expires. */
+  cancelForwardDeadline?: Promise<void>;
   /** True after the prompt request has been handed to the ACP connection. */
   dispatched?: boolean;
   /**

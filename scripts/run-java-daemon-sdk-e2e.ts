@@ -220,6 +220,11 @@ try {
       `Java E2E failed with ${result}; fake requests=${fake.requests.length}\n${stderr}\n${daemonLog}`,
     );
   }
+  if (fake.requests.length === 0) {
+    throw new Error(
+      'Java E2E completed without exercising the daemon model path; the integration tests may have been skipped',
+    );
+  }
   succeeded = true;
 } finally {
   await stopDaemon();

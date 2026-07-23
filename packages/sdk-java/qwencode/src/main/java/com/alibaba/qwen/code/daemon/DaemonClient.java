@@ -63,6 +63,7 @@ public final class DaemonClient implements AutoCloseable {
     private final AtomicInteger activeStreamLifecycles = new AtomicInteger();
     private final ThreadLocal<Boolean> futurePublicationThread = new ThreadLocal<>();
     private final Object lifecycleLock = new Object();
+    private int activeSessionCreations;
 
     private DaemonClient(Builder builder) {
         this.baseUrl = normalizeBaseUri(builder.baseUri);
@@ -151,6 +152,9 @@ public final class DaemonClient implements AutoCloseable {
         }
         synchronized (lifecycleLock) {
             ensureOpen();
+            activeSessionCreations += 1;
+        }
+        try {
             DaemonCapabilities capabilities = capabilities();
             if (!capabilities.getTransports().contains("rest")) {
                 throw new DaemonProtocolException(
@@ -160,6 +164,9 @@ public final class DaemonClient implements AutoCloseable {
                 throw new DaemonProtocolException(
                         "The daemon does not advertise session_scope_override; "
                                 + "the SDK cannot guarantee the requested session scope");
+            }
+            synchronized (lifecycleLock) {
+                ensureOpen();
             }
             HttpSupport.Response response;
             try {
@@ -192,11 +199,34 @@ public final class DaemonClient implements AutoCloseable {
                 DaemonSessionClient result = new DaemonSessionClient(this, session,
                         capabilities.supports("client_heartbeat"),
                         capabilities.supports("prompt_absolute_deadline"));
-                sessions.add(result);
-                result.startAutomaticHeartbeat();
-                return result;
+                synchronized (lifecycleLock) {
+                    if (!closed.get()) {
+                        sessions.add(result);
+                        result.startAutomaticHeartbeat();
+                        return result;
+                    }
+                }
+                IllegalStateException failure = new IllegalStateException(
+                        "DaemonClient is closed");
+                try {
+                    result.close();
+                } catch (RuntimeException cleanupFailure) {
+                    failure.addSuppressed(cleanupFailure);
+                }
+                throw failure;
             } catch (DaemonProtocolException e) {
                 throw new SessionCreationOutcomeUnknownException(e);
+            }
+        } finally {
+            boolean shutdownHttpExecutor = false;
+            synchronized (lifecycleLock) {
+                activeSessionCreations -= 1;
+                if (closed.get() && activeSessionCreations == 0) {
+                    shutdownHttpExecutor = true;
+                }
+            }
+            if (shutdownHttpExecutor) {
+                httpExecutor.shutdownNow();
             }
         }
     }
@@ -204,11 +234,13 @@ public final class DaemonClient implements AutoCloseable {
     @Override
     public void close() {
         List<DaemonSessionClient> sessionsToClose;
+        boolean shutdownHttpExecutor;
         synchronized (lifecycleLock) {
             if (!closed.compareAndSet(false, true)) {
                 return;
             }
             sessionsToClose = new ArrayList<>(sessions);
+            shutdownHttpExecutor = activeSessionCreations == 0;
         }
         RuntimeException firstFailure = null;
         try {
@@ -226,10 +258,14 @@ public final class DaemonClient implements AutoCloseable {
         } finally {
             executor.shutdown();
             maintenanceExecutor.shutdownNow();
-            httpExecutor.shutdownNow();
+            if (shutdownHttpExecutor) {
+                httpExecutor.shutdownNow();
+            }
             awaitTermination(executor);
             awaitTermination(maintenanceExecutor);
-            awaitTermination(httpExecutor);
+            if (shutdownHttpExecutor) {
+                awaitTermination(httpExecutor);
+            }
             shutdownPromptSupportIfIdle();
             if (scheduler.isShutdown()) {
                 awaitTermination(scheduler);

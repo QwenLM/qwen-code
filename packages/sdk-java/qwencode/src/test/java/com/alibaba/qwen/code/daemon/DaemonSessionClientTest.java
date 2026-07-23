@@ -170,6 +170,86 @@ class DaemonSessionClientTest {
     }
 
     @Test
+    void slowSessionCreationDoesNotBlockExistingSessionMutation()
+            throws Exception {
+        CountDownLatch createStarted = new CountDownLatch(1);
+        CountDownLatch releaseCreate = new CountDownLatch(1);
+        CountDownLatch cancelReceived = new CountDownLatch(1);
+        server.createContext("/session/session-1/cancel", exchange -> {
+            cancelReceived.countDown();
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+        server.createContext("/session/session-1/detach", noContent());
+        server.createContext("/session/session-2/detach", noContent());
+
+        try (DaemonClient daemon = newClient();
+                DaemonSessionClient first = daemon.createSession()) {
+            server.removeContext("/session");
+            server.createContext("/session", exchange -> {
+                createStarted.countDown();
+                await(releaseCreate);
+                sendJson(exchange, 200,
+                        sessionJson("session-2", "client-2"));
+            });
+            CompletableFuture<DaemonSessionClient> creating =
+                    CompletableFuture.supplyAsync(daemon::createSession);
+            try {
+                assertTrue(createStarted.await(1, TimeUnit.SECONDS));
+                CompletableFuture<Void> cancelling = CompletableFuture.runAsync(
+                        first::cancelActivePrompt);
+                assertTrue(cancelReceived.await(1, TimeUnit.SECONDS));
+                cancelling.get(1, TimeUnit.SECONDS);
+            } finally {
+                releaseCreate.countDown();
+            }
+            try (DaemonSessionClient second = creating.get(1, TimeUnit.SECONDS)) {
+                assertEquals("session-2", second.getSessionId());
+            }
+        }
+    }
+
+    @Test
+    void clientCloseDetachesSessionCreatedByLosingRace() throws Exception {
+        CountDownLatch createStarted = new CountDownLatch(1);
+        CountDownLatch releaseCreate = new CountDownLatch(1);
+        CountDownLatch detachReceived = new CountDownLatch(1);
+        AtomicReference<String> detachedClient = new AtomicReference<>();
+        server.removeContext("/session");
+        server.createContext("/session", exchange -> {
+            createStarted.countDown();
+            await(releaseCreate);
+            sendJson(exchange, 200, sessionJson("session-2", "client-2"));
+        });
+        server.createContext("/session/session-2/detach", exchange -> {
+            detachedClient.set(exchange.getRequestHeaders()
+                    .getFirst("X-Qwen-Client-Id"));
+            detachReceived.countDown();
+            exchange.sendResponseHeaders(204, -1);
+            exchange.close();
+        });
+
+        DaemonClient daemon = newClient();
+        CompletableFuture<DaemonSessionClient> creating =
+                CompletableFuture.supplyAsync(daemon::createSession);
+        try {
+            assertTrue(createStarted.await(1, TimeUnit.SECONDS));
+            CompletableFuture.runAsync(daemon::close)
+                    .get(1, TimeUnit.SECONDS);
+            assertTrue(!creating.isDone());
+            releaseCreate.countDown();
+            CompletionException failure = assertThrows(
+                    CompletionException.class, creating::join);
+            assertInstanceOf(IllegalStateException.class, failure.getCause());
+            assertTrue(detachReceived.await(1, TimeUnit.SECONDS));
+            assertEquals("client-2", detachedClient.get());
+        } finally {
+            releaseCreate.countDown();
+            daemon.close();
+        }
+    }
+
+    @Test
     void refusesDeadlineBeforePromptWhenDaemonCannotGuaranteeIt() {
         AtomicInteger promptRequests = new AtomicInteger();
         server.removeContext("/capabilities");

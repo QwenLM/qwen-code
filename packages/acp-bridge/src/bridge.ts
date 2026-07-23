@@ -1804,10 +1804,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
     const initial = (async () => {
       try {
-        const result = await entry.connection.extMethod(
-          PROMPT_CANCEL_METHOD,
-          notification,
-        );
+        const extension = entry.connection
+          .extMethod(PROMPT_CANCEL_METHOD, notification)
+          .then((result) => ({ kind: 'result' as const, result }));
+        const outcome = await Promise.race([
+          extension,
+          getTransportClosedReject(entry),
+          ...(pending.cancelForwardDeadline
+            ? [
+                pending.cancelForwardDeadline.then(() => ({
+                  kind: 'deadline' as const,
+                })),
+              ]
+            : []),
+        ]);
+        if (outcome.kind === 'deadline') return;
+        const { result } = outcome;
         if (typeof result['cancelled'] !== 'boolean') {
           throw new Error(
             `${PROMPT_CANCEL_METHOD} returned an invalid acknowledgement`,
@@ -1821,7 +1833,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             error.code === -32601) ||
           isNotCurrentlyGeneratingCancelError(error)
         ) {
-          await entry.connection.cancel(notification);
+          await Promise.race([
+            entry.connection.cancel(notification),
+            getTransportClosedReject(entry),
+            ...(pending.cancelForwardDeadline
+              ? [pending.cancelForwardDeadline]
+              : []),
+          ]);
           return;
         }
         throw error;
@@ -1837,7 +1855,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // (or the target prompt has already settled). ACP-compatible custom agents
     // that do not implement it receive one standard session/cancel notification.
     // The FIFO tail awaits this promise so no extension request remains in flight
-    // when prompt ownership advances.
+    // when prompt ownership advances, except when the prompt deadline invokes the
+    // documented DAEMON-003 overlap policy.
     pending.cancelForwardDrain = initial;
     void initial.catch(() => {});
     return initial;
@@ -5222,6 +5241,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // The race consumer may not be attached yet (or ever, for a queued
         // prompt that never dispatches) — keep the rejection handled.
         deadlinePromise.catch(() => {});
+        pendingEntry.cancelForwardDeadline = deadlinePromise.then(
+          () => undefined,
+          () => undefined,
+        );
         const onDeadline = () => {
           if (pendingEntry.terminalPublished) return;
           const deadlineErr = new PromptDeadlineExceededError(deadlineMs);
