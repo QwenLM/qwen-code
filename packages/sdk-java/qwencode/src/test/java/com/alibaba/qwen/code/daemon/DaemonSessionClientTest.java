@@ -2412,10 +2412,34 @@ class DaemonSessionClientTest {
     }
 
     @Test
+    void pendingStreamCleanupDoesNotBlockNextPromptAdmission()
+            throws Exception {
+        CompletableFuture<Void> pendingCleanup = new CompletableFuture<>();
+        CountDownLatch released = new CountDownLatch(1);
+        CountDownLatch nextStarted = new CountDownLatch(1);
+
+        try (DaemonClient daemon = clientBuilder()
+                .maximumConcurrentPrompts(1)
+                .build()) {
+            daemon.submit(() -> { }, () -> { }, released::countDown,
+                    () -> pendingCleanup);
+            assertTrue(released.await(1, TimeUnit.SECONDS));
+
+            daemon.submit(nextStarted::countDown, () -> { }, () -> { },
+                    () -> CompletableFuture.completedFuture(null));
+            assertTrue(nextStarted.await(1, TimeUnit.SECONDS));
+        } finally {
+            pendingCleanup.complete(null);
+        }
+    }
+
+    @Test
     void stalledStreamCleanupAppliesBackpressureBeforePromptExecution()
             throws Exception {
         CompletableFuture<Void> firstCleanup = new CompletableFuture<>();
+        CompletableFuture<Void> secondCleanup = new CompletableFuture<>();
         CountDownLatch firstReleased = new CountDownLatch(1);
+        CountDownLatch secondReleased = new CountDownLatch(1);
         AtomicInteger rejectedTaskRuns = new AtomicInteger();
 
         try (DaemonClient daemon = clientBuilder()
@@ -2424,6 +2448,9 @@ class DaemonSessionClientTest {
             daemon.submit(() -> { }, () -> { }, firstReleased::countDown,
                     () -> firstCleanup);
             assertTrue(firstReleased.await(1, TimeUnit.SECONDS));
+            daemon.submit(() -> { }, () -> { }, secondReleased::countDown,
+                    () -> secondCleanup);
+            assertTrue(secondReleased.await(1, TimeUnit.SECONDS));
 
             assertThrows(DaemonClientCapacityException.class,
                     () -> daemon.submit(rejectedTaskRuns::incrementAndGet,
@@ -2438,6 +2465,7 @@ class DaemonSessionClientTest {
             assertTrue(recovered.await(1, TimeUnit.SECONDS));
         } finally {
             firstCleanup.complete(null);
+            secondCleanup.complete(null);
         }
     }
 
