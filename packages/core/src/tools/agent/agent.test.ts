@@ -2512,11 +2512,13 @@ describe('AgentTool', () => {
       function lastStartSpec(): {
         depth?: number;
         parentAgentId?: string;
+        agentDescription?: string;
       } {
         const calls = mockStartSubagentSpan.mock.calls;
         return calls[calls.length - 1][0] as {
           depth?: number;
           parentAgentId?: string;
+          agentDescription?: string;
         };
       }
 
@@ -2661,6 +2663,9 @@ describe('AgentTool', () => {
         const spec = lastStartSpec();
         expect(spec.depth).toBe(0);
         expect(spec.parentAgentId).toBeUndefined();
+        expect(spec.agentDescription).toBe(
+          'Specialized agent for searching and analyzing files',
+        );
       });
 
       it('startSubagentSpan receives depth=parentDepth+1 when invoked inside an outer agent frame', async () => {
