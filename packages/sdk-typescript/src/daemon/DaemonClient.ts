@@ -24,6 +24,7 @@ import type {
   DaemonCapabilities,
   DaemonCreateAgentRequest,
   DaemonArchiveSessionsResult,
+  DaemonWorkspaceGenerationEvent,
   DaemonGeneratedAgentContent,
   DaemonDeviceFlowStartResult,
   DaemonDeviceFlowState,
@@ -1837,6 +1838,56 @@ export class DaemonClient {
     );
   }
 
+  private async *generateContentEvents<T extends { type: string }>(
+    path: string,
+    label: string,
+    body: Record<string, string>,
+    opts: { signal?: AbortSignal; clientId?: string } | undefined,
+    parse: (value: unknown) => T | undefined,
+    requireTerminal: boolean,
+  ): AsyncGenerator<T> {
+    const res = await this.transport.fetch(`${this.baseUrl}${path}`, {
+      method: 'POST',
+      headers: this.headers(
+        {
+          'Content-Type': 'application/json',
+          Accept: 'text/event-stream',
+        },
+        opts?.clientId,
+      ),
+      body: JSON.stringify(body),
+      signal: opts?.signal,
+    });
+    if (!res.ok) throw await this.failOnError(res, label);
+    if (!res.body) throw new Error('Generation response body is missing');
+    let sawTerminal = false;
+    for await (const event of parseSseStream(res.body, opts?.signal)) {
+      const generationEvent = parse(event);
+      if (!generationEvent) continue;
+      sawTerminal =
+        generationEvent.type === 'done' || generationEvent.type === 'error';
+      yield generationEvent;
+      if (requireTerminal && sawTerminal) return;
+    }
+    if (requireTerminal && !opts?.signal?.aborted && !sawTerminal) {
+      throw new Error('Stream ended without terminal event');
+    }
+  }
+
+  async *generateWorkspaceContent(
+    prompt: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): AsyncGenerator<DaemonWorkspaceGenerationEvent> {
+    yield* this.generateContentEvents(
+      '/workspace/generate',
+      'POST /workspace/generate',
+      { prompt },
+      opts,
+      parseSessionGenerationEvent,
+      true,
+    );
+  }
+
   async getWorkspaceAgent(
     agentType: string,
   ): Promise<DaemonWorkspaceAgentDetail> {
@@ -2620,29 +2671,14 @@ export class DaemonClient {
     prompt: string,
     opts?: { signal?: AbortSignal; clientId?: string },
   ): AsyncGenerator<DaemonSessionGenerationEvent> {
-    const res = await this.transport.fetch(
-      `${this.baseUrl}/session/${urlEncode(sessionId)}/generate`,
-      {
-        method: 'POST',
-        headers: this.headers(
-          {
-            'Content-Type': 'application/json',
-            Accept: 'text/event-stream',
-          },
-          opts?.clientId,
-        ),
-        body: JSON.stringify({ prompt }),
-        signal: opts?.signal,
-      },
+    yield* this.generateContentEvents(
+      `/session/${urlEncode(sessionId)}/generate`,
+      'POST /session/:id/generate',
+      { prompt },
+      opts,
+      parseSessionGenerationEvent,
+      false,
     );
-    if (!res.ok) {
-      throw await this.failOnError(res, 'POST /session/:id/generate');
-    }
-    if (!res.body) throw new Error('Generation response body is missing');
-    for await (const event of parseSseStream(res.body, opts?.signal)) {
-      const generationEvent = parseSessionGenerationEvent(event);
-      if (generationEvent) yield generationEvent;
-    }
   }
 
   async btwSession(

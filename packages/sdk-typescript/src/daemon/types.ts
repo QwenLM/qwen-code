@@ -1748,6 +1748,9 @@ export interface DaemonGeneratedAgentContent {
   systemPrompt: string;
 }
 
+/** Stateless generation events emitted by the resolved workspace runtime. */
+export type DaemonWorkspaceGenerationEvent = DaemonSessionGenerationEvent;
+
 /**
  * Body of `POST /workspace/agents/:agentType`. `name` / `level` /
  * `filePath` / `isBuiltin` are intentionally omitted — agent type
