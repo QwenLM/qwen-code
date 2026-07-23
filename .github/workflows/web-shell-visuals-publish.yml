@@ -241,6 +241,15 @@ jobs:
             --paginate --jq '.[].filename' > "${CHANGED_PATHS_FILE}" 2>/dev/null \
             || echo "::warning::Could not list changed files for PR #${PR}; the preview will not flag coverage gaps."
 
+          # --- Render status, to keep an empty/partial preview honest --------
+          # 'failure' when >=1 scenario failed to render on the PR head (the
+          # render job's continue-on-error keeps the passing shots but the whole
+          # preview would otherwise read as a clean "no changes"). Absent/empty ⇒
+          # treat as complete (older runs, or the file was pruned), so this only
+          # ever ADDS a warning, never suppresses an existing preview.
+          RENDER_STATUS_FILE="${ART}/render-status.txt"
+          [ -f "${RENDER_STATUS_FILE}" ] || RENDER_STATUS_FILE=''
+
           # --- Build the comment body ---------------------------------------
           # Delegated to the same unit-tested script (light/dark pairing, flow
           # labels, and HTML escaping live in web-shell-visuals-publish.mjs).
@@ -249,7 +258,8 @@ jobs:
             "${STAGE}" \
             "${RAW_BASE}" \
             "${SHORT_SHA}" "${RUN_URL}" "${BODY_FILE}" \
-            "${CHANGED_PATHS_FILE}"
+            "${CHANGED_PATHS_FILE}" \
+            "${RENDER_STATUS_FILE}"
 
           # --- Post or update the PR comment --------------------------------
           # Dedup only against OUR OWN prior comment (bot author + marker), and
