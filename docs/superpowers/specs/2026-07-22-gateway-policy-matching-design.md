@@ -220,7 +220,25 @@ Rules:
   to derive its authoritative decision by calling `evaluate`, so the
   trace cannot drift from enforcement.
 - `pathGlob` matching uses core's `matchesPathPattern` (picomatch +
-  normalization), closing the traversal-bypass hole.
+  normalization), closing the traversal-bypass hole. Two rules make that
+  real, and both were learned the hard way in review:
+  1. **Normalize the candidate.** `matchesPathPattern` runs only
+     `toPosixPath` on the candidate — it never collapses `.`/`..`. The
+     evaluator must `path.resolve` the candidate first (against the
+     call's cwd, which is where the operation genuinely happens), or
+     `/proj/sub/../.env` fails to match `**/.env*`.
+  2. **Anchor the pattern to `projectRoot`, never to the call's cwd.**
+     `resolvePathPattern` anchors an unprefixed pattern with
+     `path.join(cwd, specifier)`. The call's cwd comes from
+     `rawInput.directory`/`cwd` — **fields the model supplies in its own
+     tool call**. Passing that as the anchor lets a prompt-injected model
+     defeat a `**/.env*` deny on the literal path `/proj/.env` merely by
+     declaring `directory: '/proj/somewhere/else'`. So the evaluator
+     passes `projectRoot` (trusted, from daemon capabilities) as the
+     anchor: `matchesPathPattern(pattern, resolvedCandidate, projectRoot,
+projectRoot)`. A policy author writing `**/.env*` means "anywhere"
+     and `src/auth/**` means "relative to the project" — neither may move
+     because the model claimed a different working directory.
 - `tool` and `argsGlob` keep the existing hand-rolled `glob.ts` matcher:
   they carry no path semantics, and the deliberate non-RegExp choice
   (ReDoS avoidance, `glob.ts:12-18`) is preserved where it costs nothing.
@@ -303,13 +321,14 @@ discrimination test that fails against the current code:
 
 ## Threat model
 
-| Attacker                                                  | Capability                                                                                                           | Mitigation                                                                                                                                                                                                                        |
-| --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Local agent (possibly prompt-injected) issuing tool calls | Evade a `pathGlob` deny by spelling the path differently (`./x`, `a/../x`, symlink-ish forms)                        | `pathGlob` now uses core's `matchesPathPattern` (picomatch + normalization) instead of the depth-blind hand-rolled glob. Note: string normalization only — this does not resolve symlinks (see Residuals).                        |
-| Same                                                      | Perform a denied file operation by expressing it as a shell command (`cat .env`, `rm -rf x`) rather than a file tool | For `kind: 'execute'`, `extractShellOperations` contributes the touched paths and operations, so existing `pathGlob`/`operation` denies now cover shell-expressed effects, including compound commands.                           |
-| Policy author (self-inflicted)                            | Write `allow: write_file` and unknowingly also permit `edit`                                                         | Alias→kind mapping is lossy by construction; `policy lint` and load-time advisory name every widening `allow` alias. `deny` aliases widen safely.                                                                                 |
-| Operator upgrading the gateway                            | Dormant `allow` rules silently become live and start auto-approving                                                  | Documented prominently here and in the walkthrough; lint reports newly-effective allow rules; boot emits an advisory count. Deliberate trade: correctness over a dry-run gate (user decision).                                    |
-| Any                                                       | Exploit the fixed matcher to reach a _wider_ allow than before                                                       | All new dimensions are pure-AND constraints; adding `operation` can only narrow a rule. Enriched path candidates widen only _path-matching_ rules, which for `deny` is the intent and for `allow` is covered by the lint warning. |
+| Attacker                                                  | Capability                                                                                                                                                                                           | Mitigation                                                                                                                                                                                                                                                                                                                              |
+| --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Local agent (possibly prompt-injected) issuing tool calls | Evade a `pathGlob` deny by spelling the path differently (`./x`, `a/../x`, symlink-ish forms)                                                                                                        | `pathGlob` uses core's `matchesPathPattern` (picomatch) instead of the depth-blind hand-rolled glob, **and** the evaluator `path.resolve`s the candidate first — core normalizes only the pattern, so without that step `a/../x` still slips through. Note: string normalization only — this does not resolve symlinks (see Residuals). |
+| Same                                                      | Move the _pattern's_ anchor so a deny stops covering its target — declare `directory: '/proj/elsewhere'` in the tool call and walk out from under a `**/.env*` rule on the literal path `/proj/.env` | Unprefixed patterns anchor to `projectRoot` (trusted, from daemon capabilities), **never** to the call-supplied `cwd`. The model controls `rawInput.directory`/`cwd`; it must not control where a policy rule points. The call's cwd is still used to resolve _relative candidate_ paths — that is where the operation actually runs.   |
+| Same                                                      | Perform a denied file operation by expressing it as a shell command (`cat .env`, `rm -rf x`) rather than a file tool                                                                                 | For `kind: 'execute'`, `extractShellOperations` contributes the touched paths and operations, so existing `pathGlob`/`operation` denies now cover shell-expressed effects, including compound commands.                                                                                                                                 |
+| Policy author (self-inflicted)                            | Write `allow: write_file` and unknowingly also permit `edit`                                                                                                                                         | Alias→kind mapping is lossy by construction; `policy lint` and load-time advisory name every widening `allow` alias. `deny` aliases widen safely.                                                                                                                                                                                       |
+| Operator upgrading the gateway                            | Dormant `allow` rules silently become live and start auto-approving                                                                                                                                  | Documented prominently here and in the walkthrough; lint reports newly-effective allow rules; boot emits an advisory count. Deliberate trade: correctness over a dry-run gate (user decision).                                                                                                                                          |
+| Any                                                       | Exploit the fixed matcher to reach a _wider_ allow than before                                                                                                                                       | All new dimensions are pure-AND constraints; adding `operation` can only narrow a rule. Enriched path candidates widen only _path-matching_ rules, which for `deny` is the intent and for `allow` is covered by the lint warning.                                                                                                       |
 
 **Residuals (accepted, documented):**
 
