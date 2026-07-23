@@ -294,16 +294,22 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('.conclusion // .state // ""');
     expect(reviewScanJob).toContain('.workflowName // ""');
     expect(reviewScanJob).toContain('startswith("review-address")');
-    // Every failed-check selector must carry the address-check carve-out, or
-    // the loop reads its OWN runs as feedback about the PR. Asserting the
-    // property rather than the count lets a new selector be added, but not
-    // one that forgets the carve-out.
+    // Every failed-check selector must guard against the loop reading its OWN
+    // runs as feedback about the PR. Most selectors carry the review-address
+    // carve-out; the stale-base selector instead excludes ALL Qwen Autofix
+    // checks (no carve-out), which is strictly narrower. Assert that every
+    // selector has one guard or the other.
     const scanCheckSelectors =
       reviewScanJob.match(/IN\("(?:FAILURE|QUEUED)"/g) ?? [];
     expect(scanCheckSelectors.length).toBeGreaterThanOrEqual(3);
-    expect(
-      reviewScanJob.match(/startswith\("review-address"\)/g) ?? [],
-    ).toHaveLength(scanCheckSelectors.length);
+    const carveOutCount = (
+      reviewScanJob.match(/startswith\("review-address"\)/g) ?? []
+    ).length;
+    const fullExclusionCount = (reviewScanJob.match(/!= "Qwen Autofix"/g) ?? [])
+      .length;
+    expect(carveOutCount + fullExclusionCount).toBeGreaterThanOrEqual(
+      scanCheckSelectors.length,
+    );
     expect(reviewScanJob).toContain('"${N_FAILED_CHECKS}" -eq 0');
     expect(reviewScanJob).toContain('${N_FAILED_CHECKS} failed check(s) new');
     expect(reviewScanJob).toContain('.completedAt // .updatedAt // ""');
@@ -401,14 +407,15 @@ describe('qwen-autofix workflow', () => {
     expect(run([{ ...llm, name: 'resolve-pr' }])).toBe('true');
   });
 
-  it('auto-updates a PR red only from a stale base, gated on the check being green on main', () => {
+  it('auto-updates a PR red only from a stale base, gated on green-on-main AND red-at-merge-base', () => {
     // A PR can be red purely because it merged a main that was broken then and
     // is fixed now (a web-shell TS break, an agent-registry test — both stranded
-    // healthy PRs today). The one safety gate is: the SAME failing check passes
-    // on current main. That proves the red is base-inherited AND main is healthy
-    // on it, so merging main in cannot import a fresh breakage.
+    // healthy PRs today). Two predicates gate the update: (1) the SAME failing
+    // check passes on current main (main is healthy), AND (2) it was NOT green
+    // at the merge-base the PR carries (the red is base-inherited, not the PR's
+    // own regression). A marker comment bounds repetition.
     const block = reviewScanJob.match(
-      /( {12}STALE_BASE_REDS="\$\(jq[\s\S]*?\n {12}fi\n)\n {12}# Auto-rerun a check that died on INFRASTRUCTURE/,
+      /( {12}# Auto-update a PR that is red ONLY because of a stale base[\s\S]*?\n {12}fi\n)\n {12}N_FAILED_CHECKS=/,
     )?.[1];
     expect(block).toBeTruthy();
     const script = block.replace(/^ {12}/gm, '');
@@ -416,35 +423,54 @@ describe('qwen-autofix workflow', () => {
     const run = ({
       prChecks,
       mainGreen,
+      baseNotGreen = [],
       cmp = 'behind',
       updateOk = true,
       mainHead = 'mainhead999',
       dryRun = false,
+      hasMarker = false,
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'ub-'));
       const bin = join(dir, 'bin');
       mkdirSync(bin);
+      const baseSha = 'basesha123';
+      const basePrHead = 'baseprhead456';
       writeFileSync(
         join(bin, 'gh'),
         [
           '#!/usr/bin/env bash',
           `echo "$*" >> ${JSON.stringify(join(dir, 'calls.log'))}`,
           'for a in "$@"; do case "$a" in',
-          `  */compare/*) printf '${cmp}'; exit 0;;`,
-          `  */update-branch) exit ${updateOk ? 0 : 1};;`,
+          `  *compare*) printf '{"status":"%s","merge_base_commit":{"sha":"%s"}}' "${cmp}" "${baseSha}"; exit 0;;`,
+          `  *commits*pulls*) printf '%s' "${basePrHead}"; exit 0;;`,
+          `  *check-runs*) printf '%s' '${JSON.stringify(baseNotGreen)}'; exit 0;;`,
+          `  *update-branch*) ${updateOk ? '' : `printf 'HTTP 409: merge conflict' >&2; `}exit ${updateOk ? 0 : 1};;`,
           'esac; done',
           'exit 0',
         ].join('\n'),
       );
       chmodSync(join(bin, 'gh'), 0o755);
+      // ic.json: the marker check reads this file for a recent base-updated
+      // marker. An empty array means no marker; a populated one simulates a
+      // recent update.
+      const icJson = hasMarker
+        ? JSON.stringify([
+            {
+              user: { login: 'autofix-bot' },
+              body: '<!-- autofix-base-updated -->',
+              created_at: new Date().toISOString(),
+            },
+          ])
+        : '[]';
+      writeFileSync(join(dir, 'ic.json'), icJson);
       // Wrap in a for-loop so the block's `continue` is legal; a sentinel after
       // the loop body tells us whether `continue` fired (stale-base path) or the
-      // block fell through (no update).
+      // block fell through (no update). Production runs -eo pipefail; match it.
       const out = execFileSync(
         'bash',
         [
           '-c',
-          `set -uo pipefail\nfleet_row(){ :; }\nfor _ in x; do\n${script}\nprintf 'FELL_THROUGH'\ndone`,
+          `set -eo pipefail\nfleet_row(){ :; }\nfor _ in x; do\n${script}\nprintf 'FELL_THROUGH'\ndone`,
         ],
         {
           env: {
@@ -454,8 +480,10 @@ describe('qwen-autofix workflow', () => {
             MAIN_HEAD: mainHead,
             MAIN_GREEN_CHECKS: JSON.stringify(mainGreen),
             CHECKS_JSON: JSON.stringify(prChecks),
-            PR_META: JSON.stringify({ headRefOid: 'prhead123' }),
+            PR_HEAD_OID: 'prhead123',
             DRY_RUN: dryRun ? 'true' : 'false',
+            AUTOFIX_BOT: 'autofix-bot',
+            WORKDIR: dir,
             PATH: `${bin}:${process.env.PATH}`,
           },
           encoding: 'utf8',
@@ -469,51 +497,122 @@ describe('qwen-autofix workflow', () => {
         updated: /pulls\/1\/update-branch/.test(calls),
         cas: /expected_head_sha=prhead123/.test(calls),
         continued: !out.includes('FELL_THROUGH'),
+        markerPosted: /autofix-base-updated/.test(calls),
       };
     };
     const FAIL = (name) => ({ name, conclusion: 'FAILURE' });
     const OK = (name) => ({ name, conclusion: 'SUCCESS' });
 
-    // Base-inherited red (fails here, passes on main) + behind → update & skip.
-    expect(run({ prChecks: [FAIL('Test')], mainGreen: ['Test'] })).toEqual({
+    // Base-inherited red: fails here, passes on main, was red at the merge-base,
+    // and the PR is behind → update & skip.
+    expect(
+      run({
+        prChecks: [FAIL('Test')],
+        mainGreen: ['Test'],
+        baseNotGreen: ['Test'],
+      }),
+    ).toEqual({
       updated: true,
       cas: true,
       continued: true,
+      markerPosted: true,
     });
-    // Red on the PR AND on main (not base-inherited — the PR's own bug) → never
-    // touch it. This is the gate that stops churning a genuinely-broken PR.
-    expect(run({ prChecks: [FAIL('Test')], mainGreen: [] })).toEqual({
+    // Red on the PR but GREEN at the merge-base → the PR introduced the
+    // regression, NOT a stale base. Must NOT update.
+    expect(
+      run({ prChecks: [FAIL('Test')], mainGreen: ['Test'], baseNotGreen: [] }),
+    ).toEqual({
       updated: false,
       cas: false,
       continued: false,
+      markerPosted: false,
+    });
+    // Red on the PR AND red on main (main is also broken) → not stale-base.
+    expect(
+      run({
+        prChecks: [FAIL('Test')],
+        mainGreen: [],
+        baseNotGreen: ['Test'],
+      }),
+    ).toEqual({
+      updated: false,
+      cas: false,
+      continued: false,
+      markerPosted: false,
     });
     // Base-inherited red but the PR already contains main (ahead) → no-op skip.
     expect(
-      run({ prChecks: [FAIL('Test')], mainGreen: ['Test'], cmp: 'ahead' }),
-    ).toEqual({ updated: false, cas: false, continued: false });
-    // Diverged also counts as behind (has commits main lacks AND vice versa).
-    expect(
-      run({ prChecks: [FAIL('Lint')], mainGreen: ['Lint'], cmp: 'diverged' }),
-    ).toEqual({ updated: true, cas: true, continued: true });
-    // No red at all → nothing to do.
-    expect(run({ prChecks: [OK('Test')], mainGreen: ['Test'] })).toEqual({
+      run({
+        prChecks: [FAIL('Test')],
+        mainGreen: ['Test'],
+        baseNotGreen: ['Test'],
+        cmp: 'ahead',
+      }),
+    ).toEqual({
       updated: false,
       cas: false,
       continued: false,
+      markerPosted: false,
+    });
+    // Diverged also counts as behind (has commits main lacks AND vice versa).
+    expect(
+      run({
+        prChecks: [FAIL('Lint')],
+        mainGreen: ['Lint'],
+        baseNotGreen: ['Lint'],
+        cmp: 'diverged',
+      }),
+    ).toEqual({
+      updated: true,
+      cas: true,
+      continued: true,
+      markerPosted: true,
+    });
+    // No red at all → nothing to do.
+    expect(
+      run({
+        prChecks: [OK('Test')],
+        mainGreen: ['Test'],
+        baseNotGreen: ['Test'],
+      }),
+    ).toEqual({
+      updated: false,
+      cas: false,
+      continued: false,
+      markerPosted: false,
     });
     // update-branch fails (a merge conflict): still attempted and logged, but
     // the scan falls through to feedback processing rather than skipping the PR.
     expect(
-      run({ prChecks: [FAIL('Test')], mainGreen: ['Test'], updateOk: false }),
-    ).toEqual({ updated: true, cas: true, continued: false });
+      run({
+        prChecks: [FAIL('Test')],
+        mainGreen: ['Test'],
+        baseNotGreen: ['Test'],
+        updateOk: false,
+      }),
+    ).toEqual({
+      updated: true,
+      cas: true,
+      continued: false,
+      markerPosted: false,
+    });
     // DRY_RUN: the scan must NOT call update-branch — it logs and skips.
     expect(
-      run({ prChecks: [FAIL('Test')], mainGreen: ['Test'], dryRun: true }),
-    ).toEqual({ updated: false, cas: false, continued: true });
-    // A Qwen Autofix check (not review-address) that fails on the PR and passes
-    // on main must NOT be treated as stale-base red — the exclusion filter keeps
-    // the workflow's own failing checks from triggering an update-branch. A logic
-    // inversion in that filter would pass the cases above (none set workflowName).
+      run({
+        prChecks: [FAIL('Test')],
+        mainGreen: ['Test'],
+        baseNotGreen: ['Test'],
+        dryRun: true,
+      }),
+    ).toEqual({
+      updated: false,
+      cas: false,
+      continued: true,
+      markerPosted: false,
+    });
+    // A Qwen Autofix check that fails on the PR and passes on main must NOT
+    // be treated as stale-base red — the exclusion filter keeps the workflow's
+    // own failing checks from triggering an update-branch.
     expect(
       run({
         prChecks: [
@@ -524,10 +623,16 @@ describe('qwen-autofix workflow', () => {
           },
         ],
         mainGreen: ['Build'],
+        baseNotGreen: ['Build'],
       }),
-    ).toEqual({ updated: false, cas: false, continued: false });
-    // ...but a review-address check IS eligible (it is the workflow's signal that
-    // the previous address round needs a fresh base), so it still updates.
+    ).toEqual({
+      updated: false,
+      cas: false,
+      continued: false,
+      markerPosted: false,
+    });
+    // review-address is also a Qwen Autofix check and is excluded (the old
+    // carve-out was inverted relative to the description's intent).
     expect(
       run({
         prChecks: [
@@ -538,20 +643,57 @@ describe('qwen-autofix workflow', () => {
           },
         ],
         mainGreen: ['review-address (1)'],
+        baseNotGreen: ['review-address (1)'],
       }),
-    ).toEqual({ updated: true, cas: true, continued: true });
+    ).toEqual({
+      updated: false,
+      cas: false,
+      continued: false,
+      markerPosted: false,
+    });
     // MAIN_HEAD empty (initial gh api failure): the -n guard prevents any
-    // update-branch call — a future refactor removing that guard would silently
-    // allow updates with a null compare baseline.
+    // update-branch call.
     expect(
-      run({ prChecks: [FAIL('Test')], mainGreen: ['Test'], mainHead: '' }),
-    ).toEqual({ updated: false, cas: false, continued: false });
-    // CMP_STATUS empty (compare API failure): empty falls through today (no
-    // update), but a future change treating empty as "assume behind" would
-    // auto-merge main into PRs blindly.
+      run({
+        prChecks: [FAIL('Test')],
+        mainGreen: ['Test'],
+        baseNotGreen: ['Test'],
+        mainHead: '',
+      }),
+    ).toEqual({
+      updated: false,
+      cas: false,
+      continued: false,
+      markerPosted: false,
+    });
+    // CMP_STATUS empty (compare API failure): empty falls through (no update).
     expect(
-      run({ prChecks: [FAIL('Test')], mainGreen: ['Test'], cmp: '' }),
-    ).toEqual({ updated: false, cas: false, continued: false });
+      run({
+        prChecks: [FAIL('Test')],
+        mainGreen: ['Test'],
+        baseNotGreen: ['Test'],
+        cmp: '',
+      }),
+    ).toEqual({
+      updated: false,
+      cas: false,
+      continued: false,
+      markerPosted: false,
+    });
+    // Repetition guard: a recent base-updated marker prevents re-updating.
+    expect(
+      run({
+        prChecks: [FAIL('Test')],
+        mainGreen: ['Test'],
+        baseNotGreen: ['Test'],
+        hasMarker: true,
+      }),
+    ).toEqual({
+      updated: false,
+      cas: false,
+      continued: false,
+      markerPosted: false,
+    });
   });
 
   it('auto-reruns a check that died on infrastructure, once, guarded by run_attempt', () => {
@@ -627,6 +769,7 @@ describe('qwen-autofix workflow', () => {
             REPO: 'o/r',
             PR: '1',
             PR_META: JSON.stringify({ headRefOid: 'headSHA' }),
+            PR_HEAD_OID: 'headSHA',
             CHECKS_JSON: JSON.stringify(checks),
             INFRA_FAILURE_SIGNATURES: INFRA_SIGNATURES,
             PATH: `${bin}:${process.env.PATH}`,
@@ -5039,10 +5182,15 @@ describe('qwen-autofix workflow', () => {
     );
     expect(workflow).toContain("RETRY_COMMAND: '@qwen-code /retry'");
     expect(workflow).toContain('<!-- autofix-rearm -->');
-    expect(workflow).toContain('<!-- (autofix-eval|autofix-rearm|qwen-triage|');
-    // Verify all four filter sites (scan + 3 address) include autofix-rearm
+    expect(workflow).toContain(
+      '<!-- (autofix-eval|autofix-rearm|autofix-base-updated|qwen-triage|',
+    );
+    // Verify all four filter sites (scan + 3 address) include autofix-rearm;
+    // the scan site also carries autofix-base-updated.
     const filterMatches = [
-      ...workflow.matchAll(/autofix-eval\|autofix-rearm\|qwen-triage/g),
+      ...workflow.matchAll(
+        /autofix-eval\|autofix-rearm\|(autofix-base-updated\|)?qwen-triage/g,
+      ),
     ];
     expect(filterMatches.length).toBeGreaterThanOrEqual(4);
     // The re-arm marker is posted by the bot itself (both scanners filter by
