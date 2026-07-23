@@ -238,4 +238,33 @@ describe('ImageGenTool', () => {
     expect(outputPath).toBeDefined();
     await expect(access(outputPath!)).rejects.toThrow();
   });
+
+  it('does not leak signed URLs from the error cause chain', async () => {
+    const workspace = await mkdtemp(path.join(os.tmpdir(), 'image-gen-'));
+    workspaces.push(workspace);
+    process.env['TEST_IMAGE_API_KEY'] = 'secret';
+    const signedUrl =
+      'https://cdn.example.com/image.png?signature=temporary-secret&token=abc123';
+    const tool = new ImageGenTool(
+      createConfig(workspace, true) as Config,
+      vi.fn().mockRejectedValue(
+        new Error('Generated image download failed before completion.', {
+          cause: new Error(`GET ${signedUrl} failed: ECONNREFUSED`),
+        }),
+      ),
+    );
+
+    const result = await tool.buildAndExecute(
+      { prompt: 'A poster' },
+      new AbortController().signal,
+    );
+
+    expect(result.error?.type).toBe(ToolErrorType.EXECUTION_FAILED);
+    expect(result.error?.message).toBe(
+      'Generated image download failed before completion.',
+    );
+    expect(JSON.stringify(result.llmContent)).not.toContain('signature');
+    expect(JSON.stringify(result.llmContent)).not.toContain('temporary-secret');
+    expect(JSON.stringify(result.returnDisplay)).not.toContain('signature');
+  });
 });

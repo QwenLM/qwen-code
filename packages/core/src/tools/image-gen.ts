@@ -154,7 +154,9 @@ class ImageGenInvocation extends BaseToolInvocation<
         ],
       };
     } catch (error) {
-      return failureResult(getErrorMessage(error));
+      return failureResult(
+        error instanceof Error ? error.message : getErrorMessage(error),
+      );
     }
   }
 }
