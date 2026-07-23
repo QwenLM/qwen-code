@@ -3651,7 +3651,12 @@ async function runQwenServeImpl(
               workspaceTrusted: trustedWorkspace,
             });
             primaryGenerationGuard.assertOpen();
-            fresh.setValue(WORKSPACE_SETTING_SCOPE, 'tools.approvalMode', mode);
+            fresh.setValue(
+              WORKSPACE_SETTING_SCOPE,
+              'tools.approvalMode',
+              mode,
+              () => primaryGenerationGuard.assertOpen(),
+            );
           }),
       });
     if (!deps.bridge) {
@@ -4020,7 +4025,12 @@ async function runQwenServeImpl(
               workspaceTrusted: secondaryTrusted,
             });
             secondaryGenerationGuard.assertOpen();
-            fresh.setValue(WORKSPACE_SETTING_SCOPE, 'tools.approvalMode', mode);
+            fresh.setValue(
+              WORKSPACE_SETTING_SCOPE,
+              'tools.approvalMode',
+              mode,
+              () => secondaryGenerationGuard.assertOpen(),
+            );
           }),
       });
       secondaryBridgeRef = secondaryBridge;
@@ -4511,6 +4521,7 @@ async function runQwenServeImpl(
                 WORKSPACE_SETTING_SCOPE,
                 'tools.approvalMode',
                 mode,
+                () => generationGuard.assertOpen(),
               );
             }),
         });
