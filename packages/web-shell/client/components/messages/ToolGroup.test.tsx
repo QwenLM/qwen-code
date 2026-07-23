@@ -6,6 +6,7 @@ import type { ACPToolCall } from '../../adapters/types';
 import { I18nProvider } from '../../i18n';
 import { WebShellCustomizationProvider } from '../../customization';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
+import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 
 vi.mock('../../App', async () => {
   const { createContext } = await import('react');
@@ -555,6 +556,94 @@ describe('tool row rendering', () => {
     expect(card).not.toBeNull();
     expect(card?.textContent).toContain('working through the issue');
     expect(container.querySelector('[class*="expandedCardHeader"]')).toBeNull();
+  });
+
+  it('opens a single foreground agent from the tool summary', () => {
+    const onOpen = vi.fn();
+    const tool = makeTool({
+      toolName: 'agent',
+      status: 'completed',
+      args: {
+        subagent_type: 'Explore',
+        run_in_background: false,
+      },
+      subContent: 'investigation complete',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ToolGroup tools={[tool]} />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    expect(summary.hasAttribute('aria-expanded')).toBe(false);
+    act(() => summary.click());
+
+    expect(onOpen).toHaveBeenCalledWith(tool);
+  });
+
+  it('opens on-demand agent details without mounting inline content', () => {
+    const onOpen = vi.fn();
+    const tool = makeTool({
+      toolName: 'agent',
+      status: 'completed',
+      subContent: 'large hidden result',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ToolLine tool={tool} />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    expect(container.textContent).not.toContain('large hidden result');
+    expect(container.querySelector('[class*="lineExpandable"]')?.tagName).toBe(
+      'BUTTON',
+    );
+    act(() => {
+      (
+        container.querySelector('[class*="lineExpandable"]') as HTMLElement
+      ).click();
+    });
+    expect(onOpen).toHaveBeenCalledWith(tool);
+  });
+
+  it('respects hideHeader for agent tools inside SubagentDetailsProvider', () => {
+    const onOpen = vi.fn();
+    const tool = makeTool({
+      toolName: 'agent',
+      status: 'completed',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ToolLine tool={tool} hideHeader forceExpanded />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    expect(container.querySelector('button[class*="lineButton"]')).toBeNull();
   });
 
   it('keeps glob details visible in the header after expanding', () => {

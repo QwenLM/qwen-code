@@ -15,6 +15,7 @@ import type {
   DaemonCapabilities,
   DaemonClient,
   DaemonCreateAgentRequest,
+  DaemonWorkspaceGenerationEvent,
   DaemonGeneratedAgentContent,
   DaemonDeviceFlowStartResult,
   DaemonDeviceFlowState,
@@ -416,6 +417,11 @@ export interface DaemonWorkspaceActions {
   readWorkspaceFile(filePath: string): Promise<DaemonWorkspaceFile>;
   writeMemory(req: DaemonWriteMemoryRequest): Promise<DaemonWriteMemoryResult>;
 
+  generateContent(
+    prompt: string,
+    opts?: { signal?: AbortSignal },
+  ): AsyncGenerator<DaemonWorkspaceGenerationEvent>;
+
   // Agents (CRUD)
   listAgents(): Promise<DaemonWorkspaceAgentsStatus>;
   getAgent(agentType: string): Promise<DaemonWorkspaceAgentDetail>;
@@ -548,6 +554,7 @@ export interface DaemonWorkspaceActions {
     cwd: string,
     options?: { persist?: boolean; displayName?: string },
   ): Promise<DaemonAddWorkspaceResult>;
+  addScratchWorkspace(): Promise<DaemonAddWorkspaceResult>;
   suggestWorkspacePaths(
     prefix: string,
   ): Promise<DaemonWorkspacePathSuggestions>;

@@ -112,6 +112,8 @@ const SENSITIVE_PAYLOAD_KEY_PATTERN = new RegExp(
     'media',
     'webhook',
     'staff_id',
+    'staffId',
+    'dingtalkId',
     'open_id',
     'union_id',
     'user_?id',

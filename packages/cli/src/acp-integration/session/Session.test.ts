@@ -333,6 +333,7 @@ describe('Session', () => {
     tryCompressChat: ReturnType<typeof vi.fn>;
   };
   let mockBackgroundTaskRegistry: {
+    abortAll: ReturnType<typeof vi.fn>;
     setNotificationCallback: ReturnType<typeof vi.fn>;
     hasUnfinalizedTasks: ReturnType<typeof vi.fn>;
     getAll: ReturnType<typeof vi.fn>;
@@ -476,6 +477,7 @@ describe('Session', () => {
       }),
     };
     mockBackgroundTaskRegistry = {
+      abortAll: vi.fn(),
       setNotificationCallback: vi.fn(),
       hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
       getAll: vi.fn().mockReturnValue([]),
@@ -16659,6 +16661,56 @@ describe('Session', () => {
       expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledOnce();
     });
 
+    it('finalizes the aggregate ACP response before recording and returning it', async () => {
+      const prefix = 'Tool output was too large and has been truncated';
+      const execute = vi.fn().mockImplementation(async () => ({
+        llmContent: `${prefix}${'x'.repeat(7000)}`,
+        returnDisplay: 'full display',
+        persistedOutputFiles: [],
+      }));
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'read_file',
+        kind: core.Kind.Read,
+        displayName: 'Read File',
+        description: 'Read file',
+        build: vi.fn().mockReturnValue({
+          params: { file_path: 'a.ts' },
+          execute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Read file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+      mockConfig.getToolOutputBatchBudget = vi.fn().mockReturnValue(10_000);
+      mockChatRecordingService.recordToolResult.mockClear();
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-budget', [
+        { name: 'read_file', args: { file_path: 'a.ts' } },
+        { name: 'read_file', args: { file_path: 'b.ts' } },
+      ]);
+
+      const textLength = (parts: Part[]) =>
+        parts.reduce((sum, part) => {
+          const output = part.functionResponse?.response?.['output'];
+          return sum + (typeof output === 'string' ? output.length : 0);
+        }, 0);
+      expect(textLength(result.parts)).toBeLessThanOrEqual(10_000);
+      const recordedParts =
+        mockChatRecordingService.recordToolResult.mock.calls.flatMap(
+          (call) => call[0] as Part[],
+        );
+      expect(textLength(recordedParts)).toBe(textLength(result.parts));
+      expect(recordedParts).toEqual(result.parts);
+      const responseIds = result.parts.map((part) => part.functionResponse?.id);
+      expect(new Set(responseIds).size).toBe(2);
+      expect(responseIds[0]).toMatch(/-0$/);
+      expect(responseIds[1]).toMatch(/-1$/);
+    });
+
     it('suppresses duplicate provider functionCall ids already answered in history', async () => {
       const execute = vi.fn().mockResolvedValue({
         llmContent: 'should not run',
@@ -17011,6 +17063,9 @@ describe('Session', () => {
       expect(internals.notificationQueue).toHaveLength(0);
       expect(internals.cronQueue).toHaveLength(0);
       expect(internals.notificationProcessing).toBe(false);
+      expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledWith({
+        notify: false,
+      });
       expect(
         mockBackgroundTaskRegistry.setNotificationCallback,
       ).toHaveBeenLastCalledWith(undefined);

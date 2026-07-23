@@ -196,6 +196,10 @@ export type {
   WebSearchSettings,
 } from './tools/web-search.js';
 export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
+// Exported for the cross-package contract test in packages/cli (see the
+// function's own doc comment) — the daemon's file-read route must resolve the
+// workspacePath this produces.
+export { buildRecordArtifactReminder } from './tools/write-file.js';
 export type {
   ArtifactTool,
   ArtifactToolParams,
@@ -340,6 +344,7 @@ export * from './services/usageHistoryService.js';
 export * from './services/usage-dashboard-service.js';
 export * from './utils/bareMode.js';
 export * from './utils/safe-mode.js';
+export * from './utils/sanitize-child-env.js';
 export * from './utils/toolResultDisplayCompaction.js';
 
 // ============================================================================
@@ -542,6 +547,7 @@ export {
   detectRuntime,
   getOrCreateSharedDispatcher,
   isTlsVerificationDisabled,
+  preloadRuntimeFetchModule,
   redactProxyCredentials,
 } from './utils/runtimeFetchOptions.js';
 export * from './utils/runtimeStatus.js';
@@ -557,6 +563,7 @@ export * from './utils/textUtils.js';
 export * from './utils/thoughtUtils.js';
 export * from './utils/toml-to-markdown-converter.js';
 export * from './utils/tool-utils.js';
+export { finalizeToolResponses } from './utils/tool-response-finalizer.js';
 export * from './utils/workspaceContext.js';
 export * from './utils/yaml-parser.js';
 export * from './utils/btwUtils.js';

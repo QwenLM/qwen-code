@@ -54,6 +54,7 @@ import {
   EVENT_MEMORY_EXTRACT,
   EVENT_MEMORY_DREAM,
   EVENT_MEMORY_RECALL,
+  EVENT_MEMORY_RECALL_DELIVERY,
   EVENT_TOOL_OUTPUT_TRUNCATED,
 } from './constants.js';
 import {
@@ -75,6 +76,7 @@ import {
   recordMemoryExtractMetrics,
   recordMemoryDreamMetrics,
   recordMemoryRecallMetrics,
+  recordMemoryRecallDeliveryMetrics,
 } from './metrics.js';
 import { QwenLogger } from './qwen-logger/qwen-logger.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
@@ -125,6 +127,7 @@ import type {
   MemoryExtractEvent,
   MemoryDreamEvent,
   MemoryRecallEvent,
+  MemoryRecallDeliveryEvent,
 } from './types.js';
 import type { HookCallEvent } from './types.js';
 import type { UiEvent } from './uiTelemetry.js';
@@ -1380,5 +1383,38 @@ export function logMemoryRecall(
   recordMemoryRecallMetrics(config, event.duration_ms, {
     strategy: event.strategy,
     docs_selected: event.docs_selected,
+  });
+}
+
+export function logMemoryRecallDelivery(
+  config: Config,
+  event: MemoryRecallDeliveryEvent,
+): void {
+  if (!isTelemetrySdkInitialized()) return;
+
+  const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
+    'event.name': EVENT_MEMORY_RECALL_DELIVERY,
+    'event.timestamp': event['event.timestamp'],
+    phase: event.phase,
+    delivery_point: event.delivery_point,
+    strategy: event.strategy,
+    docs_selected: event.docs_selected,
+    latency_ms: event.latency_ms,
+  };
+  if (event.discard_reason) {
+    attributes['discard_reason'] = event.discard_reason;
+  }
+
+  const logger = logs.getLogger(SERVICE_NAME);
+  logger.emit({
+    body: `Memory recall delivery: phase=${event.phase}. delivery_point=${event.delivery_point}. Selected ${event.docs_selected} doc(s).`,
+    attributes,
+  });
+  recordMemoryRecallDeliveryMetrics(config, event.latency_ms, {
+    phase: event.phase,
+    delivery_point: event.delivery_point,
+    ...(event.discard_reason ? { discard_reason: event.discard_reason } : {}),
+    strategy: event.strategy,
   });
 }

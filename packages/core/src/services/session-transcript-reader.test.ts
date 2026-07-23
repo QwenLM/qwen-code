@@ -306,6 +306,29 @@ describe('SessionTranscriptReader', () => {
     expect(second.hasMore).toBe(false);
   });
 
+  it('starts backward paging at the persisted tail', async () => {
+    await writeRecords([
+      record('u1', null, 'first prompt'),
+      record('a1', 'u1', 'first answer'),
+      record('u2', 'a1', 'second prompt'),
+      record('a2', 'u2', 'second answer'),
+    ]);
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const page = await reader.readPage(sessionId, {
+      direction: 'backward',
+      limit: 2,
+    });
+
+    expect(page.records.map((item) => item.uuid)).toEqual(['u2', 'a2']);
+    expect(page.direction).toBe('backward');
+    expect(page.hasMore).toBe(true);
+    expect(page.nextCursorState).toMatchObject({
+      position: 2,
+      direction: 'backward',
+    });
+  });
+
   it('keeps backward pages within a normal user turn boundary', async () => {
     const toolCall = record('a-tool', 'u1', 'call tool');
     const toolResult = {

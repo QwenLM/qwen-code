@@ -1130,6 +1130,7 @@ describe('BridgeClient — channel-delivery extMethod dispatch', () => {
       undefined,
       undefined,
       undefined,
+      undefined,
       onChannelDelivery as never,
     );
     return { client, publish };

@@ -643,7 +643,18 @@ class WriteFileToolInvocation extends BaseToolInvocation<
   }
 }
 
-function buildRecordArtifactReminder(
+/**
+ * Builds the `record_artifact` hint appended to a successful write.
+ *
+ * Exported because the string it produces is a CONTRACT with the daemon's
+ * `GET /file` route: the `workspacePath` computed here is later resolved by
+ * `resolveWithinWorkspace` against the bound workspace root. The two sides live
+ * in different packages and drifted apart once already (a worktree session
+ * emitted a worktree-relative path that the route resolved against the
+ * workspace root, so every artifact preview 404'd). `workspace-file-read.test.ts`
+ * pins the round-trip; keep this exported so it can keep doing so.
+ */
+export function buildRecordArtifactReminder(
   config: Config,
   filePath: string,
 ): string | null {

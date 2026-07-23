@@ -5,6 +5,7 @@
  */
 
 import { Buffer } from 'node:buffer';
+import { randomUUID } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -116,6 +117,7 @@ import {
   recordFallbackApprove,
   shouldFallback,
   shouldClassifyAllShellForAutoMode,
+  finalizeToolResponses,
   shouldForceAutoModeReviewForAllow,
   shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
@@ -390,6 +392,23 @@ type BeforeModelSendDecision =
 type BeforeModelSendContext = {
   compressionFailed: boolean;
 };
+
+type PendingToolResultRecord = {
+  ordinal: number;
+  sequence: number;
+  callId: string;
+  toolName: string;
+  responseParts: Part[];
+  persistedOutputFiles?: string[];
+  metadata: Partial<ToolCallResponseInfo> & {
+    status: 'success' | 'error' | 'cancelled';
+  };
+};
+
+type QueueToolResultRecord = (
+  fc: FunctionCall,
+  record: Omit<PendingToolResultRecord, 'ordinal' | 'sequence'>,
+) => void;
 
 type DaemonToolLoopState = {
   totalToolCalls: number;
@@ -1251,6 +1270,9 @@ export class Session implements SessionContext {
    */
   pendingWorktreeNotice: string | null = null;
 
+  /** One-shot model notice for background agents restored with the session. */
+  pendingRecoveredAgentsNotice: string | null = null;
+
   // Implement SessionContext interface
   readonly sessionId: string;
 
@@ -1733,6 +1755,7 @@ export class Session implements SessionContext {
       this.#stopCronSchedulerInRuntime();
     }
 
+    this.config.getBackgroundTaskRegistry().abortAll({ notify: false });
     this.config.getBackgroundTaskRegistry().setNotificationCallback(undefined);
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
     this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
@@ -2473,6 +2496,7 @@ export class Session implements SessionContext {
               (block) => block.type === 'text',
             );
             const inputText = firstTextBlock?.text || '';
+            const isSlashInput = !isContinue && isSlashCommand(inputText);
 
             let parts: Part[] | null;
             let fullTurnModelOverride: string | undefined;
@@ -2488,7 +2512,7 @@ export class Session implements SessionContext {
               // Non-null here: the `none` case returned early above, and both
               // interruption branches assign a concrete part list.
               parts = continuationParts!;
-            } else if (isSlashCommand(inputText)) {
+            } else if (isSlashInput) {
               // Handle slash command in ACP mode using capability-based filtering
               const slashCommandResult = await handleSlashCommand(
                 inputText,
@@ -2631,6 +2655,18 @@ export class Session implements SessionContext {
               };
               parts = insertAfterFunctionResponses(parts, [noticePart]);
               this.pendingWorktreeNotice = null;
+            }
+
+            if (
+              this.pendingRecoveredAgentsNotice &&
+              !isContinue &&
+              !isSlashInput
+            ) {
+              const noticePart = {
+                text: `<system-reminder>\n${this.pendingRecoveredAgentsNotice}\n</system-reminder>\n\n`,
+              };
+              parts = insertAfterFunctionResponses(parts, [noticePart]);
+              this.pendingRecoveredAgentsNotice = null;
             }
 
             let nextMessage: Content | null = { role: 'user', parts };
@@ -5789,6 +5825,50 @@ export class Session implements SessionContext {
     toolLoopState?: DaemonToolLoopState,
   ): Promise<RunToolResult> {
     const dedupedFunctionCalls = dedupeToolCallsById(functionCalls);
+    const generatedCallIdBase = randomUUID();
+    const executionCallIds = new Map(
+      dedupedFunctionCalls.map((functionCall, index) => [
+        functionCall,
+        functionCall.id ??
+          `${functionCall.name ?? 'tool'}-${generatedCallIdBase}-${index}`,
+      ]),
+    );
+    const pendingToolResultRecords: PendingToolResultRecord[] = [];
+    let toolResultRecordSequence = 0;
+    const queueToolResultRecord: QueueToolResultRecord = (fc, record) => {
+      pendingToolResultRecords.push({
+        ...record,
+        ordinal: dedupedFunctionCalls.indexOf(fc),
+        sequence: toolResultRecordSequence++,
+      });
+    };
+    const finalizeRunToolResult = async (
+      result: RunToolResult,
+    ): Promise<RunToolResult> => {
+      if (pendingToolResultRecords.length === 0) return result;
+      const orderedRecords = [...pendingToolResultRecords].sort(
+        (left, right) =>
+          left.ordinal - right.ordinal || left.sequence - right.sequence,
+      );
+      const finalized = await finalizeToolResponses(
+        this.config,
+        orderedRecords.map((record) => ({
+          callId: record.callId,
+          toolName: record.toolName,
+          responseParts: record.responseParts,
+          persistedOutputFiles: record.persistedOutputFiles,
+        })),
+      );
+      orderedRecords.forEach((record, index) => {
+        this.config
+          .getChatRecordingService()
+          ?.recordToolResult(finalized[index].responseParts, record.metadata);
+      });
+      return {
+        ...result,
+        parts: finalized.flatMap((entry) => entry.responseParts),
+      };
+    };
     let skippedToolCallCounter = 0;
     const recordSkippedToolCall = async (
       fc: FunctionCall,
@@ -5807,12 +5887,17 @@ export class Session implements SessionContext {
       };
       const error = new Error(message);
       try {
-        this.config.getChatRecordingService()?.recordToolResult([part], {
+        queueToolResultRecord(fc, {
           callId,
-          status: 'error',
-          resultDisplay: undefined,
-          error,
-          errorType,
+          toolName,
+          responseParts: [part],
+          metadata: {
+            callId,
+            status: 'error',
+            resultDisplay: undefined,
+            error,
+            errorType,
+          },
         });
         if (emitStart) {
           await this.toolCallEmitter.emitStart({
@@ -5837,7 +5922,7 @@ export class Session implements SessionContext {
         dedupedFunctionCalls.length,
       )
     ) {
-      return {
+      return await finalizeRunToolResult({
         parts: await Promise.all(
           dedupedFunctionCalls.map((fc) =>
             recordSkippedToolCall(fc, LOOP_DETECTED_SKIP_MESSAGE, false),
@@ -5845,7 +5930,7 @@ export class Session implements SessionContext {
         ),
         stopAfterPermissionCancel: false,
         loopDetected: true,
-      };
+      });
     }
 
     type ExecutableBatch = {
@@ -5855,6 +5940,7 @@ export class Session implements SessionContext {
     };
     type DuplicateBatch = {
       kind: 'duplicate';
+      fc: FunctionCall;
       request: ToolCallRequestInfo;
       response: ToolCallResponseInfo;
     };
@@ -5877,14 +5963,17 @@ export class Session implements SessionContext {
         `[Session.runToolCalls] Dropping batch after repeated duplicate provider tool-call id: ` +
           `${providerCallId} (tool: ${repeatedDuplicateCall.name ?? 'unknown_tool'})`,
       );
-      return {
+      return await finalizeRunToolResult({
         parts: [],
         stopAfterPermissionCancel: false,
         repeatedDuplicateProviderToolCall: true,
-      };
+      });
     }
 
-    const pushDuplicateBatch = (request: ToolCallRequestInfo): void => {
+    const pushDuplicateBatch = (
+      fc: FunctionCall,
+      request: ToolCallRequestInfo,
+    ): void => {
       const providerCallId = request.providerCallId ?? request.callId;
       markDuplicateProviderToolCallResponseSent(
         providerCallId,
@@ -5896,7 +5985,7 @@ export class Session implements SessionContext {
         `[Session.runToolCalls] Suppressing duplicate provider tool-call id: ` +
           `${providerCallId} (tool: ${request.name})`,
       );
-      batches.push({ kind: 'duplicate', request, response });
+      batches.push({ kind: 'duplicate', fc, request, response });
     };
 
     const emitDuplicateBatch = async (batch: DuplicateBatch): Promise<void> => {
@@ -5934,23 +6023,27 @@ export class Session implements SessionContext {
           success: false,
         });
       }
-      this.config
-        .getChatRecordingService()
-        ?.recordToolResult(response.responseParts, {
+      queueToolResultRecord(batch.fc, {
+        callId: response.callId,
+        toolName: request.name,
+        responseParts: response.responseParts,
+        persistedOutputFiles: response.persistedOutputFiles,
+        metadata: {
           callId: response.callId,
           status: 'error',
           resultDisplay: response.resultDisplay,
           error: response.error,
           errorType: response.errorType,
-        });
+        },
+      });
     };
 
     for (const fc of dedupedFunctionCalls) {
       const providerCallId = getProviderToolCallId(fc) ?? fc.id;
       if (providerCallId) {
         if (handledProviderToolCallIds.has(providerCallId)) {
-          const callId = fc.id ?? `${fc.name}-${Date.now()}`;
-          pushDuplicateBatch({
+          const callId = executionCallIds.get(fc)!;
+          pushDuplicateBatch(fc, {
             callId,
             providerCallId,
             name: fc.name ?? 'unknown_tool',
@@ -6069,6 +6162,8 @@ export class Session implements SessionContext {
             onStopAfterPermissionCancel,
             toolLoopState,
             recordSkippedToolCall,
+            queueToolResultRecord,
+            executionCallIds.get(calls[i]),
           );
           results[i] = r;
           if (r.loopDetected) {
@@ -6101,6 +6196,8 @@ export class Session implements SessionContext {
           onStopAfterPermissionCancel,
           toolLoopState,
           recordSkippedToolCall,
+          queueToolResultRecord,
+          executionCallIds.get(calls[idx]),
         )
           .then((r) => {
             results[idx] = r;
@@ -6203,24 +6300,24 @@ export class Session implements SessionContext {
               batch.calls[batch.calls.length - 1],
               LOOP_DETECTED_SKIP_MESSAGE,
             );
-            return {
+            return await finalizeRunToolResult({
               parts,
               stopAfterPermissionCancel: false,
               loopDetected: true,
               memoryWriteCandidates,
-            };
+            });
           }
           if (shouldStop) {
             await appendSkippedAfter(
               parts,
               batch.calls[batch.calls.length - 1],
             );
-            return {
+            return await finalizeRunToolResult({
               parts,
               stopAfterPermissionCancel: true,
               repeatedDuplicateProviderToolCall: false,
               memoryWriteCandidates,
-            };
+            });
           }
         } else {
           for (const fc of batch.calls) {
@@ -6231,36 +6328,38 @@ export class Session implements SessionContext {
               undefined,
               toolLoopState,
               recordSkippedToolCall,
+              queueToolResultRecord,
+              executionCallIds.get(fc),
             );
             parts.push(...r.parts);
             collectMemoryWriteCandidates(r);
             if (r.loopDetected) {
               await appendSkippedAfter(parts, fc, LOOP_DETECTED_SKIP_MESSAGE);
-              return {
+              return await finalizeRunToolResult({
                 parts,
                 stopAfterPermissionCancel: false,
                 loopDetected: true,
                 memoryWriteCandidates,
-              };
+              });
             }
             if (r.stopAfterPermissionCancel) {
               await appendSkippedAfter(parts, fc);
-              return {
+              return await finalizeRunToolResult({
                 parts,
                 stopAfterPermissionCancel: true,
                 repeatedDuplicateProviderToolCall: false,
                 memoryWriteCandidates,
-              };
+              });
             }
           }
         }
       }
-      return {
+      return await finalizeRunToolResult({
         parts,
         stopAfterPermissionCancel: false,
         repeatedDuplicateProviderToolCall: false,
         memoryWriteCandidates,
-      };
+      });
     } finally {
       await refreshMemoryIfNeeded();
     }
@@ -6312,8 +6411,10 @@ export class Session implements SessionContext {
       message?: string,
       emitStart?: boolean,
     ) => Promise<Part>,
+    queueToolResultRecord?: QueueToolResultRecord,
+    generatedCallId?: string,
   ): Promise<RunToolResult> {
-    const callId = fc.id ?? `${fc.name}-${Date.now()}`;
+    const callId = fc.id ?? generatedCallId ?? `${fc.name}-${Date.now()}`;
     let args = (fc.args ?? {}) as Record<string, unknown>;
     if (toolLoopState?.loopDetected) {
       return {
@@ -6393,12 +6494,17 @@ export class Session implements SessionContext {
       }
 
       const errorParts = errorResponse(error);
-      this.config.getChatRecordingService()?.recordToolResult(errorParts, {
+      queueToolResultRecord?.(fc, {
         callId,
-        status: 'error',
-        resultDisplay: undefined,
-        error,
-        errorType: undefined,
+        toolName,
+        responseParts: errorParts,
+        metadata: {
+          callId,
+          status: 'error',
+          resultDisplay: undefined,
+          error,
+          errorType: undefined,
+        },
       });
       const loopDetected =
         opts?.recordInvalidToolParams === true &&
@@ -7488,10 +7594,12 @@ export class Session implements SessionContext {
                 : 'native',
           });
 
-          // Record tool result for session management
-          this.config
-            .getChatRecordingService()
-            ?.recordToolResult(responseParts, {
+          queueToolResultRecord?.(fc, {
+            callId,
+            toolName,
+            responseParts,
+            persistedOutputFiles: toolResult.persistedOutputFiles,
+            metadata: {
               callId,
               status,
               resultDisplay: toolResult.returnDisplay,
@@ -7499,7 +7607,8 @@ export class Session implements SessionContext {
                 ? new Error(toolResult.error.message)
                 : undefined,
               errorType: toolResult.error?.type,
-            });
+            },
+          });
 
           spanSuccess = succeeded;
           if (toolResult.error) {
@@ -7563,26 +7672,6 @@ export class Session implements SessionContext {
           // Use ToolCallEmitter for error handling
           await this.toolCallEmitter.emitError(callId, toolName, error);
 
-          // Record tool error for session management
-          const errorParts = [
-            {
-              functionResponse: {
-                id: callId,
-                name: toolName,
-                response: { error: error.message },
-              },
-            },
-          ];
-          this.config.getChatRecordingService()?.recordToolResult(errorParts, {
-            callId,
-            // A throw caused by abort (e.g. AbortError) is a cancellation, not
-            // a genuine tool error — keep it consistent with the success path.
-            status: activeToolAbortSignal.aborted ? 'cancelled' : 'error',
-            resultDisplay: undefined,
-            error,
-            errorType: undefined,
-          });
-
           const loopDetected =
             !activeToolAbortSignal.aborted &&
             !toolBuildSucceeded &&
@@ -7595,6 +7684,18 @@ export class Session implements SessionContext {
             );
 
           const responseParts = errorResponse(error);
+          queueToolResultRecord?.(fc, {
+            callId,
+            toolName,
+            responseParts,
+            metadata: {
+              callId,
+              status: activeToolAbortSignal.aborted ? 'cancelled' : 'error',
+              resultDisplay: undefined,
+              error,
+              errorType: undefined,
+            },
+          });
           return {
             parts: responseParts,
             stopAfterPermissionCancel: nestedPermissionCancelled,

@@ -161,6 +161,17 @@ env:
   # explicitly delegated work; removing the label restores the strict cap,
   # and re-engaging opens a fresh counting window (see REARM_KEY below).
   TAKEOVER_MAX_ROUNDS: '100'
+  # Consecutive-failure sub-cap, distinct from the total round cap above. The
+  # total cap bounds how many PRODUCTIVE rounds a PR may take; this bounds how
+  # many rounds may fail IN A ROW with nothing pushed. Under takeover a PR gets
+  # up to 100 rounds, but a PR that fails to push this many times running is not
+  # iterating, it is stuck — a too-large / fast-conflicting PR whose fix keeps
+  # timing out or failing the gate. Retrying at the same budget will not fix
+  # that; a human has to rebase or split it. Any pushed round OR a legitimate
+  # "no changes needed" no-op resets the streak, so this only ever fires on an
+  # unbroken run of failures. Observed on #6723: 7 straight failed rounds (3
+  # timeouts, 4 gate rejections) over 8 hours, heading for 100.
+  CONSECUTIVE_FAILURE_CAP: '5'
   # Do not claim more issues when too many existing autofix PRs are still open.
   MAX_OPEN_AUTOFIX_PRS: '5'
 
@@ -515,23 +526,34 @@ jobs:
                 label_is_trigger=false
                 [[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" || "${ISSUE_LABEL}" == "${AUTOFIX_APPROVED_LABEL}" ]] && label_is_trigger=true
                 [[ "${ASSIGNEE_LOGIN}" == "${AUTOFIX_BOT}" ]] && label_is_trigger=true
+                sender_permission=''
+                sender_is_trusted=false
+                if [[ -n "${SENDER_LOGIN}" ]]; then
+                  if ! sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2>&1)"; then
+                    api_error="${sender_permission}"
+                    sender_permission=''
+                    api_error="${api_error//$'\r'/ }"
+                    api_error="${api_error//$'\n'/ }"
+                    echo "::warning::Permission API call failed for ${SENDER_LOGIN}: ${api_error}"
+                  fi
+                  [[ "${sender_permission}" == 'write' || "${sender_permission}" == 'maintain' || "${sender_permission}" == 'admin' ]] && sender_is_trusted=true
+                fi
                 if [[ "${label_is_trigger}" != 'true' ]]; then
-                  echo "🧭 issue event ignored: trigger_label=false label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
+                  # A non-trigger label (e.g. scope/*, priority/*) may arrive
+                  # after the trigger labels and cancel their runs via per-issue
+                  # concurrency. If the issue already carries both required
+                  # labels and the current sender is trusted, proceed anyway.
+                  _late_ready="$(jq -r --arg l "${READY_FOR_AGENT_LABEL}" 'index($l) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
+                  _late_approved="$(jq -r --arg l "${AUTOFIX_APPROVED_LABEL}" 'index($l) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
+                  if [[ "${ISSUE_STATE}" == 'open' && "${_late_ready}" == 'true' && "${_late_approved}" == 'true' && "${sender_is_trusted}" == 'true' ]]; then
+                    echo "🧭 non-trigger label '${ISSUE_LABEL:-n/a}' but issue #${ISSUE_NUMBER} already approved+ready → issue phase"
+                    DO_ISSUE=true
+                  else
+                    echo "🧭 issue event ignored: trigger_label=false label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
+                  fi
                 else
                   issue_is_bug="$(jq -r --arg label "${BUG_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
                   issue_is_ready="$(jq -r --arg label "${READY_FOR_AGENT_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
-                  sender_permission=''
-                  sender_is_trusted=false
-                  if [[ -n "${SENDER_LOGIN}" ]]; then
-                    if ! sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2>&1)"; then
-                      api_error="${sender_permission}"
-                      sender_permission=''
-                      api_error="${api_error//$'\r'/ }"
-                      api_error="${api_error//$'\n'/ }"
-                      echo "::warning::Permission API call failed for ${SENDER_LOGIN}: ${api_error}"
-                    fi
-                    [[ "${sender_permission}" == 'write' || "${sender_permission}" == 'maintain' || "${sender_permission}" == 'admin' ]] && sender_is_trusted=true
-                  fi
                   issue_is_approved="$(jq -r --arg label "${AUTOFIX_APPROVED_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
                   if [[ "${ISSUE_STATE}" == 'open' && "${issue_is_ready}" == 'true' && "${issue_is_approved}" == 'true' && "${label_is_trigger}" == 'true' && "${sender_is_trusted}" == 'true' ]]; then
                     DO_ISSUE=true
@@ -1744,7 +1766,7 @@ jobs:
             # (the watermark floor below), and labels (the effective round
             # cap) — avoids extra round-trips per candidate PR.
             PR_META="$(gh pr view "${PR}" --repo "${REPO}" \
-              --json headRefName,statusCheckRollup,createdAt,labels,isCrossRepository,headRepositoryOwner,headRepository 2> /dev/null || echo '{}')"
+              --json headRefName,headRefOid,statusCheckRollup,createdAt,labels,isCrossRepository,headRepositoryOwner,headRepository 2> /dev/null || echo '{}')"
             HEAD_REPO_FULL="${REPO}"
             if [[ "$(jq -r '.isCrossRepository // false' <<< "${PR_META}")" == "true" ]]; then
               HR_OWNER="$(jq -r '.headRepositoryOwner.login // ""' <<< "${PR_META}")"
@@ -1902,6 +1924,16 @@ jobs:
               [ .[] | select((.user.login // "") == $ab)
                 | select((.body // "") | contains("<!-- autofix-rearm -->"))
                 | .created_at ] | max // ""' "${WORKDIR}/ic.json")"
+            # The head this PR's red checks were last reported against. Carried
+            # as its OWN marker inside the eval comment rather than a new field
+            # on autofix-eval, so none of the ts/acted/round parsers change —
+            # and the comment still matches the eval filter, so the agent never
+            # sees it as feedback.
+            RED_HEAD="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+              [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
+                | [ scan("<!-- autofix-redcheck head=([0-9a-f]+) -->") ] | .[]
+                | {sha: .[0], at: ($c.created_at // "")} ]
+              | sort_by(.at) | last | .sha // ""' "${WORKDIR}/ic.json")"
             # A maintainer '@qwen-code /retry' posts that marker to say
             # "evaluate this feedback again": markers written BEFORE it stop
             # holding the watermark down. This is the sanctioned exception to
@@ -1995,6 +2027,30 @@ jobs:
                 | select((.completedAt // .updatedAt // "") > $wm) ]
               | length
             ' <<< "${CHECKS_JSON}")"
+            # A red check is a persistent STATE, not the instant it turned red.
+            # Counting only "failed since the watermark" made a still-failing PR
+            # invisible the moment the watermark passed the failure: measured on
+            # #6451 (3 reds, all completed 09:30-09:51, watermark 10:55),
+            # #7357 (red 07:59, watermark 09:18) and #7390 (red and watermark
+            # both 11:27:37, so a strict `>` hid it the instant it appeared) —
+            # all three sat red for hours while every scan logged "nothing new".
+            #
+            # So: a currently-red check counts as feedback until the head it ran
+            # against has been evaluated. The address job records the head it
+            # reported on; a PR whose recorded head still matches is left alone,
+            # which bounds this to ONE look per head instead of every scan.
+            # Empty LIVE_HEAD → N_RED_NOW stays 0: fail-closed (no head → cannot judge → do not act),
+            # unlike the recording side where an empty REPORT_HEAD keeps reds visible.
+            LIVE_HEAD="$(jq -r '.headRefOid // ""' <<< "${PR_META}")"
+            N_RED_NOW=0
+            if [[ -n "${LIVE_HEAD}" && "${RED_HEAD}" != "${LIVE_HEAD}" ]]; then
+              N_RED_NOW="$(jq '
+                [ .[]
+                  | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED"))
+                  | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address")))) ]
+                | length
+              ' <<< "${CHECKS_JSON}")"
+            fi
 
             gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate > "${WORKDIR}/rv.json"
             gh api "repos/${REPO}/pulls/${PR}/comments" --paginate > "${WORKDIR}/rc.json"
@@ -2049,14 +2105,14 @@ jobs:
             HAS_CONFLICT='false'
             if [[ "${MERGEABLE}" == "CONFLICTING" ]]; then HAS_CONFLICT='true'; fi
 
-            if [[ "${N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0 && "${N_ISSUE_COMMENTS}" -eq 0 && "${N_FAILED_CHECKS}" -eq 0 && "${HAS_CONFLICT}" != "true" ]]; then
+            if [[ "${N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0 && "${N_ISSUE_COMMENTS}" -eq 0 && "${N_FAILED_CHECKS}" -eq 0 && "${N_RED_NOW}" -eq 0 && "${HAS_CONFLICT}" != "true" ]]; then
               echo "✅ #${PR}: nothing new since ${EFF_WM} (conflict=${HAS_CONFLICT})"
               fleet_row "${PR}" 'idle' "nothing new since ${EFF_WM} (round ${ROUND}/${EFF_MAX_ROUNDS}, conflict=${HAS_CONFLICT})"
               continue
             fi
 
-            echo "🔎 #${PR}: ${N_REVIEWS} review(s) + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} issue comment(s) + ${N_FAILED_CHECKS} failed check(s) new, conflict=${HAS_CONFLICT}, round=${ROUND}"
-            fleet_row "${PR}" 'SELECTED' "${N_REVIEWS} review + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} comment + ${N_FAILED_CHECKS} failed-check new (round ${ROUND}/${EFF_MAX_ROUNDS}, conflict=${HAS_CONFLICT})"
+            echo "🔎 #${PR}: ${N_REVIEWS} review(s) + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} issue comment(s) + ${N_FAILED_CHECKS} failed check(s) new, ${N_RED_NOW} still-red on ${LIVE_HEAD:0:9}, conflict=${HAS_CONFLICT}, round=${ROUND}"
+            fleet_row "${PR}" 'SELECTED' "${N_REVIEWS} review + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} comment + ${N_FAILED_CHECKS} failed-check new, ${N_RED_NOW} still-red (round ${ROUND}/${EFF_MAX_ROUNDS}, conflict=${HAS_CONFLICT})"
             TARGETS="$(jq -c \
               --arg pr "${PR}" --arg branch "${BRANCH}" --arg issue "${ISSUE}" \
               --arg round "${ROUND}" --arg wm "${EFF_WM}" --arg mr "${EFF_MAX_ROUNDS}" \
@@ -2402,6 +2458,12 @@ jobs:
             git checkout -B "${BRANCH}" "origin/${BRANCH}"
           fi
 
+          # The exact SHA the agent will evaluate. Captured HERE, before any
+          # agent mutation, so the marker records what was actually looked at —
+          # not the report-time remote head, which can move during the run.
+          CHECKED_OUT_HEAD="$(git rev-parse HEAD)"
+          echo "checked_out_head=${CHECKED_OUT_HEAD}" >> "${GITHUB_OUTPUT}"
+
           # Does the branch conflict with base? merge-tree computes the merge
           # without touching the tree; exit 1 means conflicts. UNKNOWN/errors are
           # treated as no-conflict so we never block on a transient state.
@@ -2455,14 +2517,17 @@ jobs:
           # QUEUES the duplicate rather than discarding it — but that queueing
           # is exactly what makes this check sound: address jobs for one PR run
           # strictly one at a time, so by the time the duplicate runs here, the
-          # first job's eval marker is posted and visible. Two duplicate
+          # first job's eval marker is posted and visible. Three duplicate
           # signatures: (a) a sibling evaluated through a NEWER live ts than
           # our matrix watermark; (b) a conflict-only sibling resolved and
           # marked at the SAME ts — with no newer feedback its marker keeps
           # ts=watermark while its ROUND advances past ours (ours is the max
-          # round observed at scan time). Either way, if there is no live
-          # conflict left and nothing newer than the live watermark, this run
-          # is a stale duplicate and discards itself.
+          # round observed at scan time); (c) a no-op sibling judged THIS exact
+          # head (its redcheck marker matches CHECKED_OUT_HEAD) while keeping
+          # BOTH ts and round unchanged — neither (a) nor (b) fires, but
+          # re-running would post a duplicate report for the same head. Either
+          # way, if there is no live conflict left and nothing newer than the
+          # live watermark, this run is a stale duplicate and discards itself.
           STALE='false'
           LIVE_MARKS="$(jq -r --arg ab "${AUTOFIX_BOT}" '
             [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
@@ -2486,6 +2551,16 @@ jobs:
                     or ((.body // "") | contains("<!-- autofix-rearm -->")))
               | .created_at ] | max // "none"' "${WORKDIR}/ic.json")"
           LIVE_MAX_ROUND="$(jq -r --arg key "${LIVE_REARM_KEY}" 'map(select(.win == $key)) | map(.round) | max // 0' <<< "${LIVE_MARKS}")"
+          # The head a sibling last judged, mirrored from the scan's RED_HEAD
+          # parse. A no-op sibling records this marker while leaving BOTH ts and
+          # round UNCHANGED — so the watermark/round triggers below never fire,
+          # yet a second same-watermark target for the same head would otherwise
+          # run the agent again and post a duplicate report for that head.
+          LIVE_RED_HEAD="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+            [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
+              | [ scan("<!-- autofix-redcheck head=([0-9a-f]+) -->") ] | .[]
+              | {sha: .[0], at: ($c.created_at // "")} ]
+            | sort_by(.at) | last | .sha // ""' "${WORKDIR}/ic.json")"
           # A re-arm SUPERSEDES every job selected under the old window key:
           # the maintainer asked for a fresh start, so a queued old-window job
           # must discard instead of finishing and stamping an old-sequence
@@ -2495,7 +2570,8 @@ jobs:
             echo "🫥 window superseded: selected under key '${WINDOW:-none}' but the live window is '${LIVE_REARM_KEY}' (re-armed while queued) — discarding without action or marker"
           fi
           if [[ -n "${LIVE_EVAL_WM}" && "${CONFLICT}" != "true" ]] \
-            && { [[ "${LIVE_EVAL_WM}" > "${WATERMARK}" ]] || [[ "${LIVE_MAX_ROUND}" -gt "${ROUND}" ]]; }; then
+            && { [[ "${LIVE_EVAL_WM}" > "${WATERMARK}" ]] || [[ "${LIVE_MAX_ROUND}" -gt "${ROUND}" ]] \
+              || { [[ -n "${LIVE_RED_HEAD}" ]] && [[ "${LIVE_RED_HEAD}" == "${CHECKED_OUT_HEAD}" ]]; }; }; then
             LIVE_NEW="$(jq -rs \
               --arg wm "${LIVE_EVAL_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson trust "${TRUSTED_ASSOC}" '
@@ -2597,6 +2673,20 @@ jobs:
               | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
               | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
               | select((.completedAt // .updatedAt // "") > $wm)
+              | "- \(((.name // .workflowName) // "external check") | gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]): \(.conclusion // .state // "?")"' \
+              "${WORKDIR}/checks.json"
+            # Checks that turned red BEFORE the watermark and are STILL red.
+            # The section above only shows checks that failed AFTER the
+            # watermark, so a persistent red (the exact case the scan's
+            # N_RED_NOW gate selects) would leave the agent with an empty
+            # "Failed checks" section and no check name to reproduce.
+            echo
+            echo "## Still-red checks (persisting from before the last evaluation)"
+            jq -r --arg wm "${WATERMARK}" '
+              .[]
+              | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED"))
+              | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
+              | select((.completedAt // .updatedAt // "") <= $wm)
               | "- \(((.name // .workflowName) // "external check") | gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]): \(.conclusion // .state // "?")"' \
               "${WORKDIR}/checks.json"
             # If the LAST round ended in a gate rejection, show the agent WHY.
@@ -2872,7 +2962,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md agent-api-error agent-api-error-kind resolved-comments.txt pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               cat "${WORKDIR}/${f}"
@@ -2905,7 +2995,13 @@ jobs:
           # Surfaced in the report footer for diagnosis + attribution; a repo
           # variable (not a secret), already the agent's OPENAI_MODEL.
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
         run: |-
+          # The head the agent actually evaluated — captured in prepare before
+          # any mutation, not the report-time remote head (which can move
+          # during the run). Empty when prepare exited early, which matches
+          # no marker and keeps reds visible — fail-open.
+          REPORT_HEAD="${CHECKED_OUT_HEAD}"
           # Prepare may have adopted a sibling's live round; the matrix value
           # would double-write that round's marker.
           ROUND="${EFFECTIVE_ROUND:-${ROUND}}"
@@ -3011,6 +3107,7 @@ jobs:
               echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
               echo
               echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->"
+              echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
             } > "${WORKDIR}/report.md"
             STATUS="pushed (round ${NEXT_ROUND}/${MAX_ROUNDS})"
           else
@@ -3027,6 +3124,7 @@ jobs:
               echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
               echo
               echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} -->"
+              echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
             } > "${WORKDIR}/report.md"
             STATUS="no action needed"
           fi
@@ -3058,10 +3156,21 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           NEWEST: '${{ steps.prepare.outputs.newest }}'
           JOB_STATUS: '${{ job.status }}'
+          # 'skipped' when an EARLIER step failed before Prepare ran (base
+          # install/build) — an infra/base failure, not the agent.
+          # 'success'/'failure' when Prepare itself ran. Distinguishes a
+          # transient pre-agent crash (retry) from a genuine agent crash.
+          PREPARE_OUTCOME: '${{ steps.prepare.outcome }}'
           STALE: '${{ steps.prepare.outputs.stale }}'
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
         run: |-
+          # The head the agent actually evaluated — captured in prepare before
+          # any mutation, not the report-time remote head (which can move
+          # during the run). Empty when prepare exited early, which matches
+          # no marker and keeps reds visible — fail-open.
+          REPORT_HEAD="${CHECKED_OUT_HEAD}"
           ROUND="${EFFECTIVE_ROUND:-${ROUND}}"
           MODEL_DISPLAY="${MODEL:-default}"
           SUFFIX=''
@@ -3155,6 +3264,16 @@ jobs:
             if [[ -s "${WORKDIR}/agent-api-error-kind" ]]; then
               API_ERROR_KIND="$(head -n 1 "${WORKDIR}/agent-api-error-kind" | tr -cd 'a-z')"
             fi
+            # A timeout means the agent evaluated NOTHING before its budget ran
+            # out (run-agent.mjs writes this signal). Routed to retry, not an
+            # evaluated advance — same as a pre-verdict crash. Bounded by the
+            # round cap and the consecutive-failure cap, so a PR that keeps
+            # timing out still stops; a one-off (usually followed by a good
+            # round) recovers on the next scan instead of stranding its feedback.
+            AGENT_TIMEOUT=''
+            if [[ -s "${WORKDIR}/agent-timeout" ]]; then
+              AGENT_TIMEOUT="$(head -n 1 "${WORKDIR}/agent-timeout" | cut -c1-120 | iconv -f utf-8 -t utf-8 -c || true)"
+            fi
             # If feedback was actually read (prepare ran), stamp its newest ts so
             # the watermark advances and the same feedback is not re-selected next
             # scan. If the crash happened before prepare, NEWEST is empty and the
@@ -3182,13 +3301,14 @@ jobs:
             MARK_TS="${NEWEST:-${WATERMARK:-9999-12-31T23:59:59Z}}"
             if [[ -n "${NEWEST:-}" ]]; then
               MARK_ROUND="$(( ROUND + 1 ))"
-              if [[ -z "${DETAIL_FILE}" || -n "${API_ERROR_DETAIL}" || "${GATE_CRASHED}" == 'true' ]]; then
-                # Prepare ran (NEWEST is set) but no verdict was reached. Three
-                # ways that happens, and in ALL of them the agent evaluated
-                # NOTHING: it produced no output at all (crashed before any
-                # verdict — a staged runner that fails to boot), it died on a
-                # model [API Error] (access/quota/5xx/transport), or the gate
-                # crashed after the agent wrote its summary. So the watermark
+              if [[ -z "${DETAIL_FILE}" || -n "${API_ERROR_DETAIL}" || -n "${AGENT_TIMEOUT}" || "${GATE_CRASHED}" == 'true' ]]; then
+                # Prepare ran (NEWEST is set) but no verdict was reached. Ways
+                # that happens, and in ALL of them the agent evaluated NOTHING:
+                # it produced no output at all (crashed before any verdict — a
+                # staged runner that fails to boot), it died on a model
+                # [API Error] (access/quota/5xx/transport), it TIMED OUT before
+                # finishing, or the gate crashed after the agent wrote its
+                # summary. So the watermark
                 # must NOT advance past this feedback: an advance makes the next
                 # scan see "nothing new" and never retry, stranding the PR on a
                 # transient failure (an infra blip, a quota reset minutes away, a
@@ -3210,6 +3330,13 @@ jobs:
                 if [[ -n "${API_ERROR_DETAIL}" ]]; then
                   CAUSE="could not reach the model — ${API_ERROR_DETAIL}"
                   LAST_FIX="a maintainer should check the autofix model key/access, then re-arm"
+                elif [[ -n "${AGENT_TIMEOUT}" ]]; then
+                  # A timeout evaluated nothing, so the feedback is unaddressed
+                  # and stays live for the retry. On a big / heavily-reviewed PR
+                  # this is usually a one-off; the last automatic attempt names
+                  # the real fix (split the PR or raise the budget).
+                  CAUSE="ran out of time before finishing (${AGENT_TIMEOUT})"
+                  LAST_FIX="a human should split the PR or raise the agent time budget, then re-arm"
                 elif [[ -z "${DETAIL_FILE}" ]]; then
                   CAUSE="crashed before it could evaluate the feedback"
                   LAST_FIX="a human should take over this PR"
@@ -3251,16 +3378,101 @@ jobs:
               else
                 HEADLINE="🤖 Could not address the latest feedback automatically (round ${MARK_ROUND}/${MAX_ROUNDS}). A human should take over this PR."
               fi
+            elif [[ "${PREPARE_OUTCOME}" != 'success' && "${PREPARE_OUTCOME}" != 'failure' ]]; then
+              # NEWEST is empty because Prepare never RAN TO A VERDICT — an
+              # earlier step failed or the job stopped before the agent started:
+              # installing/building the trusted base, node setup. That
+              # is infra or a broken base, NOT the agent, and it is usually
+              # transient (a base build fixed minutes later, an ENOSPC runner).
+              # Match on "not a real Prepare run" rather than 'skipped' alone, so
+              # this also covers a CANCELLED job (outcome 'cancelled') and a job
+              # that stopped before Prepare even entered the step context
+              # (outcome ''): a concurrency/manual cancel is not the agent's
+              # fault either, and 'cancelled' is a DISTINCT value from 'skipped'
+              # — matching only 'skipped' would send a cancel to the terminal
+              # branch below. Terminal here is wrong: a web-shell TS break on
+              # main failed the base build across a whole scan batch and stranded
+              # SIX healthy PRs terminally, including ones at round 11. Retry
+              # instead — sentinel ts keeps the feedback live — but still
+              # increment the round so a PERSISTENTLY broken base is bounded and
+              # cannot loop forever.
+              MARK_ROUND="$(( ROUND + 1 ))"
+              MARK_TS='9999-12-31T23:59:59Z'
+              if [[ "${MARK_ROUND}" -lt "${MAX_ROUNDS}" ]]; then
+                HEADLINE="🤖 AutoFix could not start — a setup step failed (or the run was cancelled) before the agent ran, so no fix was attempted. This is normally a transient infra issue, a broken base build, or a cancelled run — not this PR. It will retry on the next scan."
+              else
+                MARK_ROUND="${MAX_ROUNDS}"
+                HEADLINE="🤖 AutoFix could not start — reached the round cap (${MAX_ROUNDS}) because a setup step (base install/build) kept failing before the agent ran. This is infra or a persistently broken base, not this PR. Fix the base build, then comment \`${RETRY_COMMAND}\` to re-arm."
+              fi
             else
-              # Crashed/timed out before reading the feedback: mark terminal so the
-              # scan skips (it can't advance the watermark without a read), but say
-              # so plainly — do NOT imply MAX_ROUNDS attempts were made when zero
-              # rounds happened. Because the marker is terminal, the max-round guard
-              # skips this PR on EVERY future scan, including a forced dispatch, so
-              # the headline must state the real recovery (delete the marker) rather
-              # than promise a re-trigger that the guard would ignore.
+              # Prepare RAN (outcome success/failure) but produced no feedback to
+              # read — prepare itself crashed or timed out before emitting a
+              # verdict. Mark
+              # terminal so the scan skips (it can't advance the watermark
+              # without a read); do NOT imply MAX_ROUNDS attempts were made when
+              # zero rounds happened. The headline states the real recovery
+              # (delete the marker) rather than promise a re-trigger the
+              # max-round guard would ignore.
               MARK_ROUND="${MAX_ROUNDS}"
               HEADLINE="🤖 AutoFix could not start evaluation — it crashed or timed out before reading the feedback, so no fix was attempted. This PR is now marked terminal and future scans (including forced dispatch) will skip it. To recover: delete this bot's terminal \`autofix-eval\` marker comment, then re-trigger if the failure looked transient."
+            fi
+
+            # Consecutive-failure circuit breaker, distinct from the round cap.
+            # Reaching this step at all means this round did NOT push (the push
+            # and no-op paths report from "Push and report"), so this round is a
+            # failure. Count how many failures precede it WITHOUT a break: walk
+            # the bot's prior eval markers in API order (oldest-first, pinned
+            # by sort_by so a stray reorder cannot corrupt the streak) and
+            # reset the streak at each push ("Addressed the latest review
+            # feedback"), deliberate no-op ("no changes needed"), or pre-agent
+            # infra-failure marker ("AutoFix could not start"). After the
+            # full walk, CONSEC_FAIL holds failures since the last progress
+            # point plus one for this round. If the unbroken
+            # streak (this round included) reaches the cap, stop retrying even
+            # under takeover: a PR that fails this many times running is stuck
+            # on something a re-run at the same budget will not fix (observed on
+            # #6723: 7 straight failures, 3 timeouts + 4 gate rejections). Only
+            # overrides a would-be RETRY — a round already terminal for another
+            # reason keeps its own headline.
+            # Transient model errors (429/5xx) are exempt: the CAUSE_MAX logic
+            # above deliberately gives them the full round budget because they
+            # self-heal once the provider recovers. Letting the breaker override
+            # that would mark every in-flight PR terminal at once during a
+            # provider outage — the failures are not the PR's fault and DO
+            # self-heal. Auth errors are NOT exempt (they never self-heal).
+            # Pre-agent infra failures (skipped/cancelled/empty Prepare outcome)
+            # are exempt for the same reason: a broken base build or a runner
+            # crash is not the PR's fault, self-heals, and hits the whole scan
+            # batch at once — the exact scenario the retry path above exists to
+            # prevent. The round cap + sentinel-ts /retry recovery already
+            # bounds a persistently broken base.
+            if [[ "${MARK_ROUND}" != "${MAX_ROUNDS}" ]] && [[ "${PREPARE_OUTCOME}" == 'success' || "${PREPARE_OUTCOME}" == 'failure' ]] && { [[ -z "${API_ERROR_DETAIL}" ]] || [[ "${API_ERROR_KIND}" == 'auth' ]]; }; then
+              CONSEC_FAIL=1
+              if [[ -f "${WORKDIR}/ic.json" ]]; then
+                COMMENTS_JSON="$(cat "${WORKDIR}/ic.json")"
+              else
+                COMMENTS_JSON="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate 2> /dev/null || true)"
+              fi
+              PRIOR_HEADS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" '
+                [.[] | select((.user.login // "") == $ab)
+                     | select((.body // "") | contains("<!-- autofix-eval "))
+                     | select(
+                         ((.body // "") | contains("win=" + $win + " -->"))
+                         or ($win == "none" and (((.body // "") | contains("win=")) | not)))]
+                | sort_by(.created_at) | .[]
+                | (.body | gsub("\r"; "") | split("\n")[0])' <<< "${COMMENTS_JSON}" 2> /dev/null || true)"
+              while IFS= read -r H; do
+                [[ -n "${H}" ]] || continue
+                if [[ "${H}" == *"Addressed the latest review feedback"* || "${H}" == *"no changes needed"* || "${H}" == *"AutoFix could not start —"* ]]; then
+                  CONSEC_FAIL=1
+                else
+                  CONSEC_FAIL=$(( CONSEC_FAIL + 1 ))
+                fi
+              done <<< "${PRIOR_HEADS}"
+              if [[ "${CONSEC_FAIL}" -ge "${CONSECUTIVE_FAILURE_CAP}" ]]; then
+                MARK_ROUND="${MAX_ROUNDS}"
+                HEADLINE="🤖 AutoFix stopped after ${CONSEC_FAIL} consecutive rounds that failed to push anything (timeouts and/or gate rejections). Retrying at the same per-round budget is not converging — this usually means the PR is too large or conflicts with a fast-moving \`main\`. A human should rebase, split, or reduce it, then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
+              fi
             fi
             {
               echo "${HEADLINE}"
@@ -3313,6 +3525,14 @@ jobs:
               echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
               echo
               echo "<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} win=${WINDOW:-none} -->"
+              # A sentinel ts means the agent evaluated NOTHING (crash, API
+              # error, gate crash) and the next scan must retry. Recording a
+              # judged head here would make RED_HEAD == LIVE_HEAD, so the
+              # retry scan sees N_RED_NOW=0 and goes idle despite the handoff
+              # promising a retry.
+              if [[ "${MARK_TS}" != '9999-12-31T23:59:59Z' ]]; then
+                echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
+              fi
             } > "${WORKDIR}/report.md"
             gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md" || echo "::warning::Failed to post handoff comment on PR #${PR}"
           fi

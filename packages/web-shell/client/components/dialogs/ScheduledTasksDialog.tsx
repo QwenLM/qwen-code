@@ -26,6 +26,7 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { sanitizeDisplayText } from '../../hooks/useAtMentionMenu';
 import { useI18n } from '../../i18n';
+import { useWebShellPortalRoot } from '../../portalRoot';
 import { getComposerTagIconUrl } from '../../utils/composerTag';
 import { cssUrlValue } from '../../utils/cssUrlVar';
 import { workspaceLabel, workspaceLabelForCwd } from '../../utils/workspace';
@@ -532,6 +533,7 @@ export function ScheduledTasksDialog({
 }: ScheduledTasksDialogProps) {
   const { t } = useI18n();
   const actions = useWorkspaceActions();
+  const portalRoot = useWebShellPortalRoot();
 
   // Multi-workspace aggregation. `workspaces` mirrors the daemon capabilities;
   // with more than one the page lists every trusted workspace's tasks together
@@ -1157,7 +1159,7 @@ export function ScheduledTasksDialog({
               ))
             )}
           </div>,
-          document.body,
+          portalRoot ?? document.body,
         )
       : null;
 

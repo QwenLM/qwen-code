@@ -83,7 +83,16 @@ import { setDaemonTelemetryWorkspace } from '../server/telemetry.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
 import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
+import {
+  formatGenerationSse,
+  GENERATION_HEARTBEAT_MS,
+  writeGenerationSseChunk,
+} from '../generation-sse.js';
 import { requireSessionRuntime } from './session-runtime.js';
+import {
+  parseVirtualSubagentSessionId,
+  type VirtualSubagentSessions,
+} from '../virtual-subagent-sessions.js';
 import {
   resolveWorkspaceRuntimeFromParam,
   sendUntrustedWorkspaceResponse,
@@ -106,13 +115,13 @@ interface RegisterSessionRoutesDeps {
   promptDeadlineMs?: number;
   sessionShellCommandEnabled: boolean;
   languageCodes: string[];
+  virtualSubagentSessions?: VirtualSubagentSessions;
 }
 
 const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
 const WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES = 64 * 1024;
 const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
   'Transcript pagination state exceeds the safe limit';
-const GENERATION_HEARTBEAT_MS = 15_000;
 // Must exceed CHANNEL_DELIVERY_IPC_TIMEOUT_MS (30 s, channel-delivery-ipc.ts) plus scheduling slack.
 const CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS = 60_000;
 const PRIMARY_ONLY_LIVE_SESSION_ROUTES = [
@@ -129,50 +138,6 @@ function isPrimaryOnlyLiveSessionRoute(
   return (PRIMARY_ONLY_LIVE_SESSION_ROUTES as readonly string[]).includes(
     route,
   );
-}
-
-function formatGenerationSse(
-  event: string,
-  data: Record<string, unknown>,
-): string {
-  return `event: ${event}\ndata: ${JSON.stringify({ v: 1, ...data })}\n\n`;
-}
-
-function writeGenerationSseChunk(res: Response, chunk: string): Promise<void> {
-  if (res.destroyed) {
-    return Promise.reject(new Error('Generation SSE connection destroyed'));
-  }
-  const writable = res.write(chunk);
-  const flush = (res as Response & { flush?: () => void }).flush;
-  flush?.call(res);
-  if (writable) {
-    return res.destroyed
-      ? Promise.reject(new Error('Generation SSE connection destroyed'))
-      : Promise.resolve();
-  }
-  return new Promise<void>((resolve, reject) => {
-    const cleanup = () => {
-      res.off('drain', onDrain);
-      res.off('close', onClose);
-      res.off('error', onError);
-    };
-    const onDrain = () => {
-      cleanup();
-      resolve();
-    };
-    const onClose = () => {
-      cleanup();
-      reject(new Error('Generation SSE connection closed'));
-    };
-    const onError = (error: Error) => {
-      cleanup();
-      reject(error);
-    };
-    res.once('drain', onDrain);
-    res.once('close', onClose);
-    res.once('error', onError);
-    if (res.destroyed) onClose();
-  });
 }
 
 function isReadOnlyWorkspaceInspection(runtime: WorkspaceRuntime): boolean {
@@ -411,6 +376,7 @@ export function registerSessionRoutes(
     daemonLog,
     promptDeadlineMs,
     sessionShellCommandEnabled,
+    virtualSubagentSessions,
   } = deps;
   const LANGUAGE_CODES = deps.languageCodes;
   const transcriptCursorMasterKey = crypto.randomBytes(32);
@@ -1475,6 +1441,55 @@ export function registerSessionRoutes(
     (action: 'load' | 'resume') => async (req: Request, res: Response) => {
       const sessionId = requireSessionId(req, res);
       if (!sessionId) return;
+      const virtualKey = parseVirtualSubagentSessionId(sessionId);
+      if (virtualKey) {
+        const route = `POST /session/:id/${action}`;
+        if (action !== 'load') {
+          res.status(400).json({
+            error: `Virtual subagent sessions do not support ${action}`,
+            code: 'unsupported_action',
+            sessionId,
+          });
+          return;
+        }
+        if (!virtualSubagentSessions) {
+          res.status(404).json({
+            error: `No session with id "${sessionId}"`,
+            code: 'session_not_found',
+            sessionId,
+          });
+          return;
+        }
+        const runtime = requireSessionRuntime({
+          sessionId: virtualKey.parentSessionId,
+          route,
+          res,
+          workspaceRegistry,
+          daemonLog,
+        });
+        if (!runtime) return;
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        try {
+          const session = await virtualSubagentSessions.load(
+            runtime,
+            sessionId,
+            clientId,
+          );
+          if (!session) {
+            res.status(404).json({
+              error: 'Subagent session not found',
+              code: 'session_not_found',
+              sessionId,
+            });
+            return;
+          }
+          res.status(200).json(session);
+        } catch (err) {
+          sendBridgeError(res, err, { route, sessionId });
+        }
+        return;
+      }
       const body = safeBody(req);
       const route = `POST /session/:id/${action}`;
       let resolvedRuntime:
@@ -1689,6 +1704,116 @@ export function registerSessionRoutes(
 
   app.post('/session/:id/load', mutate(), restoreSessionHandler('load'));
   app.post('/session/:id/resume', mutate(), restoreSessionHandler('resume'));
+
+  app.get('/session/:id/subagents/:toolCallId', async (req, res) => {
+    const route = 'GET /session/:id/subagents/:toolCallId';
+    const sessionId = requireSessionId(req, res);
+    if (!sessionId) return;
+    if (!virtualSubagentSessions) {
+      res.status(404).json({
+        error: `No session with id "${sessionId}"`,
+        code: 'session_not_found',
+        sessionId,
+      });
+      return;
+    }
+    const toolCallId = req.params['toolCallId'];
+    if (!toolCallId || toolCallId.length > 500) {
+      res.status(400).json({
+        error: '`toolCallId` must be a non-empty tool call id',
+        code: 'invalid_tool_call_id',
+      });
+      return;
+    }
+    const runtime = requireSessionRuntime({
+      sessionId,
+      route,
+      res,
+      workspaceRegistry,
+      daemonLog,
+    });
+    if (!runtime) return;
+    try {
+      const resolved = await virtualSubagentSessions.resolve(
+        runtime,
+        sessionId,
+        toolCallId,
+      );
+      if (!resolved) {
+        res.status(404).json({
+          error: 'Subagent session not found',
+          code: 'session_not_found',
+          sessionId,
+          toolCallId,
+        });
+        return;
+      }
+      res.status(200).set('Cache-Control', 'no-store').json(resolved);
+    } catch (err) {
+      sendBridgeError(res, err, { route, sessionId });
+    }
+  });
+
+  app.post(
+    '/session/:id/subagents/:toolCallId/cancel',
+    mutate(),
+    async (req, res) => {
+      const route = 'POST /session/:id/subagents/:toolCallId/cancel';
+      const sessionId = requireSessionId(req, res);
+      if (!sessionId) return;
+      if (!virtualSubagentSessions) {
+        res.status(404).json({
+          error: `No session with id "${sessionId}"`,
+          code: 'session_not_found',
+          sessionId,
+        });
+        return;
+      }
+      const toolCallId = req.params['toolCallId'];
+      if (!toolCallId || toolCallId.length > 500) {
+        res.status(400).json({
+          error: '`toolCallId` must be a non-empty tool call id',
+          code: 'invalid_tool_call_id',
+        });
+        return;
+      }
+      const runtime = requireSessionRuntime({
+        sessionId,
+        route,
+        res,
+        workspaceRegistry,
+        daemonLog,
+      });
+      if (!runtime) return;
+      try {
+        const resolved = await virtualSubagentSessions.resolve(
+          runtime,
+          sessionId,
+          toolCallId,
+        );
+        if (!resolved) {
+          res.status(404).json({
+            error: 'Subagent session not found',
+            code: 'session_not_found',
+            sessionId,
+            toolCallId,
+          });
+          return;
+        }
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.cancelSessionTask(
+              sessionId,
+              resolved.taskId,
+              'agent',
+            ),
+          );
+      } catch (err) {
+        sendBridgeError(res, err, { route, sessionId });
+      }
+    },
+  );
 
   app.post(
     '/session/:id/branch',
@@ -2023,6 +2148,30 @@ export function registerSessionRoutes(
 
   app.get(
     '/session/:id/context',
+    (req, res, next) => {
+      const sessionId = req.params['id'];
+      const key = sessionId
+        ? parseVirtualSubagentSessionId(sessionId)
+        : undefined;
+      if (!sessionId || !key) {
+        next();
+        return;
+      }
+      const runtime = requireSessionRuntime({
+        sessionId: key.parentSessionId,
+        route: 'GET /session/:id/context',
+        res,
+        workspaceRegistry,
+        daemonLog,
+      });
+      if (!runtime) return;
+      res.status(200).json({
+        v: 1,
+        sessionId,
+        workspaceCwd: runtime.workspaceCwd,
+        state: {},
+      });
+    },
     withOwnerReadSession(
       'GET /session/:id/context',
       async (_req, res, sessionId, runtime) => {
@@ -2061,6 +2210,30 @@ export function registerSessionRoutes(
 
   app.get(
     '/session/:id/supported-commands',
+    (req, res, next) => {
+      const sessionId = req.params['id'];
+      const key = sessionId
+        ? parseVirtualSubagentSessionId(sessionId)
+        : undefined;
+      if (!sessionId || !key) {
+        next();
+        return;
+      }
+      const runtime = requireSessionRuntime({
+        sessionId: key.parentSessionId,
+        route: 'GET /session/:id/supported-commands',
+        res,
+        workspaceRegistry,
+        daemonLog,
+      });
+      if (!runtime) return;
+      res.status(200).json({
+        v: 1,
+        sessionId,
+        availableCommands: [],
+        availableSkills: [],
+      });
+    },
     withOwnerReadSession(
       'GET /session/:id/supported-commands',
       async (_req, res, sessionId, runtime) => {
@@ -2574,6 +2747,31 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/heartbeat',
     mutate(),
+    (req, res, next) => {
+      const sessionId = req.params['id'];
+      const key = sessionId
+        ? parseVirtualSubagentSessionId(sessionId)
+        : undefined;
+      if (!sessionId || !key) {
+        next();
+        return;
+      }
+      const runtime = requireSessionRuntime({
+        sessionId: key.parentSessionId,
+        route: 'POST /session/:id/heartbeat',
+        res,
+        workspaceRegistry,
+        daemonLog,
+      });
+      if (!runtime) return;
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      res.status(200).json({
+        sessionId,
+        ...(clientId ? { clientId } : {}),
+        lastSeenAt: Date.now(),
+      });
+    },
     withOwnerMutableSession(
       'POST /session/:id/heartbeat',
       (req, res, sessionId, runtime) => {
@@ -2591,6 +2789,27 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/detach',
     mutate(),
+    (req, res, next) => {
+      const sessionId = req.params['id'];
+      const key = sessionId
+        ? parseVirtualSubagentSessionId(sessionId)
+        : undefined;
+      if (!sessionId || !key) {
+        next();
+        return;
+      }
+      const runtime = requireSessionRuntime({
+        sessionId: key.parentSessionId,
+        route: 'POST /session/:id/detach',
+        res,
+        workspaceRegistry,
+        daemonLog,
+      });
+      if (!runtime) return;
+      const clientId = parseClientIdHeader(req, res);
+      if (clientId === null) return;
+      res.status(204).end();
+    },
     withOwnerMutableSession(
       'POST /session/:id/detach',
       async (req, res, sessionId, runtime) => {

@@ -226,6 +226,23 @@ describe('WorkspaceSection git chip', () => {
     expect(workspaceGit).toHaveBeenCalledTimes(2);
   });
 
+  it('does not re-fetch git status when only the diff handler changes', async () => {
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+    });
+    const client = makeClient();
+
+    renderSection({ client, onOpenGitDiff: vi.fn() });
+    await flush();
+    expect(workspaceGit).toHaveBeenCalledTimes(1);
+
+    renderSection({ client, onOpenGitDiff: vi.fn() });
+    await flush();
+    expect(workspaceGit).toHaveBeenCalledTimes(1);
+  });
+
   it('hides the chip when the workspace is not a git repo (null branch)', async () => {
     workspaceGit.mockResolvedValue({
       v: 2,

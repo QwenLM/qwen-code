@@ -209,6 +209,14 @@ const FORBIDDEN_ACP_TELEMETRY_PACKAGES = [
 const FORBIDDEN_ACP_PACKAGES = [
   ...FORBIDDEN_ACP_UI_PACKAGES,
   ...FORBIDDEN_ACP_TELEMETRY_PACKAGES,
+  // undici loads behind dynamic import()s at its use sites (issue #7264
+  // candidate 4); a static re-import anywhere in the ACP closure would pull
+  // ~1 MiB per bundled copy back into every cold start.
+  { label: 'undici vendor package', packageName: 'undici' },
+  // Provider implementations and MCP discovery load the Google GenAI SDK on
+  // first use (issue #7264 candidate 3). Keep the SDK out of the ACP bootstrap
+  // closure.
+  { label: 'Google GenAI SDK', packageName: '@google/genai' },
 ];
 
 export function normalizeMetafilePath(filePath) {

@@ -38,6 +38,7 @@ import {
 import { prependToFirstTextPart } from './partUtils.js';
 import type { Config } from '../config/config.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
+import { SendMessageTool } from '../tools/send-message.js';
 import { getFolderStructure } from './getFolderStructure.js';
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
@@ -517,6 +518,22 @@ describe('startup reminder builders', () => {
     expect(reminder).toContain('### MCP servers');
     expect(reminder).toContain('#### schedule-server');
     expect(reminder).toContain('- "cron_list": "List scheduled jobs."');
+  });
+
+  it('keeps completed-task revival visible in the send_message summary', () => {
+    const tool = new SendMessageTool({} as Config);
+    const reminder = buildDeferredToolsReminder(
+      registry({
+        getDeferredToolSummary: vi
+          .fn()
+          .mockReturnValue([
+            { name: tool.name, description: tool.description },
+          ]),
+      }),
+    );
+
+    expect(reminder).toContain('completed background task');
+    expect(reminder).toContain('completed tasks are revived');
   });
 
   it('JSON-encodes deferred tool metadata before rendering', () => {

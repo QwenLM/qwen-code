@@ -582,6 +582,7 @@ describe('ChannelBase', () => {
           senderId: 'sender-123',
           senderNick: 'Alice',
           senderName: 'Bob',
+          atUsers: [{ dingtalkId: 'dingtalk-123', staffId: 'staff-at-123' }],
           nested: { aeskey: 'media-key' },
         });
         logged = writeSpy.mock.calls.map((call) => String(call[0])).join('');
@@ -610,6 +611,10 @@ describe('ChannelBase', () => {
       expect(logged).toContain('"senderId":"[redacted]"');
       expect(logged).toContain('"senderNick":"[redacted]"');
       expect(logged).toContain('"senderName":"[redacted]"');
+      expect(logged).toContain('"dingtalkId":"[redacted]"');
+      expect(logged).toContain('"staffId":"[redacted]"');
+      expect(logged).not.toContain('dingtalk-123');
+      expect(logged).not.toContain('staff-at-123');
       expect(logged).toContain('"aeskey":"[redacted]"');
       expect(logged).not.toContain('\\n');
       expect(logged).not.toContain('secret-token');
