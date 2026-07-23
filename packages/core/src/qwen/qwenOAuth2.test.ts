@@ -2421,6 +2421,8 @@ describe('showFallbackMessage', () => {
     delete process.env['FORCE_HYPERLINK'];
     delete process.env['QWEN_DISABLE_HYPERLINKS'];
     delete process.env['TEAMCITY_VERSION'];
+    delete process.env['NO_COLOR'];
+    delete process.env['FORCE_COLOR'];
     // Keep TERM but clear known OSC 8 terminal names
     if (
       ['xterm-kitty', 'xterm-ghostty', 'alacritty'].includes(
@@ -2515,6 +2517,24 @@ describe('showFallbackMessage', () => {
 
     const output = getOutput();
     expect(output).toContain('\x1b]8;;');
+    // Must use DCS passthrough wrapping for tmux
+    expect(output).toContain('\x1bPtmux;');
+    expect(output).toContain('\x1b\\');
+  });
+
+  it('wraps OSC 8 in DCS passthrough for screen (STY)', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['STY'] = '12345.pts-0.host';
+    process.env['FORCE_HYPERLINK'] = '1';
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+
+    const output = getOutput();
+    expect(output).toContain('\x1bP\x1b]8;;');
+    expect(output).toContain('\x1b\\');
   });
 
   it('refuses OSC 8 in tmux without FORCE_HYPERLINK', () => {
@@ -2584,5 +2604,121 @@ describe('showFallbackMessage', () => {
     expect(output).toContain('Qwen OAuth Device Authorization');
     expect(output).toContain('Please visit the following URL');
     expect(output).toContain('Waiting for authorization');
+  });
+
+  it('treats FORCE_HYPERLINK=false as disabled', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['TERM_PROGRAM'] = 'iTerm.app';
+    process.env['FORCE_HYPERLINK'] = 'false';
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+
+    const output = getOutput();
+    expect(output).not.toContain('\x1b]8;;');
+  });
+
+  it('treats FORCE_HYPERLINK=0 as disabled', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['TERM_PROGRAM'] = 'iTerm.app';
+    process.env['FORCE_HYPERLINK'] = '0';
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+
+    const output = getOutput();
+    expect(output).not.toContain('\x1b]8;;');
+  });
+
+  it('strips control characters from URL in OSC 8 envelope', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['TERM_PROGRAM'] = 'iTerm.app';
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=\x07ABC\x1b123');
+
+    const output = getOutput();
+    // Control chars stripped — the sanitized URL appears in the envelope
+    expect(output).toContain(
+      '\x1b]8;;https://chat.qwen.ai/device?code=ABC123\x07',
+    );
+    // Raw control chars must not leak into the OSC payload
+    expect(output).not.toContain('code=\x07');
+  });
+
+  it('gates mintty on version >= 3.3', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['TERM_PROGRAM'] = 'mintty';
+    process.env['TERM_PROGRAM_VERSION'] = '3.3.0';
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+
+    const output = getOutput();
+    expect(output).toContain('\x1b]8;;');
+  });
+
+  it('refuses OSC 8 for mintty < 3.3', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['TERM_PROGRAM'] = 'mintty';
+    process.env['TERM_PROGRAM_VERSION'] = '3.1.0';
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+
+    const output = getOutput();
+    expect(output).not.toContain('\x1b]8;;');
+  });
+
+  it('refuses OSC 8 for mintty without version', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['TERM_PROGRAM'] = 'mintty';
+    delete process.env['TERM_PROGRAM_VERSION'];
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+
+    const output = getOutput();
+    expect(output).not.toContain('\x1b]8;;');
+  });
+
+  it('does not emit OSC 8 when NO_COLOR is set', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['TERM_PROGRAM'] = 'iTerm.app';
+    process.env['NO_COLOR'] = '1';
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+
+    const output = getOutput();
+    expect(output).not.toContain('\x1b]8;;');
+  });
+
+  it('does not emit OSC 8 when FORCE_COLOR=0', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['TERM_PROGRAM'] = 'iTerm.app';
+    process.env['FORCE_COLOR'] = '0';
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+
+    const output = getOutput();
+    expect(output).not.toContain('\x1b]8;;');
   });
 });

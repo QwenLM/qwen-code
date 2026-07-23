@@ -701,6 +701,13 @@ export async function getQwenOAuthClient(
   }
 }
 
+function shouldForceHyperlinks(value: string): boolean {
+  if (value.length === 0) return true;
+  const trimmed = value.trim();
+  if (!/^[+-]?\d+$/.test(trimmed)) return false;
+  return Number(trimmed) !== 0;
+}
+
 /**
  * Check whether stderr's terminal supports OSC 8 hyperlinks. A minimal but
  * safe subset of the detection logic in `packages/cli/src/ui/utils/osc8.ts` —
@@ -711,15 +718,34 @@ export async function getQwenOAuthClient(
 function supportsOsc8Hyperlinks(): boolean {
   const env = process.env;
   if (env['QWEN_DISABLE_HYPERLINKS'] === '1') return false;
+  if (env['NO_COLOR'] !== undefined && env['NO_COLOR'] !== '') return false;
+  if (env['FORCE_COLOR'] === '0' || env['FORCE_COLOR'] === 'false') {
+    return false;
+  }
   if (!process.stderr?.isTTY) return false;
   const force = env['FORCE_HYPERLINK'];
-  if (force !== undefined) return force !== '0';
+  if (force !== undefined) return shouldForceHyperlinks(force);
   if (env['CI']) return false;
+  if (env['TEAMCITY_VERSION']) return false;
   if (env['TMUX'] || env['STY']) return false;
   if (env['WT_SESSION']) return true;
   if (env['KITTY_WINDOW_ID'] || env['TERM'] === 'xterm-kitty') return true;
   if (env['DOMTERM']) return true;
   if (env['GHOSTTY_RESOURCES_DIR'] || env['TERM'] === 'xterm-ghostty') {
+    return true;
+  }
+  if (env['KONSOLE_VERSION']) {
+    const konsoleVersion = parseInt(env['KONSOLE_VERSION'], 10);
+    if (Number.isFinite(konsoleVersion) && konsoleVersion >= 210400) {
+      return true;
+    }
+  }
+  if (
+    env['TERM'] === 'alacritty' ||
+    env['ALACRITTY_LOG'] !== undefined ||
+    env['ALACRITTY_WINDOW_ID'] !== undefined ||
+    env['ALACRITTY_SOCKET'] !== undefined
+  ) {
     return true;
   }
   if (env['TERMINAL_EMULATOR'] === 'JetBrains-JediTerm') return true;
@@ -729,8 +755,18 @@ function supportsOsc8Hyperlinks(): boolean {
       case 'WezTerm':
       case 'vscode':
       case 'ghostty':
-      case 'mintty':
         return true;
+      case 'mintty': {
+        // mintty added OSC 8 in 3.1, hardened in 3.3. Older builds (still
+        // bundled with some Git-for-Windows distros) print the raw escape
+        // bytes as visible garbage, so gate on TERM_PROGRAM_VERSION.
+        const ver = env['TERM_PROGRAM_VERSION'];
+        if (!ver) return false;
+        const parts = ver.split('.').map((n) => parseInt(n, 10) || 0);
+        const major = parts[0] ?? 0;
+        const minor = parts[1] ?? 0;
+        return major > 3 || (major === 3 && minor >= 3);
+      }
       default:
         break;
     }
@@ -739,13 +775,6 @@ function supportsOsc8Hyperlinks(): boolean {
     const v = parseInt(env['VTE_VERSION'], 10);
     if (Number.isFinite(v) && v >= 5000 && v !== 5000) return true;
   }
-  if (
-    env['TERM'] === 'alacritty' ||
-    env['ALACRITTY_LOG'] !== undefined ||
-    env['ALACRITTY_WINDOW_ID'] !== undefined
-  ) {
-    return true;
-  }
   return false;
 }
 
@@ -753,11 +782,21 @@ function supportsOsc8Hyperlinks(): boolean {
  * Wrap a URL in an OSC 8 hyperlink escape sequence. BEL (\x07) terminates
  * the OSC — more broadly supported than ST (ESC \\). Control characters
  * are stripped from the URL to prevent breaking the OSC envelope.
+ *
+ * Inside tmux or screen the sequence is wrapped in a DCS passthrough
+ * envelope so the multiplexer forwards it to the host terminal.
  */
 function osc8Hyperlink(url: string): string {
   // eslint-disable-next-line no-control-regex
   const safeUrl = url.replace(/[\x00-\x1f\x7f\x80-\x9f]/g, '');
-  return `\x1b]8;;${safeUrl}\x07${safeUrl}\x1b]8;;\x07`;
+  let seq = `\x1b]8;;${safeUrl}\x07${safeUrl}\x1b]8;;\x07`;
+  if (process.env['TMUX']) {
+    const escaped = seq.replaceAll('\x1b', '\x1b\x1b');
+    seq = `\x1bPtmux;${escaped}\x1b\\`;
+  } else if (process.env['STY']) {
+    seq = `\x1bP${seq}\x1b\\`;
+  }
+  return seq;
 }
 
 /**
