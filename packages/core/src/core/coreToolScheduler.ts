@@ -497,6 +497,9 @@ const FS_PATH_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   ToolNames.LS,
   ToolNames.LSP,
   ToolNames.NOTEBOOK_EDIT,
+  ToolNames.IMAGE_VIEW,
+  ToolNames.MEDIA_WATCH,
+  ToolNames.MEDIA_EXTRACT,
 ]);
 
 /**

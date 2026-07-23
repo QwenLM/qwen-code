@@ -56,6 +56,10 @@ export const ToolNames = {
   READ_MCP_RESOURCE: 'read_mcp_resource',
   ENTER_WORKTREE: 'enter_worktree',
   EXIT_WORKTREE: 'exit_worktree',
+  IMAGE_VIEW: 'image_view',
+  MEDIA_WATCH: 'media_watch',
+  MEDIA_GREP: 'media_grep',
+  MEDIA_EXTRACT: 'media_extract',
   // Computer Use tools (computer_use__*) are intentionally NOT enumerated here.
   // Their full 35-tool surface is generated into computer-use/schemas.ts and
   // registered via computer-use/index.ts (cast to ToolName). Duplicating a
@@ -111,6 +115,10 @@ export const ToolDisplayNames = {
   READ_MCP_RESOURCE: 'ReadMcpResource',
   ENTER_WORKTREE: 'EnterWorktree',
   EXIT_WORKTREE: 'ExitWorktree',
+  IMAGE_VIEW: 'ImageView',
+  MEDIA_WATCH: 'MediaWatch',
+  MEDIA_GREP: 'MediaGrep',
+  MEDIA_EXTRACT: 'MediaExtract',
   // computer_use__* display names are not enumerated here (see ToolNames).
   WORKFLOW: 'Workflow',
   ARTIFACT: 'Artifact',

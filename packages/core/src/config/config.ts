@@ -1229,6 +1229,13 @@ export interface ConfigParameters {
    */
   visionBridgeTimeoutMs?: number;
   /**
+   * Unified multimodal (media) layer configuration. Selects reader backends,
+   * decision-ownership policy, injection strategy and upload backend. All
+   * fields are optional; unset falls back to `DEFAULT_MEDIA_CONFIG` (native
+   * reader only). Corresponds to the `media` setting.
+   */
+  media?: Partial<import('../utils/media/media-config.js').MediaConfig>;
+  /**
    * Ordered list of fallback model IDs to try when the primary model hits
    * capacity errors (429/503/529). At most 3 entries; duplicate fallback
    * entries are filtered during normalization, and primary/current model
@@ -1889,6 +1896,9 @@ export class Config {
   private webSearchNoticeEmitted = false;
   private visionModel?: string;
   private readonly visionBridgeTimeoutMs: number | undefined;
+  private readonly media?: Partial<
+    import('../utils/media/media-config.js').MediaConfig
+  >;
   private readonly modelFallbacks: string[];
   private readonly disableAllHooks: boolean;
   private readonly stopHookBlockingCap: number;
@@ -2314,6 +2324,7 @@ export class Config {
       params.visionBridgeTimeoutMs <= 2_147_483_647
         ? params.visionBridgeTimeoutMs
         : undefined;
+    this.media = params.media;
     this.modelFallbacks = normalizeModelFallbacks(params.modelFallbacks);
     this.disableAllHooks = params.disableAllHooks ?? false;
     this.stopHookBlockingCap = resolveStopHookBlockingCap(
@@ -3925,6 +3936,17 @@ export class Config {
    */
   getVisionBridgeTimeoutMs(): number | undefined {
     return this.visionBridgeTimeoutMs;
+  }
+
+  /**
+   * Resolve the raw user-supplied media-layer config (unmerged). Callers should
+   * use `resolveMediaConfig(config)` from `utils/media/media-config` to get a
+   * fully-defaulted `MediaConfig`. Returns `undefined` when nothing is set.
+   */
+  getMediaConfig():
+    | Partial<import('../utils/media/media-config.js').MediaConfig>
+    | undefined {
+    return this.media;
   }
 
   /**
@@ -6897,7 +6919,26 @@ export class Config {
       return new ReadFileTool(this);
     });
 
-    // --- Grep / RipGrep (conditional) ---
+    // --- Unified multimodal (media) layer ---
+    await registerLazy(ToolNames.IMAGE_VIEW, async () => {
+      const { ImageViewTool } = await import('../tools/media/image-view.js');
+      return new ImageViewTool(this);
+    });
+    await registerLazy(ToolNames.MEDIA_WATCH, async () => {
+      const { MediaWatchTool } = await import('../tools/media/media-watch.js');
+      return new MediaWatchTool(this);
+    });
+    await registerLazy(ToolNames.MEDIA_GREP, async () => {
+      const { MediaGrepTool } = await import('../tools/media/media-grep.js');
+      return new MediaGrepTool(this);
+    });
+    await registerLazy(ToolNames.MEDIA_EXTRACT, async () => {
+      const { MediaExtractTool } = await import(
+        '../tools/media/media-extract.js'
+      );
+      return new MediaExtractTool(this);
+    });
+
     if (this.getUseRipgrep()) {
       let useRipgrep = false;
       let errorString: undefined | string = undefined;

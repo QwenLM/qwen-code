@@ -13,6 +13,7 @@ import type {
   ChatCompressionSettings,
   ModelProvidersConfig,
   ProviderProtocolConfig,
+  MediaConfig,
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
@@ -312,6 +313,19 @@ const SETTINGS_SCHEMA = {
     requiresRestart: true,
     default: {} as { channels?: string[] },
     description: 'Persistent qwen serve settings.',
+    showInDialog: false,
+    mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+  },
+
+  // Unified multimodal (media) layer configuration.
+  media: {
+    type: 'object',
+    label: 'Media',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {} as Partial<MediaConfig>,
+    description:
+      'Unified multimodal layer: reader backends (native/delegated), decision-ownership policy, injection strategy, and upload backend. All fields optional; unset uses native-reader-only defaults.',
     showInDialog: false,
     mergeStrategy: MergeStrategy.SHALLOW_MERGE,
   },

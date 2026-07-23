@@ -137,6 +137,30 @@ export * from './tools/sdk-control-client-transport.js';
 export * from './tools/client-mcp-registrar.js';
 export * from './tools/modifiable-tool.js';
 
+// --- Unified multimodal (media) layer ---
+export * from './utils/media/types.js';
+export * from './utils/media/media-result.js';
+export * from './utils/media/probe.js';
+export * from './utils/media/reader-registry.js';
+export * from './utils/media/decision-policy.js';
+export * from './utils/media/media-config.js';
+export * from './utils/media/media-orchestrator.js';
+export * from './utils/media/media-security.js';
+export * from './utils/media/readers/native-inline.js';
+export * from './utils/media/readers/delegated-reader.js';
+export * from './core/media/transport-decider.js';
+export * from './core/media/uploader.js';
+export * from './core/media/provider-media-profiles.js';
+export * from './memory/media/media-paths.js';
+export * from './memory/media/media-memory-store.js';
+export * from './memory/media/media-indexer.js';
+export * from './memory/media/media-links.js';
+export * from './memory/media/media-recall.js';
+export * from './tools/media/image-view.js';
+export * from './tools/media/media-watch.js';
+export * from './tools/media/media-grep.js';
+export * from './tools/media/media-extract.js';
+
 // Selective re-exports of types/utilities from tool files (avoids loading full tool modules)
 export {
   buildSkillLlmContent,
