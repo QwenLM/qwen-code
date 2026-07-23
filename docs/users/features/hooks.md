@@ -633,13 +633,13 @@ The `context_usage`, `context_limit`, and `input_tokens` fields allow hook scrip
 
 #### StopFailure
 
-**Purpose**: Executed when the turn ends due to an API error (instead of Stop). This is a **fire-and-forget** event - hook output and exit codes are ignored.
+**Purpose**: Executed when the turn ends due to an API error or loop detection (instead of Stop). This is a **fire-and-forget** event - hook output and exit codes are ignored.
 
 **Event-specific fields**:
 
 ```json
 {
-  "error": "rate_limit | authentication_failed | billing_error | invalid_request | server_error | max_output_tokens | unknown",
+  "error": "rate_limit | authentication_failed | billing_error | invalid_request | server_error | max_output_tokens | loop_detected | unknown",
   "error_details": "detailed error message (optional)",
   "last_assistant_message": "the last message from the assistant before the error (optional)"
 }
