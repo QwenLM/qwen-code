@@ -59,12 +59,15 @@ const DIFF = '/abs/diff.txt';
  * satisfies that one. A plan that requires nothing is not a plan any capture
  * command writes, and coverage now reads the roster out of it.
  */
-function plan(opts: { step45?: boolean } = {}): string {
+function plan(opts: { step45?: boolean; han?: boolean } = {}): string {
   const p = join(dir, 'plan.json');
   writeFileSync(
     p,
     JSON.stringify({
       diffPathAbsolute: DIFF,
+      // What fetch-pr records when the PR description contains Han
+      // characters — the deterministic bilingual-body switch.
+      ...(opts.han ? { prDescriptionHasHan: true } : {}),
       srcDiffLines: 5000,
       diffLines: 5000,
       files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
@@ -279,10 +282,11 @@ function blindPrompt(chunk: number): string {
  */
 function coveredPlan(
   step45Keys: string[] = ['verify', 'reverse-audit'],
+  planOpts: { han?: boolean } = {},
 ): string {
   transcript('a1', goodPrompt(1), { toolCalls: 3 });
   transcript('a2', goodPrompt(2), { toolCalls: 2 });
-  const p = plan({ step45: false });
+  const p = plan({ step45: false, ...planOpts });
   recordBuilt(p, 1);
   recordBuilt(p, 2);
   recordMatrix(p);
@@ -1983,6 +1987,7 @@ describe('describeChunkGap — chunk ids leave in the author units', () => {
   it('every planned chunk collapses to the diff itself', () => {
     expect(describeChunkGap([2, 1, 3], planned)).toEqual({
       phrase: 'the entire diff',
+      phraseZh: '整个 diff',
       plural: false,
     });
   });
@@ -1990,10 +1995,12 @@ describe('describeChunkGap — chunk ids leave in the author units', () => {
   it('names the files of a narrow gap — sorted by id, deduped', () => {
     expect(describeChunkGap([2], planned)).toEqual({
       phrase: 'the diff section covering src/b.ts, src/c.ts',
+      phraseZh: '涉及 src/b.ts、src/c.ts 的 diff 片段',
       plural: false,
     });
     expect(describeChunkGap([3, 1], planned)).toEqual({
       phrase: 'the diff sections covering src/a.ts, src/d.ts',
+      phraseZh: '涉及 src/a.ts、src/d.ts 的 diff 片段',
       plural: true,
     });
     // A subject disclosed twice is one gap.
@@ -2008,6 +2015,7 @@ describe('describeChunkGap — chunk ids leave in the author units', () => {
     ];
     expect(describeChunkGap([1, 2], wide)).toEqual({
       phrase: "2 of the diff's 3 sections",
+      phraseZh: 'diff 3 个片段中的 2 个',
       plural: true,
     });
   });
@@ -2020,6 +2028,7 @@ describe('describeChunkGap — chunk ids leave in the author units', () => {
     ];
     expect(describeChunkGap([1, 2], partial)).toEqual({
       phrase: "2 of the diff's 3 sections",
+      phraseZh: 'diff 3 个片段中的 2 个',
       plural: true,
     });
   });
@@ -2027,11 +2036,87 @@ describe('describeChunkGap — chunk ids leave in the author units', () => {
   it('still says something with no plan to count against', () => {
     expect(describeChunkGap([7], [])).toEqual({
       phrase: '1 section of the diff',
+      phraseZh: 'diff 中的 1 个片段',
       plural: false,
     });
     expect(describeChunkGap([9, 7], [])).toEqual({
       phrase: '2 sections of the diff',
+      phraseZh: 'diff 中的 2 个片段',
       plural: true,
     });
+  });
+});
+
+describe('bilingual body — the PR author writes Chinese (prDescriptionHasHan)', () => {
+  it('folds the complete Chinese version under the English body, footer outside the fold', () => {
+    // Not base(): its planPath default runs coveredPlan() again on the same
+    // path and would overwrite the han-stamped plan.
+    const r = composeReview({
+      suggestionsInline: 1,
+      planPath: coveredPlan(undefined, { han: true }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    // English leads, untouched.
+    expect(
+      r.body.startsWith('Reviewed — no blockers. Suggestions are inline.'),
+    ).toBe(true);
+    // The complete Chinese version rides collapsed.
+    expect(r.body).toContain('<details>\n<summary>中文说明</summary>');
+    expect(r.body).toContain('已审查——无阻断问题。 建议见行内评论。');
+    // One footer, after the fold — never inside it.
+    expect(r.body.endsWith(FOOTER)).toBe(true);
+    expect(r.body.split(FOOTER)).toHaveLength(2);
+    expect(r.body.indexOf('</details>')).toBeLessThan(r.body.indexOf(FOOTER));
+  });
+
+  it('stays English-only without the plan flag', () => {
+    const r = composeReview(base({ suggestionsInline: 1 }));
+    expect(r.body).not.toContain('<details>');
+    expect(r.body).not.toContain('中文');
+  });
+
+  it('translates the LGTM body', () => {
+    const r = composeReview({
+      planPath: coveredPlan(undefined, { han: true }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).toContain('No issues found. LGTM! ✅');
+    expect(r.body).toContain('未发现问题。LGTM！✅');
+  });
+
+  it('translates the disclosures — role phrase and Not-reviewed frame', () => {
+    // test-matrix required and never built → one role gap, both languages.
+    const p = plan({ han: true });
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    const r = composeReview({ planPath: p, env: ENV, modelId: MODEL });
+    expect(r.body).toContain(
+      'Not reviewed: the whole-diff test-coverage check',
+    );
+    expect(r.body).toContain('未审查：全 diff 测试覆盖检查——');
+    // The zh sentence carries the translated reason, not the English one.
+    expect(r.body).toContain('没有记录表明它的 brief 到达过任何 agent');
+  });
+
+  it('quotes untranslatable caller text as-is in both halves', () => {
+    const r = composeReview({
+      suggestionsInline: 1,
+      cannotTellCriticals: ['old blocker at a.ts:1 — still reachable?'],
+      planPath: coveredPlan(undefined, { han: true }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.body).toContain('Unresolved, please confirm:');
+    expect(r.body).toContain('未决，请确认：');
+    // The caller's text, once per half.
+    expect(
+      r.body.match(/old blocker at a\.ts:1 — still reachable\?/g) ?? [],
+    ).toHaveLength(2);
   });
 });
