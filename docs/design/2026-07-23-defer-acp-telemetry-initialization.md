@@ -14,7 +14,7 @@ Telemetry events already use an initialized gate: events emitted before the SDK 
 
 ACP configuration sets the existing `deferTelemetryInitialization` option. This suppresses the constructor's fire-and-forget start without changing the default, headless, stream-JSON, interactive TUI, or daemon runtime paths.
 
-`runAcpAgent` uses the existing message-observation hook on its NDJSON transport to remember the JSON-RPC ID of an incoming `initialize` request. The hook runs after the parsed request is enqueued but before its pending read continuation can handle it. For outgoing messages, the same hook runs only after the encoded response has been successfully written to the underlying stdout stream. When a successful response with the remembered ID is observed, the child starts telemetry through the existing single-flight facade and clears the remembered ID.
+`runAcpAgent` uses the existing message-observation hook on its NDJSON transport to remember the JSON-RPC ID of an incoming `initialize` request. The hook runs after the parsed request is enqueued but before its pending read continuation can handle it. For outgoing messages, the same hook runs only after the encoded response has been successfully written to the underlying stdout stream. When a successful response with the remembered ID is observed, the child starts telemetry through the existing single-flight facade, registers its event-loop gauge only after that initialization settles, and clears the remembered ID. This ordering is required because the metrics API caches a no-op meter if a gauge is registered before the SDK installs the global meter provider.
 
 This creates a transport-defined boundary: telemetry loading cannot begin before the initialization response write resolves. It does not depend on event-loop scheduling assumptions.
 
@@ -24,16 +24,17 @@ The ACP child has one process-global telemetry SDK and one bootstrap `Config`. T
 
 The affected consumers are:
 
-- **ACP bootstrap child**: changes from constructor-started telemetry to response-write-started telemetry.
+- **ACP bootstrap child**: changes from constructor-started telemetry to response-write-started telemetry. Its event-loop gauge registration moves behind SDK initialization so early registration cannot permanently disable all metrics.
 - **ACP session creation and prompts**: retain the existing initialized gates; very early events may now be dropped for longer while SDK loading finishes.
 - **Ordinary interactive TUI**: retains post-first-render startup through `startPostRenderPrefetches`.
 - **Headless and stream-JSON CLI**: retain constructor startup.
 - **`qwen serve` parent/daemon runtime**: retains its explicit deferred core-runtime initialization and shutdown.
-- **Process exit cleanup**: retains `Config.shutdown()`. A child that disconnects before a successful protocol initialization never starts telemetry. If disconnect races a just-started import, the initializer's internal catch prevents an unhandled rejection and the ACP outer path still exits the process; current config cleanup does not promise to flush an SDK that has not finished initializing.
+- **Process exit cleanup**: retains `Config.shutdown()`. A child that disconnects before a successful protocol initialization never starts telemetry. If disconnect races a just-started import, the initializer's internal catch prevents an unhandled rejection and the ACP outer path still exits the process. Although `shutdownTelemetry()` can await an in-flight initializer, `Config.shutdown()` calls it only after the SDK reports initialized, so current config cleanup can skip an initialization that is still in flight.
 
 ## Failure and compatibility behavior
 
 - Telemetry disabled remains a facade no-op after the response and loads no heavy telemetry modules.
+- One-shot bootstrap events emitted before the response, including the initial `qwen-code.auth` event and one early `qwen-code.config` event, are permanently absent from ACP telemetry rather than merely delayed. This is the accepted cost of moving SDK initialization behind the response; the change does not synthesize or buffer replacement events.
 - A malformed or rejected `initialize` request does not start telemetry. A later valid initialize request can still start it.
 - A stdout write failure does not run the sent-message hook, so telemetry is not started for a response the client did not receive.
 - Repeated or unrelated JSON-RPC responses cannot start telemetry because the request ID and successful-response shape must both match; the remembered ID is consumed once.
@@ -64,20 +65,19 @@ With outfile telemetry enabled, 30 alternating paired cold starts produced:
 
 | Metric                               | Control P50 / P95  | Candidate P50 / P95 | P50 delta    |
 | ------------------------------------ | ------------------ | ------------------- | ------------ |
-| `channel.initialize`                 | 968.0 / 1029.2 ms  | 923.8 / 958.9 ms    | **-44.2 ms** |
-| Child process to initialize response | 973.8 / 1034.9 ms  | 928.9 / 964.2 ms    | **-44.9 ms** |
-| Cold `POST /session`                 | 1284.9 / 1348.2 ms | 1285.7 / 1330.0 ms  | +0.7 ms      |
-| Process to first session             | 1908.0 / 1986.9 ms | 1907.0 / 1978.0 ms  | -1.0 ms      |
-| Peak RSS                             | 414.1 / 446.4 MiB  | 410.6 / 438.6 MiB   | -3.6 MiB     |
+| `channel.initialize`                 | 942.1 / 1245.0 ms  | 898.3 / 1002.4 ms   | **-43.8 ms** |
+| Child process to initialize response | 947.0 / 1249.8 ms  | 903.0 / 998.4 ms    | **-43.9 ms** |
+| Cold `POST /session`                 | 1235.5 / 1591.7 ms | 1245.1 / 1462.0 ms  | +9.6 ms      |
+| Process to first session             | 1833.1 / 2190.6 ms | 1845.5 / 2417.0 ms  | +12.4 ms     |
+| Peak RSS                             | 418.7 / 443.6 MiB  | 406.7 / 438.4 MiB   | -11.9 MiB    |
 
-The paired distribution showed `channel.initialize` faster in 28 of 30 pairs with a -53.0 ms paired-median delta. Cold session request and process-to-first-session remained neutral: their paired-median deltas were -13.2 ms and +0.4 ms respectively, with wins split 17/30 and 15/30. The change therefore improves the direct ACP initialization boundary without imposing an end-to-end regression when a session is requested immediately; it does not claim a cold process-to-session improvement.
+The paired distribution showed `channel.initialize` faster in 26 of 30 pairs with a -44.2 ms paired-median delta. Cold session request and process-to-first-session had paired-median deltas of +15.0 ms and +13.8 ms respectively, with candidate wins in 13/30 and 11/30 pairs. The process-to-first-session paired-median bootstrap 95% interval was -2.8 to +27.5 ms, so this run did not establish either an end-to-end regression or an improvement. The change therefore claims only the direct ACP initialization-boundary gain.
 
-The formal 30-pair preheated run had two isolated candidate session outliers, so the preheated phase was repeated for another 30 pairs. In the replication, `channel.initialize` improved from 963.2 / 1018.0 ms to 906.9 / 940.8 ms P50/P95. The already-preheated session request changed from 81.7 / 86.0 ms to 83.4 / 90.4 ms, while process-to-session remained neutral at 3694.1 / 3721.9 ms versus 3694.3 / 3719.0 ms. The first run's outliers did not recur; the replication's paired session median was +1.8 ms and process-to-session median was -0.6 ms. RSS moved in opposite directions across the two preheated runs, so no preheated memory change is claimed.
+In the same run's 30-pair preheated phase, `channel.initialize` improved from 950.5 / 1323.7 ms to 908.4 / 964.4 ms P50/P95. The already-preheated session request changed from 82.1 / 94.8 ms to 83.7 / 131.6 ms, while process-to-session changed from 3683.5 / 4105.0 ms to 3686.1 / 3749.2 ms. The paired session and process-to-session medians were +1.4 ms and +1.0 ms respectively. Two isolated candidate session outliers and several control initialization outliers widened the unpaired P95 values; the paired medians remained neutral. No preheated memory change is claimed.
 
-Candidate functional runs passed concurrent first sessions, telemetry disabled with zero records, and legacy single-session mode. Every telemetry-enabled run reported a valid startup profile, and every run exited without a residual process. Two telemetry-enabled live-prompt smokes against the available OpenAI-compatible endpoint both completed and produced non-empty telemetry outfiles. Direct bundled-ACP smoke tests also passed both early-disconnect boundaries: EOF before initialize exited cleanly without starting telemetry, while EOF immediately after a successful initialize response exited cleanly after creating the outfile, with no stderr output in either case.
+Candidate functional runs passed concurrent first sessions, telemetry disabled with zero records, and legacy single-session mode. All 120 telemetry-enabled benchmark runs reported a valid startup profile and non-empty outfile, and every run exited without a residual process. A release-bundle smoke through the official ACP client additionally waited past the metric export interval and confirmed both `qwen-code.session.count` and `qwen-code.acp.event_loop.lag`, guarding against registration on a cached no-op meter. Two telemetry-enabled live-prompt smokes against the available OpenAI-compatible endpoint both completed and produced non-empty telemetry outfiles. Direct bundled-ACP smoke tests also passed both early-disconnect boundaries: EOF before initialize exited cleanly without starting telemetry, while EOF immediately after a successful initialize response exited cleanly after creating the outfile, with no stderr output in either case.
 
 Raw host artifacts are under:
 
-- `/root/qwen-7264-c2-20260723/results/formal/2026-07-23T03-03-41.303Z`
-- `/root/qwen-7264-c2-20260723/results/preheated-replication/2026-07-23T03-12-45.750Z`
+- `/root/qwen-7264-c2-20260723/results/fixed-formal-rerun/2026-07-23T05-14-14.236Z`
 - `/root/qwen-7264-c2-20260723/results/prompt-smoke/2026-07-23T03-23-26.883Z`

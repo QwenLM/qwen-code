@@ -2721,7 +2721,9 @@ export async function runAcpAgent(
         }
         initializeRequestId = undefined;
         if ('result' in message) {
-          void initializeTelemetry(config);
+          void initializeTelemetry(config).then(() => {
+            registerAcpEventLoopLagGauge(() => eventLoopMonitor.snapshot());
+          });
         }
       },
     });
@@ -2735,7 +2737,6 @@ export async function runAcpAgent(
     eventLoopMonitor.dispose();
     throw err;
   }
-  registerAcpEventLoopLagGauge(() => eventLoopMonitor.snapshot());
 
   // Both the SIGTERM handler and the IDE-initiated close path need
   // to drain the MCP pool before runExitCleanup. Single helper
