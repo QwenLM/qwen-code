@@ -4691,8 +4691,10 @@ async function runQwenServeImpl(
               'Workspace trust policy kept changing during runtime creation.',
             );
           }
+          const { generationGuard: _staleGuard, ...retryOptions } =
+            buildOptions ?? {};
           return createDynamicWorkspaceRuntime(cwd, {
-            ...buildOptions,
+            ...retryOptions,
             validationAttempt: (buildOptions?.validationAttempt ?? 0) + 1,
           });
         }

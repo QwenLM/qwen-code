@@ -398,6 +398,9 @@ export class SubagentManager {
       : ['project', 'user'];
     let deleted = false;
 
+    // Assert once before any deletion so a closed generation fails atomically
+    // instead of unlinking some level files and then throwing mid-loop.
+    options?.assertCanCommit?.();
     for (const currentLevel of levelsToCheck) {
       // Skip builtin and session levels for deletion
       if (currentLevel === 'builtin' || currentLevel === 'session') {
@@ -407,7 +410,6 @@ export class SubagentManager {
       // Find the actual subagent file by scanning and parsing
       const config = await this.findSubagentByNameAtLevel(name, currentLevel);
       if (config && config.filePath) {
-        options?.assertCanCommit?.();
         try {
           await fs.unlink(config.filePath);
           deleted = true;

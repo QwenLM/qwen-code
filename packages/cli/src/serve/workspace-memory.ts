@@ -124,19 +124,7 @@ function sendWorkspaceMemoryWriteError(
   },
 ): void {
   const { route, scope, mode } = options;
-  if (
-    err &&
-    typeof err === 'object' &&
-    'code' in err &&
-    err.code === 'workspace_generation_closed'
-  ) {
-    res.set('Retry-After', '1');
-    res.status(503).json({
-      error: 'Workspace runtime is not active.',
-      code: 'workspace_runtime_unavailable',
-    });
-    return;
-  }
+  if (sendGenerationClosedError(res, err)) return;
   if (err instanceof WorkspaceMemoryWriteTimeoutError) {
     writeStderrLine(
       `qwen serve: ${route} timeout — file lock at ` +

@@ -90,9 +90,11 @@ export function registerWorkspaceLifecycleRoutes(
   });
 
   app.post('/workspace/reload', mutate({ strict: true }), async (req, res) => {
-    await (
-      req.app.locals as { requestTrustReconcile?: () => Promise<void> }
-    ).requestTrustReconcile?.();
+    void (req.app.locals as { requestTrustReconcile?: () => Promise<void> })
+      .requestTrustReconcile?.()
+      .catch(() => {
+        // The policy monitor reports reconciliation failures separately.
+      });
     const clientId = parseAndValidateClientId(req, res);
     if (clientId === null) return;
     try {
