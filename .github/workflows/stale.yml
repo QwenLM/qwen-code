@@ -7,9 +7,33 @@ on:
   schedule:
     - cron: '30 0 * * *'
   workflow_dispatch:
+    inputs:
+      benchmark_poc:
+        description: 'Run the ECS benchmark POC instead of stale triage.'
+        required: false
+        type: boolean
+        default: false
+      qwen_ref:
+        description: 'Published Qwen Code tag to benchmark.'
+        required: false
+        type: string
+        default: ''
+      suite:
+        description: 'Allowlisted benchmark suite.'
+        required: false
+        type: choice
+        default: 'swebench_verified_gold_smoke'
+        options:
+          - 'swebench_verified_gold_smoke'
+          - 'swebench_verified_harbor_smoke'
+      release_id:
+        description: 'Optional GitHub Release ID to update after the benchmark.'
+        required: false
+        type: string
 
 jobs:
   stale:
+    if: '${{ github.event_name != ''workflow_dispatch'' || inputs.benchmark_poc == false }}'
     runs-on: 'ubuntu-latest'
     permissions:
       issues: 'write'
@@ -45,3 +69,65 @@ jobs:
           # Cap per-run API operations to stay well under GitHub's hourly rate limit
           # and give the current PR backlog (~150) enough headroom across a few runs.
           operations-per-run: 100
+
+  benchmark-poc:
+    if: '${{ github.event_name == ''workflow_dispatch'' && inputs.benchmark_poc == true && github.repository == ''QwenLM/qwen-code'' }}'
+    name: 'ECS benchmark POC'
+    runs-on: [self-hosted, Linux, X64, qwen-benchmark]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+
+    steps:
+      - name: 'Resolve immutable release commit'
+        id: revision
+        shell: bash
+        env:
+          QWEN_REF: '${{ inputs.qwen_ref }}'
+          GH_TOKEN: '${{ github.token }}'
+        run: |-
+          set -euo pipefail
+          object="$(curl --fail --silent --show-error \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/git/ref/tags/${QWEN_REF}")"
+          object_type="$(jq -r '.object.type' <<<"${object}")"
+          object_sha="$(jq -r '.object.sha' <<<"${object}")"
+          while [[ "${object_type}" == 'tag' ]]; do
+            object="$(curl --fail --silent --show-error \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/git/tags/${object_sha}")"
+            object_type="$(jq -r '.object.type' <<<"${object}")"
+            object_sha="$(jq -r '.object.sha' <<<"${object}")"
+          done
+          [[ "${object_type}" == 'commit' && "${object_sha}" =~ ^[0-9a-f]{40}$ ]]
+          echo "commit=${object_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: 'Queue benchmark in local ECS worker'
+        env:
+          QWEN_REF: '${{ inputs.qwen_ref }}'
+          QWEN_COMMIT: '${{ steps.revision.outputs.commit }}'
+          SUITE: '${{ inputs.suite }}'
+          RELEASE_ID: '${{ inputs.release_id }}'
+          TRIGGER: workflow_dispatch
+        run: |-
+          set -euo pipefail
+          args=(
+            --repository "${GITHUB_REPOSITORY}"
+            --qwen-ref "${QWEN_REF}"
+            --qwen-commit "${QWEN_COMMIT}"
+            --suite "${SUITE}"
+            --trigger "${TRIGGER}"
+            --github-run-id "${GITHUB_RUN_ID}"
+            --github-run-attempt "${GITHUB_RUN_ATTEMPT}"
+          )
+          if [[ -n "${RELEASE_ID}" ]]; then
+            args+=(--release-id "${RELEASE_ID}")
+          fi
+          response="$(sudo -n /usr/local/sbin/qwen-benchmark-dispatch "${args[@]}")"
+          echo "${response}" | jq .
+          echo "### Benchmark queued" >> "$GITHUB_STEP_SUMMARY"
+          echo "${response}" | jq -r '"- Run ID: `" + .run_id + "`\n- Status: `" + .status + "`"' >> "$GITHUB_STEP_SUMMARY"
