@@ -1,10 +1,12 @@
 import { basename, join } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type {
   ChannelConfig,
   ChannelMemoryCallbacks,
   ChannelMemoryEntry,
   ChannelMemoryIntentClassifier,
   ChannelMemoryTarget,
+  ChannelPromptOwner,
   ChannelProactiveTarget,
   ChannelRuntimeIdentity,
   ChannelRuntimeMemoryScope,
@@ -250,6 +252,8 @@ type PendingPermissionLookup =
   | { kind: 'ambiguous'; requestIds: string[] };
 type CollectBufferEntry = { text: string; envelope: Envelope };
 type ActivePrompt = {
+  runId: string;
+  owner?: ChannelPromptOwner;
   cancelled: boolean;
   cancelPending?: boolean;
   cancellationEmitted?: boolean;
@@ -796,11 +800,14 @@ export abstract class ChannelBase {
     sessionId: string,
     messageId?: string,
   ): ChannelTaskLifecycleBase {
+    const active = this.activePrompts.get(sessionId);
     return {
       channelName: this.name,
       chatId,
       sessionId,
       ...(messageId ? { messageId } : {}),
+      ...(active?.runId ? { runId: active.runId } : {}),
+      ...(active?.owner ? { owner: active.owner } : {}),
       identity: this.identity,
       memoryScope: this.memoryScope,
     };
@@ -1232,6 +1239,7 @@ export abstract class ChannelBase {
         doneResolve = resolve;
       });
       const promptState: ActivePrompt = {
+        runId: randomUUID(),
         cancelled: false,
         done,
         resolve: doneResolve,
@@ -1545,6 +1553,7 @@ export abstract class ChannelBase {
         doneResolve = resolve;
       });
       const promptState: ActivePrompt = {
+        runId: randomUUID(),
         cancelled: false,
         done,
         resolve: doneResolve,
@@ -1844,6 +1853,18 @@ export abstract class ChannelBase {
         this.emitTaskCancellation(active, sessionId, reason);
         return true;
       });
+  }
+
+  protected requestPromptRunCancellation(
+    sessionId: string,
+    runId: string,
+    reason: 'cancel_command' | 'clear' | 'steer' = 'cancel_command',
+  ): Promise<boolean> {
+    const active = this.activePrompts.get(sessionId);
+    if (!active || active.runId !== runId) {
+      return Promise.resolve(false);
+    }
+    return this.requestActivePromptCancellation(sessionId, reason);
   }
 
   private dropCollectBuffer(sessionId: string): void {
@@ -4957,6 +4978,11 @@ export abstract class ChannelBase {
         doneResolve = r;
       });
       const promptState: ActivePrompt = {
+        runId: randomUUID(),
+        owner: {
+          kind: 'channel_user',
+          id: envelope.senderId,
+        },
         cancelled: false,
         done,
         resolve: doneResolve,

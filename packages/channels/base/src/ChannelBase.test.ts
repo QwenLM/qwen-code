@@ -134,6 +134,14 @@ class TestChannel extends ChannelBase {
     return this.requestActivePromptCancellation(sessionId, 'cancel_command');
   }
 
+  cancelRunForTest(sessionId: string, runId: string): Promise<boolean> {
+    return this.requestPromptRunCancellation(
+      sessionId,
+      runId,
+      'cancel_command',
+    );
+  }
+
   debugPayloadForTest(platform: string, payload: unknown): void {
     this.logDebugPayload(platform, payload);
   }
@@ -5922,6 +5930,98 @@ describe('ChannelBase', () => {
           mode: 'metadata-only',
         },
       });
+    });
+
+    it('uses one run identity and owner across an attended prompt lifecycle', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        async (sessionId: string) => {
+          (bridge as unknown as EventEmitter).emit(
+            'textChunk',
+            sessionId,
+            'chunk',
+          );
+          return 'agent response';
+        },
+      );
+      const ch = createChannel();
+
+      await ch.handleInbound(
+        envelope({
+          messageId: 'm-run-1',
+          senderId: 'owner-1',
+          senderName: 'Owner 1',
+        }),
+      );
+
+      const events = ch.taskEvents as Array<
+        ChannelTaskLifecycleEvent & {
+          runId?: string;
+          owner?: { kind: string; id: string };
+        }
+      >;
+      expect(events.map((event) => event.type)).toEqual([
+        'started',
+        'text_chunk',
+        'completed',
+      ]);
+      expect(events[0]!.runId).toEqual(expect.any(String));
+      expect(new Set(events.map((event) => event.runId))).toEqual(
+        new Set([events[0]!.runId]),
+      );
+      expect(
+        events.every((event) => event.owner?.kind === 'channel_user'),
+      ).toBe(true);
+      expect(events.every((event) => event.owner?.id === 'owner-1')).toBe(true);
+    });
+
+    it('assigns a new run identity to the next prompt in one session', async () => {
+      const ch = createChannel();
+
+      await ch.handleInbound(envelope({ messageId: 'm-run-1' }));
+      await ch.handleInbound(envelope({ messageId: 'm-run-2' }));
+
+      const started = ch.taskEvents.filter(
+        (event) => event.type === 'started',
+      ) as Array<ChannelTaskLifecycleEvent & { runId?: string }>;
+      expect(started).toHaveLength(2);
+      expect(started[0]!.sessionId).toBe(started[1]!.sessionId);
+      expect(started[0]!.runId).toEqual(expect.any(String));
+      expect(started[1]!.runId).toEqual(expect.any(String));
+      expect(started[1]!.runId).not.toBe(started[0]!.runId);
+    });
+
+    it('cancels only the current exact run identity', async () => {
+      let resolvePrompt!: (value: string) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise<string>((resolve) => {
+          resolvePrompt = resolve;
+        }),
+      );
+      const ch = createChannel();
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-exact-run' }));
+      await vi.waitFor(() =>
+        expect(ch.taskEvents.some((event) => event.type === 'started')).toBe(
+          true,
+        ),
+      );
+      const started = ch.taskEvents.find(
+        (event) => event.type === 'started',
+      ) as ChannelTaskLifecycleEvent & { runId?: string };
+      expect(started.runId).toEqual(expect.any(String));
+
+      await expect(
+        ch.cancelRunForTest(started.sessionId, 'stale-run'),
+      ).resolves.toBe(false);
+      expect(bridge.cancelSession).not.toHaveBeenCalled();
+
+      await expect(
+        ch.cancelRunForTest(started.sessionId, started.runId!),
+      ).resolves.toBe(true);
+      expect(bridge.cancelSession).toHaveBeenCalledWith(started.sessionId);
+
+      resolvePrompt('late response');
+      await prompt;
     });
 
     it('uses configured channel identity and memory namespace in lifecycle metadata', async () => {
@@ -14567,7 +14667,7 @@ describe('ChannelBase', () => {
         }
       });
 
-      it('emits lifecycle events and response chunks for webhook bridge chunks', async () => {
+      it('emits lifecycle events with an unattended run identity for webhook bridge chunks', async () => {
         (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
           (sid: string) => {
             (bridge as unknown as EventEmitter).emit('textChunk', sid, 'part');
@@ -14597,6 +14697,17 @@ describe('ChannelBase', () => {
         expect(ch.responseChunks).toEqual([
           { chatId: 'group-1', chunk: 'part', sessionId: 's-1' },
         ]);
+        const events = ch.taskEvents as Array<
+          ChannelTaskLifecycleEvent & {
+            runId?: string;
+            owner?: { kind: string; id: string };
+          }
+        >;
+        expect(events[0]!.runId).toEqual(expect.any(String));
+        expect(new Set(events.map((event) => event.runId))).toEqual(
+          new Set([events[0]!.runId]),
+        );
+        expect(events.every((event) => event.owner === undefined)).toBe(true);
       });
 
       it('routes webhook permission requests to the configured thread target', async () => {
@@ -15587,7 +15698,7 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).not.toHaveBeenCalled();
     });
 
-    it('emits lifecycle events for loop chunks and completion', async () => {
+    it('emits lifecycle events with an unattended run identity for loop chunks and completion', async () => {
       (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
         (sid: string) => {
           (bridge as unknown as EventEmitter).emit('textChunk', sid, 'part');
@@ -15627,6 +15738,17 @@ describe('ChannelBase', () => {
         }),
         expect.objectContaining({ type: 'completed', messageId: 'job-1' }),
       ]);
+      const events = ch.taskEvents as Array<
+        ChannelTaskLifecycleEvent & {
+          runId?: string;
+          owner?: { kind: string; id: string };
+        }
+      >;
+      expect(events[0]!.runId).toEqual(expect.any(String));
+      expect(new Set(events.map((event) => event.runId))).toEqual(
+        new Set([events[0]!.runId]),
+      );
+      expect(events.every((event) => event.owner === undefined)).toBe(true);
     });
 
     it('suppresses loop chunks while cancellation is pending', async () => {

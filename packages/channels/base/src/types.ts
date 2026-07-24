@@ -179,6 +179,11 @@ export interface ObservedChannelContactGraph {
   groups: ObservedChannelGroup[];
 }
 
+export interface ChannelPromptOwner {
+  kind: 'channel_user';
+  id: string;
+}
+
 export interface ChannelProactiveTarget {
   channelName: string;
   type: 'user' | 'chat';
@@ -190,6 +195,8 @@ export interface ChannelTaskLifecycleBase {
   chatId: string;
   sessionId: string;
   messageId?: string;
+  runId?: string;
+  owner?: ChannelPromptOwner;
   identity: ChannelRuntimeIdentity;
   memoryScope: ChannelRuntimeMemoryScope;
 }

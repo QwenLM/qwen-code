@@ -94,6 +94,7 @@ export type {
   ChannelMemoryScopeConfig,
   ChannelMemoryScopeMode,
   ChannelPlugin,
+  ChannelPromptOwner,
   ChannelProactiveTarget,
   ChannelRuntimeIdentity,
   ChannelRuntimeMemoryScope,
