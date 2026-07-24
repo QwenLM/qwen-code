@@ -20,6 +20,11 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   watchRepoBranch: vi.fn(),
 }));
 
+vi.mock('../utils/stdioHelpers.js', () => ({
+  writeStderrLine: vi.fn(),
+  writeStderrLineSafe: vi.fn(),
+}));
+
 const getGitWorkingTreeStatusMock = vi.mocked(getGitWorkingTreeStatus);
 const resolveBranchNameMock = vi.mocked(resolveBranchName);
 const watchRepoBranchMock = vi.mocked(watchRepoBranch);

@@ -12,7 +12,7 @@ import {
   type GitWorkingTreeStatus,
 } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
-import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 
 export interface WorkspaceGitStatus {
   v: 2;
@@ -198,7 +198,7 @@ export class WorkspaceGitState {
     const run = (async () => {
       const status = await getGitWorkingTreeStatus(workspaceCwd).catch(
         (err) => {
-          writeStderrLine(
+          writeStderrLineSafe(
             `qwen serve: git status failed for ${workspaceCwd}: ${err instanceof Error ? err.message : String(err)}`,
           );
           return null;
