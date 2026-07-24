@@ -2678,6 +2678,34 @@ class DaemonSessionClientTest {
         AtomicInteger prompts = new AtomicInteger();
         server.createContext("/session/session-1/prompt", exchange -> {
             prompts.incrementAndGet();
+            sendJson(exchange, 502, "{\"error\":\"bad gateway\"}");
+        });
+        server.createContext("/session/session-1/detach", noContent());
+
+        try (DaemonClient daemon = newClient();
+                DaemonSessionClient session = daemon.createSession()) {
+            PromptCall call = session.startPrompt(PromptRequest.text("go"),
+                    PromptObserver.NOOP);
+            CompletionException failure = assertThrows(CompletionException.class,
+                    () -> call.acceptanceFuture().join());
+            PromptAdmissionUnknownException admissionFailure = assertInstanceOf(
+                    PromptAdmissionUnknownException.class, failure.getCause());
+            DaemonHttpException cause = assertInstanceOf(DaemonHttpException.class,
+                    admissionFailure.getCause());
+            assertEquals(502, cause.getStatusCode());
+            assertThrows(PromptAlreadyActiveException.class,
+                    () -> session.startPrompt(
+                            PromptRequest.text("unsafe-reuse"),
+                            PromptObserver.NOOP));
+        }
+        assertEquals(1, prompts.get());
+    }
+
+    @Test
+    void compressedRetryableHttpPromptFailureIsAdmissionUnknownAndNotRetried() {
+        AtomicInteger prompts = new AtomicInteger();
+        server.createContext("/session/session-1/prompt", exchange -> {
+            prompts.incrementAndGet();
             sendEncodedJson(exchange, 502, "gzip",
                     "{\"error\":\"bad gateway\"}");
         });
