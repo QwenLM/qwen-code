@@ -3979,9 +3979,11 @@ export abstract class ChannelBase {
    * Whether the resolved session is SHARED across senders. `single` collapses
    * the whole channel to one `__single__` session for EVERY sender — group OR
    * DM — so it is ALWAYS shared (even a DM maps to `__single__`). `thread` is
-   * shared only in a group (a DM maps to the lone caller's own chat). `user` is
-   * per-sender, never shared. Drives both the destructive-/clear confirm gate
-   * and the host-shell (`!`) gate.
+   * shared only in a group (a DM maps to the lone caller's own chat).
+   * `chat_thread` is always shared: it scopes by chat+thread, and a thread
+   * (issue/PR discussion) can carry multiple participants even outside a
+   * group. `user` is per-sender, never shared. Drives both the
+   * destructive-/clear confirm gate and the host-shell (`!`) gate.
    */
   private isSharedSession(envelope: Envelope): boolean {
     return this.isSharedSessionTarget(envelope);

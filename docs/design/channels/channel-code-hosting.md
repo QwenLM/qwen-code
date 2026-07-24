@@ -22,23 +22,23 @@ Poll cycle:
 
 1. `GET /notifications?since={cursor-1s}` — discover unread threads
 2. Per thread: `listComments(since=last_read_at)` — enumerate new comments
-3. Filter: bot's own comments, recently-processed IDs
+3. Filter: bot's own comments
 4. Process: mention detection → envelope → `handleInbound`
-5. `markThreadAsRead` — advances `last_read_at`
+5. `markNotificationsAsRead` — advances `last_read_at` (global, all fetched threads)
 6. Advance global cursor to `max(updated_at)`
 
 Correctness comes from `unread` filtering + `last_read_at` watermark. The global cursor is a performance optimization only (server-side `since` filtering).
 
 ### Scenario Behavior
 
-| Scenario                          | Behavior                                                                                    |
-| --------------------------------- | ------------------------------------------------------------------------------------------- |
-| New thread (@bot in comment)      | Appears (unread) → enumerate since cursor-1s → process → markRead                           |
-| Existing thread, new comment      | Reappears (unread) → enumerate since last_read_at → only new comments → markRead            |
-| Non-comment activity (push/label) | Appears → zero new comments → skip → markRead                                               |
-| User marks read on github.com     | Disappears from API → not processed                                                         |
-| markThreadAsRead fails            | Thread stays unread → re-enumerated next poll → in-memory dedup prevents duplicate dispatch |
-| New issue with @bot in body       | No comments → body contains mention → feed body as trigger                                  |
+| Scenario                          | Behavior                                                                                                |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| New thread (@bot in comment)      | Appears (unread) → enumerate since cursor-1s → process → markRead                                       |
+| Existing thread, new comment      | Reappears (unread) → enumerate since last_read_at → only new comments → markRead                        |
+| Non-comment activity (push/label) | Appears → zero new comments → skip → markRead                                                           |
+| User marks read on github.com     | Disappears from API → not processed                                                                     |
+| markNotificationsAsRead fails     | All threads stay unread, cursor does not advance → entire batch re-enumerated next poll (at-least-once) |
+| New issue with @bot in body       | No comments → body contains mention → feed body as trigger                                              |
 
 ## PollingChannelBase
 

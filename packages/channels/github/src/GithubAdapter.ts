@@ -20,6 +20,7 @@ interface GithubCursor {
 
 export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private octokit!: Octokit;
+  private botUserId: number | null = null;
   private botUsername: string | null = null;
   private webOrigin = 'https://github.com';
 
@@ -36,10 +37,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     return { lastProcessedAt: new Date().toISOString() };
   }
 
+  protected override validateCursor(parsed: unknown): GithubCursor | null {
+    const base = super.validateCursor(parsed);
+    if (!base || typeof base.lastProcessedAt !== 'string') return null;
+    return base;
+  }
+
   async connect(): Promise<void> {
     const cfg = this.config as GithubConfig;
     const baseUrl = cfg.baseUrl || 'https://api.github.com';
-    this.webOrigin = baseUrl.replace(/\/api\/v3\/?$/, '');
+    this.webOrigin = baseUrl
+      .replace(/\/api\/v3\/?$/, '')
+      .replace(/^https:\/\/api\.github\.com/, 'https://github.com');
     this.octokit = new Octokit({
       auth: cfg.token,
       baseUrl,
@@ -49,12 +58,26 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     });
     try {
       const { data } = await this.octokit.rest.users.getAuthenticated();
+      this.botUserId = data.id;
       this.botUsername = data.login;
     } catch (err) {
       throw new Error(
         `[Channel:${this.name}] failed to resolve bot identity: ${err}`,
       );
     }
+    // Resolve allowedUsers logins to immutable numeric IDs
+    const resolved: string[] = [];
+    for (const login of this.config.allowedUsers ?? []) {
+      try {
+        const { data: u } = await this.octokit.rest.users.getByUsername({
+          username: login,
+        });
+        resolved.push(String(u.id));
+      } catch {
+        resolved.push(login);
+      }
+    }
+    this.config.allowedUsers = resolved;
     this.startPollLoop();
   }
 
@@ -83,12 +106,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       );
     }
     const issueNumber = Number(match[1]);
-    await this.octokit.rest.issues.createComment({
-      owner: chatId.split('/')[0],
-      repo: chatId.split('/')[1],
-      issue_number: issueNumber,
-      body: text,
-    });
+    await this.githubApi(
+      () =>
+        this.octokit.rest.issues.createComment({
+          owner: chatId.split('/')[0],
+          repo: chatId.split('/')[1],
+          issue_number: issueNumber,
+          body: text,
+        }),
+      `createComment(${threadId})`,
+    );
   }
 
   protected async pollOnce(): Promise<void> {
@@ -140,11 +167,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         );
 
         const newComments = comments.filter((c) => {
-          if (
-            c.user?.login &&
-            this.botUsername &&
-            c.user.login.toLowerCase() === this.botUsername.toLowerCase()
-          ) {
+          if (c.user?.id != null && c.user.id === this.botUserId) {
+            return false;
+          }
+          if (c.updated_at && c.updated_at > maxUpdatedAt) {
             return false;
           }
           return true;
@@ -164,7 +190,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
           const envelope: Envelope = {
             channelName: this.name,
-            senderId: comment.user?.login || 'unknown',
+            senderId: String(comment.user?.id ?? 'unknown'),
             senderName: comment.user?.login || 'unknown',
             chatId,
             threadId,
@@ -197,9 +223,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         }
       } catch (err) {
         process.stderr.write(
-          `[Channel:${this.name}] API error processing ${threadId}, stopping batch: ${err}\n`,
+          `[Channel:${this.name}] API error processing ${threadId}, skipping: ${err}\n`,
         );
-        break;
+        continue;
       }
     }
 
@@ -236,7 +262,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
       const envelope: Envelope = {
         channelName: this.name,
-        senderId: issue.user?.login || 'unknown',
+        senderId: String(issue.user?.id ?? 'unknown'),
         senderName: issue.user?.login || 'unknown',
         chatId,
         threadId,
@@ -348,12 +374,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     issueNumber: number,
   ): Promise<void> {
     try {
-      await this.octokit.rest.issues.createComment({
-        owner: chatId.split('/')[0],
-        repo: chatId.split('/')[1],
-        issue_number: issueNumber,
-        body: '⚠️ Failed to process this request. Please re-mention the bot to retry.',
-      });
+      await this.githubApi(
+        () =>
+          this.octokit.rest.issues.createComment({
+            owner: chatId.split('/')[0],
+            repo: chatId.split('/')[1],
+            issue_number: issueNumber,
+            body: '⚠️ Failed to process this request. Please re-mention the bot to retry.',
+          }),
+        `postErrorComment(${chatId}#${issueNumber})`,
+      );
     } catch (err) {
       process.stderr.write(
         `[Channel:${this.name}] postErrorComment also failed for ${chatId}#${issueNumber}, user must re-mention manually: ${err}\n`,

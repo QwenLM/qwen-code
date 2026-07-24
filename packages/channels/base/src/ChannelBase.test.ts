@@ -714,6 +714,27 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).toHaveBeenCalled();
     });
 
+    it('appends envelope.metadata to the prompt text', async () => {
+      const ch = createChannel();
+      await ch.handleInbound(
+        envelope({
+          text: 'fix the bug',
+          metadata:
+            'Type: Issue | Title: Bug | URL: https://github.com/o/r/issues/1',
+        }),
+      );
+      expect(bridge.prompt).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.stringContaining('fix the bug'),
+        expect.anything(),
+      );
+      expect(bridge.prompt).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.stringContaining('Type: Issue | Title: Bug'),
+        expect.anything(),
+      );
+    });
+
     it('silently drops DM messages when dmPolicy=disabled', async () => {
       const ch = createChannel({ dmPolicy: 'disabled' });
       await ch.handleInbound(envelope());
@@ -7380,6 +7401,57 @@ describe('ChannelBase', () => {
 
       expect(threadMessages).toEqual([
         { chatId: 'owner/repo', threadId: 'issue:42', text: 'reply text' },
+      ]);
+    });
+
+    it('sendResponseMessage prefers active prompt threadId over router target', async () => {
+      const target: SessionTarget = {
+        channelName: 'test-chan',
+        senderId: 'user1',
+        chatId: 'owner/repo',
+        threadId: 'issue:42',
+        isGroup: true,
+      };
+      const router = {
+        getTarget: vi.fn().mockReturnValue(target),
+        handleSessionDied: vi.fn(),
+        setBridge: vi.fn(),
+      };
+      const ch = createChannel({}, {
+        router,
+        registerBridgeEvents: true,
+      } as unknown as ChannelBaseOptions);
+
+      // Seed an active prompt with a different threadId
+      (
+        ch as unknown as {
+          activePrompts: Map<string, { threadId?: string }>;
+        }
+      ).activePrompts.set('s-1', { threadId: 'pr:7' });
+
+      const threadMessages: Array<{
+        chatId: string;
+        threadId?: string;
+        text: string;
+      }> = [];
+      vi.spyOn(ch as never, 'sendThreadMessage').mockImplementation(
+        async (chatId: string, threadId: string | undefined, text: string) => {
+          threadMessages.push({ chatId, threadId, text });
+        },
+      );
+
+      await (
+        ch as unknown as {
+          sendResponseMessage: (
+            c: string,
+            t: string,
+            s: string,
+          ) => Promise<void>;
+        }
+      ).sendResponseMessage('owner/repo', 'reply text', 's-1');
+
+      expect(threadMessages).toEqual([
+        { chatId: 'owner/repo', threadId: 'pr:7', text: 'reply text' },
       ]);
     });
 

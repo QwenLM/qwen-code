@@ -9,11 +9,10 @@ This guide covers setting up a Qwen Code channel that monitors GitHub notificati
 
 ## Creating a Token
 
-1. Go to **Settings → Developer settings → Personal access tokens → Fine-grained tokens** (or classic)
-2. Generate a token with these permissions:
-   - **Notifications**: Read
-   - **Issues**: Read and write (to post comments)
-   - **Pull requests**: Read and write (to post comments)
+1. Go to **Settings → Developer settings → Personal access tokens → Tokens (classic)**
+2. Generate a token with these scopes:
+   - **notifications** — read notification threads
+   - **public_repo** (or **repo** for private repos) — post comments
 3. Save the token securely as an environment variable
 
 ## Configuration
@@ -60,7 +59,7 @@ For GitHub Enterprise Server, set `baseUrl`:
 
 | Option           | Default                  | Description                                |
 | ---------------- | ------------------------ | ------------------------------------------ |
-| `token`          | (required)               | GitHub PAT or fine-grained token           |
+| `token`          | (required)               | Classic PAT with `notifications` scope     |
 | `pollInterval`   | `60000`                  | Poll interval in ms                        |
 | `baseUrl`        | `https://api.github.com` | API base URL (for GHE)                     |
 | `requireMention` | `true`                   | Only respond when @mentioned               |
@@ -84,7 +83,7 @@ The adapter uses GitHub's Notifications API as a wake-up signal:
 1. **Poll** `GET /notifications` for unread threads
 2. **Enumerate** comments via `listComments` using `last_read_at` as the per-thread watermark
 3. **Process** each new comment (mention detection, envelope building)
-4. **Mark read** via `markThreadAsRead` (advances `last_read_at`)
+4. **Mark read** via `markNotificationsAsRead` (advances `last_read_at`)
 
 Non-comment activity (push, label changes) bumps the notification's `updated_at` but does not change `last_read_at`, so re-fetched threads with zero new comments are skipped without triggering the agent.
 

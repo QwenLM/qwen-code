@@ -48,10 +48,14 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
   protected abstract pollOnce(): Promise<void>;
   protected abstract createInitialCursor(): Cursor;
 
+  protected validateCursor(parsed: unknown): Cursor | null {
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed))
+      return null;
+    return parsed as Cursor;
+  }
+
   protected get pollInterval(): number {
-    const configured = (this.config as unknown as Record<string, unknown>)[
-      'pollInterval'
-    ] as unknown;
+    const configured: unknown = this.config.pollInterval;
     if (
       typeof configured === 'number' &&
       Number.isFinite(configured) &&
@@ -109,14 +113,7 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
     try {
       const raw = readFileSync(this.cursorPath(), 'utf-8').trim();
       if (!raw) return null;
-      const parsed: unknown = JSON.parse(raw);
-      if (
-        typeof parsed !== 'object' ||
-        parsed === null ||
-        Array.isArray(parsed)
-      )
-        return null;
-      return parsed as Cursor;
+      return this.validateCursor(JSON.parse(raw));
     } catch {
       return null;
     }

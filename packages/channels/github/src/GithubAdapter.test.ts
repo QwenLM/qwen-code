@@ -1,4 +1,7 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import type {
   ChannelAgentBridge,
   ChannelConfig,
@@ -8,7 +11,10 @@ import type {
 vi.mock('@octokit/rest', () => {
   const mockOctokit = {
     rest: {
-      users: { getAuthenticated: vi.fn() },
+      users: {
+        getAuthenticated: vi.fn(),
+        getByUsername: vi.fn(),
+      },
       activity: {
         listNotificationsForAuthenticatedUser: vi.fn(),
         markNotificationsAsRead: vi.fn(),
@@ -43,7 +49,10 @@ const mockOctokit = (
   }
 ).__mockOctokit as {
   rest: {
-    users: { getAuthenticated: ReturnType<typeof vi.fn> };
+    users: {
+      getAuthenticated: ReturnType<typeof vi.fn>;
+      getByUsername: ReturnType<typeof vi.fn>;
+    };
     activity: {
       listNotificationsForAuthenticatedUser: ReturnType<typeof vi.fn>;
       markNotificationsAsRead: ReturnType<typeof vi.fn>;
@@ -107,8 +116,9 @@ function makeComment(overrides: Record<string, unknown> = {}) {
   return {
     id: 1001,
     body: '@test-bot please fix this',
-    user: { login: 'alice' },
+    user: { id: 10001, login: 'alice' },
     created_at: '2026-07-02T09:00:00.000Z',
+    updated_at: '2026-07-02T09:00:00.000Z',
     ...overrides,
   };
 }
@@ -126,8 +136,11 @@ class TestableGithubChannel extends GithubChannel {
 
 describe('GithubChannel', () => {
   let channel: TestableGithubChannel;
+  let savedQwenHome: string | undefined;
 
   beforeEach(() => {
+    savedQwenHome = process.env.QWEN_HOME;
+    process.env.QWEN_HOME = mkdtempSync(join(tmpdir(), 'qwen-gh-test-'));
     vi.clearAllMocks();
     channel = new TestableGithubChannel(
       'test-github',
@@ -135,10 +148,15 @@ describe('GithubChannel', () => {
       makeBridge(),
     );
     mockOctokit.rest.users.getAuthenticated.mockResolvedValue({
-      data: { login: 'test-bot' },
+      data: { id: 99999, login: 'test-bot' },
     });
     mockOctokit.rest.activity.markNotificationsAsRead.mockResolvedValue({});
     mockOctokit.rest.issues.createComment.mockResolvedValue({});
+  });
+
+  afterEach(() => {
+    if (savedQwenHome === undefined) delete process.env.QWEN_HOME;
+    else process.env.QWEN_HOME = savedQwenHome;
   });
 
   async function initWithoutLoop() {
@@ -182,7 +200,8 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes).toHaveLength(1);
       const env = channel.inboundEnvelopes[0]!;
       expect(env.text).toBe(' please fix this');
-      expect(env.senderId).toBe('alice');
+      expect(env.senderId).toBe('10001');
+      expect(env.senderName).toBe('alice');
       expect(env.chatId).toBe('owner/repo');
       expect(env.threadId).toBe('issue:42');
       expect(env.isMentioned).toBe(true);
@@ -194,7 +213,10 @@ describe('GithubChannel', () => {
       mockOctokit.paginate
         .mockResolvedValueOnce([makeNotification()])
         .mockResolvedValueOnce([
-          makeComment({ user: { login: 'test-bot' }, body: '@test-bot reply' }),
+          makeComment({
+            user: { id: 99999, login: 'test-bot' },
+            body: '@test-bot reply',
+          }),
         ]);
 
       await initWithoutLoop();
@@ -289,7 +311,7 @@ describe('GithubChannel', () => {
       mockOctokit.paginate
         .mockResolvedValueOnce([good, bad])
         .mockResolvedValueOnce([makeComment()])
-        .mockRejectedValueOnce(new Error('rate limit'));
+        .mockRejectedValue(new Error('rate limit'));
 
       await pollOnce();
 
@@ -329,7 +351,7 @@ describe('GithubChannel', () => {
         data: {
           body: '@test-bot implement this feature',
           created_at: '2026-07-02T08:00:00.000Z',
-          user: { login: 'bob' },
+          user: { id: 10002, login: 'bob' },
         },
       });
 
@@ -340,7 +362,7 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes).toHaveLength(1);
       const env = channel.inboundEnvelopes[0]!;
       expect(env.text).toBe(' implement this feature');
-      expect(env.senderId).toBe('bob');
+      expect(env.senderId).toBe('10002');
     });
 
     it('dispatches issue body without mention as isMentioned false', async () => {
@@ -352,7 +374,7 @@ describe('GithubChannel', () => {
         data: {
           body: 'no mention here',
           created_at: '2026-07-02T08:00:00.000Z',
-          user: { login: 'bob' },
+          user: { id: 10002, login: 'bob' },
         },
       });
 
@@ -379,7 +401,7 @@ describe('GithubChannel', () => {
         data: {
           body: '@test-bot review this PR',
           created_at: '2026-07-02T08:00:00.000Z',
-          user: { login: 'carol' },
+          user: { id: 10003, login: 'carol' },
         },
       });
 
@@ -390,7 +412,7 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes).toHaveLength(1);
       const env = channel.inboundEnvelopes[0]!;
       expect(env.text).toBe(' review this PR');
-      expect(env.senderId).toBe('carol');
+      expect(env.senderId).toBe('10003');
       expect(env.threadId).toBe('pr:99');
       expect(env.metadata).toContain('Pull Request');
     });
