@@ -1392,7 +1392,7 @@ describe('createDaemonWorkspaceService', () => {
       });
     });
 
-    it('publishes the reduced disabled list when enabling a skill', async () => {
+    it('publishes an explicit enabled override for a default-disabled skill', async () => {
       const publishWorkspaceEvent = vi.fn();
       const svc = createDaemonWorkspaceService(
         makeDeps({
@@ -1400,6 +1400,7 @@ describe('createDaemonWorkspaceService', () => {
           persistDisabledSkills: vi.fn().mockResolvedValue({
             changed: true,
             disabled: ['orphan'],
+            settingsChanges: [{ key: 'skills.enabled', value: ['review'] }],
           }),
           invokeWorkspaceCommand: vi.fn().mockResolvedValue({
             sessionsRefreshed: 1,
@@ -1420,8 +1421,8 @@ describe('createDaemonWorkspaceService', () => {
       expect(publishWorkspaceEvent).toHaveBeenCalledWith({
         type: 'settings_changed',
         data: {
-          key: 'skills.disabled',
-          value: ['orphan'],
+          key: 'skills.enabled',
+          value: ['review'],
           scope: 'workspace',
         },
         originatorClientId: 'client-1',
@@ -1601,6 +1602,7 @@ describe('createDaemonWorkspaceService', () => {
           queryWorkspaceStatus: statusQuery(
             skillStatus({
               status: 'disabled',
+              disabledReason: 'inactive_extension',
               level: 'extension',
               extensionName: 'review-ext',
             }),
@@ -1614,6 +1616,72 @@ describe('createDaemonWorkspaceService', () => {
         reason: 'inactive_extension',
       });
       expect(persistDisabledSkills).not.toHaveBeenCalled();
+    });
+
+    it('rejects a legacy inactive extension skill with no disabledReason and not disabled by settings', async () => {
+      await withIsolatedWorkspace(async ({ workspace }) => {
+        const persistDisabledSkills = vi.fn();
+        const svc = createDaemonWorkspaceService(
+          makeDeps({
+            boundWorkspace: workspace,
+            queryWorkspaceStatus: statusQuery(
+              skillStatus({
+                status: 'disabled',
+                disabledReason: undefined,
+                level: 'extension',
+                extensionName: 'review-ext',
+              }),
+            ),
+            persistDisabledSkills,
+          }),
+        );
+        await expect(
+          svc.setWorkspaceSkillEnabled(makeCtx(), 'review', true),
+        ).rejects.toMatchObject({
+          reason: 'inactive_extension',
+        });
+        expect(persistDisabledSkills).not.toHaveBeenCalled();
+      });
+    });
+
+    it('allows toggling a legacy extension skill that is disabled by settings', async () => {
+      await withIsolatedWorkspace(async ({ workspace }) => {
+        await writeJson(
+          path.join(workspace, SETTINGS_DIRECTORY_NAME, 'settings.json'),
+          { skills: { disabled: ['review'] } },
+        );
+        const persistDisabledSkills = vi.fn().mockResolvedValue({
+          changed: true,
+          disabled: [],
+        });
+        const svc = createDaemonWorkspaceService(
+          makeDeps({
+            boundWorkspace: workspace,
+            queryWorkspaceStatus: statusQuery(
+              skillStatus({
+                status: 'disabled',
+                disabledReason: undefined,
+                level: 'extension',
+                extensionName: 'review-ext',
+              }),
+            ),
+            persistDisabledSkills,
+            isChannelLive: () => false,
+          }),
+        );
+        await expect(
+          svc.setWorkspaceSkillEnabled(makeCtx(), 'review', true),
+        ).resolves.toMatchObject({
+          skillName: 'review',
+          enabled: true,
+          changed: true,
+        });
+        expect(persistDisabledSkills).toHaveBeenCalledWith(
+          workspace,
+          'review',
+          true,
+        );
+      });
     });
 
     it('does not refresh or publish when persistence fails', async () => {

@@ -524,7 +524,107 @@ describe('workspace skill settings persistence', () => {
     );
     fs.writeFileSync(
       path.join(qwenHome, 'settings.json'),
-      JSON.stringify({ skills: { disabled: ['locked-skill'] } }),
+      JSON.stringify({
+        skills: {
+          disabled: ['locked-skill'],
+          defaultDisabled: ['opt-in-skill', 'inherited-opt-in'],
+          enabled: ['INHERITED-OPT-IN'],
+        },
+      }),
+    );
+
+    const originalCreateServeApp = serverModule.createServeApp;
+    let persistDisabledSkills:
+      | NonNullable<
+          Parameters<typeof serverModule.createServeApp>[2]
+        >['persistDisabledSkills']
+      | undefined;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
+      persistDisabledSkills = args[2]?.persistDisabledSkills;
+      return originalCreateServeApp(...args);
+    });
+    handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace,
+        serveWebShell: false,
+      },
+      { bridge: makeRuntimeBridge() },
+    );
+    await handle.runtimeReady;
+    expect(persistDisabledSkills).toBeDefined();
+    await expect(
+      persistDisabledSkills!(workspace, 'inherited-opt-in', true),
+    ).resolves.toEqual({
+      changed: false,
+      disabled: ['orphan', ' ReViEw ', 'review'],
+    });
+
+    await expect(
+      persistDisabledSkills!(workspace, 'review', false),
+    ).resolves.toEqual({
+      changed: true,
+      disabled: ['orphan', 'review'],
+      settingsChanges: [
+        { key: 'skills.disabled', value: ['orphan', 'review'] },
+      ],
+    });
+    await expect(
+      persistDisabledSkills!(workspace, 'review', false),
+    ).resolves.toEqual({
+      changed: false,
+      disabled: ['orphan', 'review'],
+    });
+
+    await Promise.all([
+      persistDisabledSkills!(workspace, 'alpha', false),
+      persistDisabledSkills!(workspace, 'beta', false),
+    ]);
+    await expect(
+      persistDisabledSkills!(workspace, 'review', true),
+    ).resolves.toMatchObject({ changed: true });
+    await expect(
+      persistDisabledSkills!(workspace, 'opt-in-skill', true),
+    ).resolves.toEqual({
+      changed: true,
+      disabled: ['orphan', 'alpha', 'beta'],
+      settingsChanges: [{ key: 'skills.enabled', value: ['opt-in-skill'] }],
+    });
+
+    const saved = JSON.parse(
+      fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
+    ) as { skills: { disabled: string[]; enabled: string[] } };
+    expect(saved.skills.disabled).toEqual(['orphan', 'alpha', 'beta']);
+    expect(saved.skills.enabled).toEqual(['opt-in-skill']);
+    await expect(
+      persistDisabledSkills!(workspace, 'locked-skill', true),
+    ).rejects.toMatchObject({ reason: 'locked', lockedScope: 'user' });
+  });
+
+  it('produces both skills.disabled and skills.enabled changes when enabling a workspace-hard-disabled default-disabled skill', async () => {
+    workspace = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-dual-')),
+    );
+    qwenHome = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-skill-dual-home-')),
+    );
+    previousQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = qwenHome;
+    settingsRuntime.resetHomeEnvBootstrapForTesting();
+    fs.mkdirSync(path.join(workspace, '.qwen'), { recursive: true });
+    fs.writeFileSync(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        skills: { disabled: ['dual-skill'] },
+      }),
+    );
+    fs.writeFileSync(
+      path.join(qwenHome, 'settings.json'),
+      JSON.stringify({
+        skills: { defaultDisabled: ['dual-skill'] },
+      }),
     );
 
     const originalCreateServeApp = serverModule.createServeApp;
@@ -551,33 +651,21 @@ describe('workspace skill settings persistence', () => {
     expect(persistDisabledSkills).toBeDefined();
 
     await expect(
-      persistDisabledSkills!(workspace, 'review', false),
+      persistDisabledSkills!(workspace, 'dual-skill', true),
     ).resolves.toEqual({
       changed: true,
-      disabled: ['orphan', 'review'],
+      disabled: [],
+      settingsChanges: [
+        { key: 'skills.disabled', value: undefined },
+        { key: 'skills.enabled', value: ['dual-skill'] },
+      ],
     });
-    await expect(
-      persistDisabledSkills!(workspace, 'review', false),
-    ).resolves.toEqual({
-      changed: false,
-      disabled: ['orphan', 'review'],
-    });
-
-    await Promise.all([
-      persistDisabledSkills!(workspace, 'alpha', false),
-      persistDisabledSkills!(workspace, 'beta', false),
-    ]);
-    await expect(
-      persistDisabledSkills!(workspace, 'review', true),
-    ).resolves.toMatchObject({ changed: true });
 
     const saved = JSON.parse(
       fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
-    ) as { skills: { disabled: string[] } };
-    expect(saved.skills.disabled).toEqual(['orphan', 'alpha', 'beta']);
-    await expect(
-      persistDisabledSkills!(workspace, 'locked-skill', true),
-    ).rejects.toMatchObject({ reason: 'locked', lockedScope: 'user' });
+    ) as { skills: { disabled?: string[]; enabled: string[] } };
+    expect(saved.skills.disabled).toBeUndefined();
+    expect(saved.skills.enabled).toEqual(['dual-skill']);
   });
 });
 

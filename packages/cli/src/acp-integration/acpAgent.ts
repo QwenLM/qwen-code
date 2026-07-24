@@ -198,6 +198,7 @@ import {
   buildDisabledSkillNamesProvider,
   loadCliConfig,
 } from '../config/config.js';
+import { resolveSkillSettings } from '../config/skill-settings.js';
 import {
   createWorkspaceMemoryExtractionErrorLogger,
   shouldSuppressRememberErrorDetails,
@@ -5442,7 +5443,22 @@ class QwenAgent implements Agent {
     }
 
     try {
-      const disabled = config.getDisabledSkillNames();
+      const resolved = resolveSkillSettings(
+        loadSettings(this.workspaceCwd(config), {
+          consumeCorruptionEnvVars: false,
+          skipLoadEnvironment: true,
+        }),
+      );
+      const disablements = new Map(
+        Array.from(config.getDisabledSkillNames(), (name) => {
+          const normalizedName = name.trim().toLowerCase();
+          return [
+            normalizedName,
+            resolved.disablements.get(normalizedName) ??
+              ({ reason: 'hard' } as const),
+          ] as const;
+        }),
+      );
       try {
         await config.getExtensionManager().refreshCache();
       } catch (error) {
@@ -5458,7 +5474,7 @@ class QwenAgent implements Agent {
       const skillsByKey = new Map(
         skills.map((skill) => [
           `${skill.level}:${skill.extensionName ?? ''}:${skill.name}`,
-          mapSkillConfigToStatus(skill, disabled, {
+          mapSkillConfigToStatus(skill, disablements, {
             disabled: isInactiveExtensionSkill(skill, inactiveSkillRefs),
           }),
         ]),
@@ -5482,7 +5498,7 @@ class QwenAgent implements Agent {
                 level: 'extension',
                 extensionName,
               },
-              disabled,
+              disablements,
               { disabled: true },
             ),
           );
