@@ -1079,18 +1079,21 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     ),
   );
 
-  // POST /session/:id/approval-mode — MINIMAL mount for Task 3 (the route
-  // itself; tiered scope + daemon trust-gate passthrough). WRITE is the
-  // floor (plan/default); the in-handler OWNER gate escalates for power
-  // modes (auto-edit/auto/yolo) and a durable `persist: true`. A later task
-  // (add-remote-approval-mode's approval-mode pump) is expected to widen
-  // this mount with `recordActivity(workingDevice)` + `enforceSessionLock(audit)`
-  // to match the fork/rewind mounts above, and to reposition it alongside
-  // those — this minimal form exists only so the route is reachable through
-  // the real `createGatewayApp` for its own tests.
+  // POST /session/:id/approval-mode — WRITE is the floor (plan/default);
+  // the in-handler OWNER gate escalates for power modes (auto-edit/auto/
+  // yolo) and a durable `persist: true`. Mirrors the fork/rewind mounts'
+  // middleware chain exactly (`recordActivity` then `enforceSessionLock`)
+  // so a session-locked share token is confined to its own session — the
+  // same integrity guarantee every other session-mutation route provides.
+  // A later task (add-remote-approval-mode's approval-mode pump) still
+  // owns wiring the `bus`/`notifier` fan-out for the daemon's own
+  // `approval_mode_changed` event; that is deliberately NOT this route's
+  // job (see routes/approvalMode.ts).
   app.post(
     '/session/:id/approval-mode',
     requireScope(WRITE, audit),
+    recordActivity(workingDevice),
+    enforceSessionLock(audit),
     createApprovalModeRoute(deps.daemon, { audit }),
   );
 

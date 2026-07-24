@@ -71,113 +71,135 @@ export function createApprovalModeRoute(
   deps: ApprovalModeRouteDeps = {},
 ): RequestHandler {
   return async (req, res) => {
-    const sessionId = req.params.id;
-    const body = (req.body ?? {}) as { mode?: unknown; persist?: unknown };
-
-    // Validate mode: an unknown string (or non-string) fails closed 400,
-    // never silently coerced to a default.
-    if (!isDaemonApprovalMode(body.mode)) {
-      res.status(400).json({
-        error: 'Invalid approval mode',
-        code: 'invalid_approval_mode',
-        allowed: DAEMON_APPROVAL_MODES,
-      });
-      return;
-    }
-    const mode = body.mode;
-
-    // Validate persist: only `true`/absent/`false` are meaningful; any other
-    // type (string, number, object) fails closed rather than being coerced.
-    if (body.persist !== undefined && typeof body.persist !== 'boolean') {
-      res
-        .status(400)
-        .json({ error: 'Invalid persist flag', code: 'invalid_persist_flag' });
-      return;
-    }
-    const persist = body.persist === true;
-
-    // Tiered scope: OWNER for power modes or a durable persist; WRITE (the
-    // mount floor) is enough for plan/default. Fail closed, and never grant
-    // more than the request asks for (a WRITE token cannot escalate itself
-    // by omitting persist and relying on a defaulted true, etc.).
-    const needsOwner = POWER_MODES.has(mode) || persist;
-    if (needsOwner && !hasScope(req.rcClient?.scopes ?? [], OWNER)) {
-      void deps.audit?.record({
-        action: 'scope_denied',
-        actorTokenId: req.rcClient?.id,
-        subActor: req.rcClient?.subActor,
-        detail: { required: 'owner', reason: 'approval_mode', mode, persist },
-      });
-      res
-        .status(403)
-        .json({ error: 'Owner scope required', code: 'owner_scope_required' });
-      return;
-    }
-
-    // Proxy the daemon. Any failure aborts before any audit row is written.
-    let result;
     try {
-      result = await daemon.setSessionApprovalMode(
-        sessionId,
-        mode,
-        persist ? { persist: true } : {},
-      );
-    } catch (err) {
-      const status = (err as { status?: unknown }).status;
-      const eBody = (err as { body?: unknown }).body as
-        | { code?: unknown; errorKind?: unknown }
-        | undefined;
-      if (status === 403) {
-        // Daemon trust gate (a power mode in an untrusted folder) — surface
-        // unchanged so the remote client learns the folder is untrusted,
-        // not merely that its own scope was insufficient.
-        res.status(403).json({
-          error: 'Approval mode blocked by folder trust',
-          code: typeof eBody?.code === 'string' ? eBody.code : 'trust_gate',
-          ...(typeof eBody?.errorKind === 'string'
-            ? { errorKind: eBody.errorKind }
-            : {}),
+      await handleApprovalMode(req, res, daemon, deps);
+    } catch {
+      // No global Express error middleware is mounted and Express 4 does not
+      // catch async-handler rejections (mirrors routes/rewind.ts's
+      // top-level guard); map any unexpected failure to a clean 500. Guard
+      // against a double-send if a response was already written.
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: 'Approval mode change failed',
+          code: 'approval_mode_failed',
         });
-        return;
       }
-      if (status === 404) {
-        res.status(502).json({
-          error: 'Daemon does not support approval-mode control',
-          code: 'approval_mode_unsupported',
-        });
-        return;
-      }
-      res
-        .status(502)
-        .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
-      return;
     }
+  };
+}
 
-    // A plan-mode session that ends up somewhere else counts as exiting plan
-    // "out of band" from this request's perspective (e.g. the daemon's own
-    // plan-exit heuristic fired), which downstream UIs care about.
-    const planExitedOutOfBand =
-      result.previous === 'plan' && result.mode !== 'plan';
+async function handleApprovalMode(
+  req: Parameters<RequestHandler>[0],
+  res: Parameters<RequestHandler>[1],
+  daemon: ApprovalModeDaemon,
+  deps: ApprovalModeRouteDeps,
+): Promise<void> {
+  const sessionId = req.params.id;
+  const body = (req.body ?? {}) as { mode?: unknown; persist?: unknown };
 
+  // Validate mode: an unknown string (or non-string) fails closed 400,
+  // never silently coerced to a default.
+  if (!isDaemonApprovalMode(body.mode)) {
+    res.status(400).json({
+      error: 'Invalid approval mode',
+      code: 'invalid_approval_mode',
+      allowed: DAEMON_APPROVAL_MODES,
+    });
+    return;
+  }
+  const mode = body.mode;
+
+  // Validate persist: only `true`/absent/`false` are meaningful; any other
+  // type (string, number, object) fails closed rather than being coerced.
+  if (body.persist !== undefined && typeof body.persist !== 'boolean') {
+    res
+      .status(400)
+      .json({ error: 'Invalid persist flag', code: 'invalid_persist_flag' });
+    return;
+  }
+  const persist = body.persist === true;
+
+  // Tiered scope: OWNER for power modes or a durable persist; WRITE (the
+  // mount floor) is enough for plan/default. Fail closed, and never grant
+  // more than the request asks for (a WRITE token cannot escalate itself
+  // by omitting persist and relying on a defaulted true, etc.).
+  const needsOwner = POWER_MODES.has(mode) || persist;
+  if (needsOwner && !hasScope(req.rcClient?.scopes ?? [], OWNER)) {
     void deps.audit?.record({
-      action: 'session_approval_mode_set',
+      action: 'scope_denied',
       actorTokenId: req.rcClient?.id,
       subActor: req.rcClient?.subActor,
-      target: sessionId,
-      detail: {
-        mode: result.mode,
-        previous: result.previous,
-        persisted: result.persisted,
-        planExitedOutOfBand,
-      },
+      detail: { required: 'owner', reason: 'approval_mode', mode, persist },
     });
+    res
+      .status(403)
+      .json({ error: 'Owner scope required', code: 'owner_scope_required' });
+    return;
+  }
 
-    res.status(200).json({
+  // Proxy the daemon. Any failure aborts before any audit row is written.
+  let result;
+  try {
+    result = await daemon.setSessionApprovalMode(
       sessionId,
+      mode,
+      persist ? { persist: true } : {},
+    );
+  } catch (err) {
+    const status = (err as { status?: unknown }).status;
+    const eBody = (err as { body?: unknown }).body as
+      | { code?: unknown; errorKind?: unknown }
+      | undefined;
+    if (status === 403) {
+      // Daemon trust gate (a power mode in an untrusted folder) — surface
+      // unchanged so the remote client learns the folder is untrusted, not
+      // merely that its own scope was insufficient.
+      res.status(403).json({
+        error: 'Approval mode blocked by folder trust',
+        code: typeof eBody?.code === 'string' ? eBody.code : 'trust_gate',
+        ...(typeof eBody?.errorKind === 'string'
+          ? { errorKind: eBody.errorKind }
+          : {}),
+      });
+      return;
+    }
+    if (status === 404) {
+      res.status(502).json({
+        error: 'Daemon does not support approval-mode control',
+        code: 'approval_mode_unsupported',
+      });
+      return;
+    }
+    res
+      .status(502)
+      .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
+    return;
+  }
+
+  // A plan-mode session that ends up somewhere else counts as exiting plan
+  // "out of band" from this request's perspective (e.g. the daemon's own
+  // plan-exit heuristic fired), which downstream UIs care about.
+  const planExitedOutOfBand =
+    result.previous === 'plan' && result.mode !== 'plan';
+
+  void deps.audit?.record({
+    action: 'session_approval_mode_set',
+    actorTokenId: req.rcClient?.id,
+    subActor: req.rcClient?.subActor,
+    target: sessionId,
+    detail: {
       mode: result.mode,
       previous: result.previous,
       persisted: result.persisted,
       planExitedOutOfBand,
-    });
-  };
+    },
+  });
+
+  res.status(200).json({
+    sessionId,
+    mode: result.mode,
+    previous: result.previous,
+    persisted: result.persisted,
+    planExitedOutOfBand,
+  });
 }

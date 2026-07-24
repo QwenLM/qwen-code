@@ -15,6 +15,7 @@ import { DaemonClient } from '@qwen-code/sdk';
 import { createGatewayApp } from '../server.js';
 import { TokenStore } from '../tokenStore.js';
 import { PairingService } from '../pairing.js';
+import { WRITE } from '../scopes.js';
 
 const SESSION_ID = 's1';
 
@@ -41,6 +42,7 @@ interface Ctx {
   stub: StubDaemon;
   writeToken: string;
   ownerToken: string;
+  store: TokenStore;
 }
 
 async function setup(
@@ -68,6 +70,7 @@ async function setup(
     stub,
     writeToken,
     ownerToken,
+    store,
   };
 }
 
@@ -121,6 +124,26 @@ describe('POST /session/:id/approval-mode', () => {
     expect(res.status).toBe(403);
     const body = await res.json();
     expect(body.code).toBe('owner_scope_required');
+    expect(ctx.stub.lastApprovalModeBody).toBeUndefined();
+  });
+
+  it('a session-locked write share token is 403d on a DIFFERENT session (session_locked, no daemon call)', async () => {
+    // Guards against a session-locked share token (write scope, locked to
+    // "other-session") reaching an approval-mode change on SESSION_ID
+    // ("s1") — cross-session integrity: enforceSessionLock must run on this
+    // mount exactly as it does on the sibling fork/rewind mounts.
+    const ctx = await setup();
+    const share = await ctx.store.issueShare({
+      scopes: [WRITE],
+      label: 'locked-guest',
+      sessionLockId: 'other-session',
+      ttlSec: 3600,
+      parentId: 'owner-token-id',
+    });
+    const res = await post(ctx.baseUrl, share.token, { mode: 'plan' });
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.code).toBe('session_locked');
     expect(ctx.stub.lastApprovalModeBody).toBeUndefined();
   });
 
