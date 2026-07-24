@@ -81,6 +81,19 @@ describe('resolveToggleTarget', () => {
     });
   });
 
+  it('picks the first enum-order provider when multiple non-current providers own the id', () => {
+    const config = makeConfig({
+      [AuthType.QWEN_OAUTH]: ['qwen3-coder'],
+      [AuthType.USE_GEMINI]: ['shared-model'],
+      [AuthType.USE_VERTEX_AI]: ['shared-model'],
+    });
+    // Current provider (qwen-oauth) does not own 'shared-model'.
+    // Both gemini and vertex-ai do — gemini comes first in AuthType enum order.
+    expect(
+      resolveToggleTarget(config, 'shared-model', AuthType.QWEN_OAUTH),
+    ).toEqual({ modelId: 'shared-model', authType: AuthType.USE_GEMINI });
+  });
+
   it('falls back to the current auth type when no provider owns the id', () => {
     const config = makeConfig({
       [AuthType.QWEN_OAUTH]: ['qwen3-coder'],
