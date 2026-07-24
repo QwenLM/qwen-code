@@ -9,46 +9,25 @@ import os from 'node:os';
 import path from 'node:path';
 import fsp from 'node:fs/promises';
 import type { Config } from '../config/config.js';
-import { ReadFileTool } from './read-file.js';
-import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
-import { FileReadCache } from '../services/fileReadCache.js';
-import { StandardFileSystemService } from '../services/fileSystemService.js';
-import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
+import { processSingleFileContent } from './fileUtils.js';
 import { getMediaMemory } from '../memory/media/media-memory-store.js';
-import { hashFile } from '../utils/media/probe.js';
+import { hashFile } from './media/probe.js';
 
-describe('read_file memory-first for large media', () => {
+describe('processSingleFileContent: memory-first for oversized media', () => {
   let tempRootDir: string;
   let runtimeDir: string;
   let videoPath: string;
-  let tool: ReadFileTool;
+  let config: Config;
   const originalRuntime = process.env['QWEN_RUNTIME_DIR'];
 
   beforeEach(async () => {
-    tempRootDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'rf-media-root-'));
-    runtimeDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'rf-media-rt-'));
+    tempRootDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lm-root-'));
+    runtimeDir = await fsp.mkdtemp(path.join(os.tmpdir(), 'lm-rt-'));
     process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
     videoPath = path.join(tempRootDir, 'big.mp4');
     // 11MB dummy > the 10MB inline read limit.
     await fsp.writeFile(videoPath, Buffer.alloc(11 * 1024 * 1024, 1));
-
-    const config = {
-      getFileService: () => new FileDiscoveryService(tempRootDir),
-      getFileSystemService: () => new StandardFileSystemService(),
-      getTargetDir: () => tempRootDir,
-      getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
-      storage: {
-        getProjectTempDir: () => path.join(tempRootDir, '.temp'),
-        getProjectDir: () => path.join(tempRootDir, '.project'),
-        getUserSkillsDirs: () => [path.join(os.homedir(), '.qwen', 'skills')],
-      },
-      getTruncateToolOutputThreshold: () => 2500,
-      getTruncateToolOutputLines: () => 500,
-      getContentGeneratorConfig: () => ({ modalities: { video: true } }),
-      getFileReadCache: () => new FileReadCache(),
-      getFileReadCacheDisabled: () => false,
-    } as unknown as Config;
-    tool = new ReadFileTool(config);
+    config = { getTargetDir: () => tempRootDir } as unknown as Config;
   });
 
   afterEach(async () => {
@@ -59,8 +38,7 @@ describe('read_file memory-first for large media', () => {
   });
 
   it('points to the media tools (not a bare error) when nothing is in memory', async () => {
-    const invocation = tool.build({ file_path: videoPath });
-    const result = await invocation.execute(new AbortController().signal);
+    const result = await processSingleFileContent(videoPath, config);
     expect(result.error).toBeUndefined();
     const text = result.llmContent as string;
     expect(text).toContain('too large to read inline');
@@ -79,8 +57,7 @@ describe('read_file memory-first for large media', () => {
       readerId: 'media-dispatch',
     });
 
-    const invocation = tool.build({ file_path: videoPath });
-    const result = await invocation.execute(new AbortController().signal);
+    const result = await processSingleFileContent(videoPath, config);
     expect(result.error).toBeUndefined();
     const text = result.llmContent as string;
     expect(text).toContain('media memory already has');

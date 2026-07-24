@@ -5,6 +5,7 @@
  */
 
 import fs from 'node:fs/promises';
+import path from 'node:path';
 import { atomicWriteFile } from '../../utils/atomicFileWrite.js';
 import { tagUntrustedMediaText } from '../../utils/media/media-security.js';
 import type { Modality } from '../../utils/media/types.js';
@@ -59,6 +60,8 @@ export interface StoredMediaRecord {
 export interface MediaMemory {
   put(u: MediaUnderstanding): Promise<void>;
   get(hash: string): Promise<StoredMediaRecord | undefined>;
+  /** Look up the most recent understanding of a file by its absolute path. */
+  getByPath(absPath: string): Promise<StoredMediaRecord | undefined>;
   list(): Promise<StoredMediaRecord[]>;
   linkOf(hash: string): Promise<string[]>;
 }
@@ -126,6 +129,16 @@ class FileMediaMemory implements MediaMemory {
     } catch {
       return undefined;
     }
+  }
+
+  async getByPath(absPath: string): Promise<StoredMediaRecord | undefined> {
+    const target = path.resolve(absPath);
+    const matches = (await this.list()).filter(
+      (r) => r.path && path.resolve(r.path) === target,
+    );
+    if (matches.length === 0) return undefined;
+    matches.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    return matches[0];
   }
 
   async put(u: MediaUnderstanding): Promise<void> {

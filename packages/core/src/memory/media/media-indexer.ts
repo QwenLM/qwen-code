@@ -36,8 +36,9 @@ function sanitizeField(value: string): string {
 function recordLine(rec: StoredMediaRecord): string {
   const label = sanitizeField(`${rec.modality}: ${rec.summary}`) || rec.hash;
   const target = encodeURIComponent(`${rec.hash}.md`);
+  const where = sanitizeField(rec.path);
   const when = sanitizeField(rec.updatedAt);
-  return `- [${label}](${target}) — ${when}`;
+  return `- [${label}](${target}) — ${where} — ${when}`;
 }
 
 /** Rebuild MEDIA_INDEX.md from the given records. */

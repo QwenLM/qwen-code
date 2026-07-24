@@ -53,13 +53,14 @@ equivalence.)
   combined per-segment understanding). Keyed by content hash; understandings
   accumulate rather than overwrite.
 - **Load**: (1) **memory-first on read** — reading a media file too large to
-  inline (e.g. via an `@`-mention → `read_file`) no longer returns a bare "too
-  large" error; it returns any prior cross-session understanding of that exact
-  file (or explicitly states there is none) plus which media tool to use. So the
-  model answers from memory when it can, and only analyzes when memory lacks the
-  answer. (2) automatically — reading a file already in memory via
-  `media_watch`/`image_view` surfaces its prior understanding as a note. (3)
-  explicitly — the model calls `media_grep`.
+  inline goes through the shared `processSingleFileContent`, so it applies to
+  every read path: the `read_file` tool, `@`-mentions (which expand via
+  `readManyFiles`), and `pathReader`. Instead of a bare "too large" error it
+  looks up any prior understanding **by absolute path** (`MediaMemory.getByPath`,
+  no re-hashing of the large file) and returns it, or states there is none and
+  names the media tool to use. `MEDIA_INDEX.md` records the source path too. (2)
+  automatically — reading a file already in memory via `media_watch`/`image_view`
+  surfaces its prior understanding as a note. (3) explicitly — `media_grep`.
 
 ## Layers and seams
 

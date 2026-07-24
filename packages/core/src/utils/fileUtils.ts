@@ -970,6 +970,50 @@ function mediaModalityKey(
 }
 
 /**
+ * Memory-first result for a media file too large to read inline. Looks up any
+ * prior cross-session understanding by absolute path (fast, no re-hashing of a
+ * large file) and returns it, or states there is none and names the media tool
+ * to use. Returned as a non-error result so read paths inject it as content.
+ */
+async function largeMediaMemoryResult(
+  absPath: string,
+  modality: keyof InputModalities,
+  displayName: string,
+): Promise<ProcessedFileReadResult> {
+  const tool =
+    modality === 'video'
+      ? 'media_dispatch'
+      : modality === 'image'
+        ? 'image_view'
+        : 'media_watch';
+  let record;
+  try {
+    const { getMediaMemory } = await import(
+      '../memory/media/media-memory-store.js'
+    );
+    record = await getMediaMemory().getByPath(absPath);
+  } catch {
+    record = undefined;
+  }
+  if (record?.body) {
+    return {
+      llmContent:
+        `[${modality} "${displayName}" is too large to read inline, but media memory already has a cross-session understanding of this exact file:]\n\n` +
+        `${record.body}\n\n` +
+        `[If this does not answer the question, call ${tool} with a targeted prompt (pass force:true to re-analyze from scratch).]`,
+      returnDisplay: `Recalled media memory: ${displayName}`,
+    };
+  }
+  return {
+    llmContent:
+      `[${modality} "${displayName}" is too large to read inline, and media memory has NO prior understanding of it. ` +
+      `To analyze it, call ${tool}${modality === 'video' ? ' (it splits the video into time segments and understands them in parallel)' : ''} ` +
+      `with a prompt describing what you need to know.]`,
+    returnDisplay: `Large ${modality}, not in memory: ${displayName}`,
+  };
+}
+
+/**
  * Build the same unsupported-modality message used by the converter,
  * so the LLM sees a consistent hint regardless of where the check fires.
  * Note: PDF is handled separately in the switch (pdftotext fallback) and
@@ -1209,6 +1253,20 @@ export async function processSingleFileContent(
       }
     }
     if (fileSizeInMB > 9.9 && !willExtractPdfText && fileType !== 'text') {
+      // Memory-first for oversized media (image/audio/video): a large media
+      // file can't be read inline, but the media layer may already have a
+      // cross-session understanding of it (keyed by absolute path). Surface
+      // that understanding — or state there is none and name the tool to use —
+      // instead of a bare "too large" error. This is what makes an @-mention
+      // of a big video answer from memory rather than always re-analyzing.
+      const mediaModality = mediaModalityKey(fileType);
+      if (mediaModality && mediaModality !== 'pdf') {
+        return largeMediaMemoryResult(
+          path.resolve(filePath),
+          mediaModality,
+          relativePathForDisplay,
+        );
+      }
       return {
         llmContent: 'File size exceeds the 10MB limit.',
         returnDisplay: 'File size exceeds the 10MB limit.',

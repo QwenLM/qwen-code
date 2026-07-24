@@ -29,6 +29,7 @@ function fakeMemory(records: StoredMediaRecord[]): MediaMemory {
   return {
     list: async () => records,
     get: async () => undefined,
+    getByPath: async () => undefined,
     put: async () => {},
     linkOf: async () => [],
   };

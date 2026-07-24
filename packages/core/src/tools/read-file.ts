@@ -15,10 +15,7 @@ import type {
   ToolResultDisplay,
 } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
-import { ToolErrorType } from './tool-error.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
-import { modalityOf, hashFile } from '../utils/media/probe.js';
-import { getMediaMemory } from '../memory/media/media-memory-store.js';
 
 import type { PartListUnion } from '@google/genai';
 import type { PermissionDecision } from '../permissions/types.js';
@@ -238,20 +235,6 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       result = await this.transcribePdfCandidate(result, signal);
     }
 
-    // Memory-first for large media: a big image/audio/video can't be read
-    // inline, but the media layer may already have a cross-session
-    // understanding of it. Instead of a bare "too large" error, surface that
-    // understanding (or state there is none) plus how to analyze it, so the
-    // model checks memory before re-running an expensive analysis.
-    if (result.errorType === ToolErrorType.FILE_TOO_LARGE) {
-      const mediaFirst = await this.buildLargeMediaMemoryResult(absPath).catch(
-        () => undefined,
-      );
-      if (mediaFirst) {
-        return mediaFirst;
-      }
-    }
-
     if (result.error) {
       return {
         llmContent: result.llmContent,
@@ -374,51 +357,6 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     return {
       llmContent,
       returnDisplay: this.toToolResultDisplay(result),
-    };
-  }
-
-  /**
-   * For a media file too large to read inline, return any prior cross-session
-   * understanding from media memory (or state there is none), plus how to
-   * analyze it. Returns undefined for non-media files so the normal too-large
-   * error path applies.
-   */
-  private async buildLargeMediaMemoryResult(
-    absPath: string,
-  ): Promise<ToolResult | undefined> {
-    const mimeType = getSpecificMimeType(absPath) ?? '';
-    const modality = modalityOf(mimeType);
-    if (!modality) return undefined;
-
-    const name = shortenPath(makeRelative(absPath, this.config.getTargetDir()));
-    const tool =
-      modality === 'video'
-        ? 'media_dispatch'
-        : modality === 'image'
-          ? 'image_view'
-          : 'media_watch';
-
-    const hash = await hashFile(absPath);
-    const record = await getMediaMemory()
-      .get(hash)
-      .catch(() => undefined);
-
-    if (record?.body) {
-      return {
-        llmContent:
-          `[${modality} "${name}" is too large to read inline, but media memory already has a cross-session understanding of this exact file:]\n\n` +
-          `${record.body}\n\n` +
-          `[If this does not answer the question, call ${tool} with a targeted prompt (pass force:true to re-analyze from scratch).]`,
-        returnDisplay: `Recalled media memory: ${name}`,
-      };
-    }
-
-    return {
-      llmContent:
-        `[${modality} "${name}" is too large to read inline, and media memory has NO prior understanding of it. ` +
-        `To analyze it, call ${tool}${modality === 'video' ? ' (it splits the video into time segments and understands them in parallel)' : ''} ` +
-        `with a prompt describing what you need to know.]`,
-      returnDisplay: `Large ${modality}, not in memory: ${name}`,
     };
   }
 
