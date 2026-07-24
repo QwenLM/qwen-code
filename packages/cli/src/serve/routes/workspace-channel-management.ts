@@ -333,8 +333,9 @@ export function registerWorkspaceChannelManagementRoutes(
         const resolved = await target(req, res);
         if (!resolved || !validateClient(req, res, resolved.runtime)) return;
         const name = parseInstanceName(req, res);
+        if (!name) return;
         const code = parsePairingCode(deps.safeBody(req), res);
-        if (!name || !code) return;
+        if (!code) return;
         try {
           noStore(res);
           res
@@ -350,8 +351,9 @@ export function registerWorkspaceChannelManagementRoutes(
       const resolved = await target(req, res);
       if (!resolved || !validateClient(req, res, resolved.runtime)) return;
       const name = parseInstanceName(req, res);
+      if (!name) return;
       const request = parseUpsert(deps.safeBody(req), res);
-      if (!name || !request) return;
+      if (!request) return;
       try {
         noStore(res);
         res.status(200).json(await resolved.service.upsert(name, request));
@@ -364,8 +366,9 @@ export function registerWorkspaceChannelManagementRoutes(
       const resolved = await target(req, res);
       if (!resolved || !validateClient(req, res, resolved.runtime)) return;
       const name = parseInstanceName(req, res);
+      if (!name) return;
       const request = parseRevision(deps.safeBody(req), res);
-      if (!name || !request) return;
+      if (!request) return;
       try {
         noStore(res);
         res.status(200).json(await resolved.service.remove(name, request));
@@ -378,8 +381,9 @@ export function registerWorkspaceChannelManagementRoutes(
       const resolved = await target(req, res);
       if (!resolved || !validateClient(req, res, resolved.runtime)) return;
       const name = parseInstanceName(req, res);
+      if (!name) return;
       const request = parseStartup(deps.safeBody(req), res);
-      if (!name || !request) return;
+      if (!request) return;
       try {
         noStore(res);
         res.status(200).json(await resolved.service.setStartup(name, request));

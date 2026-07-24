@@ -368,4 +368,42 @@ describe('workspace Channel management routes', () => {
     expect(primaryService.upsert).toHaveBeenCalledOnce();
     expect(primaryService.approvePairing).not.toHaveBeenCalled();
   });
+
+  it('sends only the name error when both name and body are invalid', async () => {
+    const { app, primaryService } = mount();
+
+    const approve = await auth(
+      request(app)
+        .post('/workspace/channels/a%2Fb/pairing-requests/approve')
+        .send({ code: 'short' }),
+    );
+    const upsert = await auth(
+      request(app)
+        .put('/workspace/channels/a%2Fb')
+        .send({ expectedRevision: '' }),
+    );
+    const remove = await auth(
+      request(app)
+        .delete('/workspace/channels/a%2Fb')
+        .send({ expectedRevision: '' }),
+    );
+    const startup = await auth(
+      request(app)
+        .put('/workspace/channels/a%2Fb/startup')
+        .send({ expectedRevision: '' }),
+    );
+
+    expect(approve.status).toBe(400);
+    expect(approve.body.code).toBe('invalid_channel_instance_name');
+    expect(upsert.status).toBe(400);
+    expect(upsert.body.code).toBe('invalid_channel_instance_name');
+    expect(remove.status).toBe(400);
+    expect(remove.body.code).toBe('invalid_channel_instance_name');
+    expect(startup.status).toBe(400);
+    expect(startup.body.code).toBe('invalid_channel_instance_name');
+    expect(primaryService.approvePairing).not.toHaveBeenCalled();
+    expect(primaryService.upsert).not.toHaveBeenCalled();
+    expect(primaryService.remove).not.toHaveBeenCalled();
+    expect(primaryService.setStartup).not.toHaveBeenCalled();
+  });
 });
