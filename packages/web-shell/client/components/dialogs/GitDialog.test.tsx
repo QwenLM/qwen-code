@@ -242,4 +242,67 @@ describe('GitDialog', () => {
         ?.getAttribute('aria-selected'),
     ).toBe('true');
   });
+
+  it('wraps arrow-key navigation across all three tabs', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+      files: [],
+      hiddenCount: 0,
+    });
+    workspaceGitHubPullRequests.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      pullRequests: [],
+    });
+    mockState.capabilities = { features: ['workspace_github_prs'] };
+    mount('prs');
+    await flush();
+
+    const press = (id: string, key: string) =>
+      act(async () => {
+        document
+          .getElementById(id)
+          ?.dispatchEvent(new KeyboardEvent('keydown', { key, bubbles: true }));
+      });
+
+    // ArrowRight on the last tab wraps to the first.
+    await press('git-dialog-tab-prs', 'ArrowRight');
+    await flush();
+    expect(
+      document
+        .getElementById('git-dialog-tab-diff')
+        ?.getAttribute('aria-selected'),
+    ).toBe('true');
+
+    // ArrowLeft on the first tab wraps to the last.
+    await press('git-dialog-tab-diff', 'ArrowLeft');
+    await flush();
+    expect(
+      document
+        .getElementById('git-dialog-tab-prs')
+        ?.getAttribute('aria-selected'),
+    ).toBe('true');
+
+    // Home/End jump to the ends of the three-tab list.
+    await press('git-dialog-tab-prs', 'Home');
+    await flush();
+    expect(
+      document
+        .getElementById('git-dialog-tab-diff')
+        ?.getAttribute('aria-selected'),
+    ).toBe('true');
+    await press('git-dialog-tab-diff', 'End');
+    await flush();
+    expect(
+      document
+        .getElementById('git-dialog-tab-prs')
+        ?.getAttribute('aria-selected'),
+    ).toBe('true');
+  });
 });

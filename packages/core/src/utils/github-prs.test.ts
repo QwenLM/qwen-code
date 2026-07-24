@@ -212,7 +212,7 @@ describe('fetchGitHubPullRequests', () => {
         '--json',
         expect.stringContaining('reviewDecision'),
       ],
-      expect.objectContaining({ cwd: dir }),
+      expect.objectContaining({ cwd: dir, timeout: 10_000 }),
       expect.any(Function),
     );
   });
@@ -226,6 +226,23 @@ describe('fetchGitHubPullRequests', () => {
     const result = await fetchGitHubPullRequests(dir);
 
     expect(result).toEqual({ kind: 'cli_unavailable' });
+  });
+
+  it('names the timeout when gh is killed after the deadline', async () => {
+    fs.mkdirSync(path.join(dir, '.git'));
+    mockGhError(
+      Object.assign(new Error('Command failed: gh pr list --state open'), {
+        killed: true,
+        stderr: '',
+      }),
+    );
+
+    const result = await fetchGitHubPullRequests(dir);
+
+    expect(result).toEqual({
+      kind: 'failed',
+      message: 'gh pr list timed out after 10s',
+    });
   });
 
   it('returns failed with a single-line stderr message when gh exits non-zero', async () => {

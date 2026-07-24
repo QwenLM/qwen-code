@@ -184,6 +184,11 @@ function runGhPrList(gitRoot: string): Promise<string> {
 }
 
 function ghErrorMessage(error: unknown): string {
+  // A timeout kill carries an empty stderr and a "Command failed: gh pr
+  // list …" message; name the timeout instead of dumping the argv.
+  if ((error as { killed?: unknown } | null)?.killed === true) {
+    return `gh pr list timed out after ${GH_TIMEOUT_MS / 1000}s`;
+  }
   const stderr = (error as { stderr?: unknown } | null)?.stderr;
   const raw =
     typeof stderr === 'string' && stderr.trim()

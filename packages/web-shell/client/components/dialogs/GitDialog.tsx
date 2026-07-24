@@ -17,6 +17,12 @@ export type GitDialogView = 'diff' | 'log' | 'prs';
 
 const GITHUB_PRS_FEATURE = 'workspace_github_prs';
 
+const TITLE_KEYS: Record<GitDialogView, string> = {
+  diff: 'gitDiff.title',
+  log: 'gitLog.title',
+  prs: 'githubPrs.title',
+};
+
 export function GitDialog({
   workspaceCwd,
   initialView,
@@ -67,16 +73,9 @@ export function GitDialog({
     }
   };
 
-  const titleKey =
-    view === 'diff'
-      ? 'gitDiff.title'
-      : view === 'log'
-        ? 'gitLog.title'
-        : 'githubPrs.title';
-
   return (
     <DialogShell
-      title={t(titleKey)}
+      title={t(TITLE_KEYS[view])}
       subtitle={subtitle}
       size="xl"
       allowFullscreen
@@ -97,13 +96,7 @@ export function GitDialog({
               onClick={() => selectView(name)}
               onKeyDown={onTabKeyDown}
             >
-              {t(
-                name === 'diff'
-                  ? 'gitDiff.title'
-                  : name === 'log'
-                    ? 'gitLog.title'
-                    : 'githubPrs.title',
-              )}
+              {t(TITLE_KEYS[name])}
             </button>
           ))}
         </div>

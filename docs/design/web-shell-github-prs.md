@@ -95,7 +95,8 @@ GET /workspaces/:workspace/github/prs
 state: 'open'|'draft', reviewDecision: ... | null, checks: ...,
 updatedAt: number }`(`updatedAt` 为 epoch 秒)
   - `DaemonGitHubPullRequestList`:`{ v: 1, workspaceCwd, available: boolean,
-pullRequests?: DaemonGitHubPullRequest[] }`
+pullRequests: DaemonGitHubPullRequest[] }`(`pullRequests` 恒在,不可用时为
+    空数组)
 - `DaemonClient.ts` 的 `WorkspaceDaemonClient` 增加
   `workspaceGitHubPullRequests()`,走 `workspaceJsonRequest(..., '/github/prs',
 'GET /workspaces/:workspace/github/prs', { mode: 'rest' })`。
@@ -110,7 +111,8 @@ pullRequests?: DaemonGitHubPullRequest[] }`
     `#number 标题`、分支、作者、相对更新时间、review 徽标、CI 图标。
   - 行点击 `window.open(url, '_blank', 'noopener')`。
   - 状态文案:loading / 空列表 / `available:false`(非 git 仓库)/
-    `github_cli_unavailable`(引导安装 gh)/ 其他失败(错误 + 重试按钮)。
+    `github_cli_unavailable`(引导安装 gh)/ 其他失败(静态错误文案,重新
+    打开对话框即重试,与 GitLog 一致)。
   - 副标题上报 `N 个开放 PR`。
 - `GitDialog.tsx`:view 联合加 `'prs'`,第三个 tab
   (`githubPrs.title`,中英文 "Pull requests"/"拉取请求");tab 键盘导航
@@ -118,8 +120,8 @@ pullRequests?: DaemonGitHubPullRequest[] }`
 - 入口:
   - 本地命令 `/prs`(`constants/localCommands.ts` + App.tsx 分支,仿
     `/log`;无 workspace 时 toast),打开 GitDialog `view: 'prs'`。
-  - capability `workspace_github_prs` 不存在时隐藏 tab 与 `/prs` 命令
-    (旧 daemon 404 防护)。
+  - capability `workspace_github_prs` 不存在时隐藏对话框里的 PR tab(旧
+    daemon 404 防护);`/prs` 命令仍列出,执行时 toast 提示不支持。
 - i18n:`githubPrs.*`、`local.prs`、`localCommand.prsNoWorkspace` 中英文。
 
 ### 5. 测试
