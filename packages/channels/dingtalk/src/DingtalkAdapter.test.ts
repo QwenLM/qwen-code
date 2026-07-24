@@ -127,6 +127,7 @@ vi.mock('@qwen-code/channel-base', async () => {
         _sessionId: string,
         _messageIds: string[],
       ): void {}
+      protected requestPromptRunCancellation = vi.fn().mockResolvedValue(false);
       protected supportsProactiveTarget(target: SessionTarget): boolean {
         return target.threadId === undefined;
       }
@@ -402,6 +403,15 @@ function getLifecycleHook(
   const fn = (channel as unknown as Record<string, unknown>)[
     'onTaskLifecycle'
   ] as (event: ChannelTaskLifecycleEvent) => void;
+  return fn.bind(channel);
+}
+
+function getCompleteHook(
+  channel: DingtalkChannelInstance,
+): (chatId: string, text: string, sessionId: string) => Promise<void> {
+  const fn = (channel as unknown as Record<string, unknown>)[
+    'onResponseComplete'
+  ] as (chatId: string, text: string, sessionId: string) => Promise<void>;
   return fn.bind(channel);
 }
 
@@ -1075,6 +1085,111 @@ describe('DingtalkChannel prompt reactions', () => {
       stderr.mockRestore();
       fetchSpy.mockRestore();
     }
+  });
+});
+
+describe('DingtalkChannel status cards', () => {
+  it('keeps status cards disabled when block streaming is enabled', () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+
+    expect(
+      (
+        channel as unknown as {
+          statusCardController?: unknown;
+          interactiveCardClient?: unknown;
+        }
+      ).statusCardController,
+    ).toBeUndefined();
+    expect(
+      (
+        channel as unknown as {
+          interactiveCardClient?: unknown;
+        }
+      ).interactiveCardClient,
+    ).toBeDefined();
+  });
+
+  it('binds status cards only to the matching real inbound owner', () => {
+    const channel = createChannel();
+    const start = vi.fn();
+    (
+      channel as unknown as {
+        statusCardController: { start: typeof start };
+        inboundCardOwners: Map<string, unknown>;
+      }
+    ).statusCardController = { start };
+    (
+      channel as unknown as {
+        inboundCardOwners: Map<string, unknown>;
+      }
+    ).inboundCardOwners.set('message-1', {
+      ownerId: 'owner-1',
+      target: { chatId: 'cid-1', isGroup: true },
+    });
+
+    getLifecycleHook(channel)({
+      type: 'started',
+      channelName: 'dingtalk',
+      chatId: 'cid-1',
+      sessionId: 'session-1',
+      messageId: 'message-1',
+      runId: 'run-1',
+      owner: { kind: 'channel_user', id: 'other-owner' },
+    });
+    expect(start).not.toHaveBeenCalled();
+
+    (
+      channel as unknown as {
+        inboundCardOwners: Map<string, unknown>;
+      }
+    ).inboundCardOwners.set('message-2', {
+      ownerId: 'owner-1',
+      target: { chatId: 'cid-1', isGroup: true },
+    });
+    getLifecycleHook(channel)({
+      type: 'started',
+      channelName: 'dingtalk',
+      chatId: 'cid-1',
+      sessionId: 'session-1',
+      messageId: 'message-2',
+      runId: 'run-2',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+    });
+
+    expect(start).toHaveBeenCalledOnce();
+    expect(start).toHaveBeenCalledWith(
+      expect.objectContaining({ runId: 'run-2' }),
+      { chatId: 'cid-1', isGroup: true },
+    );
+  });
+
+  it('uses the awaited status finalization or falls back to Markdown', async () => {
+    const channel = createChannel();
+    seedWebhook(channel, 'cid-1');
+    const complete = vi
+      .fn()
+      .mockResolvedValueOnce(true)
+      .mockResolvedValueOnce(false);
+    (
+      channel as unknown as {
+        statusCardController: { complete: typeof complete };
+        statusRunBySession: Map<string, string>;
+      }
+    ).statusCardController = { complete };
+    (
+      channel as unknown as {
+        statusRunBySession: Map<string, string>;
+      }
+    ).statusRunBySession.set('session-1', 'run-1');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}'));
+
+    await getCompleteHook(channel)('cid-1', 'first', 'session-1');
+    expect(fetchSpy).not.toHaveBeenCalled();
+
+    await getCompleteHook(channel)('cid-1', 'second', 'session-1');
+    expect(fetchSpy).toHaveBeenCalledOnce();
   });
 });
 

@@ -36,6 +36,7 @@ import {
   type DingtalkCardCallback,
   type DingtalkInteractiveCardConfig,
 } from './interactive-card-types.js';
+import { StatusCardController } from './status-card-controller.js';
 import type {
   ChannelConfig,
   ChannelBaseOptions,
@@ -234,6 +235,15 @@ export class DingtalkChannel extends ChannelBase {
   private proactiveToken?: { token: string; expiresAt: number };
   private readonly interactiveCardConfig: DingtalkInteractiveCardConfig;
   protected readonly interactiveCardClient?: DingtalkInteractiveCardClient;
+  private statusCardController?: StatusCardController;
+  private readonly inboundCardOwners = new Map<
+    string,
+    {
+      ownerId: string;
+      target: { chatId: string; isGroup: boolean };
+    }
+  >();
+  private readonly statusRunBySession = new Map<string, string>();
 
   constructor(
     name: string,
@@ -283,6 +293,21 @@ export class DingtalkChannel extends ChannelBase {
         robotCode: config.clientId,
         getAccessToken: () => this.getProactiveToken(),
       });
+      if (
+        this.interactiveCardConfig.statusCard.enabled &&
+        config.blockStreaming !== 'on'
+      ) {
+        this.statusCardController = new StatusCardController({
+          client: this.interactiveCardClient,
+          cancelRun: (sessionId, runId) =>
+            this.requestPromptRunCancellation(sessionId, runId),
+          onError: (operation, error) => {
+            process.stderr.write(
+              `[DingTalk:${this.name}] ${operation} failed: ${sanitizeLogText(String(error), 300)}\n`,
+            );
+          },
+        });
+      }
     }
     if (useConnectionManager) {
       this.connectionManager = new DingtalkConnectionManager({
@@ -365,8 +390,14 @@ export class DingtalkChannel extends ChannelBase {
   }
 
   protected routeCardCallback(
-    _callback: DingtalkCardCallback,
+    callback: DingtalkCardCallback,
   ): (() => Promise<void>) | undefined {
+    if (callback.actionId === 'stop') {
+      return this.statusCardController?.claimStop(
+        callback.outTrackId,
+        callback.ownerId,
+      );
+    }
     return undefined;
   }
 
@@ -1048,11 +1079,36 @@ export class DingtalkChannel extends ChannelBase {
   protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
     if (event.type === 'started') {
       this.startReaction(event.chatId, event.messageId, event.sessionId);
+      const inboundOwner = event.messageId
+        ? this.inboundCardOwners.get(event.messageId)
+        : undefined;
+      if (event.messageId) this.inboundCardOwners.delete(event.messageId);
+      if (
+        this.statusCardController &&
+        event.runId &&
+        event.owner &&
+        inboundOwner?.ownerId === event.owner.id
+      ) {
+        this.statusRunBySession.set(event.sessionId, event.runId);
+        this.statusCardController.start(event, inboundOwner.target);
+      }
+      return;
+    }
+    if (event.type === 'text_chunk' && event.runId) {
+      this.statusCardController?.append(event.runId, event.chunk);
       return;
     }
     if (isTerminalTaskLifecycleType(event.type)) {
       if (event.messageId) this.mentionTargets.delete(event.messageId);
       this.stopReaction(event.chatId, event.messageId, event.sessionId);
+      if (event.runId) {
+        if (event.type === 'failed') {
+          this.statusCardController?.fail(event.runId, event.error);
+        } else if (event.type === 'cancelled') {
+          this.statusCardController?.cancel(event.runId, event.reason);
+        }
+      }
+      this.statusRunBySession.delete(event.sessionId);
     }
   }
 
@@ -1120,6 +1176,20 @@ export class DingtalkChannel extends ChannelBase {
     if (!(await this.preflightInbound(envelope))) return;
 
     const messageId = envelope.messageId;
+    if (this.interactiveCardClient && messageId && envelope.senderId) {
+      this.inboundCardOwners.delete(messageId);
+      this.inboundCardOwners.set(messageId, {
+        ownerId: envelope.senderId,
+        target: {
+          chatId: envelope.isGroup ? envelope.chatId : envelope.senderId,
+          isGroup: envelope.isGroup,
+        },
+      });
+      if (this.inboundCardOwners.size > 1000) {
+        const oldest = this.inboundCardOwners.keys().next().value;
+        if (oldest !== undefined) this.inboundCardOwners.delete(oldest);
+      }
+    }
     const atUserId = (envelope as MentionTargetEnvelope)[mentionTarget];
     if (this.atSender && messageId && atUserId) {
       this.mentionTargets.set(messageId, atUserId);
@@ -1178,6 +1248,22 @@ export class DingtalkChannel extends ChannelBase {
       return;
     }
     await this.sendReply(chatId, text);
+  }
+
+  protected override async onResponseComplete(
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ): Promise<void> {
+    const runId = this.statusRunBySession.get(sessionId);
+    if (
+      runId &&
+      this.statusCardController &&
+      (await this.statusCardController.complete(runId, text))
+    ) {
+      return;
+    }
+    await this.sendResponseMessage(chatId, text, sessionId);
   }
 
   /**
