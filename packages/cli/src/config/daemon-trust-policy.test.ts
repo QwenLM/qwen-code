@@ -241,6 +241,30 @@ describe('daemon trust policy', () => {
     ).toHaveLength(2);
   });
 
+  it('treats a persistently missing trusted-folders read as empty, not an error', async () => {
+    const files: Record<string, string> = {
+      '/config/user.json': JSON.stringify({
+        security: { folderTrust: { enabled: true } },
+      }),
+      '/config/system.json': '{}',
+      '/config/trusted.json': JSON.stringify({
+        '/work': TrustLevel.TRUST_FOLDER,
+      }),
+    };
+    installFiles(files);
+    mockedFs.readFile.mockImplementation(async (filePath) => {
+      if (String(filePath) === '/config/trusted.json') {
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      }
+      return files[String(filePath)] ?? '';
+    });
+
+    const snapshot = await readDaemonTrustPolicySnapshot();
+
+    expect(snapshot.trustedFolders).toEqual({});
+    expect(snapshot.trustedFoldersError).toBeUndefined();
+  });
+
   it('fails closed when system defaults are malformed', async () => {
     installFiles({
       '/config/user.json': '{}',
