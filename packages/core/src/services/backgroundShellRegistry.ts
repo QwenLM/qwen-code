@@ -21,6 +21,7 @@
 import * as fs from 'node:fs';
 
 import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
+import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { escapeXml } from '../utils/xml.js';
 
@@ -446,10 +447,8 @@ export class BackgroundShellRegistry {
     }
     if (entry.exitCode !== undefined) payload['exitCode'] = entry.exitCode;
     if (entry.error !== undefined) payload['error'] = entry.error;
-    const tmpPath = `${statusPath}.tmp`;
     try {
-      fs.writeFileSync(tmpPath, JSON.stringify(payload, null, 2));
-      fs.renameSync(tmpPath, statusPath);
+      atomicWriteFileSync(statusPath, JSON.stringify(payload, null, 2));
     } catch (error) {
       debugLogger.warn(
         `status sidecar write failed for shell ${entry.shellId}: ${
