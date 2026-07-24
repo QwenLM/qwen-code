@@ -202,6 +202,19 @@ implement — satisfying a nit is never a reason to bloat the code.
   reason per finding (out of scope, conflicts with the PR's direction, or not
   worth the diff growth) so the deferral is visible in the PR thread — never
   drop one silently.
+- Needs a maintainer's decision: a finding that turns on a judgment that is
+  NOT yours to make — a product or scope tradeoff (is this acceptable for v1?
+  should the PR be split?), two reviewers asking for opposite things, or whether
+  the reported problem is worth solving at all. Do not settle it yourself:
+  neither quietly implement one contested direction nor decline it as "out of
+  scope" (declining IS deciding). Name the decision, lay out the options and
+  your recommendation, and leave the thread UNRESOLVED so the maintainer reads
+  an explicit question, not a verdict you already reached. This is not a
+  failure and not a "could not address" — do everything else this round; the
+  open question simply rides along in the summary until a human answers it (the
+  answer arrives as ordinary new feedback the next round). Distinguish it from
+  Decline: you decline when the CHANGE is not worth doing; you escalate when the
+  CALL is not yours to make.
 
 If `--conflict true`, merge `origin/<base>` and resolve conflicts by
 understanding both sides, never blindly taking one side. If false, do not merge
@@ -236,8 +249,9 @@ Finish with exactly one outcome:
   comment id per line — the `rc:<id>` handle shown in `feedback.md` — for each
   finding you IMPLEMENTED. The workflow resolves exactly those review threads
   after the push, so a human re-reviewing sees only what is still open. List an
-  id ONLY when you actually made the change: a finding you declined or deferred
-  must stay unresolved so its recorded reason gets read. Omit the file (or
+  id ONLY when you actually made the change: a finding you declined, deferred,
+  or escalated for a maintainer's decision must stay unresolved so its recorded
+  reason or open question gets read. Omit the file (or
   leave it empty) when you implemented nothing that came from an inline
   comment.
 - No change: write `<workdir>/no-action.md` (bilingual per Shared Rules).

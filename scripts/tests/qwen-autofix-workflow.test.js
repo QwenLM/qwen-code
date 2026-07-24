@@ -3382,6 +3382,10 @@ describe('qwen-autofix workflow', () => {
     const skill = readAutofixSkill();
     expect(skill).toContain('never');
     expect(skill).toContain('drop one silently');
+    // A third disposition beyond fix/decline: escalate a judgment that is the
+    // maintainer's to make, instead of silently deciding it.
+    expect(skill).toContain("Needs a maintainer's decision");
+    expect(skill).toContain('escalate when the');
   });
 
   it('requires the address path to run verification and record it as evidence', () => {
