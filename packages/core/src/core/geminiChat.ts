@@ -2391,6 +2391,12 @@ export class GeminiChat {
                 rateLimitRetryCount++;
                 const delayMs = getRateLimitRetryDelayMs(rateLimitRetryCount, {
                   ...RATE_LIMIT_RETRY_OPTIONS,
+                  initialDelayMs:
+                    cgConfig?.retryInitialDelayMs ??
+                    RATE_LIMIT_RETRY_OPTIONS.initialDelayMs,
+                  maxDelayMs:
+                    cgConfig?.retryMaxDelayMs ??
+                    RATE_LIMIT_RETRY_OPTIONS.maxDelayMs,
                   error,
                 });
                 const message = parseAndFormatApiError(

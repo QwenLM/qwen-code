@@ -88,6 +88,8 @@ export type ContentGeneratorConfig = {
   // returns 200 then goes silent is otherwise unbounded. `<= 0` disables it.
   streamIdleTimeoutMs?: number;
   maxRetries?: number; // Maximum retries for rate-limit errors
+  retryInitialDelayMs?: number; // Initial delay for stream rate-limit retries
+  retryMaxDelayMs?: number; // Maximum delay for stream rate-limit retries
   retryErrorCodes?: number[]; // Additional error codes that trigger rate-limit retry
   enableCacheControl?: boolean; // Enable cache control for DashScope providers
   // Force `scope: 'global'` on Anthropic cache_control entries even when the

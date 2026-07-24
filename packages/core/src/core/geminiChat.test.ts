@@ -7886,10 +7886,16 @@ describe('GeminiChat', async () => {
       }
     });
 
-    it('should increase delay across repeated streamed rate-limit errors', async () => {
+    it('should use configured delay across repeated streamed rate-limit errors', async () => {
       vi.useFakeTimers();
 
       try {
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          authType: AuthType.USE_OPENAI,
+          model: 'test-model',
+          retryInitialDelayMs: 3_000,
+          retryMaxDelayMs: 5_000,
+        });
         const firstError = new StreamContentError(
           'id:1\nevent:error\n:HTTP_STATUS/429\ndata:{"request_id":"req-1","code":"Throttling.AllocationQuota","message":"Allocated quota exceeded"}',
         );
@@ -7943,7 +7949,7 @@ describe('GeminiChat', async () => {
         retryInfos.push(first.value.retryInfo!);
 
         let nextPromise = iterator.next();
-        await vi.advanceTimersByTimeAsync(60_000);
+        await vi.advanceTimersByTimeAsync(3_000);
         await nextPromise;
 
         const second = await iterator.next();
@@ -7951,7 +7957,7 @@ describe('GeminiChat', async () => {
         retryInfos.push(second.value.retryInfo!);
 
         nextPromise = iterator.next();
-        await vi.advanceTimersByTimeAsync(120_000);
+        await vi.advanceTimersByTimeAsync(5_000);
         await nextPromise;
 
         const events: StreamEvent[] = [];
@@ -7961,9 +7967,7 @@ describe('GeminiChat', async () => {
           events.push(next.value);
         }
 
-        expect(retryInfos.map((info) => info.delayMs)).toEqual([
-          60_000, 120_000,
-        ]);
+        expect(retryInfos.map((info) => info.delayMs)).toEqual([3_000, 5_000]);
         expect(
           events.some(
             (e) =>

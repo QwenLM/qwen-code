@@ -32,6 +32,8 @@ export type ModelGenerationConfig = Pick<
   | 'samplingParams'
   | 'timeout'
   | 'maxRetries'
+  | 'retryInitialDelayMs'
+  | 'retryMaxDelayMs'
   | 'retryErrorCodes'
   | 'enableCacheControl'
   | 'forceGlobalCacheScope'

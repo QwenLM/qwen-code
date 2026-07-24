@@ -94,6 +94,8 @@ This auth type supports not only OpenAI's official API but also any OpenAI-compa
         "generationConfig": {
           "timeout": 60000,
           "maxRetries": 3,
+          "retryInitialDelayMs": 3000,
+          "retryMaxDelayMs": 30000,
           "enableCacheControl": true,
           "contextWindowSize": 128000,
           "modalities": {
