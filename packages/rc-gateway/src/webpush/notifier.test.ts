@@ -95,7 +95,10 @@ describe('PushNotifier', () => {
     await notifier.notify(
       {
         type: 'permission_request',
-        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r1' },
+        data: {
+          toolCall: { kind: 'execute', title: 'run_shell_command' },
+          requestId: 'r1',
+        },
       },
       { sessionId: 's1' },
     );
@@ -128,7 +131,7 @@ describe('PushNotifier', () => {
     await notifier.notify(
       {
         type: 'permission_request',
-        data: { toolCall: { name: 'bash' }, requestId: 'r1' },
+        data: { toolCall: { kind: 'execute', title: 'bash' }, requestId: 'r1' },
       },
       { sessionId: 's2' },
     );
@@ -151,7 +154,7 @@ describe('PushNotifier', () => {
     await notifier.notify(
       {
         type: 'permission_request',
-        data: { toolCall: { name: 'bash' }, requestId: 'r1' },
+        data: { toolCall: { kind: 'execute', title: 'bash' }, requestId: 'r1' },
       },
       { sessionId: 's1' },
     );
@@ -176,7 +179,7 @@ describe('PushNotifier', () => {
     await notifier.notify(
       {
         type: 'permission_request',
-        data: { toolCall: { name: 'bash' }, requestId: 'r1' },
+        data: { toolCall: { kind: 'execute', title: 'bash' }, requestId: 'r1' },
       },
       { sessionId: 's1' },
     );
@@ -214,7 +217,10 @@ describe('PushNotifier', () => {
     await notifier.notify(
       {
         type: 'permission_request',
-        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r1' },
+        data: {
+          toolCall: { kind: 'execute', title: 'run_shell_command' },
+          requestId: 'r1',
+        },
       },
       { sessionId: 's1' },
     );
@@ -304,7 +310,10 @@ describe('PushNotifier', () => {
     await notifier.notify(
       {
         type: 'permission_request',
-        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r1' },
+        data: {
+          toolCall: { kind: 'execute', title: 'run_shell_command' },
+          requestId: 'r1',
+        },
       },
       { sessionId: 's1' },
     );
@@ -342,7 +351,10 @@ describe('PushNotifier', () => {
     await notifier.notify(
       {
         type: 'permission_request',
-        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r1' },
+        data: {
+          toolCall: { kind: 'execute', title: 'run_shell_command' },
+          requestId: 'r1',
+        },
       },
       { sessionId: 's1' },
     );
@@ -376,7 +388,10 @@ describe('PushNotifier', () => {
     await notifier.notify(
       {
         type: 'permission_request',
-        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r1' },
+        data: {
+          toolCall: { kind: 'execute', title: 'run_shell_command' },
+          requestId: 'r1',
+        },
       },
       { sessionId: 's1' },
     );
@@ -414,7 +429,10 @@ describe('PushNotifier', () => {
     await notifier.notify(
       {
         type: 'permission_request',
-        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r1' },
+        data: {
+          toolCall: { kind: 'execute', title: 'run_shell_command' },
+          requestId: 'r1',
+        },
       },
       { sessionId: 's1' },
     );
@@ -476,7 +494,10 @@ describe('PushNotifier', () => {
     await notifier.notify(
       {
         type: 'permission_request',
-        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r1' },
+        data: {
+          toolCall: { kind: 'execute', title: 'run_shell_command' },
+          requestId: 'r1',
+        },
       },
       { sessionId: 's1', sessionName: 'demo' },
     );
@@ -511,7 +532,10 @@ describe('PushNotifier', () => {
     await notifier.notify(
       {
         type: 'permission_request',
-        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r1' },
+        data: {
+          toolCall: { kind: 'execute', title: 'run_shell_command' },
+          requestId: 'r1',
+        },
       },
       { sessionId: 's1' },
     );
@@ -530,7 +554,10 @@ describe('PushNotifier', () => {
     await notifier.notify(
       {
         type: 'permission_request',
-        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r1' },
+        data: {
+          toolCall: { kind: 'execute', title: 'run_shell_command' },
+          requestId: 'r1',
+        },
       },
       { sessionId: 's1', sessionName: 'demo' },
     );
@@ -541,7 +568,10 @@ describe('PushNotifier', () => {
     await notifier.notify(
       {
         type: 'permission_request',
-        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r2' },
+        data: {
+          toolCall: { kind: 'execute', title: 'run_shell_command' },
+          requestId: 'r2',
+        },
       },
       { sessionId: 's1', sessionName: 'demo' },
     );
@@ -552,7 +582,10 @@ describe('PushNotifier', () => {
     await notifier.notify(
       {
         type: 'permission_request',
-        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r3' },
+        data: {
+          toolCall: { kind: 'execute', title: 'run_shell_command' },
+          requestId: 'r3',
+        },
       },
       { sessionId: 's1', sessionName: 'demo' },
     );
@@ -585,7 +618,10 @@ describe('PushNotifier', () => {
     await notifier.notify(
       {
         type: 'permission_request',
-        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r1' },
+        data: {
+          toolCall: { kind: 'execute', title: 'run_shell_command' },
+          requestId: 'r1',
+        },
       },
       { sessionId: 's1', sessionName: 'demo' },
     );
@@ -635,7 +671,7 @@ describe('PushNotifier', () => {
     await notifier.notify(
       {
         type: 'permission_request',
-        data: { toolCall: { name: 'bash' }, requestId: 'r1' },
+        data: { toolCall: { kind: 'execute', title: 'bash' }, requestId: 'r1' },
       },
       { sessionId: 's1', sessionName: 'demo' },
     );
@@ -699,7 +735,7 @@ rules:
     await notifier.notify(
       {
         type: 'permission_request',
-        data: { toolCall: { name: 'bash' }, requestId: 'r1' },
+        data: { toolCall: { kind: 'execute', title: 'bash' }, requestId: 'r1' },
       },
       { sessionId: 's1', sessionName: 'demo' },
     );
@@ -738,7 +774,10 @@ rules:
     await notifier.notify(
       {
         type: 'permission_request',
-        data: { toolCall: { name: 'run_shell_command' }, requestId: 'r1' },
+        data: {
+          toolCall: { kind: 'execute', title: 'run_shell_command' },
+          requestId: 'r1',
+        },
       },
       { sessionId: 's1' },
     );
@@ -837,7 +876,7 @@ rules:
 
   const PERM_EVENT = {
     type: 'permission_request',
-    data: { toolCall: { name: 'bash' }, requestId: 'r1' },
+    data: { toolCall: { kind: 'execute', title: 'bash' }, requestId: 'r1' },
   };
 
   it('suppresses a subscription whose quiet window covers now (+ audits reason)', async () => {
@@ -931,7 +970,7 @@ rules:
 describe('PushNotifier rate limit (cycle 46)', () => {
   const PERM = {
     type: 'permission_request',
-    data: { toolCall: { name: 'bash' }, requestId: 'r' },
+    data: { toolCall: { kind: 'execute', title: 'bash' }, requestId: 'r' },
   };
   const NOW = new Date(1_000_000);
 
@@ -1066,7 +1105,7 @@ describe('PushNotifier same-kind coalescing (cycle 63)', () => {
   }
   const permEvent = {
     type: 'permission_request',
-    data: { toolCall: { name: 'bash' }, requestId: 'r' },
+    data: { toolCall: { kind: 'execute', title: 'bash' }, requestId: 'r' },
   };
 
   it('suppresses a same-kind same-session repeat within the window and audits reason:coalesced', async () => {
@@ -1258,7 +1297,7 @@ describe('PushNotifier.flushQuietDigests (D4 end-of-quiet digest)', () => {
     await notifier.notify(
       {
         type: 'permission_request',
-        data: { toolCall: { name: 'x' }, requestId: 'r' },
+        data: { toolCall: { kind: 'execute', title: 'x' }, requestId: 'r' },
       },
       { sessionId: 's1' },
       new Date('2026-06-09T02:00:00Z'),
@@ -1310,7 +1349,7 @@ describe('PushNotifier.flushQuietDigests (D4 end-of-quiet digest)', () => {
 describe('PushNotifier — APNs fan-out', () => {
   const PERM = {
     type: 'permission_request',
-    data: { toolCall: { name: 'bash' }, requestId: 'r1' },
+    data: { toolCall: { kind: 'execute', title: 'bash' }, requestId: 'r1' },
   };
 
   it('SECURITY: does NOT deliver another session’s push to a session-locked share token’s APNs device', async () => {
@@ -1527,7 +1566,7 @@ describe('PushNotifier — APNs fan-out', () => {
     await notifier.notify(
       {
         type: 'permission_request',
-        data: { toolCall: { name: 'bash' }, requestId: 'r1' },
+        data: { toolCall: { kind: 'execute', title: 'bash' }, requestId: 'r1' },
       },
       { sessionId: 's1' },
     );
@@ -1569,7 +1608,7 @@ describe('PushNotifier — APNs fan-out', () => {
     await notifier.notify(
       {
         type: 'permission_request',
-        data: { toolCall: { name: 'bash' }, requestId: 'r1' },
+        data: { toolCall: { kind: 'execute', title: 'bash' }, requestId: 'r1' },
       },
       { sessionId: 's1' },
     );
@@ -1601,7 +1640,10 @@ describe('PushNotifier — APNs fan-out', () => {
       notifier.notify(
         {
           type: 'permission_request',
-          data: { toolCall: { name: 'bash' }, requestId: 'r1' },
+          data: {
+            toolCall: { kind: 'execute', title: 'bash' },
+            requestId: 'r1',
+          },
         },
         { sessionId: 's1' },
       ),

@@ -167,16 +167,15 @@ export function buildPayload(
 
   switch (event.type) {
     case 'permission_request': {
-      const toolCall = data.toolCall as
-        | { name?: unknown; title?: unknown }
-        | undefined;
+      const toolCall = data.toolCall as { title?: unknown } | undefined;
       const str = (v: unknown): string | undefined =>
         typeof v === 'string' && v.length > 0 ? v : undefined;
-      const toolName: string =
-        str(toolCall?.name) ||
-        str(toolCall?.title) ||
-        str(data.toolName) ||
-        'a tool call';
+      // Real ACP permission frames carry only { toolCallId, title, kind,
+      // rawInput } — there is no `toolCall.name`, and no top-level
+      // `data.toolName`. Reading those was the same wire-mismatch that silently
+      // broke the policy engine: the fields never exist, so the humanized
+      // `title` was always what actually rendered. Use it directly.
+      const toolLabel: string = str(toolCall?.title) || 'a tool call';
       const requestId = str(data.requestId);
       // The one-time-approve option (kind 'allow_once'), NOT options[0] (which is
       // usually 'allow_always' and would persist a standing grant). Absent → the
@@ -187,7 +186,7 @@ export function buildPayload(
         kind: 'permission.required',
         sessionId: ctx.sessionId,
         ...(ctx.sessionName ? { sessionName: ctx.sessionName } : {}),
-        summary: truncate('Permission needed: ' + toolName),
+        summary: truncate('Permission needed: ' + toolLabel),
         url: sessionUrl(ctx.sessionId),
         ...(requestId ? { requestId } : {}),
         ...(approveOptionId ? { approveOptionId } : {}),

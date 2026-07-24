@@ -47,12 +47,17 @@ describe('buildDigestPayload', () => {
 });
 
 describe('buildPayload', () => {
-  it('maps permission_request to permission.required with toolName, requestId, url', () => {
+  it('maps permission_request to permission.required using the toolCall title', () => {
     const p = buildPayload(
       {
         type: 'permission_request',
+        // The REAL ACP frame shape: { toolCallId, title, kind, rawInput }.
         data: {
-          toolCall: { name: 'run_shell_command' },
+          toolCall: {
+            toolCallId: 't7',
+            kind: 'execute',
+            title: 'Run: npm test',
+          },
           requestId: 'req-7',
         },
       },
@@ -63,12 +68,26 @@ describe('buildPayload', () => {
     expect(p!.kind).toBe('permission.required');
     expect(p!.sessionId).toBe('s1');
     expect(p!.sessionName).toBe('My Session');
-    expect(p!.summary).toBe('Permission needed: run_shell_command');
+    expect(p!.summary).toBe('Permission needed: Run: npm test');
     expect(p!.url).toBe('/ui/?session=s1');
     expect(p!.requestId).toBe('req-7');
   });
 
-  it('falls back to "a tool call" when no toolName is present', () => {
+  it('ignores the nonexistent toolCall.name field (wire-mismatch regression)', () => {
+    // The daemon never sends `toolCall.name`; a frame carrying only it (the old
+    // synthetic test shape) must NOT surface it — it falls back to the generic
+    // label, proving the dead `.name` branch is gone.
+    const p = buildPayload(
+      {
+        type: 'permission_request',
+        data: { toolCall: { name: 'run_shell_command' }, requestId: 'req-x' },
+      },
+      { sessionId: 's1' },
+    );
+    expect(p!.summary).toBe('Permission needed: a tool call');
+  });
+
+  it('falls back to "a tool call" when the frame carries no title', () => {
     const p = buildPayload(
       { type: 'permission_request', data: { requestId: 'req-1' } },
       { sessionId: 's2' },
@@ -77,9 +96,9 @@ describe('buildPayload', () => {
   });
 
   it('truncates summary to <=140 chars with an ellipsis', () => {
-    const longName = 'x'.repeat(300);
+    const longTitle = 'x'.repeat(300);
     const p = buildPayload(
-      { type: 'permission_request', data: { toolName: longName } },
+      { type: 'permission_request', data: { toolCall: { title: longTitle } } },
       { sessionId: 's3' },
     );
     expect(p!.summary.length).toBe(140);
@@ -94,35 +113,48 @@ describe('buildPayload', () => {
     expect(p).toBeNull();
   });
 
-  it('never leaks tool args/secrets into the summary', () => {
+  it('never leaks rawInput/secrets into the summary or payload', () => {
     const SECRET = 'SUPER-SECRET-API-KEY-9f3a';
     const p = buildPayload(
       {
         type: 'permission_request',
+        // Real frame: the secret lives in rawInput (the actual leak vector),
+        // and the rendered summary comes only from the humanized `title`.
         data: {
           toolCall: {
-            name: 'run_shell_command',
-            args: { command: `curl -H "auth: ${SECRET}"`, path: '/etc/passwd' },
+            toolCallId: 'tc9',
+            kind: 'execute',
+            title: 'Run a shell command',
+            rawInput: {
+              command: `curl -H "auth: ${SECRET}"`,
+              directory: '/etc/passwd',
+            },
           },
           requestId: 'req-9',
         },
       },
       { sessionId: 's5' },
     );
+    expect(p!.summary).toBe('Permission needed: Run a shell command');
     expect(p!.summary).not.toContain(SECRET);
     expect(p!.summary).not.toContain('/etc/passwd');
     expect(JSON.stringify(p)).not.toContain(SECRET);
   });
 
-  it('carries approveOptionId from the first option; omits it when absent; never leaks args', () => {
+  it('carries approveOptionId from the first option; omits it when absent; never leaks rawInput', () => {
     const SECRET = 'SUPER-SECRET-API-KEY-9f3a';
     const withOptions = buildPayload(
       {
         type: 'permission_request',
         data: {
           toolCall: {
-            name: 'run_shell_command',
-            args: { command: `curl -H "auth: ${SECRET}"`, path: '/etc/passwd' },
+            toolCallId: 'tc12',
+            kind: 'execute',
+            title: 'Run a shell command',
+            rawInput: {
+              command: `curl -H "auth: ${SECRET}"`,
+              directory: '/etc/passwd',
+            },
           },
           requestId: 'req-12',
           // allow_always at [0] must NOT be chosen; the allow_once one is.
