@@ -89,8 +89,14 @@ function mount(secondaryTrusted = true) {
     resolveService: (target) => services.get(target.workspaceCwd),
     mutate,
     safeBody: (req) => (req.body ?? {}) as Record<string, unknown>,
-    parseAndValidateClientId: (req) =>
-      req.header('x-qwen-client-id') ?? undefined,
+    parseAndValidateClientId: (req, res) => {
+      const id = req.header('x-qwen-client-id') ?? undefined;
+      if (id === 'invalid') {
+        res.status(400).json({ code: 'invalid_client_id' });
+        return null;
+      }
+      return id;
+    },
   });
   return { app, primaryService, secondaryService };
 }
@@ -210,6 +216,41 @@ describe('workspace Channel management routes', () => {
       'ABCDEFGH',
     );
     expect(primaryService.pairingRequests).not.toHaveBeenCalled();
+  });
+
+  it('rejects mutation requests with an invalid client ID', async () => {
+    const { app, primaryService } = mount();
+    const invalidClient = (test: request.Test) =>
+      test
+        .set('Authorization', 'Bearer secret')
+        .set('X-Qwen-Client-Id', 'invalid');
+
+    const upsert = await invalidClient(
+      request(app)
+        .put('/workspace/channels/bot')
+        .send({ expectedRevision: 'r1', config: { type: 'dingtalk' } }),
+    );
+    const remove = await invalidClient(
+      request(app)
+        .delete('/workspace/channels/bot')
+        .send({ expectedRevision: 'r1' }),
+    );
+    const start = await invalidClient(
+      request(app).post('/workspace/channels/bot/start'),
+    );
+    const stop = await invalidClient(
+      request(app).post('/workspace/channels/bot/stop'),
+    );
+
+    expect(upsert.status).toBe(400);
+    expect(upsert.body.code).toBe('invalid_client_id');
+    expect(remove.status).toBe(400);
+    expect(start.status).toBe(400);
+    expect(stop.status).toBe(400);
+    expect(primaryService.upsert).not.toHaveBeenCalled();
+    expect(primaryService.remove).not.toHaveBeenCalled();
+    expect(primaryService.start).not.toHaveBeenCalled();
+    expect(primaryService.stop).not.toHaveBeenCalled();
   });
 
   it('rejects malformed names, revisions, secrets, and pairing codes', async () => {

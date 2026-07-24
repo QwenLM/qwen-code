@@ -417,6 +417,13 @@ export function createChannelManagementService(
       const current = opts.store.snapshot();
       assertExpectedRevision(current, request.expectedRevision);
       if (!isAllChannelSelectionName(name)) {
+        if (!Object.hasOwn(current.channels, name)) {
+          throw new ChannelManagementError(
+            'channel_instance_not_found',
+            `Channel "${name}" is not configured in this workspace.`,
+          );
+        }
+        assertWorkspaceConfig(current.channels[name]!);
         const committedNames = opts.manager.committedChannelNames();
         if (committedNames.includes(name)) {
           assertOwnedRuntime(name);
@@ -482,6 +489,7 @@ export function createChannelManagementService(
           `Channel "${name}" is not configured in this workspace.`,
         );
       }
+      assertWorkspaceConfig(persisted.channels[name]!);
       await opts.manager.setChannelEnabled(
         { name, workspaceCwd: opts.workspaceCwd },
         false,

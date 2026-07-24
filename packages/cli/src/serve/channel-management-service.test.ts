@@ -284,6 +284,9 @@ describe('createChannelManagementService', () => {
     await expect(service.start('bot')).rejects.toMatchObject({
       code: 'channel_workspace_mismatch',
     });
+    await expect(service.stop('bot')).rejects.toMatchObject({
+      code: 'channel_workspace_mismatch',
+    });
     await expect(
       service.setStartup('bot', {
         expectedRevision: 'rev-1',
@@ -293,11 +296,15 @@ describe('createChannelManagementService', () => {
     await expect(service.restart('bot')).rejects.toMatchObject({
       code: 'channel_workspace_mismatch',
     });
+    await expect(
+      service.remove('bot', { expectedRevision: 'rev-1' }),
+    ).rejects.toMatchObject({ code: 'channel_workspace_mismatch' });
     await expect(service.pairingRequests('bot')).rejects.toMatchObject({
       code: 'channel_workspace_mismatch',
     });
 
     expect(store.setStartupNames).not.toHaveBeenCalled();
+    expect(store.remove).not.toHaveBeenCalled();
     expect(manager.setChannelEnabled).not.toHaveBeenCalled();
     expect(manager.reloadWorkspace).not.toHaveBeenCalled();
   });
