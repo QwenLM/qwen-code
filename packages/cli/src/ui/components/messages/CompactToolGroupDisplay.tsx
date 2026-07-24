@@ -26,7 +26,7 @@ interface CompactToolGroupDisplayProps {
   contentWidth: number;
 }
 
-const COMPACT_GROUP_HORIZONTAL_PADDING = 2;
+const COMPACT_GROUP_HORIZONTAL_PADDING = 0;
 const ELAPSED_TIME_MARGIN_LEFT = 1;
 const EXECUTING_ELAPSED_TIME_RESERVED_LABEL = '99h 59m 59s';
 
@@ -421,7 +421,7 @@ export const CompactToolGroupDisplay: React.FC<
   const hint = getActiveToolHint(toolCalls);
 
   return (
-    <Box flexDirection="column" width={contentWidth} paddingX={1} gap={0}>
+    <Box flexDirection="column" width={contentWidth} gap={0}>
       <Box flexDirection="row">
         <ToolStatusIndicator status={overallStatus} name={activeTool.name} />
         <Box flexGrow={1}>

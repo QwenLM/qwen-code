@@ -863,7 +863,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
       effectiveDisplayRenderer.type === 'ansi');
 
   return (
-    <Box paddingX={1} paddingY={0} flexDirection="column">
+    <Box paddingY={0} flexDirection="column">
       <Box minHeight={1}>
         <ToolStatusIndicator status={status} name={name} />
         <ToolInfo

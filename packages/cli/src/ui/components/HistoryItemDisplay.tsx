@@ -403,8 +403,11 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         />
       )}
       {itemForDisplay.type === 'tool_use_summary' && (
-        <Box paddingLeft={1}>
-          <Text dimColor>● {itemForDisplay.summary}</Text>
+        <Box flexDirection="row">
+          <Box width={2} flexShrink={0}>
+            <Text dimColor>●</Text>
+          </Box>
+          <Text dimColor>{itemForDisplay.summary}</Text>
         </Box>
       )}
       {itemForDisplay.type === 'compression' && (

@@ -68,14 +68,14 @@ export function CompressionMessage({
 
   return (
     <Box flexDirection="row">
-      <Box marginRight={1}>
+      <Box width={2} flexShrink={0}>
         {isPending ? (
           <Spinner type="dots" />
         ) : (
           <Text color={theme.text.accent}>◆</Text>
         )}
       </Box>
-      <Box>
+      <Box flexGrow={1}>
         <Text
           color={
             compression.isPending ? theme.text.accent : theme.status.success

@@ -129,7 +129,7 @@ const PrefixedTextMessage: React.FC<PrefixedTextMessageProps> = ({
       marginTop={marginTop}
       alignSelf={alignSelf}
     >
-      <Box width={prefixWidth}>
+      <Box width={prefixWidth} flexShrink={0}>
         <Text color={prefixColor} aria-label={ariaLabel}>
           {prefix}
         </Text>
@@ -158,7 +158,7 @@ const PrefixedMarkdownMessage: React.FC<PrefixedMarkdownMessageProps> = ({
 
   return (
     <Box flexDirection="row">
-      <Box width={prefixWidth}>
+      <Box width={prefixWidth} flexShrink={0}>
         <Text color={prefixColor} aria-label={ariaLabel}>
           {prefix}
         </Text>

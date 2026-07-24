@@ -27,7 +27,7 @@ export const MemorySavedMessage: React.FC<MemorySavedMessageProps> = ({
 
   return (
     <Box flexDirection="row">
-      <Box minWidth={2}>
+      <Box width={2} flexShrink={0}>
         <Text dimColor>●</Text>
       </Box>
       <Text dimColor>

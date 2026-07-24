@@ -15,10 +15,12 @@ import {
 } from '../../constants.js';
 import { theme } from '../../semantic-colors.js';
 
-// One column for the status glyph plus two trailing columns so the tool
+// One column for the status glyph plus one trailing column so the tool
 // name never sits flush against the indicator. Paired with flexShrink={0}
 // on the indicator Box so the reservation survives a tight header row.
-export const STATUS_INDICATOR_WIDTH = 3;
+// The fixed 2-col width ensures both 1-col and 2-col glyphs push text
+// to the same start position.
+export const STATUS_INDICATOR_WIDTH = 2;
 
 type ToolStatusIndicatorProps = {
   status: ToolCallStatus;
