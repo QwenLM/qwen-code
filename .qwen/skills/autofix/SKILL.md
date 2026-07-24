@@ -184,6 +184,15 @@ Read `git diff origin/<base>...HEAD` first, then `<workdir>/feedback.md`.
 
 Classify every feedback point:
 
+Address each the way AGENTS.md's Simplicity First and Comments rules demand:
+the smallest change that resolves the point, no error handling for a condition
+that cannot occur, no comment that restates the code. Review rounds ratchet
+code UP — every round tends to add — so on each one also ask what the change
+lets you REMOVE or shrink, not only what to add. A suggestion whose only effect
+is more defense, configurability, or narration a senior engineer would call
+overcomplicated is a Decline (not worth the diff growth), not an automatic
+implement — satisfying a nit is never a reason to bloat the code.
+
 - Required: correctness bug, broken build/test, security issue, or a
   `CHANGES_REQUESTED` item naming a real defect. Verify it, then fix minimally.
 - Optional: suggestion, nit, or hardening — including `**[Suggestion]**`
@@ -201,8 +210,11 @@ unnecessarily.
 Finish with exactly one outcome:
 
 - Made a change: re-read the full diff as a skeptical reviewer — confirm each
-  feedback point is actually addressed AND that the change introduces no new
-  defect. Then ACTUALLY RUN `npm run build`, `npm run typecheck`,
+  feedback point is actually addressed, that the change introduces no new
+  defect, AND that it added no bloat: no defense for an impossible case, no
+  comment that is not a non-obvious "why", nothing a senior engineer would call
+  overcomplicated (AGENTS.md Simplicity First). Cut it before you commit. Then
+  ACTUALLY RUN `npm run build`, `npm run typecheck`,
   `npm run lint`, focused Vitest tests for the package(s) you touched, and
   integration tests after `npm run bundle` when the touched behavior is only
   exercised through the bundled CLI or integration harness (plus

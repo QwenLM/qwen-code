@@ -3398,6 +3398,12 @@ describe('qwen-autofix workflow', () => {
     expect(flat).toContain('## Verification');
     expect(flat).toContain('command you ran and its result');
     expect(flat).toContain('a bare "verified" is not acceptable');
+    // Simplicity First governs HOW findings are addressed against the additive
+    // ratchet of review rounds: the pre-commit self-audit rejects bloat, and a
+    // nit that would bloat the code is a decline, not an auto-implement.
+    expect(flat).toContain('Simplicity First');
+    expect(flat).toContain('added no bloat');
+    expect(flat).toContain('never a reason to bloat the code');
     // The rationale is structural, not etiquette: the gate re-runs the same
     // commands, so skipping them only moves the rejection later. Pin that
     // framing so the requirement is not softened back into "please verify".
