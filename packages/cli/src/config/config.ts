@@ -2063,6 +2063,16 @@ export async function loadCliConfig(
       disabledSlashCommands.length > 0 ? disabledSlashCommands : undefined,
     disabledSkillNamesProvider:
       bareMode || safeMode ? undefined : disabledSkillNamesProvider,
+    zvecGrepEnabled:
+      bareMode || safeMode ? false : settings.tools?.zvecGrep?.enabled === true,
+    onDisableZvecGrepForWorkspace: async () => {
+      const currentSettings = loadSettings(cwd);
+      currentSettings.setValue(
+        SettingScope.Workspace,
+        'tools.zvecGrep.enabled',
+        false,
+      );
+    },
     customSkillDirs:
       bareMode || safeMode
         ? undefined

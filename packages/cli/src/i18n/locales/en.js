@@ -181,6 +181,7 @@ export default {
   'toolDisplayName.WriteFile': 'toolDisplayName.WriteFile',
   'toolDisplayName.ReadFile': 'toolDisplayName.ReadFile',
   'toolDisplayName.Grep': 'toolDisplayName.Grep',
+  'toolDisplayName.ZvecGrep': 'toolDisplayName.ZvecGrep',
   'toolDisplayName.Glob': 'toolDisplayName.Glob',
   'toolDisplayName.Shell': 'toolDisplayName.Shell',
   'toolDisplayName.Shell Command': 'toolDisplayName.Shell Command',

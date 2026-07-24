@@ -15,6 +15,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   read_file: 'ReadFile',
   grep: 'Grep',
   grep_search: 'Grep',
+  zvec_grep: 'ZvecGrep',
   glob: 'Glob',
   run_shell_command: 'Shell',
   todo_write: 'TodoList',

@@ -917,6 +917,9 @@ export interface ConfigParameters {
    * Names returned must be lower-cased; consumers compare case-insensitively.
    */
   disabledSkillNamesProvider?: () => ReadonlySet<string>;
+  zvecGrepEnabled?: boolean;
+  /** Persists a workspace-scoped opt-out selected from zvec-grep setup. */
+  onDisableZvecGrepForWorkspace?: () => Promise<void>;
   /**
    * Additional directories to scan for skills (SKILL.md files).
    * Sourced from `settings.skills.directories`. Paths are raw
@@ -1687,6 +1690,7 @@ export class Config {
   private readonly disabledSkillNamesProvider:
     | (() => ReadonlySet<string>)
     | null;
+  private readonly zvecGrepEnabled: boolean;
   private readonly customSkillDirs: readonly string[];
   //   `disabledTools` is set at construction
   // time but can be re-synced by the daemon mutation surface
@@ -1857,6 +1861,7 @@ export class Config {
     ruleType: 'allow' | 'ask' | 'deny',
     rule: string,
   ) => Promise<void>;
+  private readonly onDisableZvecGrepForWorkspaceCallback?: () => Promise<void>;
   private initialized: boolean = false;
   private proxyDispatcherReady?: Promise<void>;
   storage: Storage;
@@ -1954,6 +1959,7 @@ export class Config {
       ...(params.disabledSlashCommands ?? []),
     ]);
     this.disabledSkillNamesProvider = params.disabledSkillNamesProvider ?? null;
+    this.zvecGrepEnabled = params.zvecGrepEnabled ?? false;
     this.customSkillDirs = Object.freeze([...(params.customSkillDirs ?? [])]);
     this.disabledTools = new Set(params.disabledTools ?? []);
     this.visibleTools = new Set(
@@ -2114,6 +2120,8 @@ export class Config {
     this.addLegacyPlanLocationWarning();
     this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
+    this.onDisableZvecGrepForWorkspaceCallback =
+      params.onDisableZvecGrepForWorkspace;
 
     // (web search removed)
     this.useRipgrep = params.useRipgrep ?? true;
@@ -4591,6 +4599,18 @@ export class Config {
     return this.disabledSkillNamesProvider?.() ?? EMPTY_DISABLED_SKILL_NAMES;
   }
 
+  isZvecGrepEnabled(): boolean {
+    return this.zvecGrepEnabled;
+  }
+
+  canDisableZvecGrepForWorkspace(): boolean {
+    return this.onDisableZvecGrepForWorkspaceCallback !== undefined;
+  }
+
+  async disableZvecGrepForWorkspace(): Promise<void> {
+    await this.onDisableZvecGrepForWorkspaceCallback?.();
+  }
+
   /**
    * Returns additional skill directories from `settings.skills.directories`.
    * Paths are raw (unexpanded); consumers must handle `~` expansion
@@ -6904,6 +6924,13 @@ export class Config {
       const { ReadFileTool } = await import('../tools/read-file.js');
       return new ReadFileTool(this);
     });
+
+    if (this.isZvecGrepEnabled()) {
+      await registerLazy(ToolNames.ZVEC_GREP, async () => {
+        const { ZvecGrepTool } = await import('../tools/zvec-grep.js');
+        return new ZvecGrepTool(this);
+      });
+    }
 
     // --- Grep / RipGrep (conditional) ---
     if (this.getUseRipgrep()) {

@@ -1057,6 +1057,17 @@
             }
           }
         },
+        "zvecGrep": {
+          "description": "Settings for the zvec-grep built-in search tool.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "When enabled, registers the zvec_grep built-in tool. Disabled by default.",
+              "type": "boolean",
+              "default": false
+            }
+          }
+        },
         "shell": {
           "description": "Settings for shell execution.",
           "type": "object",

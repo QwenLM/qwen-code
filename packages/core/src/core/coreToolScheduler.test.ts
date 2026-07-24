@@ -14217,6 +14217,19 @@ describe('extractToolFilePaths', () => {
     ).toEqual(['packages/core', 'packages/core/**/*.ts']);
   });
 
+  it('extracts zvec_grep paths and globs as path-shaped file filters', () => {
+    expect(
+      extractToolFilePaths('zvec_grep', {
+        operation: 'rg',
+        query: 'validate',
+        path: 'packages/core',
+        paths: ['src', 'include'],
+        glob: '**/*.{h,cc}',
+        exclude: ['thirdparty/**'],
+      }),
+    ).toEqual(['packages/core', 'src', 'include', 'packages/core/**/*.{h,cc}']);
+  });
+
   it('decodes file:// URIs for lsp via fileURLToPath', () => {
     // Regression: LSP `filePath` is allowed to be a `file://` URI.
     // Forwarding the URI as-is to the activation registry would never

@@ -15,7 +15,7 @@ import {
   Storage,
 } from '@qwen-code/qwen-code-core';
 import { loadCliConfig, parseArguments, type CliArgs } from './config.js';
-import type { Settings } from './settings.js';
+import { LoadedSettings, SettingScope, type Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
@@ -2189,6 +2189,53 @@ describe('mergeExcludeTools', () => {
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getPermissionsDeny()).toContain('tool_search');
+  });
+
+  it('should leave zvec_grep disabled by default', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {};
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isZvecGrepEnabled()).toBe(false);
+  });
+
+  it('should enable zvec_grep when tools.zvecGrep.enabled is true', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: { zvecGrep: { enabled: true } },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.isZvecGrepEnabled()).toBe(true);
+  });
+
+  it('should persist the zvec_grep workspace opt-out', async () => {
+    vi.mocked(isWorkspaceTrusted).mockReturnValue({
+      isTrusted: true,
+      source: 'file',
+    });
+    const setValue = vi
+      .spyOn(LoadedSettings.prototype, 'setValue')
+      .mockImplementation(() => {});
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: { zvecGrep: { enabled: true } },
+    };
+    try {
+      const config = await loadCliConfig(settings, argv, undefined, []);
+
+      expect(config.canDisableZvecGrepForWorkspace()).toBe(true);
+      await config.disableZvecGrepForWorkspace();
+
+      expect(setValue).toHaveBeenCalledWith(
+        SettingScope.Workspace,
+        'tools.zvecGrep.enabled',
+        false,
+      );
+    } finally {
+      setValue.mockRestore();
+    }
   });
 
   it('should auto-disable tool_search for deepseek-v4 models', async () => {

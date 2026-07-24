@@ -62,7 +62,7 @@ import {
   parseMaxTurns,
   claudePermissionModeToApprovalMode,
 } from './agent-frontmatter-schema.js';
-import { ToolDisplayNamesMigration } from '../tools/tool-names.js';
+import { ToolDisplayNamesMigration, ToolNames } from '../tools/tool-names.js';
 import { QWEN_DIR, Storage } from '../config/storage.js';
 import {
   hasRebuiltToolRegistry,
@@ -1174,6 +1174,10 @@ export class SubagentManager {
       );
       if (displayNameMatch) {
         result.push(displayNameMatch.name);
+        continue;
+      }
+
+      if (toolIdentifier === ToolNames.ZVEC_GREP) {
         continue;
       }
 

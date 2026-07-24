@@ -929,6 +929,8 @@ export interface ToolAskUserQuestionConfirmationDetails {
       description: string;
     }>;
     multiSelect?: boolean;
+    /** Whether to append the free-form "Type something" choice. */
+    allowCustomInput?: boolean;
   }>;
   metadata?: {
     source?: string;

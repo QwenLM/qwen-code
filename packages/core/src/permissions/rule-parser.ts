@@ -82,6 +82,11 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   search_file_content: 'grep_search', // legacy
   SearchFiles: 'grep_search', // legacy display name
 
+  // Zvec Grep tool — also matched by "Read" meta-category rules
+  zvec_grep: 'zvec_grep',
+  ZvecGrep: 'zvec_grep',
+  ZvecGrepTool: 'zvec_grep',
+
   // Glob tool — also matched by "Read" meta-category rules
   glob: 'glob',
   Glob: 'glob',
@@ -172,6 +177,7 @@ export const SHELL_TOOL_NAMES: ReadonlySet<string> = new Set([
 const READ_TOOLS = new Set([
   'read_file',
   'grep_search',
+  'zvec_grep',
   'glob',
   'list_directory',
 ]);
@@ -401,6 +407,7 @@ const CANONICAL_TO_RULE_DISPLAY: Readonly<Record<string, string>> = {
   // Read meta-category
   read_file: 'Read',
   grep_search: 'Read',
+  zvec_grep: 'Read',
   glob: 'Read',
   list_directory: 'Read',
   // Edit meta-category

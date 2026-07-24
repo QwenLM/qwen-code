@@ -1911,6 +1911,19 @@ bad`);
         ]);
       });
 
+      it('should omit zvec_grep when the optional tool is not registered', async () => {
+        const configWithOptionalSearch: SubagentConfig = {
+          ...validConfig,
+          tools: ['read_file', 'zvec_grep'],
+        };
+
+        const runtimeConfig = await manager.convertToRuntimeConfig(
+          configWithOptionalSearch,
+        );
+
+        expect(runtimeConfig.toolConfig?.tools).toEqual(['read_file']);
+      });
+
       it('fails closed when the allow-list is only the unavailable WebSearch', async () => {
         // The unresolved name stays a dead, restrictive entry: the agent
         // runs tool-less rather than inheriting shell/write it was not

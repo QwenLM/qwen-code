@@ -46,6 +46,8 @@ describe('resolveToolName', () => {
     expect(resolveToolName('NotebookEdit')).toBe('notebook_edit');
     expect(resolveToolName('NotebookEditTool')).toBe('notebook_edit');
     expect(resolveToolName('WriteFileTool')).toBe('write_file');
+    expect(resolveToolName('ZvecGrep')).toBe('zvec_grep');
+    expect(resolveToolName('ZvecGrepTool')).toBe('zvec_grep');
   });
 
   it('resolves "Read" and "Edit" meta-categories', async () => {
@@ -95,6 +97,7 @@ describe('getSpecifierKind', () => {
     expect(getSpecifierKind('notebook_edit')).toBe('path');
     expect(getSpecifierKind('write_file')).toBe('path');
     expect(getSpecifierKind('grep_search')).toBe('path');
+    expect(getSpecifierKind('zvec_grep')).toBe('path');
     expect(getSpecifierKind('glob')).toBe('path');
     expect(getSpecifierKind('list_directory')).toBe('path');
   });
@@ -118,8 +121,9 @@ describe('toolMatchesRuleToolName', () => {
     expect(toolMatchesRuleToolName('edit', 'edit')).toBe(true);
   });
 
-  it('"Read" (read_file) covers grep_search, glob, list_directory', async () => {
+  it('"Read" (read_file) covers search, glob, and list tools', async () => {
     expect(toolMatchesRuleToolName('read_file', 'grep_search')).toBe(true);
+    expect(toolMatchesRuleToolName('read_file', 'zvec_grep')).toBe(true);
     expect(toolMatchesRuleToolName('read_file', 'glob')).toBe(true);
     expect(toolMatchesRuleToolName('read_file', 'list_directory')).toBe(true);
   });
@@ -916,10 +920,11 @@ describe('matchesRule', () => {
   });
 
   // Meta-category matching: Read
-  it('Read rule matches grep_search, glob, list_directory', async () => {
+  it('Read rule matches search, glob, and list tools', async () => {
     const rule = parseRule('Read');
     expect(matchesRule(rule, 'read_file')).toBe(true);
     expect(matchesRule(rule, 'grep_search')).toBe(true);
+    expect(matchesRule(rule, 'zvec_grep')).toBe(true);
     expect(matchesRule(rule, 'glob')).toBe(true);
     expect(matchesRule(rule, 'list_directory')).toBe(true);
     expect(matchesRule(rule, 'edit')).toBe(false); // not a read tool
@@ -2200,6 +2205,15 @@ describe('PermissionManager', () => {
       ).toBe('deny');
     });
 
+    it('Read deny applies to zvec_grep too (meta-category)', async () => {
+      expect(
+        await pm.evaluate({
+          toolName: 'zvec_grep',
+          filePath: '/project/.env',
+        }),
+      ).toBe('deny');
+    });
+
     it('returns default for unmatched path', async () => {
       expect(
         await pm.evaluate({
@@ -2584,6 +2598,7 @@ describe('getRuleDisplayName', () => {
   it('maps read tools to "Read" meta-category', async () => {
     expect(getRuleDisplayName('read_file')).toBe('Read');
     expect(getRuleDisplayName('grep_search')).toBe('Read');
+    expect(getRuleDisplayName('zvec_grep')).toBe('Read');
     expect(getRuleDisplayName('glob')).toBe('Read');
     expect(getRuleDisplayName('list_directory')).toBe('Read');
   });
@@ -2631,6 +2646,14 @@ describe('buildPermissionRules', () => {
         filePath: '/external/dir',
       });
       // grep_search is directory-targeted → path used as-is, plus /** glob
+      expect(rules).toEqual(['Read(//external/dir/**)']);
+    });
+
+    it('generates Read rule with directory as-is for zvec_grep', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'zvec_grep',
+        filePath: '/external/dir',
+      });
       expect(rules).toEqual(['Read(//external/dir/**)']);
     });
 

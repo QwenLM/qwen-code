@@ -2345,6 +2345,7 @@ const ZH: Messages = {
   'toolName.read_file': '读取文件',
   'toolName.grep': '搜索内容',
   'toolName.grep_search': '搜索内容',
+  'toolName.zvec_grep': '语义搜索',
   'toolName.glob': 'Glob',
   'toolName.run_shell_command': '运行命令',
   'toolName.todo_write': '任务清单',
