@@ -147,6 +147,17 @@ describe('GitHubPrsContent', () => {
     expect(text).toContain('Changes requested');
   });
 
+  it('renders the pending checks indicator', async () => {
+    workspaceGitHubPullRequests.mockResolvedValue(
+      listPayload([pr({ checks: 'pending' })]),
+    );
+    mount();
+    await flush();
+
+    const pending = document.body.querySelector('[class*="checksPending"]');
+    expect(pending).toBeTruthy();
+  });
+
   it('reports the open count through onSubtitleChange', async () => {
     workspaceGitHubPullRequests.mockResolvedValue(
       listPayload([pr(), pr({ number: 43 })]),

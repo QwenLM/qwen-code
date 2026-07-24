@@ -65,7 +65,10 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
           return;
         case 'failed':
           res.status(502).json({
-            error: sanitizeMessage(result.message, runtime.workspaceCwd),
+            error: sanitizeMessage(
+              sanitizeMessage(result.message, runtime.workspaceCwd),
+              result.gitRoot,
+            ),
             code: 'github_prs_failed',
             status: 502,
           });

@@ -154,6 +154,7 @@ describe('workspace GitHub PR routes', () => {
     fetchGitHubPullRequestsMock.mockResolvedValue({
       kind: 'failed',
       message: 'fatal: /work/main is not a GitHub remote',
+      gitRoot: '/work/main',
     });
     const app = express();
     registerWorkspaceQualifiedGitHubPrsRoutes(app, {
@@ -168,6 +169,7 @@ describe('workspace GitHub PR routes', () => {
       error: 'fatal: <workspace> is not a GitHub remote',
       code: 'github_prs_failed',
     });
+    expect(response.body.error).not.toContain('/work/main');
   });
 
   it('falls back to the bridge error mapper on unexpected throws', async () => {

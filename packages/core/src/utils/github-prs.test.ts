@@ -124,6 +124,7 @@ describe('parseGhPrList', () => {
         { __typename: 'StatusContext', state: 'SUCCESS' },
       ],
     ],
+    ['passing', [{ __typename: 'CheckRun', conclusion: 'NEUTRAL' }]],
     ['none', []],
   ])('aggregates checks to %s', (expected, rollup) => {
     const result = parseGhPrList(
@@ -242,6 +243,7 @@ describe('fetchGitHubPullRequests', () => {
     expect(result).toEqual({
       kind: 'failed',
       message: 'gh pr list timed out after 10s',
+      gitRoot: dir,
     });
   });
 
@@ -258,6 +260,7 @@ describe('fetchGitHubPullRequests', () => {
     expect(result).toEqual({
       kind: 'failed',
       message: 'gh: not logged in Run gh auth login',
+      gitRoot: dir,
     });
   });
 

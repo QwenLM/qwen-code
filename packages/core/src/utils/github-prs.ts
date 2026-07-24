@@ -48,7 +48,7 @@ export type FetchGitHubPullRequestsResult =
   | { kind: 'ok'; pullRequests: GitHubPullRequest[] }
   | { kind: 'not_a_repo' }
   | { kind: 'cli_unavailable' }
-  | { kind: 'failed'; message: string };
+  | { kind: 'failed'; message: string; gitRoot: string };
 
 // Mirrors `gh pr checks`: a cancelled/stale check blocks the merge just like a
 // failure, so it counts as failing rather than pending.
@@ -218,12 +218,12 @@ export async function fetchGitHubPullRequests(
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return { kind: 'cli_unavailable' };
     }
-    return { kind: 'failed', message: ghErrorMessage(error) };
+    return { kind: 'failed', message: ghErrorMessage(error), gitRoot };
   }
 
   try {
     return { kind: 'ok', pullRequests: parseGhPrList(stdout) };
   } catch (error) {
-    return { kind: 'failed', message: ghErrorMessage(error) };
+    return { kind: 'failed', message: ghErrorMessage(error), gitRoot };
   }
 }
