@@ -1,0 +1,135 @@
+name: 'Core Review Router'
+
+on:
+  pull_request_target:
+    types: ['opened', 'synchronize', 'ready_for_review']
+    paths: ['packages/core/**']
+
+permissions:
+  contents: 'read'
+  pull-requests: 'write'
+
+jobs:
+  route:
+    if: |-
+      github.repository == 'QwenLM/qwen-code' &&
+      !github.event.pull_request.draft &&
+      !contains(fromJSON('["wenshao","tanzhenxin","yiliang114","LaZzyMan"]'), github.event.pull_request.user.login)
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    concurrency:
+      group: 'core-review-router-${{ github.event.pull_request.number }}'
+      cancel-in-progress: true
+    steps:
+      - name: 'Checkout router script'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        with:
+          ref: '${{ github.event.repository.default_branch }}'
+          sparse-checkout: '.github/scripts/'
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: 'Collect changed files'
+        id: 'files'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+        run: |-
+          set -euo pipefail
+          files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" --jq '.[].filename' | jq -R . | jq -sc '.')"
+          {
+            echo 'files<<EOF'
+            echo "$files"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 'Classify and pick reviewers'
+        id: 'classify'
+        env:
+          FILES: '${{ steps.files.outputs.files }}'
+          AUTHOR: '${{ github.event.pull_request.user.login }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+        run: |-
+          set -euo pipefail
+          result="$(node .github/scripts/core-review-router.mjs --files "$FILES" --author "$AUTHOR" --pr "$PR_NUMBER")"
+          reviewers="$(echo "$result" | jq -r '.reviewers | join(",")')"
+          reason="$(echo "$result" | jq -r '.reason')"
+          maintainers="$(echo "$result" | jq -r '.maintainers | join(",")')"
+          echo "reviewers=$reviewers" >> "$GITHUB_OUTPUT"
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+          echo "maintainers=$maintainers" >> "$GITHUB_OUTPUT"
+          echo "Routing decision: reviewers=[$reviewers] reason=$reason"
+
+      - name: 'Apply review requests'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+          REVIEWERS: '${{ steps.classify.outputs.reviewers }}'
+          REASON: '${{ steps.classify.outputs.reason }}'
+          MAINTAINERS: '${{ steps.classify.outputs.maintainers }}'
+        run: |-
+          set -euo pipefail
+          api="repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/requested_reviewers"
+          marker='<!-- core-review-router:managed'
+
+          # Compute the desired managed set from the routing decision.
+          if [ -n "$REVIEWERS" ]; then
+            desired="$(echo "$REVIEWERS" | tr ',' '\n' | jq -R . | jq -sc 'sort')"
+          else
+            desired="[]"
+          fi
+
+          # Fetch state from the GitHub API.
+          reviewed="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100" --jq '.[].user.login' | jq -R . | jq -sc '.')"
+          current="$(gh api "$api" --jq '[.users[].login]')"
+          comments="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" --jq '.[]' | jq -sc '.')" || comments='[]'
+
+          # Extract the marker comment body (if any).
+          marker_body="$(echo "$comments" | jq -r --arg marker "$marker" \
+            '[.[] | select(.body | startswith($marker))] | last | .body // empty' \
+            2>/dev/null)" || marker_body=""
+
+          # Reconcile via the tested Node.js script.
+          maintainer_list="$(echo "$MAINTAINERS" | tr ',' '\n' | jq -R . | jq -sc '.')"
+          result="$(node .github/scripts/reconcile-reviewers.mjs \
+            --desired "$desired" \
+            --reviewed "$reviewed" \
+            --current "$current" \
+            --marker-body "$marker_body" \
+            --maintainers "$maintainer_list")"
+
+          to_add="$(echo "$result" | jq -c '.toAdd')"
+          to_remove="$(echo "$result" | jq -c '.toRemove')"
+          unchanged="$(echo "$result" | jq -r '.unchanged')"
+          new_marker_body="$(echo "$result" | jq -r '.markerBody')"
+
+          if [ "$unchanged" = "false" ]; then
+            if [ "$to_remove" != "[]" ]; then
+              echo "$to_remove" | jq '{reviewers: .}' \
+                | gh api --method DELETE "$api" --input - > /dev/null \
+                || echo "::warning::Failed to remove reviewers: $to_remove"
+            fi
+            if [ "$to_add" != "[]" ]; then
+              echo "$to_add" | jq '{reviewers: .}' \
+                | gh api --method POST "$api" --input - > /dev/null \
+                || echo "::warning::Failed to add reviewers: $to_add"
+            fi
+            echo "Applied: $REVIEWERS ($REASON)"
+          else
+            echo "Reviewer set unchanged ($REVIEWERS) — skipping ($REASON)"
+          fi
+
+          # Persist the desired set in the marker comment.
+          comment_id="$(echo "$comments" | jq -r --arg marker "$marker" \
+            '[.[] | select(.body | startswith($marker))] | last | .id // empty' \
+            2>/dev/null)" || comment_id=""
+          if [ -n "$comment_id" ]; then
+            gh api --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" \
+              -f body="$new_marker_body" > /dev/null \
+              || echo "::warning::Failed to update marker comment"
+          else
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              -f body="$new_marker_body" > /dev/null \
+              || echo "::warning::Failed to create marker comment"
+          fi
