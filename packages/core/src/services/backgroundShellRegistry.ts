@@ -448,7 +448,10 @@ export class BackgroundShellRegistry {
     if (entry.exitCode !== undefined) payload['exitCode'] = entry.exitCode;
     if (entry.error !== undefined) payload['error'] = entry.error;
     try {
-      atomicWriteFileSync(statusPath, JSON.stringify(payload, null, 2));
+      atomicWriteFileSync(statusPath, JSON.stringify(payload, null, 2), {
+        flush: false,
+        mode: 0o600,
+      });
     } catch (error) {
       debugLogger.warn(
         `status sidecar write failed for shell ${entry.shellId}: ${
