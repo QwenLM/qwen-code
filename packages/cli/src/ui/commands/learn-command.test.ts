@@ -5,7 +5,7 @@
  */
 
 import { beforeEach, describe, it, expect, vi } from 'vitest';
-import { AuthType } from '@qwen-code/qwen-code-core';
+import { AuthType, expandHomeDir } from '@qwen-code/qwen-code-core';
 import { learnCommand } from './learn-command.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import type { SubmitPromptActionReturn } from './types.js';
@@ -135,7 +135,7 @@ describe('learnCommand', () => {
     );
 
     expect(mockReadPathFromWorkspace).toHaveBeenCalledWith(
-      './tutorial.mp4',
+      expandHomeDir('./tutorial.mp4'),
       ctx.services.config,
     );
     expect(result).toMatchObject({
@@ -147,6 +147,20 @@ describe('learnCommand', () => {
     });
   });
 
+  it('expands a home-relative local video path before reading', async () => {
+    const ctx = createVideoCapableContext();
+    await learnCommand.action!(ctx, '~/tutorial.mp4');
+
+    expect(mockReadPathFromWorkspace).toHaveBeenCalledWith(
+      expandHomeDir('~/tutorial.mp4'),
+      ctx.services.config,
+    );
+  });
+
+  // Defence-in-depth only: the fileUtils MIME fix now makes
+  // processSingleFileContent stamp video/x-m4v directly, so mime/lite never
+  // returns octet-stream for .m4v in production. This still pins the fallback's
+  // relabel behaviour for a single inline part.
   it('falls back to the parser MIME type when mime/lite does not recognise the extension', async () => {
     mockReadPathFromWorkspace.mockResolvedValueOnce([
       {
@@ -167,6 +181,27 @@ describe('learnCommand', () => {
         { text: expect.stringContaining('references/source.md') },
       ],
     });
+  });
+
+  it('does not relabel parts when the read returns multiple inline parts', async () => {
+    const pngA = {
+      inlineData: { data: 'AAAA', mimeType: 'image/png', displayName: 'a.png' },
+    };
+    const pngB = {
+      inlineData: { data: 'BBBB', mimeType: 'image/png', displayName: 'b.png' },
+    };
+    mockReadPathFromWorkspace.mockResolvedValueOnce([pngA, pngB]);
+    const ctx = createVideoCapableContext();
+    const result = await learnCommand.action!(ctx, './clips.mp4');
+
+    // A directory-like multi-part result must never be relabelled as one video;
+    // with no video part and no text diagnostic, attachment fails cleanly.
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+    });
+    expect(pngA.inlineData.mimeType).toBe('image/png');
+    expect(pngB.inlineData.mimeType).toBe('image/png');
   });
 
   it('surfaces text diagnostics when the read succeeds but returns no video part', async () => {
@@ -216,18 +251,33 @@ describe('learnCommand', () => {
     });
   });
 
-  it('rejects a local video that cannot be attached', async () => {
+  it('falls back to the text path when a local video path does not resolve', async () => {
     mockReadPathFromWorkspace.mockRejectedValueOnce(
       new Error('Absolute path is outside of the allowed workspace'),
     );
     const ctx = createVideoCapableContext();
     const result = await learnCommand.action!(ctx, '/tmp/tutorial.mp4');
 
-    expect(result).toMatchObject({
-      type: 'message',
-      messageType: 'error',
-      content: expect.stringMatching(/could not be attached.*outside/i),
-    });
+    expect(result).toMatchObject({ type: 'submit_prompt' });
+    expect((result as SubmitPromptActionReturn).content).toContain(
+      '/tmp/tutorial.mp4',
+    );
+  });
+
+  it('falls back to the text path when prose starts with a video-extension token', async () => {
+    mockReadPathFromWorkspace.mockRejectedValueOnce(
+      new Error('Path not found in workspace: demo.mov'),
+    );
+    const ctx = createVideoCapableContext();
+    const result = await learnCommand.action!(
+      ctx,
+      'demo.mov is how we record release walkthroughs',
+    );
+
+    expect(result).toMatchObject({ type: 'submit_prompt' });
+    expect((result as SubmitPromptActionReturn).content).toContain(
+      'demo.mov is how we record release walkthroughs',
+    );
   });
 
   it.each([

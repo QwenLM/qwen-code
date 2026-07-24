@@ -467,8 +467,8 @@ export default {
     '从知识源（文件、URL、对话或文本）创建可复用的技能。',
   'The current model or provider does not support native video input for /learn. Switch to a video-capable model on an OpenAI-compatible provider and try again.':
     '当前模型或提供商不支持 /learn 的原生视频输入。请切换到 OpenAI 兼容提供商上的视频模型后重试。',
-  'YouTube page URLs cannot be sent as native video input. Download the video and pass a local video file to /learn.':
-    'YouTube 页面链接不能作为原生视频输入发送。请先下载视频，再将本地视频文件传给 /learn。',
+  'YouTube page URLs cannot be sent as native video input. Download the video into your workspace and pass the local video file path to /learn.':
+    'YouTube 页面链接不能作为原生视频输入发送。请将视频下载到工作区内，再将本地视频文件路径传给 /learn。',
   'The local video could not be attached for /learn.':
     '无法为 /learn 附加本地视频。',
 

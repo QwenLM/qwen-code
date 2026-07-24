@@ -8,6 +8,7 @@ import {
   AuthType,
   buildLearnSkillPrompt,
   buildLearnVideoSkillRequest,
+  expandHomeDir,
   parseLearnVideoInput,
   readPathFromWorkspace,
 } from '@qwen-code/qwen-code-core';
@@ -63,7 +64,7 @@ export const learnCommand: SlashCommand = {
           type: 'message',
           messageType: 'error',
           content: t(
-            'YouTube page URLs cannot be sent as native video input. Download the video and pass a local video file to /learn.',
+            'YouTube page URLs cannot be sent as native video input. Download the video into your workspace and pass the local video file path to /learn.',
           ),
         };
       }
@@ -88,15 +89,18 @@ export const learnCommand: SlashCommand = {
       if (video.kind === 'local') {
         let parts: Array<string | Part>;
         try {
-          parts = await readPathFromWorkspace(video.source, config);
-        } catch (error) {
-          const reason = error instanceof Error ? error.message : String(error);
+          parts = await readPathFromWorkspace(
+            expandHomeDir(video.source),
+            config,
+          );
+        } catch {
+          // The first token looked like a video path but does not resolve in
+          // the workspace — e.g. prose such as "demo.mov is how we record …",
+          // or a file the user has not copied into the workspace. Learn the raw
+          // input as text instead of dead-ending on a hard error.
           return {
-            type: 'message',
-            messageType: 'error',
-            content: `${t(
-              'The local video could not be attached for /learn.',
-            )} ${reason}`,
+            type: 'submit_prompt',
+            content: await buildLearnSkillPrompt(rawInput, projectRoot),
           };
         }
 
@@ -105,16 +109,19 @@ export const learnCommand: SlashCommand = {
             typeof part !== 'string' &&
             part.inlineData?.mimeType?.startsWith('video/') === true,
         );
-        // mime/lite may not recognise the extension (e.g. .m4v → video/x-m4v
-        // lives in otherTypes only). Fall back to the parser's own mapping.
+        // Defence-in-depth: the fileUtils MIME mapping now stamps a video type
+        // for every extension the parser accepts, so mime/lite no longer needs
+        // help here. Only relabel when the read produced exactly one inline
+        // part, so a directory (e.g. "clips.mp4/") is never relabelled as a
+        // single video.
         if (!localVideoPart) {
-          const rawPart = parts.find(
+          const inlineParts = parts.filter(
             (part): part is Part =>
               typeof part !== 'string' && part.inlineData != null,
           );
-          if (rawPart?.inlineData) {
-            rawPart.inlineData.mimeType = video.mimeType;
-            localVideoPart = rawPart;
+          if (inlineParts.length === 1 && inlineParts[0].inlineData) {
+            inlineParts[0].inlineData.mimeType = video.mimeType;
+            localVideoPart = inlineParts[0];
           }
         }
 
