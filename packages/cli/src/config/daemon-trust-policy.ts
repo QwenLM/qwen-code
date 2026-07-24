@@ -150,6 +150,13 @@ async function readJsonObjectOnce(
     }
     return { value: parsed as Record<string, unknown> };
   } catch (error) {
+    if (
+      error instanceof Error &&
+      'code' in error &&
+      (error as NodeJS.ErrnoException).code === 'ENOENT'
+    ) {
+      return { value: {}, missing: true };
+    }
     return { error: policyError('trust_policy_invalid', filePath, error) };
   }
 }
