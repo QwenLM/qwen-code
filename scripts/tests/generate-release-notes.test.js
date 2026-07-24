@@ -6,6 +6,7 @@
 
 import { execFileSync } from 'node:child_process';
 import {
+  appendFileSync,
   chmodSync,
   mkdtempSync,
   readFileSync,
@@ -14,8 +15,9 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
+  appendDegradedStepSummary,
   buildPullRequestQuery,
   classifyChange,
   createOpenAiCompleter,
@@ -24,6 +26,7 @@ import {
   generateReleaseNotes,
   parseGeneratedEntries,
   renderReleaseNotes,
+  tryAppendDegradedStepSummary,
 } from '../generate-release-notes.js';
 
 const PR = (number) => `https://github.com/QwenLM/qwen-code/pull/${number}`;
@@ -533,5 +536,191 @@ describe('generateReleaseNotes', () => {
       );
       expect(error.stderr).not.toContain('ERROR: ERROR:');
     }
+  });
+});
+
+describe('createOpenAiCompleter retries', () => {
+  const okResponse = {
+    ok: true,
+    json: async () => ({
+      choices: [{ message: { content: '{"summaries":[]}' } }],
+    }),
+  };
+
+  it('retries a 500 once and then succeeds', async () => {
+    let calls = 0;
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      baseDelayMs: 1,
+      fetchImpl: async () => {
+        calls += 1;
+        return calls === 1 ? { ok: false, status: 500 } : okResponse;
+      },
+    });
+
+    await expect(complete({ kind: 'summaries', entries: [] })).resolves.toBe(
+      '{"summaries":[]}',
+    );
+    expect(calls).toBe(2);
+  });
+
+  it('retries a timeout before giving up after maxRetries', async () => {
+    let calls = 0;
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      baseDelayMs: 1,
+      maxRetries: 2,
+      fetchImpl: async () => {
+        calls += 1;
+        const error = new Error('timed out');
+        error.name = 'TimeoutError';
+        throw error;
+      },
+    });
+
+    await expect(complete({ kind: 'summaries', entries: [] })).rejects.toThrow(
+      'timed out',
+    );
+    expect(calls).toBe(3);
+  });
+
+  it('does not retry a 400', async () => {
+    let calls = 0;
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      baseDelayMs: 1,
+      fetchImpl: async () => {
+        calls += 1;
+        return { ok: false, status: 400 };
+      },
+    });
+
+    await expect(complete({ kind: 'summaries', entries: [] })).rejects.toThrow(
+      'HTTP 400',
+    );
+    expect(calls).toBe(1);
+  });
+});
+
+describe('generateAiContent circuit breaker', () => {
+  it('stops calling the model after consecutive batch failures', async () => {
+    const calls = [];
+    const failing = async (request) => {
+      calls.push(request.kind);
+      throw new Error('model down');
+    };
+    const entries = [
+      entry(1, 'one'),
+      entry(2, 'two'),
+      entry(3, 'three'),
+      entry(4, 'four'),
+      entry(5, 'five'),
+    ];
+
+    const result = await generateAiContent(entries, failing, { batchSize: 1 });
+
+    // 3 batch attempts, then the breaker opens: no more batch calls and no
+    // highlights call at all.
+    expect(calls).toEqual(['summaries', 'summaries', 'summaries']);
+    expect([...result.summaries.values()]).toEqual([
+      'one',
+      'two',
+      'three',
+      'four',
+      'five',
+    ]);
+    expect(
+      result.warnings.some((warning) =>
+        warning.includes('stopped after 3 consecutive failures'),
+      ),
+    ).toBe(true);
+    expect(
+      result.warnings.some((warning) =>
+        warning.includes('Highlights fallback: skipped'),
+      ),
+    ).toBe(true);
+  });
+
+  it('recovers without the breaker when a later batch succeeds', async () => {
+    let calls = 0;
+    const flaky = async (request) => {
+      calls += 1;
+      if (request.kind === 'summaries' && calls === 1) {
+        throw new Error('transient');
+      }
+      if (request.kind === 'summaries') {
+        return JSON.stringify({
+          summaries: request.entries.map((entry) => ({
+            pr: entry.number,
+            summary: `${entry.title} summary`,
+          })),
+        });
+      }
+      return JSON.stringify({ highlights: [] });
+    };
+    const entries = [entry(1, 'one'), entry(2, 'two')];
+
+    const result = await generateAiContent(entries, flaky, { batchSize: 1 });
+
+    expect(calls).toBe(3); // batch1 fails, batch2 ok, highlights attempted
+    expect(
+      result.warnings.some((warning) => warning.includes('stopped after')),
+    ).toBe(false);
+    expect(result.summaries.get(2)).toBe('two summary');
+  });
+});
+
+describe('appendDegradedStepSummary', () => {
+  it('appends a degraded note when warnings exist', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-rn-summary-'));
+    const summaryPath = join(dir, 'summary.md');
+    // test-setup mocks appendFileSync, so assert on the call instead of the file.
+    vi.mocked(appendFileSync).mockClear();
+    appendDegradedStepSummary(
+      { usedAi: false, warnings: ['Summary batch fallback: HTTP 500'] },
+      summaryPath,
+    );
+
+    expect(vi.mocked(appendFileSync)).toHaveBeenCalledTimes(1);
+    const [writtenPath, written] = vi.mocked(appendFileSync).mock.calls[0];
+    expect(writtenPath).toBe(summaryPath);
+    expect(written).toContain('AI generation degraded');
+    expect(written).toContain('Summary batch fallback: HTTP 500');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('does nothing without warnings', async () => {
+    const fs = await import('node:fs');
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-rn-summary-'));
+    const summaryPath = join(dir, 'summary.md');
+    vi.mocked(appendFileSync).mockClear();
+    appendDegradedStepSummary({ usedAi: true, warnings: [] }, summaryPath);
+    expect(vi.mocked(appendFileSync)).not.toHaveBeenCalled();
+    expect(fs.existsSync(summaryPath)).toBe(false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('does not propagate summary write failures (tryAppend)', () => {
+    vi.mocked(appendFileSync).mockImplementationOnce(() => {
+      throw new Error('ENOSPC');
+    });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(() =>
+      tryAppendDegradedStepSummary(
+        { usedAi: false, warnings: ['Summary batch fallback: HTTP 500'] },
+        join(tmpdir(), 'summary.md'),
+      ),
+    ).not.toThrow();
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('failed to write the degraded step summary'),
+    );
+    errSpy.mockRestore();
   });
 });
