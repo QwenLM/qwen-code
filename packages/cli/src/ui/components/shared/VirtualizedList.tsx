@@ -490,9 +490,28 @@ function VirtualizedList<T>(
     endIndexOffsetRaw >= offsets.length
       ? data.length - 1
       : Math.min(data.length - 1, endIndexOffsetRaw);
+  const renderStartIndex = (() => {
+    if (!isStickingToBottom || renderStatic === true || endIndex < 0) {
+      return startIndex;
+    }
+
+    let heightFromEnd = 0;
+    for (let i = endIndex; i >= 0; i--) {
+      const item = data[i];
+      const key = item ? keyExtractor(item, i) : '';
+      const raw = heights[key] ?? estimatedItemHeight(i);
+      const height = Number.isFinite(raw) && raw > 0 ? raw : 0;
+      heightFromEnd += height;
+      if (heightFromEnd >= viewHeightForEndIndex) {
+        return Math.min(startIndex, Math.max(0, i - 1));
+      }
+    }
+
+    return 0;
+  })();
 
   const topSpacerHeight =
-    renderStatic === true ? 0 : (offsets[startIndex] ?? 0);
+    renderStatic === true ? 0 : (offsets[renderStartIndex] ?? 0);
   const bottomSpacerHeight = renderStatic
     ? 0
     : totalHeight - (offsets[endIndex + 1] ?? totalHeight);
@@ -512,8 +531,24 @@ function VirtualizedList<T>(
     );
   }
 
-  const renderRangeStart = renderStatic ? 0 : startIndex;
+  const renderRangeStart = renderStatic ? 0 : renderStartIndex;
   const renderRangeEnd = renderStatic ? data.length - 1 : endIndex;
+  const measuredRenderedHeight = (() => {
+    if (!isStickingToBottom || renderStatic === true || renderRangeEnd < 0) {
+      return undefined;
+    }
+
+    let total = 0;
+    for (let i = renderRangeStart; i <= renderRangeEnd; i++) {
+      const item = data[i];
+      if (!item) return undefined;
+      const measured = heights[keyExtractor(item, i)];
+      if (measured === undefined) return undefined;
+      total += measured;
+    }
+
+    return total;
+  })();
 
   const renderedItems = useMemo(() => {
     if (!isReady) {
@@ -883,7 +918,13 @@ function VirtualizedList<T>(
   // the full `containerHeight`, so scrolling is unaffected.
   const rootHeight =
     props.containerHeight !== undefined
-      ? Math.min(props.containerHeight, totalHeight)
+      ? Math.min(
+          props.containerHeight,
+          measuredRenderedHeight !== undefined &&
+            measuredRenderedHeight < props.containerHeight
+            ? measuredRenderedHeight
+            : totalHeight,
+        )
       : '100%';
 
   return (

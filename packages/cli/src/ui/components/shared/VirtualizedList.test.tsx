@@ -92,6 +92,44 @@ describe('<VirtualizedList />', () => {
     expect(listRef!.getScrollIndex()).toBe(19);
   });
 
+  it('collapses bottom-stuck viewport to measured rows when estimates are too tall', async () => {
+    const tallEstimate = () => 4;
+
+    const { lastFrame, rerender } = render(
+      <VirtualizedList<Item>
+        data={makeItems(20)}
+        renderItem={renderItem}
+        estimatedItemHeight={tallEstimate}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        containerHeight={20}
+        width={40}
+        showScrollbar={false}
+      />,
+    );
+
+    for (let i = 0; i < 10; i++) {
+      rerender(
+        <VirtualizedList<Item>
+          data={makeItems(20)}
+          renderItem={renderItem}
+          estimatedItemHeight={tallEstimate}
+          keyExtractor={keyExtractor}
+          initialScrollIndex={SCROLL_TO_ITEM_END}
+          containerHeight={20}
+          width={40}
+          showScrollbar={false}
+        />,
+      );
+      await act(async () => {});
+    }
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain('item-0');
+    expect(frame).toContain('item-19');
+    expect(frame.endsWith('item-19')).toBe(true);
+  });
+
   it('targetScrollIndex anchors to that index on first usable render', () => {
     type RefShape = VirtualizedListRef<Item>;
     let listRef: RefShape | null = null;
