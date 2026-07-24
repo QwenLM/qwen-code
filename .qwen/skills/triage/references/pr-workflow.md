@@ -13,11 +13,11 @@ capture its ID:
 COMMENT_ID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@/tmp/stage-N.md --jq '.id')
 ```
 
-| Stage   | Comment                                                       |
-| ------- | ------------------------------------------------------------- |
-| Stage 1 | Gate findings                                                 |
-| Stage 2 | Code review + CI test evidence (+ tmux capture on local runs) |
-| Stage 3 | Reflection + verdict                                          |
+| Stage   | Comment                                                                         |
+| ------- | ------------------------------------------------------------------------------- |
+| Stage 1 | Gate findings                                                                   |
+| Stage 2 | Code review + CI test evidence (+ tmux capture on local runs when user-visible) |
+| Stage 3 | Reflection + verdict                                                            |
 
 **Terminal gate exception:** if any terminal exit triggers (Stage 0 core
 module hard block, Stage 1a template failure, Stage 1b problem-does-not-exist,
