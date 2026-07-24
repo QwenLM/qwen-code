@@ -5,6 +5,7 @@ import com.fasterxml.jackson.core.JsonFactory;
 import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonToken;
 import com.fasterxml.jackson.core.StreamReadFeature;
+import com.fasterxml.jackson.core.io.JsonEOFException;
 import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.BigInteger;
@@ -45,34 +46,46 @@ final class JsonSupport {
     private static Map<String, Object> readObject(JsonParser parser, String context)
             throws IOException {
         Map<String, Object> result = new LinkedHashMap<>();
-        while (parser.nextToken() != JsonToken.END_OBJECT) {
-            if (parser.currentToken() != JsonToken.FIELD_NAME) {
+        while (true) {
+            JsonToken fieldToken = nextContainerToken(parser, context, "object");
+            if (fieldToken == JsonToken.END_OBJECT) {
+                return result;
+            }
+            if (fieldToken != JsonToken.FIELD_NAME) {
                 throw new DaemonProtocolException(context
                         + " contains a malformed JSON object");
             }
             String field = parser.currentName();
-            JsonToken valueToken = parser.nextToken();
-            if (valueToken == null) {
-                throw new DaemonProtocolException(context
-                        + " contains an incomplete JSON object");
-            }
+            JsonToken valueToken = nextContainerToken(parser, context, "object");
             result.put(field, readValue(parser, valueToken, context));
         }
-        return result;
     }
 
     private static List<Object> readArray(JsonParser parser, String context)
             throws IOException {
         List<Object> result = new ArrayList<>();
-        JsonToken token;
-        while ((token = parser.nextToken()) != JsonToken.END_ARRAY) {
-            if (token == null) {
-                throw new DaemonProtocolException(context
-                        + " contains an incomplete JSON array");
+        while (true) {
+            JsonToken token = nextContainerToken(parser, context, "array");
+            if (token == JsonToken.END_ARRAY) {
+                return result;
             }
             result.add(readValue(parser, token, context));
         }
-        return result;
+    }
+
+    private static JsonToken nextContainerToken(JsonParser parser, String context,
+            String container) throws IOException {
+        try {
+            JsonToken token = parser.nextToken();
+            if (token != null) {
+                return token;
+            }
+        } catch (JsonEOFException e) {
+            throw new DaemonProtocolException(context
+                    + " contains an incomplete JSON " + container, e);
+        }
+        throw new DaemonProtocolException(context
+                + " contains an incomplete JSON " + container);
     }
 
     private static Object readValue(JsonParser parser, JsonToken token,
