@@ -14,6 +14,7 @@ import { formatFetchErrorForUser } from '../utils/fetch.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { combineAbortSignals } from '../utils/abortController.js';
 import { openBrowserSecurely } from '../utils/secure-browser-launcher.js';
+import { osc8Hyperlink, supportsHyperlinks } from '../utils/osc8.js';
 import {
   SharedTokenManager,
   TokenManagerError,
@@ -701,211 +702,44 @@ export async function getQwenOAuthClient(
   }
 }
 
-function shouldForceHyperlinks(value: string): boolean {
-  if (value.length === 0) return true;
-  const trimmed = value.trim();
-  if (!/^[+-]?\d+$/.test(trimmed)) return false;
-  return Number(trimmed) !== 0;
-}
-
 /**
- * Strip C0 + DEL + C1 control characters and Unicode bidi / line-separator
- * controls so an untrusted URL can be safely embedded inside an OSC escape
- * and rendered without spoofing the visible label. Mirrors `sanitizeForOsc`
- * in `packages/cli/src/ui/utils/osc8.ts`.
- */
-function sanitizeForOsc(s: string): string {
-  return s.replace(
-    // eslint-disable-next-line no-control-regex
-    /[\x00-\x1f\x7f\x80-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069\u2028\u2029]/g,
-    '',
-  );
-}
-
-interface ParsedVersion {
-  major: number;
-  minor: number;
-  patch: number;
-}
-
-/**
- * Parse a terminal version string. VTE historically reports `VTE_VERSION`
- * as a packed integer (e.g. `7800` for 0.78.0, `5000` for 0.50.0) rather
- * than dot-separated, so the packed form is unpacked here. Mirrors the
- * reference in `packages/cli/src/ui/utils/osc8.ts`.
- */
-function parseVersion(versionString: string | undefined): ParsedVersion {
-  if (!versionString) return { major: 0, minor: 0, patch: 0 };
-  if (/^\d{3,4}$/.test(versionString)) {
-    const m = /(\d{1,2})(\d{2})/.exec(versionString)!;
-    return {
-      major: 0,
-      minor: parseInt(m[1]!, 10),
-      patch: parseInt(m[2]!, 10),
-    };
-  }
-  const parts = versionString.split('.').map((n) => parseInt(n, 10) || 0);
-  return { major: parts[0] ?? 0, minor: parts[1] ?? 0, patch: parts[2] ?? 0 };
-}
-
-/**
- * Schemes safe to embed in an OSC 8 target. Restricting to network and mail
- * schemes keeps a compromised OAuth provider from turning the auth URL into
- * a one-click `javascript:` / `file:` trap. Mirrors `isSafeOscScheme` in
- * `packages/cli/src/ui/utils/osc8.ts`.
- */
-const SAFE_OSC8_SCHEMES = new Set([
-  'http:',
-  'https:',
-  'mailto:',
-  'ftp:',
-  'ftps:',
-  'sftp:',
-  'ssh:',
-]);
-
-function isSafeOscScheme(url: string): boolean {
-  const match = url.match(/^([a-z][a-z0-9+.-]*:)/i);
-  if (!match) return false;
-  return SAFE_OSC8_SCHEMES.has(match[1]!.toLowerCase());
-}
-
-/**
- * Check whether stderr's terminal supports OSC 8 hyperlinks. A minimal but
- * safe subset of the detection logic in `packages/cli/src/ui/utils/osc8.ts` —
- * enough to cover the common terminals (iTerm2, WezTerm, Kitty, VS Code,
- * Windows Terminal, GNOME Terminal/VTE) while refusing for multiplexers
- * (tmux/screen) and non-TTY contexts unless `FORCE_HYPERLINK` is set.
- */
-function supportsOsc8Hyperlinks(): boolean {
-  const env = process.env;
-  if (env['QWEN_DISABLE_HYPERLINKS'] === '1') return false;
-  if (env['NO_COLOR'] !== undefined && env['NO_COLOR'] !== '') return false;
-  if (env['FORCE_COLOR'] === '0' || env['FORCE_COLOR'] === 'false') {
-    return false;
-  }
-  if (!process.stderr?.isTTY) return false;
-  const force = env['FORCE_HYPERLINK'];
-  if (force !== undefined) return shouldForceHyperlinks(force);
-  if (env['CI']) return false;
-  if (env['TEAMCITY_VERSION']) return false;
-  if (env['TMUX'] || env['STY']) return false;
-  if (env['WT_SESSION']) return true;
-  if (env['KITTY_WINDOW_ID'] || env['TERM'] === 'xterm-kitty') return true;
-  if (env['DOMTERM']) return true;
-  if (env['GHOSTTY_RESOURCES_DIR'] || env['TERM'] === 'xterm-ghostty') {
-    return true;
-  }
-  if (env['KONSOLE_VERSION']) {
-    const konsoleVersion = parseInt(env['KONSOLE_VERSION'], 10);
-    if (Number.isFinite(konsoleVersion) && konsoleVersion >= 210400) {
-      return true;
-    }
-  }
-  if (
-    env['TERM'] === 'alacritty' ||
-    env['ALACRITTY_LOG'] !== undefined ||
-    env['ALACRITTY_WINDOW_ID'] !== undefined ||
-    env['ALACRITTY_SOCKET'] !== undefined
-  ) {
-    return true;
-  }
-  if (env['TERMINAL_EMULATOR'] === 'JetBrains-JediTerm') return true;
-  if (env['TERM_PROGRAM']) {
-    const version = parseVersion(env['TERM_PROGRAM_VERSION']);
-    switch (env['TERM_PROGRAM']) {
-      case 'iTerm.app':
-        // iTerm2 added OSC 8 in 3.1.
-        if (version.major === 3) return version.minor >= 1;
-        return version.major > 3;
-      case 'WezTerm':
-        return version.major >= 20200620;
-      case 'vscode':
-        // VS Code's integrated terminal gained OSC 8 in 1.72.
-        return (
-          version.major > 1 || (version.major === 1 && version.minor >= 72)
-        );
-      case 'ghostty':
-        return true;
-      case 'mintty':
-        // mintty added OSC 8 in 3.1, hardened in 3.3. Older builds (still
-        // bundled with some Git-for-Windows distros) print the raw escape
-        // bytes as visible garbage, so gate on TERM_PROGRAM_VERSION. A
-        // missing version means a very old build — refuse rather than guess.
-        if (!env['TERM_PROGRAM_VERSION']) return false;
-        return version.major > 3 || (version.major === 3 && version.minor >= 3);
-      default:
-        break;
-    }
-  }
-  if (env['VTE_VERSION']) {
-    // VTE 0.50.0 advertises OSC 8 but segfaults when it actually fires.
-    // Compare against the parsed version so the packed form (`'5000'`) is
-    // recognized too — a raw parseInt would misread the dot-format
-    // `'0.60.0'` as 0 and refuse a capable terminal.
-    const version = parseVersion(env['VTE_VERSION']);
-    if (version.major === 0 && version.minor === 50 && version.patch === 0) {
-      return false;
-    }
-    if (version.major > 0 || version.minor >= 50) return true;
-    return false;
-  }
-
-  // Legacy Windows console (cmd.exe, conhost) has no OSC support outside
-  // Windows Terminal (already matched above via WT_SESSION); leaked env vars
-  // from an SSH session (e.g. TERM=alacritty) must not emit visible garbage.
-  if (process.platform === 'win32') return false;
-
-  return false;
-}
-
-/**
- * Wrap a URL in an OSC 8 hyperlink escape sequence. BEL (\x07) terminates
- * the OSC — more broadly supported than ST (ESC \\). Control characters
- * are stripped from the URL to prevent breaking the OSC envelope.
+ * Displays the OAuth device authorization URL to the user.
  *
- * Inside tmux or screen the sequence is wrapped in a DCS passthrough
- * envelope so the multiplexer forwards it to the host terminal.
- */
-function osc8Hyperlink(url: string): string {
-  const safeUrl = sanitizeForOsc(url);
-  let seq = `\x1b]8;;${safeUrl}\x07${safeUrl}\x1b]8;;\x07`;
-  if (process.env['TMUX']) {
-    const escaped = seq.replaceAll('\x1b', '\x1b\x1b');
-    seq = `\x1bPtmux;${escaped}\x1b\\`;
-  } else if (process.env['STY']) {
-    seq = `\x1bP${seq}\x1b\\`;
-  }
-  return seq;
-}
-
-/**
- * Displays a formatted box with OAuth device authorization URL.
- * Uses process.stderr.write() to ensure the auth URL is always visible to users,
- * especially in non-interactive mode. Using stderr prevents corruption of
- * structured JSON output (which goes to stdout) and follows the standard Unix
- * convention of user-facing messages to stderr.
+ * When the terminal supports OSC 8 hyperlinks the URL is emitted as a single
+ * clickable link, which stays one copy/click unit even when it wraps (e.g.
+ * over SSH). Otherwise it falls back to a fixed-width ASCII box.
  *
- * When the terminal supports OSC 8 hyperlinks, the URL is emitted as a single
- * clickable link instead of being hard-wrapped across multiple lines. This is
- * especially important over SSH, where wrapped URLs are impossible to
- * copy-paste as a single link.
+ * Writes to `out` (default `process.stderr`) so the auth URL is always visible
+ * to users, especially in non-interactive mode. Using stderr prevents
+ * corruption of structured JSON output (which goes to stdout) and follows the
+ * standard Unix convention of user-facing messages to stderr. `out` is
+ * injectable for testing.
  */
-export function showFallbackMessage(verificationUriComplete: string): void {
+export function showFallbackMessage(
+  verificationUriComplete: string,
+  out: NodeJS.WriteStream = process.stderr,
+): void {
   const title = 'Qwen OAuth Device Authorization';
-  const url = sanitizeForOsc(verificationUriComplete);
-  // Only wrap in a clickable OSC 8 envelope when the terminal supports it
-  // AND the URL uses an allowlisted scheme — a compromised OAuth provider
-  // returning a javascript:/file: URL must not become a one-click trap.
-  const useOsc8 = supportsOsc8Hyperlinks() && isSafeOscScheme(url);
+  const url = verificationUriComplete;
+
+  // When the terminal supports OSC 8 hyperlinks, emit the URL as a single
+  // clickable link. Unlike the fixed-width ASCII box below, an OSC 8 envelope
+  // survives line-wrapping (e.g. over SSH), so the URL stays one copy/click
+  // unit instead of being split across lines and reassembled by hand.
+  if (
+    supportsHyperlinks(out) &&
+    (url.startsWith('https://') || url.startsWith('http://'))
+  ) {
+    out.write('\n' + title + '\n');
+    out.write('Please visit the following URL in your browser to authorize:\n');
+    out.write(osc8Hyperlink(url) + '\n');
+    out.write('Waiting for authorization to complete...\n\n');
+    return;
+  }
+
   const minWidth = 70;
   const maxWidth = 80;
-  let boxWidth = Math.min(Math.max(title.length + 4, minWidth), maxWidth);
-  // In OSC 8 mode the URL renders on a single line; widen the box so a long
-  // verification URL (and its closing border) doesn't overflow the frame.
-  if (useOsc8 && url.length + 4 > boxWidth) {
-    boxWidth = url.length + 4;
-  }
+  const boxWidth = Math.min(Math.max(title.length + 4, minWidth), maxWidth);
 
   // Calculate the width needed for the box (account for padding)
   const contentWidth = boxWidth - 4; // Subtract 2 spaces and 2 border chars
@@ -966,40 +800,30 @@ export function showFallbackMessage(verificationUriComplete: string): void {
   const waitingLine = 'Waiting for authorization to complete...';
 
   // Write the box
-  process.stderr.write('\n' + topBorder + '\n');
-  process.stderr.write(emptyLine + '\n');
+  out.write('\n' + topBorder + '\n');
+  out.write(emptyLine + '\n');
 
   // Write instructions
   for (const line of instructionLines) {
-    process.stderr.write(
-      '| ' + line + ' '.repeat(contentWidth - line.length) + ' |\n',
-    );
+    out.write('| ' + line + ' '.repeat(contentWidth - line.length) + ' |\n');
   }
 
-  process.stderr.write(emptyLine + '\n');
+  out.write(emptyLine + '\n');
 
-  // Write URL — as a single OSC 8 clickable hyperlink when supported,
-  // or hard-wrapped across lines as a fallback.
-  if (useOsc8) {
-    const osc8Padding = ' '.repeat(Math.max(0, contentWidth - url.length));
-    process.stderr.write('| ' + osc8Hyperlink(url) + osc8Padding + ' |\n');
-  } else {
-    for (const line of urlLines) {
-      process.stderr.write(
-        '| ' + line + ' '.repeat(contentWidth - line.length) + ' |\n',
-      );
-    }
+  // Write URL
+  for (const line of urlLines) {
+    out.write('| ' + line + ' '.repeat(contentWidth - line.length) + ' |\n');
   }
 
-  process.stderr.write(emptyLine + '\n');
+  out.write(emptyLine + '\n');
 
   // Write waiting message
-  process.stderr.write(
+  out.write(
     '| ' + waitingLine + ' '.repeat(contentWidth - waitingLine.length) + ' |\n',
   );
 
-  process.stderr.write(emptyLine + '\n');
-  process.stderr.write(bottomBorder + '\n\n');
+  out.write(emptyLine + '\n');
+  out.write(bottomBorder + '\n\n');
 }
 
 async function authWithQwenDeviceFlow(

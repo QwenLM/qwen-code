@@ -24,6 +24,7 @@ import {
   type ErrorData,
   type QwenCredentials,
 } from './qwenOAuth2.js';
+import { HYPERLINK_ENV_KEYS } from '../utils/osc8.js';
 import {
   SharedTokenManager,
   TokenManagerError,
@@ -2390,511 +2391,68 @@ describe('Constants and Configuration', () => {
 });
 
 describe('showFallbackMessage', () => {
-  const ORIGINAL_ENV = { ...process.env };
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  let stderrWriteSpy: any;
-  let originalIsTTY: boolean;
+  const savedEnv: Record<string, string | undefined> = {};
+  const url = 'https://chat.qwen.ai/authorize?user_code=WDJB-MJHT';
 
   beforeEach(() => {
-    originalIsTTY = process.stderr.isTTY ?? false;
-    stderrWriteSpy = vi
-      .spyOn(process.stderr, 'write')
-      .mockImplementation(() => true);
-    // Reset env — clear CI and other terminal-detection vars so
-    // supportsOsc8Hyperlinks() doesn't short-circuit on CI runners.
-    process.env = { ...ORIGINAL_ENV };
-    delete process.env['CI'];
-    delete process.env['TMUX'];
-    delete process.env['STY'];
-    delete process.env['TERM_PROGRAM'];
-    delete process.env['TERM_PROGRAM_VERSION'];
-    delete process.env['WT_SESSION'];
-    delete process.env['KITTY_WINDOW_ID'];
-    delete process.env['VTE_VERSION'];
-    delete process.env['DOMTERM'];
-    delete process.env['GHOSTTY_RESOURCES_DIR'];
-    delete process.env['KONSOLE_VERSION'];
-    delete process.env['TERMINAL_EMULATOR'];
-    delete process.env['ALACRITTY_LOG'];
-    delete process.env['ALACRITTY_WINDOW_ID'];
-    delete process.env['ALACRITTY_SOCKET'];
-    delete process.env['FORCE_HYPERLINK'];
-    delete process.env['QWEN_DISABLE_HYPERLINKS'];
-    delete process.env['TEAMCITY_VERSION'];
-    delete process.env['NO_COLOR'];
-    delete process.env['FORCE_COLOR'];
-    // Keep TERM but clear known OSC 8 terminal names
-    if (
-      ['xterm-kitty', 'xterm-ghostty', 'alacritty'].includes(
-        process.env['TERM'] ?? '',
-      )
-    ) {
-      delete process.env['TERM'];
+    for (const key of HYPERLINK_ENV_KEYS) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
     }
   });
 
   afterEach(() => {
-    stderrWriteSpy.mockRestore();
-    process.env = ORIGINAL_ENV;
-    // Restore isTTY
-    if (originalIsTTY) {
-      Object.defineProperty(process.stderr, 'isTTY', {
-        value: true,
-        configurable: true,
-      });
-    } else {
-      Object.defineProperty(process.stderr, 'isTTY', {
-        value: false,
-        configurable: true,
-      });
+    for (const key of HYPERLINK_ENV_KEYS) {
+      if (savedEnv[key] === undefined) delete process.env[key];
+      else process.env[key] = savedEnv[key];
     }
   });
 
-  function getOutput(): string {
-    return stderrWriteSpy.mock.calls.map((c: [string]) => c[0]).join('');
-  }
+  const capture = (isTTY: boolean) => {
+    const chunks: string[] = [];
+    const out = {
+      isTTY,
+      write: (chunk: string) => {
+        chunks.push(String(chunk));
+        return true;
+      },
+    } as unknown as NodeJS.WriteStream;
+    return { out, text: () => chunks.join('') };
+  };
 
-  it('emits OSC 8 hyperlink when terminal supports it (iTerm.app)', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['TERM_PROGRAM'] = 'iTerm.app';
-    process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
+  it('emits the URL as a single OSC 8 hyperlink when the terminal supports it', () => {
+    process.env['FORCE_HYPERLINK'] = '1';
+    const { out, text } = capture(true);
 
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+    showFallbackMessage(url, out);
 
-    const output = getOutput();
-    expect(output).toContain(
-      '\x1b]8;;https://chat.qwen.ai/device?code=ABC123\x07',
-    );
-    expect(output).toContain('\x1b]8;;\x07');
-    // URL appears as a single line within the OSC 8 envelope
-    expect(output).toContain(
-      'https://chat.qwen.ai/device?code=ABC123\x1b]8;;\x07',
-    );
+    const output = text();
+    // OSC 8 envelope: ESC ] 8 ; ; <url> BEL <label> ESC ] 8 ; ; BEL
+    expect(output).toContain(`\x1b]8;;${url}\x07${url}\x1b]8;;\x07`);
+    // The ASCII box is not drawn on the hyperlink path.
+    expect(output).not.toContain('+--');
   });
 
-  it('hard-wraps URL when terminal does not support OSC 8 (non-TTY)', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: false,
-      configurable: true,
-    });
-    delete process.env['TERM_PROGRAM'];
-    delete process.env['FORCE_HYPERLINK'];
-
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
-
-    const output = getOutput();
-    expect(output).not.toContain('\x1b]8;;');
-    // URL is present as plain text
-    expect(output).toContain('https://chat.qwen.ai/device?code=ABC123');
-  });
-
-  it('does not emit OSC 8 when QWEN_DISABLE_HYPERLINKS=1', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['TERM_PROGRAM'] = 'iTerm.app';
+  it('falls back to the ASCII box when hyperlinks are disabled', () => {
     process.env['QWEN_DISABLE_HYPERLINKS'] = '1';
+    const { out, text } = capture(true);
 
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+    showFallbackMessage(url, out);
 
-    const output = getOutput();
+    const output = text();
     expect(output).not.toContain('\x1b]8;;');
-  });
-
-  it('respects FORCE_HYPERLINK=1 even in tmux', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['TMUX'] = '/tmp/tmux-1000/default,1234,0';
-    process.env['FORCE_HYPERLINK'] = '1';
-
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
-
-    const output = getOutput();
-    expect(output).toContain('\x1b]8;;');
-    // Must use DCS passthrough wrapping for tmux, with ESC bytes doubled so
-    // tmux forwards the literal sequence instead of interpreting it. The
-    // exact doubled-ESC prefix fails if the doubling is accidentally removed.
-    expect(output).toContain('\x1bPtmux;\x1b\x1b]8;;');
-    expect(output).toContain('\x1b\\');
-  });
-
-  it('wraps OSC 8 in DCS passthrough for screen (STY)', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['STY'] = '12345.pts-0.host';
-    process.env['FORCE_HYPERLINK'] = '1';
-
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
-
-    const output = getOutput();
-    expect(output).toContain('\x1bP\x1b]8;;');
-    expect(output).toContain('\x1b\\');
-  });
-
-  it('refuses OSC 8 in tmux without FORCE_HYPERLINK', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['TMUX'] = '/tmp/tmux-1000/default,1234,0';
-    delete process.env['FORCE_HYPERLINK'];
-
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
-
-    const output = getOutput();
-    expect(output).not.toContain('\x1b]8;;');
-  });
-
-  it('detects Windows Terminal via WT_SESSION', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['WT_SESSION'] = 'xxx';
-
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
-
-    const output = getOutput();
-    expect(output).toContain('\x1b]8;;');
-  });
-
-  it('detects Kitty via TERM=xterm-kitty', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['TERM'] = 'xterm-kitty';
-
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
-
-    const output = getOutput();
-    expect(output).toContain('\x1b]8;;');
-  });
-
-  it('detects VS Code via TERM_PROGRAM=vscode', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['TERM_PROGRAM'] = 'vscode';
-    process.env['TERM_PROGRAM_VERSION'] = '1.85.0';
-
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
-
-    const output = getOutput();
-    expect(output).toContain('\x1b]8;;');
-  });
-
-  it('still renders the ASCII box with title and instructions', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['TERM_PROGRAM'] = 'iTerm.app';
-
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
-
-    const output = getOutput();
     expect(output).toContain('Qwen OAuth Device Authorization');
-    expect(output).toContain('Please visit the following URL');
-    expect(output).toContain('Waiting for authorization');
+    expect(output).toContain('+'); // box border
   });
 
-  it('treats FORCE_HYPERLINK=false as disabled', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['TERM_PROGRAM'] = 'iTerm.app';
-    process.env['FORCE_HYPERLINK'] = 'false';
+  it('falls back to the ASCII box for a non-TTY stream even with FORCE_HYPERLINK', () => {
+    process.env['FORCE_HYPERLINK'] = '1';
+    const { out, text } = capture(false);
 
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+    showFallbackMessage(url, out);
 
-    const output = getOutput();
+    const output = text();
     expect(output).not.toContain('\x1b]8;;');
-  });
-
-  it('treats FORCE_HYPERLINK=0 as disabled', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['TERM_PROGRAM'] = 'iTerm.app';
-    process.env['FORCE_HYPERLINK'] = '0';
-
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
-
-    const output = getOutput();
-    expect(output).not.toContain('\x1b]8;;');
-  });
-
-  it('strips control characters from URL in OSC 8 envelope', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['TERM_PROGRAM'] = 'iTerm.app';
-    process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
-
-    showFallbackMessage('https://chat.qwen.ai/device?code=\x07ABC\x1b123');
-
-    const output = getOutput();
-    // Control chars stripped — the sanitized URL appears in the envelope
-    expect(output).toContain(
-      '\x1b]8;;https://chat.qwen.ai/device?code=ABC123\x07',
-    );
-    // Raw control chars must not leak into the OSC payload
-    expect(output).not.toContain('code=\x07');
-  });
-
-  it('gates mintty on version >= 3.3', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['TERM_PROGRAM'] = 'mintty';
-    process.env['TERM_PROGRAM_VERSION'] = '3.3.0';
-
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
-
-    const output = getOutput();
-    expect(output).toContain('\x1b]8;;');
-  });
-
-  it('refuses OSC 8 for mintty < 3.3', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['TERM_PROGRAM'] = 'mintty';
-    process.env['TERM_PROGRAM_VERSION'] = '3.1.0';
-
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
-
-    const output = getOutput();
-    expect(output).not.toContain('\x1b]8;;');
-  });
-
-  it('refuses OSC 8 for mintty without version', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['TERM_PROGRAM'] = 'mintty';
-    delete process.env['TERM_PROGRAM_VERSION'];
-
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
-
-    const output = getOutput();
-    expect(output).not.toContain('\x1b]8;;');
-  });
-
-  it('does not emit OSC 8 when NO_COLOR is set', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['TERM_PROGRAM'] = 'iTerm.app';
-    process.env['NO_COLOR'] = '1';
-
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
-
-    const output = getOutput();
-    expect(output).not.toContain('\x1b]8;;');
-  });
-
-  it('does not emit OSC 8 when FORCE_COLOR=0', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['TERM_PROGRAM'] = 'iTerm.app';
-    process.env['FORCE_COLOR'] = '0';
-
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
-
-    const output = getOutput();
-    expect(output).not.toContain('\x1b]8;;');
-  });
-
-  it('strips bidi override characters from URL', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['TERM_PROGRAM'] = 'iTerm.app';
-    process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
-
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC\u202e123');
-
-    const output = getOutput();
-    expect(output).not.toContain('\u202e');
-    expect(output).toContain(
-      '\x1b]8;;https://chat.qwen.ai/device?code=ABC123\x07',
-    );
-  });
-
-  it('right-pads OSC 8 URL line to align the box border', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['TERM_PROGRAM'] = 'iTerm.app';
-    process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
-
-    const url = 'https://chat.qwen.ai/device?code=ABC123';
-    showFallbackMessage(url);
-
-    const output = getOutput();
-    const lines = output.split('\n');
-    // Find the line containing the OSC 8 hyperlink
-    const osc8Line = lines.find((l: string) => l.includes('\x1b]8;;'));
-    expect(osc8Line).toBeDefined();
-    // The visible content is: "| " + url + padding + " |"
-    // Strip ANSI/OSC sequences to get visible text
-    // eslint-disable-next-line no-control-regex
-    const visible = osc8Line!.replace(/\x1b\]8;;[^\x07]*\x07/g, '');
-    // boxWidth is 70 for this title; visible line should be 70 chars
-    expect(visible.length).toBe(70);
-    expect(visible.endsWith(' |')).toBe(true);
-  });
-
-  it('sanitizes control characters in plain-text fallback path', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: false,
-      configurable: true,
-    });
-    delete process.env['TERM_PROGRAM'];
-    delete process.env['FORCE_HYPERLINK'];
-
-    showFallbackMessage('https://chat.qwen.ai/device?code=\x07ABC\x1b123');
-
-    const output = getOutput();
-    // Control chars must not appear in the plain-text output
-    expect(output).not.toContain('\x07');
-    expect(output).not.toContain('\x1b');
-    expect(output).toContain('https://chat.qwen.ai/device?code=ABC123');
-  });
-
-  it('refuses OSC 8 for VTE 0.50.0 (packed 5000, segfaults)', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['VTE_VERSION'] = '5000';
-
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
-
-    expect(getOutput()).not.toContain('\x1b]8;;');
-  });
-
-  it('emits OSC 8 for VTE 0.78.0 (packed 7800)', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['VTE_VERSION'] = '7800';
-
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
-
-    expect(getOutput()).toContain('\x1b]8;;');
-  });
-
-  it('emits OSC 8 for VTE dot-format version 0.60.0', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['VTE_VERSION'] = '0.60.0';
-
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
-
-    expect(getOutput()).toContain('\x1b]8;;');
-  });
-
-  it('refuses OSC 8 for VTE dot-format version 0.50.0 (segfaults)', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['VTE_VERSION'] = '0.50.0';
-
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
-
-    expect(getOutput()).not.toContain('\x1b]8;;');
-  });
-
-  it('refuses OSC 8 for iTerm.app < 3.1', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['TERM_PROGRAM'] = 'iTerm.app';
-    process.env['TERM_PROGRAM_VERSION'] = '3.0.10';
-
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
-
-    expect(getOutput()).not.toContain('\x1b]8;;');
-  });
-
-  it('refuses OSC 8 for VS Code < 1.72', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['TERM_PROGRAM'] = 'vscode';
-    process.env['TERM_PROGRAM_VERSION'] = '1.71.0';
-
-    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
-
-    expect(getOutput()).not.toContain('\x1b]8;;');
-  });
-
-  it('falls back to plain text for a non-allowlisted URL scheme', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['TERM_PROGRAM'] = 'iTerm.app';
-    process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
-
-    showFallbackMessage('javascript:alert(1)');
-
-    const output = getOutput();
-    expect(output).not.toContain('\x1b]8;;');
-    expect(output).toContain('javascript:alert(1)');
-  });
-
-  it('widens the box for URLs longer than the default width in OSC 8 mode', () => {
-    Object.defineProperty(process.stderr, 'isTTY', {
-      value: true,
-      configurable: true,
-    });
-    process.env['TERM_PROGRAM'] = 'iTerm.app';
-    process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
-
-    const url = 'https://chat.qwen.ai/device?code=' + 'A'.repeat(70);
-    showFallbackMessage(url);
-
-    const output = getOutput();
-    const lines = output.split('\n');
-    const osc8Line = lines.find((l: string) => l.includes('\x1b]8;;'));
-    expect(osc8Line).toBeDefined();
-    // Strip the OSC 8 envelope to measure only the visible characters.
-    // eslint-disable-next-line no-control-regex
-    const visible = osc8Line!.replace(/\x1b\]8;;[^\x07]*\x07/g, '');
-    // The URL stays on one clickable line and the row stays aligned: it ends
-    // with the closing border and matches the box border width.
-    expect(visible.endsWith(' |')).toBe(true);
-    const border = lines.find((l: string) => l.startsWith('+'));
-    expect(visible.length).toBe(border!.length);
+    expect(output).toContain('+');
   });
 });

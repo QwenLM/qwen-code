@@ -113,6 +113,9 @@ import type {
   DaemonInitWorkspaceResult,
   DaemonMcpRestartResult,
   DaemonReloadResponse,
+  DaemonChannelDelivery,
+  DaemonChannelNotifyRequest,
+  DaemonChannelNotifyResult,
   DaemonChannelReloadResult,
   DaemonChannelControlState,
   DaemonChannelSelection,
@@ -304,6 +307,7 @@ const DEFAULT_SESSION_LIST_PAGE_SIZE = 20;
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
 const VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS = 65_000;
 const GITHUB_SETUP_DEFAULT_TIMEOUT_MS = 90_000;
+const CHANNEL_NOTIFY_DEFAULT_TIMEOUT_MS = 35_000;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
 // Keep in sync with acp-bridge bridge.ts and CLI serve/server.ts.
 const DEFAULT_MAX_PENDING_PROMPTS_PER_SESSION = 5;
@@ -494,6 +498,8 @@ export interface RestoreSessionRequest {
 
 export interface PromptRequest {
   prompt: PromptContentBlock[];
+  /** Deliver the successful final answer directly through a channel worker. */
+  delivery?: DaemonChannelDelivery;
   /** Optional ACP _meta passthrough. */
   _meta?: Record<string, unknown> | null;
   /**
@@ -955,6 +961,29 @@ export class DaemonClient {
       async (res) => {
         if (!res.ok) throw await this.failOnError(res, 'GET /capabilities');
         return (await res.json()) as DaemonCapabilities;
+      },
+    );
+  }
+
+  /**
+   * Send text directly through the primary workspace's channel worker.
+   * This does not create or prompt an Agent session. Pre-flight the
+   * `channel_delivery` capability before calling across mixed daemon versions.
+   * A successful capability check does not guarantee worker liveness; callers
+   * must treat 503 `channel_worker_unavailable` as an expected outcome.
+   */
+  async notify(
+    req: DaemonChannelNotifyRequest,
+    opts?: { timeoutMs?: number },
+  ): Promise<DaemonChannelNotifyResult> {
+    return await this.jsonRequest<DaemonChannelNotifyResult>(
+      '/workspace/notify',
+      'POST /workspace/notify',
+      {
+        method: 'POST',
+        body: req,
+        timeoutMs: opts?.timeoutMs ?? CHANNEL_NOTIFY_DEFAULT_TIMEOUT_MS,
+        mode: 'rest',
       },
     );
   }
@@ -4322,6 +4351,28 @@ export class WorkspaceDaemonClient {
 
   workspaceMcp(): Promise<DaemonWorkspaceMcpStatus> {
     return this.get('/mcp', 'GET /workspaces/:workspace/mcp');
+  }
+
+  /**
+   * Send text directly through this exact workspace's channel worker.
+   * A successful capability pre-flight does not guarantee worker liveness;
+   * callers must treat 503 `channel_worker_unavailable` as an expected outcome.
+   */
+  notify(
+    req: DaemonChannelNotifyRequest,
+    opts?: { timeoutMs?: number },
+  ): Promise<DaemonChannelNotifyResult> {
+    return this.client.workspaceJsonRequest<DaemonChannelNotifyResult>(
+      this.workspaceSelector,
+      '/notify',
+      'POST /workspaces/:workspace/notify',
+      {
+        method: 'POST',
+        body: req,
+        timeoutMs: opts?.timeoutMs ?? CHANNEL_NOTIFY_DEFAULT_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
   }
 
   initializeWorkspaceMcp(): Promise<DaemonWorkspaceMcpInitializeResult> {

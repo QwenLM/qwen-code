@@ -263,6 +263,7 @@ export interface StartScheduledTaskKeepaliveOptions {
   reviveTimeoutMs?: number;
   /** Per-task spawn timeout; defaults to KEEPALIVE_SPAWN_TIMEOUT_MS. */
   spawnTimeoutMs?: number;
+  onTasksRead?: (tasks: readonly DurableCronTask[]) => void;
 }
 
 export function startScheduledTaskKeepalive(
@@ -304,6 +305,11 @@ export function startScheduledTaskKeepalive(
       // is diagnosable rather than silent.
       log.debug('keepalive: readCronTasks failed, skipping this pass', err);
       return;
+    }
+    try {
+      opts.onTasksRead?.(tasks);
+    } catch (err) {
+      log.debug('keepalive: onTasksRead failed', err);
     }
     for (const sessionId of collectBoundSessionIds(tasks)) {
       try {
@@ -488,6 +494,7 @@ export async function rehydrateScheduledTaskSessions(deps: {
   boundWorkspace: string;
   onError?: (sessionId: string, err: unknown) => void;
   loadTimeoutMs?: number;
+  onTasksRead?: (tasks: readonly DurableCronTask[]) => void;
 }): Promise<RehydrateResult> {
   const { bridge, boundWorkspace } = deps;
   const timeoutMs = deps.loadTimeoutMs ?? REHYDRATE_LOAD_TIMEOUT_MS;
@@ -497,6 +504,11 @@ export async function rehydrateScheduledTaskSessions(deps: {
   } catch (err) {
     log.debug('rehydrate: readCronTasks failed', err);
     return { loaded: [], failed: [] };
+  }
+  try {
+    deps.onTasksRead?.(tasks);
+  } catch (err) {
+    log.debug('rehydrate: onTasksRead failed', err);
   }
 
   // Distinct sessions of enabled bound tasks — same filter the heartbeat uses.
