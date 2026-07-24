@@ -4650,7 +4650,7 @@ export class CoreToolScheduler {
             // file holding a different plan. A missing/unreadable file
             // throws here and skips the redaction entirely.
             const savedPlan = fsSync.readFileSync(planPath, 'utf-8');
-            this.config
+            const redacted = this.config
               .getGeminiClient?.()
               ?.getChat()
               .redactApprovedPlanFromHistory(
@@ -4658,6 +4658,17 @@ export class CoreToolScheduler {
                 approvedPlanRedactionText(planPath),
                 savedPlan,
               );
+            // The rewrite declines silently on a no-match call id, a
+            // non-string plan argument, or in-history text differing from
+            // the saved file — trace those so a "plan still in history"
+            // report can tell a skipped rewrite from a run one.
+            if (redacted === false) {
+              debugLogger.debug(
+                `Approved-plan redaction left history unchanged for ` +
+                  `${callId}: no matching exit_plan_mode call, or its ` +
+                  `plan text does not match ${planPath}.`,
+              );
+            }
           } catch (redactErr) {
             debugLogger.warn(
               `Skipping approved-plan redaction for ${callId} (plan file ` +

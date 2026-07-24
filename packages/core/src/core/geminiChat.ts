@@ -3731,6 +3731,15 @@ export class GeminiChat {
     );
     if (redacted) {
       this.history = redacted;
+    } else {
+      // hasPlanCall was true, so a null here means every exit_plan_mode
+      // call was skipped (unapproved, id-less, or plan text differing
+      // from the saved file) — trace it for "plan still in history"
+      // triage, mirroring the write side.
+      debugLogger.debug(
+        `Load-side plan redaction left history unchanged: no approved ` +
+          `exit_plan_mode call matches the plan file at ${planPath}.`,
+      );
     }
   }
 
