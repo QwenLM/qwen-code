@@ -536,11 +536,13 @@ A fork `refactor` that hits the approval guardrail below, **or a PR that Stage 0
 
 Then write what you're actually thinking. "Looks good, ships the feature cleanly, the before/after shows it works" — not a five-bullet summary of the stages. If you have reservations, say them plainly. If you're approving with mild concerns, name them. Sign with `— _Qwen Code · qwen3.7-max_`, add the reviewed-commit footer (empty `HEAD_SHA` → fail closed, as above — don't blank a prior footer), and save this comment's ID.
 
-**Approve verdict while CI is still running → say so in this comment, before posting it.** Reuse the Stage 2b fetch — no new API call, and **no polling**. Staleness is safe in this direction only: a check that completed after the fetch is merely treated as still pending, which defers the approval; it can never approve early. The `finalize-triage-ci` exclusion is the finalize workflow's own in-flight check on the same SHA:
+**Approve verdict while CI is still running → say so in this comment, before posting it.** Count pending **workflow runs with `event == "pull_request"`** — the PR's own CI — not check-runs. Check-runs on the head SHA also include bot orchestration jobs (`pull_request_target` / `issue_comment` runs like triage itself and review-pr) that can stay in flight long after CI finishes; counting those would defer an approval that nothing will ever un-defer, because the finalize workflow only fires on PR CI workflow completions. One extra cheap API call, still **no polling**; staleness is safe in this direction only (a run that completed after the fetch is merely treated as pending → defers, never mis-approves):
 
 ```bash
-PENDING=$(jq '[.[] | select(.name != "finalize-triage-ci")
-  | select(.status != "completed")] | length' /tmp/triage-checks.json)
+PENDING=$(gh api "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" --paginate \
+  --jq '.workflow_runs' | jq -s 'add // []
+    | [ .[] | select(.event == "pull_request") | select(.status != "completed") ] | length')
+case "$PENDING" in '' | *[!0-9]*) PENDING=1 ;; esac   # unreadable → treat as pending (defer, fail closed)
 ```
 
 If the verdict is approve and `PENDING` is greater than 0, state it plainly in the comment — "approval deferred until CI lands green on `<HEAD_SHA>`" — and include this machine marker on its own line (full OID, the same one the footer attests):

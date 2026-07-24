@@ -22,11 +22,21 @@ name: 'Qwen Triage Finalize'
 # discipline the triage skill mandates for file paths before entering a table.
 on:
   workflow_run:
-    # The long pole is 'Qwen Code CI' (its Test job is the ~30-minute suite);
-    # 'E2E Tests' is listed so a late E2E finish also converges the table. On
-    # every firing the job re-reads ALL check-runs for the SHA, so multiple
-    # triggers are idempotent — each just renders the then-current state.
-    workflows: ['Qwen Code CI', 'E2E Tests']
+    # Every workflow with a `pull_request` trigger must be listed: the deferred
+    # approval can only land on a firing that happens AFTER the last PR CI run
+    # completes, so whichever workflow finishes last has to be in this list.
+    # The long pole is 'Qwen Code CI' (its Test job is the ~30-minute suite),
+    # but path-filtered PRs can make any of the others the final finisher.
+    # E2E Tests is deliberately absent — it has no pull_request trigger (push /
+    # schedule / dispatch only), so listing it would only add dead firings.
+    # Every firing re-reads current state, so multiple triggers are idempotent.
+    workflows:
+      - 'Qwen Code CI'
+      - 'Qwen Autofix'
+      - 'SDK Java'
+      - 'SDK Python'
+      - 'Serve A/B'
+      - 'Web-shell Visuals'
     types: ['completed']
 
 # Writes go through the bot PAT below; the default token stays read-only.
@@ -42,9 +52,12 @@ concurrency:
 
 jobs:
   finalize:
-    # This job's own check-run attaches to the SAME head SHA as the triggering
-    # workflow, so every green/pending computation below excludes this exact
-    # name — otherwise the run could never observe itself "complete".
+    # workflow_run jobs are attributed to the default branch, so this job's
+    # check-run does not normally land on the PR head SHA (verified: other
+    # workflow_run jobs in this repo never appear in head-SHA check lists).
+    # The name is still excluded from the rendered table as belt-and-braces,
+    # and the approval gate reads workflow runs filtered to
+    # event == pull_request, which excludes this job structurally.
     name: 'finalize-triage-ci'
     # Only PR-caused CI runs can have triage comments to finalize; push and
     # merge-queue runs are filtered here rather than discovered-empty later.
@@ -63,7 +76,7 @@ jobs:
           set -uo pipefail
 
           if [ -z "${GH_TOKEN:-}" ]; then
-            echo "::notice::No bot token configured (fork?); skipping triage finalize."
+            echo "::notice::No bot token configured; skipping triage finalize."
             exit 0
           fi
           SHORT_SHA="${HEAD_SHA:0:7}"
@@ -93,8 +106,12 @@ jobs:
 
           # Replace everything between (and including) the region markers with
           # the contents of the region file. Fail-closed: if either marker is
-          # missing the body is left untouched — never blank a comment this
-          # run cannot parse. Fixed-string matching via index(), not regex.
+          # missing — or the region never closes because the "end" text only
+          # appears BEFORE the begin marker (grep proves existence, not order)
+          # — the exit code is non-zero and the caller leaves the comment
+          # untouched; a truncated PATCH would eat the signature and the
+          # reviewed-commit footer. Fixed-string matching via index(), never
+          # regex.
           replace_region() { # $1 body-in  $2 region-file  $3 body-out
             if ! grep -qF "$CI_BEGIN" "$1" || ! grep -qF "$CI_END" "$1"; then
               return 1
@@ -109,7 +126,48 @@ jobs:
               inr && index($0, end) { inr = 0; next }
               inr { next }
               { print }
+              END { if (inr) exit 1 }
             ' "$1" > "$3"
+          }
+
+          # Approval-gate counts, computed over WORKFLOW RUNS for the head SHA
+          # filtered to event == "pull_request" — the PR's own CI, nothing
+          # else. Bot orchestration runs (pull_request_target / issue_comment
+          # jobs like triage or review-pr) also attach check-runs to the head
+          # SHA and can run long after CI finishes; counting those would hold
+          # PENDING above zero at the moment the last CI workflow completes,
+          # after which no listed workflow ever fires again and the deferred
+          # approval would be dropped silently. Re-runs dedup per workflow
+          # (latest run wins, mirroring branch-protection semantics). A jq
+          # failure yields empty output, which the numeric validation at the
+          # call site turns into "skip approval", never "approve".
+          gate_counts() { # $1 runs-file → TSV: total pending red
+            jq -r '
+              [ .[] | select(.event == "pull_request") ]
+                | group_by(.workflow_id) | map(max_by(.id))
+                | [ length,
+                    (map(select(.status != "completed")) | length),
+                    (map(select(.status == "completed")
+                       | select((.conclusion // "") | IN("success","neutral","skipped") | not))
+                     | length) ]
+                | @tsv' "$1"
+          }
+
+          # Table rows from check-runs: one row per check NAME (latest run
+          # wins — the API default filter=latest only dedups within one check
+          # suite, and every bot event mints a new suite with the same job
+          # names), skipped rows dropped (noise in a table, though still green
+          # for the gate), and still-running + non-green rows sorted FIRST so
+          # the row cap can never truncate a failure into invisibility.
+          table_rows() { # $1 checks-file → TSV: name status conclusion
+            jq -r --arg self "$SELF_CHECK_NAME" '
+              map(select(.name != $self))
+                | group_by(.name) | map(max_by(.id))
+                | map(select(.conclusion != "skipped"))
+                | sort_by([ (.status == "completed"),
+                            ((.conclusion // "") | IN("success","neutral")),
+                            (.name | ascii_downcase) ])
+                | .[] | [.name, .status, (.conclusion // "")] | @tsv' "$1"
           }
           # --- end triage-finalize helpers ---
 
@@ -125,40 +183,55 @@ jobs:
             exit 0
           fi
 
-          # One check-runs fetch for the SHA. filter=latest (the API default)
-          # collapses re-runs to the newest attempt per check name; --paginate
-          # emits one array per page, so jq -s 'add' flattens them (this repo
-          # has hit 500+ checks on a commit). Then drop our own check.
+          # Check-runs power the TABLE only; the approval gate reads workflow
+          # runs below. --paginate emits one array per page, so jq -s 'add'
+          # flattens them (this repo has hit 500+ checks on a commit).
           if ! gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/check-runs?per_page=100" --paginate \
-            --jq '.check_runs' | jq -s 'add // []' > /tmp/checks-raw.json; then
+            --jq '.check_runs' | jq -s 'add // []' > /tmp/checks.json; then
             echo "::warning::check-runs fetch failed; skipping."
             exit 0
           fi
-          jq --arg self "$SELF_CHECK_NAME" '[ .[] | select(.name != $self) ]' \
-            /tmp/checks-raw.json > /tmp/checks.json
 
-          TOTAL=$(jq 'length' /tmp/checks.json)
-          PENDING=$(jq '[.[] | select(.status != "completed")] | length' /tmp/checks.json)
-          # Green means success, neutral, or skipped. failure / timed_out /
+          # Workflow runs for the head SHA — the approval gate's data source.
+          # Green means success, neutral, or skipped; failure / timed_out /
           # cancelled / action_required / anything unknown is NOT green — the
           # deferred approval fails closed on all of them.
-          RED=$(jq '[.[] | select(.status == "completed")
-            | select(["success","neutral","skipped"] | index(.conclusion // "") | not)] | length' /tmp/checks.json)
-          echo "Checks for $SHORT_SHA: total=$TOTAL pending=$PENDING non-green=$RED"
+          if ! gh api "repos/$GITHUB_REPOSITORY/actions/runs?head_sha=$HEAD_SHA&per_page=100" --paginate \
+            --jq '.workflow_runs' | jq -s 'add // []' > /tmp/runs.json; then
+            echo "::warning::workflow-runs fetch failed; tables may still update, approval is skipped."
+            printf '[]' > /tmp/runs.json
+          fi
+          GATE_OK=true
+          IFS=$'\t' read -r TOTAL PENDING RED < <(gate_counts /tmp/runs.json) || true
+          # A jq failure (or an API shape change) must read as "cannot attest",
+          # never as "nothing is red": non-numeric counters skip the approval.
+          case "${TOTAL:-}${PENDING:-}${RED:-}" in
+            '' | *[!0-9]*)
+              echo "::warning::Gate counts unavailable (total='${TOTAL:-}' pending='${PENDING:-}' red='${RED:-}'); approval is skipped."
+              GATE_OK=false
+              TOTAL=0 PENDING=0 RED=0
+              ;;
+          esac
+          echo "PR CI workflow runs for $SHORT_SHA: total=$TOTAL pending=$PENDING non-green=$RED gate_ok=$GATE_OK"
           # Render the replacement region once; it is identical for every PR
-          # carrying this SHA. Row cap keeps the table inside GitHub's ~65 KB
-          # comment limit alongside the rest of the Stage 2 comment.
+          # carrying this SHA, and deterministic for a given check state (no
+          # run links or timestamps inside), so the cmp below really can skip
+          # no-op PATCHes. Row cap keeps the table inside GitHub's ~65 KB
+          # comment limit alongside the rest of the Stage 2 comment; because
+          # table_rows sorts running/non-green first, the cap can only ever
+          # cut green rows.
+          table_rows /tmp/checks.json > /tmp/rows.tsv
+          ROWS=$(grep -c '' /tmp/rows.tsv || true)
           MAX_ROWS=60
           {
             printf '%s\n\n' "$CI_BEGIN"
-            if [ "$PENDING" -eq 0 ]; then
-              printf 'Final CI results for `%s` — auto-updated after CI completed ([finalize run](%s)):\n\n' "$SHORT_SHA" "$RUN_URL"
+            if [ "$GATE_OK" = true ] && [ "$PENDING" -eq 0 ]; then
+              printf 'Final CI results for `%s` (auto-updated by the triage finalize job after CI completed):\n\n' "$SHORT_SHA"
             else
-              printf 'CI results for `%s` — %s check(s) still running; this table auto-updates as CI workflows complete ([finalize run](%s)):\n\n' "$SHORT_SHA" "$PENDING" "$RUN_URL"
+              printf 'CI results for `%s` — this table auto-updates as CI workflows complete:\n\n' "$SHORT_SHA"
             fi
             printf '| Check | Result |\n| ----- | ------ |\n'
-            jq -r '.[] | [.name, .status, (.conclusion // "")] | @tsv' /tmp/checks.json |
-              sort -f | head -n "$MAX_ROWS" |
+            head -n "$MAX_ROWS" /tmp/rows.tsv |
               while IFS=$'\t' read -r name status conclusion; do
                 safe_name="$(printf '%s' "$name" | tr -d '\r\n\000' | cut -c1-120 | html_escape)"
                 if [ "$status" != "completed" ]; then
@@ -166,7 +239,6 @@ jobs:
                 else
                   case "$conclusion" in
                     success) result='✅ success' ;;
-                    skipped) result='⏭️ skipped' ;;
                     neutral) result='◽ neutral' ;;
                     failure) result='❌ failure' ;;
                     cancelled) result='🚫 cancelled' ;;
@@ -176,16 +248,16 @@ jobs:
                 fi
                 printf '| <code>%s</code> | %s |\n' "$safe_name" "$result"
               done
-            if [ "$TOTAL" -gt "$MAX_ROWS" ]; then
-              printf '| …and %s more checks | see the Checks tab |\n' "$((TOTAL - MAX_ROWS))"
+            if [ "$ROWS" -gt "$MAX_ROWS" ]; then
+              printf '| …and %s more checks | see the Checks tab |\n' "$((ROWS - MAX_ROWS))"
             fi
-            printf '\n<sub>Auto-updated by the triage finalize job after CI completion. / 此表由 finalize 任务在 CI 完成后自动更新。</sub>\n\n'
+            printf '\n<sub>One row per check name (latest run); skipped checks omitted; failures sort first. / 每个检查名一行（取最新一次运行），省略 skipped，失败项排在最前。</sub>\n\n'
             printf '%s\n' "$CI_END"
           } > /tmp/region.md
 
           # Flip the triage status comment when the deferred approval resolves,
           # so its outcome is visible without opening the Stage 2 table.
-          update_status() { # $1 pr-number  $2 approved|red|stale
+          update_status() { # $1 pr-number  $2 approved|red|stale|deferred
             local pr="$1" kind="$2" en zh sid
             case "$kind" in
               approved)
@@ -193,8 +265,12 @@ jobs:
                 zh="✅ **Qwen Triage 已完成** —— \`${SHORT_SHA}\` 的 CI 全绿，延迟审批已提交。[查看 finalize 运行](${RUN_URL})"
                 ;;
               red)
-                en="⚠️ **Deferred approval withheld** — CI finished with ${RED} non-green check(s) on \`${SHORT_SHA}\`; see the updated table in the Stage 2 comment. Re-run \`@qwen-code /triage\` after fixes. [finalize run](${RUN_URL})"
-                zh="⚠️ **延迟审批已搁置** —— \`${SHORT_SHA}\` 的 CI 有 ${RED} 项检查未通过，详见 Stage 2 评论中已更新的表格。修复后可重新运行 \`@qwen-code /triage\`。[查看 finalize 运行](${RUN_URL})"
+                en="⚠️ **Deferred approval withheld** — ${RED} PR CI workflow run(s) on \`${SHORT_SHA}\` did not finish green; see the updated table in the Stage 2 comment. Re-run \`@qwen-code /triage\` after fixes. [finalize run](${RUN_URL})"
+                zh="⚠️ **延迟审批已搁置** —— \`${SHORT_SHA}\` 有 ${RED} 个 PR CI workflow 未以绿色完成，详见 Stage 2 评论中已更新的表格。修复后可重新运行 \`@qwen-code /triage\`。[查看 finalize 运行](${RUN_URL})"
+                ;;
+              deferred)
+                en="⏳ **Approval still deferred** — ${PENDING} PR CI workflow run(s) still in progress for \`${SHORT_SHA}\`; the finalize job approves automatically once every run lands green. [finalize run](${RUN_URL})"
+                zh="⏳ **审批仍在延迟中** —— \`${SHORT_SHA}\` 还有 ${PENDING} 个 PR CI workflow 在运行，全部通过后 finalize 任务会自动提交审批。[查看 finalize 运行](${RUN_URL})"
                 ;;
               stale)
                 en="⚠️ **Deferred approval not posted** — the PR head moved (or the PR closed) after the review of \`${SHORT_SHA}\`; approving now would attest to unreviewed code. Re-run \`@qwen-code /triage\` on the new head. [finalize run](${RUN_URL})"
@@ -251,20 +327,14 @@ jobs:
               '[.[] | select(.user.login == $bot) | select(.body | contains($m))] | length' \
               "/tmp/comments-$PR.json")"
             [ "$HAS_MARKER" -gt 0 ] || continue
-            if [ "$PENDING" -gt 0 ]; then
-              echo "PR #$PR: $PENDING check(s) still running; approval stays deferred."
-              continue
-            fi
-            if [ "$RED" -gt 0 ]; then
-              echo "PR #$PR: $RED non-green check(s); approval withheld."
-              update_status "$PR" red
-              continue
-            fi
-            # All green — re-verify head and state at the last moment. The
-            # approval is pinned to HEAD_SHA either way (branch protection
-            # ignores an approval whose commit is no longer the head), but a
-            # moved head means the review is stale, so say so instead of
-            # silently doing nothing.
+            # Head/state re-check comes BEFORE any red/deferred verdict: CI's
+            # cancel-in-progress means a force-push fires this job on the
+            # now-stale SHA with a `cancelled` (non-green) run, and the status
+            # comment is not SHA-scoped — deciding red first would stamp a
+            # stale verdict over the comment that now belongs to the new
+            # head's review. The approval is pinned to HEAD_SHA either way
+            # (branch protection ignores an approval whose commit is no longer
+            # the head); the stale note keeps the outcome visible.
             if ! PR_STATE_JSON="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR")"; then
               echo "::warning::Cannot read PR #$PR state; approval stays deferred."
               continue
@@ -275,6 +345,22 @@ jobs:
             if [ "$CURRENT_HEAD" != "$HEAD_SHA" ] || [ "$PR_STATE" != "open" ] || [ "$PR_DRAFT" = "true" ]; then
               echo "PR #$PR: head moved or PR closed/draft since the review; failing closed."
               update_status "$PR" stale
+              continue
+            fi
+            # An unavailable gate or an empty run list is "cannot attest", not
+            # "nothing failed" — skip without approving.
+            if [ "$GATE_OK" != true ] || [ "$TOTAL" -eq 0 ]; then
+              echo "PR #$PR: gate unavailable or no PR CI runs (total=$TOTAL); approval stays deferred."
+              continue
+            fi
+            if [ "$PENDING" -gt 0 ]; then
+              echo "PR #$PR: $PENDING PR CI workflow run(s) still in progress; approval stays deferred."
+              update_status "$PR" deferred
+              continue
+            fi
+            if [ "$RED" -gt 0 ]; then
+              echo "PR #$PR: $RED non-green PR CI workflow run(s); approval withheld."
+              update_status "$PR" red
               continue
             fi
             ALREADY="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews" \
