@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { getEventListeners } from 'node:events';
 import {
   DEFAULT_MAX_QUEUED_BYTES,
   EventBus,
@@ -550,7 +551,7 @@ describe('EventBus', () => {
     abort.abort();
   });
 
-  it('does not size events that are delivered directly to a waiting subscriber', async () => {
+  it('rejects an unserializable event without throwing, even with a waiting subscriber', async () => {
     const bus = new EventBus(100, undefined, undefined, {
       maxQueuedBytes: 1,
     });
@@ -561,16 +562,21 @@ describe('EventBus', () => {
     const circular: Record<string, unknown> = {};
     circular['self'] = circular;
 
+    // never-throws holds; the circular event is rejected at the
+    // serializability gate (DAEMON-011) instead of being delivered
+    // with a fake 0-byte weight.
     expect(() => bus.publish({ type: 'foo', data: circular })).not.toThrow();
+    expect(bus.publish({ type: 'foo', data: 'tail' })?.id).toBe(1);
 
     const delivered = await next;
     expect(delivered.done).toBe(false);
-    expect(delivered.value.type).toBe('foo');
+    expect(delivered.value.data).toBe('tail');
+    expect(bus.subscriberCount).toBe(1);
     await it.return?.();
     abort.abort();
   });
 
-  it('does not poison queued bytes when buffered event sizing fails', async () => {
+  it('rejects a buffered unserializable event and keeps the queue healthy', async () => {
     const bus = new EventBus(100, undefined, undefined, {
       maxQueuedBytes: 256,
     });
@@ -593,13 +599,12 @@ describe('EventBus', () => {
       });
     }).not.toThrow();
 
+    // The unserializable event is rejected at the gate (DAEMON-011);
+    // only the healthy tail event reaches the buffered queue.
     const first = await it.next();
-    const second = await it.next();
     expect(first.done).toBe(false);
-    expect(first.value.type).toBe('foo');
-    expect(second.done).toBe(false);
-    expect(second.value.type).toBe('foo');
-    expect(second.value.data).toBe('tail');
+    expect(first.value.data).toBe('tail');
+    expect(first.value.id).toBe(1);
     expect(process.stderr.write).toHaveBeenCalledWith(
       expect.stringContaining(
         'qwen serve: EventBus event sizing failed {"type":"foo"}',
@@ -857,6 +862,27 @@ describe('EventBus', () => {
     }
     expect(events).toEqual([]);
     expect(bus.subscriberCount).toBe(0);
+  });
+
+  it('disposes never-iterated subscribers on bus.close(), detaching their abort listeners (DAEMON-010)', async () => {
+    const bus = new EventBus();
+    const abort = new AbortController();
+    // Subscribe but never iterate — the subscriber's abort listener is
+    // the only external reference keeping its queue + closures alive.
+    const iter = bus.subscribe({ signal: abort.signal });
+    expect(getEventListeners(abort.signal, 'abort')).toHaveLength(1);
+
+    bus.close();
+
+    // close() must dispose (not just close the queue): the listener is
+    // gone even though the consumer never called next().
+    expect(getEventListeners(abort.signal, 'abort')).toHaveLength(0);
+    expect(bus.subscriberCount).toBe(0);
+
+    // Idempotent, and a late iteration attempt unwinds immediately.
+    bus.close();
+    const first = await iter[Symbol.asyncIterator]().next();
+    expect(first.done).toBe(true);
   });
 
   it('force-pushes replay events past maxQueued so Last-Event-ID is honored', async () => {
@@ -1206,6 +1232,146 @@ describe('EventBus', () => {
       }
       expect(out[0]?.type).toBe('foo');
       expect(out.some((e) => e.type === 'state_resync_required')).toBe(false);
+      abort.abort();
+    });
+  });
+
+  describe('serializability gate (DAEMON-011)', () => {
+    it('rejects an unserializable event without burning an id', async () => {
+      const bus = new EventBus();
+      const abort = new AbortController();
+      const iter = bus.subscribe({ signal: abort.signal });
+
+      const ok1 = bus.publish({ type: 'foo', data: 1 });
+      const rejected = bus.publish({
+        type: 'bad',
+        data: { big: BigInt(1) },
+      });
+      const ok2 = bus.publish({ type: 'foo', data: 2 });
+
+      expect(ok1?.id).toBe(1);
+      expect(rejected).toBeUndefined();
+      // The rejected event must not burn an id — a gap would be misread
+      // as ring eviction by resume logic.
+      expect(ok2?.id).toBe(2);
+      expect(process.stderr.write).toHaveBeenCalledWith(
+        expect.stringContaining('EventBus event sizing failed'),
+      );
+
+      // Live fanout skips the rejected event entirely.
+      const collected = await collect(iter, 2);
+      expect(collected.map((e) => e.data)).toEqual([1, 2]);
+      abort.abort();
+
+      // Replay (ring) never saw it either.
+      const replayAbort = new AbortController();
+      const replayed = await collect(
+        bus.subscribe({ lastEventId: 0, signal: replayAbort.signal }),
+        3,
+      );
+      expect(replayed.map((e) => e.type)).toEqual([
+        'foo',
+        'foo',
+        'replay_complete',
+      ]);
+      replayAbort.abort();
+    });
+
+    it('does not ingest a rejected event into the compaction engine', () => {
+      const ingested: BridgeEvent[] = [];
+      const engine = {
+        ingest(event: BridgeEvent) {
+          ingested.push(event);
+        },
+        seedReplayEvents() {},
+        snapshot() {
+          return { compactedTurns: [], liveJournal: [], lastEventId: 0 };
+        },
+        close() {},
+      };
+      const bus = new EventBus(100, undefined, engine);
+
+      bus.publish({ type: 'ok', data: 1 });
+      bus.publish({ type: 'bad', data: { big: BigInt(1) } });
+
+      expect(ingested.map((e) => e.type)).toEqual(['ok']);
+    });
+  });
+
+  describe('replay budget (DAEMON-011)', () => {
+    const bigPayload = () => 'x'.repeat(100);
+
+    it('truncates an over-budget replay burst and demands a resync', async () => {
+      const bus = new EventBus(100, undefined, undefined, {
+        replayBudgetBytes: 400,
+      });
+      for (let i = 0; i < 5; i++) {
+        bus.publish({ type: 'payload', data: bigPayload() });
+      }
+
+      const abort = new AbortController();
+      const iter = bus.subscribe({ lastEventId: 0, signal: abort.signal });
+      const it = iter[Symbol.asyncIterator]();
+      const frames: BridgeEvent[] = [];
+      for (let i = 0; i < 4; i++) {
+        frames.push((await it.next()).value as BridgeEvent);
+      }
+
+      // Two ~190-byte frames fit the 400-byte budget; the third trips it.
+      expect(frames[0]?.id).toBe(1);
+      expect(frames[1]?.id).toBe(2);
+      expect(frames[2]?.type).toBe('state_resync_required');
+      expect(frames[2]?.data).toEqual({
+        reason: 'replay_budget_exceeded',
+        lastDeliveredId: 2,
+        earliestAvailableId: 3,
+      });
+      expect(frames[3]?.type).toBe('replay_complete');
+      expect((frames[3]?.data as { replayedCount: number }).replayedCount).toBe(
+        2,
+      );
+
+      // Truncation is NOT eviction: the subscription stays live.
+      const nextLive = it.next();
+      const live = bus.publish({ type: 'after', data: 1 });
+      expect(((await nextLive).value as BridgeEvent).id).toBe(live?.id);
+      abort.abort();
+    });
+
+    it('replays a single frame larger than the budget (first-item rule)', async () => {
+      const bus = new EventBus(100, undefined, undefined, {
+        replayBudgetBytes: 10,
+      });
+      bus.publish({ type: 'payload', data: bigPayload() });
+
+      const abort = new AbortController();
+      const frames = await collect(
+        bus.subscribe({ lastEventId: 0, signal: abort.signal }),
+        2,
+      );
+      expect(frames[0]?.id).toBe(1);
+      expect(frames[1]?.type).toBe('replay_complete');
+      abort.abort();
+    });
+
+    it('does not emit a resync frame when the replay fits the budget', async () => {
+      const bus = new EventBus();
+      for (let i = 0; i < 5; i++) {
+        bus.publish({ type: 'payload', data: bigPayload() });
+      }
+
+      const abort = new AbortController();
+      const frames = await collect(
+        bus.subscribe({ lastEventId: 0, signal: abort.signal }),
+        6,
+      );
+      expect(frames.some((e) => e.type === 'state_resync_required')).toBe(
+        false,
+      );
+      expect(frames[5]?.type).toBe('replay_complete');
+      expect((frames[5]?.data as { replayedCount: number }).replayedCount).toBe(
+        5,
+      );
       abort.abort();
     });
   });
