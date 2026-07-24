@@ -33,6 +33,15 @@ describe('splitMarkdownTableRow', () => {
   it('does not split on a pipe inside an inline math span', () => {
     expect(splitMarkdownTableRow('$a|b$ | c')).toEqual(['$a|b$', 'c']);
   });
+
+  it('recognizes single-character math without consuming escaped spans', () => {
+    expect(splitMarkdownTableRow('$x$ | \\$a|b$ | c')).toEqual([
+      '$x$',
+      '\\$a',
+      'b$',
+      'c',
+    ]);
+  });
 });
 
 describe('estimateWrappedRows', () => {

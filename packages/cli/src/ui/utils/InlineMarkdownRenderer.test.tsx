@@ -6,7 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { renderWithProviders } from '../../test-utils/render.js';
-import { RenderInline } from './InlineMarkdownRenderer.js';
+import { getPlainTextLength, RenderInline } from './InlineMarkdownRenderer.js';
 import { HYPERLINK_ENV_KEYS } from './osc8.js';
 
 describe('<RenderInline />', () => {
@@ -55,6 +55,39 @@ describe('<RenderInline />', () => {
 
     expect(lastFrame()).toContain('α');
     expect(lastFrame()).not.toContain('$\\alpha$');
+  });
+
+  it('renders single-character and CJK-adjacent inline math', () => {
+    const { lastFrame } = renderWithProviders(
+      <RenderInline text="Values $x$、$α$。" enableInlineMath />,
+    );
+
+    const output = (lastFrame() ?? '').replace(/\n/g, '');
+    expect(output).toContain('Valuesx、α。');
+    expect(output).not.toContain('$x$');
+  });
+
+  it('preserves escaped inline math and inline code', () => {
+    const { lastFrame } = renderWithProviders(
+      <RenderInline text={'Literal \\$xy$ and code `$z$`'} enableInlineMath />,
+    );
+
+    expect((lastFrame() ?? '').replace(/\n/g, '')).toContain(
+      'Literal \\$xy$ and code$z$',
+    );
+  });
+
+  it('keeps math literal inside multi-backtick code spans', () => {
+    const { lastFrame } = renderWithProviders(
+      <RenderInline text={'Use ``a `$x$` b`` then $y$'} enableInlineMath />,
+    );
+
+    expect(lastFrame()).toContain('$x$');
+    expect(lastFrame()).not.toContain('$y$');
+  });
+
+  it('measures recognized single-character math without delimiters', () => {
+    expect(getPlainTextLength('value $x$', true)).toBe('value x'.length);
   });
 
   it('does not parse ordinary dollar amounts as inline math', () => {

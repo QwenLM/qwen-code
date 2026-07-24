@@ -22,6 +22,10 @@ import {
   supportsHyperlinks,
   trimTrailingUrlPunctuation,
 } from './osc8.js';
+import {
+  INLINE_CODE_SPAN_PATTERN_SOURCE,
+  INLINE_MATH_PATTERN_SOURCE,
+} from './inline-math.js';
 
 // Constants for Markdown parsing
 const BOLD_MARKER_LENGTH = 2; // For "**"
@@ -31,19 +35,15 @@ const INLINE_CODE_MARKER_LENGTH = 1; // For "`"
 const UNDERLINE_TAG_START_LENGTH = 3; // For "<u>"
 const UNDERLINE_TAG_END_LENGTH = 4; // For "</u>"
 const INLINE_MATH_MARKER_LENGTH = 1; // For "$"
-const INLINE_MATH_MAX_CHARS = 1024;
-const INLINE_MATH_PATTERN = new RegExp(
-  String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])`,
-  'g',
-);
+const INLINE_MATH_PATTERN = new RegExp(INLINE_MATH_PATTERN_SOURCE, 'g');
 const INLINE_MARKDOWN_REGEX = new RegExp(
   String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
-    String.raw`\`+.+?\`+|<u>.*?<\/u>|https?:\/\/\S+)`,
+    String.raw`${INLINE_CODE_SPAN_PATTERN_SOURCE}|<u>.*?<\/u>|https?:\/\/\S+)`,
   'g',
 );
 const INLINE_MARKDOWN_WITH_MATH_REGEX = new RegExp(
   String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
-    String.raw`\`+.+?\`+|(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])|<u>.*?<\/u>|https?:\/\/\S+)`,
+    String.raw`${INLINE_CODE_SPAN_PATTERN_SOURCE}|${INLINE_MATH_PATTERN_SOURCE}|<u>.*?<\/u>|https?:\/\/\S+)`,
   'g',
 );
 
