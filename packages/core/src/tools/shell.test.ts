@@ -3363,6 +3363,25 @@ describe('ShellTool', () => {
         // against the hint leaking in via a shared code path.
         expect(result.llmContent).not.toContain('is_background: true');
       });
+
+      it('teaches status-file liveness checking in the launch message', async () => {
+        // #7626: with only "read the output file" guidance, the model's
+        // sole liveness heuristic becomes "empty file = dead process" —
+        // wrong for block-buffering children (Python/ML jobs) whose
+        // output file stays at 0 bytes for their whole run, which led
+        // to duplicate relaunches of still-running processes.
+        const invocation = shellTool.build({
+          command: 'python train.py',
+          is_background: true,
+        });
+        const result = await invocation.execute(mockAbortSignal);
+        const text = String(result.llmContent);
+        expect(text).toContain('status file: ');
+        expect(text).toMatch(/status file: .*shell-bg_[0-9a-f]+\.status/);
+        expect(text).toContain('Do NOT infer liveness from the output file');
+        expect(text).toContain('block-buffer');
+        expect(text).toContain('python -u');
+      });
     });
 
     describe('addCoAuthorToGitCommit', () => {
@@ -5354,6 +5373,17 @@ describe('ShellTool', () => {
         expect(result.llmContent).toContain(
           `task_stop({ task_id: '${entry.shellId}'`,
         );
+        // #7626: the promoted path must teach the same status-file
+        // liveness heuristic as executeBackground — including the
+        // actionable unbuffering hint, so the two copies cannot drift.
+        expect(result.llmContent).toContain(
+          `status file: ${entry.outputPath.replace(/\.output$/, '.status')}`,
+        );
+        expect(result.llmContent).toContain(
+          'Do NOT infer liveness from the output file',
+        );
+        expect(result.llmContent).toContain('python -u');
+        expect(result.llmContent).toContain('stdbuf -oL');
         expect(result.returnDisplay).toContain(
           `Promoted to background: ${entry.shellId}`,
         );

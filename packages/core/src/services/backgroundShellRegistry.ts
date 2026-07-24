@@ -21,6 +21,7 @@
 import * as fs from 'node:fs';
 
 import type { TaskBase, TaskRegistration } from '../agents/tasks/types.js';
+import { atomicWriteFileSync } from '../utils/atomicFileWrite.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { escapeXml } from '../utils/xml.js';
 
@@ -224,6 +225,18 @@ export type ShellTaskRegistration = Omit<
   'description' | 'outputFile'
 >;
 
+/**
+ * Derives the status sidecar path from an entry's output path:
+ * `shell-<id>.output` → `shell-<id>.status`. Falls back to appending
+ * `.status` for paths without the canonical suffix so the two files
+ * always sit next to each other (same directory, same auto-allow rules).
+ */
+export function statusFilePathFor(outputFile: string): string {
+  return outputFile.endsWith('.output')
+    ? `${outputFile.slice(0, -'.output'.length)}.status`
+    : `${outputFile}.status`;
+}
+
 /** Fires when a new entry is registered. */
 export type BackgroundShellRegisterCallback = (entry: ShellTask) => void;
 
@@ -297,6 +310,7 @@ export class BackgroundShellRegistry {
     entry.outputOffset = 0;
     entry.notified = false;
     this.entries.set(entry.shellId, entry);
+    this.writeStatusFile(entry);
     this.fireRegister(entry);
     // Mirror BackgroundTaskRegistry: registration is a status transition
     // (nothing → running) so subscribers that only care about
@@ -327,6 +341,7 @@ export class BackgroundShellRegistry {
     entry.status = 'completed';
     entry.exitCode = exitCode;
     entry.endTime = endTime;
+    this.writeStatusFile(entry);
     this.emitNotification(entry);
     this.pruneTerminalEntries();
     this.fireStatusChange(entry);
@@ -338,6 +353,7 @@ export class BackgroundShellRegistry {
     entry.status = 'failed';
     entry.error = error;
     entry.endTime = endTime;
+    this.writeStatusFile(entry);
     this.emitNotification(entry);
     this.pruneTerminalEntries();
     this.fireStatusChange(entry);
@@ -369,6 +385,10 @@ export class BackgroundShellRegistry {
   ): void {
     entry.status = 'cancelled';
     entry.endTime = endTime;
+    // Written here rather than in `cancel()` so the `abortAll()` batch
+    // path settles sidecars too — CLI exit is exactly when a stale
+    // `running` sidecar would otherwise mislead the next reader.
+    this.writeStatusFile(entry);
     entry.abortController.abort();
   }
 
@@ -394,6 +414,47 @@ export class BackgroundShellRegistry {
       if (oldest) {
         this.entries.delete(oldest.shellId);
       }
+    }
+  }
+
+  /**
+   * Mirrors the entry into a machine-readable JSON sidecar next to the
+   * output file (see {@link statusFilePathFor}) so the model can check
+   * whether a background shell is still alive instead of inferring
+   * liveness from the output file — which block-buffering children keep
+   * empty for their whole run (#7626). Timestamps are ISO strings for
+   * model readability; `pid` is included so a `running` sidecar left
+   * behind by a hard-killed CLI can still be cross-checked.
+   *
+   * Fire-and-forget: a write failure (disk full, permission change)
+   * must not poison the registry or the spawn path — mirror of the
+   * output-stream error handling in shell.ts. Temp-file + rename keeps
+   * readers from ever seeing a half-written JSON document.
+   */
+  private writeStatusFile(entry: ShellTask): void {
+    const statusPath = statusFilePathFor(entry.outputFile);
+    const payload: Record<string, unknown> = {
+      id: entry.id,
+      status: entry.status,
+      command: entry.command,
+      cwd: entry.cwd,
+      startTime: new Date(entry.startTime).toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+    if (entry.pid !== undefined) payload['pid'] = entry.pid;
+    if (entry.endTime !== undefined) {
+      payload['endTime'] = new Date(entry.endTime).toISOString();
+    }
+    if (entry.exitCode !== undefined) payload['exitCode'] = entry.exitCode;
+    if (entry.error !== undefined) payload['error'] = entry.error;
+    try {
+      atomicWriteFileSync(statusPath, JSON.stringify(payload, null, 2));
+    } catch (error) {
+      debugLogger.warn(
+        `status sidecar write failed for shell ${entry.shellId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
 
