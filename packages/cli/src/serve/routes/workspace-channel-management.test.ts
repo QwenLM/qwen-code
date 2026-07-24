@@ -108,7 +108,7 @@ const auth = (test: request.Test) =>
 
 describe('workspace Channel management routes', () => {
   it('lists catalog and sanitized instances without mutation auth', async () => {
-    const { app, primaryService } = mount();
+    const { app, primaryService, secondaryService } = mount();
 
     const catalog = await request(app).get('/workspace/channel-types');
     const channels = await request(app).get('/workspace/channels');
@@ -125,6 +125,18 @@ describe('workspace Channel management routes', () => {
     expect(channels.body).toEqual({ revision: 'r1', instances: {} });
     expect(channels.headers['cache-control']).toBe('no-store');
     expect(primaryService.list).toHaveBeenCalledOnce();
+
+    const qualifiedCatalog = await request(app).get(
+      '/workspaces/secondary/channel-types',
+    );
+    expect(qualifiedCatalog.status).toBe(200);
+    expect(qualifiedCatalog.headers['cache-control']).toBe('no-store');
+    expect(qualifiedCatalog.body).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'dingtalk', manageable: true }),
+      ]),
+    );
+    expect(secondaryService.list).not.toHaveBeenCalled();
   });
 
   it('serves the channel-type catalog without the management service', async () => {
@@ -259,6 +271,12 @@ describe('workspace Channel management routes', () => {
       'ABCDEFGH',
     );
     expect(primaryService.pairingRequests).not.toHaveBeenCalled();
+
+    const primaryPairingRequests = await auth(
+      request(app).get('/workspace/channels/bot/pairing-requests'),
+    );
+    expect(primaryPairingRequests.status).toBe(200);
+    expect(primaryService.pairingRequests).toHaveBeenCalledWith('bot');
   });
 
   it('rejects requests with an invalid client ID', async () => {
@@ -298,6 +316,9 @@ describe('workspace Channel management routes', () => {
         .post('/workspace/channels/bot/pairing-requests/approve')
         .send({ code: 'ABCDEFGH' }),
     );
+    const pairingRequests = await invalidClient(
+      request(app).get('/workspace/channels/bot/pairing-requests'),
+    );
 
     expect(list.status).toBe(400);
     expect(list.body.code).toBe('invalid_client_id');
@@ -309,6 +330,7 @@ describe('workspace Channel management routes', () => {
     expect(restart.status).toBe(400);
     expect(startup.status).toBe(400);
     expect(approve.status).toBe(400);
+    expect(pairingRequests.status).toBe(400);
     expect(primaryService.list).not.toHaveBeenCalled();
     expect(primaryService.upsert).not.toHaveBeenCalled();
     expect(primaryService.remove).not.toHaveBeenCalled();
@@ -317,6 +339,7 @@ describe('workspace Channel management routes', () => {
     expect(primaryService.restart).not.toHaveBeenCalled();
     expect(primaryService.setStartup).not.toHaveBeenCalled();
     expect(primaryService.approvePairing).not.toHaveBeenCalled();
+    expect(primaryService.pairingRequests).not.toHaveBeenCalled();
   });
 
   it('rejects malformed names, revisions, secrets, and pairing codes', async () => {
@@ -366,6 +389,7 @@ describe('workspace Channel management routes', () => {
     expect(invalidSecret.body.code).toBe('channel_settings_invalid_secret');
     expect(invalidPairing.body.code).toBe('invalid_channel_pairing_code');
     expect(primaryService.upsert).toHaveBeenCalledOnce();
+    expect(primaryService.start).not.toHaveBeenCalled();
     expect(primaryService.approvePairing).not.toHaveBeenCalled();
   });
 
