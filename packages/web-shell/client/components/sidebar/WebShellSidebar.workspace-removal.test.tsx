@@ -2679,6 +2679,18 @@ describe('WebShellSidebar non-primary archive', () => {
     expect(
       inlineSessionAction('Untrusted primary active', 'Pin'),
     ).toBeUndefined();
+    expect(
+      inlineSessionAction('Untrusted primary active', 'Delete'),
+    ).toBeUndefined();
+    expect(
+      inlineSessionAction(
+        'Untrusted primary active',
+        'Export conversation record',
+      ),
+    ).toBeUndefined();
+    expect(
+      inlineSessionAction('Untrusted primary active', 'Rename'),
+    ).toBeUndefined();
     expect(archiveButtonFor('Untrusted primary active')).toBeUndefined();
     expect(sessionActions.renameSession).not.toHaveBeenCalled();
     expect(active.archiveSession).not.toHaveBeenCalled();
