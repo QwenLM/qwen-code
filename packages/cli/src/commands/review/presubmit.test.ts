@@ -484,6 +484,70 @@ describe('presubmitCommand', () => {
     expect(result.headDrift.drifted).toBe(false);
   });
 
+  it('fails closed and caps the Approve when PR metadata cannot be read', async () => {
+    // A thrown pulls fetch (transport/auth/404 on this endpoint) is different
+    // from author:null — the head is unknown, so drift and self-PR cannot be
+    // checked and the run must not proceed as if they passed.
+    ghMock.mockImplementation((...args: string[]) => {
+      if (args[0] === 'api' && String(args[1]).includes('/pulls/')) {
+        throw new Error('HTTP 502: Bad Gateway');
+      }
+      return 'contributor';
+    });
+    ghApiMock.mockReturnValue(null);
+
+    const handler = presubmitCommand.handler;
+    if (!handler) throw new Error('presubmit handler missing');
+    await handler(baseArgs as Parameters<typeof handler>[0]);
+
+    const [, content] = writeFileSyncMock.mock.calls.find(
+      ([path]) => path === '/tmp/presubmit.json',
+    ) ?? [null, null];
+    const result = JSON.parse(String(content));
+
+    expect(result.downgradeApprove).toBe(true);
+    expect(result.downgradeReasons.join(' ')).toContain(
+      'PR metadata unavailable',
+    );
+  });
+
+  it('counts a renamed file by BOTH its new and previous path in the drift file set', async () => {
+    // An unreviewed commit that renamed a finding's anchor file (old path)
+    // must still intersect — the projection keeps previous_filename.
+    ghMock.mockImplementation((...args: string[]) => {
+      const path = String(args[1] ?? '');
+      if (path.includes('/compare/')) {
+        return JSON.stringify({
+          status: 'ahead',
+          aheadBy: 1,
+          files: ['src/new-name.ts', 'src/old-name.ts'],
+        });
+      }
+      return '{"author":"contributor","headSha":"def456"}';
+    });
+    ghApiMock.mockReturnValue(null);
+    readFileSyncMock.mockImplementation((path: string) =>
+      String(path).includes('findings')
+        ? JSON.stringify([{ path: 'src/old-name.ts', line: 5 }])
+        : '[]',
+    );
+
+    const handler = presubmitCommand.handler;
+    if (!handler) throw new Error('presubmit handler missing');
+    await handler({
+      ...baseArgs,
+      'new-findings': '/tmp/findings.json',
+    } as unknown as Parameters<typeof handler>[0]);
+
+    const [, content] = writeFileSyncMock.mock.calls.find(
+      ([path]) => path === '/tmp/presubmit.json',
+    ) ?? [null, null];
+    const result = JSON.parse(String(content));
+
+    expect(result.headDrift.compare.filesTouched).toContain('src/old-name.ts');
+    expect(result.headDrift.anchorsAtRisk).toBe(true);
+  });
+
   it('ignores the running Qwen PR review check when deciding whether CI is still pending', async () => {
     ghApiAllNestedMock.mockImplementation((path: string) =>
       path.endsWith('/check-runs')

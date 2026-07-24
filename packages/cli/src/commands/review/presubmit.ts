@@ -390,10 +390,15 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   ensureAuthenticated();
 
   // --- Self-PR detection + live head (one fetch) -------------------------
-  // Fail-soft on shape, matching the pre-projection behaviour: a deleted
-  // author account arrives as `author: null`, and an unguarded dereference
-  // here killed the whole presubmit (and with it the submission).
+  // Two different failures, two different responses. A SUCCESSFUL response
+  // with `author: null` (deleted account) is fail-SOFT — isSelfPr false is
+  // the right answer and the unguarded dereference here once killed the whole
+  // presubmit. A THROWN call (transport, auth, rate limit, a 404 on this one
+  // endpoint) is fail-CLOSED: with no head to compare, self-PR and drift are
+  // both undetectable, so the run must not silently proceed as if it had
+  // checked. It emits a downgrade reason and caps the Approve.
   let prMeta: { author?: string | null; headSha?: string | null } = {};
+  let metaUnavailable = false;
   try {
     prMeta = JSON.parse(
       gh(
@@ -404,7 +409,7 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
       ),
     ) as { author?: string | null; headSha?: string | null };
   } catch {
-    /* fall through with empty meta — isSelfPr false, drift undetectable */
+    metaUnavailable = true;
   }
   const author = prMeta.author ?? '';
   const liveHeadSha = prMeta.headSha ?? '';
@@ -422,11 +427,15 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
         gh(
           'api',
           `repos/${owner}/${repo}/compare/${commitSha}...${liveHeadSha}`,
+          // Both the new path AND `previous_filename`: an unreviewed commit
+          // that RENAMED a file a finding anchors to (under its old path)
+          // would otherwise miss the intersection — the rename bypasses the
+          // at-risk check and the stale anchor reads as safe.
           '--jq',
-          '{status, aheadBy: .ahead_by, files: [.files[].filename]}',
+          '{status, aheadBy: .ahead_by, files: [.files[] | .filename, .previous_filename] | map(select(. != null))}',
         ),
       ) as { status: string; aheadBy: number; files: string[] };
-      const allFiles = c.files ?? [];
+      const allFiles = [...new Set(c.files ?? [])];
       compare = {
         status: c.status,
         aheadBy: c.aheadBy,
@@ -517,6 +526,11 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
     );
   }
   if (driftReason) downgradeReasons.push(driftReason);
+  if (metaUnavailable) {
+    downgradeReasons.push(
+      'PR metadata unavailable — could not verify self-PR status or head drift',
+    );
+  }
 
   const result = {
     prNumber,
@@ -547,7 +561,10 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
       ciStatus.class === 'all_pending' ||
       (ciStatus.class === 'no_checks' && ciStatus.totalChecks > 0) ||
       // Commits nobody reviewed are on the PR — an Approve would certify them.
-      headDrift.drifted,
+      headDrift.drifted ||
+      // Could not read the PR head at all: neither self-PR nor drift could be
+      // checked, so an Approve would rest on unverified state.
+      metaUnavailable,
     downgradeRequestChanges: isSelfPr,
     downgradeReasons,
     blockOnExistingComments: buckets.overlap.length > 0,
