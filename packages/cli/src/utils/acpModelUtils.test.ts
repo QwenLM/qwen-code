@@ -334,13 +334,15 @@ describe('acpModelUtils', () => {
       expect(isInlineModelOverrideAllowed(config, 'missing')).toBe(false);
     });
 
-    it('does not match fast-only or voice-only models', () => {
+    it('does not match selector-only models', () => {
       const config = makeConfig({ authType: AuthType.QWEN_OAUTH }, [
         { id: 'qwen-fast', authType: AuthType.QWEN_OAUTH, fastOnly: true },
         { id: 'qwen-voice', authType: AuthType.QWEN_OAUTH, voiceOnly: true },
+        { id: 'qwen-image', authType: AuthType.QWEN_OAUTH, imageOnly: true },
       ]);
       expect(isInlineModelOverrideAllowed(config, 'qwen-fast')).toBe(false);
       expect(isInlineModelOverrideAllowed(config, 'qwen-voice')).toBe(false);
+      expect(isInlineModelOverrideAllowed(config, 'qwen-image')).toBe(false);
     });
 
     it('rejects when no active auth type is available', () => {
