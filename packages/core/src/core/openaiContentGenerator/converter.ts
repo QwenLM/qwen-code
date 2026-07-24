@@ -271,7 +271,14 @@ export function convertGeminiToolParametersToOpenAI(
 
     const result: Record<string, unknown> = {};
     for (const [key, value] of Object.entries(obj)) {
-      if (key === 'type' && typeof value === 'string') {
+      // A property can legitimately be NAMED after a JSON-Schema keyword —
+      // `{ properties: { maximum: { type: 'INTEGER' } } }` declares a tool
+      // parameter called "maximum". Recursing on any object value first keeps
+      // such subschemas converted; the keyword branches below then only ever
+      // see primitives, which is all they were meant to coerce.
+      if (typeof value === 'object' && value !== null) {
+        result[key] = convertTypes(value);
+      } else if (key === 'type' && typeof value === 'string') {
         // Convert Gemini types to OpenAI JSON Schema types
         const lowerValue = value.toLowerCase();
         if (lowerValue === 'integer') {
@@ -309,8 +316,6 @@ export function convertGeminiToolParametersToOpenAI(
         } else {
           result[key] = value;
         }
-      } else if (typeof value === 'object') {
-        result[key] = convertTypes(value);
       } else {
         result[key] = value;
       }
