@@ -50,6 +50,7 @@ import {
   MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
   MAX_CHANNEL_STARTUP_FAILURE_CODE_LENGTH,
   MAX_CHANNEL_STARTUP_FAILURE_MESSAGE_LENGTH,
+  type ChannelAdapterSnapshot,
   type ChannelStartupFailure,
 } from './channel-worker-startup-ipc.js';
 
@@ -129,6 +130,7 @@ export interface ChannelWorkerSnapshot {
   staleHeartbeatAt?: string;
   startupFailures?: ChannelStartupFailure[];
   startupFailuresTruncated?: boolean;
+  adapters?: ChannelAdapterSnapshot[];
 }
 
 export interface ChannelWorkerSupervisor {
@@ -508,6 +510,9 @@ export function createChannelWorkerSupervisor(
           })),
         }
       : {}),
+    ...(snapshot.adapters
+      ? { adapters: snapshot.adapters.map((adapter) => ({ ...adapter })) }
+      : {}),
   });
 
   const clearRestartTimer = () => {
@@ -733,6 +738,14 @@ export function createChannelWorkerSupervisor(
       state: 'starting',
       channels: channelSelectionNames(opts.selection),
       ...(requestedChannels ? { requestedChannels } : {}),
+      ...(requestedChannels
+        ? {
+            adapters: requestedChannels.map((name) => ({
+              name,
+              state: 'starting' as const,
+            })),
+          }
+        : {}),
       startedAt,
       restartCount: snapshot.restartCount ?? 0,
       ...(snapshot.lastExitAt ? { lastExitAt: snapshot.lastExitAt } : {}),
@@ -941,6 +954,15 @@ export function createChannelWorkerSupervisor(
         snapshot = {
           ...snapshot,
           startupFailures: [...(snapshot.startupFailures ?? []), failure],
+          adapters: snapshot.adapters?.map((adapter) =>
+            adapter.name === failure.channel
+              ? {
+                  name: adapter.name,
+                  state: 'error' as const,
+                  error: failure.message,
+                }
+              : adapter,
+          ),
         };
         acknowledgeStartupReport();
       };
@@ -969,6 +991,24 @@ export function createChannelWorkerSupervisor(
         if (message.requestedChannels?.length) {
           next.requestedChannels = [...message.requestedChannels];
         }
+        const adapterNames = message.requestedChannels?.length
+          ? message.requestedChannels
+          : (next.requestedChannels ?? next.channels);
+        const connected = new Set(next.channels);
+        const failures = new Map(
+          next.startupFailures?.map((failure) => [failure.channel, failure]),
+        );
+        next.adapters = adapterNames.map((name) => {
+          if (connected.has(name)) {
+            return { name, state: 'connected' as const };
+          }
+          const failure = failures.get(name);
+          return {
+            name,
+            state: 'error' as const,
+            ...(failure ? { error: failure.message } : {}),
+          };
+        });
         snapshot = next;
         armStaleHeartbeatTimer(startedChild);
         notifyReady(opts.onReady, snapshotCopy());
