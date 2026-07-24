@@ -441,7 +441,10 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   const memoryBadgeHeight = hasMemoryBadge ? 1 : 0;
   const staticHeight =
     /* marginBottom */ 1 + collapsibleSummaryHeight + memoryBadgeHeight;
-  const innerWidth = contentWidth - 2;
+  // ToolConfirmationMessage still has its own padding={1}, so it needs
+  // the -2 reservation. ToolMessage no longer pads itself (paddingX was
+  // removed in the icon-alignment PR), so it gets the full contentWidth.
+  const confirmationInnerWidth = contentWidth - 2;
 
   let countToolCallsWithResults = 0;
   for (const tool of nonCollapsibleTools) {
@@ -487,7 +490,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
               <ToolMessage
                 {...tool}
                 availableTerminalHeight={availableTerminalHeightPerToolMessage}
-                contentWidth={innerWidth}
+                contentWidth={contentWidth}
                 emphasis={
                   isConfirming
                     ? 'high'
@@ -521,7 +524,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                   availableTerminalHeight={
                     availableTerminalHeightPerToolMessage
                   }
-                  contentWidth={innerWidth}
+                  contentWidth={confirmationInnerWidth}
                 />
               )}
           </Box>

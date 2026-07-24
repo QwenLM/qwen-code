@@ -35,6 +35,8 @@ export const ToolStatusIndicator: React.FC<ToolStatusIndicatorProps> = ({
   const statusColor = isShell ? theme.ui.symbol : theme.status.warning;
 
   return (
+    // minWidth (not width) so the box can grow for wider content like the
+    // tmux spinner frames or test mocks; all production glyphs are ≤2 cols.
     <Box minWidth={STATUS_INDICATOR_WIDTH} flexShrink={0}>
       {status === ToolCallStatus.Pending && (
         <Text color={theme.status.success}>{TOOL_STATUS.PENDING}</Text>
