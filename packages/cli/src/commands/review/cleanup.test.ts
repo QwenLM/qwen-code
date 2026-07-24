@@ -77,6 +77,8 @@ vi.mock('./lib/paths.js', () => ({
   probeWorktreePath: (path: string) => `${path}-probe`,
   reviewBranch: (prNumber: string) => `qwen-review/pr-${prNumber}`,
   REVIEW_TMP_DIR: '/repo/.qwen/tmp',
+  tmpFile: (target: string, suffix: string) =>
+    `/repo/.qwen/tmp/qwen-review-${target}-${suffix}`,
   tmpPrefix: (target: string) => `qwen-review-${target}-`,
 }));
 
@@ -148,7 +150,44 @@ describe('findUnsanctionedIssueComments', () => {
       'reviewer',
       since,
     );
-    expect(got.map((c) => c.id)).toEqual([1, 2]);
+    expect(got.posted.map((c) => c.id)).toEqual([1, 2]);
+    expect(got.edited).toEqual([]);
+  });
+
+  it('classifies a pre-window comment edited inside the window as an edit', () => {
+    const got = findUnsanctionedIssueComments(
+      [
+        comment({
+          id: 5,
+          created_at: '2026-07-24T07:00:00Z',
+          updated_at: '2026-07-24T09:00:00Z',
+        }),
+        comment({
+          id: 6,
+          created_at: '2026-07-24T07:00:00Z',
+          updated_at: '2026-07-24T07:00:00Z',
+        }),
+      ],
+      'reviewer',
+      since,
+    );
+    expect(got.edited.map((c) => c.id)).toEqual([5]);
+    expect(got.posted).toEqual([]);
+  });
+
+  it('drops comments carrying the repo automation marker — CI shares the bot account', () => {
+    const got = findUnsanctionedIssueComments(
+      [
+        comment({
+          id: 7,
+          body: '<!-- qwen-pr-precheck:manual-required -->\nchecks…',
+        }),
+        comment({ id: 8, body: 'a human sentence' }),
+      ],
+      'reviewer',
+      since,
+    );
+    expect(got.posted.map((c) => c.id)).toEqual([8]);
   });
 
   it('drops comments with no author or no timestamp instead of guessing', () => {
@@ -160,7 +199,8 @@ describe('findUnsanctionedIssueComments', () => {
       'reviewer',
       since,
     );
-    expect(got).toEqual([]);
+    expect(got.posted).toEqual([]);
+    expect(got.edited).toEqual([]);
   });
 });
 
@@ -212,7 +252,7 @@ describe('runCleanup — bypass-write audit', () => {
     const warnings = mocks.writeStdoutLine.mock.calls
       .map((c) => String(c[0]))
       .filter((l) => l.startsWith('warning:'));
-    expect(warnings.join('\n')).toContain('comment 42');
+    expect(warnings.join('\n')).toContain('posted comment 42');
     expect(warnings.join('\n')).not.toContain('comment 43');
     expect(warnings.join('\n')).toContain('qwen review submit');
   });
@@ -235,7 +275,7 @@ describe('runCleanup — bypass-write audit', () => {
     expect(warnings).toEqual([]);
   });
 
-  it('skips the audit without gh calls when the fetch report is absent or pre-fetchedAt', () => {
+  it('skips the audit without gh calls when the fetch report is absent or pre-fetchedAt, and names the skip', () => {
     runCleanup('pr-123'); // report missing (readFileSync throws)
     mocks.readFileSync.mockReturnValue(
       JSON.stringify({ prNumber: '123', ownerRepo: 'acme/widgets' }),
@@ -244,6 +284,38 @@ describe('runCleanup — bypass-write audit', () => {
 
     expect(mocks.ghApiAll).not.toHaveBeenCalled();
     expect(mocks.setGhHost).not.toHaveBeenCalled();
+    const notes = mocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('note: bypass audit skipped'));
+    expect(notes.some((l) => l.includes('no fetch report'))).toBe(true);
+    expect(notes.some((l) => l.includes('no fetchedAt'))).toBe(true);
+  });
+
+  it('skips when the fetch report names a different PR than the cleanup target', () => {
+    mocks.readFileSync.mockReturnValue(
+      JSON.stringify({
+        prNumber: '999',
+        ownerRepo: 'acme/widgets',
+        fetchedAt: '2026-07-24T08:00:00Z',
+      }),
+    );
+
+    runCleanup('pr-123');
+
+    expect(mocks.ghApiAll).not.toHaveBeenCalled();
+    const notes = mocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('note: bypass audit skipped'));
+    expect(notes.some((l) => l.includes('for PR 999'))).toBe(true);
+  });
+
+  it('does not resolve the current user when the window has no comments at all', () => {
+    mocks.readFileSync.mockReturnValue(fetchReport);
+    mocks.ghApiAll.mockReturnValue([]);
+
+    runCleanup('pr-123');
+
+    expect(mocks.currentUser).not.toHaveBeenCalled();
   });
 
   it('never fails the cleanup when the audit itself fails', () => {

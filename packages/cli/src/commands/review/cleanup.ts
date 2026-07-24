@@ -25,6 +25,7 @@ import {
   probeWorktreePath,
   reviewBranch,
   REVIEW_TMP_DIR,
+  tmpFile,
   tmpPrefix,
 } from './lib/paths.js';
 
@@ -36,19 +37,44 @@ interface CleanupArgs {
 export interface RawIssueComment {
   id: number;
   user?: { login: string } | null;
+  body?: string | null;
   created_at?: string;
+  updated_at?: string;
   html_url?: string;
 }
 
 /**
- * Issue comments the current user posted inside the review window.
+ * Marker prefix every bot comment in this repo's own automation carries
+ * (`<!-- qwen-review-ack -->`, `<!-- qwen-pr-precheck:… -->`,
+ * `<!-- qwen-triage:… -->`, …). In CI the review runs under the same bot
+ * account those workflows post from, and a push mid-review triggers them —
+ * without this filter every such comment would be flagged as a bypass.
+ */
+const AUTOMATION_MARKER = '<!-- qwen-';
+
+export interface WindowWrites {
+  /** Created inside the window by the reviewing account — the incident shape. */
+  posted: RawIssueComment[];
+  /** Created before the window but edited inside it. Reactions do NOT bump
+   * an issue comment's `updated_at` (verified empirically), so an entry here
+   * is a real body edit. */
+  edited: RawIssueComment[];
+}
+
+/**
+ * Issue-comment writes by the reviewing account inside the review window.
  *
  * `qwen review submit` is the ONLY sanctioned write in `/review`, and it
- * posts a *review* — never an issue comment. So any issue comment by the
- * reviewing account created after `sinceIso` is either a write that bypassed
- * the submit gate, or something the user posted by hand from another
- * terminal; the warning below names both readings and lets the human decide.
- * Zero overlap with sanctioned output means zero correlation bookkeeping.
+ * posts a *review* — never an issue comment. So an issue comment the
+ * reviewing account created (or edited — the Step 7 ban covers edits too,
+ * and `?since=` filters on `updated_at`, so edited rows are already in the
+ * response) inside the window is a write that bypassed the submit gate,
+ * something the user did by hand from another terminal, or another workflow
+ * running under the same account; the warning below names all three
+ * readings and lets the human decide. Zero overlap with sanctioned output
+ * means zero correlation bookkeeping. Comments carrying this repo's own
+ * automation marker are dropped: in CI the reviewing account IS the bot
+ * that precheck/triage post from.
  *
  * This is a tripwire, not a wall. The gate itself lives in `submit` (it
  * refuses unauthorised posts), but a model that stops *calling* submit walks
@@ -61,14 +87,23 @@ export function findUnsanctionedIssueComments(
   comments: RawIssueComment[],
   reviewer: string,
   sinceIso: string,
-): RawIssueComment[] {
+): WindowWrites {
   const reviewerLc = reviewer.toLowerCase();
-  return comments.filter(
+  const relevant = comments.filter(
     (c) =>
       (c.user?.login ?? '').toLowerCase() === reviewerLc &&
       typeof c.created_at === 'string' &&
-      c.created_at >= sinceIso,
+      !(c.body ?? '').includes(AUTOMATION_MARKER),
   );
+  return {
+    posted: relevant.filter((c) => c.created_at! >= sinceIso),
+    edited: relevant.filter(
+      (c) =>
+        c.created_at! < sinceIso &&
+        typeof c.updated_at === 'string' &&
+        c.updated_at >= sinceIso,
+    ),
+  };
 }
 
 /**
@@ -83,67 +118,109 @@ interface AuditWindow {
   host: string | null;
 }
 
-function readAuditWindow(target: string): AuditWindow | null {
+const OWNER_REPO_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
+
+function readAuditWindow(
+  target: string,
+  expectedPrNumber: string,
+): { window: AuditWindow } | { skip: string } {
+  let raw: string;
   try {
-    const raw = readFileSync(
-      join(REVIEW_TMP_DIR, `${tmpPrefix(target)}fetch.json`),
-      'utf8',
-    );
+    raw = readFileSync(tmpFile(target, 'fetch.json'), 'utf8');
+  } catch {
+    return { skip: 'no fetch report' };
+  }
+  try {
     const report = JSON.parse(raw) as Partial<AuditWindow>;
+    if (typeof report.fetchedAt !== 'string') {
+      return {
+        skip: 'fetch report has no fetchedAt (written by an older CLI)',
+      };
+    }
     if (
       typeof report.prNumber !== 'string' ||
-      typeof report.ownerRepo !== 'string' ||
-      typeof report.fetchedAt !== 'string'
+      typeof report.ownerRepo !== 'string'
     ) {
-      return null; // a report from before fetchedAt existed — nothing to audit
+      return { skip: 'fetch report is missing prNumber/ownerRepo' };
+    }
+    // The report is a file on disk; before its values reach a gh api path,
+    // hold them to the same standard the rest of this surface applies
+    // (HOSTNAME_RE in setGhHost, safeTarget in paths). The cross-check
+    // against the cleanup target is strictly stronger than a shape test.
+    if (report.prNumber !== expectedPrNumber) {
+      return {
+        skip: `fetch report is for PR ${report.prNumber}, not ${expectedPrNumber}`,
+      };
+    }
+    if (!OWNER_REPO_RE.test(report.ownerRepo)) {
+      return { skip: 'fetch report ownerRepo is not owner/repo-shaped' };
     }
     return {
-      prNumber: report.prNumber,
-      ownerRepo: report.ownerRepo,
-      fetchedAt: report.fetchedAt,
-      host: typeof report.host === 'string' ? report.host : null,
+      window: {
+        prNumber: report.prNumber,
+        ownerRepo: report.ownerRepo,
+        fetchedAt: report.fetchedAt,
+        host: typeof report.host === 'string' ? report.host : null,
+      },
     };
   } catch {
-    return null;
+    return { skip: 'fetch report is not valid JSON' };
   }
 }
 
 /**
  * Best-effort by design: cleanup must stay idempotent and offline-safe, so
  * any failure here (no gh, no auth, no network, report missing) skips the
- * audit silently rather than failing the cleanup or nagging every offline
- * run. A skipped audit is the pre-existing state of the world, not an error.
+ * audit rather than failing the cleanup. Every skip is named on STDERR —
+ * without that, a skipped audit and a clean window produce identical
+ * output, and the tripwire's off state is indistinguishable from its
+ * all-clear state.
  */
-function auditPrWrites(target: string): void {
+function auditPrWrites(target: string, prNumber: string): void {
+  const skipNote = (reason: string) =>
+    writeStderrLine(`note: bypass audit skipped (${reason})`);
+  const read = readAuditWindow(target, prNumber);
+  if ('skip' in read) {
+    skipNote(read.skip);
+    return;
+  }
+  const window = read.window;
   try {
-    const window = readAuditWindow(target);
-    if (!window) return;
     setGhHost(window.host ?? undefined);
     const comments = ghApiAll(
       `repos/${window.ownerRepo}/issues/${window.prNumber}/comments?since=${encodeURIComponent(window.fetchedAt)}&per_page=100`,
     ) as RawIssueComment[];
-    const suspects = findUnsanctionedIssueComments(
+    // The common case; skipping currentUser() here saves a network round
+    // trip on every clean cleanup.
+    if (comments.length === 0) return;
+    const { posted, edited } = findUnsanctionedIssueComments(
       comments,
       currentUser(),
       window.fetchedAt,
     );
-    if (suspects.length === 0) return;
+    if (posted.length === 0 && edited.length === 0) return;
     writeStdoutLine(
-      `warning: ${suspects.length} issue comment(s) by the reviewing account were posted to ` +
+      `warning: ${posted.length + edited.length} issue-comment write(s) by the reviewing account on ` +
         `${window.ownerRepo}#${window.prNumber} during this review window. ` +
-        `The only sanctioned write in /review is \`qwen review submit\`, and it never posts issue comments:`,
+        `The only sanctioned write in /review is \`qwen review submit\`, and it never touches issue comments:`,
     );
-    for (const c of suspects) {
+    for (const c of posted) {
       writeStdoutLine(
-        `warning:   comment ${c.id} at ${c.created_at}${c.html_url ? ` — ${c.html_url}` : ''}`,
+        `warning:   posted comment ${c.id} at ${c.created_at}${c.html_url ? ` — ${c.html_url}` : ''}`,
+      );
+    }
+    for (const c of edited) {
+      writeStdoutLine(
+        `warning:   edited comment ${c.id} at ${c.updated_at}${c.html_url ? ` — ${c.html_url}` : ''}`,
       );
     }
     writeStdoutLine(
-      `warning: if the user posted these themselves, ignore this; otherwise a write bypassed the ` +
-        `submit gate — relay this warning verbatim in the terminal summary.`,
+      `warning: if the user did this themselves — or another workflow posts under the same ` +
+        `account — ignore this; otherwise a write bypassed the submit gate. ` +
+        `Relay this warning verbatim in the terminal summary.`,
     );
-  } catch {
-    /* audit is best-effort — see the doc comment above */
+  } catch (err) {
+    skipNote(err instanceof Error ? err.message.split('\n')[0] : String(err));
   }
 }
 
@@ -163,7 +240,7 @@ export function runCleanup(target: string): void {
 
     // Before the sweep below deletes the fetch report (the audit window's
     // carrier), check the PR for writes that bypassed `qwen review submit`.
-    auditPrWrites(target);
+    auditPrWrites(target, prNumber);
 
     // Report what actually happened, in both directions. Announcing "Removed …"
     // off a path that is still on disk is a lie; saying nothing at all when we

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Argv, CommandModule } from 'yargs';
 import { fetchPrCommand } from './fetch-pr.js';
 import { classifyHeavy } from './lib/heavy.js';
@@ -190,5 +190,127 @@ describe('fetchPrCommand builder', () => {
     } as unknown as Argv;
     ((fetchPrCommand as CommandModule).builder as (y: Argv) => Argv)(stub);
     expect(opts).toContain('host');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Producer half of the cleanup bypass-audit contract.
+//
+// `cleanup` reads `fetchedAt` / `host` back out of this report; if either is
+// dropped in a refactor, `readAuditWindow` returns a skip and the audit turns
+// off with output identical to a clean window. A tripwire whose off state is
+// indistinguishable from its all-clear state is the one property worth a test.
+// The run is steered down the lightest real path: merge-base unresolvable, so
+// no diff capture, an empty plan, and the report write is the observable.
+// ---------------------------------------------------------------------------
+
+const producerMocks = vi.hoisted(() => ({
+  writeFileSync: vi.fn(),
+  gh: vi.fn(),
+  git: vi.fn(),
+}));
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    default: {
+      ...actual,
+      mkdirSync: vi.fn(),
+      writeFileSync: producerMocks.writeFileSync,
+    },
+    mkdirSync: vi.fn(),
+    writeFileSync: producerMocks.writeFileSync,
+  };
+});
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    default: { ...actual, execFileSync: vi.fn() },
+    execFileSync: vi.fn(),
+  };
+});
+
+vi.mock('../../utils/stdioHelpers.js', () => ({
+  writeStdoutLine: vi.fn(),
+  writeStderrLine: vi.fn(),
+}));
+
+vi.mock('../../services/review-worktree-lease.js', () => ({
+  createReviewWorktreeLease: vi.fn(),
+}));
+
+vi.mock('./lib/gh.js', () => ({
+  ensureAuthenticated: vi.fn(),
+  gh: producerMocks.gh,
+  setGhHost: vi.fn(),
+}));
+
+vi.mock('./lib/git.js', () => ({
+  git: producerMocks.git,
+  gitOpt: vi.fn(() => null),
+  gitRaw: vi.fn(() => Buffer.from('')),
+  refExists: vi.fn(() => false),
+  releaseWorktree: vi.fn(() => ({ existed: false, freed: true })),
+}));
+
+vi.mock('./lib/merge-base.js', () => ({
+  resolveMergeBase: vi.fn(() => ({ sha: null, baseFetchFailed: false })),
+}));
+
+describe('fetch-pr report — audit-window contract', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    producerMocks.git.mockImplementation((...args: string[]) =>
+      args[0] === 'rev-parse' ? 'f00df00df00d' : '',
+    );
+    producerMocks.gh.mockReturnValue(
+      JSON.stringify({
+        headRefName: 'feat/x',
+        headRefOid: 'f00df00df00d',
+        baseRefName: 'main',
+        additions: 1,
+        deletions: 0,
+        changedFiles: 1,
+        isCrossRepository: false,
+        body: '',
+      }),
+    );
+  });
+
+  async function reportFor(extraArgs: Record<string, unknown>) {
+    const handler = fetchPrCommand.handler;
+    if (!handler) throw new Error('fetch-pr handler missing');
+    await handler({
+      _: [],
+      $0: 'qwen',
+      pr_number: '42',
+      owner_repo: 'acme/widgets',
+      remote: 'origin',
+      out: '/tmp/fetch-report.json',
+      maxChunkLines: 400,
+      ...extraArgs,
+    } as unknown as Parameters<typeof handler>[0]);
+    const call = producerMocks.writeFileSync.mock.calls.find(
+      ([path]) => path === '/tmp/fetch-report.json',
+    );
+    if (!call) throw new Error('report was not written');
+    return JSON.parse(String(call[1]));
+  }
+
+  it('stamps fetchedAt as a real timestamp and host as null off-Enterprise', async () => {
+    const before = Date.now();
+    const report = await reportFor({});
+    expect(report.host).toBeNull();
+    const stamped = Date.parse(report.fetchedAt);
+    expect(Number.isNaN(stamped)).toBe(false);
+    expect(stamped).toBeGreaterThanOrEqual(before - 1000);
+  });
+
+  it('carries --host into the report for the cleanup audit to reuse', async () => {
+    const report = await reportFor({ host: 'ghe.example.com' });
+    expect(report.host).toBe('ghe.example.com');
   });
 });
