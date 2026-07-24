@@ -352,6 +352,7 @@ export function registerWorkspaceChannelManagementRoutes(
       const request = parseUpsert(deps.safeBody(req), res);
       if (!name || !request) return;
       try {
+        noStore(res);
         res.status(200).json(await resolved.service.upsert(name, request));
       } catch (error) {
         sendManagementError(res, error);
@@ -365,6 +366,7 @@ export function registerWorkspaceChannelManagementRoutes(
       const request = parseRevision(deps.safeBody(req), res);
       if (!name || !request) return;
       try {
+        noStore(res);
         res.status(200).json(await resolved.service.remove(name, request));
       } catch (error) {
         sendManagementError(res, error);
@@ -378,6 +380,7 @@ export function registerWorkspaceChannelManagementRoutes(
       const request = parseStartup(deps.safeBody(req), res);
       if (!name || !request) return;
       try {
+        noStore(res);
         res.status(200).json(await resolved.service.setStartup(name, request));
       } catch (error) {
         sendManagementError(res, error);
@@ -397,6 +400,7 @@ export function registerWorkspaceChannelManagementRoutes(
           const name = parseInstanceName(req, res);
           if (!name) return;
           try {
+            noStore(res);
             res.status(200).json(await resolved.service[operation](name));
           } catch (error) {
             sendManagementError(res, error);

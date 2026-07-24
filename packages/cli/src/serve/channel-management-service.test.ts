@@ -640,6 +640,56 @@ describe('createChannelManagementService', () => {
     expect(store.upsert).toHaveBeenCalledOnce();
   });
 
+  it('allows mutations when two same-name workers run in different workspaces', async () => {
+    const { service, store, manager } = setup({ committedNames: ['bot'] });
+    const twoWorkers = {
+      enabled: true,
+      selection: { mode: 'names' as const, names: ['bot'] },
+      transition: 'idle' as const,
+      workers: [
+        {
+          enabled: true,
+          state: 'running' as const,
+          channels: ['bot'],
+          requestedChannels: ['bot'],
+          adapters: [{ name: 'bot', state: 'connected' as const }],
+          workspaceId: 'primary',
+          workspaceCwd: WORKSPACE,
+          primary: true,
+        },
+        {
+          enabled: true,
+          state: 'running' as const,
+          channels: ['bot'],
+          requestedChannels: ['bot'],
+          adapters: [{ name: 'bot', state: 'connected' as const }],
+          workspaceId: 'other',
+          workspaceCwd: '/ws/other',
+          primary: false,
+        },
+      ],
+    };
+    vi.mocked(manager.state).mockReturnValue(twoWorkers);
+
+    const upserted = await service.upsert('bot', {
+      expectedRevision: 'rev-1',
+      config: { type: 'dingtalk', clientId: 'updated' },
+    });
+    expect(upserted.instance.config).toMatchObject({ clientId: 'updated' });
+    expect(manager.reloadWorkspace).toHaveBeenCalledWith(WORKSPACE, 'bot');
+
+    vi.mocked(manager.state).mockReturnValue(twoWorkers);
+    const restarted = await service.restart('bot');
+    expect(restarted.instance.runtime).toEqual({ state: 'connected' });
+
+    vi.mocked(manager.state).mockReturnValue(twoWorkers);
+    const removed = await service.remove('bot', {
+      expectedRevision: 'rev-2',
+    });
+    expect(removed.snapshot.instances['bot']).toBeUndefined();
+    expect(store.remove).toHaveBeenCalledOnce();
+  });
+
   it('rejects restart and start for a nonexistent channel', async () => {
     const { service } = setup({ committedNames: [] });
 

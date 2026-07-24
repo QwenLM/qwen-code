@@ -214,11 +214,10 @@ export function createChannelManagementService(
 
   const assertOwnedRuntime = (name: string): void => {
     if (!workspaceCommittedNames().includes(name)) return;
-    const workers = workerFor(name);
-    if (
-      workers.length !== 1 ||
-      workers[0]!.workspaceCwd !== opts.workspaceCwd
-    ) {
+    const workers = workerFor(name).filter(
+      (worker) => worker.workspaceCwd === opts.workspaceCwd,
+    );
+    if (workers.length !== 1) {
       throw new ChannelManagementError(
         'channel_runtime_owner_mismatch',
         `Channel "${name}" does not have one confirmed runtime owner in this workspace.`,
