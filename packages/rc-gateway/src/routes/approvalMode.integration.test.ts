@@ -15,11 +15,22 @@
  *     `approval_mode_changed` owner-bus frame (the route deliberately does not
  *     publish/notify; see routes/approvalMode.ts's top-of-file doc comment).
  *
- *  2. The forward (webpush/approvalModeForward.ts) — the single broadcast per
- *     change is driven by the gateway's OWN daemon-event pump
+ *  2. The forward (webpush/approvalModeForward.ts) — the single owner-stream
+ *     broadcast per change is driven by the gateway's OWN daemon-event pump
  *     (`SessionEventPump`), whose `onEvent` hook cli.ts wires as:
- *       `if (ev.type === 'approval_mode_changed') forwardApprovalModeChange(sid, ev.data, ownerEvents, notifier)`
+ *       `if (ev.type === 'approval_mode_changed') forwardApprovalModeChange(sid, ev.data, ownerEvents)`
  *     — see cli.ts around the `pump = new SessionEventPump(...)` construction.
+ *     The forward publishes the owner-bus frame ONLY; it takes no notifier
+ *     and never calls `notify`. The push notification for this same event is
+ *     delivered by the pump's OWN universal notify path
+ *     (`SessionEventPump.runLoop`'s unconditional
+ *     `await this.notifier?.notify(...)`, pump.ts) — identical to every other
+ *     event type. This test wires ONE shared notifier to both the pump
+ *     constructor and (historically) the forward call, specifically so it
+ *     can assert the notifier fires exactly ONCE per event — a regression
+ *     guard for a verified double-push bug where the forward ALSO called
+ *     `notify`, producing two real pushes for one `approval_mode_changed`
+ *     event (no event-level dedup in `notify`, coalescer off by default).
  *     `createGatewayApp` itself does NOT construct or start that pump (it has
  *     no `SessionEventPump` reference at all — confirmed by inspection); the
  *     pump is boot-time wiring that lives only in cli.ts, alongside
@@ -214,7 +225,7 @@ describe('approval-mode integration (route set + pump forward)', () => {
       sleep: async () => {},
       onEvent: (sid: string, ev: DaemonEvent) => {
         if (ev.type === 'approval_mode_changed') {
-          forwardApprovalModeChange(sid, ev.data, gw.ownerEvents, notifier);
+          forwardApprovalModeChange(sid, ev.data, gw.ownerEvents);
         }
       },
     });
@@ -238,18 +249,18 @@ describe('approval-mode integration (route set + pump forward)', () => {
       persisted: false,
     });
 
-    // The notifier fired for this event: once from the pump's OWN
-    // always-on generic dispatch (`SessionEventPump.runLoop`'s unconditional
-    // `await this.notifier?.notify(...)` for every non-suppressed event —
-    // pump.ts, independent of `onEvent`), and once more from
-    // `forwardApprovalModeChange`'s own fire-and-forget notify. Both calls
-    // are driven by the SAME `notifier` reference cli.ts passes to both the
-    // `SessionEventPump` constructor and the `onEvent` hook's
-    // `forwardApprovalModeChange(...)` call, so this two-call total is the
-    // genuine current production behavior for an approval_mode_changed
-    // event, not a test artifact — asserting exactly 1 here would be
-    // asserting something the real wiring does not do.
-    expect(notifyCalls).toHaveLength(2);
+    // Regression guard: the notifier must fire EXACTLY ONCE for this event —
+    // from the pump's OWN always-on generic dispatch
+    // (`SessionEventPump.runLoop`'s unconditional
+    // `await this.notifier?.notify(...)` for every non-suppressed event,
+    // pump.ts, independent of `onEvent`). `forwardApprovalModeChange` no
+    // longer takes a notifier and never calls `notify` itself — it only
+    // publishes the owner-bus frame asserted above. Before that fix, this
+    // same `notifier` reference was ALSO passed into the forward, which
+    // called `notify` a second time, so this event produced TWO real
+    // pushes with no dedup (the coalescer is off by default). Asserting
+    // exactly 1 here is what would have caught that double push.
+    expect(notifyCalls).toHaveLength(1);
     for (const call of notifyCalls) {
       expect(call.event).toEqual({
         type: 'approval_mode_changed',

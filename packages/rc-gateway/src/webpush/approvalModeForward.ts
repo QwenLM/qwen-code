@@ -6,19 +6,23 @@
 
 import type { OwnerEventBus } from '../ownerEvents.js';
 
-export interface ApprovalNotifySink {
-  notify(
-    e: { type: string; data: unknown },
-    ctx: { sessionId: string },
-  ): Promise<void>;
-}
-
-/** Forward a daemon approval_mode_changed frame to the owner stream + notifier. */
+/**
+ * Forward a daemon approval_mode_changed frame to the owner stream ONLY.
+ *
+ * The push notification for this event is delivered by the pump's standard
+ * notify path (`SessionEventPump.runLoop`'s unconditional
+ * `await this.notifier?.notify(...)` for every event, pump.ts) plus the
+ * `approval_mode_changed` branch in `webpush/payload.ts` /
+ * `KIND_SCOPE['session.approval_mode_changed']` in `webpush/notifier.ts` —
+ * exactly how every other event type (agent/review/rewind) already works;
+ * none of them notify from within `onEvent`. This function must NOT also
+ * call `notifier.notify(...)`: doing so double-pushes (verified bug —
+ * see the fix commit that removed the `notifier` param from here).
+ */
 export function forwardApprovalModeChange(
   sid: string,
   data: unknown,
   ownerEvents: OwnerEventBus,
-  notifier?: ApprovalNotifySink,
 ): void {
   const d = (data ?? {}) as {
     previous?: unknown;
@@ -34,7 +38,4 @@ export function forwardApprovalModeChange(
       persisted: d.persisted === true,
     },
   });
-  void notifier
-    ?.notify({ type: 'approval_mode_changed', data }, { sessionId: sid })
-    .catch(() => {});
 }

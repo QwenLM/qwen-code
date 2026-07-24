@@ -1141,14 +1141,21 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
           ?.handleSessionEvent(sid, { type: ev.type, data: ev.data })
           .catch(() => {});
         // Approval-mode forward (add-remote-approval-mode): the daemon's own
-        // approval_mode_changed event is the single source of truth for
-        // fan-out — the route (routes/approvalMode.ts) deliberately does not
-        // publish/notify itself, so this is the ONLY broadcast per change.
-        // Bounded by the pump running at all (notifier || usageIngester ||
-        // agentLifecycle || reviewLifecycle), per the design's documented
-        // "pump must be subscribed" residual.
+        // approval_mode_changed event is the single source of truth for the
+        // owner-stream frame — the route (routes/approvalMode.ts) deliberately
+        // does not publish/notify itself, so this is the ONLY owner-bus
+        // broadcast per change. The forward publishes to `ownerEvents` ONLY;
+        // it does NOT also call notifier.notify — the push for this event is
+        // already delivered by this same pump's own universal notify path
+        // just above (`await this.notifier?.notify(...)` in
+        // SessionEventPump.runLoop, pump.ts), identical to how every other
+        // event type reaches push. Calling notify again here previously
+        // double-pushed (verified bug, fixed by removing the forward's
+        // notifier param). Bounded by the pump running at all
+        // (notifier || usageIngester || agentLifecycle || reviewLifecycle),
+        // per the design's documented "pump must be subscribed" residual.
         if (ev.type === 'approval_mode_changed') {
-          forwardApprovalModeChange(sid, ev.data, ownerEvents, notifier);
+          forwardApprovalModeChange(sid, ev.data, ownerEvents);
         }
       },
     });
