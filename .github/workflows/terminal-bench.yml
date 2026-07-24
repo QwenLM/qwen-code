@@ -11,26 +11,12 @@ on:
         required: true
         type: 'string'
         default: 'latest'
-      dsw_swe_result_release:
-        description: 'Temporary branch-only DSW full-suite result Release tag.'
-        required: false
-        type: 'string'
-        default: ''
-      dsw_swe_qwen_release:
-        description: 'Published Qwen Code Release evaluated by the DSW full-suite run.'
-        required: false
-        type: 'string'
-        default: 'v0.20.0-nightly.20260722.b98306b7e'
   release:
     types: ['published']
-
-permissions:
-  contents: 'write'
 
 jobs:
   terminal-bench:
     name: 'Terminal Bench (Task: ${{ matrix.task_id }})'
-    if: "${{ github.event_name != 'workflow_dispatch' || inputs.dsw_swe_result_release == '' }}"
     runs-on: 'ubuntu-latest'
     strategy:
       fail-fast: false
@@ -108,69 +94,3 @@ jobs:
             integration-tests/**/*.log
           if-no-files-found: 'warn'
           retention-days: 7
-
-  dsw-swe-verified-full:
-    name: 'DSW SWE-bench Verified (500 cases, 10 executors)'
-    if: "${{ github.event_name == 'workflow_dispatch' && inputs.dsw_swe_result_release != '' }}"
-    runs-on: ['self-hosted', 'Linux', 'X64', 'qwen-benchmark-dsw']
-    timeout-minutes: 1440
-    env:
-      RELEASE_TAG: '${{ inputs.dsw_swe_result_release }}'
-      QWEN_REF: '${{ inputs.dsw_swe_qwen_release }}'
-      INSTANCE_LIMIT: '500'
-      EXECUTOR_COUNT: '10'
-      RELEASE_ID: ''
-      BENCHMARK_TRIGGER: 'workflow_dispatch_branch_bootstrap'
-      BENCHMARK_IDEMPOTENCY_KEY: 'dsw-release-v1-${{ github.run_id }}'
-      GITHUB_RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
-
-    steps:
-      - name: 'Checkout branch pipeline'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
-        with:
-          fetch-depth: 0
-
-      - name: 'Resolve test and Qwen Releases'
-        id: 'release'
-        env:
-          GH_TOKEN: '${{ github.token }}'
-        run: |-
-          set -euo pipefail
-          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" > release.json
-          test "$(jq -r .draft release.json)" = "false"
-          git fetch --force origin "refs/tags/${QWEN_REF}:refs/tags/${QWEN_REF}"
-          qwen_commit="$(git rev-list -n 1 "${QWEN_REF}^{commit}")"
-          {
-            echo "qwen_commit=${qwen_commit}"
-            echo "release_id=$(jq -r .id release.json)"
-          } >> "${GITHUB_OUTPUT}"
-
-      - name: 'Run complete isolated DSW pool'
-        id: 'benchmark'
-        continue-on-error: true
-        env:
-          QWEN_COMMIT: '${{ steps.release.outputs.qwen_commit }}'
-        run: |-
-          .github/scripts/dsw-swe-verified/harden-harbor-qwen-adapter.py \
-            /mnt/workspace/qwen-benchmark-pool/venv/lib/python3.12/site-packages/harbor/agents/installed/qwen_code.py
-          .github/scripts/dsw-swe-verified/run-release-benchmark.sh
-
-      - name: 'Write full-suite result to test Release'
-        if: 'always()'
-        env:
-          GH_TOKEN: '${{ github.token }}'
-          RELEASE_COMMIT: '${{ steps.release.outputs.qwen_commit }}'
-          RELEASE_DATABASE_ID: '${{ steps.release.outputs.release_id }}'
-          BENCHMARK_STEP_OUTCOME: '${{ steps.benchmark.outcome }}'
-        run: '.github/scripts/dsw-swe-verified/publish-release-result.sh'
-
-      - name: 'Enforce full-suite publication gate'
-        if: 'always()'
-        env:
-          BENCHMARK_STEP_OUTCOME: '${{ steps.benchmark.outcome }}'
-        run: |-
-          status="$(jq -r '.status // "PIPELINE_ERROR"' benchmark-output/public-result.json)"
-          if [[ "${BENCHMARK_STEP_OUTCOME}" != "success" || "${status}" != "SUCCEEDED" ]]; then
-            echo "::error::Full-suite benchmark status=${status}; score was not published."
-            exit 1
-          fi
