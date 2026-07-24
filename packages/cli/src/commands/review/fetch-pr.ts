@@ -70,6 +70,7 @@ interface FetchPrArgs {
   owner_repo: string;
   remote: string;
   out: string;
+  host?: string;
   /** yargs camelCases `--max-chunk-lines`; the snake_case form does not exist. */
   maxChunkLines: number;
 }
@@ -80,6 +81,15 @@ type FetchPrResult = PlanReport & {
   remote: string;
   ref: string;
   fetchedSha: string;
+  /**
+   * When this review window opened (ISO-8601). `cleanup` audits the PR for
+   * writes by the current user inside [fetchedAt, cleanup) that did not go
+   * through `qwen review submit` — the submit-only contract's tripwire.
+   */
+  fetchedAt: string;
+  /** GitHub host this PR lives on (Enterprise), null for github.com — so the
+   * cleanup audit queries the same host the review did. */
+  host: string | null;
   worktreePath: string;
   baseRefName: string;
   headRefName: string;
@@ -283,6 +293,8 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     remote,
     ref,
     fetchedSha,
+    fetchedAt: new Date().toISOString(),
+    host: args.host ?? null,
     worktreePath: wt,
     baseRefName: meta.baseRefName,
     headRefName: meta.headRefName,
