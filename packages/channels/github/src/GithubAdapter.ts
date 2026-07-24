@@ -73,11 +73,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           username: login,
         });
         resolved.push(String(u.id));
-      } catch {
+      } catch (err) {
+        process.stderr.write(
+          `[Channel:${this.name}] could not resolve allowedUser "${login}" to a numeric ID, keeping login (will not match numeric senderId): ${err}\n`,
+        );
         resolved.push(login);
       }
     }
     this.config.allowedUsers = resolved;
+    this.gate.replaceAllowedUsers(resolved);
     this.startPollLoop();
   }
 

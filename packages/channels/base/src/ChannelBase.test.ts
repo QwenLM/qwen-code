@@ -723,15 +723,14 @@ describe('ChannelBase', () => {
             'Type: Issue | Title: Bug | URL: https://github.com/o/r/issues/1',
         }),
       );
-      expect(bridge.prompt).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.stringContaining('fix the bug'),
-        expect.anything(),
+      const prompts = bridge.prompt.mock.calls.map((call) => String(call[1]));
+      const prompt = prompts.find(
+        (p) =>
+          p.includes('fix the bug') && p.includes('Type: Issue | Title: Bug'),
       );
-      expect(bridge.prompt).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.stringContaining('Type: Issue | Title: Bug'),
-        expect.anything(),
+      expect(prompt).toBeDefined();
+      expect(prompt!.indexOf('fix the bug')).toBeLessThan(
+        prompt!.indexOf('Type: Issue | Title: Bug'),
       );
     });
 

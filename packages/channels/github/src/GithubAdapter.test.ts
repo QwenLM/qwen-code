@@ -186,6 +186,65 @@ describe('GithubChannel', () => {
         'failed to resolve bot identity',
       );
     });
+
+    it('resolves allowedUsers logins to numeric IDs and updates the sender gate', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ senderPolicy: 'allowlist', allowedUsers: ['alice'] }),
+        makeBridge(),
+      );
+      mockOctokit.rest.users.getByUsername.mockResolvedValue({
+        data: { id: 10001, login: 'alice' },
+      });
+      mockOctokit.paginate.mockResolvedValue([]);
+      await channel.connect();
+
+      expect(mockOctokit.rest.users.getByUsername).toHaveBeenCalledWith({
+        username: 'alice',
+      });
+      expect(
+        (channel as unknown as { config: { allowedUsers: string[] } }).config
+          .allowedUsers,
+      ).toEqual(['10001']);
+      const gate = (
+        channel as unknown as {
+          gate: { isAllowed: (senderId: string) => boolean };
+        }
+      ).gate;
+      expect(gate.isAllowed('10001')).toBe(true);
+      expect(gate.isAllowed('alice')).toBe(false);
+      channel.disconnect();
+    });
+
+    it('keeps the login and warns when allowedUser resolution fails', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ senderPolicy: 'allowlist', allowedUsers: ['alice'] }),
+        makeBridge(),
+      );
+      mockOctokit.rest.users.getByUsername.mockRejectedValue(
+        new Error('transient 502'),
+      );
+      mockOctokit.paginate.mockResolvedValue([]);
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        await channel.connect();
+        expect(
+          (channel as unknown as { config: { allowedUsers: string[] } }).config
+            .allowedUsers,
+        ).toEqual(['alice']);
+        expect(
+          stderrSpy.mock.calls.some((call) =>
+            String(call[0]).includes('could not resolve allowedUser "alice"'),
+          ),
+        ).toBe(true);
+      } finally {
+        stderrSpy.mockRestore();
+        channel.disconnect();
+      }
+    });
   });
 
   describe('poll and process', () => {
@@ -312,6 +371,70 @@ describe('GithubChannel', () => {
       expect(
         mockOctokit.rest.activity.markNotificationsAsRead,
       ).toHaveBeenCalledWith(expect.objectContaining({ read: true }));
+    });
+
+    it('continues processing remaining notifications after a per-thread error', async () => {
+      const good1 = makeNotification({
+        id: '1',
+        updated_at: '2026-07-02T08:00:00.000Z',
+        subject: {
+          title: 'Issue 1',
+          url: 'https://api.github.com/repos/owner/repo/issues/1',
+          type: 'Issue',
+        },
+      });
+      const bad = makeNotification({
+        id: '2',
+        updated_at: '2026-07-02T09:00:00.000Z',
+        subject: {
+          title: 'Issue 2',
+          url: 'https://api.github.com/repos/owner/repo/issues/2',
+          type: 'Issue',
+        },
+      });
+      const good2 = makeNotification({
+        id: '3',
+        updated_at: '2026-07-02T10:00:00.000Z',
+        subject: {
+          title: 'Issue 3',
+          url: 'https://api.github.com/repos/owner/repo/issues/3',
+          type: 'Issue',
+        },
+      });
+
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([good1, bad, good2])
+        .mockResolvedValueOnce([makeComment({ id: 2001 })]) // good1
+        .mockRejectedValueOnce(new Error('API error')) // bad, attempt 1
+        .mockRejectedValueOnce(new Error('API error')) // bad, attempt 2
+        .mockRejectedValueOnce(new Error('API error')) // bad, attempt 3 -> throws
+        .mockResolvedValueOnce([makeComment({ id: 2002 })]); // good2
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(2);
+      expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
+        '2001',
+        '2002',
+      ]);
+    });
+
+    it('excludes comments updated after the batch maxUpdatedAt', async () => {
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({ updated_at: '2026-07-02T10:00:00.000Z' }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({ id: 1, updated_at: '2026-07-02T09:00:00.000Z' }),
+          makeComment({ id: 2, updated_at: '2026-07-02T10:30:00.000Z' }),
+        ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]!.messageId).toBe('1');
     });
 
     it('uses last_read_at as enumeration window when available', async () => {
