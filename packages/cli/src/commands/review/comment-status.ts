@@ -27,6 +27,7 @@ import { DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD } from '@qwen-code/qwen-code-cor
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh, ghApiAll, setGhHost } from './lib/gh.js';
 import { gitOpt } from './lib/git.js';
+import { worktreePath } from './lib/paths.js';
 import { carriesBlockerSignal, findRootId } from './pr-context.js';
 
 /** Inline review comment, as listed by `GET /pulls/{n}/comments`. */
@@ -225,17 +226,21 @@ export function summarizeThreads(threads: ThreadStatus[]): ThreadSummary {
 }
 
 /**
- * Git-backed probe against the current working directory (the skill runs
- * this inside the PR worktree). Memoized per (path, sinceSha): several
- * threads routinely anchor to the same file at the same commit.
+ * Git-backed probe. Every call is scoped to `worktree` with `git -C`, NOT to
+ * the process CWD: the command runs from the trusted main checkout (so its
+ * `--out` cannot be redirected through a symlink an untrusted PR planted in
+ * its own tree), while the code facts must come from the PR's checked-out
+ * worktree. Memoized per (path, sinceSha): several threads routinely anchor
+ * to the same file at the same commit.
  */
-export function makeGitProbe(): CodeChangeProbe {
-  const inRepo = gitOpt('rev-parse', '--is-inside-work-tree') === 'true';
+export function makeGitProbe(worktree: string): CodeChangeProbe {
+  const inRepo =
+    gitOpt('-C', worktree, 'rev-parse', '--is-inside-work-tree') === 'true';
   const memo = new Map<string, ReturnType<CodeChangeProbe>>();
-  // Commit existence depends on the SHA alone; memoizing it separately from
-  // the (path, sha) results roughly halves the git spawns on a thread-heavy
-  // PR where many threads share one anchor commit.
-  const commitExists = new Map<string, boolean>();
+  // Ancestry depends on the SHA alone (HEAD is fixed for the run); memoizing
+  // it apart from the (path, sha) results roughly halves the git spawns on a
+  // thread-heavy PR where many threads share one anchor commit.
+  const isAncestor = new Map<string, boolean>();
   return (path, sinceSha) => {
     if (!inRepo || !sinceSha || !path) {
       return { changed: 'unknown', touchedBy: [], touchedByTotal: 0 };
@@ -244,30 +249,43 @@ export function makeGitProbe(): CodeChangeProbe {
     const hit = memo.get(key);
     if (hit) return hit;
     let result: ReturnType<CodeChangeProbe>;
-    // The comment's commit can be absent from the object store — then the
-    // range is unanswerable. (When a force-pushed-away commit is still
-    // present via the shared object database, the range widens instead;
-    // see the CodeChangeProbe doc for why that direction is accepted.)
-    let exists = commitExists.get(sinceSha);
-    if (exists === undefined) {
-      exists = gitOpt('cat-file', '-e', `${sinceSha}^{commit}`) !== null;
-      commitExists.set(sinceSha, exists);
+    // `sinceSha..HEAD` is only meaningful when sinceSha is an ANCESTOR of the
+    // worktree HEAD. After a force-push the comment's commit can survive in
+    // the shared object database without being on the current history: the
+    // range is then empty even though the trees differ, which would report a
+    // changed file as `changed: false` — the one direction this index must
+    // never fail in. `merge-base --is-ancestor` is exit 0 for an ancestor,
+    // non-zero for a non-ancestor OR a missing commit (both → `null` here),
+    // so this one call replaces the old existence check and closes that hole.
+    let ancestor = isAncestor.get(sinceSha);
+    if (ancestor === undefined) {
+      ancestor =
+        gitOpt(
+          '-C',
+          worktree,
+          'merge-base',
+          '--is-ancestor',
+          sinceSha,
+          'HEAD',
+        ) !== null;
+      isAncestor.set(sinceSha, ancestor);
     }
-    if (!exists) {
+    if (!ancestor) {
       result = { changed: 'unknown', touchedBy: [], touchedByTotal: 0 };
     } else {
-      // `:(top)` anchors the pathspec at the repository root regardless of
-      // the CWD inside the worktree. Without it, running from a subdirectory
-      // silently resolves the repo-relative comment path against the
-      // subdirectory — empty output, exit 0, and every thread reads as
-      // "untouched since the comment": the one direction this index must
-      // not fail in.
+      // `:(top,literal)` anchors the pathspec at the repo root (so a subdir
+      // CWD cannot silently mis-scope it) AND takes `path` literally — a
+      // GitHub-supplied path is untrusted, and a value like `:(exclude)a.ts`
+      // or `:(glob)**` would otherwise be read as pathspec magic and inspect
+      // unrelated files.
       const log = gitOpt(
+        '-C',
+        worktree,
         'log',
         '--format=%h',
         `${sinceSha}..HEAD`,
         '--',
-        `:(top)${path}`,
+        `:(top,literal)${path}`,
       );
       if (log === null) {
         result = { changed: 'unknown', touchedBy: [], touchedByTotal: 0 };
@@ -300,6 +318,11 @@ async function runCommentStatus(args: CommentStatusArgs): Promise<void> {
 
   ensureAuthenticated();
 
+  // Sample the live head BEFORE the comments fetch and AGAIN after: GitHub
+  // maps comment lines against whatever head is current when the list is
+  // served, so a push landing mid-fetch would pair anchor facts from a newer
+  // head with a stale drift comparison. If the two samples disagree the PR is
+  // moving right now — treat it as drift.
   const meta = JSON.parse(
     gh(
       'pr',
@@ -312,24 +335,41 @@ async function runCommentStatus(args: CommentStatusArgs): Promise<void> {
     ),
   ) as { author?: { login?: string } | null; headRefOid?: string };
   const prAuthor = meta.author?.login ?? '';
-  const liveHeadSha = meta.headRefOid ?? '';
+  const liveHeadBefore = meta.headRefOid ?? '';
 
   const comments = ghApiAll(
     `repos/${owner}/${repo}/pulls/${prNumber}/comments`,
   ) as RawStatusComment[];
 
-  const worktreeHeadSha = gitOpt('rev-parse', 'HEAD');
+  const liveHeadAfter =
+    (
+      JSON.parse(
+        gh('pr', 'view', prNumber, '--repo', ownerRepo, '--json', 'headRefOid'),
+      ) as { headRefOid?: string }
+    ).headRefOid ?? '';
+
+  const worktree = worktreePath(prNumber);
+  const worktreeHeadSha = gitOpt('-C', worktree, 'rev-parse', 'HEAD');
   // Anchor facts (`line`, outdated) describe the LIVE head — GitHub maps
   // comments against the latest diff it serves. Code facts (`touchedBy`,
   // changedSinceComment) describe the WORKTREE head — the code this review
-  // rules on. When the two differ the PR advanced mid-review; surface it
-  // rather than letting the two halves silently describe different commits.
-  const headDrift =
+  // rules on. Drift when the worktree lags the live head, OR when the head
+  // moved between the two samples (a push raced the fetch).
+  const headMovedDuringFetch =
+    liveHeadBefore !== '' &&
+    liveHeadAfter !== '' &&
+    liveHeadBefore !== liveHeadAfter;
+  const worktreeStale =
     worktreeHeadSha !== null &&
-    liveHeadSha !== '' &&
-    worktreeHeadSha !== liveHeadSha;
+    liveHeadAfter !== '' &&
+    worktreeHeadSha !== liveHeadAfter;
+  const headDrift = headMovedDuringFetch || worktreeStale;
 
-  const threads = buildThreadStatuses(comments, prAuthor, makeGitProbe());
+  const threads = buildThreadStatuses(
+    comments,
+    prAuthor,
+    makeGitProbe(worktree),
+  );
   if (headDrift) {
     // Denormalize the drift onto every thread: the code facts describe a
     // superseded checkout, and a jq consumer of threads[] must not need to
@@ -342,9 +382,11 @@ async function runCommentStatus(args: CommentStatusArgs): Promise<void> {
     prNumber,
     ownerRepo,
     prAuthor,
-    liveHeadSha,
+    liveHeadSha: liveHeadAfter,
+    liveHeadBefore,
     worktreeHeadSha,
     headDrift,
+    headMovedDuringFetch,
     inlineComments: comments.length,
     summary,
     threads,
@@ -359,9 +401,14 @@ async function runCommentStatus(args: CommentStatusArgs): Promise<void> {
       `${summary.changedSinceComment} on files changed since their comment, ` +
       `${summary.withReplies} with replies, ${summary.authorReplied} answered by the PR author)`,
   );
-  if (headDrift) {
+  if (headMovedDuringFetch) {
     writeStdoutLine(
-      `warning: worktree HEAD ${worktreeHeadSha!.slice(0, 8)} != live PR head ${liveHeadSha.slice(0, 8)} — ` +
+      `warning: PR head moved during the comments fetch (${liveHeadBefore.slice(0, 8)} → ${liveHeadAfter.slice(0, 8)}) — ` +
+        `anchor facts may be mixed across commits. Re-run after the push settles.`,
+    );
+  } else if (worktreeStale) {
+    writeStdoutLine(
+      `warning: worktree HEAD ${(worktreeHeadSha ?? '').slice(0, 8)} != live PR head ${liveHeadAfter.slice(0, 8)} — ` +
         `the PR advanced since fetch-pr. Anchor facts describe the live head; ` +
         `code facts describe the worktree.`,
     );

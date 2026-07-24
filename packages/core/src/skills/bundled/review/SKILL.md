@@ -128,7 +128,7 @@ Based on the parsed `target.type`:
 
     **`read_file` returns the first `truncateToolOutputThreshold` characters (25 000 by default) and sets `isTruncated`. Read that flag.** On a PR with a long history the context file exceeds it — `pr-context` prints a `warning:` line naming the size and any headings past the cut. When it does, page the remainder with `offset`/`limit` before Step 3, and pass the _whole_ file's contents onward. A review that never reached the open-comment section will report "no blockers" without having seen a single one of them.
 
-  - **Fetch the comment STATUS index** (worktree mode, whenever the context file reports existing inline comments; run it from inside the worktree so the git half can see the reviewed code):
+  - **Fetch the comment STATUS index** (worktree mode, whenever the context file reports existing inline comments). Run it **from the main checkout, exactly like the other subcommands** — do NOT `cd` into the worktree for it: it locates the PR worktree itself and scopes its git queries there with `git -C`, while writing its `--out` report into the trusted main-checkout `.qwen/tmp` alongside the others. (Running it from inside the untrusted worktree would let a PR redirect that relative `--out` through a planted symlink.)
 
     ```bash
     "${QWEN_CODE_CLI:-qwen}" review comment-status <pr_number> <owner>/<repo> \

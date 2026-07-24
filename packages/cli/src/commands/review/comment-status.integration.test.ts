@@ -58,22 +58,22 @@ describe('makeGitProbe (real git)', () => {
     const base = commitFile('pkg/src/a.ts', 'v1\n', 'base');
     const fix = commitFile('pkg/src/a.ts', 'v2\n', 'fix');
 
-    process.chdir(repo);
-    const got = makeGitProbe()('pkg/src/a.ts', base);
+    const got = makeGitProbe(repo)('pkg/src/a.ts', base);
     expect(got.changed).toBe(true);
     expect(got.touchedByTotal).toBe(1);
     expect(fix.startsWith(got.touchedBy[0])).toBe(true);
   });
 
-  it('resolves the repo-relative path even when run from a subdirectory', () => {
-    // The regression: without `:(top)` the pathspec resolves against the
-    // subdirectory, git log returns nothing with exit 0, and the report
-    // claims the file is untouched.
+  it('scopes git to the worktree via -C regardless of the process CWD', () => {
+    // The command runs from the trusted main checkout; the probe must still
+    // read the worktree. Driving from an unrelated CWD proves it is `-C
+    // <worktree>`, not the ambient directory, that git sees. (Also the
+    // regression guard for the old CWD-relative pathspec.)
     const base = commitFile('pkg/src/a.ts', 'v1\n', 'base');
     commitFile('pkg/src/a.ts', 'v2\n', 'fix');
 
-    process.chdir(join(repo, 'pkg', 'src'));
-    const got = makeGitProbe()('pkg/src/a.ts', base);
+    process.chdir(tmpdir());
+    const got = makeGitProbe(repo)('pkg/src/a.ts', base);
     expect(got.changed).toBe(true);
     expect(got.touchedByTotal).toBe(1);
   });
@@ -84,16 +84,14 @@ describe('makeGitProbe (real git)', () => {
       commitFile('pkg/src/a.ts', `v${i}\n`, `edit ${i}`);
     }
 
-    process.chdir(repo);
-    const got = makeGitProbe()('pkg/src/a.ts', base);
+    const got = makeGitProbe(repo)('pkg/src/a.ts', base);
     expect(got.touchedBy).toHaveLength(10);
     expect(got.touchedByTotal).toBe(12);
   });
 
   it('degrades to unknown for a commit absent from the object store', () => {
     commitFile('pkg/src/a.ts', 'v1\n', 'base');
-    process.chdir(repo);
-    const got = makeGitProbe()(
+    const got = makeGitProbe(repo)(
       'pkg/src/a.ts',
       'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
     );
@@ -101,12 +99,34 @@ describe('makeGitProbe (real git)', () => {
     expect(got.touchedByTotal).toBe(0);
   });
 
+  it('degrades to unknown for a non-ancestor (force-pushed-away) commit that still resolves', () => {
+    // A change lives on an orphaned branch that is a real commit but not an
+    // ancestor of HEAD. `sinceSha..HEAD` would be empty and wrongly read as
+    // "unchanged"; the ancestry gate must return unknown instead.
+    commitFile('pkg/src/a.ts', 'v1\n', 'base');
+    git('checkout', '-q', '-b', 'orphan');
+    const orphan = commitFile('pkg/src/a.ts', 'ORPHAN CHANGE\n', 'orphan edit');
+    git('checkout', '-q', '-');
+    commitFile('pkg/src/b.ts', 'unrelated\n', 'move head forward');
+
+    const got = makeGitProbe(repo)('pkg/src/a.ts', orphan);
+    expect(got.changed).toBe('unknown');
+  });
+
+  it('takes the comment path literally, not as pathspec magic', () => {
+    const base = commitFile('pkg/src/a.ts', 'v1\n', 'base');
+    commitFile('pkg/src/a.ts', 'v2\n', 'fix');
+    // `:(exclude)…` would flip the meaning if magic were honored; literal
+    // means "a file actually named this", which does not exist → unchanged.
+    const got = makeGitProbe(repo)(':(exclude)pkg/src/a.ts', base);
+    expect(got.changed).toBe(false);
+  });
+
   it('reports unchanged for a file the range never touched', () => {
     const base = commitFile('pkg/src/a.ts', 'v1\n', 'base');
     commitFile('pkg/src/b.ts', 'other\n', 'unrelated');
 
-    process.chdir(repo);
-    const got = makeGitProbe()('pkg/src/a.ts', base);
+    const got = makeGitProbe(repo)('pkg/src/a.ts', base);
     expect(got.changed).toBe(false);
     expect(got.touchedBy).toEqual([]);
   });

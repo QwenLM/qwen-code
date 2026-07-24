@@ -748,7 +748,7 @@ export function buildMarkdown(
     parts.push('');
     for (const c of openRoots) {
       parts.push(
-        `- \`${c.path ?? '?'}\`:${c.line ?? '?'} by @${c.user?.login ?? '?'}: ${snippetWithRef(c.body, 240, pullCommentRef(c.id, ctx))}`,
+        `- \`${c.path ?? '?'}\`:${c.line ?? '?'} by @${c.user?.login ?? '?'} (comment ${c.id}): ${snippetWithRef(c.body, 240, pullCommentRef(c.id, ctx))}`,
       );
     }
     parts.push('');
@@ -776,7 +776,7 @@ export function buildMarkdown(
       for (const root of sortedRoots) {
         const replies = repliesByRoot.get(root.id) ?? [];
         parts.push(
-          `**\`${root.path ?? '?'}\`:${root.line ?? '?'}** — initiated by @${root.user?.login ?? '?'}`,
+          `**\`${root.path ?? '?'}\`:${root.line ?? '?'}** — initiated by @${root.user?.login ?? '?'} (comment ${root.id})`,
         );
         parts.push('');
         parts.push(
