@@ -72,6 +72,7 @@ const createMockConfig = (
   getModel: () => 'test-model',
   getSessionId: () => 'test-session',
   getUserMemory: () => '',
+  getAutoMemoryPrompt: () => '',
   getToolRegistry: () => ({
     getFunctionDeclarations: () => [],
     getFunctionDeclarationsFiltered: () => [],
@@ -428,6 +429,35 @@ describe('ArenaManager', () => {
         expect(systemPrompt).toContain(
           'This is a non-interactive, single-turn run',
         );
+      }
+    });
+
+    it('does not embed the auto-memory section in the worker system prompt', async () => {
+      // The in-process worker's AgentCore appends the volatile auto-memory
+      // section itself (buildChatSystemPrompt), and the per-agent Config
+      // inherits a non-empty getAutoMemoryPrompt() from this base. If
+      // ArenaManager also appended it, the section would appear twice in the
+      // worker's system prompt. Assert ArenaManager leaves it out.
+      const marker = '__ARENA_AUTO_MEMORY_MARKER__';
+      mockConfig = {
+        ...createMockConfig(tempDir, { worktreeBaseDir: tempDir }),
+        getAutoMemoryPrompt: () => marker,
+      };
+      mockBackend.type = 'in-process';
+      const manager = new ArenaManager(mockConfig as never);
+
+      await manager.start(createValidStartOptions());
+
+      expect(mockBackend.spawnAgent).toHaveBeenCalledTimes(2);
+      for (const call of mockBackend.spawnAgent.mock.calls) {
+        const spawnConfig = call[0] as {
+          inProcess?: {
+            runtimeConfig?: { promptConfig?: { systemPrompt?: string } };
+          };
+        };
+        const systemPrompt =
+          spawnConfig.inProcess?.runtimeConfig?.promptConfig?.systemPrompt;
+        expect(systemPrompt).not.toContain(marker);
       }
     });
   });

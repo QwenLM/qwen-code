@@ -814,6 +814,7 @@ describe('subagent.ts', () => {
       it('should not append userMemory separator when userMemory is empty', async () => {
         const { config } = await createMockConfig();
         vi.spyOn(config, 'getUserMemory').mockReturnValue('');
+        vi.spyOn(config, 'getAutoMemoryPrompt').mockReturnValue('');
 
         vi.mocked(GeminiChat).mockClear();
 
@@ -843,6 +844,7 @@ describe('subagent.ts', () => {
       it('should not append userMemory separator when userMemory is whitespace-only', async () => {
         const { config } = await createMockConfig();
         vi.spyOn(config, 'getUserMemory').mockReturnValue('   \n\n  ');
+        vi.spyOn(config, 'getAutoMemoryPrompt').mockReturnValue('');
 
         vi.mocked(GeminiChat).mockClear();
 
@@ -866,6 +868,43 @@ describe('subagent.ts', () => {
         const generationConfig = getGenerationConfigFromMock();
         const sysPrompt = generationConfig.systemInstruction as string;
         expect(sysPrompt).not.toContain('---');
+      });
+
+      it('should append the auto-memory section to the system prompt when available', async () => {
+        const { config } = await createMockConfig();
+        const autoMemoryContent = '# auto memory\nMEMORY_INDEX_MARKER';
+        vi.spyOn(config, 'getUserMemory').mockReturnValue('');
+        vi.spyOn(config, 'getAutoMemoryPrompt').mockReturnValue(
+          autoMemoryContent,
+        );
+
+        vi.mocked(GeminiChat).mockClear();
+
+        const promptConfig: PromptConfig = {
+          systemPrompt: 'You are a test agent.',
+        };
+        const context = new ContextState();
+
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.execute(context);
+
+        const generationConfig = getGenerationConfigFromMock();
+        const sysPrompt = generationConfig.systemInstruction as string;
+        expect(sysPrompt).toContain('You are a test agent.');
+        // The volatile auto-memory section must be present as the trailing
+        // block, separated by the `---` suffix separator.
+        expect(sysPrompt).toContain('MEMORY_INDEX_MARKER');
+        expect(sysPrompt).toContain('---');
+        expect(sysPrompt.trimEnd().endsWith(autoMemoryContent)).toBe(true);
       });
 
       it('should replace env history with initialMessages when both initialMessages and systemPrompt are set', async () => {
