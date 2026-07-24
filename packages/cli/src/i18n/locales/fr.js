@@ -58,6 +58,7 @@ export default {
   'to search history': "pour rechercher dans l'historique",
   'to paste images': 'pour coller des images',
   'for external editor': 'pour un éditeur externe',
+  'to toggle model': 'pour basculer de modèle',
   'Jump through words in the input': "Sauter de mot en mot dans l'entrée",
   'Close dialogs, cancel requests, or quit application':
     "Fermer les boîtes de dialogue, annuler les requêtes ou quitter l'application",
@@ -2239,4 +2240,11 @@ export default {
     "L'enregistrement de la session s'est arrêté après un échec d'écriture. Les nouveaux messages de la session concernée ne seront pas enregistrés. Vérifiez l'espace disque et les autorisations, puis démarrez une nouvelle session pour reprendre l'enregistrement. Consultez le journal de débogage pour plus de détails.",
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     "L'enregistrement de la session s'est arrêté après un échec d'écriture. Les nouveaux messages de la session concernée ne seront pas enregistrés. Vérifiez l'espace disque et les autorisations, puis exécutez `/clear` pour démarrer une nouvelle session enregistrée. Consultez le journal de débogage pour plus de détails.",
+  // Model toggle hotkey messages
+  '⚠ Cannot toggle: auth type not available':
+    "⚠ Impossible de basculer : type d'authentification indisponible",
+  'Already on {{model}}': 'Déjà sur {{model}}',
+  'Switched to {{model}}': 'Basculé vers {{model}}',
+  '⚠ Failed to switch to {{model}}: {{error}}':
+    '⚠ Échec du basculement vers {{model}} : {{error}}',
 };

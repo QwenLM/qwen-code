@@ -85,6 +85,9 @@ export enum Command {
   // Transcript full-detail screen (Ctrl+O)
   TOGGLE_TRANSCRIPT = 'toggleTranscript',
 
+  // Model toggle (Ctrl+F)
+  TOGGLE_MODEL = 'toggleModel',
+
   // Scroll commands
   SCROLL_UP = 'scrollUp',
   SCROLL_DOWN = 'scrollDown',
@@ -242,6 +245,7 @@ export const defaultKeyBindings: KeyBindingConfig = {
 
   // App level bindings
   [Command.TOGGLE_TOOL_DESCRIPTIONS]: [{ key: 't', ctrl: true }],
+  [Command.TOGGLE_MODEL]: [{ key: 'f', ctrl: true, shift: false }],
   [Command.TOGGLE_IDE_CONTEXT_DETAIL]: [{ key: 'g', ctrl: true }],
   [Command.QUIT]: [{ key: 'c', ctrl: true }],
   [Command.EXIT]: [{ key: 'd', ctrl: true }],

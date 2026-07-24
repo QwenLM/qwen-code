@@ -587,6 +587,10 @@
           "description": "The model to use for conversations.",
           "type": "string"
         },
+        "toggleModel": {
+          "description": "Alternate model ID for quick toggle via the toggleModel hotkey. When set, pressing the configured hotkey switches between the current model and this model. Use the qualified syntax \"model-id(authType)\" (e.g. \"gpt-4(openai)\") to disambiguate when multiple providers offer the same model ID; without qualification the first provider in enum order wins. Leave empty to disable the hotkey.",
+          "type": "string"
+        },
         "baseUrl": {
           "description": "Base URL paired with model.name; disambiguates which provider to use when multiple modelProviders entries share the same model id.",
           "type": "string"

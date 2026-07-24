@@ -55,6 +55,7 @@ export default {
   'to paste images': 'para colar imagens',
   'for external editor': 'para editor externo',
   'to view transcript': 'para ver a transcrição',
+  'to toggle model': 'alternar modelo',
   'Jump through words in the input': 'Pular palavras na entrada',
   'Close dialogs, cancel requests, or quit application':
     'Fechar diálogos, cancelar solicitações ou sair do aplicativo',
@@ -2222,4 +2223,11 @@ export default {
     'A gravação da sessão foi interrompida após uma falha de escrita. As novas mensagens da sessão afetada não serão salvas. Verifique o espaço em disco e as permissões e inicie uma nova sessão para retomar a gravação. Consulte o log de depuração para obter detalhes.',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     'A gravação da sessão foi interrompida após uma falha de escrita. As novas mensagens da sessão afetada não serão salvas. Verifique o espaço em disco e as permissões e execute `/clear` para iniciar uma nova sessão gravada. Consulte o log de depuração para obter detalhes.',
+  // Model toggle hotkey messages
+  '⚠ Cannot toggle: auth type not available':
+    '⚠ Não é possível alternar: tipo de autenticação indisponível',
+  'Already on {{model}}': 'Já em {{model}}',
+  'Switched to {{model}}': 'Alternado para {{model}}',
+  '⚠ Failed to switch to {{model}}: {{error}}':
+    '⚠ Falha ao alternar para {{model}}: {{error}}',
 };

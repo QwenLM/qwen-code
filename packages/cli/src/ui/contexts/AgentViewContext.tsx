@@ -48,6 +48,8 @@ export interface AgentViewState {
   agents: ReadonlyMap<string, RegisteredAgent>;
   /** Whether any agent tab's embedded shell currently has input focus. */
   agentShellFocused: boolean;
+  /** Whether any agent tab has an active embedded shell PTY. */
+  agentViewHasActiveShellPty: boolean;
   /** Last synced text from the active agent tab's input buffer. */
   agentInputBufferText: string;
   /** Whether the tab bar has keyboard focus (vs the agent input). */
@@ -70,6 +72,7 @@ export interface AgentViewActions {
   unregisterAgent(agentId: string): void;
   unregisterAll(): void;
   setAgentShellFocused(focused: boolean): void;
+  setAgentViewHasActiveShellPty(agentId: string, hasPty: boolean): void;
   setAgentInputBufferText(text: string): void;
   setAgentTabBarFocused(focused: boolean): void;
   setAgentApprovalMode(agentId: string, mode: ApprovalMode): void;
@@ -86,6 +89,7 @@ const DEFAULT_STATE: AgentViewState = {
   activeView: 'main',
   agents: new Map(),
   agentShellFocused: false,
+  agentViewHasActiveShellPty: false,
   agentInputBufferText: '',
   agentTabBarFocused: false,
   agentApprovalModes: new Map(),
@@ -101,6 +105,7 @@ const DEFAULT_ACTIONS: AgentViewActions = {
   unregisterAgent: noop,
   unregisterAll: noop,
   setAgentShellFocused: noop,
+  setAgentViewHasActiveShellPty: noop,
   setAgentInputBufferText: noop,
   setAgentTabBarFocused: noop,
   setAgentApprovalMode: noop,
@@ -134,6 +139,10 @@ export function AgentViewProvider({
     () => new Map(),
   );
   const [agentShellFocused, setAgentShellFocused] = useState(false);
+  const [agentViewActiveShellPtySet, setAgentViewActiveShellPtySet] = useState<
+    Set<string>
+  >(() => new Set());
+  const agentViewHasActiveShellPty = agentViewActiveShellPtySet.size > 0;
   const [agentInputBufferText, setAgentInputBufferText] = useState('');
   const [agentTabBarFocused, setAgentTabBarFocused] = useState(false);
   const [agentApprovalModes, setAgentApprovalModes] = useState<
@@ -209,15 +218,36 @@ export function AgentViewProvider({
       next.delete(agentId);
       return next;
     });
+    setAgentViewActiveShellPtySet((prev) => {
+      if (!prev.has(agentId)) return prev;
+      const next = new Set(prev);
+      next.delete(agentId);
+      return next;
+    });
     setActiveView((current) => (current === agentId ? 'main' : current));
   }, []);
 
   const unregisterAll = useCallback(() => {
+    setAgentViewActiveShellPtySet(new Set());
     setAgents(new Map());
     setAgentApprovalModes(new Map());
     setActiveView('main');
     setAgentTabBarFocused(false);
   }, []);
+
+  const setAgentViewHasActiveShellPty = useCallback(
+    (agentId: string, hasPty: boolean) => {
+      setAgentViewActiveShellPtySet((prev) => {
+        const has = prev.has(agentId);
+        if (hasPty === has) return prev;
+        const next = new Set(prev);
+        if (hasPty) next.add(agentId);
+        else next.delete(agentId);
+        return next;
+      });
+    },
+    [],
+  );
 
   const setAgentApprovalMode = useCallback(
     (agentId: string, mode: ApprovalMode) => {
@@ -243,6 +273,7 @@ export function AgentViewProvider({
       activeView,
       agents,
       agentShellFocused,
+      agentViewHasActiveShellPty,
       agentInputBufferText,
       agentTabBarFocused,
       agentApprovalModes,
@@ -251,6 +282,7 @@ export function AgentViewProvider({
       activeView,
       agents,
       agentShellFocused,
+      agentViewHasActiveShellPty,
       agentInputBufferText,
       agentTabBarFocused,
       agentApprovalModes,
@@ -266,6 +298,7 @@ export function AgentViewProvider({
       unregisterAgent,
       unregisterAll,
       setAgentShellFocused,
+      setAgentViewHasActiveShellPty,
       setAgentInputBufferText,
       setAgentTabBarFocused,
       setAgentApprovalMode,
@@ -278,6 +311,7 @@ export function AgentViewProvider({
       unregisterAgent,
       unregisterAll,
       setAgentShellFocused,
+      setAgentViewHasActiveShellPty,
       setAgentInputBufferText,
       setAgentTabBarFocused,
       setAgentApprovalMode,

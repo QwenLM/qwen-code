@@ -8,6 +8,7 @@ import type React from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
+import { useSettings } from '../contexts/SettingsContext.js';
 import { t } from '../../i18n/index.js';
 
 interface Shortcut {
@@ -26,25 +27,37 @@ const getExternalEditorKey = () =>
   process.platform === 'darwin' ? 'ctrl+x' : 'ctrl+x';
 
 // Generate shortcuts with translations (called at render time)
-const getShortcuts = (): Shortcut[] => [
-  { key: '!', description: t('for shell mode') },
-  { key: '/', description: t('for commands') },
-  { key: '@', description: t('for file paths') },
-  { key: 'esc esc', description: t('to clear input') },
-  {
-    key: process.platform === 'win32' ? 'tab' : 'shift+tab',
-    description: t('to cycle approvals'),
-  },
-  { key: 'ctrl+c', description: t('to quit') },
-  { key: getNewlineKey(), description: t('for newline') + ' ⏎' },
-  { key: 'ctrl+l', description: t('to clear screen') },
-  { key: 'ctrl+o', description: t('to view transcript') },
-  { key: 'ctrl+r', description: t('to search history') },
-  { key: 'ctrl+y', description: t('to retry last request') },
-  { key: 'ctrl+q', description: t('to queue for the next turn') },
-  { key: getPasteKey(), description: t('to paste images') },
-  { key: getExternalEditorKey(), description: t('for external editor') },
-];
+const getShortcuts = (showModelToggle: boolean): Shortcut[] => {
+  const shortcuts: Shortcut[] = [
+    { key: '!', description: t('for shell mode') },
+    { key: '/', description: t('for commands') },
+    { key: '@', description: t('for file paths') },
+    { key: 'esc esc', description: t('to clear input') },
+    {
+      key: process.platform === 'win32' ? 'tab' : 'shift+tab',
+      description: t('to cycle approvals'),
+    },
+    { key: 'ctrl+c', description: t('to quit') },
+    { key: getNewlineKey(), description: t('for newline') + ' ⏎' },
+    { key: 'ctrl+l', description: t('to clear screen') },
+    { key: 'ctrl+o', description: t('to view transcript') },
+    { key: 'ctrl+r', description: t('to search history') },
+    { key: 'ctrl+y', description: t('to retry last request') },
+    { key: 'ctrl+q', description: t('to queue for the next turn') },
+    { key: getPasteKey(), description: t('to paste images') },
+    { key: getExternalEditorKey(), description: t('for external editor') },
+  ];
+
+  if (showModelToggle) {
+    // Insert after ctrl+o to keep logical grouping
+    shortcuts.splice(9, 0, {
+      key: 'ctrl+f',
+      description: t('to toggle model'),
+    });
+  }
+
+  return shortcuts;
+};
 
 const ShortcutItem: React.FC<{ shortcut: Shortcut }> = ({ shortcut }) => (
   <Text color={theme.text.secondary}>
@@ -57,16 +70,16 @@ const COLUMN_GAP = 4;
 const MARGIN_LEFT = 2;
 const MARGIN_RIGHT = 2;
 
-// Column distribution for different layouts (5+5+4 for 3 cols, 7+7 for 2 cols)
-const COLUMN_SPLITS: Record<number, number[]> = {
-  3: [5, 5, 4],
-  2: [7, 7],
-  1: [14],
-};
-
 export const KeyboardShortcuts: React.FC = () => {
   const { columns: terminalWidth } = useTerminalSize();
-  const shortcuts = getShortcuts();
+  const settings = useSettings();
+  const showModelToggle = !!settings.merged.model?.toggleModel;
+  const shortcuts = getShortcuts(showModelToggle);
+
+  // Column distribution sums must match shortcuts.length (15 with toggle, 14 without)
+  const columnSplits: Record<number, number[]> = showModelToggle
+    ? { 3: [5, 5, 5], 2: [8, 7], 1: [15] }
+    : { 3: [5, 5, 4], 2: [7, 7], 1: [14] };
 
   // Helper to calculate width needed for a column layout
   const getShortcutWidth = (shortcut: Shortcut) =>
@@ -89,14 +102,14 @@ export const KeyboardShortcuts: React.FC = () => {
 
   // Calculate number of columns based on terminal width and actual content
   const availableWidth = terminalWidth - MARGIN_LEFT - MARGIN_RIGHT;
-  const width3Col = calculateLayoutWidth(COLUMN_SPLITS[3]);
-  const width2Col = calculateLayoutWidth(COLUMN_SPLITS[2]);
+  const width3Col = calculateLayoutWidth(columnSplits[3]);
+  const width2Col = calculateLayoutWidth(columnSplits[2]);
 
   const numColumns =
     availableWidth >= width3Col ? 3 : availableWidth >= width2Col ? 2 : 1;
 
   // Split shortcuts into columns using predefined distribution
-  const splits = COLUMN_SPLITS[numColumns];
+  const splits = columnSplits[numColumns];
   const columns: Shortcut[][] = [];
   let startIndex = 0;
   for (const count of splits) {

@@ -1487,6 +1487,7 @@ export default {
   'to search history': '履歴を検索',
   'to paste images': '画像を貼り付け',
   'for external editor': '外部エディタ用',
+  'to toggle model': 'モデルを切り替え',
   '? for shortcuts': '? でショートカット表示',
   'Pasting…': '貼り付け中…',
   'Invalid approval mode "{{arg}}". Valid modes: {{modes}}':
@@ -2003,4 +2004,11 @@ export default {
     '書き込みに失敗したため、セッションの記録を停止しました。影響を受けたセッションの新しいメッセージは保存されません。ディスク容量と権限を確認してから、新しいセッションを開始して記録を再開してください。詳細はデバッグログを確認してください。',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     '書き込みに失敗したため、セッションの記録を停止しました。影響を受けたセッションの新しいメッセージは保存されません。ディスク容量と権限を確認してから、`/clear` を実行して記録可能な新しいセッションを開始してください。詳細はデバッグログを確認してください。',
+  // Model toggle hotkey messages
+  '⚠ Cannot toggle: auth type not available':
+    '⚠ 切り替えできません：認証タイプが利用できません',
+  'Already on {{model}}': '既に {{model}} を使用中',
+  'Switched to {{model}}': '{{model}} に切り替えました',
+  '⚠ Failed to switch to {{model}}: {{error}}':
+    '⚠ {{model}} への切り替えに失敗：{{error}}',
 };

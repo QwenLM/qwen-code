@@ -273,6 +273,7 @@ export default {
   'to paste images': 'to paste images',
   'for external editor': 'for external editor',
   'to view transcript': 'to view transcript',
+  'to toggle model': 'to toggle model',
   'Jump through words in the input': 'Jump through words in the input',
   'Close dialogs, cancel requests, or quit application':
     'Close dialogs, cancel requests, or quit application',
@@ -2714,4 +2715,11 @@ export default {
     'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.',
+  // Model toggle hotkey messages
+  '⚠ Cannot toggle: auth type not available':
+    '⚠ Cannot toggle: auth type not available',
+  'Already on {{model}}': 'Already on {{model}}',
+  'Switched to {{model}}': 'Switched to {{model}}',
+  '⚠ Failed to switch to {{model}}: {{error}}':
+    '⚠ Failed to switch to {{model}}: {{error}}',
 };

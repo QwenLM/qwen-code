@@ -56,6 +56,7 @@ vi.mock('../contexts/UIActionsContext.js', () => ({
     handleRetryLastPrompt: vi.fn(),
     temporaryCloseFeedbackDialog: vi.fn(),
     popAllQueuedMessages: vi.fn(() => null),
+    handleToggleKeypress: vi.fn(() => false),
   })),
 }));
 vi.mock('../contexts/AgentViewContext.js', () => ({
@@ -63,6 +64,7 @@ vi.mock('../contexts/AgentViewContext.js', () => ({
     activeView: 'main',
     agents: new Map(),
     agentShellFocused: false,
+    agentViewHasActiveShellPty: false,
     agentInputBufferText: '',
     agentTabBarFocused: false,
     agentApprovalModes: new Map(),

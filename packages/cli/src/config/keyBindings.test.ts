@@ -61,5 +61,11 @@ describe('keyBindings config', () => {
         { key: 'space', ctrl: false, meta: false },
       ]);
     });
+
+    it('should bind model toggle to Ctrl+F by default', () => {
+      expect(defaultKeyBindings[Command.TOGGLE_MODEL]).toEqual([
+        { key: 'f', ctrl: true, shift: false },
+      ]);
+    });
   });
 });

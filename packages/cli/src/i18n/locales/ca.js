@@ -59,6 +59,7 @@ export default {
   'to paste images': 'per enganxar imatges',
   'for external editor': 'per a editor extern',
   'to view transcript': 'per veure la transcripció',
+  'to toggle model': 'alternar model',
   'Jump through words in the input': "Salta entre paraules a l'entrada",
   'Close dialogs, cancel requests, or quit application':
     "Tanca els diàlegs, cancel·la les peticions o surt de l'aplicació",
@@ -2756,4 +2757,11 @@ export default {
     'Executant aquesta tasca programada en una sessió nova: {{link}}',
   'This scheduled run could not be started: {{error}}':
     "Aquesta execució programada no s'ha pogut iniciar: {{error}}",
+  // Model toggle hotkey messages
+  '⚠ Cannot toggle: auth type not available':
+    "⚠ No es pot alternar: tipus d'autenticació no disponible",
+  'Already on {{model}}': 'Ja en {{model}}',
+  'Switched to {{model}}': 'Alternat a {{model}}',
+  '⚠ Failed to switch to {{model}}: {{error}}':
+    '⚠ Error en alternar a {{model}}: {{error}}',
 };

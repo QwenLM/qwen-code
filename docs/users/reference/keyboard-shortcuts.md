@@ -16,6 +16,7 @@ This document lists the available keyboard shortcuts in Qwen Code.
 | `Ctrl+B`                       | While a foreground shell command is running: promote it to a background task. The child keeps running, the agent's turn unblocks, and the shell appears in `/tasks` + the Background tasks dialog. No-op when no shell is executing — Ctrl+B then falls through to its prompt-area binding (cursor-left). |
 | `Alt/Option+M`                 | Toggle Markdown output between rich rendered previews and raw/source mode. On macOS, the terminal must send Option as Meta.                                                                                                                                                                               |
 | `Shift+Tab` (`Tab` on Windows) | Cycle approval modes (`plan` → `default` → `auto-edit` → `auto` → `yolo`)                                                                                                                                                                                                                                 |
+| `Ctrl+F`                       | Toggle between the current model and the alternate model set in `model.toggleModel`. Requires `model.toggleModel` to be configured in settings. Only active when no shell is focused.                                                                                                                     |
 
 ## Input Prompt
 
@@ -35,7 +36,7 @@ This document lists the available keyboard shortcuts in Qwen Code.
 | `Esc` (double press)                                  | Clear the input prompt.                                                                                                             |
 | `Ctrl+D` / `Delete`                                   | Delete the character to the right of the cursor.                                                                                    |
 | `Ctrl+E` / `End`                                      | Move the cursor to the end of the line.                                                                                             |
-| `Ctrl+F` / `Right Arrow`                              | Move the cursor one character to the right.                                                                                         |
+| `Right Arrow`                                         | Move the cursor one character to the right.                                                                                         |
 | `Ctrl+H` / `Backspace`                                | Delete the character to the left of the cursor.                                                                                     |
 | `Ctrl+K`                                              | Delete from the cursor to the end of the line.                                                                                      |
 | `Ctrl+Left Arrow` / `Meta+Left Arrow` / `Meta+B`      | Move the cursor one word to the left.                                                                                               |
