@@ -161,13 +161,13 @@ When connecting to an OAuth-enabled server:
 **Important:** OAuth authentication requires that the redirect URI is accessible:
 
 - **Default behavior**: Redirects to `http://localhost:7777/oauth/callback` (works for local setups)
-- **Custom redirect URI**: Use `--oauth-redirect-uri` or configure `redirectUri` in settings.json to specify a different URL
+- **Custom redirect URI**: Use `--oauth-redirect-uri` or configure `redirectUri` in settings.json to specify a public URL ending in `/oauth/callback`. Reverse-proxy that path to `http://127.0.0.1:7777/oauth/callback` on the machine running Qwen Code.
 
 For **remote/cloud server deployments** (e.g., web terminals, SSH sessions, cloud IDEs):
 
 - The default `localhost` redirect will NOT work
-- You MUST configure a custom `redirectUri` pointing to a publicly accessible URL
-- The user's browser must be able to reach this URL and redirect back to the server
+- You MUST configure a custom `redirectUri` pointing to a publicly accessible URL ending in `/oauth/callback`
+- Terminate TLS at a reverse proxy and forward only that path to `http://127.0.0.1:7777/oauth/callback`
 
 Example for remote servers:
 
@@ -194,7 +194,7 @@ servers and manage OAuth authentication.
 - **`authorizationUrl`** (string): OAuth authorization endpoint (auto-discovered if omitted)
 - **`tokenUrl`** (string): OAuth token endpoint (auto-discovered if omitted)
 - **`scopes`** (string[]): Required OAuth scopes
-- **`redirectUri`** (string): Custom redirect URI. **Critical for remote deployments**: Defaults to `http://localhost:7777/oauth/callback`. When running Qwen Code on remote/cloud servers, set this to a publicly accessible URL (e.g., `https://your-server.com/oauth/callback`). Can be configured via `qwen mcp add --oauth-redirect-uri` or directly in settings.json.
+- **`redirectUri`** (string): Custom redirect URI. **Critical for remote deployments**: Defaults to `http://localhost:7777/oauth/callback`. For remote use, set a public URL ending in `/oauth/callback` and reverse-proxy it to the local callback listener. Can be configured via `qwen mcp add --oauth-redirect-uri` or directly in settings.json.
 - **`tokenParamName`** (string): Query parameter name for tokens in SSE URLs
 - **`audiences`** (string[]): Audiences the token is valid for
 
@@ -795,7 +795,7 @@ qwen mcp add [options] <name> <commandOrUrl> [args...]
 - `--exclude-tools`: A comma-separated list of tools to exclude.
 - `--oauth-client-id`: OAuth client ID for MCP server authentication.
 - `--oauth-client-secret`: OAuth client secret for MCP server authentication.
-- `--oauth-redirect-uri`: OAuth redirect URI (e.g., `https://your-server.com/oauth/callback`). Defaults to `http://localhost:7777/oauth/callback` for local setups. **Important for remote deployments**: When running Qwen Code on remote/cloud servers, set this to a publicly accessible URL.
+- `--oauth-redirect-uri`: OAuth redirect URI (e.g., `https://your-server.com/oauth/callback`). Defaults to `http://localhost:7777/oauth/callback` for local setups. **Important for remote deployments**: Use a public URL ending in `/oauth/callback` and reverse-proxy it to `http://127.0.0.1:7777/oauth/callback`.
 - `--oauth-authorization-url`: OAuth authorization URL.
 - `--oauth-token-url`: OAuth token URL.
 - `--oauth-scopes`: OAuth scopes (comma-separated).
