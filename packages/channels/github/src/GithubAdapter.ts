@@ -217,8 +217,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       });
 
       const body = issue.body || '';
-      const createdAt = issue.created_at;
-      if (createdAt <= this.cursor.lastProcessedAt) return;
+      const messageId = `issue-body-${issueNumber}`;
+      if (this.recentlyProcessed.has(messageId)) return;
 
       const isMentioned = this.botUsername
         ? testBotMention(body, this.botUsername)
@@ -235,7 +235,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         senderName: issue.user?.login || 'unknown',
         chatId,
         threadId,
-        messageId: `issue-body-${issueNumber}`,
+        messageId,
         text,
         isGroup: true,
         isMentioned,
@@ -252,6 +252,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           `[Channel:${this.name}] handleInbound failed for issue body ${issueNumber}: ${err}\n`,
         );
         await this.postErrorComment(chatId, issueNumber);
+      }
+      this.recentlyProcessed.add(messageId);
+      if (this.recentlyProcessed.size > GithubChannel.MAX_RECENTLY_PROCESSED) {
+        this.recentlyProcessed.clear();
       }
     } catch (err) {
       process.stderr.write(

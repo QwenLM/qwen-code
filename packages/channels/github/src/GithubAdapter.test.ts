@@ -322,22 +322,30 @@ describe('GithubChannel', () => {
       expect(env.senderId).toBe('bob');
     });
 
-    it('skips old issue body (created before cursor)', async () => {
+    it('skips already-processed issue body on re-poll', async () => {
       mockOctokit.paginate
         .mockResolvedValueOnce([makeNotification({ last_read_at: null })])
         .mockResolvedValueOnce([]);
 
       mockOctokit.rest.issues.get.mockResolvedValue({
         data: {
-          body: '@test-bot old issue',
-          created_at: '2026-06-01T00:00:00.000Z',
+          body: '@test-bot implement this',
+          created_at: '2026-07-02T08:00:00.000Z',
           user: { login: 'bob' },
         },
       });
 
       await initWithoutLoop();
       await pollOnce();
-      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+
+      // Re-poll with same notification (e.g. mark-read failed)
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification({ last_read_at: null })])
+        .mockResolvedValueOnce([]);
+
+      await pollOnce();
+      expect(channel.inboundEnvelopes).toHaveLength(1); // not 2
     });
 
     it('skips issue body without mention', async () => {
