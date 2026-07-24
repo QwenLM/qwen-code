@@ -14,7 +14,7 @@ Use `agent` to launch a specialized subagent to handle complex, multi-step tasks
 - `prompt` (string, required): The detailed task prompt for the subagent to execute. Should contain comprehensive instructions for autonomous execution.
 - `subagent_type` (string, optional): The type of specialized agent to use for this task. Defaults to `general-purpose` if omitted.
 - `fork_turns` (string, optional): Only valid with `subagent_type="fork"`. Omit it or use `all` for the full parent conversation, or use a positive integer string such as `"3"` for the most recent three real user turns. Tool responses and pure system reminders do not count as turns.
-- `run_in_background` (boolean, optional): Defaults to `true` for top-level one-shot agents. Set to `false` to wait for the result inline. Nested agents run in the foreground. Caller-owned `working_dir` launches default to foreground and reject explicit or configured background execution.
+- `run_in_background` (boolean, optional): Defaults to `true` for top-level one-shot agents. Set to `false` to wait for the result inline. Nested agents run in the foreground unless `run_in_background` is explicitly `true`, which is rejected because nested agents cannot receive background completion notifications. Caller-owned `working_dir` launches default to foreground and reject explicit or configured background execution.
 - `isolation` (string, optional): Set to `"worktree"` to run the agent in an isolated git worktree.
 
 ## How to use `agent` with Qwen Code

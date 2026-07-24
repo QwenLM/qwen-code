@@ -61,6 +61,18 @@ export interface CronTaskRun {
  * `lastFiredAt`, so appending a capped run adds no extra write, only bytes). */
 export const MAX_TASK_RUNS = 20;
 
+export const MAX_CHANNEL_DELIVERY_NAME_LENGTH = 2048;
+export const MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH = 2048;
+
+export interface CronTaskDelivery {
+  kind: 'channel';
+  target: {
+    channelName: string;
+    type: 'user' | 'chat';
+    id: string;
+  };
+}
+
 export interface DurableCronTask {
   id: string;
   cron: string;
@@ -97,6 +109,7 @@ export interface DurableCronTask {
    * (`cron_create`) and legacy tasks, which keep the shared-owner firing model.
    */
   sessionId?: string;
+  delivery?: CronTaskDelivery;
   /**
    * Bounded, newest-last history of recent fires (capped at MAX_TASK_RUNS).
    * Absent on tool-created tasks and on any task that has not fired yet.
@@ -417,6 +430,33 @@ function isValidRuns(value: unknown): value is CronTaskRun[] {
   });
 }
 
+function isValidDelivery(value: unknown): value is CronTaskDelivery {
+  if (typeof value !== 'object' || value === null) return false;
+  const delivery = value as Record<string, unknown>;
+  const rawTarget = delivery['target'];
+  if (
+    delivery['kind'] !== 'channel' ||
+    typeof rawTarget !== 'object' ||
+    rawTarget === null ||
+    !Object.keys(delivery).every((key) => key === 'kind' || key === 'target')
+  ) {
+    return false;
+  }
+  const target = rawTarget as Record<string, unknown>;
+  return (
+    typeof target['channelName'] === 'string' &&
+    target['channelName'].trim().length > 0 &&
+    target['channelName'].length <= MAX_CHANNEL_DELIVERY_NAME_LENGTH &&
+    (target['type'] === 'user' || target['type'] === 'chat') &&
+    typeof target['id'] === 'string' &&
+    target['id'].trim().length > 0 &&
+    target['id'].length <= MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH &&
+    Object.keys(target).every(
+      (key) => key === 'channelName' || key === 'type' || key === 'id',
+    )
+  );
+}
+
 function isValidTask(value: unknown): value is DurableCronTask {
   if (typeof value !== 'object' || value === null) return false;
   const obj = value as Record<string, unknown>;
@@ -440,6 +480,7 @@ function isValidTask(value: unknown): value is DurableCronTask {
     // would treat it as unbound, so a "bound" task would silently run unbound.
     (obj['sessionId'] === undefined ||
       (typeof obj['sessionId'] === 'string' && obj['sessionId'].length > 0)) &&
+    (obj['delivery'] === undefined || isValidDelivery(obj['delivery'])) &&
     (obj['runs'] === undefined || isValidRuns(obj['runs']))
   );
 }

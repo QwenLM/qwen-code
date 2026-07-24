@@ -38,6 +38,7 @@ import {
   tokenLimit,
   getMCPDiscoveryState,
   getMCPServerStatus,
+  initializeTelemetry,
   MCPDiscoveryState,
   MCPServerStatus,
   McpTransportPool,
@@ -119,6 +120,7 @@ import {
   RequestError,
   PROTOCOL_VERSION,
 } from '@agentclientprotocol/sdk';
+import { isNotCurrentlyGeneratingCancelError } from '@qwen-code/acp-bridge/bridgeErrors';
 import type { Content } from '@google/genai';
 import type {
   Agent,
@@ -296,6 +298,7 @@ import {
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
+  PROMPT_CANCEL_METHOD,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   type ClientMcpOverWsRuntimeConfig,
   type BridgeLoadReplayEnvelope,
@@ -2709,7 +2712,35 @@ export async function runAcpAgent(
     console.info = console.error;
     console.debug = console.error;
 
-    const stream = ndJsonStream(stdout, stdin);
+    let initializeRequestId: string | number | null | undefined;
+    const stream = ndJsonStream(stdout, stdin, {
+      onMessageObserved: ({ direction, message }) => {
+        if (
+          direction === 'received' &&
+          'id' in message &&
+          'method' in message &&
+          message.method === 'initialize'
+        ) {
+          initializeRequestId = message.id;
+          return;
+        }
+        if (
+          direction !== 'sent' ||
+          initializeRequestId === undefined ||
+          !('id' in message) ||
+          'method' in message ||
+          message.id !== initializeRequestId
+        ) {
+          return;
+        }
+        initializeRequestId = undefined;
+        if ('result' in message) {
+          void initializeTelemetry(config).then(() => {
+            registerAcpEventLoopLagGauge(() => eventLoopMonitor.snapshot());
+          });
+        }
+      },
+    });
     connection = new AgentSideConnection((conn) => {
       acpConnection = conn;
       agentInstance = new QwenAgent(
@@ -2726,7 +2757,6 @@ export async function runAcpAgent(
     eventLoopMonitor.dispose();
     throw err;
   }
-  registerAcpEventLoopLagGauge(() => eventLoopMonitor.snapshot());
 
   // Both the SIGTERM handler and the IDE-initiated close path need
   // to drain the MCP pool before runExitCleanup. Single helper
@@ -3003,8 +3033,14 @@ interface PendingMcpAuthentication {
   }>;
 }
 
+interface ActivePromptCall {
+  controller: AbortController;
+  settled: Promise<void>;
+}
+
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
+  private activePromptCalls = new Map<string, Set<ActivePromptCall>>();
   private workspaceMcpDiscoveryConfig: Config | undefined;
   private workspaceMcpDiscoveryPromise: Promise<void> | undefined;
   private workspaceMcpDiscoveryError: string | undefined;
@@ -4443,7 +4479,32 @@ class QwenAgent implements Agent {
         'Invalid trusted ACP invocation context',
       );
     }
-    return session.prompt(sanitizedParams, invocationContext);
+    let settleCall = () => {};
+    const call: ActivePromptCall = {
+      controller: new AbortController(),
+      settled: new Promise<void>((resolve) => {
+        settleCall = resolve;
+      }),
+    };
+    let calls = this.activePromptCalls.get(params.sessionId);
+    if (!calls) {
+      calls = new Set();
+      this.activePromptCalls.set(params.sessionId, calls);
+    }
+    calls.add(call);
+    try {
+      return await session.prompt(
+        sanitizedParams,
+        invocationContext,
+        call.controller.signal,
+      );
+    } finally {
+      calls.delete(call);
+      if (calls.size === 0) {
+        this.activePromptCalls.delete(params.sessionId);
+      }
+      settleCall();
+    }
   }
 
   async cancel(params: CancelNotification): Promise<void> {
@@ -4451,7 +4512,13 @@ class QwenAgent implements Agent {
     if (!session) {
       throw new Error(`Session not found: ${params.sessionId}`);
     }
-    await session.cancelPendingPrompt();
+    try {
+      await session.cancelPendingPrompt();
+    } catch (error) {
+      if (!isNotCurrentlyGeneratingCancelError(error)) {
+        throw error;
+      }
+    }
   }
 
   private loadPermissionSettings(cwd: string): LoadedSettings {
@@ -6685,6 +6752,31 @@ class QwenAgent implements Agent {
     const SESSION_ID_RE = /^[0-9a-fA-F-]{32,36}$/;
 
     switch (method) {
+      case PROMPT_CANCEL_METHOD: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const session = this.sessions.get(sessionId);
+        if (!session) {
+          throw RequestError.invalidParams(
+            undefined,
+            `Session not found for id: ${sessionId}`,
+          );
+        }
+        const targetedCalls = new Set(
+          this.activePromptCalls.get(sessionId) ?? [],
+        );
+        if (targetedCalls.size === 0) {
+          return { cancelled: false };
+        }
+        targetedCalls.forEach((call) => call.controller.abort());
+        await Promise.all(Array.from(targetedCalls, (call) => call.settled));
+        return { cancelled: true };
+      }
       case TODO_STOP_GUARD_QUEUE_RELEASE_METHOD: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -10561,7 +10653,7 @@ class QwenAgent implements Agent {
       ''
     ).trim();
     const currentAuthType = config.getAuthType();
-    const modelOptions = buildAcpModelOptions(config.getAllConfiguredModels());
+    const modelOptions = this.buildSelectableModelOptions(config);
 
     const activeRuntimeSnapshot = config.getActiveRuntimeModelSnapshot?.();
     const currentModelId = getCurrentAcpModelId(
@@ -10605,7 +10697,7 @@ class QwenAgent implements Agent {
 
   private buildConfigOptions(config: Config): SessionConfigOption[] {
     const currentApprovalMode = config.getApprovalMode();
-    const modelOptions = buildAcpModelOptions(config.getAllConfiguredModels());
+    const modelOptions = this.buildSelectableModelOptions(config);
     const rawCurrentModelId = (config.getModel() || '').trim();
     const currentAuthType = config.getAuthType?.();
 
@@ -10652,6 +10744,19 @@ class QwenAgent implements Agent {
     };
 
     return [modeConfigOption, modelConfigOption];
+  }
+
+  private buildSelectableModelOptions(config: Config) {
+    const currentAuthType = config.getAuthType();
+    return buildAcpModelOptions(
+      config
+        .getAllConfiguredModels()
+        .filter(
+          (model) =>
+            model.authType !== AuthType.QWEN_OAUTH ||
+            currentAuthType === AuthType.QWEN_OAUTH,
+        ),
+    );
   }
 }
 

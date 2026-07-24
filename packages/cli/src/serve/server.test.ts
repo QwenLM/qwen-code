@@ -26,6 +26,7 @@ import {
   type ChannelWorkerControlState,
 } from './channel-worker-manager.js';
 import { runQwenServe, type RunHandle } from './run-qwen-serve.js';
+import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 import {
   resolveWebShellDir,
   isDocumentNavigation,
@@ -386,6 +387,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_hooks',
   'workspace_extensions',
   'session_branch',
+  'channel_delivery',
   'workspace_channel_observed_contacts',
   'workspace_display_name',
   'workspace_qualified_rest_core',
@@ -439,6 +441,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'session_hooks' &&
       f !== 'workspace_extensions' &&
       f !== 'session_branch' &&
+      f !== 'channel_delivery' &&
       f !== 'workspace_channel_observed_contacts' &&
       f !== 'workspace_display_name' &&
       f !== 'workspace_qualified_rest_core' &&
@@ -478,6 +481,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'session_branch',
   'rate_limit',
   'workspace_reload',
+  'channel_delivery',
   'channel_reload',
   'channel_control',
   'workspace_channel_observed_contacts',
@@ -9387,6 +9391,75 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls[0]?.context?.promptId).toBe(res.body.promptId);
     });
 
+    it('validates delivery and forwards it only through trusted prompt context', async () => {
+      const bridge = fakeBridge();
+      const channelDeliveryAuthorizations =
+        new ChannelDeliveryAuthorizationStore();
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        channelDeliveryAuthorizations,
+      });
+      const delivery = {
+        kind: 'channel',
+        target: {
+          channelName: 'dingtalk',
+          type: 'user',
+          id: 'user-1',
+        },
+      };
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'hi' }],
+          delivery,
+          _meta: { 'qwen.daemon.channelDelivery': { forged: true } },
+        });
+
+      expect(res.status).toBe(202);
+      expect(bridge.promptCalls[0]?.req).not.toHaveProperty('delivery');
+      expect(bridge.promptCalls[0]?.context).toMatchObject({
+        promptId: res.body.promptId,
+        channelDelivery: {
+          deliveryId: res.body.promptId,
+          target: delivery.target,
+        },
+      });
+      expect(
+        channelDeliveryAuthorizations.consume(realpathSync(process.cwd()), {
+          sessionId: 'session-A',
+          deliveryId: res.body.promptId,
+          source: 'prompt',
+          promptId: res.body.promptId,
+          target: delivery.target as {
+            channelName: string;
+            type: 'user';
+            id: string;
+          },
+        }),
+      ).toBe(true);
+    });
+
+    it('rejects malformed prompt delivery before bridge admission', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'hi' }],
+          delivery: {
+            kind: 'channel',
+            channelName: 'dingtalk',
+            target: { type: 'user', id: 'user-1' },
+          },
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('channel_delivery_invalid');
+      expect(bridge.promptCalls).toHaveLength(0);
+    });
+
     it('adds the generated promptId to the active daemon request span', async () => {
       const setAttribute = vi.fn();
       const getSpanSpy = vi.spyOn(trace, 'getSpan').mockReturnValue({
@@ -13386,6 +13459,73 @@ describe('createServeApp', () => {
           route: 'POST /workspace/reload',
         }),
       );
+    });
+  });
+
+  describe('POST /workspace/notify', () => {
+    const notification = {
+      text: 'service unavailable',
+      delivery: {
+        kind: 'channel',
+        target: {
+          channelName: 'dingtalk',
+          type: 'user',
+          id: 'user-1',
+        },
+      },
+    };
+
+    it('requires strict mutation auth before delivery', async () => {
+      const deliverChannelMessage = vi.fn();
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        primaryWorkspaceTrusted: true,
+        deliverChannelMessage,
+      });
+
+      const response = await request(app)
+        .post('/workspace/notify')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send(notification);
+
+      expect(response.status).toBe(401);
+      expect(response.body.code).toBe('token_required');
+      expect(deliverChannelMessage).not.toHaveBeenCalled();
+    });
+
+    it('delivers synchronously through the exact bound workspace', async () => {
+      const opts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const deliverChannelMessage = vi.fn(async () => ({
+        delivered: true as const,
+      }));
+      const app = createServeApp(opts, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: WS_BOUND,
+        primaryWorkspaceTrusted: true,
+        deliverChannelMessage,
+      });
+
+      const response = await request(app)
+        .post('/workspace/notify')
+        .set('Host', `127.0.0.1:${opts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send(notification);
+      const capabilities = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${opts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+      expect(response.status).toBe(200);
+      expect(deliverChannelMessage).toHaveBeenCalledWith(
+        WS_BOUND,
+        expect.objectContaining({
+          deliveryId: response.body.deliveryId,
+          channelName: 'dingtalk',
+          text: 'service unavailable',
+        }),
+      );
+      expect(capabilities.body.features).toContain('channel_delivery');
     });
   });
 
