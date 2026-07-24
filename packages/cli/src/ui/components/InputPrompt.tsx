@@ -49,6 +49,7 @@ import { useShellFocusState } from '../contexts/ShellFocusContext.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useUIActions } from '../contexts/UIActionsContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
+import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
 import { useKeypressContext } from '../contexts/KeypressContext.js';
 import {
   useAgentViewState,
@@ -247,7 +248,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const settings = useSettings();
   // Mouse interactions (suggestion list + click-to-position cursor) are enabled
   // in alternate-screen mode (see RowMouseController's coordinate assumptions).
-  const mouseInteractionsEnabled = !!settings.merged.ui?.useTerminalBuffer;
+  const mouseInteractionsEnabled = useVirtualViewport(
+    settings.merged.ui?.useTerminalBuffer,
+  );
   const { pasteWorkaround } = useKeypressContext();
   const { agents, agentTabBarFocused } = useAgentViewState();
   const { setAgentTabBarFocused } = useAgentViewActions();
@@ -275,7 +278,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   // Window by the same cap the panel actually renders (VP mode uses a
   // height-aware cap via getLiveAgentPanelVpMaxRows in DefaultAppLayout)
   // so the keyboard selection can't address a row that is scrolled off.
-  const liveAgentPanelMaxRows = settings.merged.ui?.useTerminalBuffer
+  const liveAgentPanelMaxRows = uiState.useTerminalBuffer
     ? getLiveAgentPanelVpMaxRows(uiState.terminalHeight)
     : LIVE_AGENT_PANEL_MAX_ROWS;
   const getVisibleBgAgents = useCallback(

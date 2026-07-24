@@ -18,6 +18,7 @@ import {
 } from '../utils/mouse.js';
 import { useKeypressContext } from '../contexts/KeypressContext.js';
 import { SettingsContext } from '../contexts/SettingsContext.js';
+import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
 
 export type MouseHandler = (event: MouseEvent) => void;
 
@@ -151,7 +152,7 @@ export function useMouseEvents(
   // pass `bypassVpGate` to opt in. This keeps the non-VP transcript scrollable
   // no matter how many click/hover subscribers are added later.
   const settings = useContext(SettingsContext);
-  const isVpMode = settings?.merged.ui?.useTerminalBuffer ?? false;
+  const isVpMode = useVirtualViewport(settings?.merged.ui?.useTerminalBuffer);
   const vpGateOpen = isVpMode || bypassVpGate;
 
   const handlerRef = useRef(handler);

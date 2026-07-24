@@ -32,7 +32,7 @@ import {
   type Mock,
 } from 'vitest';
 import { render, cleanup } from 'ink-testing-library';
-import { useContext, act } from 'react';
+import { useContext, useState, act } from 'react';
 import {
   AppContainer,
   dedupeNewestFirst,
@@ -184,6 +184,7 @@ import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { ShellExecutionService } from '@qwen-code/qwen-code-core';
+import { clearCiEnv } from '../test-utils/ci-env.js';
 
 describe('AppContainer State Management', () => {
   let mockConfig: Config;
@@ -215,9 +216,18 @@ describe('AppContainer State Management', () => {
   const mockedUseLoadingIndicator = useLoadingIndicator as Mock;
   const mockedUseTerminalSize = useTerminalSize as Mock;
   const mockedUseKeypress = useKeypress as Mock;
+  let originalStdoutIsTTY: boolean | undefined;
+  let restoreCiEnv = () => {};
 
   beforeEach(() => {
     vi.clearAllMocks();
+    restoreCiEnv = clearCiEnv();
+    vi.stubEnv('TERM', 'xterm-256color');
+    originalStdoutIsTTY = process.stdout.isTTY;
+    Object.defineProperty(process.stdout, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
 
     // Initialize mock stdout for terminal title tests
     mockStdout = { write: vi.fn() };
@@ -404,6 +414,7 @@ describe('AppContainer State Management', () => {
         ui: {
           showStatusInTitle: false,
           hideWindowTitle: false,
+          useTerminalBuffer: false,
         },
       },
       setValue: vi.fn(),
@@ -439,6 +450,16 @@ describe('AppContainer State Management', () => {
   });
 
   afterEach(() => {
+    if (originalStdoutIsTTY === undefined) {
+      delete (process.stdout as { isTTY?: unknown }).isTTY;
+    } else {
+      Object.defineProperty(process.stdout, 'isTTY', {
+        value: originalStdoutIsTTY,
+        configurable: true,
+      });
+    }
+    vi.unstubAllEnvs();
+    restoreCiEnv();
     cleanup();
     vi.useRealTimers();
   });
@@ -869,6 +890,190 @@ describe('AppContainer State Management', () => {
       expect(mockStdout.write).not.toHaveBeenCalledWith(
         ansiEscapes.clearTerminal,
       );
+    });
+
+    it('defaults to VP mode when useTerminalBuffer is unset', () => {
+      const defaultSettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={defaultSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(capturedUIState.useTerminalBuffer).toBe(true);
+    });
+
+    it('keeps non-TTY output on the Static path', () => {
+      Object.defineProperty(process.stdout, 'isTTY', {
+        value: false,
+        configurable: true,
+      });
+      const defaultSettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={defaultSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(capturedUIState.useTerminalBuffer).toBe(false);
+    });
+
+    it('uses the startup VP decision when provided', () => {
+      const legacySettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+            useTerminalBuffer: false,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={legacySettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+          initialUseVirtualViewport={true}
+        />,
+      );
+
+      expect(capturedUIState.useTerminalBuffer).toBe(true);
+    });
+
+    it('uses a disabled startup VP decision over an enabled setting', () => {
+      const vpSettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+            useTerminalBuffer: true,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={vpSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+          initialUseVirtualViewport={false}
+        />,
+      );
+
+      expect(capturedUIState.useTerminalBuffer).toBe(false);
+    });
+
+    it('keeps screen reader mode on the Static path when useTerminalBuffer is unset', () => {
+      vi.spyOn(mockConfig, 'getScreenReader').mockReturnValue(true);
+      const defaultSettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={defaultSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(capturedUIState.useTerminalBuffer).toBe(false);
+    });
+
+    it('locks terminal buffer mode for the running session', () => {
+      const vpSettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+            useTerminalBuffer: true,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+      const legacySettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+            useTerminalBuffer: false,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      let updateSettings!: (settings: LoadedSettings) => void;
+      function Wrapper() {
+        const [settings, setSettings] = useState(vpSettings);
+        updateSettings = setSettings;
+        return (
+          <AppContainer
+            config={mockConfig}
+            settings={settings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />
+        );
+      }
+
+      render(<Wrapper />);
+
+      expect(capturedUIState.useTerminalBuffer).toBe(true);
+
+      act(() => updateSettings(legacySettings));
+
+      expect(capturedUIState.useTerminalBuffer).toBe(true);
     });
 
     // #4891 changed the resize contract: width changes now trigger ONE full
@@ -2549,6 +2754,10 @@ describe('AppContainer State Management', () => {
     };
 
     beforeEach(() => {
+      vi.stubEnv('TMUX', undefined);
+      vi.stubEnv('STY', undefined);
+      vi.stubEnv('ZELLIJ', undefined);
+      vi.stubEnv('DVTM', undefined);
       // Reset mock stdout for each test. The title useEffect now uses
       // process.stdout.write directly (to avoid Ink proxy corruption of
       // OSC escape sequences), so we spy on that.
@@ -3119,7 +3328,7 @@ describe('AppContainer State Management', () => {
       vi.stubEnv('CLI_TITLE', 'Custom Title');
       const staticTitleWithEnv = formatSessionWindowTitle(null, folderName);
       expect(staticTitleWithEnv).toBe('Custom Title');
-      vi.unstubAllEnvs();
+      vi.stubEnv('CLI_TITLE', undefined);
 
       // Verify the escape sequence format for the static title
       const writeSpy = vi.fn();

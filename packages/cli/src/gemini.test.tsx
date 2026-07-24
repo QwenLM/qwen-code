@@ -22,6 +22,7 @@ import {
   validateDnsResolutionOrder,
 } from './gemini.js';
 import { startInteractiveUI } from './ui/startInteractiveUI.js';
+import { clearCiEnv } from './test-utils/ci-env.js';
 import type { CliArgs } from './config/config.js';
 import { type LoadedSettings } from './config/settings.js';
 import { appEvents, AppEvent } from './utils/events.js';
@@ -2221,8 +2222,41 @@ describe('startInteractiveUI', () => {
     render: vi.fn().mockReturnValue({ unmount: vi.fn() }),
   }));
 
+  let initialExitListeners: NodeJS.ExitListener[] = [];
+  let originalStdoutIsTTY: boolean | undefined;
+  let restoreCiEnv = () => {};
+
   beforeEach(() => {
     vi.clearAllMocks();
+    restoreCiEnv = clearCiEnv();
+    vi.stubEnv('TERM', 'xterm-256color');
+    originalStdoutIsTTY = process.stdout.isTTY;
+    Object.defineProperty(process.stdout, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    initialExitListeners = process.listeners('exit') as NodeJS.ExitListener[];
+  });
+
+  afterEach(() => {
+    if (originalStdoutIsTTY === undefined) {
+      delete (process.stdout as { isTTY?: unknown }).isTTY;
+    } else {
+      Object.defineProperty(process.stdout, 'isTTY', {
+        value: originalStdoutIsTTY,
+        configurable: true,
+      });
+    }
+    vi.unstubAllEnvs();
+    restoreCiEnv();
+    const currentExitListeners = process.listeners(
+      'exit',
+    ) as NodeJS.ExitListener[];
+    for (const listener of currentExitListeners) {
+      if (!initialExitListeners.includes(listener)) {
+        process.removeListener('exit', listener);
+      }
+    }
   });
 
   it('should render the UI with proper React context and exitOnCtrlC disabled', async () => {
@@ -2252,11 +2286,189 @@ describe('startInteractiveUI', () => {
     expect(options).toEqual({
       exitOnCtrlC: false,
       isScreenReaderEnabled: false,
-      alternateScreen: false,
+      alternateScreen: true,
     });
 
     // Verify React element structure is valid (but don't deep dive into JSX internals)
     expect(reactElement).toBeDefined();
+  });
+
+  it('should not use alternate screen when VP mode is explicitly disabled', async () => {
+    const { render } = await import('ink');
+    const renderSpy = vi.mocked(render);
+    const legacySettings = {
+      ...mockSettings,
+      merged: {
+        ...mockSettings.merged,
+        ui: {
+          ...mockSettings.merged.ui,
+          useTerminalBuffer: false,
+        },
+      },
+    } as LoadedSettings;
+
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    await startInteractiveUI(
+      mockConfig,
+      legacySettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+    );
+
+    const [, options] = renderSpy.mock.calls[0];
+    expect(options).toMatchObject({ alternateScreen: false });
+  });
+
+  it('should not use alternate screen when stdout is not interactive', async () => {
+    Object.defineProperty(process.stdout, 'isTTY', {
+      value: false,
+      configurable: true,
+    });
+    const { render } = await import('ink');
+    const renderSpy = vi.mocked(render);
+
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    await startInteractiveUI(
+      mockConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+    );
+
+    const [, options] = renderSpy.mock.calls[0];
+    expect(options).toMatchObject({ alternateScreen: false });
+  });
+
+  it('should not use alternate screen when TERM is dumb', async () => {
+    vi.stubEnv('TERM', 'dumb');
+    const { render } = await import('ink');
+    const renderSpy = vi.mocked(render);
+
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    await startInteractiveUI(
+      mockConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+    );
+
+    const [, options] = renderSpy.mock.calls[0];
+    expect(options).toMatchObject({ alternateScreen: false });
+  });
+
+  it('should not use alternate screen in CI with a TTY stdout', async () => {
+    vi.stubEnv('CI', 'true');
+    const { render } = await import('ink');
+    const renderSpy = vi.mocked(render);
+
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    await startInteractiveUI(
+      mockConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+    );
+
+    const [, options] = renderSpy.mock.calls[0];
+    expect(options).toMatchObject({ alternateScreen: false });
+  });
+
+  it('should not use alternate screen in screen reader mode when VP mode is unset', async () => {
+    const { render } = await import('ink');
+    const renderSpy = vi.mocked(render);
+    const screenReaderConfig = {
+      ...mockConfig,
+      getScreenReader: () => true,
+    } as Config;
+
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    await startInteractiveUI(
+      screenReaderConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+    );
+
+    const [, options] = renderSpy.mock.calls[0];
+    expect(options).toMatchObject({
+      isScreenReaderEnabled: true,
+      alternateScreen: false,
+    });
+  });
+
+  it('should not use alternate screen in screen reader mode even when VP mode is explicitly enabled', async () => {
+    const { render } = await import('ink');
+    const renderSpy = vi.mocked(render);
+    const screenReaderConfig = {
+      ...mockConfig,
+      getScreenReader: () => true,
+    } as Config;
+    const vpSettings = {
+      ...mockSettings,
+      merged: {
+        ...mockSettings.merged,
+        ui: {
+          ...mockSettings.merged.ui,
+          useTerminalBuffer: true,
+        },
+      },
+    } as LoadedSettings;
+
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    await startInteractiveUI(
+      screenReaderConfig,
+      vpSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+    );
+
+    const [, options] = renderSpy.mock.calls[0];
+    expect(options).toMatchObject({
+      isScreenReaderEnabled: true,
+      alternateScreen: false,
+    });
   });
 
   it('should perform all startup tasks in correct order', async () => {

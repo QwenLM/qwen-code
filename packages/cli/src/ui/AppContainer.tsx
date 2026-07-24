@@ -18,6 +18,7 @@ import { type DOMElement, measureElement } from 'ink';
 import { App } from './App.js';
 import { AppContext } from './contexts/AppContext.js';
 import { UIStateContext, type UIState } from './contexts/UIStateContext.js';
+import { VirtualViewportContext } from './contexts/VirtualViewportContext.js';
 import {
   UIActionsContext,
   type UIActions,
@@ -125,6 +126,10 @@ import { useAuthCommand } from './auth/useAuth.js';
 import { useEditorSettings } from './hooks/useEditorSettings.js';
 import { usePreferredEditor } from './hooks/usePreferredEditor.js';
 import { useSettingsCommand } from './hooks/useSettingsCommand.js';
+import {
+  isInteractiveTerminal,
+  shouldUseVirtualViewport,
+} from './utils/terminal-buffer.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
 import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
@@ -454,6 +459,7 @@ interface AppContainerProps {
   startupWarnings?: string[];
   version: string;
   initializationResult: InitializationResult;
+  initialUseVirtualViewport?: boolean;
   extensionRefreshState?: ExtensionRefreshState;
 }
 
@@ -470,7 +476,8 @@ const SHELL_WIDTH_FRACTION = 0.89;
 const SHELL_HEIGHT_PADDING = 10;
 
 export const AppContainer = (props: AppContainerProps) => {
-  const { settings, config, initializationResult } = props;
+  const { settings, config, initializationResult, initialUseVirtualViewport } =
+    props;
   const extensionRefreshState = useMemo(
     () => props.extensionRefreshState ?? new ExtensionRefreshState(),
     [props.extensionRefreshState],
@@ -1107,12 +1114,20 @@ export const AppContainer = (props: AppContainerProps) => {
   // cursorTo+eraseDown would be a wasted flash and would also corrupt the
   // in-app scroll position. The remount-key bump is also a near-no-op for
   // VP: nothing in the VP render path is keyed by historyRemountKey, so
-  // the only reason to bump it is to keep the legacy `<Static>` branch in
-  // sync if the user toggles `useTerminalBuffer` off mid-session. The
-  // visible refresh in VP mode comes for free from the React tree
+  // keeping the bump is harmless because the startup-scoped VP decision
+  // is intentionally restart-only to match Ink's alternateScreen lifetime.
+  // The visible refresh in VP mode comes for free from the React tree
   // re-reading `mergedHistory` / `allVirtualItems` on whatever state
   // change triggered refreshStatic (Ctrl+O, model change, etc.).
-  const useTerminalBuffer = settings.merged.ui?.useTerminalBuffer ?? false;
+  const [useTerminalBuffer] = useState(
+    () =>
+      initialUseVirtualViewport ??
+      shouldUseVirtualViewport(
+        settings.merged.ui?.useTerminalBuffer,
+        config.getScreenReader(),
+        isInteractiveTerminal(),
+      ),
+  );
   const showScrollbar = settings.merged.ui?.showScrollbar ?? true;
   const refreshStatic = useCallback(() => {
     // While the transcript (alt-screen) owns the whole screen, suppress static
@@ -4532,43 +4547,45 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   return (
-    <UIStateContext.Provider value={uiState}>
-      <UIActionsContext.Provider value={uiActions}>
-        <ConfigContext.Provider value={config}>
-          <AppContext.Provider
-            value={{
-              version: props.version,
-              startupWarnings,
-            }}
-          >
-            <ThoughtExpandedProvider value={thoughtExpandedValue}>
-              <RenderModeProvider value={renderModeValue}>
-                <TerminalOutputProvider value={writeRaw}>
-                  <ShellFocusContext.Provider value={isFocused}>
-                    {transcriptFreeze ? (
-                      // TranscriptView renders as a sibling of <App/>, which
-                      // owns the StreamingContext.Provider — so the frozen
-                      // transcript subtree has no provider of its own. A
-                      // pending tool group captured in the snapshot can hold a
-                      // tool in the Executing state, whose spinner calls
-                      // useStreamingContext and would otherwise throw. Provide
-                      // the context here so the transcript renders.
-                      <StreamingContext.Provider value={streamingState}>
-                        <TranscriptView
-                          items={transcriptItems}
-                          useAlternateScreen={!useTerminalBuffer}
-                        />
-                      </StreamingContext.Provider>
-                    ) : (
-                      <App />
-                    )}
-                  </ShellFocusContext.Provider>
-                </TerminalOutputProvider>
-              </RenderModeProvider>
-            </ThoughtExpandedProvider>
-          </AppContext.Provider>
-        </ConfigContext.Provider>
-      </UIActionsContext.Provider>
-    </UIStateContext.Provider>
+    <VirtualViewportContext.Provider value={useTerminalBuffer}>
+      <UIStateContext.Provider value={uiState}>
+        <UIActionsContext.Provider value={uiActions}>
+          <ConfigContext.Provider value={config}>
+            <AppContext.Provider
+              value={{
+                version: props.version,
+                startupWarnings,
+              }}
+            >
+              <ThoughtExpandedProvider value={thoughtExpandedValue}>
+                <RenderModeProvider value={renderModeValue}>
+                  <TerminalOutputProvider value={writeRaw}>
+                    <ShellFocusContext.Provider value={isFocused}>
+                      {transcriptFreeze ? (
+                        // TranscriptView renders as a sibling of <App/>, which
+                        // owns the StreamingContext.Provider — so the frozen
+                        // transcript subtree has no provider of its own. A
+                        // pending tool group captured in the snapshot can hold a
+                        // tool in the Executing state, whose spinner calls
+                        // useStreamingContext and would otherwise throw. Provide
+                        // the context here so the transcript renders.
+                        <StreamingContext.Provider value={streamingState}>
+                          <TranscriptView
+                            items={transcriptItems}
+                            useAlternateScreen={!useTerminalBuffer}
+                          />
+                        </StreamingContext.Provider>
+                      ) : (
+                        <App />
+                      )}
+                    </ShellFocusContext.Provider>
+                  </TerminalOutputProvider>
+                </RenderModeProvider>
+              </ThoughtExpandedProvider>
+            </AppContext.Provider>
+          </ConfigContext.Provider>
+        </UIActionsContext.Provider>
+      </UIStateContext.Provider>
+    </VirtualViewportContext.Provider>
   );
 };

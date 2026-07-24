@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { useStdout } from 'ink';
 import { renderWithProviders } from '../../../test-utils/render.js';
 import { LoadedSettings } from '../../../config/settings.js';
+import { VirtualViewportContext } from '../../contexts/VirtualViewportContext.js';
 import { RadioButtonSelect } from './RadioButtonSelect.js';
 
 // `useMouseEvents` gates SGR mouse escapes on `stdout.isTTY` (so they never leak
@@ -74,6 +75,30 @@ describe('BaseSelectionList with mouse enabled (integration)', () => {
     expect(lastFrame()).toContain('Beta');
     // ...and useMouseEvents wrote the any-event enable escape to its stdout.
     expect(enabledAnyWritten()).toBe(true);
+  });
+
+  it('uses the startup VP decision when the raw setting is unset', () => {
+    const { frames } = renderWithProviders(
+      <VirtualViewportContext.Provider value={true}>
+        <RadioButtonSelect items={items} onSelect={() => {}} />
+      </VirtualViewportContext.Provider>,
+    );
+    const output = frames.join('\n');
+    expect(output).toContain('Alpha');
+    expect(output).toContain('Beta');
+    expect(enabledAnyWritten()).toBe(true);
+  });
+
+  it('keeps the mouse layer off when the startup decision overrides an enabled setting', () => {
+    const { lastFrame } = renderWithProviders(
+      <VirtualViewportContext.Provider value={false}>
+        <RadioButtonSelect items={items} onSelect={() => {}} />
+      </VirtualViewportContext.Provider>,
+      { settings: settingsWithMouse(true) },
+    );
+    expect(lastFrame()).toContain('Alpha');
+    expect(lastFrame()).toContain('Beta');
+    expect(enabledAnyWritten()).toBe(false);
   });
 
   it('does not mount the mouse layer when ui.useTerminalBuffer is off', () => {

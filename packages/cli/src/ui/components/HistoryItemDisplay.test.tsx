@@ -18,6 +18,7 @@ import { renderWithProviders } from '../../test-utils/render.js';
 import { LoadedSettings } from '../../config/settings.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
+import { VirtualViewportContext } from '../contexts/VirtualViewportContext.js';
 import type { MouseEvent } from '../utils/mouse.js';
 import {
   layoutRowForEvent,
@@ -586,6 +587,20 @@ describe('<HistoryItemDisplay />', () => {
       durationMs: 1200,
     };
 
+    const settingsWithVp = (enabled: boolean) =>
+      new LoadedSettings(
+        { path: '', settings: {}, originalSettings: {} },
+        { path: '', settings: {}, originalSettings: {} },
+        {
+          path: '',
+          settings: { ui: { useTerminalBuffer: enabled } },
+          originalSettings: {},
+        },
+        { path: '', settings: {}, originalSettings: {} },
+        true,
+        new Set(),
+      );
+
     const mouseEvent = (name: MouseEvent['name'], col: number): MouseEvent => ({
       name,
       col,
@@ -637,6 +652,35 @@ describe('<HistoryItemDisplay />', () => {
       // VP gate, so useMouseEvents only arms it in VP mode.
       expect(opts?.isActive).toBe(true);
       expect(opts?.bypassVpGate ?? false).toBe(false);
+    });
+
+    it('shows the click hint when raw settings are unset but startup VP is enabled', () => {
+      const { lastFrame } = renderWithProviders(
+        <VirtualViewportContext.Provider value={true}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={false}
+          />
+        </VirtualViewportContext.Provider>,
+      );
+
+      expect(lastFrame()).toContain(`click or ${toggleKeyHint} to expand`);
+    });
+
+    it('hides the click hint when startup VP overrides an enabled setting', () => {
+      const { lastFrame } = renderWithProviders(
+        <VirtualViewportContext.Provider value={false}>
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={false}
+          />
+        </VirtualViewportContext.Provider>,
+        { settings: settingsWithVp(true) },
+      );
+
+      expect(lastFrame()).not.toContain(`click or ${toggleKeyHint} to expand`);
     });
 
     it('toggles on a complete click', () => {

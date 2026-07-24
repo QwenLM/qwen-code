@@ -60,6 +60,7 @@ import { MemorySavedMessage } from './messages/MemorySavedMessage.js';
 import { DiffStatsDisplay } from './messages/DiffStatsDisplay.js';
 import { GoalStatusMessage } from './messages/GoalStatusMessage.js';
 import { useSettings } from '../contexts/SettingsContext.js';
+import { useVirtualViewport } from '../contexts/VirtualViewportContext.js';
 import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
 import type { MouseEvent } from '../utils/mouse.js';
@@ -124,7 +125,7 @@ const ClickableThinkMessage: React.FC<{
   const pressRef = useRef<{ col: number; row: number } | null>(null);
   const { rows: terminalHeight } = useTerminalSize();
   const settings = useSettings();
-  const clickable = !!settings.merged.ui?.useTerminalBuffer;
+  const clickable = useVirtualViewport(settings.merged.ui?.useTerminalBuffer);
   const isActive = !isPending;
 
   useMouseEvents(
