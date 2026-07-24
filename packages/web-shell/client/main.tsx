@@ -172,7 +172,6 @@ function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
             onLanguageChange: handleLanguageChange,
             onSessionIdChange: handleSessionIdChange,
             sidebar: true,
-            showWorktreeToggle: true,
             compactThinking: true,
             markdownTableMode: 'advanced',
           }}

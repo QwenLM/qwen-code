@@ -49,6 +49,7 @@ import {
   parsePositiveIntegerEnvValue,
 } from '../tokenLimits.js';
 import { setToolCallPreparations } from '../tool-call-preparation.js';
+import { reportAnthropicRequest } from '../../telemetry/gen-ai-request.js';
 
 const debugLogger = createDebugLogger('ANTHROPIC');
 
@@ -347,6 +348,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     try {
       const anthropicRequest = await this.buildRequest(request);
       runtimeDiagnostics.recordAnthropicWireRequest(anthropicRequest);
+      reportAnthropicRequest(anthropicRequest);
       const headers = this.buildPerRequestHeaders(anthropicRequest);
       response = (await this.client.messages.create(anthropicRequest, {
         signal: perRequestAc?.signal,
@@ -373,6 +375,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       stream: true,
     };
     runtimeDiagnostics.recordAnthropicWireRequest(streamingRequest);
+    reportAnthropicRequest(streamingRequest);
 
     // Wrap the caller's signal in a per-request child so the Anthropic SDK's
     // leaked abort listener (core.mjs fetchWithTimeout registers one with no
@@ -1394,6 +1397,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     let response: Message;
     try {
       runtimeDiagnostics.recordAnthropicWireRequest(fallbackRequest);
+      reportAnthropicRequest(fallbackRequest);
       response = (await this.client.messages.create(fallbackRequest, {
         signal: abortSignal,
         ...(headers ? { headers } : {}),

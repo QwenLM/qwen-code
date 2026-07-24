@@ -22,9 +22,13 @@ const mockTokenizer = {
   calculateTokens: vi.fn(),
   dispose: vi.fn(),
 };
+const mockReportAnthropicRequest = vi.hoisted(() => vi.fn());
 
 vi.mock('../../utils/request-tokenizer/index.js', () => ({
   RequestTokenEstimator: vi.fn(() => mockTokenizer),
+}));
+vi.mock('../../telemetry/gen-ai-request.js', () => ({
+  reportAnthropicRequest: mockReportAnthropicRequest,
 }));
 
 type AnthropicCreateArgs = [
@@ -1203,7 +1207,9 @@ describe('AnthropicContentGenerator', () => {
       // fallback (which would double latency + API cost).
       expect(anthropicState.createImpl).toHaveBeenCalledTimes(1);
 
-      const [, options] = anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      const [streamingRequest, options] =
+        anthropicState.lastCreateArgs as AnthropicCreateArgs;
+      expect(mockReportAnthropicRequest).toHaveBeenCalledWith(streamingRequest);
       const headers = ((options as { headers?: Record<string, string> })
         ?.headers || {}) as Record<string, string>;
       expect(headers['anthropic-beta']).toContain(
@@ -1413,6 +1419,7 @@ describe('AnthropicContentGenerator', () => {
           output_config: { effort: 'high' },
         }),
       );
+      expect(mockReportAnthropicRequest).toHaveBeenCalledWith(anthropicRequest);
 
       expect(convertResponseSpy).toHaveBeenCalledTimes(1);
     });
@@ -3840,6 +3847,10 @@ describe('AnthropicContentGenerator', () => {
         expect.objectContaining({ stream: true }),
       );
       expect(fallbackRequest).not.toHaveProperty('stream');
+      expect(mockReportAnthropicRequest).toHaveBeenNthCalledWith(
+        2,
+        fallbackRequest,
+      );
     });
 
     it('converts the non-streaming fallback response when an empty stream is recoverable', async () => {

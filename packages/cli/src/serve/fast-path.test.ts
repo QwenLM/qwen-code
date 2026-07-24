@@ -69,6 +69,11 @@ const originalRateLimit = process.env['QWEN_SERVE_RATE_LIMIT'];
 const originalRateLimitPrompt = process.env['QWEN_SERVE_RATE_LIMIT_PROMPT'];
 const originalCloudShell = process.env['CLOUD_SHELL'];
 const originalGoogleCloudProject = process.env['GOOGLE_CLOUD_PROJECT'];
+const originalNodeCompileCache = process.env['NODE_COMPILE_CACHE'];
+const originalNodeDisableCompileCache =
+  process.env['NODE_DISABLE_COMPILE_CACHE'];
+const originalPendingCompileCache =
+  process.env['QWEN_CODE_PENDING_COMPILE_CACHE'];
 const originalCwd = process.cwd();
 const cliPackageRoot = process.cwd();
 
@@ -333,6 +338,22 @@ afterEach(() => {
     delete process.env['GOOGLE_CLOUD_PROJECT'];
   } else {
     process.env['GOOGLE_CLOUD_PROJECT'] = originalGoogleCloudProject;
+  }
+  if (originalNodeCompileCache === undefined) {
+    delete process.env['NODE_COMPILE_CACHE'];
+  } else {
+    process.env['NODE_COMPILE_CACHE'] = originalNodeCompileCache;
+  }
+  if (originalNodeDisableCompileCache === undefined) {
+    delete process.env['NODE_DISABLE_COMPILE_CACHE'];
+  } else {
+    process.env['NODE_DISABLE_COMPILE_CACHE'] = originalNodeDisableCompileCache;
+  }
+  if (originalPendingCompileCache === undefined) {
+    delete process.env['QWEN_CODE_PENDING_COMPILE_CACHE'];
+  } else {
+    process.env['QWEN_CODE_PENDING_COMPILE_CACHE'] =
+      originalPendingCompileCache;
   }
   if (originalQwenRuntimeDir === undefined) {
     delete process.env['QWEN_RUNTIME_DIR'];
@@ -1131,6 +1152,26 @@ describe('serve fast path environment bootstrap', () => {
     await bootstrapServeFastPathEnvironment(tempWorkspace);
 
     expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-workspace-env');
+  });
+
+  it('preserves workspace .env compile cache over the pending default', async () => {
+    delete process.env['NODE_COMPILE_CACHE'];
+    delete process.env['NODE_DISABLE_COMPILE_CACHE'];
+    process.env['QWEN_CODE_PENDING_COMPILE_CACHE'] = '/tmp/generated-cache';
+    useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-compile-cache-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', '.env'),
+      'NODE_COMPILE_CACHE=/tmp/operator-cache\n',
+    );
+
+    await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+    expect(process.env['NODE_COMPILE_CACHE']).toBe('/tmp/operator-cache');
+    expect(process.env['QWEN_CODE_PENDING_COMPILE_CACHE']).toBeUndefined();
   });
 
   it('loads .env from --workspace even when launched from another directory', async () => {

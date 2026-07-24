@@ -164,6 +164,7 @@ export {
   type DaemonSession,
   type DaemonSessionClosedReason,
   type DaemonWorktreeInfo,
+  type DaemonBranchInfo,
   type DaemonSessionClientOptions,
   type DaemonSessionContextStatus,
   type DaemonLspServerStatus,

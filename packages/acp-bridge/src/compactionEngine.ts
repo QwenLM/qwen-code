@@ -6,6 +6,7 @@
 
 import {
   EVENT_SCHEMA_VERSION,
+  logEventSizingFailed,
   serializedBridgeEventByteLength,
   type BridgeEvent,
   type CompactionEngine,
@@ -104,6 +105,33 @@ export interface ReplayWindowEviction {
 export interface TurnBoundaryCompactionEngineOptions {
   maxReplayBytes?: number;
   onReplayWindowEviction?: (eviction: ReplayWindowEviction) => void;
+  /**
+   * Caps on the in-flight live journal (DAEMON-009). The journal holds the
+   * RAW events of the current unfinished turn and is only reset at turn
+   * boundaries, so a single long-running streaming turn grew it — and the
+   * cost of every `snapshot()` — without bound. When either cap is hit the
+   * oldest journal entries are dropped and `snapshot()` prepends a
+   * `history_truncated` marker (`reason: 'replay_window_exceeded'`,
+   * `scope: 'live_journal'`) to the live journal. Turn compaction is
+   * unaffected: it folds from the `slots` working set, not the journal.
+   */
+  maxJournalEvents?: number;
+  maxJournalBytes?: number;
+}
+
+export const DEFAULT_MAX_JOURNAL_EVENTS = 2000;
+export const DEFAULT_MAX_JOURNAL_BYTES = 2 * 1024 * 1024;
+
+function normalizeJournalCap(
+  value: number | undefined,
+  fallback: number,
+  name: string,
+): number {
+  if (value === undefined) return fallback;
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new TypeError(`${name} must be a positive safe integer`);
+  }
+  return value;
 }
 
 /**
@@ -119,6 +147,8 @@ export interface TurnBoundaryCompactionEngineOptions {
  */
 export class TurnBoundaryCompactionEngine implements CompactionEngine {
   private readonly maxReplayBytes: number;
+  private readonly maxJournalEvents: number;
+  private readonly maxJournalBytes: number;
   private readonly onReplayWindowEviction:
     | ((eviction: ReplayWindowEviction) => void)
     | undefined;
@@ -126,6 +156,10 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
   private replaySegmentStart = 0;
   private replayBytes = 0;
   private liveJournal: BridgeEvent[] = [];
+  /** Serialized size of each `liveJournal` entry, index-parallel. */
+  private journalEntryBytes: number[] = [];
+  private journalTotalBytes = 0;
+  private journalTruncatedEvents = 0;
   private lastEventId = 0;
   private closed = false;
   private truncatedEvents = 0;
@@ -143,10 +177,20 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
   constructor(opts: TurnBoundaryCompactionEngineOptions = {}) {
     this.maxReplayBytes = normalizeCompactedReplayMaxBytes(opts.maxReplayBytes);
+    this.maxJournalEvents = normalizeJournalCap(
+      opts.maxJournalEvents,
+      DEFAULT_MAX_JOURNAL_EVENTS,
+      'maxJournalEvents',
+    );
+    this.maxJournalBytes = normalizeJournalCap(
+      opts.maxJournalBytes,
+      DEFAULT_MAX_JOURNAL_BYTES,
+      'maxJournalBytes',
+    );
     this.onReplayWindowEviction = opts.onReplayWindowEviction;
   }
 
-  ingest(event: BridgeEvent): void {
+  ingest(event: BridgeEvent, byteLength?: number): void {
     if (this.closed) return;
     if (event.id !== undefined) {
       this.lastEventId = event.id;
@@ -155,6 +199,26 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     if (TRANSIENT_TYPES.has(event.type)) return;
 
     this.liveJournal.push(event);
+    // The bus passes the byte size it already computed at publish time;
+    // self-compute only for callers that don't (defensive — events in the
+    // journal passed the publish serializability gate, so `?? 0` is
+    // unreachable in practice).
+    const bytes = byteLength ?? serializedBridgeEventByteLength(event) ?? 0;
+    this.journalEntryBytes.push(bytes);
+    this.journalTotalBytes += bytes;
+    // Journal cap (DAEMON-009): drop the OLDEST entries once either limit
+    // is exceeded. The byte cap keeps at least one entry (first-item rule,
+    // matching the queue byte cap) so a single oversized event doesn't
+    // wedge the journal empty forever.
+    while (
+      this.liveJournal.length > this.maxJournalEvents ||
+      (this.journalTotalBytes > this.maxJournalBytes &&
+        this.liveJournal.length > 1)
+    ) {
+      this.liveJournal.shift();
+      this.journalTotalBytes -= this.journalEntryBytes.shift() ?? 0;
+      this.journalTruncatedEvents += 1;
+    }
 
     if (TURN_BOUNDARY_TYPES.has(event.type)) {
       this.compactCurrentTurn(event);
@@ -176,9 +240,31 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         this.makeHistoryTruncatedEvent(compactedTurns.length),
       );
     }
+    const liveJournal = this.liveJournal.slice();
+    if (this.journalTruncatedEvents > 0) {
+      // Same wire shape as the compacted-window marker: the SDK's
+      // normalizer and type guard both REQUIRE
+      // `reason === 'replay_window_exceeded'` (anything else degrades the
+      // frame to an unknown/debug event), so the journal marker reuses it
+      // and carries `scope: 'live_journal'` as the discriminator — extra
+      // fields pass both validators untouched.
+      liveJournal.unshift({
+        v: EVENT_SCHEMA_VERSION,
+        type: 'history_truncated',
+        data: {
+          reason: 'replay_window_exceeded',
+          scope: 'live_journal',
+          truncatedEvents: this.journalTruncatedEvents,
+          retainedEvents: this.liveJournal.length,
+          maxBytes: this.maxJournalBytes,
+          maxEvents: this.maxJournalEvents,
+          fullTranscriptAvailable: true,
+        },
+      });
+    }
     return {
       compactedTurns,
-      liveJournal: this.liveJournal.slice(),
+      liveJournal,
       lastEventId: this.lastEventId,
     };
   }
@@ -191,7 +277,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
       if (TRANSIENT_TYPES.has(event.type)) continue;
       this.addReplaySegment([event], 0);
     }
-    this.liveJournal = [];
+    this.resetJournal();
     this.slots = [];
     this.toolSlotIndex.clear();
     this.clearTextSlotIndex();
@@ -223,7 +309,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
       recordEvents.push(event);
     }
     flushRecord();
-    this.liveJournal = [];
+    this.resetJournal();
     this.slots = [];
     this.toolSlotIndex.clear();
     this.clearTextSlotIndex();
@@ -233,7 +319,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     if (this.closed) return;
     this.closed = true;
     this.resetReplayWindow();
-    this.liveJournal = [];
+    this.resetJournal();
     this.slots = [];
     this.toolSlotIndex.clear();
     this.clearTextSlotIndex();
@@ -430,7 +516,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
     compacted.push(boundaryEvent);
     this.addReplaySegment(compacted, 1);
-    this.liveJournal = [];
+    this.resetJournal();
     this.slots = [];
     this.toolSlotIndex.clear();
     this.clearTextSlotIndex();
@@ -442,10 +528,28 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     }
   }
 
+  private resetJournal(): void {
+    this.liveJournal = [];
+    this.journalEntryBytes = [];
+    this.journalTotalBytes = 0;
+    this.journalTruncatedEvents = 0;
+  }
+
   private addReplaySegment(events: BridgeEvent[], turnCount: number): void {
     if (events.length === 0) return;
     const bytes = events.reduce(
-      (sum, event) => sum + serializedBridgeEventByteLength(event),
+      // Live events passed the publish-time serializability gate, but the
+      // seed paths (persisted transcripts) bypass it — log a diagnostic
+      // and count 0 so a single unserializable record can't wedge the
+      // replay-window accounting.
+      (sum, event) => {
+        const size = serializedBridgeEventByteLength(event);
+        if (size === undefined) {
+          logEventSizingFailed(event.type);
+          return sum;
+        }
+        return sum + size;
+      },
       0,
     );
     this.replaySegments.push({ events: events.slice(), bytes, turnCount });
