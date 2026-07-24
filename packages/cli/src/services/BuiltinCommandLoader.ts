@@ -16,6 +16,7 @@ import { approvalModeCommand } from '../ui/commands/approvalModeCommand.js';
 import { authCommand } from '../ui/commands/authCommand.js';
 import { branchCommand } from '../ui/commands/branchCommand.js';
 import { btwCommand } from '../ui/commands/btwCommand.js';
+import { advisorCommand } from '../ui/commands/advisor-command.js';
 import { bugCommand } from '../ui/commands/bugCommand.js';
 import { cdCommand } from '../ui/commands/cdCommand.js';
 import { clearCommand } from '../ui/commands/clearCommand.js';
@@ -107,6 +108,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
 
     const allDefinitions: Array<SlashCommand | null> = [
       aboutCommand,
+      advisorCommand,
       agentsCommand,
       tasksCommand,
       // Gated behind isWorkflowsEnabled — feature flag honors

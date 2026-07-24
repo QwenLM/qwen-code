@@ -558,6 +558,11 @@
       "type": "string",
       "default": ""
     },
+    "advisorModel": {
+      "description": "Model used by /advisor for second-opinion reviews of the conversation. Leave empty to use the main model. A model at least as capable as the main model is recommended.",
+      "type": "string",
+      "default": ""
+    },
     "visionModel": {
       "description": "Image-capable model used as the vision bridge: when a text-only main model receives an image, it is transcribed by this model first. Set with /model --vision. Leave empty to auto-pick a same-provider vision model.",
       "type": "string",
