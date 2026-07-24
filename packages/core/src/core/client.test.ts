@@ -5659,6 +5659,258 @@ hello
       expect(client['pendingMemoryPrefetch']).toBeUndefined();
     });
 
+    it('should fire StopFailure hook on always-on loop detection', async () => {
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const fireStopFailureEvent = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+        fireStopFailureEvent,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const loopDetector = client['loopDetector'];
+      vi.spyOn(loopDetector, 'checkAlwaysOnSafeties').mockReturnValue(true);
+      vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(
+        LoopType.TURN_TOOL_CALL_CAP,
+      );
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'looping' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'trigger a loop' }],
+        new AbortController().signal,
+        'prompt-id-sf-always',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _event of stream) {
+        // drain
+      }
+
+      expect(fireStopFailureEvent).toHaveBeenCalledWith(
+        'loop_detected',
+        LoopType.TURN_TOOL_CALL_CAP,
+      );
+    });
+
+    it('should fire StopFailure hook on heuristic loop detection', async () => {
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const fireStopFailureEvent = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+        fireStopFailureEvent,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const loopDetector = client['loopDetector'];
+      vi.spyOn(loopDetector, 'addAndCheckHeuristicLoops').mockReturnValue(true);
+      vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(
+        LoopType.CHANTING_IDENTICAL_SENTENCES,
+      );
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'looping' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'trigger a loop' }],
+        new AbortController().signal,
+        'prompt-id-sf-heuristic',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _event of stream) {
+        // drain
+      }
+
+      expect(fireStopFailureEvent).toHaveBeenCalledWith(
+        'loop_detected',
+        LoopType.CHANTING_IDENTICAL_SENTENCES,
+      );
+    });
+
+    it('should pass undefined error_details when loopType is null', async () => {
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const fireStopFailureEvent = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+        fireStopFailureEvent,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const loopDetector = client['loopDetector'];
+      vi.spyOn(loopDetector, 'addAndCheckHeuristicLoops').mockReturnValue(true);
+      vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(null);
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'looping' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'trigger a loop' }],
+        new AbortController().signal,
+        'prompt-id-sf-null',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _event of stream) {
+        // drain
+      }
+
+      expect(fireStopFailureEvent).toHaveBeenCalledWith(
+        'loop_detected',
+        undefined,
+      );
+    });
+
+    it('should not fire StopFailure hook on loop detection when hooks are disabled', async () => {
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const fireStopFailureEvent = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(true);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+        fireStopFailureEvent,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const loopDetector = client['loopDetector'];
+      vi.spyOn(loopDetector, 'checkAlwaysOnSafeties').mockReturnValue(true);
+      vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(
+        LoopType.TURN_TOOL_CALL_CAP,
+      );
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'looping' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'trigger a loop' }],
+        new AbortController().signal,
+        'prompt-id-sf-disabled',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _event of stream) {
+        // drain
+      }
+
+      expect(fireStopFailureEvent).not.toHaveBeenCalled();
+    });
+
+    it('should not fire StopFailure hook on loop detection when no StopFailure hooks configured', async () => {
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const fireStopFailureEvent = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(false);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+        fireStopFailureEvent,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const loopDetector = client['loopDetector'];
+      vi.spyOn(loopDetector, 'checkAlwaysOnSafeties').mockReturnValue(true);
+      vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(
+        LoopType.TURN_TOOL_CALL_CAP,
+      );
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'looping' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'trigger a loop' }],
+        new AbortController().signal,
+        'prompt-id-sf-no-hooks',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _event of stream) {
+        // drain
+      }
+
+      expect(fireStopFailureEvent).not.toHaveBeenCalled();
+    });
+
+    it('should swallow StopFailure hook rejection on loop detection', async () => {
+      const mockChat: Partial<GeminiChat> = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+      };
+      client['chat'] = mockChat as GeminiChat;
+
+      const fireStopFailureEvent = vi
+        .fn()
+        .mockRejectedValue(new Error('hook boom'));
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue({
+        fireStopFailureEvent,
+      } as unknown as ReturnType<Config['getHookSystem']>);
+
+      const loopDetector = client['loopDetector'];
+      vi.spyOn(loopDetector, 'checkAlwaysOnSafeties').mockReturnValue(true);
+      vi.spyOn(loopDetector, 'getLastLoopType').mockReturnValue(
+        LoopType.TURN_TOOL_CALL_CAP,
+      );
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'looping' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'trigger a loop' }],
+        new AbortController().signal,
+        'prompt-id-sf-reject',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _event of stream) {
+        // drain — must not throw
+      }
+
+      expect(fireStopFailureEvent).toHaveBeenCalledWith(
+        'loop_detected',
+        LoopType.TURN_TOOL_CALL_CAP,
+      );
+    });
+
     it('always-on consecutive halt clears all pending calls (uniform with the turn cap)', async () => {
       // skipLoopDetection defaults true, so this also confirms the consecutive
       // guard halts via the always-on path on a mixed batch (distinct calls
