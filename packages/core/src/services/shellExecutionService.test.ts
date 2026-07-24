@@ -444,6 +444,32 @@ describe('ShellExecutionService', () => {
       );
     });
 
+    it('suppresses parser diagnostics for malformed PTY output', async () => {
+      const consoleErrorSpy = vi
+        .spyOn(console, 'error')
+        .mockImplementation(() => {});
+
+      try {
+        const { result } = await simulateExecution(
+          'malformed-output',
+          (pty) => {
+            pty.onData.mock.calls[0][0]('\u001b\xb0');
+            pty.onData.mock.calls[0][0]('recovered');
+            pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+          },
+        );
+
+        expect(
+          consoleErrorSpy.mock.calls.some((args) =>
+            args.some((arg) => String(arg).includes('Parsing error')),
+          ),
+        ).toBe(false);
+        expect(result.output).toContain('recovered');
+      } finally {
+        consoleErrorSpy.mockRestore();
+      }
+    });
+
     it('should correctly decode multi-byte characters split across chunks', async () => {
       const { result } = await simulateExecution('echo "你好"', (pty) => {
         const multiByteChar = '你好';
