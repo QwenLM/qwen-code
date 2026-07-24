@@ -155,12 +155,24 @@ describe('buildThreadStatuses — signals', () => {
   });
 
   it('does not flag a negated blocker mention', () => {
-    const [t] = buildThreadStatuses(
-      [comment({ id: 1, body: 'No blockers here, just a nit.' })],
+    // The body must contain a phrase carriesBlockerSignal actually MATCHES so
+    // the negation branch is exercised: "blocking" hits /\bblocking\b/, and
+    // the leading "No " must suppress it. (The bare plural "blockers" matches
+    // no pattern at all, which would test nothing.)
+    const [negated] = buildThreadStatuses(
+      [comment({ id: 1, body: 'No blocking issues here, just a nit.' })],
       'author',
       noChange,
     );
-    expect(t.isBlocker).toBe(false);
+    expect(negated.isBlocker).toBe(false);
+    // Control: the same signal un-negated IS flagged, proving the false above
+    // is the negation logic and not a pattern that never fired.
+    const [asserted] = buildThreadStatuses(
+      [comment({ id: 2, body: 'This is a blocking defect.' })],
+      'author',
+      noChange,
+    );
+    expect(asserted.isBlocker).toBe(true);
   });
 
   it('never reports authorReplied for a ghost author matching a ghost replier', () => {
