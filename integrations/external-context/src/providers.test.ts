@@ -12,7 +12,6 @@ import {
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { renderExternalContext } from './context.js';
-import { ProviderResponseError, ProviderTimeoutError } from './http-client.js';
 import {
   GenericHttpSearchV1Adapter,
   Mem0PlatformV3Adapter,
@@ -25,7 +24,7 @@ afterEach(async () => {
 });
 
 describe('GenericHttpSearchV1Adapter', () => {
-  it('sends only query and limit and drops invalid entries', async () => {
+  it('sends only query and limit without discarding content for bad metadata', async () => {
     let requestBody: unknown;
     let authorization: string | undefined;
     let accept: string | undefined;
@@ -43,7 +42,22 @@ describe('GenericHttpSearchV1Adapter', () => {
             updated_at: '2026-07-23T00:00:00Z',
           },
           { id: 'invalid-without-content' },
-          { id: 'invalid-score', content: 'bad', score: 'high' },
+          {
+            id: 'invalid-score',
+            content: 'bad',
+            title: 42,
+            uri: false,
+            updated_at: [],
+            score: 'high',
+          },
+          { id: 'nullable-score', content: 'real', score: null },
+          {
+            id: 'large',
+            content: 'x'.repeat(150_000),
+            title: 't'.repeat(3000),
+            uri: `https://example.com/${'u'.repeat(5000)}`,
+          },
+          { id: 'i'.repeat(2000), content: 'oversized id' },
         ],
       });
     });
@@ -66,7 +80,7 @@ describe('GenericHttpSearchV1Adapter', () => {
     expect(JSON.stringify(requestBody)).not.toMatch(
       /tenant|repository|namespace|filter/i,
     );
-    expect(items).toEqual([
+    expect(items.slice(0, 3)).toEqual([
       {
         id: 'valid',
         content: 'repository policy',
@@ -74,6 +88,30 @@ describe('GenericHttpSearchV1Adapter', () => {
         score: 0.82,
         updatedAt: '2026-07-23T00:00:00Z',
       },
+      { id: 'invalid-score', content: 'bad' },
+      { id: 'nullable-score', content: 'real' },
+    ]);
+    expect(items[3]).toMatchObject({ id: 'large' });
+    expect(items[3]?.content).toHaveLength(150_000);
+    expect(items[3]?.title).toHaveLength(3000);
+    expect(items[3]?.uri).toHaveLength(5020);
+    expect(items[4]?.id).toHaveLength(2000);
+  });
+
+  it('filters invalid entries before applying the result limit', async () => {
+    const baseUrl = await startServer((_request, response) => {
+      json(response, {
+        items: [
+          ...Array.from({ length: 5 }, (_, index) => ({
+            id: `invalid-${index}`,
+          })),
+          { id: 'valid', content: 'repository policy' },
+        ],
+      });
+    });
+
+    await expect(searchGeneric(baseUrl)).resolves.toEqual([
+      { id: 'valid', content: 'repository policy' },
     ]);
   });
 
@@ -112,8 +150,8 @@ describe('GenericHttpSearchV1Adapter', () => {
       response.end();
     });
 
-    await expect(searchGeneric(baseUrl)).rejects.toBeInstanceOf(
-      ProviderResponseError,
+    await expect(searchGeneric(baseUrl)).rejects.toThrow(
+      'External context provider returned an invalid response.',
     );
   });
 
@@ -126,8 +164,8 @@ describe('GenericHttpSearchV1Adapter', () => {
       response.end('{}');
     });
 
-    await expect(searchGeneric(baseUrl)).rejects.toBeInstanceOf(
-      ProviderResponseError,
+    await expect(searchGeneric(baseUrl)).rejects.toThrow(
+      'External context provider returned an invalid response.',
     );
   });
 
@@ -138,8 +176,8 @@ describe('GenericHttpSearchV1Adapter', () => {
       response.end('x'.repeat(512 * 1024 + 1));
     });
 
-    await expect(searchGeneric(baseUrl)).rejects.toBeInstanceOf(
-      ProviderResponseError,
+    await expect(searchGeneric(baseUrl)).rejects.toThrow(
+      'External context provider returned an invalid response.',
     );
   });
 
@@ -184,7 +222,9 @@ describe('GenericHttpSearchV1Adapter', () => {
         limit: 5,
         signal: AbortSignal.timeout(1000),
       }),
-    ).rejects.toBeInstanceOf(ProviderResponseError);
+    ).rejects.toThrow(
+      'External context provider returned an invalid response.',
+    );
   });
 
   it('rejects a valid JSON response with an invalid envelope', async () => {
@@ -214,10 +254,12 @@ describe('GenericHttpSearchV1Adapter', () => {
         limit: 5,
         signal: AbortSignal.timeout(1000),
       }),
-    ).rejects.toBeInstanceOf(ProviderResponseError);
+    ).rejects.toThrow(
+      'External context provider returned an invalid response.',
+    );
   });
 
-  it('preserves the caller timeout classification', async () => {
+  it('reports an interrupted request without a public error taxonomy', async () => {
     const delayedUrl = await startServer(
       async (_request, response) =>
         new Promise<void>((resolve) => {
@@ -240,11 +282,34 @@ describe('GenericHttpSearchV1Adapter', () => {
         limit: 5,
         signal: AbortSignal.timeout(10),
       }),
-    ).rejects.toBeInstanceOf(ProviderTimeoutError);
+    ).rejects.toThrow('External context provider request did not complete.');
   });
 });
 
 describe('Mem0PlatformV3Adapter', () => {
+  it('validates an injected test origin before sending a project key', () => {
+    const config = {
+      type: 'mem0-platform-v3' as const,
+      apiKeyEnv: 'MEM0_API_KEY',
+      apiKey: 'project-key',
+      appId: 'fixed-repository',
+    };
+    expect(
+      () =>
+        new Mem0PlatformV3Adapter(
+          config,
+          new URL('http://context.example.com'),
+        ),
+    ).toThrow('Provider URL must use HTTPS or loopback HTTP.');
+    expect(
+      () =>
+        new Mem0PlatformV3Adapter(
+          config,
+          new URL('https://context.example.com/prefix'),
+        ),
+    ).toThrow('Provider URL must not contain credentials, path');
+  });
+
   it('binds app_id and fixed V3 search options in the adapter', async () => {
     let requestBody: unknown;
     let requestPath: string | undefined;

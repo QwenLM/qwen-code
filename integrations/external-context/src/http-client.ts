@@ -6,36 +6,20 @@
 
 const MAX_RESPONSE_BYTES = 1024 * 1024;
 
-class ProviderHttpError extends Error {
-  constructor() {
-    super('External context provider rejected the request.');
-    this.name = 'ProviderHttpError';
-  }
-}
-
-export class ProviderResponseError extends Error {
+class ProviderResponseError extends Error {
   constructor() {
     super('External context provider returned an invalid response.');
     this.name = 'ProviderResponseError';
   }
 }
 
-export class ProviderTransportError extends Error {
-  constructor() {
-    super('External context provider request did not complete.');
-    this.name = 'ProviderTransportError';
-  }
-}
-
-export class ProviderTimeoutError extends ProviderTransportError {
-  constructor() {
-    super();
-    this.name = 'TimeoutError';
-  }
-}
-
 export function validateProviderBaseUrl(value: string): URL {
-  const url = new URL(value);
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error('Provider URL is invalid.');
+  }
   if (
     url.username ||
     url.password ||
@@ -81,7 +65,7 @@ export async function postJson(input: {
       signal: input.signal,
     });
   } catch {
-    throw transportError(input.signal);
+    throw new Error('External context provider request did not complete.');
   }
 
   if (response.status >= 300 && response.status < 400) {
@@ -90,7 +74,7 @@ export async function postJson(input: {
   }
   if (!response.ok) {
     cancelResponseBody(response);
-    throw new ProviderHttpError();
+    throw new Error('External context provider rejected the request.');
   }
 
   const declaredLength = response.headers.get('content-length');
@@ -109,7 +93,7 @@ export async function postJson(input: {
     if (error instanceof ProviderResponseError) {
       throw error;
     }
-    throw transportError(input.signal);
+    throw new Error('External context provider request did not complete.');
   }
 
   try {
@@ -117,19 +101,6 @@ export async function postJson(input: {
   } catch {
     throw new ProviderResponseError();
   }
-}
-
-function transportError(signal: AbortSignal): ProviderTransportError {
-  if (
-    signal.aborted &&
-    typeof signal.reason === 'object' &&
-    signal.reason !== null &&
-    'name' in signal.reason &&
-    signal.reason.name === 'TimeoutError'
-  ) {
-    return new ProviderTimeoutError();
-  }
-  return new ProviderTransportError();
 }
 
 function cancelResponseBody(response: Response): void {

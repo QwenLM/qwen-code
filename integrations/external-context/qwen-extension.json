@@ -13,7 +13,8 @@
     "external-context": {
       "command": "node",
       "args": ["${extensionPath}${/}dist${/}main.js"],
-      "cwd": "${extensionPath}"
+      "cwd": "${extensionPath}",
+      "includeTools": ["context_search"]
     }
   }
 }

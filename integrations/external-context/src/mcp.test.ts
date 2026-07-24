@@ -160,6 +160,25 @@ describe('external context MCP server', () => {
     expect(JSON.stringify(result)).toContain('External context search failed.');
     expect(JSON.stringify(result)).not.toContain('secret upstream');
   });
+
+  it('reports an empty normalized query without calling the provider', async () => {
+    const search = vi.fn().mockResolvedValue([]);
+    const client = await connect({
+      config: config(),
+      provider: { search },
+    });
+
+    const result = await client.callTool({
+      name: 'context_search',
+      arguments: { query: ' \t\n ' },
+    });
+
+    expect(result.isError).toBe(true);
+    expect(JSON.stringify(result.content)).toContain(
+      'Search query must not be empty.',
+    );
+    expect(search).not.toHaveBeenCalled();
+  });
 });
 
 function config(): ExternalContextConfig {

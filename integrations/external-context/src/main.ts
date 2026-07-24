@@ -4,11 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { ConfigurationError } from './config.js';
 import { runMcp } from './mcp.js';
 
 try {
   await runMcp();
-} catch {
-  process.stderr.write('[external-context] startup failed\n');
+} catch (error) {
+  const message =
+    error instanceof ConfigurationError
+      ? error.message
+      : 'External context startup failed.';
+  process.stderr.write(`[external-context] ${message}\n`);
   process.exitCode = 1;
 }

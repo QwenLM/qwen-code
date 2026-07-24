@@ -65,6 +65,42 @@ describe('renderExternalContext', () => {
     expect(items.every((item) => item.content.length <= 1000)).toBe(true);
   });
 
+  it('uses serialized length when trimming escape-heavy content', () => {
+    const sources = Array.from({ length: 5 }, (_, index) => ({
+      id: `item-${index}`,
+      content: '\0\n"\\🙂'.repeat(200),
+    }));
+    const rendered = renderExternalContext(sources);
+    const items = JSON.parse(rendered).untrusted_external_context
+      .items as Array<{ id: string; content: string }>;
+
+    expect(rendered.length).toBeLessThanOrEqual(4000);
+    expect(items.length).toBeGreaterThan(0);
+    expect(items.every((item) => item.content.length > 0)).toBe(true);
+    expect(items.map((item) => item.id)).toEqual(
+      sources.slice(0, items.length).map((item) => item.id),
+    );
+  });
+
+  it('drops low-value metadata before provenance under budget pressure', () => {
+    const rendered = renderExternalContext(
+      Array.from({ length: 5 }, (_, index) => ({
+        id: `item-${index}`,
+        content: 'x'.repeat(500),
+        title: 't'.repeat(150),
+        uri: `https://example.com/${'u'.repeat(40)}`,
+        score: 0.9,
+        updatedAt: '2026-07-23T00:00:00Z',
+      })),
+    );
+    const items = JSON.parse(rendered).untrusted_external_context
+      .items as Array<{ uri?: string; score?: number }>;
+
+    expect(items.some((item) => item.uri && item.score === undefined)).toBe(
+      true,
+    );
+  });
+
   it('renders an empty result set in the same untrusted envelope', () => {
     expect(JSON.parse(renderExternalContext([]))).toEqual({
       untrusted_external_context: {

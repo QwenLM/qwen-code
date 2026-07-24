@@ -52,8 +52,16 @@ export function createExternalContextMcpServer(
       },
     },
     async ({ query }, extra) => {
+      let normalizedQuery: string;
       try {
-        const normalizedQuery = normalizeSearchQuery(query);
+        normalizedQuery = normalizeSearchQuery(query);
+      } catch (error) {
+        return errorResult(
+          error instanceof Error ? error.message : 'Search query is invalid.',
+        );
+      }
+
+      try {
         const items = await runtime.provider.search({
           query: normalizedQuery,
           limit: 5,

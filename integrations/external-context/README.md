@@ -105,7 +105,10 @@ confirmation; use the governed profile when that is required.
 For a local trusted trial, the built directory may instead be linked with
 `qwen extensions link`. The extension manifest contribution and
 workspace-scoped enablement are convenience mechanisms only; they do not
-provide the managed MCP source binding described above.
+provide the managed MCP source binding described above. Before starting Qwen,
+the trial environment must set `QWEN_EXTERNAL_CONTEXT_CONFIG` to the absolute
+configuration path and set the credential environment variable referenced by
+that file.
 
 Each MCP subprocess reads configuration and credentials once when it starts.
 Qwen may restart that subprocess, so the configuration path, file contents,
@@ -118,6 +121,8 @@ Qwen session and start a new one with a new managed configuration path.
 
 Phase 1 emits no local per-request audit record. It does not write queries,
 results, credentials, provider errors, or operation metadata to `stderr`.
+Sanitized startup configuration errors may be written once before the MCP
+server exits; unexpected startup failures remain opaque.
 Operators who need access records may use provider-side logs, but those are
 outside this integration and are not a tamper-resistant compliance audit.
 

@@ -156,7 +156,12 @@ The returned payload is JSON with this envelope:
 
 At most five items are returned. Each content field is capped at 1000
 characters and the serialized envelope is capped at 4000 characters. Optional
-metadata is bounded separately.
+metadata is bounded separately. These are independent maxima rather than a
+guarantee that five maximum-sized items fit simultaneously. Results remain a
+prefix of provider ranking: low-value metadata is removed before provenance,
+the final fitting item may have its content shortened against the serialized
+JSON budget, and lower-ranked items are omitted once the next item cannot
+retain non-empty content.
 
 JSON serialization preserves the data envelope, but it cannot guarantee that a
 model will ignore prompt injection embedded in retrieved content. Provider
@@ -164,11 +169,13 @@ content remains untrusted.
 
 ### Failure behavior
 
-Configuration is validated before the MCP server connects. A missing or
-invalid configuration causes a metadata-free startup failure. After startup,
-timeouts, rate limits, transport failures, invalid envelopes, and provider
-errors produce the stable MCP error `External context search failed.` They do
-not expose upstream bodies, URLs, queries, or credentials.
+Configuration is validated before the MCP server connects. Missing or invalid
+administrator configuration produces a sanitized local startup message;
+unexpected failures remain opaque. After startup, timeouts, rate limits,
+transport failures, invalid envelopes, and provider errors produce the stable
+MCP error `External context search failed.` Local query validation instead
+returns an actionable input error. Neither path exposes upstream bodies, URLs,
+queries, or credentials.
 
 The default search timeout is 5000 milliseconds. Administrators may configure
 1 through 30000 milliseconds. Requests are not retried and results are not
@@ -177,6 +184,7 @@ the in-flight provider request.
 
 Phase 1 emits no local per-request audit record. It does not write queries,
 results, credentials, provider errors, or operation metadata to `stderr`.
+Sanitized startup configuration messages are not per-request audit records.
 Operators may use provider-side access logs where available, but those logs are
 outside this integration and are not a tamper-resistant compliance audit.
 

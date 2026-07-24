@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { ConfigurationError } from './config.js';
 import { postJson, validateProviderBaseUrl } from './http-client.js';
 import type {
   ExternalContextItem,
@@ -32,7 +33,7 @@ export class GenericHttpSearchV1Adapter implements ExternalContextProvider {
   private readonly searchUrl: URL;
 
   constructor(private readonly config: GenericHttpProviderConfig) {
-    const baseUrl = validateProviderBaseUrl(config.baseUrl);
+    const baseUrl = validateConfiguredBaseUrl(config.baseUrl);
     this.searchUrl = new URL('/v1/context/search', baseUrl);
   }
 
@@ -52,10 +53,14 @@ export class GenericHttpSearchV1Adapter implements ExternalContextProvider {
 }
 
 export class Mem0PlatformV3Adapter implements ExternalContextProvider {
+  private readonly baseUrl: URL;
+
   constructor(
     private readonly config: Mem0ProviderConfig,
-    private readonly baseUrl: URL = MEM0_BASE_URL,
-  ) {}
+    baseUrl: URL = MEM0_BASE_URL,
+  ) {
+    this.baseUrl = validateConfiguredBaseUrl(baseUrl.toString());
+  }
 
   async search(input: {
     query: string;
@@ -68,7 +73,7 @@ export class Mem0PlatformV3Adapter implements ExternalContextProvider {
       body: {
         query: input.query,
         filters: { app_id: this.config.appId },
-        top_k: Math.min(input.limit, 5),
+        top_k: Math.min(input.limit, MAX_PROVIDER_ITEMS),
         threshold: 0.1,
         rerank: false,
       },
@@ -83,9 +88,9 @@ function parseGenericItems(response: unknown): readonly ExternalContextItem[] {
     throw new Error('External context provider returned an invalid response.');
   }
   return response['items']
-    .slice(0, MAX_PROVIDER_ITEMS)
     .map(parseGenericItem)
-    .filter((item): item is ExternalContextItem => item !== undefined);
+    .filter((item): item is ExternalContextItem => item !== undefined)
+    .slice(0, MAX_PROVIDER_ITEMS);
 }
 
 function parseGenericItem(value: unknown): ExternalContextItem | undefined {
@@ -104,11 +109,11 @@ function parseMem0Items(response: unknown): readonly ExternalContextItem[] {
     throw new Error('External context provider returned an invalid response.');
   }
   return values
-    .slice(0, MAX_PROVIDER_ITEMS)
     .map((value) =>
       isRecord(value) ? parseItemFields(value, 'memory') : undefined,
     )
-    .filter((item): item is ExternalContextItem => item !== undefined);
+    .filter((item): item is ExternalContextItem => item !== undefined)
+    .slice(0, MAX_PROVIDER_ITEMS);
 }
 
 function parseItemFields(
@@ -120,34 +125,21 @@ function parseItemFields(
   if (
     typeof id !== 'string' ||
     id.length === 0 ||
-    id.length > 512 ||
     typeof content !== 'string' ||
-    content.length === 0 ||
-    content.length > 100_000
+    content.length === 0
   ) {
     return undefined;
   }
 
   const optional = {
-    title: parseOptionalString(value['title'], 2000),
-    uri: parseOptionalString(value['uri'], 4096),
-    updatedAt: parseOptionalString(
-      value['updated_at'] ?? value['updatedAt'],
-      128,
-    ),
+    title: parseOptionalString(value['title']),
+    uri: parseOptionalString(value['uri']),
+    updatedAt: parseOptionalString(value['updated_at'] ?? value['updatedAt']),
     score:
       typeof value['score'] === 'number' && Number.isFinite(value['score'])
         ? value['score']
         : undefined,
   };
-  if (
-    optional.title === null ||
-    optional.uri === null ||
-    optional.updatedAt === null ||
-    (value['score'] !== undefined && optional.score === undefined)
-  ) {
-    return undefined;
-  }
 
   const item: ExternalContextItem = { id, content };
   if (optional.title !== undefined) {
@@ -165,19 +157,22 @@ function parseItemFields(
   return item;
 }
 
-function parseOptionalString(
-  value: unknown,
-  maximumLength: number,
-): string | undefined | null {
-  if (value === undefined || value === null) {
-    return undefined;
-  }
-  if (typeof value !== 'string' || value.length > maximumLength) {
-    return null;
-  }
-  return value;
+function parseOptionalString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function validateConfiguredBaseUrl(value: string): URL {
+  try {
+    return validateProviderBaseUrl(value);
+  } catch (error) {
+    throw new ConfigurationError(
+      error instanceof Error
+        ? error.message
+        : 'External context provider URL is invalid.',
+    );
+  }
 }

@@ -30,9 +30,9 @@ export function renderExternalContext(
   for (const source of sourceItems.slice(0, MAX_ITEMS)) {
     const item = compactItem(source);
     items.push(item);
-    trimNewestItemToBudget(items);
-    if (JSON.stringify(envelope(items)).length > MAX_RENDERED_CHARS) {
+    if (!fitNewestItemToBudget(items)) {
       items.pop();
+      break;
     }
   }
 
@@ -59,26 +59,43 @@ function compactItem(source: ExternalContextItem): ExternalContextItem {
   return item;
 }
 
-function trimNewestItemToBudget(items: ExternalContextItem[]): void {
+function fitNewestItemToBudget(items: ExternalContextItem[]): boolean {
   const item = items.at(-1);
   if (!item) {
-    return;
+    return false;
   }
 
-  for (const key of ['uri', 'title', 'updatedAt'] as const) {
-    if (JSON.stringify(envelope(items)).length <= MAX_RENDERED_CHARS) {
-      return;
+  for (const key of ['score', 'updatedAt', 'title', 'uri'] as const) {
+    if (fitsBudget(items)) {
+      return true;
     }
     delete item[key];
   }
 
-  const excess = JSON.stringify(envelope(items)).length - MAX_RENDERED_CHARS;
-  if (excess > 0) {
-    item.content = truncate(
-      item.content,
-      Math.max(0, Array.from(item.content).length - excess),
-    );
+  if (fitsBudget(items)) {
+    return true;
   }
+
+  const characters = Array.from(item.content);
+  let lower = 1;
+  let upper = characters.length;
+  let best = 0;
+  while (lower <= upper) {
+    const middle = Math.floor((lower + upper) / 2);
+    item.content = characters.slice(0, middle).join('');
+    if (fitsBudget(items)) {
+      best = middle;
+      lower = middle + 1;
+    } else {
+      upper = middle - 1;
+    }
+  }
+  item.content = characters.slice(0, best).join('');
+  return best > 0;
+}
+
+function fitsBudget(items: readonly ExternalContextItem[]): boolean {
+  return JSON.stringify(envelope(items)).length <= MAX_RENDERED_CHARS;
 }
 
 function envelope(items: readonly ExternalContextItem[]) {
