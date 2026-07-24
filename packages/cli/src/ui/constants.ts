@@ -45,4 +45,5 @@ export const ICON = {
   BECAUSE: `∵${_VS15}`,
   STAR: `★${_VS15}`,
   RADIO_FILLED: `◉${_VS15}`,
+  CIRCLE_LEFT_HALF: `◐${_VS15}`,
 } as const;

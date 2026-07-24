@@ -21,7 +21,7 @@ interface TodoDisplayProps {
 
 const STATUS_ICONS = {
   pending: ICON.CIRCLE_EMPTY,
-  in_progress: '◐',
+  in_progress: ICON.CIRCLE_LEFT_HALF,
   completed: ICON.CIRCLE_FILLED,
 } as const;
 
