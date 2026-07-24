@@ -21,8 +21,6 @@ interface GithubCursor {
 export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private octokit!: Octokit;
   private botUsername: string | null = null;
-  private recentlyProcessed = new Set<string>();
-  private static readonly MAX_RECENTLY_PROCESSED = 10_000;
 
   constructor(
     name: string,
@@ -103,6 +101,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       { since, per_page: 100 },
     );
 
+    notifications.sort((a, b) => a.updated_at.localeCompare(b.updated_at));
+
     let maxUpdatedAt = this.cursor.lastProcessedAt;
 
     for (const notification of notifications) {
@@ -119,6 +119,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const lastReadAt = notification.last_read_at;
       const windowSince = lastReadAt || since;
 
+      let latestCommentAt: string | undefined;
+
       try {
         const comments = await this.octokit.paginate(
           this.octokit.rest.issues.listComments,
@@ -131,6 +133,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           },
         );
 
+        comments.sort((a, b) =>
+          (a.created_at || '').localeCompare(b.created_at || ''),
+        );
+
         const newComments = comments.filter((c) => {
           if (
             c.user?.login &&
@@ -139,7 +145,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           ) {
             return false;
           }
-          if (this.recentlyProcessed.has(String(c.id))) return false;
           return true;
         });
 
@@ -177,11 +182,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             );
             await this.postErrorComment(chatId, issueNumber);
           }
-          this.recentlyProcessed.add(String(comment.id));
-          if (
-            this.recentlyProcessed.size > GithubChannel.MAX_RECENTLY_PROCESSED
-          ) {
-            this.recentlyProcessed.clear();
+          if (comment.created_at) {
+            latestCommentAt = comment.created_at;
           }
         }
 
@@ -194,7 +196,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           );
         }
       } finally {
-        await this.markThreadAsRead(notification.id);
+        await this.markThreadAsRead(notification.id, latestCommentAt);
       }
     }
 
@@ -217,8 +219,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       });
 
       const body = issue.body || '';
-      const messageId = `issue-body-${issueNumber}`;
-      if (this.recentlyProcessed.has(messageId)) return;
+      const createdAt = issue.created_at;
+      if (createdAt <= this.cursor.lastProcessedAt) return;
 
       const isMentioned = this.botUsername
         ? testBotMention(body, this.botUsername)
@@ -235,7 +237,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         senderName: issue.user?.login || 'unknown',
         chatId,
         threadId,
-        messageId,
+        messageId: `issue-body-${issueNumber}`,
         text,
         isGroup: true,
         isMentioned,
@@ -252,10 +254,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           `[Channel:${this.name}] handleInbound failed for issue body ${issueNumber}: ${err}\n`,
         );
         await this.postErrorComment(chatId, issueNumber);
-      }
-      this.recentlyProcessed.add(messageId);
-      if (this.recentlyProcessed.size > GithubChannel.MAX_RECENTLY_PROCESSED) {
-        this.recentlyProcessed.clear();
       }
     } catch (err) {
       process.stderr.write(
@@ -287,10 +285,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     return `Type: ${type} | Title: ${title} | URL: ${url}`;
   }
 
-  private async markThreadAsRead(threadId: string): Promise<void> {
+  private async markThreadAsRead(
+    threadId: string,
+    lastReadAt?: string,
+  ): Promise<void> {
     try {
       await this.octokit.rest.activity.markThreadAsRead({
         thread_id: Number(threadId),
+        ...(lastReadAt ? { last_read_at: lastReadAt } : {}),
       });
     } catch (err) {
       process.stderr.write(

@@ -257,9 +257,45 @@ describe('GithubChannel', () => {
       });
     });
 
-    it('deduplicates via recentlyProcessed', async () => {
+    it('sorts notifications by updated_at ascending', async () => {
+      const older = makeNotification({
+        id: '1',
+        updated_at: '2026-07-02T08:00:00.000Z',
+        last_read_at: '2026-07-02T07:00:00.000Z',
+        subject: {
+          title: 'Old',
+          url: 'https://api.github.com/repos/owner/repo/issues/10',
+        },
+      });
+      const newer = makeNotification({
+        id: '2',
+        updated_at: '2026-07-02T10:00:00.000Z',
+        last_read_at: '2026-07-02T09:00:00.000Z',
+        subject: {
+          title: 'New',
+          url: 'https://api.github.com/repos/owner/repo/issues/20',
+        },
+      });
+
+      mockOctokit.paginate
+        .mockResolvedValueOnce([newer, older])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([]);
+
+      await initWithoutLoop();
+      await pollOnce();
+
+      const calls = mockOctokit.rest.activity.markThreadAsRead.mock.calls;
+      expect(calls).toHaveLength(2);
+      expect(calls[0][0].thread_id).toBe(1);
+      expect(calls[1][0].thread_id).toBe(2);
+    });
+
+    it('passes latest comment created_at to markThreadAsRead', async () => {
       const notification = makeNotification();
-      const comment = makeComment();
+      const comment = makeComment({
+        created_at: '2026-07-02T09:30:00.000Z',
+      });
 
       mockOctokit.paginate
         .mockResolvedValueOnce([notification])
@@ -267,17 +303,11 @@ describe('GithubChannel', () => {
 
       await initWithoutLoop();
       await pollOnce();
-      expect(channel.inboundEnvelopes).toHaveLength(1);
 
-      // Second poll with same comment (mark-read failed scenario)
-      mockOctokit.paginate
-        .mockResolvedValueOnce([notification])
-        .mockResolvedValueOnce([comment]);
-
-      await (
-        channel as unknown as { pollOnce: () => Promise<void> }
-      ).pollOnce();
-      expect(channel.inboundEnvelopes).toHaveLength(1); // not 2
+      expect(mockOctokit.rest.activity.markThreadAsRead).toHaveBeenCalledWith({
+        thread_id: 100,
+        last_read_at: '2026-07-02T09:30:00.000Z',
+      });
     });
 
     it('uses last_read_at as enumeration window when available', async () => {
@@ -320,32 +350,6 @@ describe('GithubChannel', () => {
       const env = channel.inboundEnvelopes[0]!;
       expect(env.text).toBe('implement this feature');
       expect(env.senderId).toBe('bob');
-    });
-
-    it('skips already-processed issue body on re-poll', async () => {
-      mockOctokit.paginate
-        .mockResolvedValueOnce([makeNotification({ last_read_at: null })])
-        .mockResolvedValueOnce([]);
-
-      mockOctokit.rest.issues.get.mockResolvedValue({
-        data: {
-          body: '@test-bot implement this',
-          created_at: '2026-07-02T08:00:00.000Z',
-          user: { login: 'bob' },
-        },
-      });
-
-      await initWithoutLoop();
-      await pollOnce();
-      expect(channel.inboundEnvelopes).toHaveLength(1);
-
-      // Re-poll with same notification (e.g. mark-read failed)
-      mockOctokit.paginate
-        .mockResolvedValueOnce([makeNotification({ last_read_at: null })])
-        .mockResolvedValueOnce([]);
-
-      await pollOnce();
-      expect(channel.inboundEnvelopes).toHaveLength(1); // not 2
     });
 
     it('skips issue body without mention', async () => {
@@ -426,9 +430,9 @@ describe('GithubChannel', () => {
       await initWithoutLoop();
       await pollOnce();
 
-      expect(mockOctokit.rest.activity.markThreadAsRead).toHaveBeenCalledWith({
-        thread_id: 100,
-      });
+      expect(mockOctokit.rest.activity.markThreadAsRead).toHaveBeenCalledWith(
+        expect.objectContaining({ thread_id: 100 }),
+      );
     });
   });
 
