@@ -406,6 +406,37 @@ describe('WorkspaceGitState', () => {
     state.dispose();
   });
 
+  it('wait:true joins an already in-flight fast-path refresh', async () => {
+    let resolveGit!: (value: GitWorkingTreeStatus | null) => void;
+    getGitWorkingTreeStatusMock.mockImplementation(
+      () =>
+        new Promise<GitWorkingTreeStatus | null>((resolve) => {
+          resolveGit = resolve;
+        }),
+    );
+    resolveBranchNameMock.mockResolvedValue('main');
+    watchRepoBranchMock.mockResolvedValue(() => {});
+    const state = new WorkspaceGitState();
+    const { bridge } = bridgeWith();
+
+    // Fast path kicks a background refresh, setting statusPromise.
+    const fastPromise = state.getStatus('/workspace', bridge);
+    await vi.waitFor(() =>
+      expect(getGitWorkingTreeStatusMock).toHaveBeenCalledTimes(1),
+    );
+
+    // wait:true should join the in-flight computation, not spawn a second one.
+    const waitPromise = state.getStatus('/workspace', bridge, { wait: true });
+
+    resolveGit(summary({ staged: 3 }));
+
+    const [fast, wait] = await Promise.all([fastPromise, waitPromise]);
+    expect(getGitWorkingTreeStatusMock).toHaveBeenCalledTimes(1);
+    expect(fast.branch).toBe('main');
+    expect(wait.staged).toBe(3);
+    state.dispose();
+  });
+
   it('wait:true awaits a fresh computation and bypasses the throttle', async () => {
     let resolveGit!: (value: GitWorkingTreeStatus | null) => void;
     getGitWorkingTreeStatusMock.mockImplementation(
