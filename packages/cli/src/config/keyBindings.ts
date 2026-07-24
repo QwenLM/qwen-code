@@ -39,6 +39,8 @@ export enum Command {
   ACCEPT_SUGGESTION = 'acceptSuggestion',
   COMPLETION_UP = 'completionUp',
   COMPLETION_DOWN = 'completionDown',
+  COMPLETION_TAB_LEFT = 'completionTabLeft',
+  COMPLETION_TAB_RIGHT = 'completionTabRight',
 
   // Text input
   SUBMIT = 'submit',
@@ -184,6 +186,17 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.COMPLETION_DOWN]: [
     { key: 'down', shift: false },
     { key: 'n', ctrl: true },
+  ],
+  // Completion category tab switching (for the tabbed @ completion UI).
+  // Bound to Ctrl+arrows rather than plain arrows so the bare arrow keys keep
+  // moving the caret in the editable input buffer (plain arrows only switch
+  // tabs in modal dialogs, which have no text buffer). Alt/Option+arrows still
+  // perform word movement.
+  [Command.COMPLETION_TAB_LEFT]: [
+    { key: 'left', shift: false, ctrl: true, command: false },
+  ],
+  [Command.COMPLETION_TAB_RIGHT]: [
+    { key: 'right', shift: false, ctrl: true, command: false },
   ],
 
   // Text input

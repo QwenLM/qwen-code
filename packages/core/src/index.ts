@@ -238,7 +238,11 @@ export {
 } from './services/chatCompressionService.js';
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
-export type { DurableCronTask, CronTaskRun } from './services/cronTasksFile.js';
+export type {
+  CronTaskDelivery,
+  DurableCronTask,
+  CronTaskRun,
+} from './services/cronTasksFile.js';
 export {
   readCronTasks,
   updateCronTasks,
@@ -248,6 +252,8 @@ export {
   appendCronRun,
   taskHasLegacyCondition,
   MAX_TASK_RUNS,
+  MAX_CHANNEL_DELIVERY_NAME_LENGTH,
+  MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH,
 } from './services/cronTasksFile.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';
@@ -261,6 +267,7 @@ export * from './services/visionBridge/image-part-utils.js';
 export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
+export * from './services/session-reference-service.js';
 export * from './services/sessionService.js';
 export * from './services/session-writer-lease.js';
 export {
@@ -524,6 +531,7 @@ export {
   openaiLogger,
   resolveOpenAILogDir,
 } from './utils/openaiLogger.js';
+export * from './utils/osc8.js';
 export * from './utils/partUtils.js';
 export * from './utils/sessionStorageUtils.js';
 export * from './utils/pathReader.js';

@@ -574,6 +574,7 @@ export class SystemController extends BaseController {
     try {
       const models = this.context.config
         .getAvailableModels()
+        .filter((model) => !model.imageOnly)
         .map(({ id, label, capabilities, contextWindowSize }) => ({
           id,
           label,

@@ -1948,6 +1948,7 @@ export default {
   'Reverse search history': 'Verlauf rückwärts durchsuchen',
   'Press ? again to close': 'Erneut ? drücken, um zu schließen',
   '? for shortcuts': '? für Tastenkürzel',
+  'Pasting…': 'Einfügen…',
   'Invalid approval mode "{{arg}}". Valid modes: {{modes}}':
     'Ungültiger Freigabemodus "{{arg}}". Gültige Modi: {{modes}}',
   'Approval mode set to "{{mode}}"': 'Freigabemodus auf "{{mode}}" gesetzt',

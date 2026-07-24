@@ -33,6 +33,7 @@ import { logProtocolTagSanitized } from '../../telemetry/loggers.js';
 import { ProtocolTagSanitizedEvent } from '../../telemetry/types.js';
 import { getErrorMessage, getErrorStatus } from '../../utils/errors.js';
 import { getRateLimitErrorDetails } from '../../utils/rateLimit.js';
+import { reportOpenAiRequest } from '../../telemetry/gen-ai-request.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
 
@@ -547,7 +548,7 @@ export class ContentGenerationPipeline {
 
         // Stage 2b: Filter empty responses to avoid downstream issues
         if (
-          response.candidates?.[0]?.content?.parts?.length === 0 &&
+          (response.candidates?.[0]?.content?.parts?.length ?? 0) === 0 &&
           !response.candidates?.[0]?.finishReason &&
           !response.usageMetadata &&
           // Preparation-only responses must reach ACP before arguments complete.
@@ -1119,6 +1120,7 @@ export class ContentGenerationPipeline {
       // so the logger sees the exact bytes sent on the wire.
       openaiRequestCaptureContext.getStore()?.(openaiRequest);
       runtimeDiagnostics.recordOpenAIWireRequest(openaiRequest);
+      reportOpenAiRequest(openaiRequest);
 
       return executor(openaiRequest, context);
     };

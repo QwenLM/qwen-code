@@ -45,6 +45,10 @@ describe('keyMatchers', () => {
       (key.name === 'up' && !key.shift) || (key.ctrl && key.name === 'p'),
     [Command.COMPLETION_DOWN]: (key: Key) =>
       (key.name === 'down' && !key.shift) || (key.ctrl && key.name === 'n'),
+    [Command.COMPLETION_TAB_LEFT]: (key: Key) =>
+      key.name === 'left' && !key.shift && key.ctrl && !key.meta,
+    [Command.COMPLETION_TAB_RIGHT]: (key: Key) =>
+      key.name === 'right' && !key.shift && key.ctrl && !key.meta,
     [Command.ESCAPE]: (key: Key) => key.name === 'escape',
     [Command.SUBMIT]: (key: Key) =>
       key.name === 'return' && !key.ctrl && !key.meta && !key.paste,
@@ -230,6 +234,26 @@ describe('keyMatchers', () => {
         createKey('up'),
         createKey('p', { ctrl: true }),
         createKey('down', { shift: true }),
+      ],
+    },
+    {
+      command: Command.COMPLETION_TAB_LEFT,
+      positive: [createKey('left', { ctrl: true })],
+      negative: [
+        createKey('left'),
+        createKey('left', { shift: true, ctrl: true }),
+        createKey('left', { ctrl: true, meta: true }),
+        createKey('right', { ctrl: true }),
+      ],
+    },
+    {
+      command: Command.COMPLETION_TAB_RIGHT,
+      positive: [createKey('right', { ctrl: true })],
+      negative: [
+        createKey('right'),
+        createKey('right', { shift: true, ctrl: true }),
+        createKey('right', { ctrl: true, meta: true }),
+        createKey('left', { ctrl: true }),
       ],
     },
 

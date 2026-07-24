@@ -622,6 +622,12 @@ export interface DaemonWorktreeInfo {
   branch: string;
 }
 
+/** Branch metadata returned when a session is created with a new branch. */
+export interface DaemonBranchInfo {
+  name: string;
+  baseBranch: string;
+}
+
 /** Returned from `POST /session`. */
 export interface DaemonSession {
   sessionId: string;
@@ -651,6 +657,8 @@ export interface DaemonSession {
   sourcePersisted?: boolean;
   /** Present when the session was created with worktree isolation. */
   worktree?: DaemonWorktreeInfo;
+  /** Present when the session was created with a new branch. */
+  branch?: DaemonBranchInfo;
 }
 
 /**
@@ -811,6 +819,8 @@ export interface DaemonSessionSummary {
   color?: DaemonSessionGroupPresetColor | null;
   /** Present when the session was created with worktree isolation. */
   worktree?: DaemonWorktreeInfo;
+  /** Present when the session was created with a new branch. */
+  branch?: DaemonBranchInfo;
 }
 
 export type DaemonSessionExportFormat = 'html' | 'md' | 'json' | 'jsonl';
@@ -2663,6 +2673,25 @@ export interface DaemonChannelWorkerSnapshot {
 export type DaemonChannelSelection =
   | { mode: 'all' }
   | { mode: 'names'; names: string[] };
+
+export interface DaemonChannelDelivery {
+  kind: 'channel';
+  target: {
+    channelName: string;
+    type: 'user' | 'chat';
+    id: string;
+  };
+}
+
+export interface DaemonChannelNotifyRequest {
+  text: string;
+  delivery: DaemonChannelDelivery;
+}
+
+export interface DaemonChannelNotifyResult {
+  delivered: true;
+  deliveryId: string;
+}
 
 export type DaemonChannelControlTransition =
   | 'idle'

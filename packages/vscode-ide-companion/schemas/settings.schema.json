@@ -563,6 +563,11 @@
       "type": "string",
       "default": ""
     },
+    "imageModel": {
+      "description": "Model used by the built-in image_gen tool. Set with /model --image. The selected model must be marked imageOnly in modelProviders.",
+      "type": "string",
+      "default": ""
+    },
     "visionBridgeTimeoutMs": {
       "description": "Per-attempt timeout in milliseconds for the vision bridge image transcription call (a positive integer up to 2147483647). Unset uses the built-in 30s. Raise for slow or proxied vision endpoints.",
       "type": "integer",

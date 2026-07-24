@@ -35,6 +35,53 @@ describe('ModelsConfig', () => {
     return modelsConfig.getGenerationConfig() as ContentGeneratorConfig;
   }
 
+  it('rejects image-only models as the primary model', async () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_OPENAI,
+      modelProvidersConfig: {
+        openai: [{ id: 'chat-model' }, { id: 'image-model', imageOnly: true }],
+      },
+    });
+    await modelsConfig.switchModel(AuthType.USE_OPENAI, 'chat-model');
+
+    await expect(
+      modelsConfig.switchModel(AuthType.USE_OPENAI, 'image-model'),
+    ).rejects.toThrow(
+      "Image-only model 'image-model' cannot be used as the primary model",
+    );
+    expect(modelsConfig.getModel()).toBe('chat-model');
+  });
+
+  it('rejects an image-only model during auth refresh without changing state', () => {
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.USE_ANTHROPIC,
+      modelProvidersConfig: {
+        openai: [{ id: 'image-model', imageOnly: true }],
+      },
+      generationConfig: { model: 'previous-model' },
+    });
+
+    expect(() =>
+      modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'image-model'),
+    ).toThrow(
+      "Image-only model 'image-model' cannot be used as the primary model",
+    );
+    expect(modelsConfig.getCurrentAuthType()).toBe(AuthType.USE_ANTHROPIC);
+    expect(modelsConfig.getModel()).toBe('previous-model');
+  });
+
+  it('does not choose an image-only model as the auth default', () => {
+    const modelsConfig = new ModelsConfig({
+      modelProvidersConfig: {
+        openai: [{ id: 'image-model', imageOnly: true }, { id: 'chat-model' }],
+      },
+    });
+
+    modelsConfig.syncAfterAuthRefresh(AuthType.USE_OPENAI, 'missing-model');
+
+    expect(modelsConfig.getModel()).toBe('chat-model');
+  });
+
   it('should fully rollback state when switchModel fails after applying defaults (authType change)', async () => {
     const modelProvidersConfig: ModelProvidersConfig = {
       openai: [

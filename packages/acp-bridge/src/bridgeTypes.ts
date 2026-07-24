@@ -96,6 +96,8 @@ export interface BridgeSpawnRequest {
   approvalMode?: ApprovalMode;
   /** Worktree isolation metadata, set by the daemon route before spawn. */
   worktree?: { slug: string; path: string; branch: string };
+  /** Branch metadata, set by the daemon route before spawn. */
+  branch?: { name: string; baseBranch: string };
 }
 
 export interface BridgeSession {
@@ -130,6 +132,8 @@ export interface BridgeSession {
   sourcePersisted?: boolean;
   /** Present when the session was created with worktree isolation. */
   worktree?: { slug: string; path: string; branch: string };
+  /** Present when the session was created with a new branch. */
+  branch?: { name: string; baseBranch: string };
 }
 
 export interface BridgeRestoreSessionRequest {
@@ -435,6 +439,8 @@ export interface BridgeSessionSummary {
   color?: SessionGroupPresetColor | null;
   /** Present when the session was created with worktree isolation. */
   worktree?: { slug: string; path: string; branch: string };
+  /** Present when the session was created with a new branch. */
+  branch?: { name: string; baseBranch: string };
 }
 
 /**
@@ -493,6 +499,16 @@ export interface BridgeClientRequestContext {
    * SSE event to the pending HTTP 202 request.
    */
   promptId?: string;
+  /** Trusted Channel delivery correlation injected by the daemon prompt
+   * route. Never populated from caller-controlled ACP metadata. */
+  channelDelivery?: {
+    deliveryId: string;
+    target: {
+      channelName: string;
+      type: 'user' | 'chat';
+      id: string;
+    };
+  };
   /**
    * Internal: set ONLY by `continueSession` to re-arm the continuation meta
    * key that `sendPrompt` strips from untrusted callers. HTTP routes never
@@ -509,6 +525,8 @@ export interface BridgeClientRequestContext {
    */
   deadlineMs?: number;
 }
+
+export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
 
 /**
  * Returned from `recordHeartbeat`. `lastSeenAt` is the server-side

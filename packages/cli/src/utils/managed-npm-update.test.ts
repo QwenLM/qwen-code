@@ -347,4 +347,100 @@ describe('managed npm update', () => {
 
     expect(fs.existsSync(update.stagingDir)).toBe(false);
   });
+
+  it('removes only orphaned managed update artifacts before staging', () => {
+    const root = makeTemporaryDirectory();
+    const bootstrap = writeBaseInstallation(root);
+    const updateRoot = path.join(root, 'updates');
+    const current = prepareManagedNpmUpdate('2.0.0', bootstrap, updateRoot);
+    const versionsDir = path.dirname(current.stagingDir);
+    const missingPid = 999999999;
+    const staleStagingDir = fs.mkdtempSync(
+      path.join(versionsDir, `.2.1.0-${missingPid}-`),
+    );
+    const staleActiveFile = path.join(
+      current.launcherRoot,
+      `active.json.${missingPid}`,
+    );
+    const activeStagingDir = fs.mkdtempSync(
+      path.join(versionsDir, `.2.2.0-${process.pid}-`),
+    );
+    const activeTemporaryFile = path.join(
+      current.launcherRoot,
+      `active.json.${process.pid}`,
+    );
+    const versionDir = path.join(versionsDir, '1.0.0');
+    const unknownDir = path.join(versionsDir, 'unrelated');
+    const nonSemverDir = path.join(
+      versionsDir,
+      `.not-semver-${missingPid}-abc123`,
+    );
+    const stagingSymlink = path.join(
+      versionsDir,
+      `.2.3.0-${missingPid}-abcdef`,
+    );
+    fs.writeFileSync(staleActiveFile, 'stale');
+    fs.writeFileSync(activeTemporaryFile, 'active');
+    fs.mkdirSync(versionDir);
+    fs.mkdirSync(unknownDir);
+    fs.mkdirSync(nonSemverDir);
+    fs.symlinkSync(
+      versionDir,
+      stagingSymlink,
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    const kill = vi.spyOn(process, 'kill').mockImplementation((pid) => {
+      if (pid === missingPid) {
+        const error = new Error('process not found') as NodeJS.ErrnoException;
+        error.code = 'ESRCH';
+        throw error;
+      }
+      return true;
+    });
+    try {
+      prepareManagedNpmUpdate('3.0.0', bootstrap, updateRoot);
+
+      expect(fs.existsSync(staleStagingDir)).toBe(false);
+      expect(fs.existsSync(staleActiveFile)).toBe(false);
+      expect(fs.existsSync(current.stagingDir)).toBe(true);
+      expect(fs.existsSync(activeStagingDir)).toBe(true);
+      expect(fs.existsSync(activeTemporaryFile)).toBe(true);
+      expect(fs.existsSync(versionDir)).toBe(true);
+      expect(fs.existsSync(unknownDir)).toBe(true);
+      expect(fs.existsSync(nonSemverDir)).toBe(true);
+      expect(fs.existsSync(stagingSymlink)).toBe(true);
+    } finally {
+      kill.mockRestore();
+    }
+  });
+
+  it('keeps artifacts when process liveness is uncertain', () => {
+    const root = makeTemporaryDirectory();
+    const bootstrap = writeBaseInstallation(root);
+    const updateRoot = path.join(root, 'updates');
+    const current = prepareManagedNpmUpdate('2.0.0', bootstrap, updateRoot);
+    const versionsDir = path.dirname(current.stagingDir);
+    const inaccessiblePid = 888888888;
+    const stagingDir = fs.mkdtempSync(
+      path.join(versionsDir, `.2.1.0-${inaccessiblePid}-`),
+    );
+    const temporaryActiveFile = path.join(
+      current.launcherRoot,
+      `active.json.${inaccessiblePid}`,
+    );
+    fs.writeFileSync(temporaryActiveFile, 'unverified');
+    const kill = vi.spyOn(process, 'kill').mockImplementation(() => {
+      const error = new Error('permission denied') as NodeJS.ErrnoException;
+      error.code = 'EPERM';
+      throw error;
+    });
+    try {
+      prepareManagedNpmUpdate('3.0.0', bootstrap, updateRoot);
+
+      expect(fs.existsSync(stagingDir)).toBe(true);
+      expect(fs.existsSync(temporaryActiveFile)).toBe(true);
+    } finally {
+      kill.mockRestore();
+    }
+  });
 });
