@@ -153,7 +153,7 @@ describe('StatusCardController', () => {
     );
   });
 
-  it('awaits terminal writes and rejects late chunks', async () => {
+  it('commits final content through V2 instance fields and rejects late chunks', async () => {
     const { client, controller } = createHarness();
     controller.start(started(), { chatId: 'cid-1', isGroup: true });
     controller.append('run-1', 'answer');
@@ -161,21 +161,44 @@ describe('StatusCardController', () => {
     await expect(controller.complete('run-1', 'answer')).resolves.toBe(true);
     expect(client.openOrUpdateStream).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        content: 'answer',
+        content: '',
         finalize: true,
       }),
     );
     expect(client.updateInstance).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        cardParamMap: expect.objectContaining({
+        cardParamMap: {
+          blockList: '[{"type":0,"markdown":"answer"}]',
+          content: 'answer',
+          copy_content: 'answer',
           flowStatus: 3,
           statusLine: 'Completed',
-        }),
+          hasAction: '0',
+          stop_action: '0',
+        },
       }),
     );
 
     controller.append('run-1', 'late');
     expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
+  });
+
+  it('retains streamed content when completion has no response body', async () => {
+    const { client, controller } = createHarness();
+    controller.start(started(), { chatId: 'cid-1', isGroup: true });
+    controller.append('run-1', 'streamed answer');
+
+    await expect(controller.complete('run-1', '')).resolves.toBe(true);
+
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          blockList: '[{"type":0,"markdown":"streamed answer"}]',
+          content: 'streamed answer',
+          copy_content: 'streamed answer',
+        }),
+      }),
+    );
   });
 
   it('does not let a delayed waiting update overwrite completion', async () => {

@@ -274,18 +274,25 @@ export class StatusCardController {
     try {
       if (!(await record.ready)) return false;
       await record.writeChain;
+      const finalContent = boundContent(content || record.content);
       await this.options.client.openOrUpdateStream({
         outTrackId: record.outTrackId,
         key: 'content',
-        content,
+        content: '',
         finalize: true,
         isError,
       });
       await this.options.client.updateInstance({
         outTrackId: record.outTrackId,
         cardParamMap: {
-          content,
-          copyContent: content,
+          blockList: JSON.stringify([
+            {
+              type: 0,
+              markdown: finalContent,
+            },
+          ]),
+          content: finalContent,
+          copy_content: finalContent,
           flowStatus: 3,
           statusLine,
           hasAction: '0',
