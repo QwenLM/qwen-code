@@ -234,6 +234,16 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar collapsed session group persistence', () => {
+  it('shows the complete session name in a native tooltip', async () => {
+    renderSidebar();
+    await flushSidebar();
+
+    const sessionName = container.querySelector<HTMLElement>(
+      '[title="API review"]',
+    );
+    expect(sessionName?.textContent).toContain('API review');
+  });
+
   it('writes collapsed section ids with the qwen-code-web-shell-* key', async () => {
     renderSidebar();
     await flushSidebar();

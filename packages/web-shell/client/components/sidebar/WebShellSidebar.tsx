@@ -2808,7 +2808,9 @@ export function WebShellSidebar({
               busy && styles.busySession,
             )}
           >
-            <span className={styles.sessionText}>{label}</span>
+            <span className={styles.sessionText} title={label}>
+              {label}
+            </span>
             <div className={styles.sessionMetaSlot}>
               <span className={styles.sessionTime}>{time}</span>
               {hasArchivedActions && (
@@ -2966,7 +2968,7 @@ export function WebShellSidebar({
                 </form>
               ) : (
                 <>
-                  <span className={styles.sessionText}>
+                  <span className={styles.sessionText} title={label}>
                     {session.worktree && (
                       <GitForkIcon
                         size={11}
