@@ -1,4 +1,4 @@
-name: PR self-report label
+name: 'PR self-report label'
 
 # When a PR closes an issue that its OWN author opened (self-reported and
 # self-fixed), apply a label so a reviewer can see at a glance that the problem
@@ -9,32 +9,33 @@ name: PR self-report label
 
 on:
   pull_request_target:
-    types: [opened, edited, reopened]
+    types: ['opened', 'edited', 'reopened']
 
 permissions:
-  contents: read
-  issues: write
-  pull-requests: write
+  contents: 'read'
+  issues: 'write'
+  pull-requests: 'write'
 
 concurrency:
-  group: pr-self-report-${{ github.event.pull_request.number }}
+  group: 'pr-self-report-${{ github.event.pull_request.number }}'
   cancel-in-progress: true
 
 jobs:
   label:
-    if: ${{ github.repository == 'QwenLM/qwen-code' }}
-    runs-on: ubuntu-latest
+    if: |-
+      ${{ github.repository == 'QwenLM/qwen-code' }}
+    runs-on: 'ubuntu-latest'
     steps:
       - name: 'Label a self-reported PR'
         # PR-controlled values reach the script ONLY through env, never
         # interpolated into the run body — the injection-safe pattern for
         # pull_request_target.
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          LABEL: review/self-reported
+          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          REPO: '${{ github.repository }}'
+          PR: '${{ github.event.pull_request.number }}'
+          PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
+          LABEL: 'review/self-reported'
         run: |
           set -euo pipefail
           # Issues this PR closes — "Fixes/Closes #N" keywords AND Development
