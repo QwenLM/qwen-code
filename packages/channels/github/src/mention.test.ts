@@ -49,26 +49,26 @@ describe('stripBotMention', () => {
   const bot = 'qwen-bot';
 
   it('removes the bot mention', () => {
-    expect(stripBotMention('@qwen-bot fix this', bot)).toBe('fix this');
+    expect(stripBotMention('@qwen-bot fix this', bot)).toBe(' fix this');
   });
 
   it('preserves other mentions', () => {
-    expect(stripBotMention('@qwen-bot ask @alice', bot)).toBe('ask @alice');
+    expect(stripBotMention('@qwen-bot ask @alice', bot)).toBe(' ask @alice');
   });
 
   it('preserves markdown indentation', () => {
     const input = '@qwen-bot Repro:\n\n    const x = 1;\n    foo(x);';
     expect(stripBotMention(input, bot)).toBe(
-      'Repro:\n\n    const x = 1;\n    foo(x);',
+      ' Repro:\n\n    const x = 1;\n    foo(x);',
     );
   });
 
   it('preserves nested list formatting', () => {
     const input = '@qwen-bot\n- a\n  - b\n    - c';
-    expect(stripBotMention(input, bot)).toBe('- a\n  - b\n    - c');
+    expect(stripBotMention(input, bot)).toBe('\n- a\n  - b\n    - c');
   });
 
   it('is case-insensitive', () => {
-    expect(stripBotMention('@Qwen-Bot fix', bot)).toBe('fix');
+    expect(stripBotMention('@Qwen-Bot fix', bot)).toBe(' fix');
   });
 });

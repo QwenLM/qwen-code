@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { PollingChannelBase } from './PollingChannelBase.js';
-import type { ChannelAgentBridge, ChannelConfig } from './types.js';
+import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
+import type { ChannelConfig } from './types.js';
 
 vi.mock('./paths.js', () => ({
   getGlobalQwenDir: () => '/tmp/test-polling-base',

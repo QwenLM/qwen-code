@@ -1087,6 +1087,7 @@ export abstract class ChannelBase {
       alreadyPrefixed: true,
       referencedText: undefined,
       attachments: undefined,
+      metadata: undefined,
       imageBase64: undefined,
       imageMimeType: undefined,
     };

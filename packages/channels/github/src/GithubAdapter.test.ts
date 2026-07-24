@@ -181,7 +181,7 @@ describe('GithubChannel', () => {
 
       expect(channel.inboundEnvelopes).toHaveLength(1);
       const env = channel.inboundEnvelopes[0]!;
-      expect(env.text).toBe('please fix this');
+      expect(env.text).toBe(' please fix this');
       expect(env.senderId).toBe('alice');
       expect(env.chatId).toBe('owner/repo');
       expect(env.threadId).toBe('issue:42');
@@ -202,7 +202,7 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes).toHaveLength(0);
     });
 
-    it('skips non-mention comments when requireMention is true', async () => {
+    it('dispatches non-mention comments with isMentioned false', async () => {
       mockOctokit.paginate
         .mockResolvedValueOnce([makeNotification()])
         .mockResolvedValueOnce([
@@ -211,7 +211,8 @@ describe('GithubChannel', () => {
 
       await initWithoutLoop();
       await pollOnce();
-      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]!.isMentioned).toBe(false);
     });
 
     it('does not false-positive on trailing newline', async () => {
@@ -221,7 +222,8 @@ describe('GithubChannel', () => {
 
       await initWithoutLoop();
       await pollOnce();
-      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]!.isMentioned).toBe(false);
     });
 
     it('detects mention case-insensitively', async () => {
@@ -337,11 +339,11 @@ describe('GithubChannel', () => {
 
       expect(channel.inboundEnvelopes).toHaveLength(1);
       const env = channel.inboundEnvelopes[0]!;
-      expect(env.text).toBe('implement this feature');
+      expect(env.text).toBe(' implement this feature');
       expect(env.senderId).toBe('bob');
     });
 
-    it('skips issue body without mention', async () => {
+    it('dispatches issue body without mention as isMentioned false', async () => {
       mockOctokit.paginate
         .mockResolvedValueOnce([makeNotification({ last_read_at: null })])
         .mockResolvedValueOnce([]);
@@ -356,7 +358,8 @@ describe('GithubChannel', () => {
 
       await initWithoutLoop();
       await pollOnce();
-      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]!.isMentioned).toBe(false);
     });
 
     it('feeds PR body when no comments and PR is new', async () => {
@@ -386,7 +389,7 @@ describe('GithubChannel', () => {
 
       expect(channel.inboundEnvelopes).toHaveLength(1);
       const env = channel.inboundEnvelopes[0]!;
-      expect(env.text).toBe('review this PR');
+      expect(env.text).toBe(' review this PR');
       expect(env.senderId).toBe('carol');
       expect(env.threadId).toBe('pr:99');
       expect(env.metadata).toContain('Pull Request');

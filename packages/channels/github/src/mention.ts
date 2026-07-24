@@ -18,5 +18,5 @@ export function stripBotMention(text: string, username: string): string {
     `${MENTION_LOOKBEHIND}@${escapeRegex(username)}${MENTION_LOOKAHEAD}`,
     'gi',
   );
-  return text.replace(re, '').trim();
+  return text.replace(re, '');
 }

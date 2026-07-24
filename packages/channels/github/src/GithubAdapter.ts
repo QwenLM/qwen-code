@@ -11,7 +11,6 @@ import { testBotMention, stripBotMention } from './mention.js';
 
 interface GithubConfig extends ChannelConfig {
   baseUrl?: string;
-  requireMention?: boolean;
 }
 
 interface GithubCursor {
@@ -33,10 +32,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   protected createInitialCursor(): GithubCursor {
     return { lastProcessedAt: new Date().toISOString() };
-  }
-
-  private get requireMention(): boolean {
-    return (this.config as GithubConfig).requireMention !== false;
   }
 
   async connect(): Promise<void> {
@@ -149,13 +144,13 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           return true;
         });
 
+        let dispatchedMention = false;
+
         for (const comment of newComments) {
           const body = comment.body || '';
           const isMentioned = this.botUsername
             ? testBotMention(body, this.botUsername)
             : false;
-
-          if (this.requireMention && !isMentioned) continue;
 
           const text = this.botUsername
             ? stripBotMention(body, this.botUsername)
@@ -177,6 +172,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
           try {
             await this.handleInbound(envelope);
+            if (isMentioned) dispatchedMention = true;
           } catch (err) {
             process.stderr.write(
               `[Channel:${this.name}] handleInbound failed for comment ${comment.id}: ${err}\n`,
@@ -185,7 +181,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           }
         }
 
-        if (newComments.length === 0 && !lastReadAt) {
+        if (!dispatchedMention && !lastReadAt) {
           await this.tryFirstContactBody(
             chatId,
             threadId,
@@ -227,7 +223,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const isMentioned = this.botUsername
         ? testBotMention(body, this.botUsername)
         : false;
-      if (this.requireMention && !isMentioned) return;
 
       const text = this.botUsername
         ? stripBotMention(body, this.botUsername)

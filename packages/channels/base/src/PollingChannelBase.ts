@@ -48,7 +48,16 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
   protected abstract createInitialCursor(): Cursor;
 
   protected get pollInterval(): number {
-    return this.config.pollInterval ?? 60_000;
+    const configured = (this.config as Record<string, unknown>)
+      .pollInterval as unknown;
+    if (
+      typeof configured === 'number' &&
+      Number.isFinite(configured) &&
+      configured > 0
+    ) {
+      return configured;
+    }
+    return 60_000;
   }
 
   protected saveCursor(): void {
@@ -99,7 +108,12 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
       const raw = readFileSync(this.cursorPath(), 'utf-8').trim();
       if (!raw) return null;
       const parsed: unknown = JSON.parse(raw);
-      if (typeof parsed !== 'object' || parsed === null) return null;
+      if (
+        typeof parsed !== 'object' ||
+        parsed === null ||
+        Array.isArray(parsed)
+      )
+        return null;
       return parsed as Cursor;
     } catch {
       return null;
