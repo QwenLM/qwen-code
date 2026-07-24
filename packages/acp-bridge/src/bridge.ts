@@ -3589,7 +3589,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         if (published === undefined) {
           failureCount += 1;
           teeServeDebugLine(
-            `broadcastWorkspaceEvent: publish on session ${entry.sessionId} no-op (bus closed)`,
+            `broadcastWorkspaceEvent: publish on session ${entry.sessionId} no-op (bus closed or unserializable)`,
           );
         } else {
           successCount += 1;
@@ -6475,7 +6475,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           if (published === undefined) {
             failureCount += 1;
             teeServeDebugLine(
-              `publishWorkspaceEvent: publish on session ${entry.sessionId} no-op (bus closed)`,
+              `publishWorkspaceEvent: publish on session ${entry.sessionId} no-op (bus closed or unserializable)`,
             );
           } else {
             successCount += 1;
