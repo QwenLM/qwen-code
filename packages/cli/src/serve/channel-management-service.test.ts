@@ -554,7 +554,7 @@ describe('createChannelManagementService', () => {
     await expect(service.restart('bot')).rejects.toMatchObject({
       code: 'channel_worker_not_enabled',
     });
-    expect(manager.reload).not.toHaveBeenCalled();
+    expect(manager.reloadWorkspace).not.toHaveBeenCalled();
   });
 
   it('rejects restart of a configured channel that is not enabled', async () => {
