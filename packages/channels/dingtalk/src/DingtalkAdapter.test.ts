@@ -2479,6 +2479,7 @@ describe('DingtalkChannel proactive send', () => {
   function proactive(channel: DingtalkChannelInstance) {
     return channel as unknown as {
       supportsProactiveTarget(target: SessionTarget): boolean;
+      supportsProactiveDeliveryTarget(target: SessionTarget): boolean;
       supportsProactiveWebhookTarget(target: SessionTarget): boolean;
       pushProactive(target: SessionTarget, text: string): Promise<void>;
     };
@@ -2556,6 +2557,15 @@ describe('DingtalkChannel proactive send', () => {
         threadId: '7',
       }),
     ).toBe(false);
+  });
+
+  it('keeps loop targets group-only while direct delivery accepts users', () => {
+    const channel = proactive(createChannel());
+
+    expect(channel.supportsProactiveTarget(groupTarget)).toBe(true);
+    expect(channel.supportsProactiveTarget(directTarget)).toBe(false);
+    expect(channel.supportsProactiveDeliveryTarget(groupTarget)).toBe(true);
+    expect(channel.supportsProactiveDeliveryTarget(directTarget)).toBe(true);
   });
 
   it('sends proactive group messages through the robot API', async () => {

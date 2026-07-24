@@ -96,6 +96,7 @@ import { parseSessionSource } from './session-source.js';
 import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
+  DAEMON_CHANNEL_DELIVERY_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_META_KEY,
   LOAD_REPLAY_MODE_META_KEY,
@@ -2265,6 +2266,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             })
             .catch(() => undefined);
         },
+        opts.onChannelDelivery,
       );
       const connection = new ClientSideConnection(() => client, channel.stream);
 
@@ -5410,8 +5412,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 const promptRequest = (() => {
                   const copy = {
                     ...normalized,
-                  } as PromptRequest & { retry?: unknown };
+                  } as PromptRequest & { retry?: unknown; delivery?: unknown };
                   delete copy.retry;
+                  delete copy.delivery;
                   const meta =
                     copy._meta && typeof copy._meta === 'object'
                       ? { ...copy._meta }
@@ -5423,11 +5426,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   // only `continueSession` (via the trusted `isContinue` flag
                   // below) re-arms it after this strip.
                   delete meta[DAEMON_CONTINUE_META_KEY];
+                  delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
                   if (isRetry) {
                     meta[DAEMON_RETRY_META_KEY] = true;
                   }
                   if (isContinue) {
                     meta[DAEMON_CONTINUE_META_KEY] = true;
+                  }
+                  if (context?.channelDelivery) {
+                    meta[DAEMON_CHANNEL_DELIVERY_META_KEY] =
+                      context.channelDelivery;
                   }
                   meta[INVOCATION_CONTEXT_META_KEY] = invocationContext;
                   if (Object.keys(meta).length > 0) {

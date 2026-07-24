@@ -192,6 +192,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
    * `first-turn` mode, which waits for the sub-session's first turn to finish).
    */
   createSubSession: 'qwen/control/create-sub-session',
+  channelDelivery: 'qwen/control/channel-delivery',
 } as const;
 
 export type ServeStatus =

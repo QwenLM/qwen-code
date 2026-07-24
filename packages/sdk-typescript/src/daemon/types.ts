@@ -2674,6 +2674,25 @@ export type DaemonChannelSelection =
   | { mode: 'all' }
   | { mode: 'names'; names: string[] };
 
+export interface DaemonChannelDelivery {
+  kind: 'channel';
+  target: {
+    channelName: string;
+    type: 'user' | 'chat';
+    id: string;
+  };
+}
+
+export interface DaemonChannelNotifyRequest {
+  text: string;
+  delivery: DaemonChannelDelivery;
+}
+
+export interface DaemonChannelNotifyResult {
+  delivered: true;
+  deliveryId: string;
+}
+
 export type DaemonChannelControlTransition =
   | 'idle'
   | 'starting'
