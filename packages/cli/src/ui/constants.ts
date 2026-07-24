@@ -28,11 +28,11 @@ export const TOOL_STATUS = {
   ERROR: 'x',
 } as const;
 
-// Variation Selector 15 forces narrow (text) presentation for
-// East-Asian-Width "Ambiguous" glyphs so the terminal cursor advance
-// matches string-width's default (ambiguousIsNarrow: true).
-// Without this, CJK terminals render these glyphs as 2 columns while
-// Ink's layout engine allocates 1, causing a 1-column visual drift.
+// Variation Selector 15 (U+FE0E) is zero-width in string-width but forces
+// the terminal to render the preceding glyph in narrow (1-column) text
+// presentation. This ensures CJK terminals (which would otherwise render
+// East-Asian-Width "Ambiguous" glyphs as 2 columns) agree with Ink's
+// layout engine (which always measures them as 1 column).
 const _VS15 = '\uFE0E';
 export const ICON = {
   DIAMOND: `◆${_VS15}`,
