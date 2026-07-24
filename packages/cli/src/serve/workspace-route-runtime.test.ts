@@ -44,11 +44,15 @@ describe('resolveContainedCwd', () => {
   it('returns the resolved path for a valid subdirectory', () => {
     const sub = path.join(workspace, 'sub');
     fs.mkdirSync(sub);
-    expect(resolveContainedCwd(fakeReq(sub), workspace)).toBe(sub);
+    expect(resolveContainedCwd(fakeReq(sub), workspace)).toBe(
+      fs.realpathSync(sub),
+    );
   });
 
   it('accepts the workspace root itself', () => {
-    expect(resolveContainedCwd(fakeReq(workspace), workspace)).toBe(workspace);
+    expect(resolveContainedCwd(fakeReq(workspace), workspace)).toBe(
+      fs.realpathSync(workspace),
+    );
   });
 
   it('returns workspaceCwd for a path outside the workspace', () => {
