@@ -41,6 +41,8 @@ import {
 import { setToolCallPreparations } from '../tool-call-preparation.js';
 
 // Mock dependencies
+const mockReportOpenAiRequest = vi.hoisted(() => vi.fn());
+
 vi.mock('./converter.js', () => ({
   OpenAIContentConverter: {
     convertGeminiRequestToOpenAI: vi.fn(),
@@ -52,6 +54,9 @@ vi.mock('./converter.js', () => ({
 vi.mock('openai');
 vi.mock('../../telemetry/loggers.js', () => ({
   logProtocolTagSanitized: vi.fn(),
+}));
+vi.mock('../../telemetry/gen-ai-request.js', () => ({
+  reportOpenAiRequest: mockReportOpenAiRequest,
 }));
 
 describe('ContentGenerationPipeline', () => {
@@ -182,6 +187,9 @@ describe('ContentGenerationPipeline', () => {
         expect.objectContaining({
           signal: undefined,
         }),
+      );
+      expect(mockReportOpenAiRequest).toHaveBeenCalledWith(
+        vi.mocked(mockClient.chat.completions.create).mock.calls[0]![0],
       );
       expect(mockConverter.convertOpenAIResponseToGemini).toHaveBeenCalledWith(
         mockOpenAIResponse,
@@ -2078,6 +2086,8 @@ describe('ContentGenerationPipeline', () => {
       expect(calls).toHaveLength(2);
       expect(calls[0][0].enable_thinking).toBe(false);
       expect(calls[1][0].enable_thinking).toBe(true);
+      expect(mockReportOpenAiRequest).toHaveBeenNthCalledWith(1, calls[0][0]);
+      expect(mockReportOpenAiRequest).toHaveBeenNthCalledWith(2, calls[1][0]);
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
 
@@ -2164,6 +2174,9 @@ describe('ContentGenerationPipeline', () => {
         expect.objectContaining({
           signal: expect.any(AbortSignal),
         }),
+      );
+      expect(mockReportOpenAiRequest).toHaveBeenCalledWith(
+        vi.mocked(mockClient.chat.completions.create).mock.calls[0]![0],
       );
     });
 

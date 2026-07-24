@@ -20,14 +20,15 @@ An upgrade to either baseline requires regenerating and reviewing this matrix.
 
 ## Field contract
 
-| Span         | Standard attributes emitted in this phase                                                                                                        | Source and omission rule                                                                                                                                                 |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| LLM          | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.conversation.id`, `gen_ai.request.model`                                                | Written at span creation. Conversation ID is the existing session ID.                                                                                                    |
-| LLM response | `gen_ai.response.id`, `gen_ai.response.model`, `gen_ai.response.finish_reasons`                                                                  | Provider response data only. Missing response model is omitted rather than replaced with the request model. All candidate finish reasons are ordered by candidate index. |
-| LLM output   | `gen_ai.output.type`                                                                                                                             | Gemini and Vertex AI only, and only when an explicit response MIME type or one unambiguous response modality is sent on the wire.                                        |
-| LLM usage    | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens`    | Only provider-reported non-negative safe integers. Explicit zero is retained. When only a total is reported, input/output are omitted instead of estimated.              |
-| Tool         | `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.type=function`, `gen_ai.tool.call.id`                                     | Tool call ID prefers the provider/model ID and falls back to Qwen Code's internal ID.                                                                                    |
-| Agent        | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.name`, `gen_ai.agent.description`, `gen_ai.conversation.id`, optional `gen_ai.request.model` | Description uses the existing 1024-UTF-16-code-unit truncation threshold and never splits surrogate pairs. Internal invocation IDs remain private.                       |
+| Span         | Standard attributes emitted in this phase                                                                                                                                                                                | Source and omission rule                                                                                                                                                 |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| LLM          | `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.conversation.id`, `gen_ai.request.model`                                                                                                                        | Written at span creation. Conversation ID is the existing session ID.                                                                                                    |
+| LLM request  | `gen_ai.request.choice.count`, `gen_ai.request.max_tokens`, `gen_ai.request.temperature`, `gen_ai.request.top_p`, `gen_ai.request.frequency_penalty`, `gen_ai.request.presence_penalty`, `gen_ai.request.stop_sequences` | Read from the first provider-final SDK request object. Invalid or unavailable values are omitted; no SDK or server defaults are inferred.                                |
+| LLM response | `gen_ai.response.id`, `gen_ai.response.model`, `gen_ai.response.finish_reasons`                                                                                                                                          | Provider response data only. Missing response model is omitted rather than replaced with the request model. All candidate finish reasons are ordered by candidate index. |
+| LLM output   | `gen_ai.output.type`                                                                                                                                                                                                     | Gemini and Vertex AI only, and only when an explicit response MIME type or one unambiguous response modality is sent on the wire.                                        |
+| LLM usage    | `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens`                                                                            | Only provider-reported non-negative safe integers. Explicit zero is retained. When only a total is reported, input/output are omitted instead of estimated.              |
+| Tool         | `gen_ai.operation.name=execute_tool`, `gen_ai.tool.name`, `gen_ai.tool.type=function`, `gen_ai.tool.call.id`                                                                                                             | Tool call ID prefers the provider/model ID and falls back to Qwen Code's internal ID.                                                                                    |
+| Agent        | `gen_ai.operation.name=invoke_agent`, `gen_ai.agent.name`, `gen_ai.agent.description`, `gen_ai.conversation.id`, optional `gen_ai.request.model`                                                                         | Description uses the existing 1024-UTF-16-code-unit truncation threshold and never splits surrogate pairs. Internal invocation IDs remain private.                       |
 
 Private attributes without an exact standard equivalent remain available for
 compatibility. Exact-equivalent private aliases and invalid GenAI aliases are
@@ -64,6 +65,36 @@ from the model name.
 
 OpenAI-compatible, Anthropic, and Qwen OAuth requests use operation `chat`.
 Gemini and Vertex AI requests use `generate_content`.
+
+## Request parameters
+
+Request attributes are collected after provider adapters have applied defaults,
+overrides, unsupported-field removal, and output-window clamps, immediately
+before calling the provider SDK. This is the final SDK request object visible
+to Qwen Code, not the original logical configuration or the serialized HTTP
+body. A logical LLM span records only its first such request snapshot.
+
+| Standard attribute                 | OpenAI-compatible and Qwen OAuth                           | Anthropic          | Gemini and Vertex AI      |
+| ---------------------------------- | ---------------------------------------------------------- | ------------------ | ------------------------- |
+| `gen_ai.request.choice.count`      | `n`                                                        | Not applicable     | `config.candidateCount`   |
+| `gen_ai.request.max_tokens`        | `max_tokens`, `max_completion_tokens`, or `max_new_tokens` | `max_tokens`       | `config.maxOutputTokens`  |
+| `gen_ai.request.temperature`       | `temperature`                                              | `temperature`      | `config.temperature`      |
+| `gen_ai.request.top_p`             | `top_p`                                                    | `top_p`            | `config.topP`             |
+| `gen_ai.request.frequency_penalty` | `frequency_penalty`                                        | Not currently sent | `config.frequencyPenalty` |
+| `gen_ai.request.presence_penalty`  | `presence_penalty`                                         | Not currently sent | `config.presencePenalty`  |
+| `gen_ai.request.stop_sequences`    | `stop`                                                     | `stop_sequences`   | `config.stopSequences`    |
+
+Finite numbers and safe integers are preserved exactly, including zero and
+negative values on failed provider requests. Choice count is omitted when it is
+one. Stop sequences must be a complete string array; OpenAI's single-string
+form is normalized to a one-element array. Empty arrays are retained and mixed
+arrays are omitted rather than filtered. Explicit adapter defaults are
+recorded, while implicit SDK or server defaults are not inferred.
+
+When multiple OpenAI-compatible output-budget aliases are present, the standard
+maximum is emitted only if all present values are valid safe integers and
+equal. Conflicting values are omitted because compatible endpoints do not have
+a common precedence rule.
 
 ## Response and usage provenance
 
@@ -104,8 +135,6 @@ Qwen Code does not inject that vendor-specific resource attribute or
 
 ## Deferred work
 
-- Request sampling, choice, maximum-output, and stop fields need hooks after
-  provider adapters finalize the wire request.
 - `seed` and `top_k` have incompatible ARMS and GenAI types in the baselines.
 - Messages, instructions, tool definitions, arguments, and results require a
   standard JSON schema, privacy controls, and payload caps.
