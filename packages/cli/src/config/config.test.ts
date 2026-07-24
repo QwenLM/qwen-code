@@ -996,8 +996,11 @@ describe('parseArguments', () => {
 
 describe('loadCliConfig', () => {
   const originalArgv = process.argv;
+  let savedSandbox: string | undefined;
 
   beforeEach(() => {
+    savedSandbox = process.env['SANDBOX'];
+    delete process.env['SANDBOX'];
     vi.resetAllMocks();
     nativeLspServiceMock.mockReset();
     nativeLspServiceMock.mockImplementation(
@@ -1019,6 +1022,11 @@ describe('loadCliConfig', () => {
   afterEach(() => {
     process.argv = originalArgv;
     vi.unstubAllEnvs();
+    if (savedSandbox === undefined) {
+      delete process.env['SANDBOX'];
+    } else {
+      process.env['SANDBOX'] = savedSandbox;
+    }
     resetMcpApprovalsForTesting();
     vi.restoreAllMocks();
   });
@@ -4251,8 +4259,11 @@ describe('Telemetry configuration via environment variables', () => {
 
 describe('sandbox image resolution precedence', () => {
   const originalArgv = process.argv;
+  let savedSandbox: string | undefined;
 
   beforeEach(() => {
+    savedSandbox = process.env['SANDBOX'];
+    delete process.env['SANDBOX'];
     vi.resetAllMocks();
     vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
     vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
@@ -4262,6 +4273,11 @@ describe('sandbox image resolution precedence', () => {
   afterEach(() => {
     process.argv = originalArgv;
     vi.unstubAllEnvs();
+    if (savedSandbox === undefined) {
+      delete process.env['SANDBOX'];
+    } else {
+      process.env['SANDBOX'] = savedSandbox;
+    }
     vi.restoreAllMocks();
     delete process.env['QWEN_SANDBOX_IMAGE'];
   });

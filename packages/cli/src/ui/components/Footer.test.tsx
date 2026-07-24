@@ -6,7 +6,7 @@
 
 import { render } from 'ink-testing-library';
 import { act } from '@testing-library/react';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { Footer } from './Footer.js';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import * as useTerminalSize from '../hooks/useTerminalSize.js';
@@ -123,13 +123,25 @@ const renderWithWidth = (
 };
 
 describe('<Footer />', () => {
+  let savedSandbox: string | undefined;
+
   beforeEach(() => {
+    savedSandbox = process.env['SANDBOX'];
+    delete process.env['SANDBOX'];
     useStatusLineMock.mockReturnValue({
       lines: [],
       useThemeColors: false,
       respectUserColors: false,
       hideContextIndicator: false,
     });
+  });
+
+  afterEach(() => {
+    if (savedSandbox === undefined) {
+      delete process.env['SANDBOX'];
+    } else {
+      process.env['SANDBOX'] = savedSandbox;
+    }
   });
 
   it('renders the component', () => {

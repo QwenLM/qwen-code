@@ -2904,6 +2904,8 @@ export const AppContainer = (props: AppContainerProps) => {
     IdeContext | undefined
   >();
   const [showEscapePrompt, setShowEscapePrompt] = useState(false);
+  const [fleetDoubleTapPending, setFleetDoubleTapPending] = useState(false);
+  const [isFleetViewOpen, setIsFleetViewOpen] = useState(false);
   const [showIdeRestartPrompt, setShowIdeRestartPrompt] = useState(false);
 
   const { isFolderTrustDialogOpen, handleFolderTrustSelect, isRestarting } =
@@ -3650,6 +3652,17 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const handleGlobalKeypress = useCallback(
     (key: Key) => {
+      // Fleet View owns all input while open. Ctrl+D (EXIT) force-closes the
+      // view; Ctrl+C is left to FleetView's own handler (clears dispatch input
+      // or closes the view) so typed text isn't silently discarded.
+      if (isFleetViewOpen) {
+        if (keyMatchers[Command.EXIT](key)) {
+          setIsFleetViewOpen(false);
+          setFleetDoubleTapPending(false);
+        }
+        return;
+      }
+
       // Debug log keystrokes if enabled
       if (settings.merged.general?.debugKeystrokeLogging) {
         debugLogger.debug('[DEBUG] Keystroke:', JSON.stringify(key));
@@ -3949,6 +3962,7 @@ export const AppContainer = (props: AppContainerProps) => {
       vimEnabled,
       vimMode,
       setThoughtExpanded,
+      isFleetViewOpen,
       openTranscript,
       closeTranscript,
     ],
@@ -4116,6 +4130,8 @@ export const AppContainer = (props: AppContainerProps) => {
       ctrlCPressedOnce,
       ctrlDPressedOnce,
       showEscapePrompt,
+      fleetDoubleTapPending,
+      isFleetViewOpen,
       isFocused,
       elapsedTime,
       currentLoadingPhrase,
@@ -4260,6 +4276,8 @@ export const AppContainer = (props: AppContainerProps) => {
       ctrlCPressedOnce,
       ctrlDPressedOnce,
       showEscapePrompt,
+      fleetDoubleTapPending,
+      isFleetViewOpen,
       isFocused,
       elapsedTime,
       currentLoadingPhrase,
@@ -4374,6 +4392,9 @@ export const AppContainer = (props: AppContainerProps) => {
       handleMcpApprovalSelect,
       setConstrainHeight,
       onEscapePromptChange: handleEscapePromptChange,
+      openFleetView: () => setIsFleetViewOpen(true),
+      closeFleetView: () => setIsFleetViewOpen(false),
+      setFleetDoubleTapPending,
       onTabConsumerChange: setHasTabConsumer,
       refreshStatic,
       handleFinalSubmit,

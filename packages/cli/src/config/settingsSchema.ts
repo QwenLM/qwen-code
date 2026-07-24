@@ -854,6 +854,30 @@ const SETTINGS_SCHEMA = {
         description: 'Hide helpful tips in the UI',
         showInDialog: true,
       },
+      leftArrowOpensFleetView: {
+        type: 'boolean',
+        label: 'Left Arrow Opens Fleet View',
+        category: 'UI',
+        requiresRestart: false,
+        default: true,
+        description:
+          'When true, pressing the left arrow key twice on an empty input opens Fleet View to manage sessions.',
+        showInDialog: true,
+      },
+      fleetViewGroupMode: {
+        type: 'enum',
+        label: 'Fleet View Group Mode',
+        category: 'UI',
+        requiresRestart: false,
+        default: 'state',
+        description:
+          'How to group sessions in Fleet View. "state" groups by current/idle status. "directory" groups by workspace path.',
+        showInDialog: true,
+        options: [
+          { value: 'state', label: 'By state' },
+          { value: 'directory', label: 'By directory' },
+        ],
+      },
       history: {
         type: 'object',
         label: 'History',

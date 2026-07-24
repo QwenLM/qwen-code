@@ -68,6 +68,7 @@ import { authCommand } from '../commands/auth.js';
 import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
+import { fleetCommand } from '../commands/fleet.js';
 import { updateCommand } from '../commands/update.js';
 
 // UUID v4 regex pattern for validation
@@ -1085,6 +1086,8 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(serveCommand)
     // Register sessions subcommands
     .command(sessionsCommand)
+    // Register Fleet View
+    .command(fleetCommand)
     // Register update command
     .command(updateCommand);
 
