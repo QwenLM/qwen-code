@@ -1048,6 +1048,67 @@ describe('scheduled-tasks routes', () => {
     expect(h.bridge.closed).toEqual([]);
   });
 
+  it('preserves a concurrent max-tasks response when no mutation committed', async () => {
+    await teardown(h);
+    let checks = 0;
+    h = await makeHarness(true, {
+      closed: false,
+      assertOpen() {
+        checks += 1;
+        if (checks > 3) {
+          throw Object.assign(new Error('generation closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+      },
+      close() {},
+    });
+    const file = getCronFilePath(h.workspace);
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    const tasks = Array.from({ length: 49 }, (_, index) => ({
+      id: `task-${index}`,
+      cron: '0 9 * * *',
+      prompt: `prompt-${index}`,
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: 1_700_000_000_000,
+      enabled: true,
+    }));
+    await fsp.writeFile(file, JSON.stringify(tasks), 'utf8');
+    const spawnOrAttach = h.bridge.spawnOrAttach;
+    h.bridge.spawnOrAttach = async (req) => {
+      const session = await spawnOrAttach(req);
+      await fsp.writeFile(
+        file,
+        JSON.stringify([
+          ...tasks,
+          {
+            id: 'concurrent-task',
+            cron: '0 9 * * *',
+            prompt: 'concurrent prompt',
+            recurring: true,
+            createdAt: 1_700_000_000_000,
+            lastFiredAt: 1_700_000_000_000,
+            enabled: true,
+          },
+        ]),
+        'utf8',
+      );
+      return session;
+    };
+
+    const res = await create({ cron: '0 9 * * *', prompt: 'overflow' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('max_tasks_reached');
+    expect(checks).toBe(3);
+    expect(h.bridge.spawned).toEqual(['sess-1']);
+    expect(h.bridge.closed).toEqual(['sess-1']);
+    const stored = await readCronTasks(h.workspace);
+    expect(stored).toHaveLength(50);
+    expect(stored.at(-1)?.id).toBe('concurrent-task');
+  });
+
   it('updates cron / prompt / recurring via PATCH', async () => {
     const created = await create({
       cron: '0 9 * * *',

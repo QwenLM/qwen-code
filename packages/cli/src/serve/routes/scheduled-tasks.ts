@@ -576,18 +576,20 @@ function registerScheduledTaskCrudRoutes(
       });
       return;
     }
-    try {
-      target.assertGenerationOpen?.();
-    } catch (error) {
-      await rollbackCronMutation(
-        workspaceCwd,
-        rollbackBefore,
-        rollbackAfter,
-        `POST ${base}`,
-      );
-      await rollbackSession();
-      if (sendGenerationClosedError(res, error)) return;
-      throw error;
+    if (rollbackBefore && rollbackAfter) {
+      try {
+        target.assertGenerationOpen?.();
+      } catch (error) {
+        await rollbackCronMutation(
+          workspaceCwd,
+          rollbackBefore,
+          rollbackAfter,
+          `POST ${base}`,
+        );
+        await rollbackSession();
+        if (sendGenerationClosedError(res, error)) return;
+        throw error;
+      }
     }
     if (overCap) {
       await rollbackSession();
