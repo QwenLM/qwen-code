@@ -10125,6 +10125,80 @@ Other open files:
       );
     });
 
+    it('appends the auto-memory section to a per-call systemInstruction override', async () => {
+      // The truthy `generationConfig.systemInstruction` branch composes
+      // getCustomSystemPrompt(...) + the volatile auto-memory suffix. Guard it
+      // with a non-empty getAutoMemoryPrompt so a regression that drops the
+      // append — silently stripping managed memory from side queries (session
+      // recap, title/summary, fast-model queries) — fails here.
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      vi.mocked(getCustomSystemPrompt).mockReturnValueOnce(
+        'Custom side-query prompt',
+      );
+      vi.mocked(mockConfig.getAutoMemoryPrompt).mockReturnValue(
+        '# auto memory\nMEMORY_INDEX_MARKER',
+      );
+
+      await client.generateContent(
+        contents,
+        { systemInstruction: 'Custom side-query prompt' },
+        abortSignal,
+        DEFAULT_QWEN_FLASH_MODEL,
+      );
+
+      const request = vi
+        .mocked(mockContentGenerator.generateContent)
+        .mock.calls.at(-1)?.[0];
+      const systemInstruction = request?.config?.systemInstruction as string;
+      expect(systemInstruction).toBe(
+        'Custom side-query prompt\n\n---\n\n# auto memory\nMEMORY_INDEX_MARKER',
+      );
+    });
+
+    it('includes context and auto-memory but omits appendPrompt/gitStatus in the per-call systemInstruction branch', async () => {
+      // The side-query branch assembles only base + contextFiles + autoMemory.
+      // It deliberately omits the appendPrompt and gitStatus layers so a
+      // configured --append-system-prompt (and the repo snapshot) do not leak
+      // into side queries (title generation, session recap, fast-model
+      // queries). Lock that layer selection in: a change that starts wiring
+      // appendPrompt/gitStatus into this branch fails here.
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      vi.mocked(getCustomSystemPrompt).mockReturnValueOnce('Side query base');
+      vi.mocked(mockConfig.getUserMemory).mockReturnValue(
+        'CONTEXT_FILES_MARKER',
+      );
+      vi.mocked(mockConfig.getAutoMemoryPrompt).mockReturnValue(
+        'AUTO_MEMORY_MARKER',
+      );
+      vi.mocked(mockConfig.getAppendSystemPrompt).mockReturnValue(
+        'APPEND_PROMPT_MARKER',
+      );
+
+      await client.generateContent(
+        contents,
+        { systemInstruction: 'Side query base' },
+        abortSignal,
+        DEFAULT_QWEN_FLASH_MODEL,
+      );
+
+      const request = vi
+        .mocked(mockContentGenerator.generateContent)
+        .mock.calls.at(-1)?.[0];
+      const systemInstruction = request?.config?.systemInstruction as string;
+      expect(systemInstruction).toContain('CONTEXT_FILES_MARKER');
+      expect(systemInstruction).toContain('AUTO_MEMORY_MARKER');
+      expect(systemInstruction).not.toContain('APPEND_PROMPT_MARKER');
+      // Exact shape: base + contextFiles + autoMemory, in that order, with no
+      // appendPrompt or gitStatus segment between them.
+      expect(systemInstruction).toBe(
+        'Side query base\n\n---\n\nCONTEXT_FILES_MARKER\n\n---\n\nAUTO_MEMORY_MARKER',
+      );
+    });
+
     it('should use config system prompt override when provided', async () => {
       const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
       const abortSignal = new AbortController().signal;
