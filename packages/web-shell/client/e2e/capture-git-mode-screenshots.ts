@@ -3,6 +3,7 @@
  * Usage: npx tsx client/e2e/capture-git-mode-screenshots.ts
  * Requires: Vite dev server running on port 5174
  */
+import { mkdirSync } from 'node:fs';
 import { chromium } from '@playwright/test';
 import {
   createWebShellDaemonScenario,
@@ -11,6 +12,7 @@ import {
 
 const BASE_URL = process.env.PLAYWRIGHT_BASE_URL ?? 'http://127.0.0.1:5174';
 const OUT_DIR = 'client/e2e/test-results';
+mkdirSync(OUT_DIR, { recursive: true });
 const WORKSPACE_CWD = '/tmp/qwen-web-shell-e2e';
 
 async function main() {

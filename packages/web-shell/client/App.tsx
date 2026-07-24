@@ -3238,9 +3238,11 @@ export function App({
   // git-status effect targets (computed once above), so the chip and the
   // dialog always target the same repo.
   const gitDiffWorkspaceCwd = activeWorkspaceCwd;
-  const gitModeEligible =
+  const gitModeEligible = Boolean(
     !connection.sessionId &&
-    workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)?.trusted;
+      workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)?.trusted &&
+      selectedWorkspaceGitStatus?.branch,
+  );
   useEffect(() => {
     if (!gitModeEligible) {
       setGitModeIntent({ mode: 'current' });

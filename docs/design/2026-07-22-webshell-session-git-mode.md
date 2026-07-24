@@ -146,14 +146,18 @@ export interface DaemonSession {
 
 #### 错误码
 
-| 错误码                         | 含义                                       |
-| ------------------------------ | ------------------------------------------ |
-| `branch_and_worktree_conflict` | 同时传了 `branch` 和 `worktree`            |
-| `branch_not_git_repo`          | workspace 不是 git 仓库                    |
-| `branch_invalid_name`          | 分支名不合法                               |
-| `branch_already_exists`        | 分支名已存在                               |
-| `branch_dirty_tree`            | 工作目录有未提交改动，需先 commit 或 stash |
-| `branch_checkout_failed`       | `git checkout -b` 失败（其他原因）         |
+| 错误码                         | 含义                                                                  |
+| ------------------------------ | --------------------------------------------------------------------- |
+| `branch_and_worktree_conflict` | 同时传了 `branch` 和 `worktree`                                       |
+| `invalid_branch`               | `branch` 字段不是对象（需为 `{"name":"..."}`）                        |
+| `branch_invalid_name`          | 分支名不合法                                                          |
+| `branch_session_conflict`      | 该 workspace 已有分支 session，或共享 checkout 上已有其他活跃 session |
+| `branch_init_failed`           | 初始化 git 服务失败                                                   |
+| `branch_not_git_repo`          | workspace 不是 git 仓库                                               |
+| `branch_already_exists`        | 分支名已存在                                                          |
+| `branch_status_failed`         | 检查工作目录状态失败                                                  |
+| `branch_dirty_tree`            | 工作目录有未提交改动，需先 commit 或 stash                            |
+| `branch_checkout_failed`       | `git checkout -b` 失败（其他原因）                                    |
 
 ### 前端传参链路
 

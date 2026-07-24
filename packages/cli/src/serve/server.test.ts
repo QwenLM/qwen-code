@@ -9103,6 +9103,7 @@ describe('createServeApp', () => {
           name: 'feat/x',
           baseBranch: 'main',
         });
+        expect(bridge.calls[0]?.sessionScope).toBe('thread');
       } finally {
         mockWt.impl = undefined;
         mockBranchOps.getHeadCommit = undefined;
