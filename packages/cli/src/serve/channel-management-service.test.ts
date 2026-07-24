@@ -699,6 +699,58 @@ describe('createChannelManagementService', () => {
     expect(store.remove).toHaveBeenCalledOnce();
   });
 
+  it('rejects mutations when two same-name workers run in the same workspace', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    const twoWorkers = {
+      enabled: true,
+      selection: { mode: 'names' as const, names: ['bot'] },
+      transition: 'idle' as const,
+      workers: [
+        {
+          enabled: true,
+          state: 'running' as const,
+          channels: ['bot'],
+          requestedChannels: ['bot'],
+          adapters: [{ name: 'bot', state: 'connected' as const }],
+          workspaceId: 'primary',
+          workspaceCwd: WORKSPACE,
+          primary: true,
+        },
+        {
+          enabled: true,
+          state: 'running' as const,
+          channels: ['bot'],
+          requestedChannels: ['bot'],
+          adapters: [{ name: 'bot', state: 'connected' as const }],
+          workspaceId: 'primary-dup',
+          workspaceCwd: WORKSPACE,
+          primary: false,
+        },
+      ],
+    };
+    vi.mocked(manager.state).mockReturnValue(twoWorkers);
+
+    await expect(
+      service.upsert('bot', {
+        expectedRevision: 'rev-1',
+        config: { type: 'dingtalk', clientId: 'updated' },
+      }),
+    ).rejects.toMatchObject({ code: 'channel_runtime_owner_mismatch' });
+
+    vi.mocked(manager.state).mockReturnValue(twoWorkers);
+    await expect(service.restart('bot')).rejects.toMatchObject({
+      code: 'channel_runtime_owner_mismatch',
+    });
+
+    vi.mocked(manager.state).mockReturnValue(twoWorkers);
+    await expect(
+      service.remove('bot', { expectedRevision: 'rev-1' }),
+    ).rejects.toMatchObject({ code: 'channel_runtime_owner_mismatch' });
+
+    expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+    expect(manager.setChannelEnabled).not.toHaveBeenCalled();
+  });
+
   it('rejects lifecycle operations for a nonexistent channel', async () => {
     const { service, manager } = setup({ committedNames: [] });
 
