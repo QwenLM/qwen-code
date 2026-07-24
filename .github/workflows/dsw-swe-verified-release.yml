@@ -46,9 +46,9 @@ concurrency:
 
 jobs:
   benchmark:
-    name: SWE-bench Verified on DSW
+    name: Dispatch SWE-bench Verified to DSW
     runs-on: [self-hosted, Linux, X64, qwen-benchmark-dsw]
-    timeout-minutes: 1440
+    timeout-minutes: 15
     env:
       RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
       QWEN_REF: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.qwen_release_tag || inputs.release_tag }}
@@ -100,36 +100,23 @@ jobs:
             echo "release_url=$(jq -r .html_url release.json)"
           } >> "${GITHUB_OUTPUT}"
 
-      - name: Run isolated DSW pool
-        id: benchmark
-        continue-on-error: true
+      - name: Dispatch to persistent DSW pool
+        id: dispatch
         env:
           QWEN_REF: ${{ steps.release.outputs.qwen_ref }}
           QWEN_COMMIT: ${{ steps.release.outputs.release_commit }}
+          RELEASE_ID: ${{ steps.release.outputs.release_id }}
         run: |
-          .github/scripts/dsw-swe-verified/harden-harbor-qwen-adapter.py \
-            /mnt/workspace/qwen-benchmark-pool/venv/lib/python3.12/site-packages/harbor/agents/installed/qwen_code.py
-          .github/scripts/dsw-swe-verified/run-release-benchmark.sh
+          .github/scripts/dsw-swe-verified/dispatch-release-benchmark.sh
 
-      - name: Write result to Release
-        if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RELEASE_COMMIT: ${{ steps.release.outputs.release_commit }}
-          RELEASE_DATABASE_ID: ${{ steps.release.outputs.release_id || env.RELEASE_ID }}
-          RELEASE_URL: ${{ steps.release.outputs.release_url }}
-          BENCHMARK_STEP_OUTCOME: ${{ steps.benchmark.outcome }}
-          GITHUB_RUN_URL: ${{ env.GITHUB_RUN_URL }}
+      - name: Record dispatch receipt
         run: |
-          .github/scripts/dsw-swe-verified/publish-release-result.sh
-
-      - name: Enforce publication gate
-        if: always()
-        env:
-          BENCHMARK_STEP_OUTCOME: ${{ steps.benchmark.outcome }}
-        run: |
-          status="$(jq -r '.status // "PIPELINE_ERROR"' benchmark-output/public-result.json)"
-          if [[ "${BENCHMARK_STEP_OUTCOME}" != "success" || "${status}" != "SUCCEEDED" ]]; then
-            echo "::error::Benchmark was published without a score because status=${status}"
-            exit 1
-          fi
+          {
+            echo "### DSW SWE-bench Verified dispatch"
+            echo
+            echo "- Pool run: \`${{ steps.dispatch.outputs.run_id }}\`"
+            echo "- State: queued"
+            echo "- Cases: ${INSTANCE_LIMIT}"
+            echo "- DSW executors: ${EXECUTOR_COUNT}"
+            echo "- The persistent DSW publisher will update the Release after the run reaches a validated terminal state."
+          } >> "${GITHUB_STEP_SUMMARY}"

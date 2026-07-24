@@ -2,7 +2,7 @@
 
 This pipeline is an isolated implementation of:
 
-`GitHub Release -> DSW self-hosted runner -> 10-executor SWE-bench Verified pool -> Release result`
+`GitHub Release -> short DSW dispatch job -> persistent 10-executor pool -> DSW publisher -> Release result`
 
 It does not use or modify the workflow, service, state, or result markers from
 PR #7584.
@@ -11,13 +11,17 @@ PR #7584.
 
 - A published Release starts the workflow from the Release tag's target commit.
 - The Release tag is resolved to its immutable Git commit.
-- The DSW preflight removes Harbor's CLI key argument so the model key is passed
-  to Qwen Code only through the process environment.
 - The full 500-instance SWE-bench Verified manifest is frozen before dispatch.
-- Ten executors atomically claim tasks from PostgreSQL. Each executor runs one
-  Harbor/Docker trial at a time.
+- The Action writes the manifest and Release callback metadata to PostgreSQL,
+  records the pool `run_id`, and ends without waiting for the benchmark.
+- A persistent Coordinator and ten persistent executors process the run. Each
+  executor atomically claims one task and runs one Harbor/Docker trial at a time.
+- Harbor live trial directories stay on local NVMe. Completed attempt artifacts
+  are copied to OSS without depending on OSS POSIX permission operations.
 - The Coordinator maintains leases, heartbeat recovery, one infrastructure
-  retry, run counters, and the completion gate.
+  retry, run counters, a circuit breaker, and the completion gate.
+- A persistent DSW publisher watches terminal runs and actively updates the
+  triggering Release.
 - A score is written to the Release only when all 500 instances have a unique
   terminal state and the run status is `SUCCEEDED`.
 - A `QUARANTINED` or pipeline-error run writes status and counts, but never a
@@ -52,4 +56,6 @@ This override is accepted only for prereleases. A normal Release always evaluate
 its own tag.
 
 `workflow_dispatch` remains available for explicit diagnostics and reruns.
-Manual validation defaults to one instance to bound time and model cost.
+Manual validation defaults to one instance to bound time and model cost. Both
+triggers are asynchronous: Actions records a dispatch receipt but does not stay
+alive for the benchmark duration.
