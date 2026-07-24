@@ -2031,6 +2031,43 @@ describe('App session callbacks', () => {
     });
   });
 
+  it('skips the wait:true fresh path for worktree sessions', async () => {
+    const worktreePath = '/workspace/.worktrees/feat-a';
+    mockWorkspace.client.sessionStatus.mockResolvedValue({
+      worktree: { slug: 'feat-a', path: worktreePath, branch: 'feat-a' },
+    });
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    const workspaceGit = vi.fn().mockResolvedValue({ branch: 'feat-a' });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit,
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    // The worktree session status lands and the git effect re-runs with the
+    // worktree path.
+    await vi.waitFor(() => {
+      expect(workspaceGit).toHaveBeenCalledWith({ cwd: worktreePath });
+    });
+
+    // After the worktree cwd call, no wait:true call should follow — worktree
+    // ?cwd= reads compute directly, so a second request would be a duplicate.
+    const calls = workspaceGit.mock.calls.map(([arg]) => arg);
+    const cwdIndex = calls.findIndex(
+      (arg: Record<string, unknown>) => arg?.cwd === worktreePath,
+    );
+    const waitAfter = calls
+      .slice(cwdIndex + 1)
+      .filter((arg: Record<string, unknown>) => arg?.wait === true);
+    expect(waitAfter).toHaveLength(0);
+  });
+
   it('forwards the branch intent to createSession when submitting a prompt', async () => {
     mockConnection.sessionId = undefined;
     mockWorkspace.capabilities = {

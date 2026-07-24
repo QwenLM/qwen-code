@@ -59,6 +59,22 @@ function sameWorkingTreeStatus(
   a: GitWorkingTreeStatus,
   b: GitWorkingTreeStatus,
 ): boolean {
+  // Exhaustiveness guard: if a field is added to GitWorkingTreeStatus,
+  // this line will fail to compile until the field is added below.
+  const _exhaustive: Record<keyof GitWorkingTreeStatus, true> = {
+    branch: true,
+    detached: true,
+    hasUpstream: true,
+    ahead: true,
+    behind: true,
+    staged: true,
+    unstaged: true,
+    untracked: true,
+    conflicted: true,
+    stashCount: true,
+    operation: true,
+  };
+  void _exhaustive;
   return (
     a.branch === b.branch &&
     a.detached === b.detached &&
