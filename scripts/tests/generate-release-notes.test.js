@@ -26,6 +26,7 @@ import {
   generateReleaseNotes,
   parseGeneratedEntries,
   renderReleaseNotes,
+  tryAppendDegradedStepSummary,
 } from '../generate-release-notes.js';
 
 const PR = (number) => `https://github.com/QwenLM/qwen-code/pull/${number}`;
@@ -653,7 +654,15 @@ describe('generateAiContent circuit breaker', () => {
       if (request.kind === 'summaries' && calls === 1) {
         throw new Error('transient');
       }
-      return '{}';
+      if (request.kind === 'summaries') {
+        return JSON.stringify({
+          summaries: request.entries.map((entry) => ({
+            pr: entry.number,
+            summary: `${entry.title} summary`,
+          })),
+        });
+      }
+      return JSON.stringify({ highlights: [] });
     };
     const entries = [entry(1, 'one'), entry(2, 'two')];
 
@@ -663,6 +672,7 @@ describe('generateAiContent circuit breaker', () => {
     expect(
       result.warnings.some((warning) => warning.includes('stopped after')),
     ).toBe(false);
+    expect(result.summaries.get(2)).toBe('two summary');
   });
 });
 
@@ -694,5 +704,23 @@ describe('appendDegradedStepSummary', () => {
     expect(vi.mocked(appendFileSync)).not.toHaveBeenCalled();
     expect(fs.existsSync(summaryPath)).toBe(false);
     rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('does not propagate summary write failures (tryAppend)', () => {
+    vi.mocked(appendFileSync).mockImplementationOnce(() => {
+      throw new Error('ENOSPC');
+    });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    expect(() =>
+      tryAppendDegradedStepSummary(
+        { usedAi: false, warnings: ['Summary batch fallback: HTTP 500'] },
+        join(tmpdir(), 'summary.md'),
+      ),
+    ).not.toThrow();
+    expect(errSpy).toHaveBeenCalledWith(
+      expect.stringContaining('failed to write the degraded step summary'),
+    );
+    errSpy.mockRestore();
   });
 });

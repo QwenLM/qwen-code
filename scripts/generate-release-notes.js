@@ -739,7 +739,7 @@ async function main() {
     // plain stderr text was invisible there even though the run stayed green.
     console.error(`::warning::${warning}`);
   }
-  appendDegradedStepSummary(result);
+  tryAppendDegradedStepSummary(result);
 
   if (args['dry-run']) {
     process.stdout.write(result.markdown);
@@ -748,6 +748,20 @@ async function main() {
     writeFileSync(output, result.markdown);
     console.error(
       `Wrote ${baseEntries.length} pull requests to ${output}${result.usedAi ? ' with AI summaries' : ''}.`,
+    );
+  }
+}
+
+export function tryAppendDegradedStepSummary(result, summaryPath) {
+  // The step summary is auxiliary; a filesystem failure there (EACCES,
+  // ENOSPC) must not cost the primary release-notes artifact.
+  try {
+    appendDegradedStepSummary(result, summaryPath);
+  } catch (error) {
+    console.error(
+      `::warning::failed to write the degraded step summary: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
     );
   }
 }
