@@ -2942,15 +2942,15 @@ export const useGeminiStream = (
           // a new conversation turn (cleared in submitQuery).
           if (retryCountdownTimerRef.current) {
             clearRetryCountdown();
-          } else if (pendingRetryErrorItemRef.current) {
-            // A static error+hint is still showing but we reached the turn
-            // completion path — the error was auto-recovered mid-turn (e.g.
-            // a transient socket drop during a tool-use loop that the stream
-            // processor retried successfully). Clear the stale error so it
-            // doesn't linger on screen, and reset the errored flag so the
-            // turn is correctly reported as delivered.
+          } else if (
+            pendingRetryErrorItemRef.current &&
+            !lastPromptErroredRef.current
+          ) {
+            // A countdown-originated error item lingers after the timer
+            // expired and the retry succeeded. Clear it so it does not
+            // stay on screen. Terminal errors (handleErrorEvent) set
+            // lastPromptErroredRef and are intentionally left visible.
             setPendingRetryErrorItem(null);
-            lastPromptErroredRef.current = false;
           }
           const loopDetected = loopDetectedRef.current;
           if (loopDetected) {
