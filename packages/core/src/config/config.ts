@@ -165,7 +165,11 @@ import { WorkspaceContext } from '../utils/workspaceContext.js';
 import { type ToolName } from '../utils/tool-utils.js';
 import { FatalConfigError, getErrorMessage } from '../utils/errors.js';
 import { normalizeProxyUrl } from '../utils/proxyUtils.js';
-import { loadUndici, redactProxyError } from '../utils/runtimeFetchOptions.js';
+import {
+  loadUndici,
+  setResolvedProxyUrlForRuntimeFetch,
+  redactProxyError,
+} from '../utils/runtimeFetchOptions.js';
 
 // Local config modules
 import type { FileFilteringOptions } from './constants.js';
@@ -212,12 +216,15 @@ import {
 } from '../utils/debugLogger.js';
 import {
   getAutoMemoryRoot,
+  getAutoMemoryIndexPath,
   getTeamAutoMemoryRoot,
+  getUserAutoMemoryIndexPath,
   getUserAutoMemoryRoot,
 } from '../memory/paths.js';
 import {
-  readAutoMemoryIndex,
-  readUserAutoMemoryIndex,
+  type AutoMemoryIndexRead,
+  readAutoMemoryIndexWithStats,
+  readUserAutoMemoryIndexWithStats,
 } from '../memory/store.js';
 import {
   rebuildTeamAutoMemoryIndex,
@@ -911,6 +918,12 @@ export interface ConfigParameters {
    */
   disabledSkillNamesProvider?: () => ReadonlySet<string>;
   /**
+   * Additional directories to scan for skills (SKILL.md files).
+   * Sourced from `settings.skills.directories`. Paths are raw
+   * (unexpanded); `SkillManager.getSkillsBaseDirs` handles `~` expansion.
+   */
+  customSkillDirs?: readonly string[];
+  /**
    * Tool names hidden from the registry at construction time. Unlike
    * `permissions.deny` (which keeps the tool registered and rejects
    * invocation), tools listed here are not registered at all and never
@@ -1603,6 +1616,7 @@ export class Config {
    * process exit (which dies with the process — no leak).
    */
   private pendingStartupWorktreeNotice: string | null = null;
+  private pendingRecoveredAgentsNotice: string | null = null;
   private debugLogger: DebugLogger;
   private toolRegistry!: ToolRegistry;
   /**
@@ -1673,6 +1687,7 @@ export class Config {
   private readonly disabledSkillNamesProvider:
     | (() => ReadonlySet<string>)
     | null;
+  private readonly customSkillDirs: readonly string[];
   //   `disabledTools` is set at construction
   // time but can be re-synced by the daemon mutation surface
   // (`setWorkspaceToolEnabled` propagates through ACP) so a subsequent
@@ -1939,6 +1954,7 @@ export class Config {
       ...(params.disabledSlashCommands ?? []),
     ]);
     this.disabledSkillNamesProvider = params.disabledSkillNamesProvider ?? null;
+    this.customSkillDirs = Object.freeze([...(params.customSkillDirs ?? [])]);
     this.disabledTools = new Set(params.disabledTools ?? []);
     this.visibleTools = new Set(
       (params.visibleTools ?? []).filter(
@@ -2247,6 +2263,10 @@ export class Config {
               httpsProxy: proxyUrl,
             }),
           );
+          // Paths that pin their own dispatcher off the global one (the MCP
+          // streamable HTTP fetch) read the explicit proxy back from here
+          // (#7195).
+          setResolvedProxyUrlForRuntimeFetch(proxyUrl);
         })
         .catch((error) => {
           // Redact before logging: the error can embed the proxy URL with
@@ -3145,10 +3165,22 @@ export class Config {
           }
         }
       }
-      const [managedAutoMemoryIndex, userAutoMemoryIndex] = await Promise.all([
-        readAutoMemoryIndex(this.getProjectRoot()),
-        readUserAutoMemoryIndex().catch(() => null),
-      ]);
+      const [managedAutoMemoryIndexRead, userAutoMemoryIndexRead] =
+        await Promise.all([
+          readAutoMemoryIndexWithStats(this.getProjectRoot()),
+          readUserAutoMemoryIndexWithStats().catch(() => null),
+        ]);
+      this.recordAutoMemoryIndexRead(
+        getAutoMemoryIndexPath(this.getProjectRoot()),
+        managedAutoMemoryIndexRead,
+      );
+      this.recordAutoMemoryIndexRead(
+        getUserAutoMemoryIndexPath(),
+        userAutoMemoryIndexRead,
+      );
+      const managedAutoMemoryIndex =
+        managedAutoMemoryIndexRead?.content ?? null;
+      const userAutoMemoryIndex = userAutoMemoryIndexRead?.content ?? null;
       // Always surface the user-level section so the main assistant knows the
       // dir exists and can route ad-hoc "remember this cross-project" saves
       // there. When empty the prompt builder emits a "MEMORY.md is currently
@@ -3179,6 +3211,20 @@ export class Config {
       conditionalRules,
       projectRoot,
     );
+  }
+
+  private recordAutoMemoryIndexRead(
+    indexPath: string,
+    indexRead: AutoMemoryIndexRead | null,
+  ): void {
+    if (indexRead === null || this.getFileReadCacheDisabled()) {
+      return;
+    }
+
+    this.getFileReadCache().recordRead(indexPath, indexRead.stats, {
+      full: true,
+      cacheable: true,
+    });
   }
 
   private buildMemoryContextWarning(memoryContent: string): string | undefined {
@@ -3430,6 +3476,7 @@ export class Config {
       process.env['QWEN_CODE_SESSION_ID'] = this.sessionId;
     }
     this.sessionData = sessionData;
+    this.pendingRecoveredAgentsNotice = null;
     setDebugLogSession(this);
     this.debugLogger = createDebugLogger();
     this.chatRecordingService = this.chatRecordingEnabled
@@ -4542,6 +4589,15 @@ export class Config {
    */
   getDisabledSkillNames(): ReadonlySet<string> {
     return this.disabledSkillNamesProvider?.() ?? EMPTY_DISABLED_SKILL_NAMES;
+  }
+
+  /**
+   * Returns additional skill directories from `settings.skills.directories`.
+   * Paths are raw (unexpanded); consumers must handle `~` expansion
+   * (see `SkillManager.getSkillsBaseDirs`).
+   */
+  getCustomSkillDirs(): readonly string[] {
+    return this.customSkillDirs;
   }
 
   /**
@@ -6506,9 +6562,36 @@ export class Config {
   async loadPausedBackgroundAgents(
     sessionId: string = this.getSessionId(),
   ): Promise<ReadonlyArray<import('../agents/background-tasks.js').AgentTask>> {
-    return this.getBackgroundAgentResumeService().loadPausedBackgroundAgents(
-      sessionId,
-    );
+    if (sessionId !== this.getSessionId()) {
+      this.debugLogger.warn(
+        `Refusing to restore background agents for non-current session ${sessionId}.`,
+      );
+      return [];
+    }
+    const service = this.getBackgroundAgentResumeService();
+    let recovered: ReadonlyArray<
+      import('../agents/background-tasks.js').AgentTask
+    >;
+    try {
+      recovered = await service.loadPausedBackgroundAgents(sessionId);
+    } catch (error) {
+      this.debugLogger.warn(
+        `Background agent restore failed for session ${sessionId}; continuing without restored agents.`,
+        error,
+      );
+      return [];
+    }
+    if (recovered.length > 0 && !this.getBareMode()) {
+      this.pendingRecoveredAgentsNotice =
+        service.buildRecoveredBackgroundAgentsModelNotice(recovered.length);
+    }
+    return recovered;
+  }
+
+  consumePendingRecoveredAgentsNotice(): string | null {
+    const notice = this.pendingRecoveredAgentsNotice;
+    this.pendingRecoveredAgentsNotice = null;
+    return notice;
   }
 
   async resumeBackgroundAgent(
@@ -6796,6 +6879,10 @@ export class Config {
     await registerLazy(ToolNames.AGENT, async () => {
       const { AgentTool } = await import('../tools/agent/agent.js');
       return new AgentTool(this);
+    });
+    await registerLazy(ToolNames.LIST_AGENTS, async () => {
+      const { ListAgentsTool } = await import('../tools/list-agents.js');
+      return new ListAgentsTool(this);
     });
     await registerLazy(ToolNames.TASK_STOP, async () => {
       const { TaskStopTool } = await import('../tools/task-stop.js');

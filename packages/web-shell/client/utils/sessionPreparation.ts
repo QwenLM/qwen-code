@@ -12,9 +12,11 @@ type PromptSessionActions = {
     approvalMode?: DaemonApprovalMode;
     sourceType?: string;
     worktree?: { slug?: string };
+    branch?: { name: string };
   }) => Promise<{
     sessionId: string;
     worktree?: { slug: string; path: string; branch: string };
+    branch?: { name: string; baseBranch: string };
   }>;
   attachSession: () => Promise<void>;
   clearSession: () => Promise<void>;
@@ -32,6 +34,7 @@ export async function createAndAttachSessionForPrompt({
   modeId,
   workspaceCwd,
   worktree,
+  branch,
   onSessionCreated,
   onSessionAllocated,
   getCurrentSessionId,
@@ -42,11 +45,15 @@ export async function createAndAttachSessionForPrompt({
   modeId?: string;
   workspaceCwd?: string;
   worktree?: { slug?: string };
+  branch?: { name: string };
   onSessionCreated?: (sessionId: string) => Promise<void> | void;
   onSessionAllocated?: (sessionId: string) => void;
   getCurrentSessionId: () => string | undefined;
   warn?: (message?: unknown, ...optionalParams: unknown[]) => void;
-}): Promise<{ worktree?: { slug: string; path: string; branch: string } }> {
+}): Promise<{
+  worktree?: { slug: string; path: string; branch: string };
+  branch?: { name: string; baseBranch: string };
+}> {
   // Seed the approval mode in the create request itself so the daemon applies
   // it atomically at spawn (`POST /session` → `spawnOrAttach({ approvalMode })`),
   // saving a follow-up round-trip. Approval mode is fail-closed at spawn: if the
@@ -55,13 +62,17 @@ export async function createAndAttachSessionForPrompt({
   // The model, by contrast, stays a best-effort follow-up below.
   const approvalMode =
     modeId && isDaemonApprovalMode(modeId) ? modeId : undefined;
-  const { sessionId, worktree: worktreeInfo } =
-    await sessionActions.createSession({
-      workspaceCwd,
-      sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
-      ...(approvalMode ? { approvalMode } : {}),
-      ...(worktree ? { worktree } : {}),
-    });
+  const {
+    sessionId,
+    worktree: worktreeInfo,
+    branch: branchInfo,
+  } = await sessionActions.createSession({
+    workspaceCwd,
+    sourceType: WEB_SHELL_SESSION_SOURCE_TYPE,
+    ...(approvalMode ? { approvalMode } : {}),
+    ...(worktree ? { worktree } : {}),
+    ...(branch ? { branch } : {}),
+  });
   onSessionAllocated?.(sessionId);
   let preparationStep = 'prepare new session';
   try {
@@ -132,5 +143,8 @@ export async function createAndAttachSessionForPrompt({
       warn('[WebShell] failed to set model for new session:', error);
     });
   }
-  return worktreeInfo ? { worktree: worktreeInfo } : {};
+  return {
+    ...(worktreeInfo ? { worktree: worktreeInfo } : {}),
+    ...(branchInfo ? { branch: branchInfo } : {}),
+  };
 }

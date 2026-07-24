@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import {
   ClientSideConnection,
@@ -25,10 +25,14 @@ import type {
 import {
   DAEMON_TRACEPARENT_META_KEY,
   DAEMON_TRACESTATE_META_KEY,
+  INVOCATION_CONTEXT_META_KEY,
+  PRIVATE_ACP_CAPABILITY_ENV,
+  PRIVATE_PARENT_CAPABILITY_META_KEY,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   TrustGateError,
   normalizeSnapshotPayload,
   ShellExecutionService,
+  type InvocationContextV1,
   type ShellOutputEvent,
 } from '@qwen-code/qwen-code-core';
 import type { ShellCommandResult } from './bridgeTypes.js';
@@ -92,11 +96,13 @@ import { parseSessionSource } from './session-source.js';
 import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
+  DAEMON_CHANNEL_DELIVERY_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_META_KEY,
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
+  PROMPT_CANCEL_METHOD,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
 } from './bridgeTypes.js';
 import { getChannelStartupProfileAttributes } from './channel-startup-profile.js';
@@ -126,6 +132,7 @@ import type {
   BridgeSessionTranscriptPage,
   BridgeSessionTranscriptPageRequest,
   BridgeGenerationStreamEvent,
+  BridgeWorkspaceGenerationStreamEvent,
 } from './bridgeTypes.js';
 import type {
   BridgeFreshSessionAdmissionContext,
@@ -453,6 +460,8 @@ interface SessionEntry {
   sourceId?: string;
   /** Worktree isolation metadata, when created with worktree param. */
   worktree?: { slug: string; path: string; branch: string };
+  /** Branch metadata, when created with branch param. */
+  branch?: { name: string; baseBranch: string };
   channel: AcpChannel;
   connection: ClientSideConnection;
   /** Per-session event bus drives `GET /session/:id/events`. */
@@ -585,16 +594,10 @@ interface SessionEntry {
     errorKind?: string;
   };
   retryAllowed: boolean;
-  /**
-   * Per-prompt "already broadcast `prompt_cancelled`" latch. The explicit
-   * `cancelSession` route and the `sendPrompt` abort path (originator SSE
-   * drop) can both fire for the same active prompt — e.g. a client POSTs
-   * /cancel then immediately closes its socket. Without dedup, peers
-   * receive two `prompt_cancelled` frames for one turn. Reset to `false`
-   * when the **next prompt starts** (the latch is per-prompt); set `true`
-   * on the first broadcast.
-   */
-  cancelBroadcast?: boolean;
+  /** Prompt id whose `prompt_cancelled` event has already been broadcast. */
+  cancelBroadcastPromptId?: string;
+  /** Whether an id-less idle cancellation has already been broadcast. */
+  cancelBroadcastWithoutPrompt?: boolean;
   /**
    * Count of times `spawnOrAttach` has returned `attached: true` for
    * this entry — i.e. a second-or-subsequent client claimed this
@@ -977,10 +980,9 @@ function broadcastPromptCancelled(
 
 /**
  * Dedup wrapper around {@link broadcastPromptCancelled}. Broadcasts at
- * most once per active prompt by latching `entry.cancelBroadcast`, so the
+ * most once per active prompt by recording its id, so the
  * `cancelSession` route and the `sendPrompt` abort path can't both emit a
  * `prompt_cancelled` for a single turn (POST /cancel then socket close).
- * The latch is reset when the next prompt starts.
  */
 function broadcastPromptCancelledOnce(
   entry: SessionEntry,
@@ -989,13 +991,20 @@ function broadcastPromptCancelledOnce(
   originatorClientId: string | undefined,
   reason?: 'forward_failed',
 ): void {
-  if (entry.cancelBroadcast) {
+  if (
+    (promptId !== undefined && entry.cancelBroadcastPromptId === promptId) ||
+    (promptId === undefined && entry.cancelBroadcastWithoutPrompt === true)
+  ) {
     writeStderrLine(
-      `broadcastPromptCancelledOnce: suppressed duplicate cancel for session ${sessionId} (latch already set)`,
+      `broadcastPromptCancelledOnce: suppressed duplicate cancel for session ${sessionId} prompt=${promptId ?? 'none'}`,
     );
     return;
   }
-  entry.cancelBroadcast = true;
+  if (promptId === undefined) {
+    entry.cancelBroadcastWithoutPrompt = true;
+  } else {
+    entry.cancelBroadcastPromptId = promptId;
+  }
   broadcastPromptCancelled(
     entry,
     sessionId,
@@ -1795,12 +1804,87 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // daemon. Cleared in the `finally` of the creator.
   let inFlightChannelSpawn: Promise<ChannelInfo> | undefined;
   const byId = new Map<string, SessionEntry>();
+  const forwardRunningPromptCancel = async (
+    entry: SessionEntry,
+    pending: PendingPromptEntry,
+    notification: CancelNotification,
+  ): Promise<void> => {
+    if (pending.cancelForwardInitial) {
+      return pending.cancelForwardInitial;
+    }
+    const initial = (async () => {
+      try {
+        const extension = entry.connection
+          .extMethod(PROMPT_CANCEL_METHOD, notification)
+          .then((result) => ({ kind: 'result' as const, result }));
+        const outcome = await Promise.race([
+          extension,
+          getTransportClosedReject(entry),
+          ...(pending.cancelForwardDeadline
+            ? [
+                pending.cancelForwardDeadline.then(() => ({
+                  kind: 'deadline' as const,
+                })),
+              ]
+            : []),
+        ]);
+        if (outcome.kind === 'deadline') return;
+        const { result } = outcome;
+        if (typeof result['cancelled'] !== 'boolean') {
+          throw new Error(
+            `${PROMPT_CANCEL_METHOD} returned an invalid acknowledgement`,
+          );
+        }
+      } catch (error) {
+        if (
+          (typeof error === 'object' &&
+            error !== null &&
+            'code' in error &&
+            error.code === -32601) ||
+          isNotCurrentlyGeneratingCancelError(error)
+        ) {
+          await Promise.race([
+            entry.connection.cancel(notification),
+            getTransportClosedReject(entry),
+            ...(pending.cancelForwardDeadline
+              ? [pending.cancelForwardDeadline]
+              : []),
+          ]);
+          return;
+        }
+        throw error;
+      }
+    })().catch((error) => {
+      if (pending.cancelForwardInitial === initial) {
+        delete pending.cancelForwardInitial;
+      }
+      throw error;
+    });
+    pending.cancelForwardInitial = initial;
+    // The same-revision extension resolves only after cancellation is handled
+    // (or the target prompt has already settled). ACP-compatible custom agents
+    // that do not implement it receive one standard session/cancel notification.
+    // The FIFO tail awaits this promise so no extension request remains in flight
+    // when prompt ownership advances, except when the prompt deadline invokes the
+    // documented DAEMON-003 overlap policy.
+    pending.cancelForwardDrain = initial;
+    void initial.catch(() => {});
+    return initial;
+  };
   const generationRequests = new Map<
     string,
     {
       sessionId: string;
       connection: ClientSideConnection;
       queue: GenerationStreamQueue<BridgeGenerationStreamEvent>;
+      settled: boolean;
+    }
+  >();
+  const workspaceGenerationRequests = new Map<
+    string,
+    {
+      connection?: ClientSideConnection;
+      queue: GenerationStreamQueue<BridgeWorkspaceGenerationStreamEvent>;
       settled: boolean;
     }
   >();
@@ -1837,6 +1921,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ...(entry.turnError !== undefined ? { turnError: entry.turnError } : {}),
       pendingInteractions: [...entry.pendingInteractions.values()],
       ...(entry.worktree ? { worktree: entry.worktree } : {}),
+      ...(entry.branch ? { branch: entry.branch } : {}),
     };
   };
   // Pending + resolved permission state lives in
@@ -2074,6 +2159,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     if (inFlightChannelSpawn) return await inFlightChannelSpawn;
 
     const promise = (async () => {
+      const privateParentCapability = randomBytes(32).toString('base64url');
       const acpChannelId = randomUUID();
       const channel = await telemetry.withSpan(
         'channel.spawn',
@@ -2082,7 +2168,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           'qwen-code.daemon.channel.reused': false,
           'qwen-code.daemon.acp_channel.id': acpChannelId,
         },
-        async () => await channelFactory(boundWorkspace, childEnvOverrides),
+        async () =>
+          await channelFactory(boundWorkspace, {
+            ...childEnvOverrides,
+            [PRIVATE_ACP_CAPABILITY_ENV]: privateParentCapability,
+          }),
       );
       const sessionIds = new Set<string>();
       const client = new BridgeClient(
@@ -2170,6 +2260,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             })
             .catch(() => undefined);
         },
+        (event) => {
+          const request = workspaceGenerationRequests.get(event.requestId);
+          if (!request) return;
+          if (request.queue.push(event)) return;
+          request.settled = true;
+          workspaceGenerationRequests.delete(event.requestId);
+          request.queue.fail(new Error('Generation stream consumer too slow'));
+          void request.connection
+            ?.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceGenerationCancel, {
+              requestId: event.requestId,
+            })
+            .catch(() => undefined);
+        },
+        opts.onChannelDelivery,
       );
       const connection = new ClientSideConnection(() => client, channel.stream);
 
@@ -2352,6 +2456,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   [CHANNEL_STARTUP_PROFILE_META_KEY]: {
                     v: CHANNEL_STARTUP_PROFILE_VERSION,
                   },
+                  [PRIVATE_PARENT_CAPABILITY_META_KEY]: privateParentCapability,
                 },
                 clientCapabilities: {
                   fs: { readTextFile: true, writeTextFile: true },
@@ -2432,6 +2537,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     sourceType?: string,
     sourceId?: string,
     worktree?: { slug: string; path: string; branch: string },
+    branch?: { name: string; baseBranch: string },
   ): Promise<BridgeSession> {
     // Get-or-create the daemon's single channel, then call
     // `connection.newSession()` on it. Sessions share the child's
@@ -2536,7 +2642,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         newSessionResp.sessionId,
         boundWorkspace,
         undefined,
-        { parentSessionId, sourceType, sourceId, worktree },
+        { parentSessionId, sourceType, sourceId, worktree, branch },
       );
       initializedSessionId = entry.sessionId;
       sessionRegistered = true;
@@ -2728,6 +2834,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ? { parentSessionPersisted: parentSessionPersisted === true }
           : {}),
         ...(entry.worktree ? { worktree: entry.worktree } : {}),
+        ...(entry.branch ? { branch: entry.branch } : {}),
       };
     } finally {
       ci.sessionSpawnsInFlight = Math.max(0, ci.sessionSpawnsInFlight - 1);
@@ -3482,7 +3589,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         if (published === undefined) {
           failureCount += 1;
           teeServeDebugLine(
-            `broadcastWorkspaceEvent: publish on session ${entry.sessionId} no-op (bus closed)`,
+            `broadcastWorkspaceEvent: publish on session ${entry.sessionId} no-op (bus closed or unserializable)`,
           );
         } else {
           successCount += 1;
@@ -3518,7 +3625,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
   };
 
-  const createSessionEventBus = (): EventBus =>
+  const createSessionEventBus = (sessionId: string): EventBus =>
     new EventBus(
       eventRingSize,
       undefined,
@@ -3530,6 +3637,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           );
         },
       }),
+      {
+        // Fired once, on the FIRST ingest/seed failure (the bus keeps the
+        // degraded flag set silently afterwards). The bus doesn't know its
+        // session, so the sessionId context is injected here.
+        onCompactionError: (err) => {
+          writeStderrLine(
+            `qwen serve: compaction degraded for session=${JSON.stringify(sessionId)}; replay snapshot may lag behind live events: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        },
+      },
     );
 
   // §2.3 publish helpers — centralise cache + generation + bus publish so
@@ -3684,7 +3803,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     ci: ChannelInfo,
     sessionId: string,
     workspaceCwd: string,
-    events = createSessionEventBus(),
+    events = createSessionEventBus(sessionId),
     options: {
       drainEarlyEvents?: boolean;
       lifecycleReason?: string;
@@ -3692,6 +3811,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       sourceType?: string;
       sourceId?: string;
       worktree?: { slug: string; path: string; branch: string };
+      branch?: { name: string; baseBranch: string };
     } = {},
   ): SessionEntry => {
     const entry: SessionEntry = {
@@ -3704,6 +3824,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ...(options.sourceType ? { sourceType: options.sourceType } : {}),
       ...(options.sourceId !== undefined ? { sourceId: options.sourceId } : {}),
       ...(options.worktree ? { worktree: options.worktree } : {}),
+      ...(options.branch ? { branch: options.branch } : {}),
       channel: ci.channel,
       connection: ci.connection,
       events,
@@ -3939,6 +4060,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     | 'compactedReplay'
     | 'liveJournal'
     | 'lastEventId'
+    | 'eventEpoch'
+    | 'replayDegraded'
     | 'partial'
     | 'replayError'
     | 'historyHasMore'
@@ -3952,22 +4075,32 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               : {}),
           }
         : {};
+    // Clients seed their reconnect cursor from `lastEventId`; the epoch
+    // token must travel with it so a daemon restart between this response
+    // and the first subscribe is detected (stale cursor + dead epoch).
+    const eventEpoch = entry.events.epoch;
     const snapshot = entry.events.snapshotReplay();
     if (!snapshot) {
-      return { lastEventId: entry.events.lastEventId, ...replayStatus };
+      return {
+        lastEventId: entry.events.lastEventId,
+        eventEpoch,
+        ...replayStatus,
+      };
     }
     if (action === 'load') {
       return {
         compactedReplay: snapshot.compactedTurns,
         liveJournal: snapshot.liveJournal,
         lastEventId: snapshot.lastEventId,
+        eventEpoch,
         ...replayStatus,
+        ...(snapshot.degraded ? { replayDegraded: true } : {}),
         ...(entry.restoreHistoryHasMore === true
           ? { historyHasMore: true }
           : {}),
       };
     }
-    return { lastEventId: snapshot.lastEventId, ...replayStatus };
+    return { lastEventId: snapshot.lastEventId, eventEpoch, ...replayStatus };
   };
 
   const restoredArtifactSnapshotFromState = (
@@ -4217,7 +4350,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       throw new SessionLimitExceededError(maxSessions);
     }
 
-    const restoreEvents = createSessionEventBus();
+    const restoreEvents = createSessionEventBus(req.sessionId);
     let registeredEntry: SessionEntry | undefined;
     let ci: ChannelInfo | undefined;
     // Live counter shared with coalesced waiters (see InFlightRestore
@@ -5009,6 +5142,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         source.sourceType,
         source.sourceId,
         req.worktree,
+        req.branch,
       );
       // Track in-flight spawns regardless of scope. Under `single`
       // this also serves the coalescing path above (a parallel
@@ -5090,6 +5224,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // the first prompt on an idle session starts immediately and
       // doesn't need a queue event.
       const promptId = context?.promptId ?? randomUUID();
+      const invocationContext: InvocationContextV1 = Object.freeze({
+        version: 1,
+        sessionId,
+        promptId,
+        ...(originatorClientId ? { originatorClientId } : {}),
+      });
       const isQueued = entry.pendingPromptCount > 1;
       const pendingAbort = new AbortController();
       if (signal) {
@@ -5142,6 +5282,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // The race consumer may not be attached yet (or ever, for a queued
         // prompt that never dispatches) — keep the rejection handled.
         deadlinePromise.catch(() => {});
+        pendingEntry.cancelForwardDeadline = deadlinePromise.then(
+          () => undefined,
+          () => undefined,
+        );
         const onDeadline = () => {
           if (pendingEntry.terminalPublished) return;
           const deadlineErr = new PromptDeadlineExceededError(deadlineMs);
@@ -5275,23 +5419,32 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 const promptRequest = (() => {
                   const copy = {
                     ...normalized,
-                  } as PromptRequest & { retry?: unknown };
+                  } as PromptRequest & { retry?: unknown; delivery?: unknown };
                   delete copy.retry;
+                  delete copy.delivery;
                   const meta =
                     copy._meta && typeof copy._meta === 'object'
                       ? { ...copy._meta }
                       : {};
                   delete meta[DAEMON_RETRY_META_KEY];
+                  delete meta[INVOCATION_CONTEXT_META_KEY];
+                  delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
                   // External prompt callers cannot self-trigger a continuation;
                   // only `continueSession` (via the trusted `isContinue` flag
                   // below) re-arms it after this strip.
                   delete meta[DAEMON_CONTINUE_META_KEY];
+                  delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
                   if (isRetry) {
                     meta[DAEMON_RETRY_META_KEY] = true;
                   }
                   if (isContinue) {
                     meta[DAEMON_CONTINUE_META_KEY] = true;
                   }
+                  if (context?.channelDelivery) {
+                    meta[DAEMON_CHANNEL_DELIVERY_META_KEY] =
+                      context.channelDelivery;
+                  }
+                  meta[INVOCATION_CONTEXT_META_KEY] = invocationContext;
                   if (Object.keys(meta).length > 0) {
                     copy._meta = meta;
                   } else {
@@ -5301,6 +5454,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 })();
                 entry.promptActive = true;
                 entry.activePromptId = pendingEntry.promptId;
+                delete entry.cancelBroadcastWithoutPrompt;
                 delete entry.turnError;
                 activePromptCounter++;
                 entry.sessionLastSeenAt = Date.now();
@@ -5332,7 +5486,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   //
                   // Retry: skip echo — the original user_message_chunk is already
                   // in the transcript from the first attempt.
-                  entry.cancelBroadcast = false;
                   // Continuations carry no user prompt to echo (empty `prompt`);
                   // the original user_message_chunk is already in the transcript.
                   if (!isRetry && !isContinue) {
@@ -5347,6 +5500,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   settleActivePromptState(entry, pendingEntry.promptId);
                   throw echoErr;
                 }
+                pendingEntry.dispatched = true;
                 const promptPromise = entry.connection
                   .prompt(promptRequest)
                   .finally(() => {
@@ -5399,7 +5553,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                         // onDeadline already published the terminal and
                         // aborted the prompt — the abort listener (onAbort)
                         // ran synchronously and handled the cancel broadcast
-                        // + connection.cancel. Nothing to compensate.
+                        // and cancellation handshake. Nothing to compensate.
                         return;
                       }
                       if (
@@ -5423,11 +5577,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                         'forward_failed',
                       );
                       cancelPendingForSession(sessionId);
-                      entry.connection.cancel({ sessionId }).catch((err) => {
-                        writeStderrLine(
-                          `[pending-prompt] cancel forward failed after prompt abort session=${sessionId}: ${extractErrorMessage(err)}`,
-                        );
-                      });
                     },
                   )
                   .catch(() => {});
@@ -5444,11 +5593,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     originatorClientId,
                   );
                   cancelPendingForSession(sessionId);
-                  entry.connection.cancel({ sessionId }).catch((err) => {
-                    writeStderrLine(
-                      `[pending-prompt] cancel forward failed after removePendingPrompt session=${sessionId}: ${extractErrorMessage(err)}`,
-                    );
-                  });
+                  if (byId.get(sessionId) === entry) {
+                    void forwardRunningPromptCancel(entry, pendingEntry, {
+                      sessionId,
+                    }).catch((err) => {
+                      writeStderrLine(
+                        `[pending-prompt] cancel forward failed after removePendingPrompt session=${sessionId}: ${extractErrorMessage(err)}`,
+                      );
+                    });
+                  }
                 };
                 if (abortSignal.aborted) {
                   onAbort();
@@ -5498,9 +5651,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
       // Tail swallows failures so subsequent prompts still run. The caller
       // still sees rejections on its own `result` reference.
+      const drainCancelForwarding = async (): Promise<void> => {
+        try {
+          await pendingEntry.cancelForwardDrain;
+        } catch {
+          // The initiating mutation already reports or logs forwarding
+          // failures. The queue only needs to fence any in-flight write.
+        }
+      };
       entry.promptQueue = result.then(
-        () => undefined,
-        () => undefined,
+        drainCancelForwarding,
+        drainCancelForwarding,
       );
       result
         .finally(() => {
@@ -5596,6 +5757,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry,
         context?.clientId,
       );
+      const runningPrompt = entry.pendingPromptList.find(
+        (pending) => pending.state === 'running' && !pending.terminalPublished,
+      );
       // Broadcast `prompt_cancelled` so other SSE-subscribed clients see
       // the cancel as a first-class event rather than inferring it from
       // the absence of further `agent_message_chunk` frames. Mirrors
@@ -5615,14 +5779,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // user-voted); this top-level `prompt_cancelled` carries the
       // cancelling client so peer UIs can attribute it.
       //
-      // `...Once` dedups against the `sendPrompt` abort path so a client
-      // that POSTs /cancel and then drops its socket doesn't emit two
-      // `prompt_cancelled` frames for the same turn. The latch resets at
-      // the next prompt start, so a later turn still broadcasts.
+      // `...Once` dedups against the `sendPrompt` abort path by prompt id, so
+      // a client that POSTs /cancel and then drops its socket doesn't emit two
+      // `prompt_cancelled` frames for the same turn.
       broadcastPromptCancelledOnce(
         entry,
         sessionId,
-        entry.activePromptId,
+        entry.activePromptId ?? runningPrompt?.promptId,
         cancelOriginatorClientId,
       );
       // ACP spec: cancelling a prompt MUST resolve outstanding
@@ -5655,6 +5818,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           'session.id': sessionId,
         },
         async () => {
+          if (runningPrompt) {
+            const forwarding =
+              runningPrompt.dispatched === true &&
+              entry.activePromptId === runningPrompt.promptId
+                ? forwardRunningPromptCancel(entry, runningPrompt, notif)
+                : Promise.resolve();
+            runningPrompt.abortController.abort(
+              new DOMException(
+                'Prompt cancelled before dispatch',
+                'AbortError',
+              ),
+            );
+            await forwarding;
+            return;
+          }
           try {
             await entry.connection.cancel(notif);
           } catch (err) {
@@ -5715,6 +5893,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       return entry.events.lastEventId;
+    },
+
+    getSessionEventEpoch(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      return entry.events.epoch;
     },
 
     getSessionReplaySnapshot(sessionId) {
@@ -6291,7 +6475,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           if (published === undefined) {
             failureCount += 1;
             teeServeDebugLine(
-              `publishWorkspaceEvent: publish on session ${entry.sessionId} no-op (bus closed)`,
+              `publishWorkspaceEvent: publish on session ${entry.sessionId} no-op (bus closed or unserializable)`,
             );
           } else {
             successCount += 1;
@@ -6660,6 +6844,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const liveEntry = byId.get(sessionId);
       if (!liveEntry) throw new SessionNotFoundError(sessionId);
       const lastEventId = liveEntry.events.lastEventId;
+      // Epoch token paired with the cursor above, mirroring the prompt 202
+      // envelope (DAEMON-001): without it a client that seeds its SSE resume
+      // position from this response cannot detect a daemon restart.
+      const eventEpoch = liveEntry.events.epoch;
       const promptId = context?.promptId;
 
       // Admit synchronously: `sendPrompt` throws synchronously for queue-full /
@@ -6695,6 +6883,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ...decision,
         ...(promptId !== undefined ? { promptId } : {}),
         lastEventId,
+        eventEpoch,
       };
     },
 
@@ -7750,7 +7939,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
     },
 
-    async reloadWorkspaceMcp() {
+    async reloadWorkspaceMcp(options) {
       const info = await ensureChannel();
       info.workspaceMcpDiscoveryRequested = true;
       try {
@@ -7758,7 +7947,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           withTimeout(
             info.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.workspaceMcpReload,
-              { cwd: boundWorkspace },
+              { cwd: boundWorkspace, ...options },
             ),
             initTimeoutMs,
             SERVE_CONTROL_EXT_METHODS.workspaceMcpReload,
@@ -7796,6 +7985,100 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         description: string;
         systemPrompt: string;
       };
+    },
+
+    generateWorkspaceContent(prompt, signal, _originatorClientId) {
+      const requestId = randomUUID();
+      const queue =
+        new GenerationStreamQueue<BridgeWorkspaceGenerationStreamEvent>(
+          GENERATION_STREAM_QUEUE_CAPACITY,
+        );
+      const request = {
+        connection: undefined as ClientSideConnection | undefined,
+        queue,
+        settled: false,
+      };
+
+      const cancel = () => {
+        if (request.settled) return;
+        request.settled = true;
+        workspaceGenerationRequests.delete(requestId);
+        queue.close();
+        void request.connection
+          ?.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceGenerationCancel, {
+            requestId,
+          })
+          .catch(() => undefined);
+      };
+      signal.addEventListener('abort', cancel, { once: true });
+
+      if (signal.aborted) {
+        cancel();
+        return queue;
+      }
+
+      void (async () => {
+        let info: ChannelInfo | undefined;
+        try {
+          const channelInfo = await ensureChannel();
+          info = channelInfo;
+          request.connection = channelInfo.connection;
+          await withWorkspaceControl(channelInfo, async () => {
+            if (request.settled) return;
+            workspaceGenerationRequests.set(requestId, request);
+            const raw = await Promise.race([
+              withTimeout(
+                channelInfo.connection.extMethod(
+                  SERVE_CONTROL_EXT_METHODS.workspaceGenerationStart,
+                  {
+                    requestId,
+                    prompt,
+                    purpose: 'text',
+                  },
+                ),
+                SESSION_GENERATION_TIMEOUT_MS,
+                SERVE_CONTROL_EXT_METHODS.workspaceGenerationStart,
+              ),
+              getChannelClosedReject(channelInfo),
+            ]);
+            if (request.settled) return;
+            const response = raw as Record<string, unknown>;
+            const model = response['model'];
+            const modelSource = response['modelSource'];
+            if (
+              typeof model !== 'string' ||
+              (modelSource !== 'fast' && modelSource !== 'main')
+            ) {
+              throw new Error('Malformed workspace generation completion');
+            }
+            const accepted = queue.push({
+              type: 'done',
+              requestId,
+              model,
+              modelSource,
+              ...(typeof response['inputTokens'] === 'number'
+                ? { inputTokens: response['inputTokens'] }
+                : {}),
+              ...(typeof response['outputTokens'] === 'number'
+                ? { outputTokens: response['outputTokens'] }
+                : {}),
+            });
+            if (accepted) queue.close();
+            else queue.fail(new Error('Generation stream consumer too slow'));
+          });
+        } catch (error: unknown) {
+          if (!request.settled) queue.fail(error);
+        } finally {
+          request.settled = true;
+          signal.removeEventListener('abort', cancel);
+          workspaceGenerationRequests.delete(requestId);
+          if (info && hasNoChannelWork(info) && !info.isDying) {
+            await startIdleTimer(info, 'workspace generation');
+          }
+        }
+      })().catch(() => undefined);
+
+      return queue;
     },
 
     async addRuntimeMcpServer(name, config, originatorClientId) {

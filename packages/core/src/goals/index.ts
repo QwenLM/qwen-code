@@ -35,3 +35,27 @@ export {
 } from './goalHook.js';
 export { judgeGoal } from './goalJudge.js';
 export type { GoalJudgeOutcome, JudgeResult } from './goalJudge.js';
+export * from './goal-protocol.js';
+export {
+  GoalConflictError,
+  GoalInvalidTransitionError,
+  elapsedActiveTime,
+  parseGoalControlRequest,
+  parseGoalSnapshotV2,
+  parseGoalStateRecordPayloadV2,
+  reduceGoalControl,
+  reduceGoalTurnFinished,
+} from './goal-reducer.js';
+export type {
+  GoalControlTransition,
+  GoalTurnFinishedTransition,
+} from './goal-reducer.js';
+export * from './goal-persistence.js';
+export { projectGoalStateToLegacy } from './goal-legacy-projection.js';
+export type {
+  LegacyActiveGoal,
+  LegacyGoalProjection,
+  LegacyGoalStatus,
+  LegacyGoalStatusKind,
+  LegacyGoalTerminal,
+} from './goal-legacy-projection.js';

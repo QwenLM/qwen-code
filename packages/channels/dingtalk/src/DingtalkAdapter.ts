@@ -50,6 +50,11 @@ interface DingTalkRepliedMsg {
   };
 }
 
+interface DingTalkAtUser {
+  dingtalkId?: string;
+  staffId?: string;
+}
+
 interface DingTalkMessageData {
   msgId?: string;
   msgtype?: string;
@@ -62,6 +67,7 @@ interface DingTalkMessageData {
   senderNick?: string;
   chatbotUserId?: string;
   isInAtList?: boolean;
+  atUsers?: DingTalkAtUser[];
   text?: {
     content?: string;
     isReplyMsg?: boolean;
@@ -102,6 +108,32 @@ const mentionTarget = Symbol('mentionTarget');
 type MentionTargetEnvelope = Envelope & {
   [mentionTarget]?: string;
 };
+
+function withNonBotMentionContext(
+  data: DingTalkMessageData,
+  text: string,
+): string {
+  if (!Array.isArray(data.atUsers) || typeof data.chatbotUserId !== 'string') {
+    return text;
+  }
+
+  const mentions = new Set<string>();
+  for (const user of data.atUsers) {
+    if (!user) continue;
+    const dingtalkId =
+      typeof user.dingtalkId === 'string' ? user.dingtalkId : undefined;
+    // DingTalk Stream always sets dingtalkId for the bot entry; staffId-only bot entries are not expected.
+    if (dingtalkId === data.chatbotUserId) continue;
+    const staffId = typeof user.staffId === 'string' ? user.staffId : undefined;
+    const stableId = dingtalkId || staffId;
+    if (stableId) mentions.add(stableId);
+  }
+
+  if (mentions.size === 0) return text;
+  const memberLabel = mentions.size === 1 ? 'member' : 'members';
+  const context = `[Mentioned ${mentions.size} other group ${memberLabel}]`;
+  return text ? `${context}\n${text}` : context;
+}
 
 interface DingTalkTokenResponse {
   errcode?: number;
@@ -497,6 +529,16 @@ export class DingtalkChannel extends ChannelBase {
   protected override supportsProactiveTarget(target: SessionTarget): boolean {
     return (
       target.isGroup === true &&
+      target.threadId === undefined &&
+      this.isStableTargetId(target.chatId)
+    );
+  }
+
+  protected override supportsProactiveDeliveryTarget(
+    target: SessionTarget,
+  ): boolean {
+    return (
+      typeof target.isGroup === 'boolean' &&
       target.threadId === undefined &&
       this.isStableTargetId(target.chatId)
     );
@@ -1322,7 +1364,10 @@ export class DingtalkChannel extends ChannelBase {
       // After stripping the bot @mention, cleanText may legitimately be empty
       // (user pinged the bot with no other text). Don't fall back to the
       // original text in that case — it would re-introduce the @mention.
-      const envelopeText = isMentioned ? cleanText : cleanText || content.text;
+      const messageText = isMentioned ? cleanText : cleanText || content.text;
+      const envelopeText = isGroup
+        ? withNonBotMentionContext(data, messageText)
+        : messageText;
       const senderId = senderStaffId || senderIdValue || '';
       const senderName = senderNick || senderId || 'Unknown';
 

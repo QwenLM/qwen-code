@@ -108,6 +108,17 @@ class SendMessageInvocation extends BaseToolInvocation<
         };
       }
 
+      if (entry.resumeBlockedReason) {
+        return {
+          llmContent: `Error: Background task "${this.params.task_id}" cannot be continued: ${entry.resumeBlockedReason}`,
+          returnDisplay: 'Task cannot be continued.',
+          error: {
+            message: `Task cannot be continued: ${this.params.task_id}`,
+            type: ToolErrorType.SEND_MESSAGE_NOT_RUNNING,
+          },
+        };
+      }
+
       if (entry.status === 'paused') {
         const resumed = await this.config.resumeBackgroundAgent(
           this.params.task_id,
@@ -288,8 +299,8 @@ export class SendMessageTool extends BaseDeclarativeTool<
       ToolDisplayNames.SEND_MESSAGE,
       'Send a message to a teammate (use "to") or to a running, paused, or completed background task (use "task_id"); completed tasks are revived. ' +
         'For teams, set "to" to a bare teammate name (no @) or "*" to broadcast. ' +
-        'For background tasks, set "task_id" to the id from the launch response, a recovered paused task, or a completed task. ' +
-        'Running tasks receive it at the next tool-round boundary; paused recovered tasks resume with the message as their first continuation instruction; completed tasks continue on their resident runtime when available and otherwise revive from their transcript. ' +
+        'For background tasks, set "task_id" to the id from the launch response or list_agents. ' +
+        'Running tasks receive it at the next tool-round boundary; paused recovered tasks resume with the message as their first continuation instruction; completed tasks continue on their resident runtime when available and otherwise revive from their transcript and continue with your message. ' +
         'Your text output is NOT visible to other agents — use this tool to communicate.',
       Kind.Other,
       {

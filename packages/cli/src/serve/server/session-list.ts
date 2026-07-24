@@ -540,7 +540,18 @@ async function listOrganizedWorkspaceSessionsForResponse(
               organization,
             ),
           );
-        } else if (!(await sessionService.sessionExists(live.sessionId))) {
+        } else if (
+          // `listAllPersistedSummaries` already scanned every persisted
+          // session when the scan wasn't truncated, so a `sessionId` missing
+          // from `bySessionId` is definitively new — no disk re-check
+          // needed. Re-checking here raced a session that persists its
+          // first write (e.g. a `displayName` update) between the scan
+          // above and this point: `existing` stayed undefined but
+          // `sessionExists` flipped to true, silently dropping the live
+          // session from the response instead of merging it.
+          !persisted.truncated ||
+          !(await sessionService.sessionExists(live.sessionId))
+        ) {
           bySessionId.set(
             live.sessionId,
             applyOrganization(
@@ -649,7 +660,14 @@ async function listWorkspaceSessionsByMetadataForResponse(
             live.sessionId,
             mergeLiveSessionSummary(existing, live),
           );
-        } else if (!(await sessionService.sessionExists(live.sessionId))) {
+        } else if (
+          // See the matching comment in
+          // `listOrganizedWorkspaceSessionsForResponse`: an untruncated scan
+          // already covers every persisted session, so skip the racy
+          // re-check when nothing was truncated.
+          !persisted.truncated ||
+          !(await sessionService.sessionExists(live.sessionId))
+        ) {
           bySessionId.set(live.sessionId, {
             ...live,
             createdAt: live.createdAt,
@@ -798,7 +816,15 @@ export async function listWorkspaceSessionsForResponse(
       bySessionId.set(live.sessionId, mergeLiveSessionSummary(existing, live));
     } else if (
       isFirstPage &&
-      !(await sessionService.sessionExists(live.sessionId))
+      // If this is a complete scan (no further pages), a missing
+      // `sessionId` here is definitively new — no disk re-check needed.
+      // Re-checking raced a session that persists its first write (e.g. a
+      // `displayName` update) between the scan above and this point:
+      // `existing` stayed undefined but `sessionExists` flipped to true,
+      // silently dropping the live session from the response instead of
+      // merging it.
+      (persisted.nextCursor == null ||
+        !(await sessionService.sessionExists(live.sessionId)))
     ) {
       bySessionId.set(live.sessionId, {
         ...live,

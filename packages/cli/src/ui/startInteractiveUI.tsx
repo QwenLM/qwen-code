@@ -27,10 +27,14 @@ import { VimModeProvider } from './contexts/VimModeContext.js';
 import { AgentViewProvider } from './contexts/AgentViewContext.js';
 import { BackgroundTaskViewProvider } from './contexts/BackgroundTaskViewContext.js';
 import { useKittyKeyboardProtocol } from './hooks/useKittyKeyboardProtocol.js';
-import { disableKittyProtocol } from './utils/kittyProtocolDetector.js';
+import {
+  disableKittyProtocol,
+  pushKittyProtocolFlags,
+} from './utils/kittyProtocolDetector.js';
 import { installTerminalRedrawOptimizer } from './utils/terminalRedrawOptimizer.js';
 import { installSynchronizedOutput } from './utils/synchronizedOutput.js';
-import { registerCleanup } from '../utils/cleanup.js';
+import { ErrorBoundary } from './components/shared/ErrorBoundary.js';
+import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { stopAndGetCapturedInput } from '../utils/earlyInputCapture.js';
 import { profileCheckpoint } from '../utils/startupProfiler.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
@@ -192,13 +196,29 @@ export async function startInteractiveUI(
     // coordinates even though these listeners are owned and cleaned up.
     process.stdout.setMaxListeners(0);
   }
+  const appTree = (
+    <ErrorBoundary
+      onError={(error, info) => {
+        debugLogger.error(
+          `[FATAL_RENDER_ERROR] ${error.message}\n${info.componentStack ?? ''}\n${error.stack ?? ''}`,
+        );
+        // The fallback replaces AppWrapper, unmounting KeypressProvider and
+        // Ctrl+C handling. Schedule a graceful exit so the session does not
+        // hang (e.g. under the Kitty keyboard protocol where Ctrl+C is a
+        // keypress, not SIGINT).
+        setTimeout(() => {
+          void runExitCleanup().then(() => process.exit(1));
+        }, 5000);
+      }}
+    >
+      <AppWrapper />
+    </ErrorBoundary>
+  );
   const instance = render(
     process.env['DEBUG'] ? (
-      <React.StrictMode>
-        <AppWrapper />
-      </React.StrictMode>
+      <React.StrictMode>{appTree}</React.StrictMode>
     ) : (
-      <AppWrapper />
+      appTree
     ),
     {
       exitOnCtrlC: false,
@@ -206,6 +226,17 @@ export async function startInteractiveUI(
       alternateScreen: useVP,
     },
   );
+  if (useVP) {
+    // Ink entered the alternate screen synchronously inside render() above.
+    // The Kitty keyboard flags were pushed at startup on the main screen, and
+    // the spec tracks them per screen, so re-push them onto the alternate
+    // screen now — otherwise Shift+Enter (and other modified keys) arrive
+    // without their modifier and degrade to a bare Enter or an orphaned Escape.
+    // The push is ordered after Ink's enter-alternate-screen write, and Ink
+    // discards the alternate screen (and its flag stack) on unmount, so the
+    // startup main-screen push remains balanced by disableKittyProtocol() below.
+    pushKittyProtocolFlags();
+  }
   // Records the moment Ink's `render()` call has returned, which is
   // synchronous and happens before React reconciliation actually pushes
   // bytes to the terminal. We intentionally keep the legacy name

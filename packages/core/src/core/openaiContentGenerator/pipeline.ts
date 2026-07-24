@@ -31,8 +31,21 @@ import { getToolCallPreparations } from '../tool-call-preparation.js';
 import { InvalidStreamError } from '../invalid-stream-error.js';
 import { logProtocolTagSanitized } from '../../telemetry/loggers.js';
 import { ProtocolTagSanitizedEvent } from '../../telemetry/types.js';
+import { getErrorMessage, getErrorStatus } from '../../utils/errors.js';
+import { getRateLimitErrorDetails } from '../../utils/rateLimit.js';
+import { reportOpenAiRequest } from '../../telemetry/gen-ai-request.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
+
+function isRequiredThinkingError(error: unknown): boolean {
+  if (getErrorStatus(error) !== 400) return false;
+  const providerMessage = getRateLimitErrorDetails(error).providerMessage;
+  const message = `${getErrorMessage(error)} ${providerMessage ?? ''}`;
+  return (
+    message.includes('enable_thinking') &&
+    /(?:restricted to|must be) true\b/i.test(message)
+  );
+}
 
 /**
  * Error thrown when the API returns an error embedded as stream content
@@ -281,6 +294,7 @@ export type { PipelineConfig } from './types.js';
 export class ContentGenerationPipeline {
   client: OpenAI;
   private contentGeneratorConfig: ContentGeneratorConfig;
+  private readonly requiredThinkingModels = new Set<string>();
   // Resolved once (config field > env > default) so the env read + any
   // invalid-value warning happen per pipeline, not per streaming request.
   private readonly streamIdleTimeoutMs: number;
@@ -714,6 +728,9 @@ export class ContentGenerationPipeline {
         if (response.usageMetadata) {
           pendingFinishResponse.usageMetadata = response.usageMetadata;
         }
+        if (response.modelVersion) {
+          pendingFinishResponse.modelVersion = response.modelVersion;
+        }
         setPendingFinish(pendingFinishResponse);
       } else {
         // This is a finish reason chunk
@@ -735,10 +752,14 @@ export class ContentGenerationPipeline {
       }
 
       // Copy other essential properties from the current response
-      mergedResponse.responseId = response.responseId;
-      mergedResponse.createTime = response.createTime;
-      mergedResponse.modelVersion = response.modelVersion;
-      mergedResponse.promptFeedback = response.promptFeedback;
+      mergedResponse.responseId =
+        response.responseId || pendingFinishResponse.responseId;
+      mergedResponse.createTime =
+        response.createTime || pendingFinishResponse.createTime;
+      mergedResponse.modelVersion =
+        response.modelVersion || pendingFinishResponse.modelVersion;
+      mergedResponse.promptFeedback =
+        response.promptFeedback || pendingFinishResponse.promptFeedback;
 
       setPendingFinish(mergedResponse);
       return true; // Yield the merged response
@@ -826,10 +847,7 @@ export class ContentGenerationPipeline {
     const isDashScope = DashScopeOpenAICompatibleProvider.isDashScopeProvider(
       this.contentGeneratorConfig,
     );
-    const configModel = (this.contentGeneratorConfig.model ?? '').toLowerCase();
-    const thinkingMandatory =
-      this.contentGeneratorConfig.thinkingMandatory === true &&
-      model === configModel;
+    const thinkingMandatory = this.requiresThinking(model);
     const reasoningDisabled =
       request.config?.thinkingConfig?.includeThoughts === false ||
       this.contentGeneratorConfig.reasoning === false;
@@ -897,7 +915,7 @@ export class ContentGenerationPipeline {
       if ('reasoning' in typed) {
         delete typed['reasoning'];
       }
-      if ('reasoning_effort' in typed) {
+      if ('reasoning_effort' in typed && typed['reasoning_effort'] !== 'none') {
         delete typed['reasoning_effort'];
       }
       // DeepSeek V4+ defaults `thinking.type` to `'enabled'`, so removing
@@ -911,18 +929,40 @@ export class ContentGenerationPipeline {
       }
     }
 
-    if (thinkingMandatory && isDashScope) {
+    if (thinkingMandatory) {
       const typed = providerRequest as unknown as Record<string, unknown>;
-      // DashScope rejects forced tool selection while thinking is enabled.
       if (typed['enable_thinking'] === false) {
         delete typed['enable_thinking'];
       }
-      if (typed['tool_choice'] === 'required') {
+      const chatTemplateKwargs = typed['chat_template_kwargs'] as
+        | Record<string, unknown>
+        | undefined;
+      if (chatTemplateKwargs?.['enable_thinking'] === false) {
+        const remaining = { ...chatTemplateKwargs };
+        delete remaining['enable_thinking'];
+        if (Object.keys(remaining).length > 0) {
+          typed['chat_template_kwargs'] = remaining;
+        } else {
+          delete typed['chat_template_kwargs'];
+        }
+      }
+      // DashScope rejects forced tool selection while thinking is enabled.
+      if (isDashScope && typed['tool_choice'] === 'required') {
         delete typed['tool_choice'];
       }
     }
 
     return providerRequest;
+  }
+
+  private requiresThinking(model: string): boolean {
+    const normalizedModel = model.toLowerCase();
+    return (
+      this.requiredThinkingModels.has(normalizedModel) ||
+      (this.contentGeneratorConfig.thinkingMandatory === true &&
+        normalizedModel ===
+          (this.contentGeneratorConfig.model ?? '').toLowerCase())
+    );
   }
 
   private buildGenerateContentConfig(
@@ -1066,9 +1106,9 @@ export class ContentGenerationPipeline {
     ) => Promise<T>,
   ): Promise<T> {
     const context = this.createRequestContext(request, isStreaming);
-
-    try {
-      const openaiRequest = await this.buildRequest(
+    let openaiRequest: OpenAI.Chat.ChatCompletionCreateParams | undefined;
+    const executeAttempt = async () => {
+      openaiRequest = await this.buildRequest(
         request,
         userPromptId,
         context,
@@ -1080,10 +1120,36 @@ export class ContentGenerationPipeline {
       // so the logger sees the exact bytes sent on the wire.
       openaiRequestCaptureContext.getStore()?.(openaiRequest);
       runtimeDiagnostics.recordOpenAIWireRequest(openaiRequest);
+      reportOpenAiRequest(openaiRequest);
 
-      const result = await executor(openaiRequest, context);
-      return result;
+      return executor(openaiRequest, context);
+    };
+
+    try {
+      return await executeAttempt();
     } catch (error) {
+      const model = context.model.toLowerCase();
+      const wireRequest = openaiRequest as Record<string, unknown> | undefined;
+      const chatTemplateKwargs = wireRequest?.['chat_template_kwargs'] as
+        | Record<string, unknown>
+        | undefined;
+      if (
+        (wireRequest?.['enable_thinking'] === false ||
+          chatTemplateKwargs?.['enable_thinking'] === false) &&
+        request.config?.abortSignal?.aborted !== true &&
+        isRequiredThinkingError(error)
+      ) {
+        this.requiredThinkingModels.add(model);
+        debugLogger.warn('Retrying with required thinking enabled', {
+          model,
+          originalError: getErrorMessage(error),
+        });
+        try {
+          return await executeAttempt();
+        } catch (retryError) {
+          return await this.handleError(retryError, context, request);
+        }
+      }
       // Use shared error handling logic
       return await this.handleError(error, context, request);
     }

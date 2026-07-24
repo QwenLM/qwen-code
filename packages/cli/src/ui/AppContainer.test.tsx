@@ -1145,6 +1145,52 @@ describe('AppContainer State Management', () => {
       expect(mockQueueMessage).not.toHaveBeenCalled();
     });
 
+    it('injects a recovered-agent reminder into the next ordinary prompt once', () => {
+      const mockQueueMessage = vi.fn();
+      vi.spyOn(mockConfig, 'consumePendingRecoveredAgentsNotice')
+        .mockReturnValueOnce('Use list_agents to inspect restored agents.')
+        .mockReturnValue(null);
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'idle',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.handleFinalSubmit('continue the review');
+      capturedUIActions.handleFinalSubmit('one more check');
+
+      expect(mockQueueMessage).toHaveBeenNthCalledWith(
+        1,
+        '<system-reminder>\nUse list_agents to inspect restored agents.\n' +
+          '</system-reminder>\n\ncontinue the review',
+      );
+      expect(mockQueueMessage).toHaveBeenNthCalledWith(2, 'one more check');
+    });
+
     it.each(['exit', 'quit', ':q', ':q!', ':wq', ':wq!'])(
       'routes bare "%s" to /quit instead of sending as a message',
       (command) => {
