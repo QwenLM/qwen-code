@@ -115,6 +115,11 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
   }
 
   override requiresUserInteraction(): boolean {
+    // Outside plan mode, no user interaction is needed — execute() will
+    // return a guidance error directly (#7671).
+    if (this.config.getApprovalMode() !== ApprovalMode.PLAN) {
+      return false;
+    }
     return (
       !isPlanRequiredTeammateContext() &&
       !isPlanLifecycleToolUnavailableInSubagent(ToolNames.EXIT_PLAN_MODE)
@@ -122,13 +127,11 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
   }
 
   override async getDefaultPermission(): Promise<PermissionDecision> {
-    if (
-      isPlanRequiredTeammateContext() ||
-      isPlanLifecycleToolUnavailableInSubagent(ToolNames.EXIT_PLAN_MODE)
-    ) {
-      return 'allow';
-    }
-    return this.config.getApprovalMode() === ApprovalMode.PLAN ? 'ask' : 'deny';
+    // Always allow at the permission layer. Plan-mode gating lives in
+    // requiresUserInteraction() (forces 'ask' via permissionFlow) and
+    // execute() (returns guidance error outside plan mode). A single
+    // source of truth avoids duplicated conditionals (#7671).
+    return 'allow';
   }
 
   override async getConfirmationDetails(
@@ -198,6 +201,19 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
         ToolNames.EXIT_PLAN_MODE,
         'ExitPlanModeTool',
         debugLogger,
+      );
+    }
+
+    // Not in plan mode and no approval snapshot — the user may have
+    // manually switched modes. Return a guidance error instead of a
+    // permission deny (#7671). If there IS an approval snapshot, let the
+    // stale-revision check below handle it (concurrent exit scenario).
+    if (this.config.getApprovalMode() !== ApprovalMode.PLAN && !this.approval) {
+      const currentMode = this.config.getApprovalMode();
+      return this.errorResult(
+        `You are not in plan mode (current mode: ${currentMode}). ` +
+          `The user may have manually switched modes via Shift+Tab or /approval-mode. ` +
+          `Do not call exit_plan_mode again. Continue working in the current mode.`,
       );
     }
 
