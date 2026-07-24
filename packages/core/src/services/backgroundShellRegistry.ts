@@ -448,9 +448,15 @@ export class BackgroundShellRegistry {
     if (entry.exitCode !== undefined) payload['exitCode'] = entry.exitCode;
     if (entry.error !== undefined) payload['error'] = entry.error;
     try {
+      // 0o600 + forceMode + noFollow: the sidecar embeds the full
+      // `command`, so it matches the credential write sites' posture.
+      // forceMode heals a looser pre-existing file back to 0o600;
+      // noFollow refuses to write through a pre-placed symlink.
       atomicWriteFileSync(statusPath, JSON.stringify(payload, null, 2), {
         flush: false,
         mode: 0o600,
+        forceMode: true,
+        noFollow: true,
       });
     } catch (error) {
       debugLogger.warn(

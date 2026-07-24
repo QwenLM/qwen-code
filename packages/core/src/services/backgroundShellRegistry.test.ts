@@ -5,11 +5,14 @@
  */
 
 import {
+  chmodSync,
   constants as fsConstants,
+  lstatSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -422,11 +425,12 @@ describe('BackgroundShellRegistry', () => {
       // error and the entry would never reach a terminal status.
       const reg = new BackgroundShellRegistry();
       const callback = vi.fn();
+      const dir = makeTempDir();
       reg.setNotificationCallback(callback);
       reg.register(
         makeEntry({
           shellId: 'a',
-          outputPath: join(tmpdir(), 'qwen-shell-no-such-file-xyz.log'),
+          outputPath: join(dir, 'no-such-file.log'),
         }),
       );
 
@@ -845,6 +849,34 @@ describe('BackgroundShellRegistry', () => {
       );
       expect(residue).toEqual([]);
     });
+
+    it.skipIf(process.platform === 'win32')(
+      'forces 0o600 even when a looser sidecar pre-exists (forceMode)',
+      () => {
+        const reg = new BackgroundShellRegistry();
+        const e = makeDirEntry({ shellId: 'a' });
+        writeFileSync(e.statusPath, '{}');
+        chmodSync(e.statusPath, 0o644); // legacy bad perms
+        reg.register(e);
+        expect(statSync(e.statusPath).mode & 0o777).toBe(0o600);
+      },
+    );
+
+    it.skipIf(process.platform === 'win32')(
+      'replaces a pre-placed symlink instead of writing through it (noFollow)',
+      () => {
+        const reg = new BackgroundShellRegistry();
+        const e = makeDirEntry({ shellId: 'a' });
+        const secretPath = join(dirname(e.statusPath), 'secret.txt');
+        writeFileSync(secretPath, 'secret credentials');
+        symlinkSync(secretPath, e.statusPath);
+        reg.register(e);
+        // The symlink target is untouched; the sidecar replaced the link.
+        expect(readFileSync(secretPath, 'utf8')).toBe('secret credentials');
+        expect(lstatSync(e.statusPath).isSymbolicLink()).toBe(false);
+        expect(readStatus(e.statusPath)['status']).toBe('running');
+      },
+    );
 
     it('swallows sidecar write failures without throwing', () => {
       const reg = new BackgroundShellRegistry();
