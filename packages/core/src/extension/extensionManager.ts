@@ -2624,6 +2624,14 @@ export function getExtensionId(
   } else {
     idValue = installMetadata?.source ?? config.name;
   }
+  // A marketplace repo can host several plugins; hashing only the repo URL
+  // collapses them into one id and the second install trips the store's
+  // id-ownership check (#7568). Suffix the plugin name so each plugin from
+  // the same source gets its own id. Installs recorded under the old
+  // repo-only id are re-keyed by ExtensionStore.ensureInitialized.
+  if (installMetadata?.pluginName) {
+    idValue += `:${installMetadata.pluginName}`;
+  }
   return hashValue(idValue);
 }
 
