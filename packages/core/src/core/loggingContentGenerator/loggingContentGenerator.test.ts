@@ -795,6 +795,8 @@ describe('LoggingContentGenerator', () => {
     expect(meta).toBeDefined();
     expect(typeof meta!.ttftMs).toBe('number');
     expect(meta!.ttftMs!).toBeGreaterThanOrEqual(0);
+    const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
+    expect(responseEvent.ttft_ms).toBe(meta!.ttftMs);
   });
 
   it('forwards cachedInputTokens from usageMetadata to endLLMRequestSpan (Phase 4a)', async () => {
@@ -869,6 +871,8 @@ describe('LoggingContentGenerator', () => {
     const spanRecord = getStreamSpanRecord();
     const meta = spanRecord.endMetadata as { ttftMs?: number } | undefined;
     expect(meta!.ttftMs).toBeUndefined();
+    const [, responseEvent] = vi.mocked(logApiResponse).mock.calls[0];
+    expect(responseEvent.ttft_ms).toBeUndefined();
   });
 
   it('forwards cachedInputTokens to endLLMRequestSpan on non-stream success (Phase 4a)', async () => {

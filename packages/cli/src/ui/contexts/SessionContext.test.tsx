@@ -269,6 +269,64 @@ describe('SessionStatsContext', () => {
     uiTelemetryService.reset();
   });
 
+  it('should update when generation metrics are mutated in place', () => {
+    uiTelemetryService.reset();
+    const contextRef: MutableRefObject<
+      ReturnType<typeof useSessionStats> | undefined
+    > = { current: undefined };
+
+    let renderCount = 0;
+    const CountingTestHarness = () => {
+      contextRef.current = useSessionStats();
+      renderCount++;
+      return null;
+    };
+
+    render(
+      <SessionStatsProvider>
+        <CountingTestHarness />
+      </SessionStatsProvider>,
+    );
+
+    const metrics = uiTelemetryService.getMetrics();
+    metrics.generation = {
+      timedRequests: 1,
+      totalTtftMs: 100,
+      totalGenerationDurationMs: 400,
+      totalThroughputOutputTokens: 20,
+      last: {
+        model: 'qwen3-coder',
+        ttftMs: 100,
+        generationDurationMs: 400,
+        outputTokens: 20,
+      },
+    };
+
+    act(() => {
+      uiTelemetryService.emit('update', {
+        metrics,
+        lastPromptTokenCount: 0,
+      });
+    });
+    const afterFirstUpdate = renderCount;
+
+    metrics.generation.last!.ttftMs = 150;
+    metrics.generation.totalTtftMs = 150;
+    act(() => {
+      uiTelemetryService.emit('update', {
+        metrics,
+        lastPromptTokenCount: 0,
+      });
+    });
+
+    expect(renderCount).toBeGreaterThan(afterFirstUpdate);
+    expect(contextRef.current?.stats.metrics.generation?.last?.ttftMs).toBe(
+      150,
+    );
+
+    uiTelemetryService.reset();
+  });
+
   it('should throw an error when useSessionStats is used outside of a provider', () => {
     // Suppress console.error for this test since we expect an error
     const consoleSpy = vi.spyOn(console, 'error').mockImplementation(() => {});

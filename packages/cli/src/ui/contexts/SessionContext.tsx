@@ -15,6 +15,7 @@ import {
 } from 'react';
 
 import type {
+  GenerationMetrics,
   SessionMetrics,
   ModelMetrics,
   ModelMetricsCore,
@@ -130,9 +131,38 @@ function areSkillMetricsEqual(a: SkillMetrics, b: SkillMetrics): boolean {
   return true;
 }
 
+function areGenerationMetricsEqual(
+  a: GenerationMetrics | undefined,
+  b: GenerationMetrics | undefined,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  if (
+    a.timedRequests !== b.timedRequests ||
+    a.totalTtftMs !== b.totalTtftMs ||
+    a.totalGenerationDurationMs !== b.totalGenerationDurationMs ||
+    a.totalThroughputOutputTokens !== b.totalThroughputOutputTokens
+  ) {
+    return false;
+  }
+
+  if (a.last === b.last) return true;
+  if (!a.last || !b.last) return false;
+  return (
+    a.last.model === b.last.model &&
+    a.last.ttftMs === b.last.ttftMs &&
+    a.last.generationDurationMs === b.last.generationDurationMs &&
+    a.last.outputTokens === b.last.outputTokens
+  );
+}
+
 function areMetricsEqual(a: SessionMetrics, b: SessionMetrics): boolean {
   if (a === b) return true;
   if (!a || !b) return false;
+
+  if (!areGenerationMetricsEqual(a.generation, b.generation)) {
+    return false;
+  }
 
   // Compare files
   if (
@@ -260,6 +290,21 @@ function cloneSessionMetrics(metrics: SessionMetrics): SessionMetrics {
         },
       ]),
     ),
+    ...(metrics.generation
+      ? {
+          generation: {
+            timedRequests: metrics.generation.timedRequests,
+            totalTtftMs: metrics.generation.totalTtftMs,
+            totalGenerationDurationMs:
+              metrics.generation.totalGenerationDurationMs,
+            totalThroughputOutputTokens:
+              metrics.generation.totalThroughputOutputTokens,
+            ...(metrics.generation.last
+              ? { last: { ...metrics.generation.last } }
+              : {}),
+          },
+        }
+      : {}),
     tools: {
       totalCalls: metrics.tools.totalCalls,
       totalSuccess: metrics.tools.totalSuccess,
