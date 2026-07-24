@@ -3751,7 +3751,7 @@ export const AppContainer = (props: AppContainerProps) => {
           historyManager.addItem(
             {
               type: MessageType.ERROR,
-              text: '⚠ Cannot toggle: auth type not available',
+              text: t('⚠ Cannot toggle: auth type not available'),
             },
             Date.now(),
           );
@@ -3771,7 +3771,10 @@ export const AppContainer = (props: AppContainerProps) => {
         }
         if (action.type === 'already-on') {
           historyManager.addItem(
-            { type: MessageType.INFO, text: 'Already on ' + action.modelId },
+            {
+              type: MessageType.INFO,
+              text: t('Already on {{model}}', { model: action.modelId }),
+            },
             Date.now(),
           );
           return;
@@ -3796,7 +3799,9 @@ export const AppContainer = (props: AppContainerProps) => {
               historyManager.addItem(
                 {
                   type: MessageType.INFO,
-                  text: 'Switched to ' + switchTo.modelId,
+                  text: t('Switched to {{model}}', {
+                    model: switchTo.modelId,
+                  }),
                 },
                 Date.now(),
               );
@@ -3809,11 +3814,10 @@ export const AppContainer = (props: AppContainerProps) => {
               historyManager.addItem(
                 {
                   type: MessageType.ERROR,
-                  text:
-                    '⚠ Failed to switch to ' +
-                    switchTo.modelId +
-                    ': ' +
-                    (err instanceof Error ? err.message : String(err)),
+                  text: t('⚠ Failed to switch to {{model}}: {{error}}', {
+                    model: switchTo.modelId,
+                    error: err instanceof Error ? err.message : String(err),
+                  }),
                 },
                 Date.now(),
               );
@@ -3824,7 +3828,10 @@ export const AppContainer = (props: AppContainerProps) => {
           });
         return;
       }
-      if (keyMatchers[Command.TOGGLE_MODEL](key)) {
+      if (
+        keyMatchers[Command.TOGGLE_MODEL](key) &&
+        toggleModelConfiguredRef.current
+      ) {
         debugLogger.debug('toggle rejected by guard');
       }
       // Ctrl+O: open the transcript full-detail screen. (Close while open is

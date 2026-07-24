@@ -2494,4 +2494,10 @@ export default {
     '会话录制因写入失败而停止。受影响会话中的新消息将不会被保存。请检查磁盘空间和权限，然后创建一个新会话以恢复录制。详情请查看调试日志。',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     '会话录制因写入失败而停止。受影响会话中的新消息将不会被保存。请检查磁盘空间和权限，然后运行 `/clear` 创建一个新的可录制会话。详情请查看调试日志。',
+  // Model toggle hotkey messages
+  '⚠ Cannot toggle: auth type not available': '⚠ 无法切换：认证类型不可用',
+  'Already on {{model}}': '已在使用 {{model}}',
+  'Switched to {{model}}': '已切换到 {{model}}',
+  '⚠ Failed to switch to {{model}}: {{error}}':
+    '⚠ 切换到 {{model}} 失败：{{error}}',
 };

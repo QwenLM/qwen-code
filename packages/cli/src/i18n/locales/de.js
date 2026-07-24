@@ -2230,4 +2230,11 @@ export default {
     'Die Sitzungsaufzeichnung wurde nach einem Schreibfehler beendet. Neue Nachrichten der betroffenen Sitzung werden nicht gespeichert. Prüfen Sie Speicherplatz und Berechtigungen und starten Sie anschließend eine neue Sitzung, um die Aufzeichnung fortzusetzen. Weitere Details finden Sie im Debug-Protokoll.',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     'Die Sitzungsaufzeichnung wurde nach einem Schreibfehler beendet. Neue Nachrichten der betroffenen Sitzung werden nicht gespeichert. Prüfen Sie Speicherplatz und Berechtigungen und führen Sie anschließend `/clear` aus, um eine neue aufgezeichnete Sitzung zu starten. Weitere Details finden Sie im Debug-Protokoll.',
+  // Model toggle hotkey messages
+  '⚠ Cannot toggle: auth type not available':
+    '⚠ Umschalten nicht möglich: Authentifizierungstyp nicht verfügbar',
+  'Already on {{model}}': 'Bereits auf {{model}}',
+  'Switched to {{model}}': 'Gewechselt zu {{model}}',
+  '⚠ Failed to switch to {{model}}: {{error}}':
+    '⚠ Wechsel zu {{model}} fehlgeschlagen: {{error}}',
 };

@@ -2204,4 +2204,11 @@ export default {
     'Запись сеанса остановлена после ошибки записи. Новые сообщения затронутого сеанса не будут сохранены. Проверьте свободное место и разрешения, затем начните новый сеанс, чтобы возобновить запись. Подробности см. в журнале отладки.',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     'Запись сеанса остановлена после ошибки записи. Новые сообщения затронутого сеанса не будут сохранены. Проверьте свободное место и разрешения, затем выполните `/clear`, чтобы начать новый записываемый сеанс. Подробности см. в журнале отладки.',
+  // Model toggle hotkey messages
+  '⚠ Cannot toggle: auth type not available':
+    '⚠ Не удалось переключить: тип авторизации недоступен',
+  'Already on {{model}}': 'Уже используется {{model}}',
+  'Switched to {{model}}': 'Переключено на {{model}}',
+  '⚠ Failed to switch to {{model}}: {{error}}':
+    '⚠ Не удалось переключиться на {{model}}: {{error}}',
 };
