@@ -127,11 +127,16 @@ explicit finish reason omits the complete output-message attribute.
 
 Each JSON attribute is compactly serialized and independently limited by
 `telemetry.sensitiveSpanAttributeMaxLength`. Invalid, cyclic, incomplete, or
-oversized values are omitted as a whole; JSON is never truncated. Empty arrays
-and objects are retained when the provider explicitly sends or returns them.
-With the default 1 MiB limit, the application-side theoretical maximum is about
-4 MiB of sensitive attributes per LLM span and 2 MiB per Tool span. Collectors
-and backends can impose lower limits.
+oversized attribute values are omitted as a whole; JSON is never truncated.
+Within `gen_ai.tool.definitions`, `type` and `name` are required identities, so
+an invalid identity omits the complete attribute. `parameters` is optional in
+the standard schema; when a provider-supplied parameter schema cannot be
+normalized to Draft-07, only that optional property is omitted while the
+ordered tool identity list is retained. Empty arrays and objects are retained
+when the provider explicitly sends or returns them. With the default 1 MiB
+limit, the application-side theoretical maximum is about 4 MiB of sensitive
+attributes per LLM span and 2 MiB per Tool span. Collectors and backends can
+impose lower limits.
 
 Tool arguments are captured from the final invocation parameters immediately
 before execution, after permission and edit hooks. A tool result is captured
