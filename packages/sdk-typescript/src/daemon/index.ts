@@ -440,6 +440,7 @@ export type {
   DaemonSession,
   DaemonSessionArchiveState,
   DaemonWorktreeInfo,
+  DaemonBranchInfo,
   DaemonSessionExportFormat,
   DaemonSessionExportResult,
   DaemonSessionTranscriptPage,
