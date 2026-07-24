@@ -57,9 +57,11 @@ describe('createShowMemoryAction', () => {
     });
   });
 
-  const getCombinedMemoryMessage = (): Message | undefined =>
+  type InfoMessage = Extract<Message, { content: string }>;
+
+  const getCombinedMemoryMessage = (): InfoMessage | undefined =>
     messages.find(
-      (m) =>
+      (m): m is InfoMessage =>
         m.type === MessageType.INFO &&
         m.content.startsWith('Current combined memory content:'),
     );
