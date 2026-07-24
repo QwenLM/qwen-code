@@ -547,7 +547,7 @@ export class ContentGenerationPipeline {
 
         // Stage 2b: Filter empty responses to avoid downstream issues
         if (
-          response.candidates?.[0]?.content?.parts?.length === 0 &&
+          (response.candidates?.[0]?.content?.parts?.length ?? 0) === 0 &&
           !response.candidates?.[0]?.finishReason &&
           !response.usageMetadata &&
           // Preparation-only responses must reach ACP before arguments complete.
