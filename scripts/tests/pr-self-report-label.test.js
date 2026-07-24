@@ -71,6 +71,7 @@ describe('pr-self-report-label', () => {
     return {
       added: /add-label/.test(calls),
       removed: /remove-label/.test(calls),
+      labelCreated: /label create/.test(calls),
       out: out.trim(),
     };
   };
@@ -79,6 +80,7 @@ describe('pr-self-report-label', () => {
     expect(run({ prAuthor: 'alice', issueAuthors: 'alice' })).toMatchObject({
       added: true,
       removed: false,
+      labelCreated: true,
     });
     // One self-reported issue among several linked is enough.
     expect(
