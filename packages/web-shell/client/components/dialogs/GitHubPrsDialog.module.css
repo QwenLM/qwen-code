@@ -1,0 +1,107 @@
+.content {
+  display: flex;
+  flex-direction: column;
+  min-height: 50vh;
+}
+
+.placeholder {
+  padding: 24px 12px;
+  text-align: center;
+  color: var(--muted-foreground);
+  white-space: pre-wrap;
+}
+
+.prList {
+  display: flex;
+  flex-direction: column;
+}
+
+.prRow {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 8px 10px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  color: inherit;
+}
+
+.prRow:hover {
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
+}
+
+.prLine {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.stateOpen {
+  flex-shrink: 0;
+  color: var(--success-color);
+}
+
+.stateDraft {
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+}
+
+.prTitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.badge {
+  flex-shrink: 0;
+  padding: 0 5px;
+  border-radius: 4px;
+  font-size: 10px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.badgeApproved {
+  background: var(--success-bg, rgba(76, 175, 80, 0.12));
+  color: var(--success-color);
+}
+
+.badgeChanges {
+  background: var(--error-bg, rgba(244, 67, 54, 0.12));
+  color: var(--error-color);
+}
+
+.checksPassing {
+  flex-shrink: 0;
+  display: inline-flex;
+  color: var(--success-color);
+}
+
+.checksFailing {
+  flex-shrink: 0;
+  display: inline-flex;
+  color: var(--error-color);
+}
+
+.checksPending {
+  flex-shrink: 0;
+  display: inline-flex;
+  color: var(--muted-foreground);
+}
+
+.prMeta {
+  padding-left: 20px;
+  font-size: 11px;
+  color: var(--muted-foreground);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

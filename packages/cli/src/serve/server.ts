@@ -210,6 +210,7 @@ import {
   registerWorkspaceGitLogRoutes,
   registerWorkspaceQualifiedGitLogRoutes,
 } from './routes/workspace-git-log.js';
+import { registerWorkspaceQualifiedGitHubPrsRoutes } from './routes/workspace-github-prs.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
 import {
   registerWorkspaceMcpControlRoutes,
@@ -1230,6 +1231,10 @@ export function createServeApp(
     sendBridgeError,
   });
   registerWorkspaceQualifiedGitLogRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+  });
+  registerWorkspaceQualifiedGitHubPrsRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
   });

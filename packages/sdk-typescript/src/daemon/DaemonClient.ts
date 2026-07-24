@@ -76,6 +76,7 @@ import type {
   DaemonWorkspaceGitDiffHunks,
   DaemonGitLog,
   DaemonGitCommitDetail,
+  DaemonGitHubPullRequestList,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMcpInitializeResult,
   DaemonWorkspaceMcpReloadOptions,
@@ -4485,6 +4486,15 @@ export class WorkspaceDaemonClient {
       this.workspaceSelector,
       `/git/log/commit?sha=${urlEncode(sha)}`,
       'GET /workspaces/:workspace/git/log/commit',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceGitHubPullRequests(): Promise<DaemonGitHubPullRequestList> {
+    return this.client.workspaceJsonRequest<DaemonGitHubPullRequestList>(
+      this.workspaceSelector,
+      '/github/prs',
+      'GET /workspaces/:workspace/github/prs',
       { mode: 'rest' },
     );
   }
