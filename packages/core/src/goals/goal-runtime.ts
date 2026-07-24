@@ -59,13 +59,6 @@ export interface GoalEvidenceSource {
   readActiveTranscriptChain(): Promise<readonly GoalEvidenceRecord[]>;
 }
 
-export class GoalPersistenceUnavailableError extends Error {
-  constructor() {
-    super('Goal persistence is unavailable for this session');
-    this.name = 'GoalPersistenceUnavailableError';
-  }
-}
-
 export interface GoalTurnHost {
   startGoalTurn(input: {
     permit: GoalTurnPermit;
@@ -893,12 +886,6 @@ export function createGoalRuntime(
           continuationQueued = false;
         } else if (request.action === 'resume') {
           blockedAudit = undefined;
-          if (currentProposal?.blockedAuditCandidate) {
-            currentProposal = {
-              proposal: currentProposal.proposal,
-              readyForVerification: false,
-            };
-          }
         }
         snapshot = {
           ...structuredClone(nextSnapshot),
