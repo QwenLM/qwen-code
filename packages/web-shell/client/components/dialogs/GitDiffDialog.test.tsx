@@ -179,7 +179,11 @@ describe('GitDiffDialog', () => {
     });
     await flush();
 
-    expect(workspaceGitDiffFile).toHaveBeenCalledWith('src/a.ts', undefined);
+    expect(workspaceGitDiffFile).toHaveBeenCalledWith(
+      'src/a.ts',
+      undefined,
+      undefined,
+    );
     // Plain-text fallback: the line bodies render without the +/- prefix
     // (the marker is a separate column).
     expect(document.body.textContent).toContain('const a = 2');
@@ -272,6 +276,7 @@ describe('GitDiffDialog', () => {
     expect(workspaceGitDiffFile).toHaveBeenCalledWith(
       'src/new.ts',
       'src/old.ts',
+      undefined,
     );
   });
 
@@ -346,7 +351,11 @@ describe('GitDiffDialog', () => {
     });
     await flush();
 
-    expect(workspaceGitDiffFile).toHaveBeenCalledWith('src/a.ts', undefined);
+    expect(workspaceGitDiffFile).toHaveBeenCalledWith(
+      'src/a.ts',
+      undefined,
+      undefined,
+    );
     expect(document.body.textContent).toContain('Failed to load this diff');
   });
 

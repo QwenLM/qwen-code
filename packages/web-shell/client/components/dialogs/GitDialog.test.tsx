@@ -115,7 +115,7 @@ describe('GitDialog', () => {
     ).toHaveLength(1);
     expect(historyTab?.getAttribute('aria-selected')).toBe('true');
     expect(panel?.getAttribute('aria-labelledby')).toBe('git-dialog-tab-log');
-    expect(workspaceGitLog).toHaveBeenCalledWith(50, 0);
+    expect(workspaceGitLog).toHaveBeenCalledWith(50, 0, undefined);
   });
 
   it('supports arrow-key tab navigation', async () => {

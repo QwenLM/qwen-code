@@ -18,6 +18,7 @@ import type {
 } from '../workspace-registry.js';
 import {
   requireTrustedWorkspaceRuntime,
+  resolveContainedCwd,
   resolveWorkspaceRuntimeFromParam,
 } from '../workspace-route-runtime.js';
 import { applyReadHeaders } from './workspace-file-read.js';
@@ -200,7 +201,7 @@ export function registerWorkspaceQualifiedGitDiffRoutes(
     if (!runtime) return;
     void handleDiffList(
       res,
-      runtime.workspaceCwd,
+      resolveContainedCwd(req, runtime.workspaceCwd),
       deps.sendBridgeError,
       'GET /workspaces/:workspace/git/diff',
     );
@@ -211,7 +212,7 @@ export function registerWorkspaceQualifiedGitDiffRoutes(
     void handleDiffFile(
       req,
       res,
-      runtime.workspaceCwd,
+      resolveContainedCwd(req, runtime.workspaceCwd),
       deps.sendBridgeError,
       'GET /workspaces/:workspace/git/diff/file',
     );

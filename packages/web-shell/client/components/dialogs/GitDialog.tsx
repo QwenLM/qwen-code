@@ -15,10 +15,12 @@ export type GitDialogView = 'diff' | 'log';
 
 export function GitDialog({
   workspaceCwd,
+  gitCwd,
   initialView,
   onClose,
 }: {
   workspaceCwd: string;
+  gitCwd?: string;
   initialView: GitDialogView;
   onClose: () => void;
 }) {
@@ -101,11 +103,13 @@ export function GitDialog({
           {view === 'diff' ? (
             <GitDiffContent
               workspaceCwd={workspaceCwd}
+              gitCwd={gitCwd}
               onSubtitleChange={setSubtitle}
             />
           ) : (
             <GitLogContent
               workspaceCwd={workspaceCwd}
+              gitCwd={gitCwd}
               onSubtitleChange={setSubtitle}
             />
           )}

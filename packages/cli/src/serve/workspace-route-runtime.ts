@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fs from 'node:fs';
 import path from 'node:path';
 import type { Request, Response } from 'express';
 import { canonicalizeWorkspace } from './acp-session-bridge.js';
@@ -211,4 +212,30 @@ export function sendWorkspaceMismatch(
     code: 'workspace_mismatch',
     workspaceCount: runtimes.length,
   });
+}
+
+/**
+ * Resolve an optional `?cwd=` query parameter to a path contained within the
+ * workspace root. Returns the workspace root itself when the parameter is
+ * absent, unresolvable, or escapes the workspace boundary.
+ */
+export function resolveContainedCwd(
+  req: Request,
+  workspaceCwd: string,
+): string {
+  const rawCwd = req.query['cwd'];
+  if (typeof rawCwd !== 'string' || rawCwd.length === 0) {
+    return workspaceCwd;
+  }
+  try {
+    const resolved = fs.realpathSync(path.resolve(rawCwd));
+    const root = fs.realpathSync(workspaceCwd);
+    const rel = path.relative(root, resolved);
+    if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
+      return resolved;
+    }
+  } catch {
+    // Path doesn't exist or can't be resolved — fall back to workspace root.
+  }
+  return workspaceCwd;
 }

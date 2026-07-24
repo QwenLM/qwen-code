@@ -91,7 +91,7 @@ describe('GitLogDialog', () => {
     mount();
     await flush();
 
-    expect(workspaceGitLog).toHaveBeenCalledWith(50, 0);
+    expect(workspaceGitLog).toHaveBeenCalledWith(50, 0, undefined);
     expect(document.body.textContent).toContain('first change');
     expect(document.body.textContent).toContain('Ada');
     expect(document.body.textContent).toContain('2 minutes ago');
@@ -153,7 +153,7 @@ describe('GitLogDialog', () => {
     await flush();
 
     // Second call uses the accumulated offset (1 entry already loaded).
-    expect(workspaceGitLog).toHaveBeenNthCalledWith(2, 50, 1);
+    expect(workspaceGitLog).toHaveBeenNthCalledWith(2, 50, 1, undefined);
     expect(document.body.textContent).toContain('newest');
     expect(document.body.textContent).toContain('older');
   });
@@ -182,8 +182,8 @@ describe('GitLogDialog', () => {
     });
     await flush();
 
-    expect(workspaceGitLog).toHaveBeenNthCalledWith(2, 50, 1);
-    expect(workspaceGitLog).toHaveBeenNthCalledWith(3, 50, 3);
+    expect(workspaceGitLog).toHaveBeenNthCalledWith(2, 50, 1, undefined);
+    expect(workspaceGitLog).toHaveBeenNthCalledWith(3, 50, 3, undefined);
     expect(document.body.textContent?.match(/duplicate/g)).toHaveLength(1);
     expect(document.body.textContent).toContain('older');
   });
@@ -230,7 +230,7 @@ describe('GitLogDialog', () => {
     });
     await flush();
 
-    expect(workspaceGitCommitDetail).toHaveBeenCalledWith(e.sha);
+    expect(workspaceGitCommitDetail).toHaveBeenCalledWith(e.sha, undefined);
     expect(document.body.textContent).toContain('the full body');
     expect(document.body.textContent).toContain('src/x.ts');
   });
