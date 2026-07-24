@@ -83,13 +83,20 @@ test('git mode chip shows popover with three modes and captures screenshots', as
     animations: 'disabled',
   });
 
-  // Click "New branch" option
-  const branchOption = popover.getByText('New branch', { exact: false });
-  await branchOption.click();
+  // Click "New branch" option (match by role: the option's text is split
+  // across a name + description span, so getByText('New branch') is ambiguous)
+  await popover.getByRole('radio', { name: /New branch/ }).click();
 
   // Wait for the branch input to appear
   const branchInput = page.locator('[data-testid="git-mode-branch-input"]');
   await expect(branchInput).toBeVisible({ timeout: 5_000 });
+  // Regression guard: clicking an option used to steal focus to the composer
+  // (via the surface onClick bubbling through the portal), dismissing the
+  // popover ~100ms after the input flashed visible. Assert it stays open.
+  await expect(branchInput).toBeVisible();
+  await page.waitForTimeout(300);
+  await expect(popover).toBeVisible();
+  await expect(branchInput).toBeVisible();
 
   // Type a branch name
   await branchInput.fill('feat/git-mode-selector');
@@ -145,12 +152,17 @@ test('git mode chip worktree mode sends worktree intent', async ({
   const popover = page.locator('[data-slot="popover-content"]');
   await expect(popover).toBeVisible({ timeout: 5_000 });
 
-  // Click "Worktree" option
-  const worktreeOption = popover.getByText('Worktree', { exact: false });
-  await worktreeOption.click();
+  // Click "Worktree" option (match by role; see the branch test above)
+  await popover.getByRole('radio', { name: /Worktree/ }).click();
 
   // Confirm worktree selection
   const confirmBtn = page.locator('[data-testid="git-mode-confirm-worktree"]');
+  await expect(confirmBtn).toBeVisible();
+  // Regression guard: same focus-steal dismissal as the branch test — the
+  // confirm button flashed visible, then the popover closed before it could
+  // be clicked. Assert the popover survives the click.
+  await page.waitForTimeout(300);
+  await expect(popover).toBeVisible();
   await expect(confirmBtn).toBeVisible();
   await confirmBtn.click();
 
@@ -209,8 +221,8 @@ test('git mode chip clear button resets to current branch', async ({
   const popover = page.locator('[data-slot="popover-content"]');
   await expect(popover).toBeVisible({ timeout: 5_000 });
 
-  // Select branch mode
-  await popover.getByText('New branch', { exact: false }).click();
+  // Select branch mode (match by role; see the first branch test)
+  await popover.getByRole('radio', { name: /New branch/ }).click();
   const branchInput = page.locator('[data-testid="git-mode-branch-input"]');
   await branchInput.fill('feat/temp');
   await page.locator('[data-testid="git-mode-confirm-branch"]').click();

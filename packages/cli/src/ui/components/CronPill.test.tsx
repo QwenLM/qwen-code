@@ -17,7 +17,7 @@ describe('CronPill', () => {
 
   it('renders the active scheduled task count', () => {
     const { lastFrame, unmount } = renderWithProviders(<CronPill count={2} />);
-    expect(lastFrame()).toContain('◎ 2 scheduled tasks');
+    expect(lastFrame()).toContain('◎\uFE0E 2 scheduled tasks');
     unmount();
   });
 });
