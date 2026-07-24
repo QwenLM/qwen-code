@@ -31,4 +31,18 @@ describe('validateBranchName', () => {
       expect(validateBranchName(name)).toBe(true);
     },
   );
+
+  it('rejects names exceeding the byte-length caps', () => {
+    // Mirrors the server-side caps (200 bytes per `/`-separated component,
+    // 1000 bytes total). Counted in UTF-8 bytes, so CJK chars (3 bytes each)
+    // trip the component cap at ~86 chars.
+    expect(validateBranchName('a'.repeat(201))).toBe(false);
+    expect(validateBranchName(`feat/${'a'.repeat(201)}`)).toBe(false);
+    expect(validateBranchName('a'.repeat(1001))).toBe(false);
+    expect(validateBranchName('功'.repeat(86))).toBe(false);
+  });
+
+  it('accepts a name at the byte-length boundary', () => {
+    expect(validateBranchName('a'.repeat(200))).toBe(true);
+  });
 });

@@ -105,6 +105,27 @@ describe('createBranch', () => {
   it('rejects when the branch already exists', async () => {
     await expect(createBranch(repo, 'main')).rejects.toThrow();
   });
+
+  it('rejects but leaves the branch created and checked out when a post-checkout hook fails', async () => {
+    // A failing post-checkout hook makes `git checkout -b` exit nonzero AFTER
+    // git has already created the ref and moved HEAD (verified against real
+    // git). The route must treat this as a partial success and roll back; this
+    // test locks in the hazard shape that rollback guards against.
+    const hooksDir = path.join(repo, '.git', 'hooks');
+    fs.mkdirSync(hooksDir, { recursive: true });
+    const hookPath = path.join(hooksDir, 'post-checkout');
+    fs.writeFileSync(hookPath, '#!/bin/sh\nexit 1\n');
+    fs.chmodSync(hookPath, 0o755);
+
+    const before = git(repo, 'rev-parse', 'HEAD').trim();
+    await expect(createBranch(repo, 'feature')).rejects.toThrow();
+    // The branch exists and HEAD moved despite the nonzero exit.
+    await expect(branchExists(repo, 'feature')).resolves.toBe(true);
+    expect(git(repo, 'rev-parse', '--abbrev-ref', 'HEAD').trim()).toBe(
+      'feature',
+    );
+    expect(git(repo, 'rev-parse', 'HEAD').trim()).toBe(before);
+  });
 });
 
 describe('checkoutRef', () => {

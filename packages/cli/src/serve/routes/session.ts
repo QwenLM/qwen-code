@@ -114,6 +114,17 @@ import type {
 // storage is case-folding on macOS/Windows.
 const GIT_RESERVED_BRANCH = 'HEAD';
 
+// Byte-length caps for branch names. git creates loose refs as files under
+// `.git/refs/heads/`, so each `/`-separated component is bounded by the
+// filesystem's per-component name limit (255 bytes on Linux/macOS, minus the
+// `.lock` suffix git appends while writing). A component over that limit fails
+// inside `git checkout -b` with a raw error that embeds the absolute workspace
+// path; rejecting here keeps every bad name a clean 400. Unicode is allowed, so
+// count UTF-8 bytes, not code points. Mirrors validateBranchName in
+// GitModePopover.tsx; keep the two in sync.
+const MAX_BRANCH_NAME_BYTES = 1000;
+const MAX_BRANCH_COMPONENT_BYTES = 200;
+
 interface RegisterSessionRoutesDeps {
   boundWorkspace: string;
   bridge: AcpSessionBridge;
@@ -394,11 +405,12 @@ export function registerSessionRoutes(
   >();
 
   // Tracks workspaces with an active branch session (workspaceCwd → sessionId).
-  // Prevents concurrent branch sessions that would conflict on HEAD.
-  // Known limitation: this guard only prevents branch-vs-branch conflicts.
-  // A concurrent current-branch session in the same workspace is not blocked;
-  // the dirty-tree check mitigates the most common case but a clean tree can
-  // still be silently moved to the new branch.
+  // Prevents concurrent branch sessions that would conflict on HEAD. The
+  // POST /session branch block additionally rejects branch creation while any
+  // other live (client-attached) non-worktree session shares the workspace, so
+  // a concurrent current-branch session is not silently moved onto the new
+  // branch. A detached session is not blocked; the dirty-tree check still
+  // covers the most common dirty-tree case.
   const activeBranchSessions = new Map<string, string>();
   // Workspaces with a branch creation currently in flight (reserved between
   // the conflict guard and `activeBranchSessions.set`, which only happens
@@ -1281,7 +1293,13 @@ export function registerSessionRoutes(
         branchName
           .split('/')
           .some((c) => c.startsWith('.') || c.endsWith('.lock')) ||
-        branchName.toUpperCase() === GIT_RESERVED_BRANCH
+        branchName.toUpperCase() === GIT_RESERVED_BRANCH ||
+        Buffer.byteLength(branchName, 'utf8') > MAX_BRANCH_NAME_BYTES ||
+        branchName
+          .split('/')
+          .some(
+            (c) => Buffer.byteLength(c, 'utf8') > MAX_BRANCH_COMPONENT_BYTES,
+          )
       ) {
         res.status(400).json({
           error: `Invalid branch name: ${branchName}`,
@@ -1306,6 +1324,25 @@ export function registerSessionRoutes(
         } catch {
           activeBranchSessions.delete(workspaceCwd);
         }
+      }
+      // Reject when any other live (client-attached) non-worktree session
+      // already runs in this workspace. `git checkout -b` moves the shared
+      // HEAD, so a concurrent current-branch session with a clean tree would
+      // be silently relocated onto the new branch and commit to the wrong
+      // ref. Worktree sessions are exempt (they run in their own cwd). Scoped
+      // to sessions with an attached client so a detached session left behind
+      // by a "new chat" does not block a fresh branch session.
+      const sharedCheckoutSession = runtime.bridge
+        .listWorkspaceSessions(workspaceCwd)
+        .find((session) => !session.worktree && session.clientCount > 0);
+      if (sharedCheckoutSession) {
+        res.status(409).json({
+          error:
+            'Another session is already active in this workspace; creating a branch would move its shared checkout',
+          code: 'branch_session_conflict',
+          existingSessionId: sharedCheckoutSession.sessionId,
+        });
+        return;
       }
       let wtService: GitWorktreeService;
       try {
@@ -1378,9 +1415,29 @@ export function registerSessionRoutes(
       try {
         await createBranch(workspaceCwd, branchName);
       } catch (checkoutErr) {
-        inFlightBranchWorkspaces.delete(workspaceCwd);
+        // `git checkout -b` can reject AFTER git already created the ref and
+        // moved HEAD — a failing post-checkout hook or a timeout past the ref
+        // update both leave the workspace on the new branch while the command
+        // exits nonzero. Roll back transactionally (restore the base ref, then
+        // delete the partial branch) so the shared workspace is never silently
+        // left on the new branch; when nothing was created the rollback is a
+        // harmless no-op. Log the full git error but return a generic detail —
+        // git stderr can embed the absolute workspace path, which must not
+        // reach the caller in the 500 body.
+        daemonLog?.warn('branch checkout failed', {
+          error:
+            checkoutErr instanceof Error
+              ? checkoutErr.message
+              : String(checkoutErr),
+        });
+        await rollbackBranchCreation(
+          workspaceCwd,
+          { name: branchName, baseBranch },
+          baseCommit,
+          daemonLog,
+        );
         res.status(500).json({
-          error: `Failed to create branch: ${checkoutErr instanceof Error ? checkoutErr.message : String(checkoutErr)}`,
+          error: 'Failed to create branch',
           code: 'branch_checkout_failed',
         });
         return;

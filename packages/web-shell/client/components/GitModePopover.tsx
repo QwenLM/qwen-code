@@ -15,6 +15,15 @@ export type SessionGitIntent =
   | { mode: 'branch'; name: string }
   | { mode: 'worktree'; slug?: string };
 
+// Byte-length caps mirroring the server predicate in session.ts; keep in sync.
+// git creates loose refs as files, so each `/`-separated component is bounded
+// by the filesystem's per-component name limit (~255 bytes minus git's `.lock`
+// suffix). Count UTF-8 bytes, not code points, since Unicode is allowed.
+const MAX_BRANCH_NAME_BYTES = 1000;
+const MAX_BRANCH_COMPONENT_BYTES = 200;
+
+const branchNameEncoder = new TextEncoder();
+
 // UX-only validation; the server re-validates in POST /session (session.ts).
 // Keep the two predicates in sync.
 export function validateBranchName(name: string): boolean {
@@ -31,7 +40,13 @@ export function validateBranchName(name: string): boolean {
     name.endsWith('.git') ||
     name.includes('@{') ||
     name.split('/').some((c) => c.startsWith('.') || c.endsWith('.lock')) ||
-    name.toUpperCase() === 'HEAD'
+    name.toUpperCase() === 'HEAD' ||
+    branchNameEncoder.encode(name).length > MAX_BRANCH_NAME_BYTES ||
+    name
+      .split('/')
+      .some(
+        (c) => branchNameEncoder.encode(c).length > MAX_BRANCH_COMPONENT_BYTES,
+      )
   );
 }
 
@@ -159,6 +174,8 @@ export function GitModePopover({
 
           <button
             type="button"
+            role="radio"
+            aria-checked={selectedMode === 'current'}
             className={`${styles.option} ${selectedMode === 'current' ? styles.optionSelected : ''}`}
             onClick={handleSelectCurrent}
           >
@@ -172,12 +189,16 @@ export function GitModePopover({
               </span>
             </span>
             {selectedMode === 'current' && (
-              <span className={styles.checkCurrent}>✓</span>
+              <span className={styles.checkCurrent} aria-hidden="true">
+                ✓
+              </span>
             )}
           </button>
 
           <button
             type="button"
+            role="radio"
+            aria-checked={selectedMode === 'branch'}
             className={`${styles.option} ${selectedMode === 'branch' ? styles.optionSelected : ''}`}
             onClick={() => setSelectedMode('branch')}
           >
@@ -191,7 +212,9 @@ export function GitModePopover({
               </span>
             </span>
             {selectedMode === 'branch' && (
-              <span className={styles.checkBranch}>✓</span>
+              <span className={styles.checkBranch} aria-hidden="true">
+                ✓
+              </span>
             )}
           </button>
 
@@ -223,6 +246,7 @@ export function GitModePopover({
                   {branchName && (
                     <span
                       className={styles.branchStatus}
+                      aria-hidden="true"
                       style={{
                         color: branchValid
                           ? 'var(--git-mode-valid)'
@@ -251,6 +275,8 @@ export function GitModePopover({
 
           <button
             type="button"
+            role="radio"
+            aria-checked={selectedMode === 'worktree'}
             className={`${styles.option} ${selectedMode === 'worktree' ? styles.optionSelected : ''}`}
             onClick={() => setSelectedMode('worktree')}
           >
@@ -264,7 +290,9 @@ export function GitModePopover({
               </span>
             </span>
             {selectedMode === 'worktree' && (
-              <span className={styles.checkWorktree}>✓</span>
+              <span className={styles.checkWorktree} aria-hidden="true">
+                ✓
+              </span>
             )}
           </button>
 

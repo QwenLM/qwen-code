@@ -8847,6 +8847,233 @@ describe('createServeApp', () => {
       }
     });
 
+    it('rolls back the partial branch when checkout fails after HEAD moved', async () => {
+      // `git checkout -b` can reject AFTER git already created the branch and
+      // moved HEAD (e.g. a failing post-checkout hook). The route must roll
+      // back: restore the base ref and delete the partially-created branch,
+      // rather than leaving the shared workspace on the new branch.
+      const rollbackCalls: string[] = [];
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('abc123');
+      mockBranchOps.createBranch = () =>
+        Promise.reject(new Error('fatal: post-checkout hook failed'));
+      mockBranchOps.checkoutRef = () => {
+        rollbackCalls.push('checkout');
+        return Promise.resolve();
+      };
+      mockBranchOps.deleteBranch = () => {
+        rollbackCalls.push('delete');
+        return Promise.resolve();
+      };
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/x' } });
+
+        expect(res.status).toBe(500);
+        expect(res.body.code).toBe('branch_checkout_failed');
+        // The raw git error (which can embed the workspace path) is not
+        // surfaced to the caller.
+        expect(res.body.error).toBe('Failed to create branch');
+        expect(rollbackCalls).toContain('checkout');
+        expect(rollbackCalls).toContain('delete');
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+        mockBranchOps.createBranch = undefined;
+        mockBranchOps.checkoutRef = undefined;
+        mockBranchOps.deleteBranch = undefined;
+      }
+    });
+
+    it('409 when a live non-worktree session already runs in the workspace', async () => {
+      // A concurrent current-branch session shares the working tree; creating
+      // a branch would move the shared HEAD out from under it.
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: 'live-session',
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+          },
+        ],
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('abc123');
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/x' } });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('branch_session_conflict');
+        expect(res.body.existingSessionId).toBe('live-session');
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+      }
+    });
+
+    it('allows branch creation when only a worktree session shares the workspace', async () => {
+      // Worktree sessions run in their own checkout, so moving the main HEAD
+      // does not affect them.
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: 'wt-session',
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            clientCount: 1,
+            hasActivePrompt: false,
+            worktree: { slug: 'task', path: '/tmp/wt', branch: 'wt-task' },
+          },
+        ],
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('abc123');
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/x' } });
+
+        expect(res.status).toBe(200);
+        expect(bridge.calls).toHaveLength(1);
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+      }
+    });
+
+    it('allows branch creation when the sharing session has no attached client', async () => {
+      // A detached session (e.g. left behind by a "new chat") is not actively
+      // running, so it must not block a fresh branch session.
+      const bridge = fakeBridge({
+        listImpl: () => [
+          {
+            sessionId: 'detached-session',
+            workspaceCwd: WS_BOUND,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            clientCount: 0,
+            hasActivePrompt: false,
+          },
+        ],
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('abc123');
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/x' } });
+
+        expect(res.status).toBe(200);
+        expect(bridge.calls).toHaveLength(1);
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+      }
+    });
+
+    it('400 on branch names exceeding the byte-length caps', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      const names = [
+        'a'.repeat(201), // single component over the 200-byte cap
+        `feat/${'a'.repeat(201)}`, // a nested component over the cap
+        'a'.repeat(1001), // total over the 1000-byte cap
+        // ~86 CJK chars in one component exceed 255 UTF-8 bytes (3 bytes
+        // each) — the realistic pasted-name trigger now that Unicode is
+        // allowed, which previously surfaced a path-leaking 500.
+        '功'.repeat(86),
+      ];
+      for (const name of names) {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name } });
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('branch_invalid_name');
+      }
+      // Validation rejects before any spawn.
+      expect(bridge.calls).toHaveLength(0);
+    });
+
+    it('accepts a branch name at the byte-length boundary', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      // A 200-byte component is exactly at the cap; it must pass name
+      // validation and only fail the later git-repo check.
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(false),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'a'.repeat(200) } });
+
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('branch_not_git_repo');
+      } finally {
+        mockWt.impl = undefined;
+      }
+    });
+
     it('200 with branch metadata on successful branch creation', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
