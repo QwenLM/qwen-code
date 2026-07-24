@@ -368,6 +368,34 @@ tmux kill-session -t "$S"
 - Cannot run after exhausting workarounds → FAIL, not skip.
 - Fork code: sandbox (strip write tokens/secrets).
 
+**Scale the evidence to the change** — the tmux before/after above is the floor,
+not the ceiling. Match the depth to what is actually under review:
+
+- **UI / styling / interaction changes** (color, highlight, cursor position, or
+  layout is the thing being reviewed): `capture-pane` text cannot show which
+  item is highlighted or where the caret block sits. Use the `terminal-capture`
+  skill (node-pty → xterm.js → pixel-accurate PNG; it needs
+  `npx playwright install chromium` — install on demand if absent). Whatever the
+  medium, name the **oracle**: the exact on-screen element that proves the
+  behavior ("the highlighted pill is the active tab; the filtered list is the
+  oracle for which tab is active"), and show the state before AND after the
+  action so the change is _visible_, not asserted.
+- **Build / typecheck / test numbers you cite as evidence**: get them from a
+  clean state, not a shared or symlinked `node_modules` — a contaminated tree
+  surfaces spurious cross-package `TS2307`/`TS2353` errors that are
+  environmental, not the PR's. Report such errors as environmental and never as
+  a PR defect; a clean install is what makes the counts trustworthy.
+- **Performance changes**: behavioral before/after is not enough — measure it.
+  Instrument the REAL built code (wrap the hot path, e.g. `node:fs`), run the
+  old path vs the new, and report concrete numbers (calls, disk walks, ms).
+  "Faster" must be a measurement, not a claim.
+
+A docs / types / refactor PR needs none of this — say `N/A` when nothing is
+user-visible. When the verification was non-trivial, separate merge-BLOCKERS
+from standing, non-blocking follow-ups (a pre-existing gap, a platform caveat, a
+nit), and add a one-paragraph methodology note (environment, how you drove it)
+so the maintainer can trust and reproduce it.
+
 Post a single Stage 2 comment (must include `<!-- qwen-triage stage=2 -->` at the top), in this order: code review findings → optional sequence diagram (2a-bis) → optional changed-files overview (2a-bis) → real-scenario testing result (below) → the bilingual `<details>` Chinese summary → signature + footer last (the same tail order as the Stage 1 template). Include the two enrichments only when 2a-bis says they earn their place; a small, focused PR is just findings + testing.
 
 **⛔ BEFORE POSTING: verify your comment contains the tmux output.** Read back through your draft — does it have a fenced code block with the actual terminal capture? If not, add it now. The maintainer cannot approve without seeing what actually happened.
