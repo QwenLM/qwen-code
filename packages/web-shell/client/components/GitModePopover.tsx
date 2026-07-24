@@ -160,6 +160,13 @@ export function GitModePopover({
           align="end"
           sideOffset={8}
           className={styles.popover}
+          // The content is portaled out of the composer, but React synthetic
+          // clicks still bubble through the React tree to the composer
+          // surface's onClick, which calls core.focus() and steals focus out of
+          // the popover — Radix then dismisses it via focus-outside. Stop the
+          // bubble so option clicks keep focus inside (mirrors the composer
+          // ToolbarPopover pattern in ChatEditor).
+          onClick={(e) => e.stopPropagation()}
           onOpenAutoFocus={(e) => e.preventDefault()}
           onInteractOutside={(e) => {
             // The portal container fools Radix's dismissable-layer into
