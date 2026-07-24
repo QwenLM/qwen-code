@@ -418,12 +418,70 @@ describe('presubmitCommand', () => {
       reviewedSha: 'abc123',
       liveHeadSha: 'def456',
       drifted: true,
-      compare: { status: 'ahead', aheadBy: 2, filesTouched: ['src/x.ts'] },
+      compare: {
+        status: 'ahead',
+        aheadBy: 2,
+        filesTouched: ['src/x.ts'],
+        filesTotal: 1,
+      },
+      // No --new-findings in baseArgs: the anchor set is unknown, so risk
+      // fails safe.
+      anchorsAtRisk: true,
     });
     expect(result.downgradeApprove).toBe(true);
     expect(result.downgradeReasons.join(' ')).toContain(
       'PR head advanced during review',
     );
+  });
+
+  it('makes exactly one gh() call on the no-drift happy path', async () => {
+    // The PR's efficiency claim: live head rides the author fetch, and no
+    // compare call happens when nothing moved.
+    const handler = presubmitCommand.handler;
+    if (!handler) throw new Error('presubmit handler missing');
+    await handler(baseArgs as Parameters<typeof handler>[0]);
+
+    expect(ghMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the drift verdict when the compare call itself throws', async () => {
+    ghMock.mockImplementation((...args: string[]) => {
+      const path = args[1] ?? '';
+      if (path.includes('/compare/')) {
+        throw new Error('HTTP 404: no common ancestor');
+      }
+      return '{"author":"contributor","headSha":"def456"}';
+    });
+
+    const handler = presubmitCommand.handler;
+    if (!handler) throw new Error('presubmit handler missing');
+    await handler(baseArgs as Parameters<typeof handler>[0]);
+
+    const [, content] = writeFileSyncMock.mock.calls.find(
+      ([path]) => path === '/tmp/presubmit.json',
+    ) ?? [null, null];
+    const result = JSON.parse(String(content));
+
+    expect(result.headDrift.drifted).toBe(true);
+    expect(result.headDrift.compare).toBeNull();
+    expect(result.headDrift.anchorsAtRisk).toBe(true);
+    expect(result.downgradeApprove).toBe(true);
+  });
+
+  it('survives a deleted PR author (author: null) instead of dying pre-submission', async () => {
+    ghMock.mockReturnValue('{"author":null,"headSha":"abc123"}');
+
+    const handler = presubmitCommand.handler;
+    if (!handler) throw new Error('presubmit handler missing');
+    await handler(baseArgs as Parameters<typeof handler>[0]);
+
+    const [, content] = writeFileSyncMock.mock.calls.find(
+      ([path]) => path === '/tmp/presubmit.json',
+    ) ?? [null, null];
+    const result = JSON.parse(String(content));
+
+    expect(result.isSelfPr).toBe(false);
+    expect(result.headDrift.drifted).toBe(false);
   });
 
   it('ignores the running Qwen PR review check when deciding whether CI is still pending', async () => {
@@ -501,45 +559,111 @@ describe('classifyHeadDrift', () => {
     status: 'ahead',
     aheadBy: 3,
     filesTouched: ['src/a.ts', 'src/b.ts'],
+    filesTotal: 2,
   };
 
   it('reports no drift when the head has not moved', () => {
-    const got = classifyHeadDrift('sha-aaa', 'sha-aaa', null);
+    const got = classifyHeadDrift('sha-aaa', 'sha-aaa', null, []);
     expect(got.headDrift.drifted).toBe(false);
+    expect(got.headDrift.anchorsAtRisk).toBe(false);
     expect(got.downgradeReason).toBeUndefined();
   });
 
   it('does not claim drift when the live head could not be read', () => {
-    const got = classifyHeadDrift('sha-aaa', '', null);
+    const got = classifyHeadDrift('sha-aaa', '', null, []);
     expect(got.headDrift.drifted).toBe(false);
   });
 
-  it('names both SHAs even when the compare detail is unavailable', () => {
+  it('trusts an identical/zero-ahead compare over a SHA-string mismatch', () => {
+    // An abbreviated commit_sha differs as a string from the full head, but
+    // the compare's own evidence says nothing is unreviewed.
+    const identical: CompareSummary = {
+      status: 'identical',
+      aheadBy: 0,
+      filesTouched: [],
+      filesTotal: 0,
+    };
+    const got = classifyHeadDrift('abc123', 'abc123def456', identical, []);
+    expect(got.headDrift.drifted).toBe(false);
+    expect(got.downgradeReason).toBeUndefined();
+  });
+
+  it('names both SHAs even when the compare detail is unavailable, and fails anchors safe', () => {
     const got = classifyHeadDrift(
       '57a9273ade45a43b9f16ae1f84cc3ba448a87429',
       '08ede5645612adca7d4193c1503d9c9e0f4387fb',
       null,
+      [],
     );
     expect(got.headDrift.drifted).toBe(true);
     expect(got.headDrift.compare).toBeNull();
-    expect(got.downgradeReason).toContain('57a9273a');
-    expect(got.downgradeReason).toContain('08ede564');
-    expect(got.downgradeReason).not.toContain('(');
+    expect(got.headDrift.anchorsAtRisk).toBe(true);
+    expect(got.downgradeReason).toBe(
+      'PR head advanced during review: reviewed 57a9273a, PR is now at 08ede564',
+    );
   });
 
-  it('carries the unreviewed-commit count and touched-file count', () => {
-    const got = classifyHeadDrift('sha-old', 'sha-new', ahead);
+  it('carries the unreviewed-commit count and the PRE-cap file count', () => {
+    const got = classifyHeadDrift('sha-old', 'sha-new', ahead, []);
     expect(got.downgradeReason).toContain('+3 unreviewed commit(s)');
     expect(got.downgradeReason).toContain('2 file(s)');
     expect(got.headDrift.compare).toEqual(ahead);
   });
 
-  it('calls out a force-push as rewritten history', () => {
-    const got = classifyHeadDrift('sha-old', 'sha-new', {
-      status: 'diverged',
-      aheadBy: 1,
-      filesTouched: [],
-    });
+  it('calls out a force-push as rewritten history and puts anchors at risk', () => {
+    const got = classifyHeadDrift(
+      'sha-old',
+      'sha-new',
+      {
+        status: 'diverged',
+        aheadBy: 1,
+        filesTouched: [],
+        filesTotal: 0,
+      },
+      [],
+    );
     expect(got.downgradeReason).toContain('history rewritten');
+    expect(got.headDrift.anchorsAtRisk).toBe(true);
+  });
+
+  it('rules anchors safe only when a complete file list provably misses every finding', () => {
+    const got = classifyHeadDrift('sha-old', 'sha-new', ahead, ['src/z.ts']);
+    expect(got.headDrift.anchorsAtRisk).toBe(false);
+  });
+
+  it('rules anchors at risk when a finding path intersects the touched files', () => {
+    const got = classifyHeadDrift('sha-old', 'sha-new', ahead, ['src/b.ts']);
+    expect(got.headDrift.anchorsAtRisk).toBe(true);
+  });
+
+  it('fails safe when the touched-file list was truncated — a dropped path cannot intersect', () => {
+    const truncated: CompareSummary = {
+      status: 'ahead',
+      aheadBy: 41,
+      filesTouched: ['docs/a.md'],
+      filesTotal: 283,
+    };
+    const got = classifyHeadDrift('sha-old', 'sha-new', truncated, [
+      'src/z.ts',
+    ]);
+    expect(got.headDrift.anchorsAtRisk).toBe(true);
+    // The reason reports the REAL count, not the cap.
+    expect(got.downgradeReason).toContain('283 file(s)');
+  });
+
+  it("fails safe at the compare API's own 300-file cap even when nothing was cut locally", () => {
+    const apiCapped: CompareSummary = {
+      status: 'ahead',
+      aheadBy: 5,
+      filesTouched: Array.from({ length: 300 }, (_, i) => `f${i}.ts`),
+      filesTotal: 300,
+    };
+    const got = classifyHeadDrift('sha-old', 'sha-new', apiCapped, ['zz.ts']);
+    expect(got.headDrift.anchorsAtRisk).toBe(true);
+  });
+
+  it('fails safe when no findings list was supplied to intersect against', () => {
+    const got = classifyHeadDrift('sha-old', 'sha-new', ahead, null);
+    expect(got.headDrift.anchorsAtRisk).toBe(true);
   });
 });

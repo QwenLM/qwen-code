@@ -132,16 +132,36 @@ export interface CompareSummary {
    * force-push rewrote the history the review read. */
   status: string;
   aheadBy: number;
-  /** Files the unreviewed commits touched (capped) — what Step 7 intersects
-   * with its findings' paths to decide whether anchors are at risk. */
+  /** Files the unreviewed commits touched (capped at FILES_TOUCHED_CAP). */
   filesTouched: string[];
+  /** Count before the cap. When it exceeds `filesTouched.length` the list
+   * was cut — and the compare endpoint itself caps at 300, so a total of
+   * 300 may also be incomplete. `anchorsAtRisk` accounts for both. */
+  filesTotal: number;
 }
+
+/** GitHub's compare endpoint returns at most this many files. */
+const COMPARE_API_FILES_CAP = 300;
+const FILES_TOUCHED_CAP = 50;
 
 export interface HeadDrift {
   reviewedSha: string;
   liveHeadSha: string;
   drifted: boolean;
   compare: CompareSummary | null;
+  /**
+   * The submit-or-restart decision, computed here rather than delegated to
+   * prose: could the unreviewed commits have invalidated the review's inline
+   * anchors? True whenever the answer cannot be PROVEN no — compare
+   * unavailable, history diverged (force-push), the touched-file list
+   * truncated (locally or by the API's own 300 cap), or no findings list
+   * supplied to intersect against. A dropped path cannot intersect, so a
+   * naive intersection over a truncated list fails open — measured on a real
+   * 283-file base-merge drift where the 50 surviving alphabetically-first
+   * paths contained no packages/cli or packages/core file at all, i.e. the
+   * gate read "safe" on exactly the largest drifts.
+   */
+  anchorsAtRisk: boolean;
 }
 
 /**
@@ -156,27 +176,59 @@ export interface HeadDrift {
  * at the submission gate, and the downgrade rides the machinery that
  * already exists rather than a new rule the model must remember.
  *
- * Kept pure for unit testing; the gh calls stay in `runPresubmit`.
+ * `findingPaths` is the file set the review's inline comments anchor to
+ * (null = unknown, which is fail-safe). Kept pure for unit testing; the gh
+ * calls stay in `runPresubmit`.
  */
 export function classifyHeadDrift(
   reviewedSha: string,
   liveHeadSha: string,
   compare: CompareSummary | null,
+  findingPaths: string[] | null,
 ): { headDrift: HeadDrift; downgradeReason?: string } {
-  const drifted = liveHeadSha !== '' && reviewedSha !== liveHeadSha;
+  // `identical` (an abbreviated reviewed SHA compared against its own full
+  // form) and `behind`/`ahead_by: 0` (no commits the review has not seen)
+  // carry the compare's own proof that nothing is unreviewed — a SHA-string
+  // mismatch alone must not cap the verdict against that evidence.
+  const provedSame =
+    compare !== null && compare.status !== 'diverged' && compare.aheadBy === 0;
+  const drifted =
+    liveHeadSha !== '' && reviewedSha !== liveHeadSha && !provedSame;
   if (!drifted) {
     return {
-      headDrift: { reviewedSha, liveHeadSha, drifted: false, compare: null },
+      headDrift: {
+        reviewedSha,
+        liveHeadSha,
+        drifted: false,
+        compare: null,
+        anchorsAtRisk: false,
+      },
     };
   }
+  const truncated =
+    compare !== null &&
+    (compare.filesTotal > compare.filesTouched.length ||
+      compare.filesTotal >= COMPARE_API_FILES_CAP);
+  const anchorsAtRisk =
+    compare === null ||
+    compare.status === 'diverged' ||
+    truncated ||
+    findingPaths === null ||
+    findingPaths.some((p) => compare.filesTouched.includes(p));
   const detail =
     compare === null
       ? ''
       : compare.status === 'diverged'
         ? ' (history rewritten — the reviewed commit is no longer on the PR)'
-        : ` (+${compare.aheadBy} unreviewed commit(s) touching ${compare.filesTouched.length} file(s))`;
+        : ` (+${compare.aheadBy} unreviewed commit(s) touching ${compare.filesTotal} file(s))`;
   return {
-    headDrift: { reviewedSha, liveHeadSha, drifted: true, compare },
+    headDrift: {
+      reviewedSha,
+      liveHeadSha,
+      drifted: true,
+      compare,
+      anchorsAtRisk,
+    },
     downgradeReason:
       `PR head advanced during review: reviewed ${reviewedSha.slice(0, 8)}, ` +
       `PR is now at ${liveHeadSha.slice(0, 8)}${detail}`,
@@ -338,45 +390,68 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   ensureAuthenticated();
 
   // --- Self-PR detection + live head (one fetch) -------------------------
-  const prMeta = JSON.parse(
-    gh(
-      'api',
-      `repos/${owner}/${repo}/pulls/${prNumber}`,
-      '--jq',
-      '{author: .user.login, headSha: .head.sha}',
-    ),
-  ) as { author: string; headSha: string };
+  // Fail-soft on shape, matching the pre-projection behaviour: a deleted
+  // author account arrives as `author: null`, and an unguarded dereference
+  // here killed the whole presubmit (and with it the submission).
+  let prMeta: { author?: string | null; headSha?: string | null } = {};
+  try {
+    prMeta = JSON.parse(
+      gh(
+        'api',
+        `repos/${owner}/${repo}/pulls/${prNumber}`,
+        '--jq',
+        '{author: .user.login, headSha: .head.sha}',
+      ),
+    ) as { author?: string | null; headSha?: string | null };
+  } catch {
+    /* fall through with empty meta — isSelfPr false, drift undetectable */
+  }
+  const author = prMeta.author ?? '';
+  const liveHeadSha = prMeta.headSha ?? '';
   const me = currentUser();
-  const isSelfPr = prMeta.author.toLowerCase() === me.toLowerCase();
+  const isSelfPr = author !== '' && author.toLowerCase() === me.toLowerCase();
 
   // --- Head drift ---------------------------------------------------------
   // Detail is best-effort: the drift itself (and its downgrade) never
   // depends on the compare call succeeding — a force-pushed-away reviewed
   // SHA can make compare 404, and that case is precisely `drifted`.
   let compare: CompareSummary | null = null;
-  if (prMeta.headSha && prMeta.headSha !== commitSha) {
+  if (liveHeadSha && liveHeadSha !== commitSha) {
     try {
       const c = JSON.parse(
         gh(
           'api',
-          `repos/${owner}/${repo}/compare/${commitSha}...${prMeta.headSha}`,
+          `repos/${owner}/${repo}/compare/${commitSha}...${liveHeadSha}`,
           '--jq',
           '{status, aheadBy: .ahead_by, files: [.files[].filename]}',
         ),
       ) as { status: string; aheadBy: number; files: string[] };
+      const allFiles = c.files ?? [];
       compare = {
         status: c.status,
         aheadBy: c.aheadBy,
-        filesTouched: (c.files ?? []).slice(0, 50),
+        filesTouched: allFiles.slice(0, FILES_TOUCHED_CAP),
+        filesTotal: allFiles.length,
       };
     } catch {
       /* detail only — drift stands without it */
     }
   }
+
+  // Parsed before drift classification: the findings' file set is what
+  // anchorsAtRisk intersects against (absent file = unknown = fail-safe).
+  let newFindings: FindingAnchor[] | null = null;
+  if (newFindingsPath) {
+    newFindings = JSON.parse(
+      readFileSync(newFindingsPath, 'utf8'),
+    ) as FindingAnchor[];
+  }
+
   const { headDrift, downgradeReason: driftReason } = classifyHeadDrift(
     commitSha,
-    prMeta.headSha,
+    liveHeadSha,
     compare,
+    newFindings === null ? null : newFindings.map((f) => f.path),
   );
 
   // --- CI status ---------------------------------------------------------
@@ -411,11 +486,9 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
     if (c.in_reply_to_id) repliedToIds.add(c.in_reply_to_id);
   }
 
-  let newFindings: FindingAnchor[] = [];
-  if (newFindingsPath) {
-    newFindings = JSON.parse(readFileSync(newFindingsPath, 'utf8'));
-  }
-  const newFindingKeys = new Set(newFindings.map((f) => `${f.path}:${f.line}`));
+  const newFindingKeys = new Set(
+    (newFindings ?? []).map((f) => `${f.path}:${f.line}`),
+  );
 
   const buckets = classifyExistingComments(
     qwenComments,
