@@ -97,6 +97,18 @@ describe('ExitPlanModeTool', () => {
     expect(result.llmContent).toContain('Do not call exit_plan_mode again');
   });
 
+  it('getConfirmationDetails throws guidance outside plan mode (#7671)', async () => {
+    approvalMode = ApprovalMode.DEFAULT;
+    const invocation = tool.build({ plan: 'Plan' });
+
+    await expect(
+      invocation.getConfirmationDetails(new AbortController().signal),
+    ).rejects.toThrow('not in plan mode');
+    await expect(
+      invocation.getConfirmationDetails(new AbortController().signal),
+    ).rejects.toThrow('Do not call exit_plan_mode again');
+  });
+
   it.each([
     [ToolConfirmationOutcome.ProceedOnce, ApprovalMode.DEFAULT],
     [ToolConfirmationOutcome.ProceedAlways, ApprovalMode.AUTO_EDIT],

@@ -144,7 +144,7 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
       return super.getConfirmationDetails(abortSignal);
     }
     if (this.config.getApprovalMode() !== ApprovalMode.PLAN) {
-      throw new Error('Cannot request plan approval outside plan mode.');
+      throw new Error(this.outsidePlanGuidanceMessage());
     }
 
     const snapshot: ExitApprovalSnapshot = {
@@ -209,12 +209,7 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
     // permission deny (#7671). If there IS an approval snapshot, let the
     // stale-revision check below handle it (concurrent exit scenario).
     if (this.config.getApprovalMode() !== ApprovalMode.PLAN && !this.approval) {
-      const currentMode = this.config.getApprovalMode();
-      return this.errorResult(
-        `You are not in plan mode (current mode: ${currentMode}). ` +
-          `The user may have manually switched modes via Shift+Tab or /approval-mode. ` +
-          `Do not call exit_plan_mode again. Continue working in the current mode.`,
-      );
+      return this.errorResult(this.outsidePlanGuidanceMessage());
     }
 
     const { plan, originalRequest, researchSummary } = this.params;
@@ -366,6 +361,15 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
         plan,
       },
     };
+  }
+
+  private outsidePlanGuidanceMessage(): string {
+    const currentMode = this.config.getApprovalMode();
+    return (
+      `You are not in plan mode (current mode: ${currentMode}). ` +
+      `The user may have manually switched modes via Shift+Tab or /approval-mode. ` +
+      `Do not call exit_plan_mode again. Continue working in the current mode.`
+    );
   }
 
   private savePlanBestEffort(plan: string): void {
