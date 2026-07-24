@@ -5,6 +5,7 @@ import {
   clearChannelMemory,
   getChannelMemoryRevision,
   listChannelMemoryEntries,
+  nextFireTime,
   readChannelMemory,
   recordChannelMemoryRecallMetrics,
   removeChannelMemoryEntries,
@@ -12,6 +13,8 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import {
+  ChannelLoopScheduler,
+  ChannelLoopStore,
   DaemonChannelBridge,
   isChannelProactiveDeliveryError,
   sanitizeLogText,
@@ -20,6 +23,7 @@ import {
 import type {
   ChannelAgentBridge,
   ChannelBase,
+  ChannelLoopRunner,
   ChannelWebhookRunOptions,
   ChannelWebhookTask,
   DaemonChannelSessionClient,
@@ -62,6 +66,7 @@ import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { resolveProxyUrl } from './proxy.js';
 import {
   createChannel,
+  daemonChannelLoopPath,
   daemonObservedContactsPath,
   daemonSessionRoutesPath,
   loadChannelsConfig,
@@ -76,6 +81,10 @@ import {
 } from './runtime.js';
 import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
 import { ObservedChannelContactStore } from './observed-contact-store.js';
+import {
+  createChannelLoopController,
+  isChannelCronEnabled,
+} from './loop-runtime.js';
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
@@ -438,6 +447,14 @@ export async function runChannelDaemonWorker(
   const observedContacts = new ObservedChannelContactStore(
     daemonObservedContactsPath(daemonWorkspace),
   );
+  const loopStore = isChannelCronEnabled(settings)
+    ? new ChannelLoopStore({
+        filePath: daemonChannelLoopPath(daemonWorkspace),
+      })
+    : undefined;
+  const loopController = loopStore
+    ? createChannelLoopController(loopStore)
+    : undefined;
 
   const bridge = new DaemonChannelBridge({
     cwd: daemonWorkspace,
@@ -451,6 +468,7 @@ export async function runChannelDaemonWorker(
 
   const channels = new Map<string, ChannelBase>();
   const connected: string[] = [];
+  let scheduler: ChannelLoopScheduler | undefined;
   let connectFailureCount = 0;
   const diagnosticRedaction = {
     ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
@@ -523,6 +541,7 @@ export async function runChannelDaemonWorker(
                 observedContacts.observe(channelName, observation);
               },
             },
+            ...(loopController ? { loopController } : {}),
           }),
           startupSignal,
         ),
@@ -603,6 +622,39 @@ export async function runChannelDaemonWorker(
       throw new Error('No channels connected.');
     }
 
+    if (loopStore) {
+      const schedulerChannels = new Map<string, ChannelLoopRunner>();
+      for (const name of connected) {
+        const channel = channels.get(name)!;
+        schedulerChannels.set(name, {
+          runLoopPrompt: async (job, options) => {
+            let jobWorkspace: string | undefined;
+            try {
+              jobWorkspace = canonicalizeWorkspace(job.cwd);
+            } catch {
+              jobWorkspace = undefined;
+            }
+            if (jobWorkspace !== daemonWorkspace) {
+              await loopStore.disable(job.id).catch(() => false);
+              writeStderrLine(
+                `[Channel] Disabled loop "${sanitizeLogText(job.id, 128)}": its workspace does not match this daemon worker.`,
+              );
+              throw new Error(
+                `Loop ${sanitizeLogText(job.id, 128)} is outside daemon workspace and was disabled.`,
+              );
+            }
+            return channel.runLoopPrompt(job, options);
+          },
+        });
+      }
+      scheduler = new ChannelLoopScheduler({
+        store: loopStore,
+        channels: schedulerChannels,
+        nextFireTime,
+      });
+      scheduler.start();
+    }
+
     opts.sendReady?.({
       channels: connected,
       requestedChannels: parsed.map((p) => p.name),
@@ -646,6 +698,7 @@ export async function runChannelDaemonWorker(
         }
       },
       async close() {
+        scheduler?.stop();
         disconnectAll();
         try {
           bridge.stop();
@@ -655,6 +708,7 @@ export async function runChannelDaemonWorker(
       },
     };
   } catch (err) {
+    scheduler?.stop();
     disconnectAll();
     try {
       bridge.stop();
