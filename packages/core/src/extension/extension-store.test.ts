@@ -126,6 +126,24 @@ describe('ExtensionStore', () => {
     });
   });
 
+  it('re-keys across a case mismatch and normalizes the stored name', async () => {
+    const store = makeStore();
+    const oldId = 'a'.repeat(64);
+    const newId = 'b'.repeat(64);
+    await store.ensureInitialized([{ id: oldId, name: 'DotNet' }]);
+    await store.setDefaultActivation({ id: oldId, name: 'DotNet' }, 'disabled');
+
+    const snapshot = await store.ensureInitialized([
+      { id: newId, name: 'dotnet' },
+    ]);
+
+    expect(snapshot.extensions[oldId]).toBeUndefined();
+    expect(snapshot.extensions[newId]).toMatchObject({
+      name: 'dotnet',
+      defaultActivation: 'disabled',
+    });
+  });
+
   it('re-keys only the orphaned policy when a sibling plugin installs fresh', async () => {
     const store = makeStore();
     const repoOnlyId = 'a'.repeat(64);
