@@ -400,10 +400,10 @@ export interface DaemonStateResyncRequiredData {
    */
   reason: string;
   /**
-   * Optional trigger discriminator carried via the index signature on
-   * the wire. `'epoch_mismatch'` marks an `'epoch_reset'` produced by
-   * the epoch token comparison rather than the numeric heuristic.
-   * Operational/wire-level field — UI consumers key on `reason` alone.
+   * Optional trigger discriminator on the wire. `'epoch_mismatch'` marks an
+   * `'epoch_reset'` produced by the epoch token comparison rather than the
+   * numeric heuristic. Operational/wire-level field — UI consumers key on
+   * `reason` alone.
    */
   detail?: string;
   /** Consumer's `Last-Event-ID` at reconnect time. */
