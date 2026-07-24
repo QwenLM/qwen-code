@@ -261,13 +261,14 @@ describe('workspace Channel management routes', () => {
     expect(primaryService.pairingRequests).not.toHaveBeenCalled();
   });
 
-  it('rejects mutation requests with an invalid client ID', async () => {
+  it('rejects requests with an invalid client ID', async () => {
     const { app, primaryService } = mount();
     const invalidClient = (test: request.Test) =>
       test
         .set('Authorization', 'Bearer secret')
         .set('X-Qwen-Client-Id', 'invalid');
 
+    const list = await invalidClient(request(app).get('/workspace/channels'));
     const upsert = await invalidClient(
       request(app)
         .put('/workspace/channels/bot')
@@ -284,16 +285,38 @@ describe('workspace Channel management routes', () => {
     const stop = await invalidClient(
       request(app).post('/workspace/channels/bot/stop'),
     );
+    const restart = await invalidClient(
+      request(app).post('/workspace/channels/bot/restart'),
+    );
+    const startup = await invalidClient(
+      request(app)
+        .put('/workspace/channels/bot/startup')
+        .send({ expectedRevision: 'r1', enabled: true }),
+    );
+    const approve = await invalidClient(
+      request(app)
+        .post('/workspace/channels/bot/pairing-requests/approve')
+        .send({ code: 'ABCDEFGH' }),
+    );
 
+    expect(list.status).toBe(400);
+    expect(list.body.code).toBe('invalid_client_id');
     expect(upsert.status).toBe(400);
     expect(upsert.body.code).toBe('invalid_client_id');
     expect(remove.status).toBe(400);
     expect(start.status).toBe(400);
     expect(stop.status).toBe(400);
+    expect(restart.status).toBe(400);
+    expect(startup.status).toBe(400);
+    expect(approve.status).toBe(400);
+    expect(primaryService.list).not.toHaveBeenCalled();
     expect(primaryService.upsert).not.toHaveBeenCalled();
     expect(primaryService.remove).not.toHaveBeenCalled();
     expect(primaryService.start).not.toHaveBeenCalled();
     expect(primaryService.stop).not.toHaveBeenCalled();
+    expect(primaryService.restart).not.toHaveBeenCalled();
+    expect(primaryService.setStartup).not.toHaveBeenCalled();
+    expect(primaryService.approvePairing).not.toHaveBeenCalled();
   });
 
   it('rejects malformed names, revisions, secrets, and pairing codes', async () => {

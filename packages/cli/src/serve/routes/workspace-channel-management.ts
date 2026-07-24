@@ -300,7 +300,7 @@ export function registerWorkspaceChannelManagementRoutes(
 
     app.get(`${prefix}/channels`, async (req, res) => {
       const resolved = await target(req, res);
-      if (!resolved) return;
+      if (!resolved || !validateClient(req, res, resolved.runtime)) return;
       try {
         noStore(res);
         res.status(200).json(await resolved.service.list());
