@@ -534,8 +534,14 @@ describe('workspace skill settings persistence', () => {
           Parameters<typeof serverModule.createServeApp>[2]
         >['persistDisabledSkills']
       | undefined;
+    let persistDisabledTools:
+      | Parameters<
+          typeof workspaceServiceRuntime.createDaemonWorkspaceService
+        >[0]['persistDisabledTools']
+      | undefined;
     vi.spyOn(serverModule, 'createServeApp').mockImplementation((...args) => {
       persistDisabledSkills = args[2]?.persistDisabledSkills;
+      persistDisabledTools = args[2]?.persistDisabledTools;
       return originalCreateServeApp(...args);
     });
     handle = await runQwenServe(
@@ -550,6 +556,7 @@ describe('workspace skill settings persistence', () => {
     );
     await handle.runtimeReady;
     expect(persistDisabledSkills).toBeDefined();
+    expect(persistDisabledTools).toBeDefined();
 
     await expect(
       persistDisabledSkills!(workspace, 'review', false),
@@ -576,6 +583,34 @@ describe('workspace skill settings persistence', () => {
       fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
     ) as { skills: { disabled: string[] } };
     expect(saved.skills.disabled).toEqual(['orphan', 'alpha', 'beta']);
+
+    const setValue = vi.spyOn(
+      settingsRuntime.LoadedSettings.prototype,
+      'setValue',
+    );
+    for (const persist of [
+      (assertGenerationOpen: () => void) =>
+        persistDisabledSkills!(
+          workspace,
+          'guarded-skill',
+          false,
+          assertGenerationOpen,
+        ),
+      (assertGenerationOpen: () => void) =>
+        persistDisabledTools!(
+          workspace,
+          'guarded-tool',
+          false,
+          assertGenerationOpen,
+        ),
+    ]) {
+      const assertGenerationOpen = vi.fn();
+      await persist(assertGenerationOpen);
+      expect(setValue.mock.calls).toHaveLength(1);
+      expect(setValue.mock.calls[0]?.[3]).toBe(assertGenerationOpen);
+      setValue.mockClear();
+    }
+
     await expect(
       persistDisabledSkills!(workspace, 'locked-skill', true),
     ).rejects.toMatchObject({ reason: 'locked', lockedScope: 'user' });

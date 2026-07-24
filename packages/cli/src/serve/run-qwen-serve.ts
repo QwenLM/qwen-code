@@ -3430,6 +3430,7 @@ async function runQwenServeImpl(
           WORKSPACE_SETTING_SCOPE,
           'tools.disabled',
           [...next].sort(),
+          assertGenerationOpen,
         );
       });
     const persistDisabledSkillsFn = (
@@ -3501,6 +3502,7 @@ async function runQwenServeImpl(
           WORKSPACE_SETTING_SCOPE,
           'skills.disabled',
           next.length > 0 ? next : undefined,
+          assertGenerationOpen,
         );
         return { changed: true, disabled: next };
       });
