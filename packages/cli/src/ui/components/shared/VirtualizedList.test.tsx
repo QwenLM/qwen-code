@@ -130,6 +130,44 @@ describe('<VirtualizedList />', () => {
     expect(frame.endsWith('item-19')).toBe(true);
   });
 
+  it('collapses a short bottom-stuck list below the container height', async () => {
+    const { lastFrame, rerender } = render(
+      <VirtualizedList<Item>
+        data={makeItems(5)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        containerHeight={20}
+        width={40}
+        showScrollbar={false}
+      />,
+    );
+
+    rerender(
+      <VirtualizedList<Item>
+        data={makeItems(5)}
+        renderItem={renderItem}
+        estimatedItemHeight={estimatedItemHeight}
+        keyExtractor={keyExtractor}
+        initialScrollIndex={SCROLL_TO_ITEM_END}
+        containerHeight={20}
+        width={40}
+        showScrollbar={false}
+      />,
+    );
+    await act(async () => {});
+
+    const frame = lastFrame() ?? '';
+    expect(frame.split('\n')).toEqual([
+      'item-0',
+      'item-1',
+      'item-2',
+      'item-3',
+      'item-4',
+    ]);
+  });
+
   it('targetScrollIndex anchors to that index on first usable render', () => {
     type RefShape = VirtualizedListRef<Item>;
     let listRef: RefShape | null = null;
