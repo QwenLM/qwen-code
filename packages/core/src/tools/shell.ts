@@ -89,6 +89,19 @@ import { createPatchSmart, getDiffStat } from './diffOptions.js';
 const debugLogger = createDebugLogger('SHELL');
 
 /**
+ * Model-facing liveness guidance shared verbatim by both background
+ * launch paths (`executeBackground` and the foreground→background
+ * promote), so the two copies cannot drift (#7626).
+ */
+function statusFileGuidance(outputPath: string): string {
+  return (
+    `status file: ${statusFilePathFor(outputPath)}\n` +
+    `To check whether this process is still running, Read the status file (status: running|completed|failed|cancelled). ` +
+    `Do NOT infer liveness from the output file: programs often block-buffer stdout when not attached to a TTY, so an empty output file is normal while the process is alive (for live output, re-run with e.g. \`python -u\` or \`stdbuf -oL\`).`
+  );
+}
+
+/**
  * Strip a single bare trailing `&` (bash background operator) from a
  * command string. Returns the input unchanged if the trailing form is
  * `&&` (logical AND), `\&` (escaped literal `&`), or there is no `&`
@@ -3463,10 +3476,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     const statusLine = postPromoteSettleObserved
       ? `Status: ${postPromoteFinalStatus ?? 'settled'}. PID: ${result.pid ?? '(unknown)'}.`
       : `Status: running. PID: ${result.pid ?? '(unknown)'}.`;
-    const statusFileLine =
-      `status file: ${statusFilePathFor(outputPath)}\n` +
-      `To check whether this process is still running, Read the status file (status: running|completed|failed|cancelled). ` +
-      `Do NOT infer liveness from the output file: programs often block-buffer stdout when not attached to a TTY, so an empty output file is normal while the process is alive.`;
+    const statusFileLine = statusFileGuidance(outputPath);
     const inspectLine = `To inspect: \`/tasks\` (text), the Background tasks dialog (↓ + Enter on the footer pill), or \`Read\` the output file directly.`;
     const stopLine = postPromoteSettleObserved
       ? `Process has already exited; no \`task_stop\` needed (the entry is observable in \`/tasks\` for inspection).`
@@ -3697,9 +3707,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         `id: ${shellId}\n` +
         pidLine +
         `output file: ${outputPath}\n` +
-        `status file: ${statusFilePathFor(outputPath)}\n` +
-        `To check whether this process is still running, Read the status file (status: running|completed|failed|cancelled). ` +
-        `Do NOT infer liveness from the output file: programs often block-buffer stdout when not attached to a TTY, so an empty output file is normal while the process is alive (for live output, re-run with e.g. \`python -u\` or \`stdbuf -oL\`). ` +
+        `${statusFileGuidance(outputPath)} ` +
         `To inspect: /tasks (text) or the interactive Background tasks dialog (focus the footer Background tasks pill, then Enter — detail view + live updates). Read the output file directly to view the captured output.`,
       returnDisplay: `Background shell ${shellId} started${pid !== undefined ? ` (pid ${pid})` : ''}.`,
     };

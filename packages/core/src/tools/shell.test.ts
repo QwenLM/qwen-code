@@ -5374,13 +5374,16 @@ describe('ShellTool', () => {
           `task_stop({ task_id: '${entry.shellId}'`,
         );
         // #7626: the promoted path must teach the same status-file
-        // liveness heuristic as executeBackground.
+        // liveness heuristic as executeBackground — including the
+        // actionable unbuffering hint, so the two copies cannot drift.
         expect(result.llmContent).toContain(
           `status file: ${entry.outputPath.replace(/\.output$/, '.status')}`,
         );
         expect(result.llmContent).toContain(
           'Do NOT infer liveness from the output file',
         );
+        expect(result.llmContent).toContain('python -u');
+        expect(result.llmContent).toContain('stdbuf -oL');
         expect(result.returnDisplay).toContain(
           `Promoted to background: ${entry.shellId}`,
         );
