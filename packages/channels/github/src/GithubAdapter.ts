@@ -10,7 +10,6 @@ import { PollingChannelBase } from '@qwen-code/channel-base';
 import { testBotMention, stripBotMention } from './mention.js';
 
 interface GithubConfig extends ChannelConfig {
-  pollInterval?: number;
   baseUrl?: string;
   requireMention?: boolean;
 }
@@ -23,6 +22,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private octokit!: Octokit;
   private botUsername: string | null = null;
   private recentlyProcessed = new Set<string>();
+  private static readonly MAX_RECENTLY_PROCESSED = 10_000;
 
   constructor(
     name: string,
@@ -75,10 +75,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     text: string,
   ): Promise<void> {
     if (!threadId) {
-      process.stderr.write(
-        `[Channel:${this.name}] cannot deliver response: no threadId\n`,
-      );
-      return;
+      return super.sendThreadMessage(chatId, threadId, text);
     }
     const match = threadId.match(/^(?:issue|pr):(\d+)$/);
     if (!match) {
@@ -181,6 +178,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             await this.postErrorComment(chatId, issueNumber);
           }
           this.recentlyProcessed.add(String(comment.id));
+          if (
+            this.recentlyProcessed.size > GithubChannel.MAX_RECENTLY_PROCESSED
+          ) {
+            this.recentlyProcessed.clear();
+          }
         }
 
         if (newComments.length === 0 && !lastReadAt) {

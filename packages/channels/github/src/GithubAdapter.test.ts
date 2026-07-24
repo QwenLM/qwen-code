@@ -1,5 +1,4 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import process from 'node:process';
 import type {
   ChannelAgentBridge,
   ChannelConfig,
@@ -449,28 +448,22 @@ describe('GithubChannel', () => {
       channel.disconnect();
     });
 
-    it('logs and returns when threadId is undefined', async () => {
+    it('falls through to sendMessage when threadId is undefined', async () => {
       mockOctokit.paginate.mockResolvedValue([]);
       await channel.connect();
-      const stderrSpy = vi
-        .spyOn(process.stderr, 'write')
-        .mockImplementation(() => true);
 
-      await (
-        channel as unknown as {
-          sendThreadMessage: (
-            c: string,
-            t: string | undefined,
-            text: string,
-          ) => Promise<void>;
-        }
-      ).sendThreadMessage('owner/repo', undefined, 'response');
-
-      expect(stderrSpy).toHaveBeenCalledWith(
-        expect.stringContaining('no threadId'),
-      );
+      await expect(
+        (
+          channel as unknown as {
+            sendThreadMessage: (
+              c: string,
+              t: string | undefined,
+              text: string,
+            ) => Promise<void>;
+          }
+        ).sendThreadMessage('owner/repo', undefined, 'response'),
+      ).rejects.toThrow('requires a threadId');
       expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
-      stderrSpy.mockRestore();
       channel.disconnect();
     });
   });

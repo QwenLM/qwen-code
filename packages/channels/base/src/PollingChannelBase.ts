@@ -97,7 +97,9 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
     try {
       const raw = readFileSync(this.cursorPath(), 'utf-8').trim();
       if (!raw) return null;
-      return JSON.parse(raw) as Cursor;
+      const parsed: unknown = JSON.parse(raw);
+      if (typeof parsed !== 'object' || parsed === null) return null;
+      return parsed as Cursor;
     } catch {
       return null;
     }
