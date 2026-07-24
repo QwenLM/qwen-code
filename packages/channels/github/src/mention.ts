@@ -2,7 +2,7 @@ export function escapeRegex(str: string): string {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-const MENTION_LOOKBEHIND = '(?<=\\s|^|[([{<])';
+const MENTION_LOOKBEHIND = '(?<=\\s|^|[([{<:;"\'])';
 const MENTION_LOOKAHEAD = '(?=[^a-zA-Z0-9_/-]|$)';
 
 export function testBotMention(text: string, username: string): boolean {

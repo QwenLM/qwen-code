@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import process from 'node:process';
@@ -48,8 +49,9 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
   protected abstract createInitialCursor(): Cursor;
 
   protected get pollInterval(): number {
-    const configured = (this.config as Record<string, unknown>)
-      .pollInterval as unknown;
+    const configured = (this.config as unknown as Record<string, unknown>)[
+      'pollInterval'
+    ] as unknown;
     if (
       typeof configured === 'number' &&
       Number.isFinite(configured) &&
@@ -122,6 +124,14 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
 
   private cursorPath(): string {
     const encoded = this.name.replace(/[^a-zA-Z0-9_-]/g, '_');
-    return join(getGlobalQwenDir(), 'channels', `${encoded}-poll-cursor.json`);
+    const hash = createHash('sha256')
+      .update(this.name)
+      .digest('hex')
+      .slice(0, 16);
+    return join(
+      getGlobalQwenDir(),
+      'channels',
+      `${encoded}-${hash}-poll-cursor.json`,
+    );
   }
 }

@@ -20,6 +20,7 @@ interface GithubCursor {
 export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private octokit!: Octokit;
   private botUsername: string | null = null;
+  private webOrigin = 'https://github.com';
 
   constructor(
     name: string,
@@ -36,9 +37,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   async connect(): Promise<void> {
     const cfg = this.config as GithubConfig;
+    const baseUrl = cfg.baseUrl || 'https://api.github.com';
+    this.webOrigin = baseUrl.replace(/\/api\/v3\/?$/, '');
     this.octokit = new Octokit({
       auth: cfg.token,
-      baseUrl: cfg.baseUrl || 'https://api.github.com',
+      baseUrl,
     });
     try {
       const { data } = await this.octokit.rest.users.getAuthenticated();
@@ -71,10 +74,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
     const match = threadId.match(/^(?:issue|pr):(\d+)$/);
     if (!match) {
-      process.stderr.write(
-        `[Channel:${this.name}] invalid threadId format: ${threadId}\n`,
+      throw new Error(
+        `[Channel:${this.name}] invalid threadId format: ${threadId}`,
       );
-      return;
     }
     const issueNumber = Number(match[1]);
     await this.octokit.rest.issues.createComment({
@@ -278,7 +280,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   ): string {
     const type = threadId.startsWith('pr:') ? 'Pull Request' : 'Issue';
     const title = notification.subject.title || '';
-    const url = `https://github.com/${chatId}/${threadId.startsWith('pr:') ? 'pull' : 'issues'}/${threadId.split(':')[1]}`;
+    const url = `${this.webOrigin}/${chatId}/${threadId.startsWith('pr:') ? 'pull' : 'issues'}/${threadId.split(':')[1]}`;
     return `Type: ${type} | Title: ${title} | URL: ${url}`;
   }
 
@@ -348,8 +350,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         issue_number: issueNumber,
         body: '⚠️ Failed to process this request. Please re-mention the bot to retry.',
       });
-    } catch {
-      // best-effort
+    } catch (err) {
+      process.stderr.write(
+        `[Channel:${this.name}] postErrorComment also failed for ${chatId}#${issueNumber}, user must re-mention manually: ${err}\n`,
+      );
     }
   }
 }

@@ -1,12 +1,27 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { describe, it, expect, vi, beforeEach, afterAll } from 'vitest';
+import { createHash } from 'node:crypto';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { PollingChannelBase } from './PollingChannelBase.js';
 import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import type { ChannelConfig } from './types.js';
 
+const testHome = mkdtempSync(join(tmpdir(), 'poll-test-'));
+
 vi.mock('./paths.js', () => ({
-  getGlobalQwenDir: () => '/tmp/test-polling-base',
+  getGlobalQwenDir: () => testHome,
 }));
+
+afterAll(() => {
+  rmSync(testHome, { recursive: true, force: true });
+});
 
 interface TestCursor {
   ts: string;
@@ -69,9 +84,15 @@ class TestPoller extends PollingChannelBase<TestCursor> {
   async sendMessage(): Promise<void> {}
 }
 
+function cursorFile(name: string): string {
+  const encoded = name.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const hash = createHash('sha256').update(name).digest('hex').slice(0, 16);
+  return join(testHome, 'channels', `${encoded}-${hash}-poll-cursor.json`);
+}
+
 describe('PollingChannelBase', () => {
   beforeEach(() => {
-    mkdirSync('/tmp/test-polling-base/channels', { recursive: true });
+    mkdirSync(join(testHome, 'channels'), { recursive: true });
   });
 
   it('initializes with default cursor when no file exists', () => {
@@ -80,9 +101,8 @@ describe('PollingChannelBase', () => {
   });
 
   it('loads cursor from disk', () => {
-    const path = '/tmp/test-polling-base/channels/saved-poll-cursor.json';
     writeFileSync(
-      path,
+      cursorFile('saved'),
       JSON.stringify({ ts: '2026-06-01T00:00:00.000Z', count: 5 }),
       'utf-8',
     );
@@ -91,8 +111,7 @@ describe('PollingChannelBase', () => {
   });
 
   it('falls back to initial cursor on corrupt file', () => {
-    const path = '/tmp/test-polling-base/channels/corrupt-poll-cursor.json';
-    writeFileSync(path, 'not json{{{', 'utf-8');
+    writeFileSync(cursorFile('corrupt'), 'not json{{{', 'utf-8');
     const poller = new TestPoller('corrupt', makeConfig(), makeBridge());
     expect(poller.cursor).toEqual({ ts: '2026-01-01T00:00:00.000Z', count: 0 });
   });
@@ -101,10 +120,7 @@ describe('PollingChannelBase', () => {
     const poller = new TestPoller('persist', makeConfig(), makeBridge());
     poller.cursor = { ts: '2026-07-01T00:00:00.000Z', count: 42 };
     (poller as unknown as { saveCursor: () => void }).saveCursor();
-    const raw = readFileSync(
-      '/tmp/test-polling-base/channels/persist-poll-cursor.json',
-      'utf-8',
-    );
+    const raw = readFileSync(cursorFile('persist'), 'utf-8');
     expect(JSON.parse(raw)).toEqual({
       ts: '2026-07-01T00:00:00.000Z',
       count: 42,

@@ -43,6 +43,18 @@ describe('testBotMention', () => {
   it('does not match mention embedded in word', () => {
     expect(testBotMention('foo@qwen-bot', bot)).toBe(false);
   });
+
+  it('matches after colon (cc:@bot)', () => {
+    expect(testBotMention('cc:@qwen-bot please help', bot)).toBe(true);
+  });
+
+  it('matches after quote ("@bot")', () => {
+    expect(testBotMention('"@qwen-bot" mentioned you', bot)).toBe(true);
+  });
+
+  it('does not match email addresses', () => {
+    expect(testBotMention('user@qwen-bot.com', bot)).toBe(false);
+  });
 });
 
 describe('stripBotMention', () => {
