@@ -25,7 +25,7 @@ jobs:
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
         with:
           ref: '${{ github.event.repository.default_branch }}'
-          sparse-checkout: '.github/scripts/core-review-router.mjs'
+          sparse-checkout: '.github/scripts/'
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
@@ -79,83 +79,57 @@ jobs:
             desired="[]"
           fi
 
-          # Do not re-request maintainers who already reviewed this PR.
-          # GitHub drops a reviewer from requested_reviewers once they submit
-          # a review, so without this they would be re-added (and re-pinged)
-          # on every subsequent synchronize push — exactly the notification
-          # churn this router exists to remove.
+          # Fetch state from the GitHub API.
           reviewed="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/reviews?per_page=100" --jq '.[].user.login' | jq -R . | jq -sc '.')"
-          desired="$(jq -cn --argjson d "$desired" --argjson r "$reviewed" '$d - $r | sort')"
-
           current="$(gh api "$api" --jq '[.users[].login]')"
-
-          # Fetch marker comments once for both prev_desired and comment_id.
-          # gh api does not support --arg, so pipe to jq separately.
           comments="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" --jq '.[]' | jq -sc '.')" || comments='[]'
 
-          # Read the previous desired set from the marker comment so we
-          # can detect manually-dismissed reviewers and avoid re-adding them.
-          prev_desired="$(echo "$comments" | jq -c --arg marker "$marker" \
-            '[.[] | select(.body | startswith($marker))] | last | .body // "" | split($marker)[1] // "" | split(" -->")[0] // "" | ltrimstr(" ") | fromjson? // {} | .desired // []' \
-            2>/dev/null)" || prev_desired='[]'
-          [ -z "$prev_desired" ] && prev_desired='[]'
+          # Extract the marker comment body (if any).
+          marker_body="$(echo "$comments" | jq -r --arg marker "$marker" \
+            '[.[] | select(.body | startswith($marker))] | last | .body // empty' \
+            2>/dev/null)" || marker_body=""
 
-          # Reviewers in prev_desired but no longer in current and not in
-          # reviewed were manually dismissed — don't re-add them.
-          drift="$(jq -cn --argjson p "$prev_desired" --argjson c "$current" --argjson r "$reviewed" \
-            '$p - $c - $r')"
-          pre_drift_desired="$desired"
-          desired="$(jq -cn --argjson d "$desired" --argjson drift "$drift" '$d - $drift | sort')"
-
-          # Manage all maintainer reviewers — including CODEOWNERS-assigned
-          # ones — so the router can trim the auto-assigned set to the
-          # desired subset.  Non-maintainer reviewers are never touched.
+          # Reconcile via the tested Node.js script.
           maintainer_list="$(echo "$MAINTAINERS" | tr ',' '\n' | jq -R . | jq -sc '.')"
-          managed="$(echo "$current" | jq -c --argjson m "$maintainer_list" \
-            '[.[] | select(. as $l | $m | index($l))] | sort')"
+          result="$(node .github/scripts/reconcile-reviewers.mjs \
+            --desired "$desired" \
+            --reviewed "$reviewed" \
+            --current "$current" \
+            --marker-body "$marker_body" \
+            --maintainers "$maintainer_list")"
 
-          # Reconcile the maintainer set toward `desired`.  Non-maintainer
-          # reviewers are untouched.
-          #
-          # Diff guard: skip reviewer API calls when the set is unchanged so
-          # a stable synchronize push does not re-notify reviewers.
-          if [ "$managed" != "$desired" ]; then
-            # Remove maintainers that should no longer be requested.
-            to_remove="$(jq -cn --argjson a "$managed" --argjson b "$desired" '$a - $b')"
+          to_add="$(echo "$result" | jq -c '.toAdd')"
+          to_remove="$(echo "$result" | jq -c '.toRemove')"
+          unchanged="$(echo "$result" | jq -r '.unchanged')"
+          new_marker_body="$(echo "$result" | jq -r '.markerBody')"
+
+          if [ "$unchanged" = "false" ]; then
             if [ "$to_remove" != "[]" ]; then
               echo "$to_remove" | jq '{reviewers: .}' \
                 | gh api --method DELETE "$api" --input - > /dev/null \
                 || echo "::warning::Failed to remove reviewers: $to_remove"
             fi
-
-            # Add maintainers that should be newly requested.
-            to_add="$(jq -cn --argjson a "$desired" --argjson b "$managed" '$a - $b')"
             if [ "$to_add" != "[]" ]; then
               echo "$to_add" | jq '{reviewers: .}' \
                 | gh api --method POST "$api" --input - > /dev/null \
                 || echo "::warning::Failed to add reviewers: $to_add"
             fi
-
             echo "Applied: $REVIEWERS ($REASON)"
           else
             echo "Reviewer set unchanged ($REVIEWERS) — skipping ($REASON)"
           fi
 
-          # Persist the desired set in a marker comment so the next run
-          # can detect manually-dismissed reviewers.  The JSON is embedded
-          # in the marker line itself so parsing does not depend on line
-          # positions.
-          marker_body="${marker} {\"desired\":${pre_drift_desired}} -->"
+          # Persist the desired set in the marker comment.
           comment_id="$(echo "$comments" | jq -r --arg marker "$marker" \
             '[.[] | select(.body | startswith($marker))] | last | .id // empty' \
             2>/dev/null)" || comment_id=""
           if [ -n "$comment_id" ]; then
             gh api --method PATCH \
               "repos/${GITHUB_REPOSITORY}/issues/comments/${comment_id}" \
-              -f body="$marker_body" > /dev/null \
+              -f body="$new_marker_body" > /dev/null \
               || echo "::warning::Failed to update marker comment"
           else
             gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
-              -f body="$marker_body" > /dev/null \
+              -f body="$new_marker_body" > /dev/null \
               || echo "::warning::Failed to create marker comment"
           fi
