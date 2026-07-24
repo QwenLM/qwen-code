@@ -85,6 +85,20 @@ function mount(initialView: 'diff' | 'log' | 'prs' = 'diff') {
   });
 }
 
+function rerender(initialView: 'diff' | 'log' | 'prs' = 'diff') {
+  act(() => {
+    root.render(
+      <I18nProvider language="en">
+        <GitDialog
+          workspaceCwd="/repo"
+          initialView={initialView}
+          onClose={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+  });
+}
+
 afterEach(() => {
   act(() => root.unmount());
   container.remove();
@@ -304,5 +318,51 @@ describe('GitDialog', () => {
         .getElementById('git-dialog-tab-prs')
         ?.getAttribute('aria-selected'),
     ).toBe('true');
+  });
+
+  it('clamps to the diff view when the capability is withdrawn mid-session', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+      files: [],
+      hiddenCount: 0,
+    });
+    workspaceGitHubPullRequests.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      pullRequests: [],
+    });
+    mockState.capabilities = { features: ['workspace_github_prs'] };
+    mount('prs');
+    await flush();
+    expect(
+      document
+        .getElementById('git-dialog-tab-prs')
+        ?.getAttribute('aria-selected'),
+    ).toBe('true');
+
+    // A daemon reconnect resets capabilities to undefined; the PR tab must
+    // disappear and the dialog must fall back to a rendered, selected tab
+    // with intact ARIA wiring.
+    mockState.capabilities = undefined;
+    rerender('prs');
+    await flush();
+
+    expect(document.getElementById('git-dialog-tab-prs')).toBeNull();
+    expect(
+      document
+        .getElementById('git-dialog-tab-diff')
+        ?.getAttribute('aria-selected'),
+    ).toBe('true');
+    expect(
+      document
+        .getElementById('git-dialog-panel')
+        ?.getAttribute('aria-labelledby'),
+    ).toBe('git-dialog-tab-diff');
   });
 });

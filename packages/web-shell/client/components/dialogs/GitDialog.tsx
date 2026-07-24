@@ -39,10 +39,14 @@ export function GitDialog({
   const views: GitDialogView[] = prsSupported
     ? ['diff', 'log', 'prs']
     : ['diff', 'log'];
-  const [view, setView] = useState(
-    initialView === 'prs' && !prsSupported ? 'diff' : initialView,
-  );
+  const [view, setView] = useState(initialView);
   const [subtitle, setSubtitle] = useState<string>();
+
+  // The PR tab can vanish after mount if the capability is withdrawn
+  // mid-session (a daemon reconnect resets capabilities to undefined);
+  // clamp the rendered view so the tablist, ARIA wiring, and content never
+  // reference a tab that is no longer rendered.
+  const effectiveView = views.includes(view) ? view : 'diff';
 
   const selectView = useCallback((next: GitDialogView) => {
     setSubtitle(undefined);
@@ -55,7 +59,7 @@ export function GitDialog({
   };
 
   const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
-    const index = views.indexOf(view);
+    const index = views.indexOf(effectiveView);
     if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
       event.preventDefault();
       const delta = event.key === 'ArrowRight' ? 1 : -1;
@@ -75,7 +79,7 @@ export function GitDialog({
 
   return (
     <DialogShell
-      title={t(TITLE_KEYS[view])}
+      title={t(TITLE_KEYS[effectiveView])}
       subtitle={subtitle}
       size="xl"
       allowFullscreen
@@ -89,10 +93,10 @@ export function GitDialog({
               id={`git-dialog-tab-${name}`}
               type="button"
               role="tab"
-              aria-selected={view === name}
+              aria-selected={effectiveView === name}
               aria-controls="git-dialog-panel"
-              tabIndex={view === name ? 0 : -1}
-              className={`${styles.tab}${view === name ? ` ${styles.tabActive}` : ''}`}
+              tabIndex={effectiveView === name ? 0 : -1}
+              className={`${styles.tab}${effectiveView === name ? ` ${styles.tabActive}` : ''}`}
               onClick={() => selectView(name)}
               onKeyDown={onTabKeyDown}
             >
@@ -104,14 +108,14 @@ export function GitDialog({
           id="git-dialog-panel"
           className={styles.tabPanel}
           role="tabpanel"
-          aria-labelledby={`git-dialog-tab-${view}`}
+          aria-labelledby={`git-dialog-tab-${effectiveView}`}
         >
-          {view === 'diff' ? (
+          {effectiveView === 'diff' ? (
             <GitDiffContent
               workspaceCwd={workspaceCwd}
               onSubtitleChange={setSubtitle}
             />
-          ) : view === 'log' ? (
+          ) : effectiveView === 'log' ? (
             <GitLogContent
               workspaceCwd={workspaceCwd}
               onSubtitleChange={setSubtitle}
