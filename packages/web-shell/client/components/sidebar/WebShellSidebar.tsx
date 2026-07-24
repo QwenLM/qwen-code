@@ -557,6 +557,10 @@ export function WebShellSidebar({
     () => providedWorkspaces ?? workspace.capabilities?.workspaces ?? [],
     [providedWorkspaces, workspace.capabilities?.workspaces],
   );
+  const workspaceCatalogAdvertised =
+    workspaces.length > 0 ||
+    workspace.capabilities?.workspaces !== undefined ||
+    connection.capabilities?.workspaces !== undefined;
   const primaryWorkspaceCwd =
     workspaces.find((entry) => entry.primary)?.cwd ??
     workspace.capabilities?.workspaceCwd ??
@@ -809,6 +813,9 @@ export function WebShellSidebar({
       const workspaceEntry = workspaces.find((entry) => entry.cwd === cwd);
 
       if (explicitCwd && !workspaceEntry) {
+        if (!workspaceCatalogAdvertised && cwd === primaryWorkspaceCwd) {
+          return { kind: 'primary', cwd };
+        }
         return { kind: 'unknown', cwd };
       }
       if (workspaceEntry && !workspaceEntry.trusted) {
@@ -826,7 +833,12 @@ export function WebShellSidebar({
       }
       return { kind: 'restricted', cwd, workspace: workspaceEntry };
     },
-    [lockedWorkspaceCwd, primaryWorkspaceCwd, workspaces],
+    [
+      lockedWorkspaceCwd,
+      primaryWorkspaceCwd,
+      workspaceCatalogAdvertised,
+      workspaces,
+    ],
   );
   const getSessionWorkspaceCwd = useCallback(
     (session: DaemonSessionSummary) =>
@@ -1984,6 +1996,16 @@ export function WebShellSidebar({
     if (!name || !color) return;
     void (async () => {
       setGroupBusy(true);
+      const reportCreatedGroupAssignmentFailure = (error: unknown) => {
+        setGroupEditor(null);
+        setGroupName('');
+        if (groupEditor.workspaceCwd) {
+          bumpWorkspaceReload();
+        } else {
+          void reloadGroups().catch(() => undefined);
+        }
+        onError(error, t('sidebar.groupAssignFailedAfterCreate'));
+      };
       try {
         const scope = resolveWorkspaceScope(groupEditor.workspaceCwd);
         const groupActions =
@@ -2020,12 +2042,20 @@ export function WebShellSidebar({
                 targetScope.kind !== scope.kind ||
                 targetScope.cwd !== scope.cwd
               ) {
+                reportCreatedGroupAssignmentFailure(
+                  new Error(t('sidebar.groupAssignFailedAfterCreate')),
+                );
                 return;
               }
               const targetActions = livePolicy.getSessionWorkspaceActions(
                 groupEditor.targetSession,
               );
-              if (!targetActions) return;
+              if (!targetActions) {
+                reportCreatedGroupAssignmentFailure(
+                  new Error(t('sidebar.groupAssignFailedAfterCreate')),
+                );
+                return;
+              }
               await targetActions.updateSessionOrganization(
                 groupEditor.targetSession.sessionId,
                 // Assigning a named group clears any color tag (single choice
@@ -2037,12 +2067,7 @@ export function WebShellSidebar({
               }
               bumpWorkspaceReload();
             } catch (err) {
-              setGroupEditor(null);
-              setGroupName('');
-              if (!groupEditor.workspaceCwd) {
-                void reloadGroups().catch(() => undefined);
-              }
-              onError(err, t('sidebar.groupAssignFailedAfterCreate'));
+              reportCreatedGroupAssignmentFailure(err);
               return;
             }
           }
@@ -2986,20 +3011,63 @@ export function WebShellSidebar({
                         onClick={(event) => event.stopPropagation()}
                         onKeyDown={(event) => event.stopPropagation()}
                       >
-                        <button
-                          className={styles.sessionActionButton}
-                          type="button"
-                          disabled={busy || isCurrent}
-                          aria-label={t('sidebar.archive')}
-                          title={
-                            isCurrent
-                              ? t('sidebar.archiveCurrentDisabled')
-                              : t('sidebar.archive')
-                          }
-                          onClick={() => handleArchive(session)}
-                        >
-                          <ArchiveIcon />
-                        </button>
+                        {inlineActionItems.has('archive') ? (
+                          <button
+                            className={styles.sessionActionButton}
+                            type="button"
+                            disabled={busy || isCurrent}
+                            aria-label={t('sidebar.archive')}
+                            title={
+                              isCurrent
+                                ? t('sidebar.archiveCurrentDisabled')
+                                : t('sidebar.archive')
+                            }
+                            onClick={() => handleArchive(session)}
+                          >
+                            <ArchiveIcon />
+                          </button>
+                        ) : (
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <button
+                                className={styles.sessionActionButton}
+                                type="button"
+                                aria-label={t('sidebar.moreActions')}
+                                title={t('sidebar.moreActions')}
+                              >
+                                <EllipsisVerticalIcon />
+                              </button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent
+                              align="end"
+                              className="w-auto min-w-40"
+                              onPointerDownOutside={() => {
+                                sessionMenuPointerDismissRef.current = true;
+                              }}
+                              onCloseAutoFocus={(event) => {
+                                if (!sessionMenuPointerDismissRef.current)
+                                  return;
+                                sessionMenuPointerDismissRef.current = false;
+                                event.preventDefault();
+                              }}
+                            >
+                              <DropdownMenuGroup>
+                                <DropdownMenuItem
+                                  disabled={busy || isCurrent}
+                                  title={
+                                    isCurrent
+                                      ? t('sidebar.archiveCurrentDisabled')
+                                      : undefined
+                                  }
+                                  onSelect={() => handleArchive(session)}
+                                >
+                                  <ArchiveIcon />
+                                  {t('sidebar.archive')}
+                                </DropdownMenuItem>
+                              </DropdownMenuGroup>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        )}
                       </div>
                     )}
                     {!readOnly && (
@@ -3331,12 +3399,12 @@ export function WebShellSidebar({
           expanded={expanded}
           onToggle={() => toggleSessionSection(section.id)}
           onRename={
-            section.kind === 'group' && group
+            section.kind === 'group' && group && canOrganizeWorkspace()
               ? () => handleRenameGroup(group)
               : undefined
           }
           onDelete={
-            section.kind === 'group' && group
+            section.kind === 'group' && group && canOrganizeWorkspace()
               ? () => handleDeleteGroup(group)
               : undefined
           }
@@ -3350,6 +3418,7 @@ export function WebShellSidebar({
     });
   }, [
     collapsedSessionSectionIds,
+    canOrganizeWorkspace,
     error,
     filteredSessions,
     groupBusy,
