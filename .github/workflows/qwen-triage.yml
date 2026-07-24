@@ -248,23 +248,24 @@ jobs:
             exit 0
           fi
           # Neutralize git exec vectors a prior run could have planted in the
-          # persistent workspace: local config knobs that make a later git
-          # invocation run a command, and hook scripts. The knobs span several
-          # families — hooksPath/fsmonitor, the pager/editor/diff.external/
-          # sshCommand that fire on the plain `git log`/`diff`/`show` triage
-          # runs, filter.*.{clean,smudge,process} (run on checkout via
-          # .gitattributes), credential.helper, url.*.insteadOf, init.templateDir,
-          # aliases, and include/includeIf which pull any of them back in from an
-          # arbitrary file. Enumerate the actual keys and --unset-all each:
-          # --remove-section cannot target an includeIf subsection like
-          # [includeIf "gitdir:…"] (it errors "no such section" and the `|| true`
-          # hides it), but unsetting the resolved key removes it. This is a
-          # best-effort denylist for defense-in-depth (the `run_shell_command(git
-          # config)` deny rule already stops the current run from planting these);
-          # a keep-known-safe config allowlist is the exhaustive end-state, tracked
-          # with the workflow-test-harness follow-up since it needs a checkout test.
+          # persistent workspace's local config, plus hook scripts. A later git
+          # command runs an attacker command via any of a long, open-ended set of
+          # knobs — core.{hooksPath,fsmonitor,pager,editor,sshCommand},
+          # sequence.editor, diff.external, filter.*.{clean,smudge,process},
+          # credential.helper, url.*.insteadOf, init.templateDir, aliases, and
+          # include/includeIf which pull any of them in from an arbitrary file.
+          # Rather than denylist each family (which kept missing new ones), KEEP
+          # a known-safe allowlist and --unset-all everything else: this closes
+          # the whole class, including knobs not yet enumerated. The kept set is
+          # only plumbing that carries no command — repo format, remote, branch,
+          # fetch/gc/pack/index, safe.directory, extensions, and submodule
+          # url/active/branch (NOT submodule.*.update, which can be `!cmd`).
+          # actions/checkout re-establishes remote/auth/fetch afterward, and it
+          # overwrites remote.origin.url, so a planted `ext::` transport URL kept
+          # here is replaced before any fetch. --unset-all handles resolved
+          # includeIf subsections that --remove-section cannot target.
           git config --local --name-only --list 2>/dev/null \
-            | grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand)|sequence\.editor|diff\.external|filter\.|credential\.|url\.|init\.templatedir|pager\.|alias\.|include\.|includeif\.)' \
+            | grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' \
             | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
           HOOKS_DIR="$(git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
           # Match -type f OR -type l: a symlinked hook (e.g. post-checkout ->
