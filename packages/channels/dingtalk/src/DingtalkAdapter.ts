@@ -418,7 +418,7 @@ export class DingtalkChannel extends ChannelBase {
   protected routeCardCallback(
     callback: DingtalkCardCallback,
   ): (() => Promise<void>) | undefined {
-    if (callback.actionId === 'stop') {
+    if (callback.actionId === 'btn_stop') {
       return this.statusCardController?.claimStop(
         callback.outTrackId,
         callback.ownerId,
@@ -1143,12 +1143,20 @@ export class DingtalkChannel extends ChannelBase {
           this.statusCardController?.fail(event.runId, event.error);
         } else if (event.type === 'cancelled') {
           this.statusCardController?.cancel(event.runId, event.reason);
+        } else if (
+          this.statusRunBySession.get(event.sessionId) === event.runId
+        ) {
+          void this.statusCardController?.complete(event.runId, '');
         }
         this.questionCardController?.cancelRun(event.runId);
         this.cardRuns.delete(event.runId);
+        if (this.statusRunBySession.get(event.sessionId) === event.runId) {
+          this.statusRunBySession.delete(event.sessionId);
+        }
+        if (this.cardRunBySession.get(event.sessionId) === event.runId) {
+          this.cardRunBySession.delete(event.sessionId);
+        }
       }
-      this.statusRunBySession.delete(event.sessionId);
-      this.cardRunBySession.delete(event.sessionId);
     }
   }
 
@@ -1304,6 +1312,14 @@ export class DingtalkChannel extends ChannelBase {
       return;
     }
     await this.sendResponseMessage(chatId, text, sessionId);
+  }
+
+  protected override onResponseBoundary(
+    _chatId: string,
+    sessionId: string,
+  ): void {
+    const runId = this.statusRunBySession.get(sessionId);
+    if (runId) this.statusCardController?.responseBoundary(runId);
   }
 
   protected override async presentUserInputRequest(

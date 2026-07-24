@@ -585,20 +585,29 @@ export abstract class ChannelBase {
         return this.respondToUserInput(pending, response);
       },
     };
+    pending.userInputPresented = true;
     return (async () => {
       try {
         const result = await this.presentUserInputRequest(context);
-        if (result.kind === 'presented') {
-          if (this.pendingPermissions.get(pending.requestId) === pending) {
-            pending.userInputPresented = true;
-          }
+        if (this.pendingPermissions.get(pending.requestId) !== pending) {
           return true;
         }
-        return result.kind === 'handled' && respondInvoked;
+        if (
+          result.kind === 'presented' ||
+          (result.kind === 'handled' && respondInvoked)
+        ) {
+          return true;
+        }
+        pending.userInputPresented = false;
+        return false;
       } catch (err) {
         process.stderr.write(
           `[${this.name}] user input presentation failed for request ${sanitizeLogText(pending.requestId, 128)}: ${this.lifecycleError(err)}\n`,
         );
+        if (this.pendingPermissions.get(pending.requestId) !== pending) {
+          return true;
+        }
+        pending.userInputPresented = false;
         return false;
       }
     })();
@@ -692,8 +701,8 @@ export abstract class ChannelBase {
     ) {
       return false;
     }
-    pending.responsePromise = this.bridge
-      .respondToPermission(pending.requestId, response)
+    pending.responsePromise = Promise.resolve()
+      .then(() => this.bridge.respondToPermission!(pending.requestId, response))
       .then(
         (accepted) => {
           this.removePendingPermission(

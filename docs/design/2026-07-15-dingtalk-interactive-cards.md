@@ -2,7 +2,7 @@
 
 ## Status
 
-Final design draft for [#6443](https://github.com/QwenLM/qwen-code/issues/6443). This document fixes the implementation boundary, payload contract, state ownership, degradation behavior, and acceptance criteria before implementation begins. This PR remains design-only and does not change runtime behavior.
+Final implementation contract for [#6443](https://github.com/QwenLM/qwen-code/issues/6443). This document fixes the implementation boundary, payload contract, state ownership, degradation behavior, and acceptance criteria followed by the accompanying runtime implementation.
 
 ## Motivation
 

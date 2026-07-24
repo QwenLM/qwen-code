@@ -17,6 +17,8 @@ type QuestionTerminalState =
   | 'expired'
   | 'resolved_outside_card';
 
+const OTHER_OPTION_VALUE = '__qwen_other__';
+
 interface QuestionRecord {
   context: ChannelUserInputRequestContext;
   outTrackId: string;
@@ -84,6 +86,9 @@ export class QuestionCardController {
       record.delivered = true;
     } catch (error) {
       this.options.onError?.('question card creation', error);
+      if (record.state === 'terminal') {
+        return { kind: 'presented' };
+      }
       await this.finalize(record, 'cancelled');
       try {
         await this.options.sendFallback(
@@ -118,11 +123,12 @@ export class QuestionCardController {
     if (
       !record ||
       record.state !== 'pending' ||
-      record.context.owner.id !== callback.ownerId
+      record.context.owner.id !== callback.ownerId ||
+      callback.hasBusinessPayload === false
     ) {
       return undefined;
     }
-    if (callback.actionId === 'cancel') {
+    if (callback.isCancel || callback.actionId === 'cancel') {
       record.state = 'responding';
       return () => this.respond(record, 'cancelled');
     }
@@ -206,13 +212,35 @@ export class QuestionCardController {
 
   private async projectTerminal(record: QuestionRecord): Promise<void> {
     if (!record.terminalState) return;
+    const cardParamMap: Record<
+      QuestionTerminalState,
+      Record<string, string>
+    > = {
+      submitted: {
+        card_status: 'submitted',
+        question_desc: 'Submitted.',
+        form_btn_text: 'Submitted',
+      },
+      expired: {
+        card_status: 'expired',
+        question_desc: 'This question expired. Please retry.',
+        form_btn_text: 'Expired',
+      },
+      resolved_outside_card: {
+        card_status: 'cancelled',
+        question_desc: 'Resolved outside this card.',
+        form_btn_text: 'Resolved',
+      },
+      cancelled: {
+        card_status: 'cancelled',
+        question_desc: 'Cancelled.',
+        form_btn_text: 'Cancelled',
+      },
+    };
     try {
       await this.options.client.updateInstance({
         outTrackId: record.outTrackId,
-        cardParamMap: {
-          card_status: record.terminalState,
-          form_btn_text: '',
-        },
+        cardParamMap: cardParamMap[record.terminalState],
       });
     } catch (error) {
       this.options.onError?.('question card finalization', error);
@@ -224,28 +252,57 @@ export class QuestionCardController {
     formData: Record<string, unknown>,
   ): Record<string, string> | undefined {
     const allowed = new Set(
-      record.context.questions.map((question) => question.answerKey),
+      record.context.questions.flatMap((question) => [
+        question.answerKey,
+        this.otherAnswerKey(question.answerKey),
+      ]),
     );
     if (Object.keys(formData).some((key) => !allowed.has(key))) {
       return undefined;
     }
     const answers: Record<string, string> = {};
     for (const question of record.context.questions) {
-      const value = formData[question.answerKey];
-      if (typeof value === 'string') {
-        if (!value.trim()) return undefined;
-        answers[question.answerKey] = value;
-      } else if (
-        Array.isArray(value) &&
-        value.length > 0 &&
-        value.every((item) => typeof item === 'string' && item.trim())
-      ) {
-        answers[question.answerKey] = value.join(', ');
-      } else {
+      const values = this.readAnswerValues(formData[question.answerKey]);
+      if (values.length === 0 || (!question.multiSelect && values.length !== 1))
         return undefined;
+      const optionLabels = new Set(
+        question.options.map((option) => option.label),
+      );
+      const customValue = this.readAnswerValues(
+        formData[this.otherAnswerKey(question.answerKey)],
+      )[0]?.trim();
+      const normalized: string[] = [];
+      for (const value of values) {
+        if (value === OTHER_OPTION_VALUE) {
+          if (!customValue) return undefined;
+          normalized.push(customValue);
+        } else if (optionLabels.has(value)) {
+          normalized.push(value);
+        } else {
+          return undefined;
+        }
       }
+      answers[question.answerKey] = normalized.join(', ');
     }
     return answers;
+  }
+
+  private readAnswerValues(value: unknown): string[] {
+    if (typeof value === 'string') return value.trim() ? [value.trim()] : [];
+    if (Array.isArray(value)) {
+      return value
+        .filter((item): item is string => typeof item === 'string')
+        .map((item) => item.trim())
+        .filter(Boolean);
+    }
+    if (value !== null && typeof value === 'object') {
+      return this.readAnswerValues((value as Record<string, unknown>)['value']);
+    }
+    return [];
+  }
+
+  private otherAnswerKey(answerKey: string): string {
+    return `${answerKey}_other`;
   }
 
   private cardData(
@@ -261,18 +318,30 @@ export class QuestionCardController {
       selected_text: '',
       selected_values: '[]',
       form: {
-        fields: context.questions.map((question) => ({
-          name: question.answerKey,
-          label: question.question,
-          type: question.multiSelect
-            ? 'MULTI_CHECKBOX_GROUP'
-            : 'CHECKBOX_GROUP',
-          required: true,
-          options: question.options.map((option) => ({
-            value: option.label,
-            text: option.label,
-          })),
-        })),
+        fields: context.questions.flatMap((question) => [
+          {
+            name: question.answerKey,
+            label: question.question,
+            type: question.multiSelect
+              ? 'MULTI_CHECKBOX_GROUP'
+              : 'CHECKBOX_GROUP',
+            required: true,
+            options: [
+              ...question.options.map((option) => ({
+                value: option.label,
+                text: option.label,
+              })),
+              { value: OTHER_OPTION_VALUE, text: 'Other' },
+            ],
+          },
+          {
+            name: this.otherAnswerKey(question.answerKey),
+            label: `${question.header}: Other`,
+            type: 'TEXT',
+            required: false,
+            placeholder: 'Enter a custom answer when Other is selected',
+          },
+        ]),
       },
     };
   }

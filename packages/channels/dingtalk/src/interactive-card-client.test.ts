@@ -150,6 +150,6 @@ describe('DingtalkInteractiveCardClient', () => {
         target: { chatId: 'user-1', isGroup: false },
         cardParamMap: {},
       }),
-    ).rejects.toThrow('template denied');
+    ).rejects.toThrow(`${QUESTION_CARD_TEMPLATE_ID}: template denied`);
   });
 });

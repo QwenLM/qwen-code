@@ -8,10 +8,12 @@ import { QuestionCardController } from './question-card-controller.js';
 
 function deferred<T>() {
   let resolve!: (value: T | PromiseLike<T>) => void;
-  const promise = new Promise<T>((res) => {
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
     resolve = res;
+    reject = rej;
   });
-  return { promise, resolve };
+  return { promise, reject, resolve };
 }
 
 function createContext() {
@@ -108,8 +110,16 @@ describe('QuestionCardController', () => {
                 type: 'CHECKBOX_GROUP',
               }),
               expect.objectContaining({
+                name: '0_other',
+                type: 'TEXT',
+              }),
+              expect.objectContaining({
                 name: '1',
                 type: 'MULTI_CHECKBOX_GROUP',
+              }),
+              expect.objectContaining({
+                name: '1_other',
+                type: 'TEXT',
               }),
             ],
           },
@@ -138,7 +148,8 @@ describe('QuestionCardController', () => {
     expect(client.updateInstance).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: expect.objectContaining({
-          card_status: 'resolved_outside_card',
+          card_status: 'cancelled',
+          question_desc: 'Resolved outside this card.',
         }),
       }),
     );
@@ -162,6 +173,24 @@ describe('QuestionCardController', () => {
     expect(respond).toHaveBeenCalledWith({
       outcome: { outcome: 'cancelled' },
     });
+  });
+
+  it('does not cancel again when delivery fails after external settlement', async () => {
+    const delivery = deferred<void>();
+    const { client, controller, sendFallback } = createHarness();
+    vi.mocked(client.createAndDeliver).mockReturnValue(delivery.promise);
+    const { context, settle, respond } = createContext();
+
+    const presenting = controller.present(context, {
+      chatId: 'cid-1',
+      isGroup: true,
+    });
+    settle('resolved_outside_card');
+    delivery.reject(new Error('late delivery failure'));
+
+    await expect(presenting).resolves.toEqual({ kind: 'presented' });
+    expect(sendFallback).not.toHaveBeenCalled();
+    expect(respond).not.toHaveBeenCalled();
   });
 
   it('claims one owner callback and submits validated answers', async () => {
@@ -226,6 +255,64 @@ describe('QuestionCardController', () => {
       }),
     ).toBeUndefined();
     expect(respond).not.toHaveBeenCalled();
+  });
+
+  it('submits the built-in cancel callback without form answers', async () => {
+    const { client, controller } = createHarness();
+    const { context, respond } = createContext();
+    await controller.present(context, { chatId: 'cid-1', isGroup: true });
+    const outTrackId = vi.mocked(client.createAndDeliver).mock.calls[0]![0]
+      .outTrackId;
+
+    await controller.claim({
+      outTrackId,
+      actionId: 'request-1',
+      ownerId: 'owner-1',
+      formData: {},
+      hasBusinessPayload: true,
+      isCancel: true,
+    })?.();
+
+    expect(respond).toHaveBeenCalledWith({
+      outcome: { outcome: 'cancelled' },
+    });
+  });
+
+  it('ignores non-business callbacks and accepts custom answers', async () => {
+    const { client, controller } = createHarness();
+    const { context, respond } = createContext();
+    await controller.present(context, { chatId: 'cid-1', isGroup: true });
+    const outTrackId = vi.mocked(client.createAndDeliver).mock.calls[0]![0]
+      .outTrackId;
+
+    expect(
+      controller.claim({
+        outTrackId,
+        actionId: 'request-1',
+        ownerId: 'owner-1',
+        formData: {},
+        hasBusinessPayload: false,
+        isCancel: false,
+      }),
+    ).toBeUndefined();
+    await controller.claim({
+      outTrackId,
+      actionId: 'request-1',
+      ownerId: 'owner-1',
+      formData: {
+        '0': '__qwen_other__',
+        '0_other': 'Shenzhen',
+        '1': ['Logs'],
+        '1_other': '',
+      },
+      hasBusinessPayload: true,
+      isCancel: false,
+    })?.();
+
+    expect(respond).toHaveBeenCalledWith({
+      outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      answers: { '0': 'Shenzhen', '1': 'Logs' },
+    });
   });
 
   it('terminalizes a rejected responder without releasing the claim', async () => {

@@ -3,6 +3,14 @@ import type { ChannelTaskLifecycleEvent } from '@qwen-code/channel-base';
 import type { DingtalkInteractiveCardClient } from './interactive-card-client.js';
 import { StatusCardController } from './status-card-controller.js';
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 function started(
   overrides: Partial<
     Extract<ChannelTaskLifecycleEvent, { type: 'started' }>
@@ -83,6 +91,68 @@ describe('StatusCardController', () => {
     expect(content.endsWith('b'.repeat(2_000))).toBe(true);
   });
 
+  it('clears prior segment content at a response boundary', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+    controller.start(started(), { chatId: 'cid-1', isGroup: true });
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.openOrUpdateStream).mockClear();
+
+    controller.append('run-1', 'old segment');
+    controller.responseBoundary('run-1');
+    controller.append('run-1', 'new segment');
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(client.openOrUpdateStream).toHaveBeenCalledOnce();
+    expect(client.openOrUpdateStream).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: 'new segment',
+        finalize: false,
+      }),
+    );
+  });
+
+  it('finalizes without prior segment content after a response boundary', async () => {
+    const { client, controller } = createHarness();
+    controller.start(started(), { chatId: 'cid-1', isGroup: true });
+    controller.append('run-1', 'old segment');
+    controller.responseBoundary('run-1');
+
+    controller.cancel('run-1', 'cancel_command');
+
+    await vi.waitFor(() =>
+      expect(client.openOrUpdateStream).toHaveBeenCalledWith(
+        expect.objectContaining({
+          content: '',
+          finalize: true,
+        }),
+      ),
+    );
+  });
+
+  it('serializes waiting-state and stream writes', async () => {
+    vi.useFakeTimers();
+    const streamWrite = deferred<void>();
+    const { client, controller } = createHarness();
+    controller.start(started(), { chatId: 'cid-1', isGroup: true });
+    await vi.advanceTimersByTimeAsync(0);
+    vi.mocked(client.openOrUpdateStream).mockClear();
+    vi.mocked(client.openOrUpdateStream).mockReturnValueOnce(
+      streamWrite.promise,
+    );
+
+    controller.append('run-1', 'answer');
+    await vi.advanceTimersByTimeAsync(500);
+    controller.setWaitingInput('run-1', true);
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(client.updateInstance).not.toHaveBeenCalled();
+    streamWrite.resolve();
+    await vi.waitFor(() =>
+      expect(client.updateInstance).toHaveBeenCalledOnce(),
+    );
+  });
+
   it('awaits terminal writes and rejects late chunks', async () => {
     const { client, controller } = createHarness();
     controller.start(started(), { chatId: 'cid-1', isGroup: true });
@@ -106,6 +176,49 @@ describe('StatusCardController', () => {
 
     controller.append('run-1', 'late');
     expect(client.openOrUpdateStream).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not let a delayed waiting update overwrite completion', async () => {
+    const waitingUpdate = deferred<void>();
+    const events: string[] = [];
+    const { client, controller } = createHarness();
+    controller.start(started(), { chatId: 'cid-1', isGroup: true });
+    await vi.waitFor(() =>
+      expect(client.createAndDeliver).toHaveBeenCalledOnce(),
+    );
+    vi.mocked(client.updateInstance)
+      .mockImplementationOnce(async () => {
+        events.push('waiting-started');
+        await waitingUpdate.promise;
+        events.push('waiting-finished');
+      })
+      .mockImplementationOnce(async () => {
+        events.push('completed');
+      });
+
+    controller.setWaitingInput('run-1', true);
+    await vi.waitFor(() =>
+      expect(client.updateInstance).toHaveBeenCalledOnce(),
+    );
+    const completion = controller.complete('run-1', 'answer');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(events).toEqual(['waiting-started']);
+
+    waitingUpdate.resolve();
+    await expect(completion).resolves.toBe(true);
+    expect(events).toEqual([
+      'waiting-started',
+      'waiting-finished',
+      'completed',
+    ]);
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          flowStatus: 3,
+          statusLine: 'Completed',
+        }),
+      }),
+    );
   });
 
   it('allows only the owner to stop the exact current run', async () => {

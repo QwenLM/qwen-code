@@ -87,6 +87,7 @@ export class DingtalkInteractiveCardClient {
         userIdType: 1,
         ...targetModel,
       },
+      input.templateId,
     );
     const result =
       data && typeof data === 'object'
@@ -102,9 +103,11 @@ export class DingtalkInteractiveCardClient {
       ) as { errorMsg?: unknown } | undefined;
       if (failure) {
         throw new Error(
-          typeof failure.errorMsg === 'string' && failure.errorMsg.trim()
-            ? failure.errorMsg.trim()
-            : 'DingTalk card delivery failed',
+          `${input.templateId}: ${
+            typeof failure.errorMsg === 'string' && failure.errorMsg.trim()
+              ? failure.errorMsg.trim()
+              : 'DingTalk card delivery failed'
+          }`,
         );
       }
     }
@@ -136,6 +139,7 @@ export class DingtalkInteractiveCardClient {
     path: string,
     method: 'POST' | 'PUT',
     body: unknown,
+    templateId?: string,
   ): Promise<unknown> {
     const token = await this.options.getAccessToken();
     const response = await this.fetch(`${DINGTALK_API}${path}`, {
@@ -150,7 +154,7 @@ export class DingtalkInteractiveCardClient {
     if (!response.ok) {
       const detail = (await response.text().catch(() => '')).slice(0, 300);
       throw new Error(
-        `DingTalk Card OpenAPI ${method} ${path} failed: HTTP ${response.status}${detail ? ` ${detail}` : ''}`,
+        `DingTalk Card OpenAPI ${method} ${path} failed${templateId ? ` for ${templateId}` : ''}: HTTP ${response.status}${detail ? ` ${detail}` : ''}`,
       );
     }
     return response.json().catch(() => undefined);

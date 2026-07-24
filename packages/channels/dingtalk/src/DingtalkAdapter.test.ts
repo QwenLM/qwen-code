@@ -292,7 +292,7 @@ it('ACKs a parsed card callback before starting asynchronous handling', async ()
       userId: 'owner-1',
       value: JSON.stringify({
         outTrackId: 'status-1',
-        actionValue: 'stop',
+        actionValue: 'btn_stop',
       }),
     }),
   } as DWClientDownStream);
@@ -303,6 +303,49 @@ it('ACKs a parsed card callback before starting asynchronous handling', async ()
     status: 'success',
     message: 'ok',
   });
+});
+
+it('routes the built-in btn_stop action to the status card controller', () => {
+  const stopAction = vi.fn().mockResolvedValue(undefined);
+  const claimStop = vi.fn().mockReturnValue(stopAction);
+  class CallbackRoutingChannel extends DingtalkChannel {
+    route(callback: {
+      outTrackId: string;
+      actionId: string;
+      ownerId: string;
+      formData: Record<string, unknown>;
+    }) {
+      return this.routeCardCallback(callback);
+    }
+  }
+  const channel = new CallbackRoutingChannel(
+    'test-dingtalk',
+    {
+      type: 'dingtalk',
+      token: '',
+      clientId: 'client-id',
+      clientSecret: 'client-secret',
+      senderPolicy: 'open',
+      allowedUsers: [],
+      sessionScope: 'user',
+      cwd: '/tmp',
+      groupPolicy: 'open',
+      dmPolicy: 'open',
+      groups: {},
+    } as never,
+    {} as never,
+  );
+  Object.assign(channel, { statusCardController: { claimStop } });
+
+  expect(
+    channel.route({
+      outTrackId: 'status-1',
+      actionId: 'btn_stop',
+      ownerId: 'owner-1',
+      formData: {},
+    }),
+  ).toBe(stopAction);
+  expect(claimStop).toHaveBeenCalledWith('status-1', 'owner-1');
 });
 
 it('keeps callbacks and ACKs bound to the client that received them', async () => {
@@ -413,6 +456,15 @@ function getCompleteHook(
   const fn = (channel as unknown as Record<string, unknown>)[
     'onResponseComplete'
   ] as (chatId: string, text: string, sessionId: string) => Promise<void>;
+  return fn.bind(channel);
+}
+
+function getBoundaryHook(
+  channel: DingtalkChannelInstance,
+): (chatId: string, sessionId: string) => void {
+  const fn = (channel as unknown as Record<string, unknown>)[
+    'onResponseBoundary'
+  ] as (chatId: string, sessionId: string) => void;
   return fn.bind(channel);
 }
 
@@ -1200,6 +1252,87 @@ describe('DingtalkChannel status cards', () => {
 
     await getCompleteHook(channel)('cid-1', 'second', 'session-1');
     expect(fetchSpy).toHaveBeenCalledOnce();
+  });
+
+  it('completes the status card when the agent response is empty', () => {
+    const channel = createChannel();
+    const complete = vi.fn().mockResolvedValue(true);
+    (
+      channel as unknown as {
+        statusCardController: { complete: typeof complete };
+        statusRunBySession: Map<string, string>;
+        cardRunBySession: Map<string, string>;
+      }
+    ).statusCardController = { complete };
+    (
+      channel as unknown as {
+        statusRunBySession: Map<string, string>;
+        cardRunBySession: Map<string, string>;
+      }
+    ).statusRunBySession.set('session-1', 'run-1');
+    (
+      channel as unknown as {
+        cardRunBySession: Map<string, string>;
+      }
+    ).cardRunBySession.set('session-1', 'run-1');
+
+    getLifecycleHook(channel)({
+      type: 'completed',
+      channelName: 'dingtalk',
+      chatId: 'cid-1',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+    });
+
+    expect(complete).toHaveBeenCalledWith('run-1', '');
+  });
+
+  it('resets the exact status run at a response boundary', () => {
+    const channel = createChannel();
+    const responseBoundary = vi.fn();
+    (
+      channel as unknown as {
+        statusCardController: { responseBoundary: typeof responseBoundary };
+        statusRunBySession: Map<string, string>;
+      }
+    ).statusCardController = { responseBoundary };
+    (
+      channel as unknown as {
+        statusRunBySession: Map<string, string>;
+      }
+    ).statusRunBySession.set('session-1', 'run-1');
+
+    getBoundaryHook(channel)('cid-1', 'session-1');
+
+    expect(responseBoundary).toHaveBeenCalledWith('run-1');
+  });
+
+  it('does not let a stale terminal event detach a newer session run', () => {
+    const channel = createChannel();
+    const maps = channel as unknown as {
+      statusRunBySession: Map<string, string>;
+      cardRunBySession: Map<string, string>;
+      cardRuns: Map<string, unknown>;
+    };
+    maps.statusRunBySession.set('session-1', 'run-new');
+    maps.cardRunBySession.set('session-1', 'run-new');
+    maps.cardRuns.set('run-old', {});
+    maps.cardRuns.set('run-new', {});
+
+    getLifecycleHook(channel)({
+      type: 'completed',
+      channelName: 'dingtalk',
+      chatId: 'cid-1',
+      sessionId: 'session-1',
+      runId: 'run-old',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+    });
+
+    expect(maps.statusRunBySession.get('session-1')).toBe('run-new');
+    expect(maps.cardRunBySession.get('session-1')).toBe('run-new');
+    expect(maps.cardRuns.has('run-old')).toBe(false);
+    expect(maps.cardRuns.has('run-new')).toBe(true);
   });
 });
 

@@ -1422,6 +1422,65 @@ describe('ChannelBase', () => {
       await active.finish();
     });
 
+    it('does not let permission commands bypass an in-flight card presentation', async () => {
+      let finishPresentation!: (result: UserInputPresentationResult) => void;
+      const ch = createChannel();
+      ch.userInputPresentationHandler = () =>
+        new Promise<UserInputPresentationResult>((resolve) => {
+          finishPresentation = resolve;
+        });
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+      emitUserQuestion(active.sessionId, 'req-presenting');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+
+      await ch.handleInbound(
+        envelope({
+          senderId: 'owner-1',
+          text: '/approve req-presenting',
+        }),
+      );
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toContain(
+        'Submit this question through its interactive card',
+      );
+
+      finishPresentation({ kind: 'unsupported' });
+      await vi.waitFor(() =>
+        expect(ch.sent.at(-1)?.text).toContain(
+          'Permission required to run a tool',
+        ),
+      );
+      await active.finish();
+    });
+
+    it('does not relay a fallback after an in-flight card request is denied', async () => {
+      let finishPresentation!: (result: UserInputPresentationResult) => void;
+      const ch = createChannel();
+      ch.userInputPresentationHandler = () =>
+        new Promise<UserInputPresentationResult>((resolve) => {
+          finishPresentation = resolve;
+        });
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+      emitUserQuestion(active.sessionId, 'req-presenting-deny');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+
+      await ch.handleInbound(
+        envelope({
+          senderId: 'owner-1',
+          text: '/deny req-presenting-deny',
+        }),
+      );
+      expect(ch.sent.at(-1)?.text).toBe('Permission denied.');
+
+      finishPresentation({ kind: 'unsupported' });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(ch.sent).toHaveLength(1);
+      expect(respondToPermissionMock()).toHaveBeenCalledOnce();
+      await active.finish();
+    });
+
     it('uses one response promise and emits one typed user input settlement', async () => {
       const ch = createChannel();
       ch.userInputPresentationResult = { kind: 'presented' };
@@ -1476,6 +1535,31 @@ describe('ChannelBase', () => {
           answers: { '0': 'Beijing' },
         }),
       ).rejects.toThrow('bridge response failed');
+      expect(settled).toHaveBeenCalledOnce();
+      expect(settled).toHaveBeenCalledWith('cancelled');
+
+      await active.finish();
+    });
+
+    it('settles a synchronously throwing user input responder as cancelled', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+      emitUserQuestion(active.sessionId, 'req-sync-response-error');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      const context = ch.userInputPresentations[0]!;
+      const settled = vi.fn();
+      context.onSettled(settled);
+      respondToPermissionMock().mockImplementationOnce(() => {
+        throw new Error('synchronous bridge failure');
+      });
+
+      await expect(
+        context.respond({
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+          answers: { '0': 'Beijing' },
+        }),
+      ).rejects.toThrow('synchronous bridge failure');
       expect(settled).toHaveBeenCalledOnce();
       expect(settled).toHaveBeenCalledWith('cancelled');
 

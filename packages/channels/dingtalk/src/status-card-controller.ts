@@ -29,6 +29,7 @@ interface StatusRecord {
   pendingSnapshot?: string;
   flushTimer?: ReturnType<typeof setTimeout>;
   inFlight?: Promise<void>;
+  writeChain: Promise<void>;
 }
 
 export interface StatusCardControllerOptions {
@@ -67,6 +68,7 @@ export class StatusCardController {
       stopClaimed: false,
       waiting: false,
       lastWriteAt: Date.now(),
+      writeChain: Promise.resolve(),
     };
     this.recordsByRun.set(record.runId, record);
     this.recordsByOutTrack.set(outTrackId, record);
@@ -87,8 +89,9 @@ export class StatusCardController {
     const record = this.recordsByRun.get(runId);
     if (!record || record.terminal || record.waiting === waiting) return;
     record.waiting = waiting;
-    void record.ready
-      .then(async (ready) => {
+    record.writeChain = record.writeChain
+      .then(async () => {
+        const ready = await record.ready;
         if (!ready || record.terminal) return;
         await this.options.client.updateInstance({
           outTrackId: record.outTrackId,
@@ -101,6 +104,20 @@ export class StatusCardController {
       .catch((error) => {
         this.options.onError?.('status card state update', error);
       });
+  }
+
+  responseBoundary(runId: string): void {
+    const record = this.recordsByRun.get(runId);
+    if (!record || record.terminal) return;
+    record.content = '';
+    if (record.flushTimer) clearTimeout(record.flushTimer);
+    record.flushTimer = undefined;
+    if (record.streamFailed) {
+      record.pendingSnapshot = undefined;
+      return;
+    }
+    record.pendingSnapshot = '';
+    this.scheduleFlush(record);
   }
 
   complete(runId: string, text: string): Promise<boolean> {
@@ -207,11 +224,17 @@ export class StatusCardController {
   }
 
   private flush(record: StatusRecord): void {
-    if (record.terminal || record.inFlight || !record.pendingSnapshot) return;
+    if (
+      record.terminal ||
+      record.inFlight ||
+      record.pendingSnapshot === undefined
+    )
+      return;
     const content = record.pendingSnapshot;
     record.pendingSnapshot = undefined;
-    record.inFlight = record.ready
-      .then(async (ready) => {
+    const write = record.writeChain
+      .then(async () => {
+        const ready = await record.ready;
         if (!ready || record.terminal) return;
         await this.options.client.openOrUpdateStream({
           outTrackId: record.outTrackId,
@@ -224,12 +247,16 @@ export class StatusCardController {
         record.streamFailed = true;
         record.pendingSnapshot = undefined;
         this.options.onError?.('status card streaming', error);
-      })
-      .finally(() => {
-        record.inFlight = undefined;
-        record.lastWriteAt = Date.now();
-        if (record.pendingSnapshot) this.scheduleFlush(record);
       });
+    const tracked = write.finally(() => {
+      if (record.inFlight === tracked) {
+        record.inFlight = undefined;
+      }
+      record.lastWriteAt = Date.now();
+      if (record.pendingSnapshot !== undefined) this.scheduleFlush(record);
+    });
+    record.inFlight = tracked;
+    record.writeChain = tracked;
   }
 
   private async finalize(
@@ -246,7 +273,7 @@ export class StatusCardController {
     record.pendingSnapshot = undefined;
     try {
       if (!(await record.ready)) return false;
-      await record.inFlight;
+      await record.writeChain;
       await this.options.client.openOrUpdateStream({
         outTrackId: record.outTrackId,
         key: 'content',
