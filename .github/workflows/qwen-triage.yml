@@ -264,8 +264,12 @@ jobs:
           # overwrites remote.origin.url, so a planted `ext::` transport URL kept
           # here is replaced before any fetch. --unset-all handles resolved
           # includeIf subsections that --remove-section cannot target.
+          # `|| true` on the grep: no non-allowlisted keys (the steady state
+          # on a reused runner this step already sanitized) means grep exits
+          # 1, and with the default `bash -e` plus pipefail above that would
+          # kill the whole step exactly when there is nothing to clean.
           git config --local --name-only --list 2>/dev/null \
-            | grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' \
+            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
             | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
           HOOKS_DIR="$(git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
           # Match -type f OR -type l: a symlinked hook (e.g. post-checkout ->
