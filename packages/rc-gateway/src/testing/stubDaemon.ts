@@ -25,6 +25,8 @@ export interface StubDaemon {
   lastPromptBody: unknown;
   /** Body of the most recent POST /session/:id/rewind request. */
   lastRewindBody: unknown;
+  /** Body of the most recent POST /session/:id/approval-mode request. */
+  lastApprovalModeBody: unknown;
   /**
    * `{ requestId, response }` captured from the most recent
    * POST /session/:id/permission/:requestId request. Lets a test assert
@@ -101,6 +103,21 @@ export interface StubDaemonOptions {
    * consistent with what it sent.
    */
   rewindResult?: { targetTurnIndex: number; apiTruncateIndex: number };
+  /** Status for POST /session/:id/approval-mode (default 200). */
+  approvalModeStatus?: number;
+  /**
+   * Response body for POST /session/:id/approval-mode on success. Defaults to
+   * `{ sessionId, mode, previous, persisted }` so a test that doesn't care
+   * about the exact value still gets one that's consistent with what it sent.
+   */
+  approvalModeResult?: {
+    sessionId?: string;
+    mode: string;
+    previous: string;
+    persisted: boolean;
+  };
+  /** JSON body to return on a non-200 approval-mode response. */
+  approvalModeBody?: unknown;
   /** Status for POST /session (default 200). Non-200 → { error }. */
   createSessionStatus?: number;
   /**
@@ -127,6 +144,7 @@ export async function startStubDaemon(
     lastCreateSessionBody: undefined as unknown,
     lastPromptBody: undefined as unknown,
     lastRewindBody: undefined as unknown,
+    lastApprovalModeBody: undefined as unknown,
     lastRespondedPermission: undefined as
       | { requestId: string; response: unknown }
       | undefined,
@@ -258,6 +276,27 @@ export async function startStubDaemon(
     );
   });
 
+  app.post('/session/:id/approval-mode', express.json(), (req, res) => {
+    state.lastApprovalModeBody = req.body;
+    const status = opts.approvalModeStatus ?? 200;
+    if (status !== 200) {
+      res.status(status).json(opts.approvalModeBody ?? { error: 'stub' });
+      return;
+    }
+    const r = opts.approvalModeResult ?? {
+      sessionId: req.params.id,
+      mode: req.body?.mode ?? 'default',
+      previous: 'default',
+      persisted: false,
+    };
+    res.status(200).json({
+      sessionId: r.sessionId ?? req.params.id,
+      mode: r.mode,
+      previous: r.previous,
+      persisted: r.persisted,
+    });
+  });
+
   app.post('/session/:id/prompt', (req, res) => {
     const status = opts.promptStatus ?? 200;
     state.lastPromptBody = req.body;
@@ -344,6 +383,9 @@ export async function startStubDaemon(
     },
     get lastRewindBody() {
       return state.lastRewindBody;
+    },
+    get lastApprovalModeBody() {
+      return state.lastApprovalModeBody;
     },
     get lastRespondedPermission() {
       return state.lastRespondedPermission;
