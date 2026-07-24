@@ -487,4 +487,23 @@ describe('WorkspaceGitState', () => {
     await pending;
     expect(publishWorkspaceEvent).not.toHaveBeenCalled();
   });
+
+  it('keeps the cache and resolves wait:true when publishWorkspaceEvent throws', async () => {
+    resolveBranchNameMock.mockResolvedValue('main');
+    watchRepoBranchMock.mockResolvedValue(() => {});
+    getGitWorkingTreeStatusMock.mockResolvedValue(summary({ staged: 2 }));
+    const state = new WorkspaceGitState();
+    const { bridge, publishWorkspaceEvent } = bridgeWith();
+    publishWorkspaceEvent.mockImplementationOnce(() => {
+      throw new Error('sse down');
+    });
+
+    await expect(
+      state.getStatus('/workspace', bridge, { wait: true }),
+    ).resolves.toMatchObject({ staged: 2 });
+
+    const fast = await state.getStatus('/workspace', bridge);
+    expect(fast.computedAt).toBeDefined();
+    state.dispose();
+  });
 });

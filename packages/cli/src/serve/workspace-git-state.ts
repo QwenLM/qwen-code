@@ -75,6 +75,9 @@ function sameWorkingTreeStatus(
     operation: true,
   };
   void _exhaustive;
+  // branch is compared even though materialize() overlays the watcher branch:
+  // a status.branch delta is the first signal of a checkout the watcher has
+  // not yet seen — publishing is intentionally conservative.
   return (
     a.branch === b.branch &&
     a.detached === b.detached &&
