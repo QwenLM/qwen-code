@@ -37,13 +37,16 @@ import {
   type DingtalkInteractiveCardConfig,
 } from './interactive-card-types.js';
 import { StatusCardController } from './status-card-controller.js';
+import { QuestionCardController } from './question-card-controller.js';
 import type {
   ChannelConfig,
   ChannelBaseOptions,
   Envelope,
   ChannelAgentBridge,
   ChannelTaskLifecycleEvent,
+  ChannelUserInputRequestContext,
   SessionTarget,
+  UserInputPresentationResult,
 } from '@qwen-code/channel-base';
 
 /**
@@ -236,6 +239,7 @@ export class DingtalkChannel extends ChannelBase {
   private readonly interactiveCardConfig: DingtalkInteractiveCardConfig;
   protected readonly interactiveCardClient?: DingtalkInteractiveCardClient;
   private statusCardController?: StatusCardController;
+  private questionCardController?: QuestionCardController;
   private readonly inboundCardOwners = new Map<
     string,
     {
@@ -244,6 +248,14 @@ export class DingtalkChannel extends ChannelBase {
     }
   >();
   private readonly statusRunBySession = new Map<string, string>();
+  private readonly cardRunBySession = new Map<string, string>();
+  private readonly cardRuns = new Map<
+    string,
+    {
+      ownerId: string;
+      target: { chatId: string; isGroup: boolean };
+    }
+  >();
 
   constructor(
     name: string,
@@ -301,6 +313,20 @@ export class DingtalkChannel extends ChannelBase {
           client: this.interactiveCardClient,
           cancelRun: (sessionId, runId) =>
             this.requestPromptRunCancellation(sessionId, runId),
+          onError: (operation, error) => {
+            process.stderr.write(
+              `[DingTalk:${this.name}] ${operation} failed: ${sanitizeLogText(String(error), 300)}\n`,
+            );
+          },
+        });
+      }
+      if (this.interactiveCardConfig.questionCard.enabled) {
+        this.questionCardController = new QuestionCardController({
+          client: this.interactiveCardClient,
+          timeoutMs: this.interactiveCardConfig.questionCard.timeoutMs,
+          setWaitingInput: (runId, waiting) =>
+            this.statusCardController?.setWaitingInput(runId, waiting),
+          sendFallback: (chatId, text) => this.sendMessage(chatId, text),
           onError: (operation, error) => {
             process.stderr.write(
               `[DingTalk:${this.name}] ${operation} failed: ${sanitizeLogText(String(error), 300)}\n`,
@@ -398,7 +424,7 @@ export class DingtalkChannel extends ChannelBase {
         callback.ownerId,
       );
     }
-    return undefined;
+    return this.questionCardController?.claim(callback);
   }
 
   private onDownStream(raw: unknown, client: DingTalkClientInternals): void {
@@ -1062,6 +1088,14 @@ export class DingtalkChannel extends ChannelBase {
     }
     this.sessionMentionTargets.delete(sessionId);
     this.textReplySessions.delete(sessionId);
+    const cardRunId = this.cardRunBySession.get(sessionId);
+    if (cardRunId) {
+      this.cardRunBySession.delete(sessionId);
+      this.statusRunBySession.delete(sessionId);
+      this.statusCardController?.cancel(cardRunId, 'dropped');
+      this.questionCardController?.cancelRun(cardRunId);
+      this.cardRuns.delete(cardRunId);
+    }
     const keys = this.sessionReactionKeys.get(sessionId);
     if (keys) {
       this.sessionReactionKeys.delete(sessionId);
@@ -1084,13 +1118,16 @@ export class DingtalkChannel extends ChannelBase {
         : undefined;
       if (event.messageId) this.inboundCardOwners.delete(event.messageId);
       if (
-        this.statusCardController &&
         event.runId &&
         event.owner &&
         inboundOwner?.ownerId === event.owner.id
       ) {
-        this.statusRunBySession.set(event.sessionId, event.runId);
-        this.statusCardController.start(event, inboundOwner.target);
+        this.cardRuns.set(event.runId, inboundOwner);
+        this.cardRunBySession.set(event.sessionId, event.runId);
+        if (this.statusCardController) {
+          this.statusRunBySession.set(event.sessionId, event.runId);
+          this.statusCardController.start(event, inboundOwner.target);
+        }
       }
       return;
     }
@@ -1107,8 +1144,11 @@ export class DingtalkChannel extends ChannelBase {
         } else if (event.type === 'cancelled') {
           this.statusCardController?.cancel(event.runId, event.reason);
         }
+        this.questionCardController?.cancelRun(event.runId);
+        this.cardRuns.delete(event.runId);
       }
       this.statusRunBySession.delete(event.sessionId);
+      this.cardRunBySession.delete(event.sessionId);
     }
   }
 
@@ -1176,7 +1216,7 @@ export class DingtalkChannel extends ChannelBase {
     if (!(await this.preflightInbound(envelope))) return;
 
     const messageId = envelope.messageId;
-    if (this.interactiveCardClient && messageId && envelope.senderId) {
+    if (messageId && envelope.senderId) {
       this.inboundCardOwners.delete(messageId);
       this.inboundCardOwners.set(messageId, {
         ownerId: envelope.senderId,
@@ -1264,6 +1304,30 @@ export class DingtalkChannel extends ChannelBase {
       return;
     }
     await this.sendResponseMessage(chatId, text, sessionId);
+  }
+
+  protected override async presentUserInputRequest(
+    context: ChannelUserInputRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    const run = this.cardRuns.get(context.runId);
+    if (!run || run.ownerId !== context.owner.id) {
+      return { kind: 'unsupported' };
+    }
+    if (this.questionCardController) {
+      return this.questionCardController.present(context, run.target);
+    }
+    try {
+      await this.sendMessage(
+        context.target.chatId,
+        'Interactive questions are disabled for this DingTalk channel, so this request was cancelled. Enable question cards and retry.',
+      );
+    } catch (error) {
+      process.stderr.write(
+        `[DingTalk:${this.name}] disabled question fallback failed: ${sanitizeLogText(String(error), 300)}\n`,
+      );
+    }
+    await context.respond({ outcome: { outcome: 'cancelled' } });
+    return { kind: 'handled' };
   }
 
   /**

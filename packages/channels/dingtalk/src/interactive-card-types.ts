@@ -132,7 +132,10 @@ export function parseDingtalkCardCallback(
   if (!outTrackId || !actionId || !ownerId) return undefined;
   const formData =
     sources
-      .map((source) => parseEmbeddedRecord(source['formData']))
+      .flatMap((source) => [
+        parseEmbeddedRecord(source['formData']),
+        parseEmbeddedRecord(parseEmbeddedRecord(source['params'])?.['form']),
+      ])
       .find((source) => source !== undefined) ?? {};
   return { outTrackId, actionId, ownerId, formData };
 }

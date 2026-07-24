@@ -87,16 +87,20 @@ export class StatusCardController {
     const record = this.recordsByRun.get(runId);
     if (!record || record.terminal || record.waiting === waiting) return;
     record.waiting = waiting;
-    void record.ready.then(async (ready) => {
-      if (!ready || record.terminal) return;
-      await this.options.client.updateInstance({
-        outTrackId: record.outTrackId,
-        cardParamMap: {
-          flowStatus: 2,
-          statusLine: waiting ? 'Waiting for input' : 'Running',
-        },
+    void record.ready
+      .then(async (ready) => {
+        if (!ready || record.terminal) return;
+        await this.options.client.updateInstance({
+          outTrackId: record.outTrackId,
+          cardParamMap: {
+            flowStatus: 2,
+            statusLine: waiting ? 'Waiting for input' : 'Running',
+          },
+        });
+      })
+      .catch((error) => {
+        this.options.onError?.('status card state update', error);
       });
-    });
   }
 
   complete(runId: string, text: string): Promise<boolean> {
@@ -266,6 +270,13 @@ export class StatusCardController {
     } catch (error) {
       this.options.onError?.('status card finalization', error);
       return false;
+    } finally {
+      if (this.recordsByRun.get(runId) === record) {
+        this.recordsByRun.delete(runId);
+      }
+      if (this.recordsByOutTrack.get(record.outTrackId) === record) {
+        this.recordsByOutTrack.delete(record.outTrackId);
+      }
     }
   }
 }

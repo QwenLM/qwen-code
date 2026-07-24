@@ -55,6 +55,26 @@ describe('card callback parser', () => {
     });
   });
 
+  it('parses the built-in form template callback shape', () => {
+    expect(
+      parseDingtalkCardCallback({
+        userId: 'owner-1',
+        outTrackId: 'question-1',
+        content: JSON.stringify({
+          cardPrivateData: {
+            actionIds: ['request-1'],
+            params: { form: { '0': 'Beijing' } },
+          },
+        }),
+      }),
+    ).toEqual({
+      outTrackId: 'question-1',
+      actionId: 'request-1',
+      ownerId: 'owner-1',
+      formData: { '0': 'Beijing' },
+    });
+  });
+
   it('fails closed for malformed or incomplete callbacks', () => {
     expect(parseDingtalkCardCallback('{broken')).toBeUndefined();
     expect(

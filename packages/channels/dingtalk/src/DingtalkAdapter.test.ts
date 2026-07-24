@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import type {
   ChannelTaskLifecycleEvent,
+  ChannelUserInputRequestContext,
   Envelope,
   SessionTarget,
 } from '@qwen-code/channel-base';
@@ -412,6 +413,15 @@ function getCompleteHook(
   const fn = (channel as unknown as Record<string, unknown>)[
     'onResponseComplete'
   ] as (chatId: string, text: string, sessionId: string) => Promise<void>;
+  return fn.bind(channel);
+}
+
+function getUserInputHook(
+  channel: DingtalkChannelInstance,
+): (context: ChannelUserInputRequestContext) => Promise<{ kind: string }> {
+  const fn = (channel as unknown as Record<string, unknown>)[
+    'presentUserInputRequest'
+  ] as (context: ChannelUserInputRequestContext) => Promise<{ kind: string }>;
   return fn.bind(channel);
 }
 
@@ -1190,6 +1200,56 @@ describe('DingtalkChannel status cards', () => {
 
     await getCompleteHook(channel)('cid-1', 'second', 'session-1');
     expect(fetchSpy).toHaveBeenCalledOnce();
+  });
+});
+
+describe('DingtalkChannel question cards', () => {
+  it('keeps question cards eligible while block streaming is enabled', () => {
+    const channel = createChannel({ blockStreaming: 'on' });
+
+    expect(
+      (
+        channel as unknown as {
+          questionCardController?: unknown;
+        }
+      ).questionCardController,
+    ).toBeDefined();
+  });
+
+  it('presents through the matching attended run only', async () => {
+    const channel = createChannel();
+    const present = vi.fn().mockResolvedValue({ kind: 'presented' });
+    (
+      channel as unknown as {
+        questionCardController: { present: typeof present };
+        cardRuns: Map<string, unknown>;
+      }
+    ).questionCardController = { present };
+    (channel as unknown as { cardRuns: Map<string, unknown> }).cardRuns.set(
+      'run-1',
+      {
+        ownerId: 'owner-1',
+        target: { chatId: 'cid-1', isGroup: true },
+      },
+    );
+    const context = {
+      requestId: 'request-1',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+    } as ChannelUserInputRequestContext;
+
+    await expect(getUserInputHook(channel)(context)).resolves.toEqual({
+      kind: 'presented',
+    });
+    expect(present).toHaveBeenCalledWith(context, {
+      chatId: 'cid-1',
+      isGroup: true,
+    });
+
+    await expect(
+      getUserInputHook(channel)({ ...context, runId: 'unknown' }),
+    ).resolves.toEqual({ kind: 'unsupported' });
   });
 });
 
