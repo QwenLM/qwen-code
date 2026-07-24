@@ -67,6 +67,8 @@ abstract class ChannelBase {
 }
 ```
 
+All internal message delivery routes through `sendThreadMessage(chatId, threadId, text)`. The default implementation falls through to `sendMessage(chatId, text)`, ignoring `threadId` — IM adapters are unaffected. Polling adapters (e.g. GitHub) override `sendThreadMessage` to post comments on a specific issue/PR using the `threadId`.
+
 Handles common cross-cutting concerns: sender gating (allowlist / denylist), group gating, message block streaming (chunk size, throttling), inbound debounce.
 
 ### Per-channel adapters
