@@ -17,9 +17,9 @@ import {
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { execFileSync } from 'node:child_process';
-import yaml from 'js-yaml';
+import { parse } from 'yaml';
 
-const workflow = yaml.load(
+const workflow = parse(
   readFileSync('.github/workflows/pr-self-report-label.yml', 'utf8'),
 );
 const runBlock = workflow.jobs.label.steps[0].run;
@@ -31,7 +31,7 @@ const GH_STUB = [
   '#!/usr/bin/env bash',
   'echo "gh $*" >> "${CALLS_LOG}"',
   'case "$*" in',
-  "  *'api graphql'*) printf '%s\\n' ${GH_ISSUE_AUTHORS:-} ;;",
+  "  *'api graphql'*) [ \"${GH_API_FAILS:-false}\" = true ] && exit 1; printf '%s\\n' ${GH_ISSUE_AUTHORS:-} ;;",
   "  *'pr view'*labels*) { [ \"${GH_HAS_LABEL:-false}\" = true ] && printf 'true' || printf 'false'; } ;;",
   '  *) : ;;',
   'esac',
@@ -39,7 +39,12 @@ const GH_STUB = [
 ].join('\n');
 
 describe('pr-self-report-label', () => {
-  const run = ({ prAuthor = 'alice', issueAuthors = '', hasLabel = false }) => {
+  const run = ({
+    prAuthor = 'alice',
+    issueAuthors = '',
+    hasLabel = false,
+    apiFails = false,
+  }) => {
     const dir = mkdtempSync(join(tmpdir(), 'lbl-'));
     const bin = join(dir, 'bin');
     mkdirSync(bin);
@@ -57,6 +62,7 @@ describe('pr-self-report-label', () => {
         LABEL: 'review/self-reported',
         GH_ISSUE_AUTHORS: issueAuthors,
         GH_HAS_LABEL: String(hasLabel),
+        GH_API_FAILS: String(apiFails),
       },
       encoding: 'utf8',
     });
@@ -101,6 +107,18 @@ describe('pr-self-report-label', () => {
     // A PR that closes no issue is never labelled.
     expect(
       run({ prAuthor: 'alice', issueAuthors: '', hasLabel: false }),
+    ).toMatchObject({ added: false, removed: false });
+  });
+
+  it('fails open: a GraphQL failure never adds or removes the label', () => {
+    // gh api graphql 5xx → API_OK=false. The label state is unknown, so the
+    // step must leave it untouched rather than read empty results as
+    // "no self-reported link" and strip a correct label.
+    expect(
+      run({ prAuthor: 'alice', hasLabel: true, apiFails: true }),
+    ).toMatchObject({ added: false, removed: false });
+    expect(
+      run({ prAuthor: 'alice', hasLabel: false, apiFails: true }),
     ).toMatchObject({ added: false, removed: false });
   });
 

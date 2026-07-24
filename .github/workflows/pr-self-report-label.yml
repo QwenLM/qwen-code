@@ -9,7 +9,7 @@ name: 'PR self-report label'
 
 on:
   pull_request_target:
-    types: ['opened', 'edited', 'reopened']
+    types: ['opened', 'edited', 'reopened', 'synchronize']
 
 permissions:
   contents: 'read'
@@ -39,9 +39,12 @@ jobs:
         run: |
           set -euo pipefail
           # Issues this PR closes — "Fixes/Closes #N" keywords AND Development
-          # sidebar links — and the login that OPENED each. Fail-open to empty
-          # (an API blip must never strip a correct label).
-          ISSUE_AUTHORS="$(gh api graphql \
+          # sidebar links — and the login that OPENED each. Track whether the
+          # query succeeded: an API blip must never strip a correct label, so a
+          # failed query sets API_OK=false and blocks removal (fail-open) rather
+          # than masquerading as "no linked issues".
+          API_OK='false'
+          if ISSUE_AUTHORS="$(gh api graphql \
             -f owner="${REPO%/*}" -f name="${REPO#*/}" -F pr="${PR}" -f query='
             query($owner: String!, $name: String!, $pr: Int!) {
               repository(owner: $owner, name: $name) {
@@ -50,7 +53,9 @@ jobs:
                 }
               }
             }' --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[]
-                     | .author.login // empty' 2> /dev/null || true)"
+                     | .author.login // empty' 2> /dev/null)"; then
+            API_OK='true'
+          fi
 
           # Self-reported iff SOME closed issue was opened by the PR author.
           SELF='false'
@@ -71,11 +76,12 @@ jobs:
               2> /dev/null || true
             gh pr edit "${PR}" --repo "${REPO}" --add-label "${LABEL}"
             echo "🏷️ #${PR}: added ${LABEL} — a closed issue was opened by ${PR_AUTHOR}"
-          elif [[ "${SELF}" != 'true' && "${HAS_LABEL}" == 'true' ]]; then
+          elif [[ "${SELF}" != 'true' && "${HAS_LABEL}" == 'true' && "${API_OK}" == 'true' ]]; then
             # The link was removed or re-pointed to someone else's issue — clear
-            # the now-stale label so it never lies.
+            # the now-stale label so it never lies. Only when the query itself
+            # succeeded: an API failure must not look like "no self-reported link".
             gh pr edit "${PR}" --repo "${REPO}" --remove-label "${LABEL}"
             echo "🏷️ #${PR}: removed ${LABEL} — no self-reported linked issue"
           else
-            echo "#${PR}: no change (self=${SELF}, labeled=${HAS_LABEL})"
+            echo "#${PR}: no change (self=${SELF}, labeled=${HAS_LABEL}, api=${API_OK})"
           fi
