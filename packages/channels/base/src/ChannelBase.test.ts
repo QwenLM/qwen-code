@@ -7,8 +7,10 @@ import type {
   ChannelConfig,
   ChannelMemoryEntry,
   ChannelTaskLifecycleEvent,
+  ChannelUserInputRequestContext,
   Envelope,
   SessionTarget,
+  UserInputPresentationResult,
 } from './types.js';
 import type {
   ChannelAgentBridge,
@@ -68,6 +70,13 @@ class TestChannel extends ChannelBase {
   throwOnPromptEnd = false;
   responseCompleteGate?: Promise<void>;
   proactiveError?: Error;
+  userInputPresentations: ChannelUserInputRequestContext[] = [];
+  userInputPresentationResult: UserInputPresentationResult = {
+    kind: 'unsupported',
+  };
+  userInputPresentationHandler?: (
+    context: ChannelUserInputRequestContext,
+  ) => Promise<UserInputPresentationResult>;
 
   async connect() {
     this.connected = true;
@@ -88,6 +97,16 @@ class TestChannel extends ChannelBase {
 
   protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
     this.taskEvents.push(event);
+  }
+
+  protected async presentUserInputRequest(
+    context: ChannelUserInputRequestContext,
+  ): Promise<UserInputPresentationResult> {
+    this.userInputPresentations.push(context);
+    if (this.userInputPresentationHandler) {
+      return this.userInputPresentationHandler(context);
+    }
+    return this.userInputPresentationResult;
   }
 
   override supportsProactiveSend(): boolean {
@@ -1028,6 +1047,66 @@ describe('ChannelBase', () => {
       });
     }
 
+    function emitUserQuestion(sessionId: string, requestId: string): void {
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId,
+        sessionId,
+        request: {
+          toolCall: {
+            toolCallId: `tool-${requestId}`,
+            kind: 'other',
+            title: 'AskUserQuestion: Ask user 1 question',
+            rawInput: {
+              questions: [
+                {
+                  header: 'Region',
+                  question: 'Which region?',
+                  options: [
+                    {
+                      label: 'Beijing',
+                      description: 'Use Beijing staging.',
+                    },
+                    {
+                      label: 'Shanghai',
+                      description: 'Use Shanghai staging.',
+                    },
+                  ],
+                },
+              ],
+            },
+            _meta: {
+              toolName: 'ask_user_question',
+              qwenInteractionKind: 'user_question',
+              qwenQuestions: [
+                {
+                  header: 'Region',
+                  question: 'Which region?',
+                  options: [
+                    {
+                      label: 'Beijing',
+                      description: 'Use Beijing staging.',
+                    },
+                    {
+                      label: 'Shanghai',
+                      description: 'Use Shanghai staging.',
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+          options: [
+            {
+              optionId: 'proceed_once',
+              kind: 'allow_once',
+              name: 'Submit',
+            },
+            { optionId: 'cancel', kind: 'reject_once', name: 'Cancel' },
+          ],
+        },
+      });
+    }
+
     async function startSession(
       ch: TestChannel,
       env: Partial<Envelope> = {},
@@ -1037,6 +1116,487 @@ describe('ChannelBase', () => {
         .results;
       return results[results.length - 1]!.value as string;
     }
+
+    async function startActiveSession(
+      ch: TestChannel,
+      env: Partial<Envelope> = {},
+    ): Promise<{
+      sessionId: string;
+      finish(response?: string): Promise<void>;
+    }> {
+      let resolvePrompt!: (value: string) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise<string>((resolve) => {
+          resolvePrompt = resolve;
+        }),
+      );
+      const running = ch.handleInbound(
+        envelope({ text: 'run tests', messageId: 'active-message', ...env }),
+      );
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+      return {
+        sessionId,
+        async finish(response = '') {
+          resolvePrompt(response);
+          await running;
+        },
+      };
+    }
+
+    it('presents canonical semantic user input with normalized questions', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId: 'req-question',
+        sessionId: active.sessionId,
+        request: {
+          toolCall: {
+            toolCallId: 'tool-question',
+            kind: 'other',
+            title: 'AskUserQuestion: Ask user 2 questions',
+            rawInput: { questions: [{ question: 'stale legacy question' }] },
+            _meta: {
+              toolName: 'ask_user_question',
+              qwenInteractionKind: 'user_question',
+              qwenQuestions: [
+                {
+                  header: 'Region',
+                  question: 'Which region?',
+                  options: [
+                    {
+                      label: 'Beijing',
+                      description: 'Use Beijing staging.',
+                    },
+                    {
+                      label: 'Shanghai',
+                      description: 'Use Shanghai staging.',
+                    },
+                  ],
+                },
+                {
+                  header: 'Signals',
+                  question: 'Which signals?',
+                  options: [
+                    { label: 'Logs', description: 'Collect logs.' },
+                    { label: 'Metrics', description: 'Collect metrics.' },
+                  ],
+                  multiSelect: true,
+                },
+              ],
+            },
+          },
+          options: [
+            {
+              optionId: 'proceed_once',
+              kind: 'allow_once',
+              name: 'Submit',
+            },
+            { optionId: 'cancel', kind: 'reject_once', name: 'Cancel' },
+          ],
+        },
+      });
+
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      expect(ch.userInputPresentations[0]).toMatchObject({
+        requestId: 'req-question',
+        sessionId: active.sessionId,
+        runId: expect.any(String),
+        owner: { kind: 'channel_user', id: 'owner-1' },
+        target: {
+          channelName: 'test-chan',
+          senderId: 'owner-1',
+          chatId: 'chat1',
+        },
+        submitOptionId: 'proceed_once',
+        questions: [
+          {
+            answerKey: '0',
+            header: 'Region',
+            question: 'Which region?',
+            options: [
+              {
+                label: 'Beijing',
+                description: 'Use Beijing staging.',
+              },
+              {
+                label: 'Shanghai',
+                description: 'Use Shanghai staging.',
+              },
+            ],
+            multiSelect: false,
+          },
+          {
+            answerKey: '1',
+            header: 'Signals',
+            question: 'Which signals?',
+            options: [
+              { label: 'Logs', description: 'Collect logs.' },
+              { label: 'Metrics', description: 'Collect metrics.' },
+            ],
+            multiSelect: true,
+          },
+        ],
+      });
+      expect(ch.sent).toEqual([]);
+
+      await active.finish();
+    });
+
+    it('presents identified legacy user input from rawInput questions', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId: 'req-legacy-question',
+        sessionId: active.sessionId,
+        request: {
+          toolCall: {
+            toolCallId: 'tool-legacy-question',
+            kind: 'ask_user_question',
+            title: 'Ask user',
+            rawInput: {
+              questions: [
+                {
+                  header: 'Region',
+                  question: 'Which region?',
+                  options: [
+                    { label: 'A', description: 'Use A.' },
+                    { label: 'B', description: 'Use B.' },
+                  ],
+                },
+              ],
+            },
+          },
+          options: [
+            { optionId: 'proceed_once', name: 'Submit' },
+            { optionId: 'cancel', name: 'Cancel' },
+          ],
+        },
+      });
+
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      expect(ch.userInputPresentations[0]!.questions).toEqual([
+        {
+          answerKey: '0',
+          header: 'Region',
+          question: 'Which region?',
+          options: [
+            { label: 'A', description: 'Use A.' },
+            { label: 'B', description: 'Use B.' },
+          ],
+          multiSelect: false,
+        },
+      ]);
+      expect(ch.sent).toEqual([]);
+
+      await active.finish();
+    });
+
+    it('does not fall back to legacy input when canonical questions are malformed', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId: 'req-malformed-canonical',
+        sessionId: active.sessionId,
+        request: {
+          toolCall: {
+            toolCallId: 'tool-malformed-canonical',
+            kind: 'ask_user_question',
+            title: 'Ask user',
+            rawInput: {
+              questions: [
+                {
+                  header: 'Region',
+                  question: 'Which region?',
+                  options: [
+                    { label: 'A', description: 'Use A.' },
+                    { label: 'B', description: 'Use B.' },
+                  ],
+                },
+              ],
+            },
+            _meta: {
+              qwenInteractionKind: 'user_question',
+              qwenQuestions: [],
+            },
+          },
+          options: [
+            { optionId: 'proceed_once', kind: 'allow_once', name: 'Submit' },
+          ],
+        },
+      });
+
+      await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
+      expect(ch.userInputPresentations).toEqual([]);
+      expect(ch.sent[0]!.text).toContain('Permission required to run a tool');
+
+      await active.finish();
+    });
+
+    it('does not present unrelated tools that happen to contain questions', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+
+      (bridge as unknown as EventEmitter).emit('permissionRequest', {
+        requestId: 'req-unrelated',
+        sessionId: active.sessionId,
+        request: {
+          toolCall: {
+            toolCallId: 'tool-unrelated',
+            kind: 'other',
+            title: 'Configure survey',
+            rawInput: {
+              questions: [
+                {
+                  header: 'Region',
+                  question: 'Which region?',
+                  options: [
+                    { label: 'A', description: 'Use A.' },
+                    { label: 'B', description: 'Use B.' },
+                  ],
+                },
+              ],
+            },
+          },
+          options: [
+            {
+              optionId: 'proceed_once',
+              kind: 'allow_once',
+              name: 'Allow once',
+            },
+          ],
+        },
+      });
+
+      await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
+      expect(ch.userInputPresentations).toEqual([]);
+      expect(ch.sent[0]!.text).toContain('Permission required to run a tool');
+
+      await active.finish();
+    });
+
+    it('falls back when handled is returned without responding', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'handled' };
+      const active = await startActiveSession(ch);
+
+      emitUserQuestion(active.sessionId, 'req-unhandled');
+
+      await vi.waitFor(() => expect(ch.sent).toHaveLength(1));
+      expect(ch.userInputPresentations).toHaveLength(1);
+      expect(ch.sent[0]!.text).toContain('Permission required to run a tool');
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+
+      await active.finish();
+    });
+
+    it('accepts handled only when the hook synchronously invokes respond', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationHandler = async (context) => {
+        void context.respond({
+          outcome: { outcome: 'selected', optionId: 'cancel' },
+        });
+        return { kind: 'handled' };
+      };
+      const active = await startActiveSession(ch);
+
+      emitUserQuestion(active.sessionId, 'req-handled-response');
+
+      await vi.waitFor(() =>
+        expect(respondToPermissionMock()).toHaveBeenCalledOnce(),
+      );
+      expect(ch.sent).toEqual([]);
+      expect(respondToPermissionMock()).toHaveBeenCalledWith(
+        'req-handled-response',
+        { outcome: { outcome: 'selected', optionId: 'cancel' } },
+      );
+
+      await active.finish();
+    });
+
+    it('uses one response promise and emits one typed user input settlement', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+      emitUserQuestion(active.sessionId, 'req-one-shot');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      const context = ch.userInputPresentations[0]!;
+      const settled = vi.fn();
+      context.onSettled(settled);
+      respondToPermissionMock().mockImplementation(
+        async (requestId: string, response: { outcome: unknown }) => {
+          (bridge as unknown as EventEmitter).emit('permissionResolved', {
+            requestId,
+            outcome: response.outcome,
+          });
+          return true;
+        },
+      );
+      const response = {
+        outcome: { outcome: 'selected' as const, optionId: 'proceed_once' },
+        answers: { '0': 'Beijing' },
+      };
+
+      const first = context.respond(response);
+      const second = context.respond(response);
+
+      await expect(first).resolves.toBe(true);
+      await expect(second).resolves.toBe(true);
+      expect(respondToPermissionMock()).toHaveBeenCalledTimes(1);
+      expect(settled).toHaveBeenCalledOnce();
+      expect(settled).toHaveBeenCalledWith('resolved_outside_card');
+
+      await active.finish();
+    });
+
+    it('settles a rejected user input response as cancelled', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+      emitUserQuestion(active.sessionId, 'req-response-error');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      const context = ch.userInputPresentations[0]!;
+      const settled = vi.fn();
+      context.onSettled(settled);
+      respondToPermissionMock().mockRejectedValueOnce(
+        new Error('bridge response failed'),
+      );
+
+      await expect(
+        context.respond({
+          outcome: { outcome: 'selected', optionId: 'proceed_once' },
+          answers: { '0': 'Beijing' },
+        }),
+      ).rejects.toThrow('bridge response failed');
+      expect(settled).toHaveBeenCalledOnce();
+      expect(settled).toHaveBeenCalledWith('cancelled');
+
+      await active.finish();
+    });
+
+    it('settles semantic user input when another client resolves it', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+      emitUserQuestion(active.sessionId, 'req-external');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      const settled = vi.fn();
+      const unsubscribed = vi.fn();
+      const context = ch.userInputPresentations[0]!;
+      context.onSettled(settled);
+      const unsubscribe = context.onSettled(unsubscribed);
+      unsubscribe();
+
+      (bridge as unknown as EventEmitter).emit('permissionResolved', {
+        requestId: 'req-external',
+        outcome: { outcome: 'cancelled' },
+      });
+
+      expect(settled).toHaveBeenCalledOnce();
+      expect(settled).toHaveBeenCalledWith('cancelled');
+      expect(unsubscribed).not.toHaveBeenCalled();
+
+      await active.finish();
+    });
+
+    it('settles semantic user input with run cancellation before bridge cleanup', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+      emitUserQuestion(active.sessionId, 'req-run-cancel');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      const context = ch.userInputPresentations[0]!;
+      const settled = vi.fn();
+      context.onSettled(settled);
+
+      await expect(
+        ch.cancelRunForTest(active.sessionId, context.runId),
+      ).resolves.toBe(true);
+
+      expect(settled).toHaveBeenCalledOnce();
+      expect(settled).toHaveBeenCalledWith('run_cancelled');
+
+      await active.finish();
+    });
+
+    it('requires card-presented questions to be submitted or denied', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch, { senderId: 'owner-1' });
+      emitUserQuestion(active.sessionId, 'req-card-command');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      const settled = vi.fn();
+      ch.userInputPresentations[0]!.onSettled(settled);
+
+      await ch.handleInbound(
+        envelope({
+          senderId: 'owner-1',
+          text: '/approve req-card-command',
+        }),
+      );
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toContain(
+        'Submit this question through its interactive card',
+      );
+
+      await ch.handleInbound(
+        envelope({
+          senderId: 'owner-1',
+          text: '/deny req-card-command',
+        }),
+      );
+
+      expect(respondToPermissionMock()).toHaveBeenCalledOnce();
+      expect(respondToPermissionMock()).toHaveBeenCalledWith(
+        'req-card-command',
+        { outcome: { outcome: 'selected', optionId: 'cancel' } },
+      );
+      expect(settled).toHaveBeenCalledWith('cancelled');
+
+      await active.finish();
+    });
+
+    it('rejects card-presented denial from another shared-session user', async () => {
+      const ch = createChannel({
+        groupPolicy: 'open',
+        sessionScope: 'single',
+      });
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch, {
+        chatId: 'group-1',
+        isGroup: true,
+        isMentioned: true,
+        senderId: 'owner-1',
+      });
+      emitUserQuestion(active.sessionId, 'req-owner-only');
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group-1',
+          isGroup: true,
+          isMentioned: true,
+          senderId: 'other-user',
+          text: '/deny req-owner-only',
+        }),
+      );
+
+      expect(respondToPermissionMock()).not.toHaveBeenCalled();
+      expect(ch.sent.at(-1)?.text).toBe(
+        'No pending permission request with that id for this chat.',
+      );
+
+      await active.finish();
+    });
 
     it('sends permission requests to the owning chat and approves with /approve', async () => {
       const ch = createChannel();

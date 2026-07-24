@@ -102,6 +102,9 @@ export type {
   ChannelTaskLifecycleBase,
   ChannelTaskLifecycleEvent,
   ChannelType,
+  ChannelUserInputRequestContext,
+  ChannelUserInputResponse,
+  ChannelUserQuestion,
   DispatchMode,
   DmPolicy,
   Envelope,
@@ -118,4 +121,6 @@ export type {
   SenderPolicy,
   SessionScope,
   SessionTarget,
+  UserInputPresentationResult,
+  UserInputSettlementReason,
 } from './types.js';

@@ -1,3 +1,4 @@
+import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
 import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import type { ChannelBase, ChannelBaseOptions } from './ChannelBase.js';
 import type { ChannelWebhookConfig } from './ChannelWebhookTask.js';
@@ -182,6 +183,43 @@ export interface ObservedChannelContactGraph {
 export interface ChannelPromptOwner {
   kind: 'channel_user';
   id: string;
+}
+
+export type UserInputPresentationResult =
+  | { kind: 'presented' }
+  | { kind: 'handled' }
+  | { kind: 'unsupported' };
+
+export type UserInputSettlementReason =
+  | 'resolved_outside_card'
+  | 'cancelled'
+  | 'run_cancelled';
+
+export type ChannelUserInputResponse = RequestPermissionResponse & {
+  answers?: Record<string, string>;
+};
+
+export interface ChannelUserQuestion {
+  answerKey: string;
+  header: string;
+  question: string;
+  options: Array<{
+    label: string;
+    description: string;
+  }>;
+  multiSelect: boolean;
+}
+
+export interface ChannelUserInputRequestContext {
+  requestId: string;
+  sessionId: string;
+  runId: string;
+  owner: ChannelPromptOwner;
+  target: SessionTarget;
+  questions: ChannelUserQuestion[];
+  submitOptionId: string;
+  onSettled(listener: (reason: UserInputSettlementReason) => void): () => void;
+  respond(response: ChannelUserInputResponse): Promise<boolean>;
 }
 
 export interface ChannelProactiveTarget {
