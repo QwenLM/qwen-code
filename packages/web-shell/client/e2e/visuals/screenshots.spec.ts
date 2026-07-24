@@ -423,16 +423,31 @@ for (const theme of THEMES) {
       // Open: the three-mode popover (current / new branch / worktree). Assert
       // an option is visible (not just the chip's aria-label) so a regression
       // that fails to open the popover fails here, not only in the visually
-      // reviewed screenshot. The branch-name sub-state is intentionally not
-      // captured: its input autoFocuses, and the popover then dismisses on the
-      // idle frame captureScreenshot waits for — so it can't be shot stably
-      // through this pipeline (the functional web-shell.git-mode.spec.ts drives
-      // that path). The chip + open popover already show the new UI head-only.
+      // reviewed screenshot.
       await chip.click();
       await expect(
         page.getByText('Current branch', { exact: true }),
       ).toBeVisible();
       await captureScreenshot(page, `git-mode-popover-${theme}`);
+
+      // New-branch mode: reveals the branch-name input (validated ✓) and the
+      // Create-branch affordance. Selecting an option once dismissed the popover
+      // — the click bubbled through the React tree (portaled content) to the
+      // composer surface's onClick → core.focus() → Radix focus-outside close —
+      // until #7668 stopped that propagation on PopoverContent. So this capture
+      // both shows the sub-state the previous revision couldn't and stands as a
+      // visual regression guard: if that dismissal ever returns, the input goes
+      // missing and this assertion fails here, not just in the screenshot.
+      // Match the option by role — its label is split across a name + a
+      // description span, so getByText('New branch') is ambiguous (#7668).
+      await page.getByRole('radio', { name: /New branch/ }).click();
+      const branchInput = page.locator('[data-testid="git-mode-branch-input"]');
+      await expect(branchInput).toBeVisible();
+      await branchInput.fill('feat/my-feature');
+      await expect(
+        page.locator('[data-testid="git-mode-confirm-branch"]'),
+      ).toBeVisible();
+      await captureScreenshot(page, `git-mode-branch-${theme}`);
     });
 
     test(`slash menu`, async ({ page }, testInfo) => {
