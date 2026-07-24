@@ -5825,7 +5825,7 @@ export class Config {
   }
 
   getImageGenerationConfig(): ImageGenerationConfig | undefined {
-    if (this.bareMode || this.safeMode || isSafeModeEnv()) return undefined;
+    if (this.bareMode || this.safeMode) return undefined;
     return this.resolveImageGenerationModel(this.imageModel);
   }
 
