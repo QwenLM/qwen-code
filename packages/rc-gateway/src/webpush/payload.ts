@@ -165,6 +165,22 @@ export function buildPayload(
     };
   }
 
+  if (event.type === 'approval_mode_changed') {
+    const d = event.data as { next?: unknown } | undefined;
+    const next =
+      typeof d?.next === 'string' && d.next.length > 0 ? d.next : undefined;
+    return {
+      v: 1,
+      kind: 'session.approval_mode_changed',
+      sessionId: ctx.sessionId,
+      ...(ctx.sessionName ? { sessionName: ctx.sessionName } : {}),
+      summary: truncate(
+        next ? `Approval mode → ${next}` : 'Approval mode changed',
+      ),
+      url: sessionUrl(ctx.sessionId),
+    };
+  }
+
   switch (event.type) {
     case 'permission_request': {
       const toolCall = data.toolCall as { title?: unknown } | undefined;

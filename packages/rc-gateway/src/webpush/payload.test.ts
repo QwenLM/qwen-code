@@ -404,3 +404,32 @@ describe('session_rewound push payload', () => {
     expect(SNOOZE_BYPASS_KINDS.has('session.rewound')).toBe(false);
   });
 });
+
+describe('approval_mode_changed push payload', () => {
+  it('maps approval_mode_changed to session.approval_mode_changed with the next mode', () => {
+    const p = buildPayload(
+      {
+        type: 'approval_mode_changed',
+        data: {
+          sessionId: 's1',
+          previous: 'default',
+          next: 'plan',
+          persisted: false,
+        },
+      },
+      { sessionId: 's1' },
+    );
+    expect(p).not.toBeNull();
+    expect(p!.kind).toBe('session.approval_mode_changed');
+    expect(p!.summary).toBe('Approval mode → plan');
+  });
+
+  it('gives approval_mode_changed a generic summary when next is absent', () => {
+    const p = buildPayload(
+      { type: 'approval_mode_changed', data: { sessionId: 's1' } },
+      { sessionId: 's1' },
+    );
+    expect(p!.kind).toBe('session.approval_mode_changed');
+    expect(p!.summary).toBe('Approval mode changed');
+  });
+});

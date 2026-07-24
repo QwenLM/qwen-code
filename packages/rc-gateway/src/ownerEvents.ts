@@ -111,6 +111,18 @@ export interface ReviewLifecyclePayload {
 }
 
 /**
+ * Payload of an `approval_mode_changed` frame, emitted when a session's
+ * approval mode is set via the remote-control route and forwarded from the
+ * daemon's own `approval_mode_changed` event (add-remote-approval-mode).
+ */
+export interface ApprovalModePayload {
+  sessionId: string;
+  previous: string;
+  next: string;
+  persisted: boolean;
+}
+
+/**
  * A frame broadcast on the owner-level event stream. A discriminated union so
  * producers can add variants without breaking consumers (clients switch on
  * `type` and ignore unknown frames). The `/rc/events` route JSON-stringifies the
@@ -132,6 +144,8 @@ export interface ReviewLifecyclePayload {
  *  - `review_*`: review lifecycle frames (add-remote-review) emitted as a
  *    tagged daemon session runs the `/review` skill against a PR, path, or
  *    the local working tree.
+ *  - `approval_mode_changed`: a session's approval mode was set (mirrors the
+ *    daemon's own `approval_mode_changed` event; add-remote-approval-mode).
  */
 export type OwnerEvent =
   | { type: 'audit'; record: AuditRecord }
@@ -160,6 +174,11 @@ export type OwnerEvent =
       /** Review lifecycle frame (add-remote-review). */
       type: ReviewLifecycleEventType;
       review: ReviewLifecyclePayload;
+    }
+  | {
+      /** Approval-mode change frame (add-remote-approval-mode). */
+      type: 'approval_mode_changed';
+      mode: ApprovalModePayload;
     }
   | {
       /**
