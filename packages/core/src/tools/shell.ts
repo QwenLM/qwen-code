@@ -980,6 +980,7 @@ export function parseNumstat(numstatOutput: string): Map<string, number> {
 
 export const OUTPUT_UPDATE_INTERVAL_MS = 1000;
 export const DEFAULT_SHELL_HEARTBEAT_INTERVAL_MS = 10_000;
+const BACKGROUND_SHELL_STATUS_INTERVAL_MS = 5_000;
 const DEFAULT_FOREGROUND_TIMEOUT_MS = 120000;
 
 /**
@@ -3558,6 +3559,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     const shellId = `bg_${crypto.randomBytes(4).toString('hex')}`;
     const outputPath = path.join(outputDir, `shell-${shellId}.output`);
+    const statusPath = path.join(outputDir, `shell-${shellId}.status`);
 
     // Background shells are explicitly independent of the current turn:
     // the user pressing Ctrl+C on a turn (which aborts `signal`) should
@@ -3647,10 +3649,50 @@ export class ShellToolInvocation extends BaseToolInvocation<
       throw e;
     }
 
+    const writeRunningStatus = () => {
+      try {
+        fs.writeFileSync(
+          statusPath,
+          [
+            `id: ${shellId}`,
+            'status: RUNNING',
+            `pid: ${pid ?? 'unknown'}`,
+            `alive as of: ${new Date().toISOString()}`,
+            'An empty output file does not mean this process exited; programs may buffer output.',
+          ].join('\n') + '\n',
+          'utf8',
+        );
+      } catch (e) {
+        debugLogger.warn(
+          `background shell ${shellId} status write error: ${getErrorMessage(e)}`,
+        );
+      }
+    };
+    writeRunningStatus();
+    const statusTimer = setInterval(
+      writeRunningStatus,
+      BACKGROUND_SHELL_STATUS_INTERVAL_MS,
+    );
+    statusTimer.unref();
+
+    const removeRunningStatus = () => {
+      clearInterval(statusTimer);
+      try {
+        fs.unlinkSync(statusPath);
+      } catch (e) {
+        if (!(isNodeError(e) && e.code === 'ENOENT')) {
+          debugLogger.warn(
+            `background shell ${shellId} status cleanup error: ${getErrorMessage(e)}`,
+          );
+        }
+      }
+    };
+
     // Settle in the background — do NOT await here, the agent should be
     // unblocked immediately.
     void resultPromise.then(
       (result) => {
+        removeRunningStatus();
         outputStream.end();
         const endTime = Date.now();
         if (entryAc.signal.aborted) {
@@ -3677,6 +3719,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
         }
       },
       (err) => {
+        removeRunningStatus();
         outputStream.end();
         registry.fail(shellId, getErrorMessage(err), Date.now());
       },
@@ -3689,6 +3732,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
         `id: ${shellId}\n` +
         pidLine +
         `output file: ${outputPath}\n` +
+        `status file: ${statusPath}\n` +
+        `Status: running. Use the status file for liveness. A quiet or empty output file does not mean the process exited; programs may buffer output. Do not relaunch solely because captured output is empty.\n` +
         `To inspect: /tasks (text) or the interactive Background tasks dialog (focus the footer Background tasks pill, then Enter — detail view + live updates). Read the output file directly to view the captured output.`,
       returnDisplay: `Background shell ${shellId} started${pid !== undefined ? ` (pid ${pid})` : ''}.`,
     };
