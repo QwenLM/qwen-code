@@ -28,6 +28,8 @@ import {
 } from '../agents/runtime/subagent-plan-tool-policy.js';
 import { getTeammateContext } from '../agents/team/identity.js';
 import type { TeamPlanApprovalDecision } from '../agents/team/TeamManager.js';
+import { StructuredToolError } from './priorReadEnforcement.js';
+import { ToolErrorType } from './tool-error.js';
 
 const debugLogger = createDebugLogger('EXIT_PLAN_MODE');
 
@@ -144,7 +146,10 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
       return super.getConfirmationDetails(abortSignal);
     }
     if (this.config.getApprovalMode() !== ApprovalMode.PLAN) {
-      throw new Error(this.outsidePlanGuidanceMessage());
+      throw new StructuredToolError(
+        this.outsidePlanGuidanceMessage(),
+        ToolErrorType.EXECUTION_DENIED,
+      );
     }
 
     const snapshot: ExitApprovalSnapshot = {
@@ -209,7 +214,10 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
     // permission deny (#7671). If there IS an approval snapshot, let the
     // stale-revision check below handle it (concurrent exit scenario).
     if (this.config.getApprovalMode() !== ApprovalMode.PLAN && !this.approval) {
-      return this.errorResult(this.outsidePlanGuidanceMessage());
+      return this.errorResult(
+        this.outsidePlanGuidanceMessage(),
+        ToolErrorType.EXECUTION_DENIED,
+      );
     }
 
     const { plan, originalRequest, researchSummary } = this.params;
@@ -382,11 +390,11 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
     }
   }
 
-  private errorResult(message: string): ToolResult {
+  private errorResult(message: string, type?: ToolErrorType): ToolResult {
     return {
       llmContent: message,
       returnDisplay: message,
-      error: { message },
+      error: { message, type },
     };
   }
 
