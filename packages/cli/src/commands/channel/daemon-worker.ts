@@ -635,7 +635,7 @@ export async function runChannelDaemonWorker(
               jobWorkspace = undefined;
             }
             if (jobWorkspace !== daemonWorkspace) {
-              await loopStore.disable(job.id);
+              await loopStore.disable(job.id).catch(() => false);
               writeStderrLine(
                 `[Channel] Disabled loop "${sanitizeLogText(job.id, 128)}": its workspace does not match this daemon worker.`,
               );

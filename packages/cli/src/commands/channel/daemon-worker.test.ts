@@ -984,6 +984,15 @@ describe('runChannelDaemonWorker', () => {
     );
     expect(channel.runLoopPrompt).not.toHaveBeenCalled();
 
+    mockChannelLoopStoreDisable.mockRejectedValueOnce(new Error('disk full'));
+    await expect(
+      runner.runLoopPrompt({ id: 'unwritable-loop', cwd: '/other' }),
+    ).rejects.toThrow('outside daemon workspace');
+    expect(mockWriteStderrLine).toHaveBeenCalledWith(
+      '[Channel] Disabled loop "unwritable-loop": its workspace does not match this daemon worker.',
+    );
+    expect(channel.runLoopPrompt).not.toHaveBeenCalled();
+
     await expect(
       runner.runLoopPrompt({ id: 'local-loop', cwd: '/workspace' }),
     ).resolves.toBe('done');
