@@ -59,12 +59,19 @@ export function resolveOwnsModel(
 }
 
 function buildGenerationConfig(
-  spec: Pick<ModelSpec, 'enableThinking' | 'contextWindowSize' | 'modalities'>,
+  spec: Pick<
+    ModelSpec,
+    'enableThinking' | 'thinkingMandatory' | 'contextWindowSize' | 'modalities'
+  >,
 ): ProviderModelConfig['generationConfig'] | undefined {
   const parts: ProviderModelConfig['generationConfig'] = {};
   let hasAny = false;
   if (spec.enableThinking) {
     parts.extra_body = { enable_thinking: true };
+    hasAny = true;
+  }
+  if (spec.thinkingMandatory) {
+    parts.thinkingMandatory = true;
     hasAny = true;
   }
   if (spec.contextWindowSize) {

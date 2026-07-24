@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code-core",
-  "version": "0.20.0",
+  "version": "0.20.1",
   "description": "Qwen Code Core",
   "repository": {
     "type": "git",
@@ -16,6 +16,10 @@
     "./transcriptRecords": {
       "types": "./dist/src/utils/transcript-records.d.ts",
       "import": "./dist/src/utils/transcript-records.js"
+    },
+    "./goalWire": {
+      "types": "./dist/src/goals/goal-wire.d.ts",
+      "import": "./dist/src/goals/goal-wire.js"
     },
     "./package.json": "./package.json",
     "./dist/*": "./dist/*",

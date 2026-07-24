@@ -22,10 +22,16 @@ import type OpenAI from 'openai';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { createOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
+import {
+  estimateTextTokens,
+  estimateTextTokenUnits,
+  TOKEN_ESTIMATE_UNITS_PER_TOKEN,
+} from '../../utils/request-tokenizer/textTokenizer.js';
 import type { RequestContext, StreamingTextDeltaState } from './types.js';
 import { parseTaggedThinkingText } from './taggedThinkingParser.js';
 import {
   convertSchema,
+  relaxSchemaForFunctionCalling,
   type SchemaComplianceMode,
 } from '../../utils/schemaConverter.js';
 import {
@@ -34,6 +40,7 @@ import {
 } from '../tool-call-preparation.js';
 import { InvalidStreamError } from '../invalid-stream-error.js';
 import { normalizeMcpToolName } from '../../utils/tool-name-utils.js';
+import { setGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 
 const debugLogger = createDebugLogger('CONVERTER');
 const SPLIT_TOOL_MEDIA_TEXT = '(attached media from previous tool call)';
@@ -359,6 +366,13 @@ export async function convertGeminiToolsToOpenAI(
 
           if (parameters) {
             parameters = convertSchema(parameters, schemaCompliance);
+            // #7315: gateways enforcing OpenAI's structured-output contract
+            // promote every property to required when an object level has
+            // `additionalProperties: false` — forcing the model to emit
+            // mutually exclusive optional fields (Agent working_dir vs
+            // isolation). Relax the wire schema; client-side
+            // validateToolParams still enforces the source schema.
+            parameters = relaxSchemaForFunctionCalling(parameters);
           }
 
           openAITools.push({
@@ -1179,6 +1193,8 @@ export function convertOpenAIResponseToGemini(
   requestContext: RequestContext,
 ): GenerateContentResponse {
   const choice = openaiResponse.choices?.[0];
+  const message = choice?.message as ExtendedCompletionMessage | undefined;
+  const reasoningText = message?.reasoning_content ?? message?.reasoning;
   const response = new GenerateContentResponse();
 
   if (choice) {
@@ -1191,9 +1207,6 @@ export function convertOpenAIResponseToGemini(
     // Tagged thinking providers may put thoughts in content, while other
     // responses still use reasoning_content. Preserve the separate reasoning
     // channel unless content parsing already produced thought parts.
-    const reasoningText =
-      (choice.message as ExtendedCompletionMessage).reasoning_content ??
-      (choice.message as ExtendedCompletionMessage).reasoning;
     if (reasoningText && !hasThoughtPart(textParts)) {
       parts.push(createOpenAIReasoningThoughtPart(reasoningText));
     }
@@ -1243,7 +1256,7 @@ export function convertOpenAIResponseToGemini(
     ? openaiResponse.created.toString()
     : new Date().getTime().toString();
 
-  response.modelVersion = requestContext.model;
+  response.modelVersion = openaiResponse.model || undefined;
   response.promptFeedback = { safetyRatings: [] };
 
   // Add usage metadata if available
@@ -1260,29 +1273,42 @@ export function convertOpenAIResponseToGemini(
       usage.prompt_tokens_details?.cached_tokens ??
       extendedUsage.cached_tokens ??
       0;
-    const thinkingTokens =
-      usage.completion_tokens_details?.reasoning_tokens || 0;
-
-    // If we only have total tokens but no breakdown, estimate the split
-    // Typically input is ~70% and output is ~30% for most conversations
-    let finalPromptTokens = promptTokens;
-    let finalCompletionTokens = completionTokens;
-
-    if (totalTokens > 0 && promptTokens === 0 && completionTokens === 0) {
-      // Estimate: assume 70% input, 30% output. Derive completion from the
-      // remainder so the two halves always add back up to totalTokens rather
-      // than rounding each independently (e.g. 5 would give 4 + 2 = 6).
-      finalPromptTokens = Math.round(totalTokens * 0.7);
-      finalCompletionTokens = totalTokens - finalPromptTokens;
+    const cachedInputTokensReported =
+      typeof usage.prompt_tokens_details?.cached_tokens === 'number' ||
+      typeof extendedUsage.cached_tokens === 'number';
+    const providerReasoningTokens =
+      usage.completion_tokens_details?.reasoning_tokens;
+    let thinkingTokens = providerReasoningTokens;
+    if (thinkingTokens == null) {
+      const estimatedThinkingTokens = estimateTextTokens(reasoningText ?? '');
+      thinkingTokens =
+        completionTokens > 0
+          ? Math.min(estimatedThinkingTokens, completionTokens)
+          : estimatedThinkingTokens;
+      if (thinkingTokens > 0) {
+        debugLogger.debug(
+          `convertOpenAIResponseToGemini: reasoning_tokens absent; estimated ${thinkingTokens} from text`,
+        );
+      }
     }
 
+    const hasTokenBreakdown =
+      totalTokens === 0 || promptTokens !== 0 || completionTokens !== 0;
+
     response.usageMetadata = {
-      promptTokenCount: finalPromptTokens,
-      candidatesTokenCount: finalCompletionTokens,
+      ...(hasTokenBreakdown
+        ? {
+            promptTokenCount: promptTokens,
+            candidatesTokenCount: completionTokens,
+          }
+        : {}),
       totalTokenCount: totalTokens,
       cachedContentTokenCount: cachedTokens,
       thoughtsTokenCount: thinkingTokens,
     };
+    setGenAiUsageProvenance(response.usageMetadata, {
+      cachedInputTokensReported,
+    });
   }
 
   return response;
@@ -1363,15 +1389,19 @@ export function convertOpenAIChunkToGemini(
       (!requestContext.responseParsingOptions?.taggedThinkingTags ||
         !requestContext.hasTaggedThinkingThought)
     ) {
+      const reasoningDeltaState = (requestContext.reasoningDeltaState ??= {
+        emittedText: '',
+        emittedLength: 0,
+        cumulativeMode: false,
+      });
       const normalizedReasoningText = normalizeStreamingTextDelta(
         reasoningText,
-        (requestContext.reasoningDeltaState ??= {
-          emittedText: '',
-          emittedLength: 0,
-          cumulativeMode: false,
-        }),
+        reasoningDeltaState,
       );
       if (normalizedReasoningText) {
+        reasoningDeltaState.emittedTokenUnits =
+          (reasoningDeltaState.emittedTokenUnits ?? 0) +
+          estimateTextTokenUnits(normalizedReasoningText);
         requestContext.hasStructuredReasoningContent = true;
         if (THINKING_TAG_PATTERN.test(normalizedReasoningText)) {
           requestContext.hasThinkingTagInReasoning = true;
@@ -1708,7 +1738,7 @@ export function convertOpenAIChunkToGemini(
     ? chunk.created.toString()
     : new Date().getTime().toString();
 
-  response.modelVersion = requestContext.model;
+  response.modelVersion = chunk.model || undefined;
   response.promptFeedback = { safetyRatings: [] };
 
   // Add usage metadata if available in the chunk
@@ -1718,8 +1748,22 @@ export function convertOpenAIChunkToGemini(
     const promptTokens = usage.prompt_tokens || 0;
     const completionTokens = usage.completion_tokens || 0;
     const totalTokens = usage.total_tokens || 0;
+    const providerReasoningTokens =
+      usage.completion_tokens_details?.reasoning_tokens;
+    const estimatedThinkingTokens = Math.ceil(
+      (requestContext.reasoningDeltaState?.emittedTokenUnits ?? 0) /
+        TOKEN_ESTIMATE_UNITS_PER_TOKEN,
+    );
     const thinkingTokens =
-      usage.completion_tokens_details?.reasoning_tokens || 0;
+      providerReasoningTokens ??
+      (completionTokens > 0
+        ? Math.min(estimatedThinkingTokens, completionTokens)
+        : estimatedThinkingTokens);
+    if (providerReasoningTokens == null && estimatedThinkingTokens > 0) {
+      debugLogger.debug(
+        `convertOpenAIChunkToGemini: reasoning_tokens absent; estimated ${thinkingTokens} from streamed text`,
+      );
+    }
     // Support both formats: prompt_tokens_details.cached_tokens (OpenAI standard)
     // and cached_tokens (some models return it at top level)
     const extendedUsage = usage as ExtendedCompletionUsage;
@@ -1727,27 +1771,27 @@ export function convertOpenAIChunkToGemini(
       usage.prompt_tokens_details?.cached_tokens ??
       extendedUsage.cached_tokens ??
       0;
+    const cachedInputTokensReported =
+      typeof usage.prompt_tokens_details?.cached_tokens === 'number' ||
+      typeof extendedUsage.cached_tokens === 'number';
 
-    // If we only have total tokens but no breakdown, estimate the split
-    // Typically input is ~70% and output is ~30% for most conversations
-    let finalPromptTokens = promptTokens;
-    let finalCompletionTokens = completionTokens;
-
-    if (totalTokens > 0 && promptTokens === 0 && completionTokens === 0) {
-      // Estimate: assume 70% input, 30% output. Derive completion from the
-      // remainder so the two halves always add back up to totalTokens rather
-      // than rounding each independently (e.g. 5 would give 4 + 2 = 6).
-      finalPromptTokens = Math.round(totalTokens * 0.7);
-      finalCompletionTokens = totalTokens - finalPromptTokens;
-    }
+    const hasTokenBreakdown =
+      totalTokens === 0 || promptTokens !== 0 || completionTokens !== 0;
 
     response.usageMetadata = {
-      promptTokenCount: finalPromptTokens,
-      candidatesTokenCount: finalCompletionTokens,
+      ...(hasTokenBreakdown
+        ? {
+            promptTokenCount: promptTokens,
+            candidatesTokenCount: completionTokens,
+          }
+        : {}),
       thoughtsTokenCount: thinkingTokens,
       totalTokenCount: totalTokens,
       cachedContentTokenCount: cachedTokens,
     };
+    setGenAiUsageProvenance(response.usageMetadata, {
+      cachedInputTokensReported,
+    });
   }
 
   if (preparations.length > 0) {

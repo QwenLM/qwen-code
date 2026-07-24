@@ -274,7 +274,15 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.enterCategory(1));
     await runDebounce();
 
-    expect(latest!.state?.items[0]?.description).toBe('Reviewtxt中文');
+    expect(latest!.state?.items[0]).toMatchObject({
+      description: 'Reviewtxt中文',
+      composerTag: {
+        id: 'extension:@ext:review',
+        kind: 'extension',
+        value: 'Reviewtxt中文',
+        serialized: '@ext:review',
+      },
+    });
   });
 
   it('filters cached extension provider data while searching', async () => {
@@ -716,57 +724,63 @@ describe('useAtMentionMenu', () => {
     });
   });
 
-  it('decorates accepted extension refs as inline composer tags', async () => {
-    vi.useFakeTimers();
-    const inlineTagEffect = StateEffect.define<{
-      from: number;
-      to: number;
-      tag: WebShellComposerTag;
-    }>();
-    const view = makeView('@');
-    mount({
-      view,
-      createInlineTagEffect: (range) => inlineTagEffect.of(range),
-      actions: {
-        loadExtensionsStatus: vi.fn().mockResolvedValue({
-          extensions: [
-            {
-              name: 'review',
-              displayName: 'Review',
-              isActive: true,
-            },
-          ],
-        }),
-      },
-    });
+  it.each([
+    ['localized displayName', 'Review', 'Review'],
+    ['extension name fallback', undefined, 'review'],
+  ])(
+    'decorates accepted extension refs using the %s',
+    async (_case, displayName, expectedValue) => {
+      vi.useFakeTimers();
+      const inlineTagEffect = StateEffect.define<{
+        from: number;
+        to: number;
+        tag: WebShellComposerTag;
+      }>();
+      const view = makeView('@');
+      mount({
+        view,
+        createInlineTagEffect: (range) => inlineTagEffect.of(range),
+        actions: {
+          loadExtensionsStatus: vi.fn().mockResolvedValue({
+            extensions: [
+              {
+                name: 'review',
+                ...(displayName ? { displayName } : {}),
+                isActive: true,
+              },
+            ],
+          }),
+        },
+      });
 
-    act(() => latest!.refreshForView(view));
-    act(() => latest!.enterCategory(1));
-    await runDebounce();
-    act(() => {
-      expect(latest!.accept()).toBe(true);
-    });
+      act(() => latest!.refreshForView(view));
+      act(() => latest!.enterCategory(1));
+      await runDebounce();
+      act(() => {
+        expect(latest!.accept()).toBe(true);
+      });
 
-    const spec = vi.mocked(view.dispatch).mock.calls[0]?.[0];
-    expect(spec).toMatchObject({
-      changes: { from: 0, to: 1, insert: '@ext:review ' },
-      selection: { anchor: 12 },
-      scrollIntoView: true,
-    });
-    expect(Array.isArray(spec?.effects)).toBe(true);
-    const effect = Array.isArray(spec?.effects) ? spec.effects[0] : undefined;
-    expect(effect?.is(inlineTagEffect)).toBe(true);
-    expect(effect?.value).toEqual({
-      from: 0,
-      to: 11,
-      tag: {
-        id: 'extension:@ext:review',
-        kind: 'extension',
-        value: 'review',
-        serialized: '@ext:review',
-      },
-    });
-  });
+      const spec = vi.mocked(view.dispatch).mock.calls[0]?.[0];
+      expect(spec).toMatchObject({
+        changes: { from: 0, to: 1, insert: '@ext:review ' },
+        selection: { anchor: 12 },
+        scrollIntoView: true,
+      });
+      expect(Array.isArray(spec?.effects)).toBe(true);
+      const effect = Array.isArray(spec?.effects) ? spec.effects[0] : undefined;
+      expect(effect?.is(inlineTagEffect)).toBe(true);
+      expect(effect?.value).toEqual({
+        from: 0,
+        to: 11,
+        tag: {
+          id: 'extension:@ext:review',
+          kind: 'extension',
+          value: expectedValue,
+          serialized: '@ext:review',
+        },
+      });
+    },
+  );
 
   it('clears a pending provider search when closing from items', async () => {
     vi.useFakeTimers();

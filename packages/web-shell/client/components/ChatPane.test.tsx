@@ -73,6 +73,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     loading: false,
     capacityReached: false,
     loadMore: vi.fn(),
+    release: vi.fn(),
   }),
   useTranscriptStore: () => ({
     dispatch: transcriptDispatch,
@@ -304,13 +305,19 @@ describe('ChatPane', () => {
       workspaceCwd: '/work/web-shell',
       workspaces: [
         { id: 'w0', cwd: '/work/web-shell', primary: true, trusted: true },
-        { id: 'w1', cwd: '/work/api', primary: false, trusted: true },
+        {
+          id: 'w1',
+          cwd: '/work/api',
+          displayName: 'Payments API',
+          primary: false,
+          trusted: true,
+        },
       ],
     };
     // The split view hands each pane its own workspace explicitly.
     render({ title: 'Add pagination', workspaceCwd: '/work/api' });
     expect(latestChatEditorProps.visibleToolbarActions).toContain('workspace');
-    expect(latestChatEditorProps.workspaceName).toBe('api');
+    expect(latestChatEditorProps.workspaceName).toBe('Payments API');
     expect(latestChatEditorProps.workspaceTitle).toBe('/work/api');
     // The chip carries the pane's stable accent color (api is the 2nd workspace
     // → the 2nd palette color) so it stays distinct when it collapses to an icon.
@@ -323,7 +330,13 @@ describe('ChatPane', () => {
       workspaceCwd: '/work/web-shell',
       workspaces: [
         { id: 'w0', cwd: '/work/web-shell', primary: true, trusted: true },
-        { id: 'w1', cwd: '/work/api', primary: false, trusted: true },
+        {
+          id: 'w1',
+          cwd: '/work/api',
+          displayName: 'Payments API',
+          primary: false,
+          trusted: true,
+        },
       ],
     };
     render({ title: 'Add pagination', workspaceCwd: '/work/api' });
@@ -332,7 +345,7 @@ describe('ChatPane', () => {
     // in a hover tooltip.
     const tag = container!.querySelector('[data-web-shell-pane-workspace]');
     expect(tag).not.toBeNull();
-    expect(tag!.textContent).toContain('api');
+    expect(tag!.textContent).toContain('Payments API');
     expect(tag!.getAttribute('title')).toBe('/work/api');
   });
 
@@ -389,6 +402,87 @@ describe('ChatPane', () => {
     });
     expect(clearFollowup).not.toHaveBeenCalled();
     expect(enqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it('lets the host handle a slash command', () => {
+    const onSlashCommand = vi.fn(() => true);
+    render({ onSlashCommand });
+    let returned: boolean | undefined;
+
+    act(() => {
+      returned = latestOnSubmit!('/deploy production');
+    });
+
+    expect(returned).toBe(true);
+    expect(onSlashCommand).toHaveBeenCalledWith({
+      command: 'deploy',
+      args: 'production',
+      input: '/deploy production',
+    });
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it('forwards a slash command the host does not handle', () => {
+    const onSlashCommand = vi.fn();
+    render({ onSlashCommand });
+
+    act(() => {
+      latestOnSubmit!('/deploy staging');
+    });
+
+    expect(onSlashCommand).toHaveBeenCalledTimes(1);
+    expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
+      onAdmitted: expect.any(Function),
+    });
+  });
+
+  it('lets the host handle a slash command while the pane is disconnected', () => {
+    connectionState.status = 'disconnected';
+    const onSlashCommand = vi.fn(() => true);
+    render({ onSlashCommand });
+
+    act(() => {
+      latestOnSubmit!('/deploy staging');
+    });
+
+    expect(onSlashCommand).toHaveBeenCalledTimes(1);
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('reports a host slash command error and continues default handling', () => {
+    const error = new Error('host handler exploded');
+    const onSlashCommand = vi.fn(() => {
+      throw error;
+    });
+    const onError = vi.fn();
+    render({ onSlashCommand, onError });
+
+    act(() => {
+      latestOnSubmit!('/deploy staging');
+    });
+
+    expect(onError).toHaveBeenCalledWith(
+      error,
+      'onSlashCommand callback failed',
+    );
+    expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
+      onAdmitted: expect.any(Function),
+    });
+  });
+
+  it('does not treat an absolute path as a slash command', () => {
+    const onSlashCommand = vi.fn(() => true);
+    render({ onSlashCommand });
+
+    act(() => {
+      latestOnSubmit!('/usr/local/bin/tool');
+    });
+
+    expect(onSlashCommand).not.toHaveBeenCalled();
+    expect(sendPrompt).toHaveBeenCalledWith('/usr/local/bin/tool', {
+      onAdmitted: expect.any(Function),
+    });
   });
 
   it('commits an idle prompt only after daemon admission', () => {

@@ -18,6 +18,7 @@ import {
   formatChannelWorkerDaemonUrl,
   InvalidPolicyConfigError,
   createDisabledChannelWorkerSupervisor,
+  createBoundChannelDeliveryHandler,
   resolveRuntimeStartupTimeoutMs,
   runQwenServe,
   type RunHandle,
@@ -27,6 +28,7 @@ import {
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { isLoopbackBind } from './loopback-binds.js';
+import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 import * as acpBridge from '@qwen-code/acp-bridge/bridge';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import type {
@@ -49,6 +51,7 @@ import type {
 } from '../commands/channel/pidfile.js';
 import { LARGE_PIPE_FRAME_THRESHOLD_BYTES } from './large-pipe-frame-observer.js';
 import type { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
+import { ChannelDeliveryError } from './channel-delivery-ipc.js';
 import {
   workspaceRegistrationId,
   type WorkspaceRegistrationStore,
@@ -89,6 +92,351 @@ const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
   permissionPolicy: 'first-responder',
   sessions: [],
 };
+
+describe('createBoundChannelDeliveryHandler', () => {
+  const info = {
+    sessionId: 'session-1',
+    deliveryId: 'prompt-1',
+    source: 'prompt' as const,
+    target: { channelName: 'dingtalk', type: 'user' as const, id: 'user-1' },
+    text: 'answer',
+    promptId: 'prompt-1',
+  };
+
+  it('routes only to the workspace captured by the bridge', async () => {
+    const deliverChannelMessage = vi.fn(async () => ({
+      delivered: true as const,
+    }));
+    const authorizations = new ChannelDeliveryAuthorizationStore();
+    authorizations.authorizePrompt('/canonical', {
+      sessionId: info.sessionId,
+      deliveryId: info.deliveryId,
+      target: info.target,
+    });
+    const handler = createBoundChannelDeliveryHandler(
+      '/canonical',
+      () => ({ deliverChannelMessage }) as never,
+      authorizations,
+    );
+
+    await expect(
+      handler({ ...info, workspaceCwd: '/forged' } as never),
+    ).resolves.toEqual({ status: 'delivered' });
+    expect(deliverChannelMessage).toHaveBeenCalledWith('/canonical', {
+      deliveryId: 'prompt-1',
+      channelName: 'dingtalk',
+      target: { type: 'user', id: 'user-1' },
+      text: 'answer',
+    });
+  });
+
+  it('does not lazily start a missing manager and returns a clear failure', async () => {
+    const getManager = vi.fn(() => undefined);
+    const warn = vi.fn(() => {
+      throw new Error('logger unavailable');
+    });
+    const authorizations = new ChannelDeliveryAuthorizationStore();
+    authorizations.authorizePrompt('/canonical', {
+      sessionId: info.sessionId,
+      deliveryId: info.deliveryId,
+      target: info.target,
+    });
+    const handler = createBoundChannelDeliveryHandler(
+      '/canonical',
+      getManager,
+      authorizations,
+      { warn } as never,
+    );
+
+    await expect(handler(info)).resolves.toEqual({
+      status: 'failed',
+      code: 'channel_worker_unavailable',
+      error: 'Channel worker is not running.',
+    });
+    expect(getManager).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith('channel delivery failed', {
+      sessionId: info.sessionId,
+      deliveryId: info.deliveryId,
+      source: info.source,
+      channelName: info.target.channelName,
+      code: 'channel_worker_unavailable',
+    });
+  });
+
+  it('rejects an unauthorized or changed target before worker IPC', async () => {
+    const deliverChannelMessage = vi.fn(async () => ({
+      delivered: true as const,
+    }));
+    const authorizations = new ChannelDeliveryAuthorizationStore();
+    const handler = createBoundChannelDeliveryHandler(
+      '/canonical',
+      () => ({ deliverChannelMessage }) as never,
+      authorizations,
+    );
+
+    await expect(handler(info)).resolves.toEqual({
+      status: 'failed',
+      code: 'channel_delivery_invalid',
+      error: 'Channel delivery is not authorized.',
+    });
+    authorizations.authorizePrompt('/canonical', {
+      sessionId: info.sessionId,
+      deliveryId: info.deliveryId,
+      target: info.target,
+    });
+    await expect(
+      handler({ ...info, target: { ...info.target, id: 'user-2' } }),
+    ).resolves.toEqual({
+      status: 'failed',
+      code: 'channel_delivery_invalid',
+      error: 'Channel delivery is not authorized.',
+    });
+    expect(deliverChannelMessage).not.toHaveBeenCalled();
+
+    await expect(handler(info)).resolves.toEqual({ status: 'delivered' });
+    expect(deliverChannelMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('consumes prompt authorization before skipping an empty final', async () => {
+    const getManager = vi.fn(() => undefined);
+    const authorizations = new ChannelDeliveryAuthorizationStore();
+    authorizations.authorizePrompt('/canonical', {
+      sessionId: info.sessionId,
+      deliveryId: info.deliveryId,
+      target: info.target,
+    });
+    const handler = createBoundChannelDeliveryHandler(
+      '/canonical',
+      getManager,
+      authorizations,
+    );
+
+    await expect(handler({ ...info, text: '  \n' })).resolves.toEqual({
+      status: 'skipped',
+    });
+    expect(getManager).not.toHaveBeenCalled();
+    await expect(handler(info)).resolves.toEqual({
+      status: 'failed',
+      code: 'channel_delivery_invalid',
+      error: 'Channel delivery is not authorized.',
+    });
+  });
+
+  it('advances recurring scheduled authorization before skipping an empty final', async () => {
+    const deliverChannelMessage = vi.fn(async () => ({
+      delivered: true as const,
+    }));
+    const authorizations = new ChannelDeliveryAuthorizationStore();
+    authorizations.registerScheduledTask('/canonical', {
+      sessionId: info.sessionId,
+      taskId: 'task-1',
+      target: info.target,
+      recurring: true,
+    });
+    const handler = createBoundChannelDeliveryHandler(
+      '/canonical',
+      () => ({ deliverChannelMessage }) as never,
+      authorizations,
+    );
+    const scheduledInfo = {
+      ...info,
+      deliveryId: 'task-1:100',
+      source: 'scheduled' as const,
+      text: '',
+      promptId: undefined,
+      taskId: 'task-1',
+      firedAt: 100,
+    };
+
+    await expect(handler(scheduledInfo)).resolves.toEqual({
+      status: 'skipped',
+    });
+    expect(deliverChannelMessage).not.toHaveBeenCalled();
+    await expect(handler(scheduledInfo)).resolves.toMatchObject({
+      status: 'failed',
+      code: 'channel_delivery_invalid',
+    });
+    await expect(
+      handler({
+        ...scheduledInfo,
+        deliveryId: 'task-1:101',
+        firedAt: 101,
+        text: 'next answer',
+      }),
+    ).resolves.toEqual({ status: 'delivered' });
+  });
+
+  it('consumes one-shot scheduled authorization before skipping an empty final', async () => {
+    const getManager = vi.fn(() => undefined);
+    const authorizations = new ChannelDeliveryAuthorizationStore();
+    authorizations.registerScheduledTask('/canonical', {
+      sessionId: info.sessionId,
+      taskId: 'task-once',
+      target: info.target,
+      recurring: false,
+    });
+    const handler = createBoundChannelDeliveryHandler(
+      '/canonical',
+      getManager,
+      authorizations,
+    );
+    const scheduledInfo = {
+      ...info,
+      deliveryId: 'task-once:100',
+      source: 'scheduled' as const,
+      text: '',
+      promptId: undefined,
+      taskId: 'task-once',
+      firedAt: 100,
+    };
+
+    await expect(handler(scheduledInfo)).resolves.toEqual({
+      status: 'skipped',
+    });
+    expect(getManager).not.toHaveBeenCalled();
+    await expect(
+      handler({
+        ...scheduledInfo,
+        deliveryId: 'task-once:101',
+        firedAt: 101,
+        text: 'later answer',
+      }),
+    ).resolves.toMatchObject({
+      status: 'failed',
+      code: 'channel_delivery_invalid',
+    });
+  });
+
+  it('logs a sanitized diagnostic for unexpected delivery failures', async () => {
+    vi.stubEnv('CHANNEL_DELIVERY_TEST_API_KEY', 'worker-secret');
+    const deliverChannelMessage = vi
+      .fn()
+      .mockRejectedValue(new Error('EPIPE worker-secret daemon-secret user-1'));
+    const warn = vi.fn();
+    const authorizations = new ChannelDeliveryAuthorizationStore();
+    authorizations.authorizePrompt('/canonical', {
+      sessionId: info.sessionId,
+      deliveryId: info.deliveryId,
+      target: info.target,
+    });
+    const handler = createBoundChannelDeliveryHandler(
+      '/canonical',
+      () => ({ deliverChannelMessage }) as never,
+      authorizations,
+      { warn } as never,
+      {
+        daemonToken: 'daemon-secret',
+        workerEnv: process.env,
+      },
+    );
+
+    try {
+      const result = await handler(info);
+      expect(result).toEqual({
+        status: 'failed',
+        code: 'channel_delivery_failed',
+        error: 'Channel delivery failed.',
+      });
+      expect(warn).toHaveBeenCalledWith('channel delivery failed', {
+        sessionId: info.sessionId,
+        deliveryId: info.deliveryId,
+        source: info.source,
+        channelName: info.target.channelName,
+        code: 'channel_delivery_failed',
+        diagnostic: 'EPIPE <redacted> <redacted> <redacted>',
+      });
+      expect(JSON.stringify({ result, calls: warn.mock.calls })).not.toMatch(
+        /worker-secret|daemon-secret|user-1/u,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('sanitizes typed delivery failures before returning them', async () => {
+    vi.stubEnv('CHANNEL_DELIVERY_TEST_API_KEY', 'abcdworkerxyz');
+    const collidingInfo = {
+      ...info,
+      target: { ...info.target, id: 'worker' },
+    };
+    const deliverChannelMessage = vi
+      .fn()
+      .mockRejectedValue(
+        new ChannelDeliveryError(
+          'channel_worker_unavailable',
+          'Channel worker is not running. abcdworkerxyz daemon-secret /canonical',
+        ),
+      );
+    const warn = vi.fn();
+    const authorizations = new ChannelDeliveryAuthorizationStore();
+    authorizations.authorizePrompt('/canonical', {
+      sessionId: collidingInfo.sessionId,
+      deliveryId: collidingInfo.deliveryId,
+      target: collidingInfo.target,
+    });
+    const handler = createBoundChannelDeliveryHandler(
+      '/canonical',
+      () => ({ deliverChannelMessage }) as never,
+      authorizations,
+      { warn } as never,
+      {
+        daemonToken: 'daemon-secret',
+        workerEnv: process.env,
+      },
+    );
+
+    try {
+      const result = await handler(collidingInfo);
+      expect(result).toEqual({
+        status: 'failed',
+        code: 'channel_worker_unavailable',
+        error: 'Channel worker is unavailable.',
+      });
+      expect(warn).toHaveBeenCalledWith('channel delivery failed', {
+        sessionId: collidingInfo.sessionId,
+        deliveryId: collidingInfo.deliveryId,
+        source: collidingInfo.source,
+        channelName: collidingInfo.target.channelName,
+        code: 'channel_worker_unavailable',
+        diagnostic:
+          'Channel <redacted> is not running. <redacted> <redacted> /canonical',
+      });
+      expect(JSON.stringify({ result, calls: warn.mock.calls })).not.toMatch(
+        /abcdworkerxyz|abcd|xyz|daemon-secret/u,
+      );
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it('keeps diagnostic formatting failures out of the delivery result path', async () => {
+    const diagnosticFailure = {
+      toString: () => {
+        throw new Error('diagnostic formatting failed');
+      },
+    };
+    const deliverChannelMessage = vi.fn().mockRejectedValue(diagnosticFailure);
+    const warn = vi.fn();
+    const authorizations = new ChannelDeliveryAuthorizationStore();
+    authorizations.authorizePrompt('/canonical', {
+      sessionId: info.sessionId,
+      deliveryId: info.deliveryId,
+      target: info.target,
+    });
+    const handler = createBoundChannelDeliveryHandler(
+      '/canonical',
+      () => ({ deliverChannelMessage }) as never,
+      authorizations,
+      { warn } as never,
+    );
+
+    await expect(handler(info)).resolves.toEqual({
+      status: 'failed',
+      code: 'channel_delivery_failed',
+      error: 'Channel delivery failed.',
+    });
+  });
+});
 
 function makeRuntimeBridge(): HttpAcpBridge {
   return {
@@ -775,6 +1123,12 @@ describe('runQwenServe telemetry validation', () => {
         body: JSON.stringify({ cwd: secondary, persist: true }),
       });
       expect(added.status).toBe(201);
+      expect(createBridge.mock.calls[0]?.[0].onChannelDelivery).toBeTypeOf(
+        'function',
+      );
+      expect(createBridge.mock.calls[1]?.[0].onChannelDelivery).toBeTypeOf(
+        'function',
+      );
 
       const before = (await (
         await fetch(`${handle.url}/capabilities`, { headers })
@@ -1014,11 +1368,13 @@ describe('runQwenServe telemetry validation', () => {
         compactedReplayMaxBytes: 1024,
         eventRingSize: 1234,
         permissionPolicy: 'local-only',
+        onChannelDelivery: expect.any(Function),
       });
       expect(createBridge.mock.calls[1]?.[0]).toMatchObject({
         compactedReplayMaxBytes: 1024,
         eventRingSize: 1234,
         permissionPolicy: 'local-only',
+        onChannelDelivery: expect.any(Function),
       });
       expect(createBridge.mock.calls[1]?.[0]).not.toHaveProperty(
         'permissionConsensusQuorum',
@@ -1142,7 +1498,7 @@ describe('runQwenServe telemetry validation', () => {
     tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-tv-')));
     const initializeTelemetry = vi
       .spyOn(qwenCore, 'initializeTelemetry')
-      .mockImplementation(() => {});
+      .mockResolvedValue(undefined);
     vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
       enabled: false,
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
@@ -1170,6 +1526,46 @@ describe('runQwenServe telemetry validation', () => {
       expect(runtimeConfig.getTelemetryResourceAttributes()).toMatchObject({
         'service.instance.id': `daemon:${process.pid}`,
       });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('awaits telemetry initialization before daemon metrics', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-tm-')));
+    const callOrder: string[] = [];
+    vi.spyOn(qwenCore, 'initializeTelemetry').mockImplementation(async () => {
+      callOrder.push('telemetry-start');
+      await Promise.resolve();
+      callOrder.push('telemetry-resolved');
+    });
+    vi.spyOn(qwenCore, 'initializeDaemonMetrics').mockImplementation(() => {
+      callOrder.push('daemon-metrics');
+    });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: true,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      expect(callOrder).toEqual([
+        'telemetry-start',
+        'telemetry-resolved',
+        'daemon-metrics',
+      ]);
     } finally {
       await handle.close();
     }
@@ -1276,6 +1672,156 @@ describe('runQwenServe permissionResponseTimeoutMs validation', () => {
         path.join(tmpDir, 'debug', 'daemon', '.stable-writer.lock'),
       ),
     ).toBe(false);
+  });
+});
+
+describe('runQwenServe initializeTimeoutMs validation', () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    if (tmpDir) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects a non-positive initializeTimeoutMs', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-it-')));
+    const fakeBridge = {
+      spawnOrAttach: vi.fn(),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      killAllSync: vi.fn(),
+    } as unknown as HttpAcpBridge;
+
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            maxSessions: 1,
+            initializeTimeoutMs: 0,
+          },
+          { bridge: fakeBridge },
+        ),
+      ).rejects.toThrow(/initializeTimeoutMs/);
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) {
+        process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+    }
+  });
+
+  it('rejects a non-finite initializeTimeoutMs', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-it-')));
+    const fakeBridge = {
+      spawnOrAttach: vi.fn(),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      killAllSync: vi.fn(),
+    } as unknown as HttpAcpBridge;
+
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            maxSessions: 1,
+            initializeTimeoutMs: Number.NaN,
+          },
+          { bridge: fakeBridge },
+        ),
+      ).rejects.toThrow(/initializeTimeoutMs/);
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) {
+        process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+    }
+  });
+
+  it('rejects an initializeTimeoutMs above the JS timer ceiling', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-it-')));
+    const fakeBridge = {
+      spawnOrAttach: vi.fn(),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      killAllSync: vi.fn(),
+    } as unknown as HttpAcpBridge;
+
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            maxSessions: 1,
+            initializeTimeoutMs: 2_147_483_648,
+          },
+          { bridge: fakeBridge },
+        ),
+      ).rejects.toThrow(/initializeTimeoutMs/);
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) {
+        process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+    }
+  });
+
+  it('propagates a valid initializeTimeoutMs to the bridge options', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-it-')));
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          initializeTimeoutMs: 30_000,
+          serveWebShell: false,
+        },
+        { resolveOnListen: true },
+      );
+      try {
+        await handle.runtimeReady;
+        expect(createBridge.mock.calls[0]?.[0]).toMatchObject({
+          initializeTimeoutMs: 30_000,
+        });
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) {
+        process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+    }
   });
 });
 
@@ -2500,6 +3046,7 @@ describe('runQwenServe runtime startup failures', () => {
       .spyOn(acpBridge, 'createAcpSessionBridge')
       .mockImplementation(() => makeRuntimeBridge());
     let restoredCwds: string[] = [];
+    let restoredDisplayNames: Array<string | undefined> = [];
     let restoredRemovable: Array<boolean | undefined> = [];
     let restoredRegistrationIds: Array<readonly string[] | undefined> = [];
     let advertisedMaxTotalSessions: number | undefined;
@@ -2509,6 +3056,10 @@ describe('runQwenServe runtime startup failures', () => {
           deps?.workspaceRegistry
             ?.list()
             .map((runtime) => runtime.workspaceCwd) ?? [];
+        restoredDisplayNames =
+          deps?.workspaceRegistry
+            ?.list()
+            .map((runtime) => runtime.displayName) ?? [];
         restoredRemovable =
           deps?.workspaceRegistry?.list().map((runtime) => runtime.removable) ??
           [];
@@ -2531,6 +3082,14 @@ describe('runQwenServe runtime startup failures', () => {
           restoredSecondaryAlias,
           canonicalRestoredSecondary,
         ],
+        displayNames: {
+          [workspaceRegistrationId(canonicalExplicitSecondary)]:
+            'Explicit workspace',
+          [workspaceRegistrationId(restoredSecondaryAlias)]:
+            'Restored workspace',
+          [workspaceRegistrationId(canonicalRestoredSecondary)]:
+            'Later alias name',
+        },
       }),
     } as unknown as WorkspaceRegistrationStore;
 
@@ -2557,6 +3116,11 @@ describe('runQwenServe runtime startup failures', () => {
         canonicalPrimary,
         canonicalExplicitSecondary,
         canonicalRestoredSecondary,
+      ]);
+      expect(restoredDisplayNames).toEqual([
+        undefined,
+        'Explicit workspace',
+        'Restored workspace',
       ]);
       expect(restoredRemovable).toEqual([false, false, true]);
       expect(restoredRegistrationIds).toEqual([
@@ -5358,6 +5922,9 @@ describe('runQwenServe channel worker supervisor', () => {
       enqueueWebhookTask: vi
         .fn()
         .mockRejectedValue(new Error('Channel worker is not running.')),
+      deliverChannelMessage: vi
+        .fn()
+        .mockRejectedValue(new Error('Channel worker is not running.')),
     };
   }
 
@@ -5409,6 +5976,7 @@ describe('runQwenServe channel worker supervisor', () => {
       channels: ['telegram'],
     });
     worker.enqueueWebhookTask.mockResolvedValueOnce({ accepted: true });
+    worker.deliverChannelMessage.mockResolvedValueOnce({ delivered: true });
     const originalCreateServeApp = serverModule.createServeApp;
     let capturedDeps:
       | Parameters<typeof serverModule.createServeApp>[2]
@@ -5450,6 +6018,16 @@ describe('runQwenServe channel worker supervisor', () => {
         capturedDeps!.enqueueChannelWebhookTask!(task),
       ).resolves.toEqual({ accepted: true });
       expect(worker.enqueueWebhookTask).toHaveBeenCalledWith(task);
+      const delivery = {
+        deliveryId: 'delivery-1',
+        channelName: 'telegram',
+        target: { type: 'user' as const, id: 'user-1' },
+        text: 'CI failed',
+      };
+      await expect(
+        capturedDeps!.deliverChannelMessage!(tmpDir, delivery),
+      ).resolves.toEqual({ delivered: true });
+      expect(worker.deliverChannelMessage).toHaveBeenCalledWith(delivery);
     } finally {
       await handle.close();
     }
@@ -5491,6 +6069,14 @@ describe('runQwenServe channel worker supervisor', () => {
           targetRef: 'default',
           title: 'CI failed',
           payload: { runId: 123 },
+        }),
+      ).rejects.toMatchObject({ code: 'channel_worker_unavailable' });
+      await expect(
+        capturedDeps!.deliverChannelMessage!(tmpDir, {
+          deliveryId: 'delivery-1',
+          channelName: 'telegram',
+          target: { type: 'user', id: 'user-1' },
+          text: 'CI failed',
         }),
       ).rejects.toMatchObject({ code: 'channel_worker_unavailable' });
     } finally {
@@ -7693,17 +8279,15 @@ describe('runQwenServe channel worker supervisor', () => {
       listen: vi.fn((port, _host, cb) => {
         portsAttempted.push(port);
         const srv = createServer();
+        if (typeof cb === 'function') {
+          srv.once('error', cb);
+        }
         if (portsAttempted.length === 1) {
           const err = new Error('address in use') as NodeJS.ErrnoException;
           err.code = 'EADDRINUSE';
           setImmediate(() => srv.emit('error', err));
         } else {
-          srv.listen(0, '127.0.0.1', () => {
-            setImmediate(() => {
-              srv.emit('listening');
-              if (typeof cb === 'function') cb();
-            });
-          });
+          srv.listen(0, '127.0.0.1', cb);
         }
         return srv;
       }),
@@ -7726,8 +8310,12 @@ describe('runQwenServe channel worker supervisor', () => {
     try {
       stderrSpy.mockRestore();
       expect(portsAttempted).toEqual([4170, 4171]);
+      expect(handle.server.listening).toBe(true);
       expect(handle.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
       expect(handle.url).not.toContain(':4170');
+      expect(new URL(handle.url).port).toBe(
+        String((handle.server.address() as AddressInfo).port),
+      );
       expect(
         stderrWrites.some((w) =>
           w.includes('port 4170 is in use, trying 4171'),

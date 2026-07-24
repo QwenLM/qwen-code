@@ -194,6 +194,7 @@ export default {
   'toolDisplayName.CronDelete': '删除定时任务',
   'toolDisplayName.LoopWakeup': '循环唤醒',
   'toolDisplayName.CreateSubSession': '创建子会话',
+  'toolDisplayName.ListAgents': '列出 Agent',
   'toolDisplayName.TaskCreate': '创建任务',
   'toolDisplayName.TaskUpdate': '更新任务',
   'toolDisplayName.TaskList': '任务列表',
@@ -2399,8 +2400,14 @@ export default {
   'A new version of Qwen Code is available! {{current}} → {{latest}}':
     'Qwen Code 有新版本可用！{{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} 已是最新！',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    '检查更新失败。请检查网络或 registry 配置。',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    '检查更新失败（{{reason}}）。请检查网络或 registry 配置。',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    '已跳过更新检查（{{reason}}）— 可运行 /update 重试。',
+  'registry did not respond within {{seconds}}s':
+    'registry 在 {{seconds}} 秒内未响应',
+  'registry unreachable': 'registry 无法连接',
+  'registry error': 'registry 错误',
   'Unable to check for updates: {{reason}}': '无法检查更新：{{reason}}',
   'Update successful! The new version will be used on your next run.':
     '更新成功！新版本将在下次运行时生效。',

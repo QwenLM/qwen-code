@@ -33,6 +33,8 @@ import {
   SendMessageType,
   ToolErrorType,
   ToolConfirmationOutcome,
+  getRuntimeContentGenerator,
+  runWithRuntimeContentGenerator,
 } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
@@ -96,9 +98,31 @@ const mockActiveGoalEquals = vi.hoisted(() => vi.fn());
 const mockSetActiveGoal = vi.hoisted(() => vi.fn());
 const mockClearActiveGoal = vi.hoisted(() => vi.fn());
 const mockRefreshMemoryAfterManagedWrite = vi.hoisted(() => vi.fn());
+const mockCleanupReviewWorktreeLeases = vi.hoisted(() => vi.fn());
+const mockLogConversationFinishedEvent = vi.hoisted(() => vi.fn());
+const mockUseDualOutput = vi.hoisted(() => vi.fn());
+const mockDualOutput = vi.hoisted(() => ({
+  startAssistantMessage: vi.fn(),
+  processEvent: vi.fn(),
+  finalizeAssistantMessage: vi.fn(),
+  emitToolResult: vi.fn(),
+  emitUserMessage: vi.fn(),
+}));
+
+vi.mock('../../services/review-worktree-lease.js', () => ({
+  cleanupReviewWorktreeLeases: mockCleanupReviewWorktreeLeases,
+}));
+
+vi.mock('../../dualOutput/DualOutputContext.js', () => ({
+  useDualOutput: mockUseDualOutput,
+}));
+const mockFinalizeToolResponses = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actualCoreModule = (await importOriginal()) as any;
+  mockFinalizeToolResponses.mockImplementation(
+    actualCoreModule.finalizeToolResponses,
+  );
   return {
     ...actualCoreModule,
     GeminiClient: MockedGeminiClientClass,
@@ -112,6 +136,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     clearActiveGoal: mockClearActiveGoal,
     runVisionBridge: mockRunVisionBridge,
     refreshMemoryAfterManagedWrite: mockRefreshMemoryAfterManagedWrite,
+    logConversationFinishedEvent: mockLogConversationFinishedEvent,
+    finalizeToolResponses: mockFinalizeToolResponses,
   };
 });
 
@@ -179,6 +205,10 @@ describe('useGeminiStream', () => {
   let mockCancelAllToolCalls: Mock;
   let mockMarkToolsAsSubmitted: Mock;
   let mockBackgroundShellRegistry: { setNotificationCallback: Mock };
+  let mockMonitorRegistry: {
+    setNotificationCallback: Mock;
+    get: Mock;
+  };
   let handleAtCommandSpy: MockInstance;
 
   beforeEach(() => {
@@ -210,6 +240,10 @@ describe('useGeminiStream', () => {
     };
     mockBackgroundShellRegistry = {
       setNotificationCallback: vi.fn(),
+    };
+    mockMonitorRegistry = {
+      setNotificationCallback: vi.fn(),
+      get: vi.fn().mockReturnValue({ status: 'running' }),
     };
 
     mockConfig = {
@@ -259,12 +293,12 @@ describe('useGeminiStream', () => {
       getEmitToolUseSummaries: vi.fn(() => false),
       getFastModel: vi.fn(() => undefined),
       getBackgroundTaskRegistry: vi.fn(() => ({
+        canStartBackgroundAgent: vi.fn(() => true),
+        getMaxConcurrentBackgroundAgents: vi.fn(() => 10),
         setNotificationCallback: vi.fn(),
       })),
       getBackgroundShellRegistry: vi.fn(() => mockBackgroundShellRegistry),
-      getMonitorRegistry: vi.fn(() => ({
-        setNotificationCallback: vi.fn(),
-      })),
+      getMonitorRegistry: vi.fn(() => mockMonitorRegistry),
     } as unknown as Config;
     mockOnDebugMessage = vi.fn();
     mockHandleSlashCommand = vi.fn().mockResolvedValue(false);
@@ -292,6 +326,8 @@ describe('useGeminiStream', () => {
       .mockReturnValue((async function* () {})());
     handleAtCommandSpy = vi.spyOn(atCommandProcessor, 'handleAtCommand');
     mockRunVisionBridge.mockReset();
+    mockCleanupReviewWorktreeLeases.mockReset();
+    mockUseDualOutput.mockReset().mockReturnValue(null);
   });
 
   afterEach(() => {
@@ -1100,6 +1136,42 @@ describe('useGeminiStream', () => {
     expect(addedTexts.some((t) => t.includes('teammate_message'))).toBe(false);
   });
 
+  it('drains teammate reports outside the teammate runtime context', async () => {
+    const mockManager = { setLeaderMessageCallback: vi.fn() };
+    (mockConfig.getTeamManager as unknown as Mock).mockReturnValue(mockManager);
+    renderTestHook();
+
+    await waitFor(() => {
+      expect(mockManager.setLeaderMessageCallback).toHaveBeenCalledWith(
+        expect.any(Function),
+      );
+    });
+
+    let capturedRuntimeView: unknown = 'unset';
+    mockSendMessageStream.mockImplementationOnce(() => {
+      capturedRuntimeView = getRuntimeContentGenerator();
+      return (async function* () {})();
+    });
+
+    const callback = (mockManager.setLeaderMessageCallback as Mock).mock
+      .calls[0][0] as (modelText: string, display: string) => void;
+    const teammateView = {
+      contentGenerator: {},
+      contentGeneratorConfig: { model: 'teammate-model' },
+    } as never;
+    await runWithRuntimeContentGenerator(teammateView, async () => {
+      await act(async () => {
+        callback('<teammate_message>report</teammate_message>', 'reported');
+      });
+    });
+
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+    expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
+      type: SendMessageType.Teammate,
+    });
+    expect(capturedRuntimeView).toBeUndefined();
+  });
+
   it('should not submit tool responses if not all tool calls are completed', () => {
     const toolCalls: TrackedToolCall[] = [
       {
@@ -1266,6 +1338,155 @@ describe('useGeminiStream', () => {
     );
   });
 
+  it('waits for a background agent when its launch exhausts capacity', async () => {
+    const responseParts: Part[] = [
+      {
+        functionResponse: {
+          id: 'agent-call',
+          name: 'agent',
+          response: { result: 'Background agent launched successfully.' },
+        },
+      },
+    ];
+    let notificationCallback:
+      | ((displayText: string, modelText: string) => void)
+      | undefined;
+    const getMaxConcurrentBackgroundAgents = vi.fn(() => 1);
+    mockConfig.getBackgroundTaskRegistry = vi.fn(() => ({
+      canStartBackgroundAgent: vi.fn(() => false),
+      getMaxConcurrentBackgroundAgents,
+      setNotificationCallback: vi.fn((callback) => {
+        notificationCallback = callback;
+      }),
+    })) as Config['getBackgroundTaskRegistry'];
+
+    let capturedOnComplete:
+      | ((completedTools: TrackedToolCall[]) => Promise<void>)
+      | null = null;
+    mockUseReactToolScheduler.mockImplementation((onComplete) => {
+      capturedOnComplete = onComplete;
+      return [[], mockScheduleToolCalls, mockMarkToolsAsSubmitted];
+    });
+
+    const client = new MockedGeminiClientClass(mockConfig);
+    renderHook(() =>
+      useGeminiStream(
+        client,
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+      ),
+    );
+
+    await waitFor(() => expect(notificationCallback).toBeDefined());
+    await act(async () => {
+      await capturedOnComplete?.([
+        {
+          request: {
+            callId: 'agent-call',
+            name: 'agent',
+            args: { run_in_background: true },
+            isClientInitiated: false,
+            prompt_id: 'prompt-id-agent',
+          },
+          status: 'success',
+          responseSubmittedToGemini: false,
+          response: {
+            callId: 'agent-call',
+            responseParts,
+            errorType: undefined,
+            resultDisplay: {
+              type: 'task_execution',
+              subagentName: 'researcher',
+              taskDescription: 'Research',
+              taskPrompt: 'Inspect the code',
+              status: 'background',
+            },
+          },
+          tool: { displayName: 'Agent' },
+          invocation: {
+            getDescription: () => 'Research',
+          } as unknown as AnyToolInvocation,
+        } as TrackedCompletedToolCall,
+      ]);
+    });
+
+    expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith(['agent-call']);
+    expect(client.addHistory).toHaveBeenCalledWith({
+      role: 'user',
+      parts: responseParts,
+    });
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
+
+    act(() => {
+      notificationCallback?.(
+        'Background agent completed.',
+        '<task-notification>done</task-notification>',
+      );
+    });
+
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledOnce());
+    expect(mockSendMessageStream).toHaveBeenCalledWith(
+      '<task-notification>done</task-notification>',
+      expect.any(AbortSignal),
+      expect.any(String),
+      expect.objectContaining({ type: SendMessageType.Notification }),
+    );
+
+    mockSendMessageStream.mockClear();
+    client.addHistory.mockClear();
+    getMaxConcurrentBackgroundAgents.mockReturnValue(2);
+    await act(async () => {
+      await capturedOnComplete?.([
+        {
+          request: {
+            callId: 'agent-call-2',
+            name: 'agent',
+            args: { run_in_background: true },
+            isClientInitiated: false,
+            prompt_id: 'prompt-id-agent-2',
+          },
+          status: 'success',
+          responseSubmittedToGemini: false,
+          response: {
+            callId: 'agent-call-2',
+            responseParts,
+            errorType: undefined,
+            resultDisplay: {
+              type: 'task_execution',
+              subagentName: 'researcher',
+              taskDescription: 'Research',
+              taskPrompt: 'Inspect the code',
+              status: 'background',
+            },
+          },
+          tool: { displayName: 'Agent' },
+          invocation: {
+            getDescription: () => 'Research',
+          } as unknown as AnyToolInvocation,
+        } as TrackedCompletedToolCall,
+      ]);
+    });
+
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalledOnce());
+    expect(client.addHistory).not.toHaveBeenCalled();
+  });
+
   it('records mid-turn queued user messages after tool results accept them', async () => {
     const queuedPrompt = 'save the logs locally first';
     const recordMidTurnUserMessage = vi.fn();
@@ -1362,8 +1583,7 @@ describe('useGeminiStream', () => {
       queuedPrompt,
     );
     const queuedPromptAddItemIndex = mockAddItem.mock.calls.findIndex(
-      ([item]) =>
-        item.type === MessageType.NOTIFICATION && item.text === queuedPrompt,
+      ([item]) => item.type === MessageType.USER && item.text === queuedPrompt,
     );
     expect(queuedPromptAddItemIndex).toBeGreaterThanOrEqual(0);
     expect(recordMidTurnUserMessage.mock.invocationCallOrder[0]).toBeLessThan(
@@ -1373,7 +1593,7 @@ describe('useGeminiStream', () => {
       recordMidTurnUserMessage.mock.invocationCallOrder[0],
     );
     expect(mockAddItem).toHaveBeenCalledWith(
-      { type: MessageType.NOTIFICATION, text: queuedPrompt },
+      { type: MessageType.USER, text: queuedPrompt, sentToModel: false },
       expect.any(Number),
     );
     expect(mockSendMessageStream).toHaveBeenCalledWith(
@@ -1450,7 +1670,7 @@ describe('useGeminiStream', () => {
     expect(steerInput?.parts).toEqual([{ text: steeredPrompt }]);
     expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
     expect(mockAddItem).not.toHaveBeenCalledWith(
-      { type: MessageType.NOTIFICATION, text: steeredPrompt },
+      { type: MessageType.USER, text: steeredPrompt, sentToModel: false },
       expect.any(Number),
     );
     steerInput?.accept();
@@ -1459,7 +1679,7 @@ describe('useGeminiStream', () => {
       steeredPrompt,
     );
     expect(mockAddItem).toHaveBeenCalledWith(
-      { type: MessageType.NOTIFICATION, text: steeredPrompt },
+      { type: MessageType.USER, text: steeredPrompt, sentToModel: false },
       expect.any(Number),
     );
   });
@@ -1772,7 +1992,7 @@ describe('useGeminiStream', () => {
     expect(steerInput).toBeUndefined();
     expect(restoreSteer).toHaveBeenCalledWith([steeredPrompt]);
     expect(mockAddItem).not.toHaveBeenCalledWith(
-      { type: MessageType.NOTIFICATION, text: steeredPrompt },
+      { type: MessageType.USER, text: steeredPrompt, sentToModel: false },
       expect.any(Number),
     );
   });
@@ -2647,7 +2867,7 @@ describe('useGeminiStream', () => {
     expect(resolveSignal?.aborted).toBe(true);
     expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
     expect(mockAddItem).not.toHaveBeenCalledWith(
-      { type: MessageType.NOTIFICATION, text: queuedPrompt },
+      { type: MessageType.USER, text: queuedPrompt, sentToModel: false },
       expect.any(Number),
     );
     expect(mockSendMessageStream).not.toHaveBeenCalled();
@@ -2852,7 +3072,7 @@ describe('useGeminiStream', () => {
     });
 
     expect(mockAddItem).toHaveBeenCalledWith(
-      { type: MessageType.NOTIFICATION, text: queuedPrompt },
+      { type: MessageType.USER, text: queuedPrompt, sentToModel: false },
       expect.any(Number),
     );
     expect(mockSendMessageStream).toHaveBeenCalledWith(
@@ -3142,6 +3362,22 @@ describe('useGeminiStream', () => {
   });
 
   it('suppresses duplicate provider tool-call ids before TUI scheduling', async () => {
+    const recordToolResult = vi.fn();
+    (
+      mockConfig as Config & {
+        getToolOutputBatchBudget: () => number;
+        getChatRecordingService: () => {
+          recordToolResult: typeof recordToolResult;
+        };
+      }
+    ).getToolOutputBatchBudget = () => 10_000;
+    (
+      mockConfig as Config & {
+        getChatRecordingService: () => {
+          recordToolResult: typeof recordToolResult;
+        };
+      }
+    ).getChatRecordingService = () => ({ recordToolResult });
     let capturedOnComplete:
       | ((completedTools: TrackedToolCall[]) => Promise<void>)
       | null = null;
@@ -3250,13 +3486,16 @@ describe('useGeminiStream', () => {
             functionResponse: {
               id: 'tool-dup',
               name: 'shell',
-              response: { output: 'first' },
+              response: {
+                output: `Tool output was too large and has been truncated${'x'.repeat(14_000)}`,
+              },
             },
           },
         ],
         resultDisplay: 'first',
         error: undefined,
         errorType: undefined,
+        persistedOutputFiles: [],
       },
       tool: {
         name: 'shell',
@@ -3280,11 +3519,25 @@ describe('useGeminiStream', () => {
     });
     const toolResultParts = mockSendMessageStream.mock.calls[1][0] as Part[];
     expect(toolResultParts).toHaveLength(2);
-    expect(toolResultParts[0].functionResponse?.response?.['output']).toBe(
-      'first',
+    expect(toolResultParts[0].functionResponse?.response?.['output']).toContain(
+      'Tool output truncated.',
     );
     expect(toolResultParts[1].functionResponse?.response?.['error']).toContain(
       'Duplicate provider tool call id "tool-dup"',
+    );
+    const wireLength = toolResultParts.reduce((sum, part) => {
+      const response = part.functionResponse?.response;
+      const output = response?.['output'];
+      const error = response?.['error'];
+      return (
+        sum +
+        (typeof output === 'string' ? output.length : 0) +
+        (typeof error === 'string' ? error.length : 0)
+      );
+    }, 0);
+    expect(wireLength).toBeLessThanOrEqual(10_000);
+    expect(recordToolResult.mock.calls.flatMap((call) => call[0])).toEqual(
+      toolResultParts,
     );
     expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(1);
   });
@@ -6761,11 +7014,90 @@ describe('useGeminiStream', () => {
           mockSendMessageStream.mock.calls[0][3].modelOverride,
         ).toBeUndefined();
       });
+
+      it('drops a queued running monitor event after cancellation', async () => {
+        let monitorStatus = 'running';
+        mockMonitorRegistry.get.mockImplementation(() => ({
+          status: monitorStatus,
+        }));
+        renderTestHook();
+
+        const callback = mockMonitorRegistry.setNotificationCallback.mock
+          .calls[0][0] as (
+          displayText: string,
+          modelText: string,
+          meta: {
+            monitorId: string;
+            status: string;
+          },
+        ) => void;
+        mockSendMessageStream.mockClear();
+        mockAddItem.mockClear();
+
+        await act(async () => {
+          callback(
+            'Monitor "logs" event #1: ready',
+            '<task-notification>running</task-notification>',
+            { monitorId: 'mon_1', status: 'running' },
+          );
+          monitorStatus = 'cancelled';
+        });
+
+        expect(mockSendMessageStream).not.toHaveBeenCalled();
+        expect(mockAddItem).not.toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'notification' }),
+          expect.any(Number),
+        );
+      });
+
+      // Regression for #7156: progress setState calls issued from inside a
+      // background subagent's AsyncLocalStorage frame can batch with the
+      // notification trigger into one React commit, so the drain effect
+      // executes on a stack that still carries the subagent's frame. The
+      // drained turn — and every async continuation it starts — then
+      // resolves Config.getModel() to the subagent's runtime view and the
+      // main session switches onto the subagent's model. The drain effect
+      // must therefore run via runOutsideAgentContext. This test drives the
+      // notification callback from inside an agent frame (bypassing the
+      // producer-side guard in BackgroundTaskRegistry.emitNotification) and
+      // fails if the consumer-side wrapping is removed.
+      it('drains a notification outside a background agent ALS frame', async () => {
+        renderTestHook();
+        const callback = mockBackgroundShellRegistry.setNotificationCallback
+          .mock.calls[0][0] as (displayText: string, modelText: string) => void;
+
+        let capturedRuntimeView: unknown = 'unset';
+        mockSendMessageStream.mockImplementationOnce(() => {
+          capturedRuntimeView = getRuntimeContentGenerator();
+          return (async function* () {})();
+        });
+
+        const subagentView = {
+          contentGenerator: {},
+          contentGeneratorConfig: { model: 'small-default' },
+        } as never;
+        // The whole act() flush runs inside the agent frame, mirroring the
+        // contaminated React commit from the issue.
+        await runWithRuntimeContentGenerator(subagentView, async () => {
+          await act(async () => {
+            callback(
+              'Background shell "npm test" completed.',
+              '<task-notification>completed</task-notification>',
+            );
+          });
+        });
+
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
+          type: SendMessageType.Notification,
+        });
+        expect(capturedRuntimeView).toBeUndefined();
+      });
     });
   });
 
   describe('Memory Refresh on save_memory', () => {
-    it('should call performMemoryRefresh when a save_memory tool call completes successfully', async () => {
+    it('refreshes memory without finalizing client-only tool responses', async () => {
       const mockPerformMemoryRefresh = vi.fn().mockResolvedValue(undefined);
       const completedToolCall: TrackedCompletedToolCall = {
         request: {
@@ -6839,6 +7171,11 @@ describe('useGeminiStream', () => {
       await waitFor(() => {
         expect(mockPerformMemoryRefresh).toHaveBeenCalledTimes(1);
       });
+      expect(mockFinalizeToolResponses).not.toHaveBeenCalled();
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+      expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([
+        'save-mem-call-1',
+      ]);
     });
 
     it('refreshes managed-memory instructions after interactive memory file writes', async () => {
@@ -8323,7 +8660,8 @@ describe('useGeminiStream', () => {
       );
     });
 
-    it('should commit thought to history on UserCancelled', async () => {
+    it('should commit thought and finalize dual output on UserCancelled', async () => {
+      mockUseDualOutput.mockReturnValue(mockDualOutput);
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
@@ -8349,6 +8687,41 @@ describe('useGeminiStream', () => {
           }),
           expect.any(Number),
         ),
+      );
+      expect(mockDualOutput.startAssistantMessage).toHaveBeenCalledOnce();
+      expect(mockDualOutput.finalizeAssistantMessage).toHaveBeenCalledOnce();
+      await waitFor(() =>
+        expect(mockCleanupReviewWorktreeLeases).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          promptId: 'test-session-id########5',
+          repositoryRoot: '/test/dir',
+        }),
+      );
+    });
+
+    it('should clean up review lease when the stream throws', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'partial',
+          };
+          throw new Error('stream blew up');
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('error query');
+      });
+
+      await waitFor(() =>
+        expect(mockCleanupReviewWorktreeLeases).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          promptId: 'test-session-id########5',
+          repositoryRoot: '/test/dir',
+        }),
       );
     });
 
@@ -9426,6 +9799,13 @@ describe('useGeminiStream', () => {
           typeof result.current.loopDetectionConfirmationRequest?.onComplete,
         ).toBe('function');
       });
+      await waitFor(() =>
+        expect(mockCleanupReviewWorktreeLeases).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          promptId: 'test-session-id########5',
+          repositoryRoot: '/test/dir',
+        }),
+      );
     });
 
     it('should disable loop detection and show message when user selects "disable"', async () => {
@@ -10284,5 +10664,53 @@ describe('useGeminiStream', () => {
         expect(call[0]).not.toHaveProperty('timestamp');
       }
     });
+  });
+
+  it('excludes sentToModel-false steer items from YOLO turn-count telemetry', async () => {
+    mockConfig.getApprovalMode = () => ApprovalMode.YOLO;
+
+    const history: HistoryItem[] = [
+      { id: 1, type: MessageType.USER, text: 'first' },
+      { id: 2, type: MessageType.GEMINI, text: 'reply one' },
+      { id: 3, type: MessageType.USER, text: 'second' },
+      { id: 4, type: MessageType.GEMINI, text: 'reply two' },
+      { id: 5, type: MessageType.USER, text: 'steer', sentToModel: false },
+    ];
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        history,
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        undefined,
+        undefined,
+        undefined,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(mockLogConversationFinishedEvent).toHaveBeenCalledOnce();
+    });
+
+    const event = mockLogConversationFinishedEvent.mock.calls[0][1];
+    // findLastIndex should land on 'second' (index 2), not the steer (index 4).
+    // turnCount = history.length - 2 = 3.
+    expect(event.turnCount).toBe(3);
   });
 });

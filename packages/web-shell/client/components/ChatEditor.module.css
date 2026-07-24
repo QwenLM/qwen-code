@@ -190,14 +190,8 @@
 }
 
 :global([data-web-shell-slash-menu]) {
-  width: min(
-    max(
-      240px,
-      calc(
-        var(--slash-command-col) + var(--slash-desc-col) +
-          var(--slash-column-gap) + 20px
-      )
-    ),
+  width: 620px;
+  max-width: min(
     calc(var(--radix-popover-trigger-width) - 32px),
     var(--radix-popover-content-available-width),
     calc(100vw - 24px)
@@ -208,11 +202,7 @@
 
 :global([data-web-shell-slash-detail]) {
   z-index: calc(var(--web-shell-popover-z-index, 1000) + 1);
-  width: min(
-    320px,
-    var(--radix-popover-content-available-width),
-    calc(100vw - 24px)
-  );
+  width: min(320px, calc(100vw - 24px));
   max-height: min(200px, var(--radix-popover-content-available-height));
   overflow: hidden;
 }
@@ -303,8 +293,8 @@
   width: 100%;
   min-width: 0;
   grid-template-columns:
-    minmax(0, 2fr)
-    minmax(0, 3fr);
+    minmax(0, 220px)
+    minmax(0, 1fr);
   column-gap: 8px;
   align-items: baseline;
   padding: 5px 8px;
@@ -379,6 +369,7 @@
   font-size: 12px;
   font-weight: 400;
   line-height: 20px;
+  text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -695,18 +686,6 @@
   font-size: 12px;
 }
 
-@container (max-width: 699px) {
-  .slashList {
-    width: 100%;
-  }
-
-  .slashItem {
-    width: 100%;
-    grid-template-columns: minmax(0, 1fr);
-    row-gap: 2px;
-  }
-}
-
 .attachments {
   display: flex;
   min-height: 0;
@@ -880,6 +859,37 @@
   line-height: 1.6;
 }
 
+/* Touch-device textarea backend (#5958). Mirrors the CodeMirror look; the
+   16px font size is mandatory: iOS Safari auto-zooms the page when focusing
+   any input with a smaller font. */
+.mobileTextarea {
+  width: 100%;
+  min-height: var(--chat-editor-input-min-height, 44px);
+  max-height: var(--chat-editor-input-max-height, 300px);
+  padding: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  resize: none;
+  color: var(--chat-editor-text-primary, #e0e0e0);
+  caret-color: var(--chat-editor-accent-color, #4a9eff);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 16px;
+  line-height: 1.6;
+}
+
+.mobileTextarea::placeholder {
+  color: var(--chat-editor-text-dimmed, #666);
+}
+
+/* As .editorArea's last child the textarea would inherit `overflow: clip`
+   from the rule above, pinning scrollTop to 0 — content beyond the height
+   cap would become unreachable. The extra `textarea` type wins that
+   specificity. */
+.editorArea > textarea.mobileTextarea {
+  overflow-y: auto;
+}
+
 .editorArea .cm-scroller {
   scrollbar-color: var(--chat-editor-border-color) transparent;
   scrollbar-width: thin;
@@ -958,14 +968,12 @@
   border: 0;
   background: transparent;
   cursor: pointer;
-  font: inherit;
-  color: inherit;
-  padding: 0;
   margin: 0;
 }
 
 .gitBranchChipButton:hover {
-  background: var(--subtle-bg);
+  background: var(--chat-editor-bg-tertiary);
+  color: var(--chat-editor-text-primary);
 }
 
 .gitBranchChipButton:focus-visible {
@@ -994,6 +1002,10 @@
 
 .gitBranchChip[data-detached='true'] .gitBranchText {
   color: var(--warning-color);
+}
+
+.gitBranchChip[data-worktree='true'] {
+  color: var(--color-accent-fg, #8b5cf6);
 }
 
 .gitBranchIconWrap {

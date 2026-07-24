@@ -9,7 +9,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import type { CSSProperties, ReactNode, RefObject } from 'react';
+import type { ReactNode, RefObject } from 'react';
 import { Tooltip as TooltipPrimitive } from 'radix-ui';
 import { DAEMON_APPROVAL_MODES } from '@qwen-code/webui/daemon-react-sdk';
 import type { CommandInfo } from '../adapters/types';
@@ -53,14 +53,7 @@ import { VoiceButton } from '../voice/VoiceButton';
 import { GitBranchChipContent, GitBranchIndicator } from './GitBranchIndicator';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
 import { ChevronDownIcon, FolderClosedIcon } from 'lucide-react';
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from './ui/select';
+import { WorkspaceSelector } from './WorkspaceSelector';
 import {
   Popover,
   PopoverAnchor,
@@ -131,6 +124,8 @@ interface ChatEditorProps {
   currentMode?: string;
   currentModel?: string;
   gitBranch?: string;
+  /** Whether the session is in a worktree (styles the git chip purple). */
+  gitWorktree?: boolean;
   /** Enriched working-tree summary (dirty / ahead-behind / stash / operation). */
   gitStatus?: DaemonWorkspaceGitStatus;
   /** Opens the working-tree Changes dialog; makes the git chip clickable. */
@@ -156,10 +151,16 @@ interface ChatEditorProps {
     cwd: string;
     label: string;
     primary: boolean;
+    trusted: boolean;
   }>;
   selectedWorkspaceCwd?: string;
   workspaceSelectionDisabled?: boolean;
   onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
+  scratchWorkspaceSupported?: boolean;
+  existingFolderWorkspaceSupported?: boolean;
+  workspaceMutationBusy?: boolean;
+  onCreateScratchWorkspace?: () => void;
+  onOpenExistingWorkspace?: () => void;
   atWorkspaceCwd?: string;
   onChatWidthModeChange?: (mode: '1000' | 'wide') => void;
   onFocusFooter?: () => boolean;
@@ -837,6 +838,7 @@ function SlashCommandPanel({
   const [hoverDetail, setHoverDetail] = useState<{
     label: string;
     detail: string;
+    side: 'top' | 'right' | 'bottom' | 'left';
   } | null>(null);
 
   useEffect(() => {
@@ -884,25 +886,6 @@ function SlashCommandPanel({
   }, []);
 
   const rowPlans = planSlashSectionRows(menu.items, menu.kind);
-  const maxLabelLength = Math.max(
-    ...menu.items.map((item) => Array.from(item.label).length),
-    0,
-  );
-  const maxDetailLength = Math.max(
-    ...menu.items.map((item) => Array.from(item.detail ?? '').length),
-    0,
-  );
-  const hasDetailColumn = maxDetailLength > 0;
-  const panelStyle = {
-    '--slash-command-col': `${Math.min(
-      Math.max(maxLabelLength + 1, 10),
-      24,
-    )}ch`,
-    '--slash-desc-col': hasDetailColumn
-      ? `${Math.min(Math.max(maxDetailLength + 1, 18), 36)}ch`
-      : '0px',
-    '--slash-column-gap': hasDetailColumn ? '2ch' : '0px',
-  } as CSSProperties;
 
   return (
     <>
@@ -923,11 +906,12 @@ function SlashCommandPanel({
           align="start"
           alignOffset={16}
           sideOffset={8}
+          avoidCollisions={false}
           collisionPadding={12}
           collisionBoundary={collisionBoundary ?? undefined}
+          className="duration-0 data-open:animate-none data-closed:animate-none"
           role="listbox"
           data-web-shell-slash-menu
-          style={panelStyle}
           onOpenAutoFocus={(event) => event.preventDefault()}
           onCloseAutoFocus={(event) => event.preventDefault()}
           onInteractOutside={(event) => {
@@ -1000,9 +984,29 @@ function SlashCommandPanel({
                             return;
                           }
                           hoverAnchorRef.current = event.currentTarget;
+                          const rowRect =
+                            event.currentTarget.getBoundingClientRect();
+                          const boundaryRect =
+                            collisionBoundary?.getBoundingClientRect();
+                          const left = boundaryRect?.left ?? 0;
+                          const right =
+                            boundaryRect?.right ?? window.innerWidth;
+                          const top = boundaryRect?.top ?? 0;
+                          const bottom =
+                            boundaryRect?.bottom ?? window.innerHeight;
+                          const detailWidth = Math.min(320, right - left - 24);
+                          const side =
+                            right - rowRect.right >= detailWidth + 8
+                              ? 'right'
+                              : rowRect.left - left >= detailWidth + 8
+                                ? 'left'
+                                : rowRect.top - top >= bottom - rowRect.bottom
+                                  ? 'top'
+                                  : 'bottom';
                           setHoverDetail({
                             label: item.label,
                             detail: item.detail,
+                            side,
                           });
                         }}
                         onMouseDown={(event) => {
@@ -1042,11 +1046,12 @@ function SlashCommandPanel({
         {hoverDetail && (
           <PopoverContent
             ref={detailRef}
-            side="right"
+            side={hoverDetail.side}
             align="start"
             sideOffset={8}
             collisionPadding={12}
             collisionBoundary={collisionBoundary ?? undefined}
+            className="duration-0 data-open:animate-none data-closed:animate-none"
             data-web-shell-slash-detail
             onOpenAutoFocus={(event) => event.preventDefault()}
             onCloseAutoFocus={(event) => event.preventDefault()}
@@ -1078,10 +1083,14 @@ function QuickActionsPanel({
   actions,
   onRun,
   onPressKey,
+  showKeyHints = true,
 }: {
   actions: readonly QuickActionItem[];
   onRun: (action: QuickActionItem) => void;
   onPressKey: (item: QuickKeyItem) => void;
+  // The keyboard shortcut grid is pointless without a hardware keyboard, so
+  // the mobile textarea backend hides it.
+  showKeyHints?: boolean;
 }) {
   const { t } = useI18n();
 
@@ -1105,20 +1114,22 @@ function QuickActionsPanel({
             </button>
           ))}
         </div>
-        <div className={styles.quickKeysGrid}>
-          {QUICK_KEY_ITEMS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={styles.quickKey}
-              title={t(item.descriptionKey)}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => onPressKey(item)}
-            >
-              <span className={styles.quickKeyLabel}>{item.label}</span>
-            </button>
-          ))}
-        </div>
+        {showKeyHints && (
+          <div className={styles.quickKeysGrid}>
+            {QUICK_KEY_ITEMS.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={styles.quickKey}
+                title={t(item.descriptionKey)}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => onPressKey(item)}
+              >
+                <span className={styles.quickKeyLabel}>{item.label}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1145,6 +1156,7 @@ export const ChatEditor = memo(
       currentMode = 'default',
       currentModel = '',
       gitBranch,
+      gitWorktree,
       gitStatus,
       onOpenGitDiff,
       workspaceName,
@@ -1161,6 +1173,11 @@ export const ChatEditor = memo(
       selectedWorkspaceCwd,
       workspaceSelectionDisabled = false,
       onSelectWorkspace,
+      scratchWorkspaceSupported = false,
+      existingFolderWorkspaceSupported = false,
+      workspaceMutationBusy = false,
+      onCreateScratchWorkspace,
+      onOpenExistingWorkspace,
       atWorkspaceCwd,
       onChatWidthModeChange,
       onFocusFooter,
@@ -1183,6 +1200,7 @@ export const ChatEditor = memo(
       renderComposerTag,
       renderComposerTagTooltip,
       onComposerTagClick,
+      parseUserMessageContent,
     } = useWebShellCustomization();
 
     const core = useComposerCore({
@@ -1210,6 +1228,7 @@ export const ChatEditor = memo(
       atProviders,
       atWorkspaceCwd,
       composerTagIcons,
+      parseUserMessageContent,
       renderComposerTag,
       renderComposerTagTooltip,
       onComposerTagClick,
@@ -1223,7 +1242,6 @@ export const ChatEditor = memo(
     const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
     const [quickActionsOpen, setQuickActionsOpen] = useState(false);
-    const [workspaceTooltipOpen, setWorkspaceTooltipOpen] = useState(false);
     const [showQuickActions, setShowQuickActions] = useState(isTouchLikeDevice);
     const containerRef = useRef<HTMLDivElement>(null);
     const slashPanelRef = useRef<HTMLDivElement>(null);
@@ -1236,9 +1254,6 @@ export const ChatEditor = memo(
     const toolbarEndRef = useRef<HTMLDivElement>(null);
     const toolbarRightCustomRef = useRef<HTMLDivElement>(null);
     const toolbarMeasurementsRef = useRef<HTMLDivElement>(null);
-    const workspaceSelectTriggerRef = useRef<HTMLButtonElement>(null);
-    const suppressWorkspaceTooltipRef = useRef(false);
-    const workspaceSelectPointerInsideRef = useRef(false);
     const [widthToggleFits, setWidthToggleFits] = useState(false);
     const [toolbarLabelVisibility, setToolbarLabelVisibility] = useState({
       workspaceSelect: false,
@@ -1494,6 +1509,15 @@ export const ChatEditor = memo(
     );
     const dispatchComposerKey = useCallback(
       (event: QuickKeyItem['event']) => {
+        if (core.mobileComposer) {
+          // No CodeMirror to dispatch into. History search is the one key
+          // action with a non-keyboard equivalent; the rest are hidden on
+          // the textarea backend.
+          if (event.ctrlKey && event.key === 'r') {
+            core.searchState.openHistorySearch();
+          }
+          return;
+        }
         const view = core.viewRef.current;
         if (!view) return;
         view.focus();
@@ -1548,6 +1572,7 @@ export const ChatEditor = memo(
       searchInputRef,
       searchUiRef,
       closeSearch,
+      restoreSearchMatch,
       handleSearchKeyDown,
       handleSearchInput,
       handleSearchCompositionEnd,
@@ -1608,7 +1633,11 @@ export const ChatEditor = memo(
     );
     const selectedWorkspaceLabel = selectedWorkspace?.label ?? '';
     const workspaceSelectVisible = Boolean(
-      workspaces && workspaces.length > 1 && onSelectWorkspace,
+      workspaces &&
+        onSelectWorkspace &&
+        (workspaces.length > 1 ||
+          scratchWorkspaceSupported ||
+          existingFolderWorkspaceSupported),
     );
     const workspaceIndicatorVisible = Boolean(
       workspaceName && showToolbarAction('workspace'),
@@ -1861,7 +1890,11 @@ export const ChatEditor = memo(
                         }`}
                         onMouseDown={(event) => {
                           event.preventDefault();
-                          core.replaceEditorText(match);
+                          if (restoreSearchMatch) {
+                            restoreSearchMatch(match);
+                          } else {
+                            core.replaceEditorText(match);
+                          }
                           closeSearch(false);
                         }}
                       >
@@ -1995,7 +2028,29 @@ export const ChatEditor = memo(
                   !
                 </span>
               )}
-              <div ref={core.containerRef} data-web-shell-composer-editor />
+              {core.mobileComposer ? (
+                // Touch devices get a plain textarea instead of CodeMirror:
+                // mobile virtual keyboards and IMEs interact poorly with the
+                // contenteditable editor (#5958). Enter inserts a newline
+                // natively; submission goes through the Send button.
+                <textarea
+                  ref={core.mobileComposer.textareaRef}
+                  className={styles.mobileTextarea}
+                  value={core.mobileComposer.value}
+                  onChange={core.mobileComposer.onChange}
+                  onPaste={core.mobileComposer.onPaste}
+                  placeholder={core.mobileComposer.placeholder}
+                  disabled={core.disabled}
+                  rows={1}
+                  enterKeyHint="enter"
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  data-web-shell-composer-editor
+                />
+              ) : (
+                <div ref={core.containerRef} data-web-shell-composer-editor />
+              )}
             </div>
             <div ref={toolbarRef} className={styles.toolbar}>
               <div ref={toolbarLeadingRef} className={styles.toolbarLeading}>
@@ -2014,95 +2069,26 @@ export const ChatEditor = memo(
                   {workspaceSelectVisible &&
                     workspaces &&
                     onSelectWorkspace && (
-                      <Select
-                        value={selectedWorkspace?.id}
+                      <WorkspaceSelector
+                        workspaces={workspaces}
+                        selectedWorkspaceCwd={selectedWorkspaceCwd}
                         disabled={workspaceSelectionDisabled}
-                        onValueChange={(value) => {
-                          const nextWorkspace = workspaces.find(
-                            (entry) => entry.id === value,
-                          );
-                          if (!nextWorkspace) return;
-                          onSelectWorkspace(
-                            nextWorkspace.primary
-                              ? undefined
-                              : nextWorkspace.cwd,
-                          );
-                          suppressWorkspaceTooltipRef.current = true;
-                          setWorkspaceTooltipOpen(false);
-                          requestAnimationFrame(() => {
-                            workspaceSelectTriggerRef.current?.blur();
-                          });
-                        }}
-                      >
-                        <TooltipProvider delayDuration={300}>
-                          <Tooltip
-                            open={workspaceTooltipOpen}
-                            onOpenChange={(open) => {
-                              if (
-                                open &&
-                                (suppressWorkspaceTooltipRef.current ||
-                                  !workspaceSelectPointerInsideRef.current)
-                              ) {
-                                return;
-                              }
-                              setWorkspaceTooltipOpen(open);
-                            }}
-                          >
-                            <TooltipTrigger asChild>
-                              <span
-                                className={`${styles.workspaceSelectTooltipTrigger} ${
-                                  showWorkspaceSelectLabel
-                                    ? ''
-                                    : styles.workspaceSelectTooltipTriggerCompact
-                                }`}
-                                onPointerEnter={() => {
-                                  workspaceSelectPointerInsideRef.current = true;
-                                }}
-                                onPointerLeave={() => {
-                                  workspaceSelectPointerInsideRef.current = false;
-                                  suppressWorkspaceTooltipRef.current = false;
-                                }}
-                                onBlur={() => {
-                                  if (
-                                    !workspaceSelectPointerInsideRef.current
-                                  ) {
-                                    suppressWorkspaceTooltipRef.current = false;
-                                  }
-                                }}
-                              >
-                                <SelectTrigger
-                                  ref={workspaceSelectTriggerRef}
-                                  size="sm"
-                                  className={`${styles.toolBtn} ${styles.workspaceSelectTrigger} ${
-                                    showWorkspaceSelectLabel
-                                      ? ''
-                                      : styles.workspaceSelectTriggerCompact
-                                  }`}
-                                  aria-label={t('sidebar.workspaceSelectLabel')}
-                                >
-                                  <FolderClosedIcon
-                                    size={16}
-                                    strokeWidth={1.2}
-                                  />
-                                  <SelectValue />
-                                </SelectTrigger>
-                              </span>
-                            </TooltipTrigger>
-                            <TooltipContent side="top">
-                              {selectedWorkspaceLabel}
-                            </TooltipContent>
-                          </Tooltip>
-                        </TooltipProvider>
-                        <SelectContent position="popper" align="start">
-                          <SelectGroup>
-                            {workspaces.map((entry) => (
-                              <SelectItem key={entry.id} value={entry.id}>
-                                {entry.label}
-                              </SelectItem>
-                            ))}
-                          </SelectGroup>
-                        </SelectContent>
-                      </Select>
+                        busy={workspaceMutationBusy}
+                        scratchSupported={scratchWorkspaceSupported}
+                        existingFolderSupported={
+                          existingFolderWorkspaceSupported
+                        }
+                        className={`${styles.toolBtn} ${styles.workspaceSelectTrigger} ${
+                          showWorkspaceSelectLabel
+                            ? ''
+                            : styles.workspaceSelectTriggerCompact
+                        }`}
+                        onSelectWorkspace={onSelectWorkspace}
+                        onCreateScratch={onCreateScratchWorkspace ?? (() => {})}
+                        onOpenExistingFolder={
+                          onOpenExistingWorkspace ?? (() => {})
+                        }
+                      />
                     )}
                   {workspaceIndicatorVisible && workspaceName && (
                     <WorkspaceIndicator
@@ -2121,6 +2107,7 @@ export const ChatEditor = memo(
                       status={gitStatus}
                       compact={!showGitBranchLabel}
                       onOpenDiff={onOpenGitDiff}
+                      worktree={gitWorktree}
                     />
                   )}
                   {showModeAction && (
@@ -2446,6 +2433,7 @@ export const ChatEditor = memo(
                       branch={gitBranch}
                       status={gitStatus}
                       compact
+                      worktree={gitWorktree}
                     />
                   </span>
                   <span
@@ -2456,6 +2444,7 @@ export const ChatEditor = memo(
                       branch={gitBranch}
                       status={gitStatus}
                       compact={false}
+                      worktree={gitWorktree}
                     />
                   </span>
                 </>
@@ -2516,6 +2505,7 @@ export const ChatEditor = memo(
             actions={quickActions}
             onRun={runQuickAction}
             onPressKey={pressQuickKey}
+            showKeyHints={!core.mobileComposer}
           />
         )}
       </div>

@@ -16,20 +16,17 @@ import type {
 import { FolderClosedIcon, FolderOpenIcon } from 'lucide-react';
 import { GitBranchIndicator } from '../GitBranchIndicator';
 import { SESSION_LIST_PAGE_SIZE } from '../../constants/sessions';
+import { useI18n } from '../../i18n';
 import {
   readWorkspaceCollapsedGroupIds,
   writeWorkspaceCollapsedGroupIds,
 } from './collapsedSessionSections';
+import { workspaceLabel } from '../../utils/workspace';
 import { SessionGroupSection } from './SessionGroupSection';
 import styles from './WorkspaceSection.module.css';
 
 function cx(...classes: Array<string | false | undefined>): string {
   return classes.filter(Boolean).join(' ');
-}
-
-function getWorkspaceName(cwd: string): string {
-  const parts = cwd.split(/[\\/]+/).filter(Boolean);
-  return parts.at(-1) ?? cwd;
 }
 
 // The cwd-qualified daemon route only accepts a workspace id or absolute path.
@@ -127,6 +124,7 @@ export function WorkspaceSection({
   excludePinned = false,
   onOpenGitDiff,
 }: WorkspaceSectionProps) {
+  const { t } = useI18n();
   const [sessions, setSessions] = useState<DaemonSessionSummary[]>([]);
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
   const [loadError, setLoadError] = useState(false);
@@ -225,12 +223,13 @@ export function WorkspaceSection({
   // Undefined when `cwd` is not a real path (synthetic fallback workspace), so
   // the poll — which qualifies the route with the cwd — is skipped entirely.
   const gitPollCwd = isAbsolutePath(workspace.cwd) ? workspace.cwd : undefined;
+  const gitStatusEnabled = Boolean(onOpenGitDiff);
 
   // Log a poll failure only on the success→failure transition, not on every
   // 60s/focus tick, so an unreachable workspace doesn't spam a long-lived tab.
   const gitPollFailed = useRef(false);
   const loadGitStatus = useCallback(async () => {
-    if (!onOpenGitDiff || !workspace.trusted || !gitPollCwd) return;
+    if (!gitStatusEnabled || !workspace.trusted || !gitPollCwd) return;
     try {
       const status = await client.workspaceByCwd(gitPollCwd).workspaceGit();
       gitPollFailed.current = false;
@@ -244,7 +243,7 @@ export function WorkspaceSection({
         gitPollFailed.current = true;
       }
     }
-  }, [client, gitPollCwd, onOpenGitDiff, workspace.trusted]);
+  }, [client, gitPollCwd, gitStatusEnabled, workspace.trusted]);
 
   // The git chip lives in the always-visible folder header, so it polls
   // independently of session expansion: on mount/trust, on window focus, and on
@@ -252,7 +251,7 @@ export function WorkspaceSection({
   // per call, so the cadence stays gentle). Skipped entirely when no diff
   // handler is wired, since the chip — its only consumer — would not render.
   useEffect(() => {
-    if (!onOpenGitDiff || !workspace.trusted || !gitPollCwd) {
+    if (!gitStatusEnabled || !workspace.trusted || !gitPollCwd) {
       setGitStatus(undefined);
       return;
     }
@@ -268,8 +267,8 @@ export function WorkspaceSection({
     };
   }, [
     gitPollCwd,
+    gitStatusEnabled,
     loadGitStatus,
-    onOpenGitDiff,
     reloadToken,
     workspace.trusted,
   ]);
@@ -338,9 +337,7 @@ export function WorkspaceSection({
                 <WorkspaceFolderIcon open={expanded} />
               </span>
               <span className={styles.headerContent}>
-                <span className={styles.name}>
-                  {getWorkspaceName(workspace.cwd)}
-                </span>
+                <span className={styles.name}>{workspaceLabel(workspace)}</span>
               </span>
               {!workspace.trusted && (
                 <span className={styles.badge}>{untrustedLabel}</span>
@@ -352,14 +349,18 @@ export function WorkspaceSection({
           )}
         </button>
         {onOpenGitDiff && workspace.trusted && gitStatus?.branch && (
-          <span className={styles.gitPill}>
+          <button
+            type="button"
+            className={styles.gitPill}
+            aria-label={`${t('gitDiff.title')} — ${gitStatus.branch}`}
+            onClick={() => onOpenGitDiff(workspace.cwd)}
+          >
             <GitBranchIndicator
               branch={gitStatus.branch}
               status={gitStatus}
               compact
-              onOpenDiff={() => onOpenGitDiff(workspace.cwd)}
             />
-          </span>
+          </button>
         )}
         {headerActions?.(actionsVisible)}
       </div>

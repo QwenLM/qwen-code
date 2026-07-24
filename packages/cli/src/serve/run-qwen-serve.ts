@@ -37,7 +37,10 @@ import {
   resolveWorkspaceInputs,
 } from './workspace-inputs.js';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
-import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
+import {
+  canonicalizeWorkspace,
+  translateAndCheckAbsoluteWorkspacePath,
+} from '@qwen-code/acp-bridge/workspacePaths';
 import type {
   AuthType,
   ProviderSetupInputs,
@@ -90,10 +93,20 @@ import type {
   WorkspaceRuntime,
 } from './workspace-registry.js';
 import {
+  isManagedScratchChild,
+  prepareManagedScratchRoot,
+  type ManagedScratchRoot,
+  type WorkspaceRuntimeProvenance,
+} from './managed-scratch-workspace.js';
+import {
   workspaceRegistrationId,
   type WorkspaceRegistrationStore,
 } from './workspace-registration-store.js';
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
+import type {
+  ChannelDeliveryHandler,
+  ChannelDeliveryHostResult,
+} from '@qwen-code/acp-bridge/bridgeOptions';
 import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
 import type { AcpHttpHandle } from './acp-http/index.js';
@@ -117,6 +130,16 @@ import type {
 } from './channel-worker-supervisor.js';
 import { QWEN_SERVER_TOKEN_ENV } from './channel-worker-env.js';
 import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
+import {
+  ChannelDeliveryError,
+  isChannelDeliveryError,
+} from './channel-delivery-ipc.js';
+import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
+import {
+  normalizeWorkerDiagnostic,
+  sanitizeWorkerDiagnostic,
+  type WorkerDiagnosticRedactionOptions,
+} from './channel-worker-diagnostics.js';
 import { channelSelectionNames } from './channel-selection.js';
 import {
   resolveChannelWorkspaceGroups,
@@ -159,6 +182,107 @@ const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
 const DAEMON_LOG_FORCED_FLUSH_BUDGET_MS = 250;
+
+function channelDeliveryPublicError(
+  code: Extract<ChannelDeliveryHostResult, { status: 'failed' }>['code'],
+): string {
+  switch (code) {
+    case 'channel_worker_unavailable':
+      return 'Channel worker is unavailable.';
+    case 'channel_delivery_timeout':
+      return 'Channel delivery timed out.';
+    case 'channel_delivery_invalid':
+      return 'Channel delivery is invalid.';
+    case 'channel_delivery_rejected':
+      return 'Channel delivery was rejected.';
+    case 'channel_delivery_queue_full':
+      return 'Channel delivery queue is full.';
+    case 'channel_delivery_failed':
+      return 'Channel delivery failed.';
+    default:
+      return 'Channel delivery failed.';
+  }
+}
+
+export function createBoundChannelDeliveryHandler(
+  boundWorkspace: string,
+  getManager: () => ChannelWorkerManager | undefined,
+  authorizations: ChannelDeliveryAuthorizationStore,
+  daemonLog?: Pick<DaemonLogger, 'warn'>,
+  diagnosticRedaction: WorkerDiagnosticRedactionOptions = {
+    workerEnv: {},
+  },
+): ChannelDeliveryHandler {
+  return async (info): Promise<ChannelDeliveryHostResult> => {
+    const failed = (
+      code: Extract<ChannelDeliveryHostResult, { status: 'failed' }>['code'],
+      error: string,
+      diagnostic?: unknown,
+    ): ChannelDeliveryHostResult => {
+      writeDaemonLifecycleBestEffort(() => {
+        if (!daemonLog) return;
+        let diagnosticText: string | undefined;
+        if (diagnostic !== undefined) {
+          const message =
+            diagnostic instanceof Error
+              ? diagnostic.message
+              : String(diagnostic);
+          const sanitized = sanitizeWorkerDiagnostic(
+            message,
+            512,
+            diagnosticRedaction,
+          );
+          const targetId = normalizeWorkerDiagnostic(info.target.id);
+          diagnosticText = sanitizeLogText(
+            targetId.length > 0
+              ? sanitized.replaceAll(targetId, '<redacted>')
+              : sanitized,
+            512,
+          );
+        }
+        daemonLog.warn('channel delivery failed', {
+          sessionId: info.sessionId,
+          deliveryId: info.deliveryId,
+          source: info.source,
+          channelName: info.target.channelName,
+          code,
+          ...(diagnosticText ? { diagnostic: diagnosticText } : {}),
+        });
+      });
+      return { status: 'failed', code, error };
+    };
+    if (!authorizations.consume(boundWorkspace, info)) {
+      return failed(
+        'channel_delivery_invalid',
+        'Channel delivery is not authorized.',
+      );
+    }
+    if (info.text.trim().length === 0) {
+      return { status: 'skipped' };
+    }
+    const manager = getManager();
+    if (!manager) {
+      return failed(
+        'channel_worker_unavailable',
+        'Channel worker is not running.',
+      );
+    }
+    try {
+      await manager.deliverChannelMessage(boundWorkspace, {
+        deliveryId: info.deliveryId,
+        channelName: info.target.channelName,
+        target: { type: info.target.type, id: info.target.id },
+        text: info.text,
+      });
+      return { status: 'delivered' };
+    } catch (err) {
+      if (isChannelDeliveryError(err)) {
+        return failed(err.code, channelDeliveryPublicError(err.code), err);
+      }
+      return failed('channel_delivery_failed', 'Channel delivery failed.', err);
+    }
+  };
+}
 
 async function flushDaemonLogBounded(
   daemonLog: DaemonLogger,
@@ -997,6 +1121,7 @@ function currentServeFeaturesForRunQwenServe(
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
     sessionGenerationAvailable: true,
+    workspaceGenerationAvailable: true,
     rateLimit: opts.rateLimit === true,
     reloadAvailable: true,
     channelReloadAvailable: opts.channelSelection !== undefined,
@@ -1695,6 +1820,60 @@ interface DaemonLoggerLifecycleCallbacks {
   signalOwned(): void;
 }
 
+/**
+ * Validates and canonicalizes a `--workspace` boot argument. Extracted to
+ * module scope (from the runQwenServe closure) so the #7139 sandbox path
+ * translation ahead of the absolute-path guard is testable — this is the
+ * primary reproduction path of that issue.
+ */
+export function validateAndCanonicalizeWorkspaceInput(
+  rawWorkspace: string,
+): string {
+  // #7139: inside a Linux container sandbox a Windows host forwards
+  // `--workspace C:\…` in host shape; translate to the bind-mount
+  // location BEFORE the absolute-path guard, which would otherwise
+  // reject it (`path.isAbsolute('C:\…')` is false on POSIX).
+  const workspace = translateAndCheckAbsoluteWorkspacePath(rawWorkspace);
+  if (workspace === null) {
+    throw new Error(
+      `Invalid --workspace "${rawWorkspace}": must be an absolute path.`,
+    );
+  }
+  try {
+    const stats = fs.statSync(workspace);
+    if (!stats.isDirectory()) {
+      throw new Error(
+        `Invalid --workspace "${workspace}": exists but is not a directory.`,
+      );
+    }
+  } catch (err) {
+    if (err && typeof err === 'object' && 'code' in err) {
+      const code = (err as { code?: unknown }).code;
+      if (code === 'ENOENT') {
+        throw new Error(
+          `Invalid --workspace "${workspace}": directory does not exist.`,
+        );
+      }
+      // EACCES / EPERM: the path exists but the current user can't
+      // stat it (typical for SIP-protected paths on macOS, root-owned
+      // dirs the daemon's user can't traverse, etc.). The raw Node
+      // SystemError has the path AND the syscall but no operator-
+      // facing breadcrumb that this came from `--workspace`. Wrap
+      // both codes so the boot failure points at the flag the
+      // operator actually set.
+      if (code === 'EACCES' || code === 'EPERM') {
+        throw new Error(
+          `Invalid --workspace "${workspace}": permission denied ` +
+            `(${String(code)}). The path exists but cannot be stat'd ` +
+            `by the current user.`,
+        );
+      }
+    }
+    throw err;
+  }
+  return canonicalizeWorkspace(workspace);
+}
+
 export async function runQwenServe(
   optsIn: RunQwenServeOptions,
   deps: RunQwenServeDeps = {},
@@ -1734,6 +1913,7 @@ async function runQwenServeImpl(
   loggerLifecycle: DaemonLoggerLifecycleCallbacks,
 ): Promise<RunHandle> {
   const runStartedAt = performance.now();
+  const channelDeliveryAuthorizations = new ChannelDeliveryAuthorizationStore();
   const shouldPreheat = !deps.bridge && shouldPreheatBridge(deps);
   const startup: DaemonStartupSnapshot = {
     processStartedAt: new Date(
@@ -1763,6 +1943,10 @@ async function runQwenServeImpl(
     typeof rawToken === 'string' && rawToken.trim().length > 0
       ? rawToken.trim()
       : undefined;
+  const channelDeliveryDiagnosticRedaction: WorkerDiagnosticRedactionOptions = {
+    workerEnv: daemonRuntimeBaseEnv,
+    ...(token ? { daemonToken: token } : {}),
+  };
   const sessionShellCommandEnabled =
     optsIn.enableSessionShell === true && token !== undefined;
   if (optsIn.enableSessionShell === true && token === undefined) {
@@ -2053,46 +2237,8 @@ async function runQwenServeImpl(
     );
   }
 
-  const validateAndCanonicalizeWorkspace = (workspace: string): string => {
-    if (!path.isAbsolute(workspace)) {
-      throw new Error(
-        `Invalid --workspace "${workspace}": must be an absolute path.`,
-      );
-    }
-    try {
-      const stats = fs.statSync(workspace);
-      if (!stats.isDirectory()) {
-        throw new Error(
-          `Invalid --workspace "${workspace}": exists but is not a directory.`,
-        );
-      }
-    } catch (err) {
-      if (err && typeof err === 'object' && 'code' in err) {
-        const code = (err as { code?: unknown }).code;
-        if (code === 'ENOENT') {
-          throw new Error(
-            `Invalid --workspace "${workspace}": directory does not exist.`,
-          );
-        }
-        // EACCES / EPERM: the path exists but the current user can't
-        // stat it (typical for SIP-protected paths on macOS, root-owned
-        // dirs the daemon's user can't traverse, etc.). The raw Node
-        // SystemError has the path AND the syscall but no operator-
-        // facing breadcrumb that this came from `--workspace`. Wrap
-        // both codes so the boot failure points at the flag the
-        // operator actually set.
-        if (code === 'EACCES' || code === 'EPERM') {
-          throw new Error(
-            `Invalid --workspace "${workspace}": permission denied ` +
-              `(${String(code)}). The path exists but cannot be stat'd ` +
-              `by the current user.`,
-          );
-        }
-      }
-      throw err;
-    }
-    return canonicalizeWorkspace(workspace);
-  };
+  const validateAndCanonicalizeWorkspace =
+    validateAndCanonicalizeWorkspaceInput;
 
   // Resolve the bound workspace list. The first explicit workspace remains the
   // primary workspace for legacy APIs; later workspaces are isolated secondary
@@ -2100,6 +2246,7 @@ async function runQwenServeImpl(
   const workspaceInputs = rawWorkspaces.map((workspace) => ({
     raw: workspace,
     cwd: validateAndCanonicalizeWorkspace(workspace),
+    displayName: undefined as string | undefined,
     removable: false,
     registrationIds: [] as string[],
   }));
@@ -2166,6 +2313,7 @@ async function runQwenServeImpl(
       const stored = await workspaceRegistrationStore.read();
       for (const storedWorkspace of stored.workspaces) {
         const registrationId = workspaceRegistrationId(storedWorkspace);
+        const displayName = stored.displayNames?.[registrationId];
         let cwd: string;
         try {
           cwd = validateAndCanonicalizeWorkspace(storedWorkspace);
@@ -2182,6 +2330,7 @@ async function runQwenServeImpl(
         );
         if (existingInput) {
           existingInput.registrationIds.push(registrationId);
+          existingInput.displayName ??= displayName;
           continue;
         }
         const nested = workspaceInputs.some(
@@ -2208,6 +2357,7 @@ async function runQwenServeImpl(
         workspaceInputs.push({
           raw: storedWorkspace,
           cwd,
+          displayName,
           removable: true,
           registrationIds: [registrationId],
         });
@@ -2392,6 +2542,14 @@ async function runQwenServeImpl(
         `Invalid sessionIdleTimeoutMs: ${opts.sessionIdleTimeoutMs}. Must be a non-negative integer (milliseconds, 0 = disabled).`,
       );
     }
+  }
+  if (opts.initializeTimeoutMs !== undefined) {
+    if (!isPositiveIntegerMs(opts.initializeTimeoutMs)) {
+      throw new TypeError(
+        `Invalid initializeTimeoutMs: ${opts.initializeTimeoutMs}. Must be a positive integer (milliseconds).`,
+      );
+    }
+    assertTimerDelayInRange('initializeTimeoutMs', opts.initializeTimeoutMs);
   }
   // Validate here (not just in the yargs handler) so embedded callers of
   // `runQwenServe({ permissionResponseTimeoutMs })` also fail loud: the
@@ -2819,6 +2977,21 @@ async function runQwenServeImpl(
         cliVersionPromise,
       ]);
     cliVersion = resolvedCliVersion;
+    let managedScratchRoot: ManagedScratchRoot | undefined;
+    try {
+      // Root acceptance is fail-closed and happens only after every startup
+      // workspace (including restored registrations) has been resolved.
+      managedScratchRoot = prepareManagedScratchRoot(
+        path.join(core.Storage.getGlobalQwenDir(), 'scratch-workspaces'),
+        workspaceInputs.map((workspace) => workspace.cwd),
+      );
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: managed scratch workspaces are unavailable: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
     let runtimeBootSettings:
       | ReturnType<SettingsRuntime['loadSettings']>
       | undefined;
@@ -2922,7 +3095,10 @@ async function runQwenServeImpl(
       }
       throw err;
     }
-    core.initializeTelemetry(
+    // Must settle before initializeDaemonMetrics(): metrics.getMeter() caches
+    // a noop meter permanently if called before the SDK registers the global
+    // MeterProvider. This runs in the deferred runtime load, off the fast path.
+    await core.initializeTelemetry(
       createDaemonTelemetryRuntimeConfig(
         daemonTelemetrySettings,
         resolvedCliVersion,
@@ -3324,6 +3500,13 @@ async function runQwenServeImpl(
         // connection that hosts a named client MCP server (#5626).
         clientMcpSender: clientMcpSenderRegistry.lookup,
         onCreateSubSession: subSessionLauncher.launch,
+        onChannelDelivery: createBoundChannelDeliveryHandler(
+          boundWorkspace,
+          () => channelWorkerManager,
+          channelDeliveryAuthorizations,
+          daemonLog,
+          channelDeliveryDiagnosticRedaction,
+        ),
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
         sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
@@ -3338,6 +3521,9 @@ async function runQwenServeImpl(
           : {}),
         ...(opts.channelIdleTimeoutMs !== undefined
           ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
+          : {}),
+        ...(opts.initializeTimeoutMs !== undefined
+          ? { initializeTimeoutMs: opts.initializeTimeoutMs }
           : {}),
         ...(opts.sessionReapIntervalMs !== undefined
           ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
@@ -3472,6 +3658,9 @@ async function runQwenServeImpl(
       {
         workspaceId: daemonWorkspaceHash,
         workspaceCwd: boundWorkspace,
+        ...(workspaceInputs[0]?.displayName
+          ? { displayName: workspaceInputs[0].displayName }
+          : {}),
         primary: true,
         trusted: trustedWorkspace,
         removable: false,
@@ -3633,6 +3822,13 @@ async function runQwenServeImpl(
       const secondaryBridge = runtime.createAcpSessionBridge({
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
         onCreateSubSession: secondarySubSessionLauncher.launch,
+        onChannelDelivery: createBoundChannelDeliveryHandler(
+          workspaceInput.cwd,
+          () => channelWorkerManager,
+          channelDeliveryAuthorizations,
+          daemonLog,
+          channelDeliveryDiagnosticRedaction,
+        ),
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
         sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
@@ -3647,6 +3843,9 @@ async function runQwenServeImpl(
           : {}),
         ...(opts.channelIdleTimeoutMs !== undefined
           ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
+          : {}),
+        ...(opts.initializeTimeoutMs !== undefined
+          ? { initializeTimeoutMs: opts.initializeTimeoutMs }
           : {}),
         ...(opts.sessionReapIntervalMs !== undefined
           ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
@@ -3766,6 +3965,9 @@ async function runQwenServeImpl(
       workspaceRuntimes.push({
         workspaceId: secondaryWorkspaceHash,
         workspaceCwd: workspaceInput.cwd,
+        ...(workspaceInput.displayName
+          ? { displayName: workspaceInput.displayName }
+          : {}),
         primary: false,
         trusted: secondaryTrusted,
         removable: workspaceInput.removable,
@@ -3942,7 +4144,19 @@ async function runQwenServeImpl(
     // Factory for dynamically creating workspace runtimes (POST /workspaces).
     const createDynamicWorkspaceRuntime = async (
       cwd: string,
+      options: { provenance: WorkspaceRuntimeProvenance },
     ): Promise<import('./workspace-registry.js').WorkspaceRuntime> => {
+      // HTTP clients cannot choose provenance. This second boundary prevents a
+      // future caller from granting managed trust to an arbitrary directory.
+      if (
+        options.provenance === 'managed-scratch' &&
+        (!managedScratchRoot ||
+          !isManagedScratchChild(cwd, managedScratchRoot.canonicalRoot))
+      ) {
+        throw new Error(
+          'Managed scratch runtime must use an accepted direct child directory',
+        );
+      }
       let wsSettings: ReturnType<SettingsRuntime['loadSettings']> | undefined;
       try {
         wsSettings = settingsRuntime.settings.loadSettings(cwd);
@@ -3955,12 +4169,14 @@ async function runQwenServeImpl(
             `falling back to defaults.`,
         );
       }
-      const trusted = wsSettings
-        ? settingsRuntime.trustedFolders.getWorkspaceTrustStatus(
-            wsSettings.merged,
-            cwd,
-          ).effective.state === 'trusted'
-        : false;
+      const trusted =
+        options.provenance === 'managed-scratch' ||
+        (wsSettings
+          ? settingsRuntime.trustedFolders.getWorkspaceTrustStatus(
+              wsSettings.merged,
+              cwd,
+            ).effective.state === 'trusted'
+          : false);
       const wsEnv = createRuntimeEnvMetadata(cwd, wsSettings);
       const wsHash = core.hashDaemonWorkspace(cwd);
       const wsFsFactory = runtime.resolveBridgeFsFactory({
@@ -4001,6 +4217,13 @@ async function runQwenServeImpl(
         wsBridge = runtime.createAcpSessionBridge({
           clientMcpSender: wsClientMcpRegistry.lookup,
           onCreateSubSession: wsSubSessionLauncher.launch,
+          onChannelDelivery: createBoundChannelDeliveryHandler(
+            cwd,
+            () => channelWorkerManager,
+            channelDeliveryAuthorizations,
+            daemonLog,
+            channelDeliveryDiagnosticRedaction,
+          ),
           maxSessions: opts.maxSessions,
           freshSessionAdmission: totalSessionAdmission.admit,
           sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
@@ -4015,6 +4238,9 @@ async function runQwenServeImpl(
             : {}),
           ...(opts.channelIdleTimeoutMs !== undefined
             ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
+            : {}),
+          ...(opts.initializeTimeoutMs !== undefined
+            ? { initializeTimeoutMs: opts.initializeTimeoutMs }
             : {}),
           ...(opts.sessionReapIntervalMs !== undefined
             ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
@@ -4316,6 +4542,7 @@ async function runQwenServeImpl(
     const app = runtime.createServeApp(opts, () => actualPort, {
       workspaceRegistry,
       createWorkspaceRuntime: createDynamicWorkspaceRuntime,
+      managedScratchRoot,
       workspaceRegistrationStore,
       workspaceRuntimeRemoval,
       voiceCoordinator: workspaceVoiceCoordinator,
@@ -4355,6 +4582,19 @@ async function runQwenServeImpl(
         }
         return channelWorkerManager.enqueueWebhookTask(task);
       },
+      deliverChannelMessage: async (workspaceCwd, request) => {
+        if (!channelWorkerManager) {
+          throw new ChannelDeliveryError(
+            'channel_worker_unavailable',
+            'Channel worker is not running.',
+          );
+        }
+        return channelWorkerManager.deliverChannelMessage(
+          workspaceCwd,
+          request,
+        );
+      },
+      channelDeliveryAuthorizations,
       reloadChannelWorker,
       getPerfSnapshot: () => ({
         eventLoop: currentDaemonEventLoopMonitor.snapshot(),
@@ -4631,7 +4871,11 @@ async function runQwenServeImpl(
     // `server.maxConnections`, `server.address()`, `attachServer(server)`,
     // graceful close — is unchanged). Otherwise `app.listen()` keeps the
     // existing plain-HTTP path bit-for-bit.
-    const onListening = () => {
+    const onListening = (error?: Error) => {
+      // Error handling (retry/reject) is owned by tryListen's
+      // server.once('error') handler.
+      if (error) return;
+
       startup.listenerReadyAt = new Date().toISOString();
       startup.processToListenMs = Math.round(process.uptime() * 1000);
       startup.runQwenServeToListenMs = Math.round(

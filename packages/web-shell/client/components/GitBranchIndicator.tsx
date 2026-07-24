@@ -5,7 +5,12 @@
  */
 
 import type { DaemonWorkspaceGitStatus } from '@qwen-code/sdk/daemon';
-import { CircleDotIcon, LayersIcon, TriangleAlertIcon } from 'lucide-react';
+import {
+  CircleDotIcon,
+  GitForkIcon,
+  LayersIcon,
+  TriangleAlertIcon,
+} from 'lucide-react';
 import { useI18n } from '../i18n';
 import styles from './ChatEditor.module.css';
 import {
@@ -87,10 +92,12 @@ export function GitBranchChipContent({
   branch,
   status,
   compact,
+  worktree = false,
 }: {
   branch: string;
   status?: DaemonWorkspaceGitStatus;
   compact: boolean;
+  worktree?: boolean;
 }) {
   const { t } = useI18n();
   const s = deriveStatus(status);
@@ -99,7 +106,13 @@ export function GitBranchChipContent({
     <>
       <span className={styles.gitBranchIconWrap}>
         <span className={styles.gitBranchIcon}>
-          {s.detached ? <CircleDotIcon /> : <GitBranchIcon />}
+          {worktree ? (
+            <GitForkIcon size={14} strokeWidth={1.5} />
+          ) : s.detached ? (
+            <CircleDotIcon />
+          ) : (
+            <GitBranchIcon />
+          )}
         </span>
         {compact && tone && (
           <span
@@ -147,11 +160,13 @@ export function GitBranchIndicator({
   status,
   compact = false,
   onOpenDiff,
+  worktree = false,
 }: {
   branch: string;
   status?: DaemonWorkspaceGitStatus;
   compact?: boolean;
   onOpenDiff?: () => void;
+  worktree?: boolean;
 }) {
   const { t } = useI18n();
   const s = deriveStatus(status);
@@ -187,10 +202,16 @@ export function GitBranchIndicator({
     'data-dirty': s.dirty ? 'true' : undefined,
     'data-operation': s.operation ?? undefined,
     'data-clickable': onOpenDiff ? 'true' : undefined,
+    'data-worktree': worktree ? 'true' : undefined,
   } as const;
 
   const chipInner = (
-    <GitBranchChipContent branch={branch} status={status} compact={compact} />
+    <GitBranchChipContent
+      branch={branch}
+      status={status}
+      compact={compact}
+      worktree={worktree}
+    />
   );
 
   return (

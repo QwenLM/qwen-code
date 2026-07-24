@@ -18,9 +18,10 @@
 //      `.qwen/tmp/review-pr-<n>` so subsequent steps can run in isolation.
 //   5. Capture the review diff to `.qwen/tmp/qwen-review-pr-<n>-diff.txt` and
 //      partition it into chunks. Review agents `read_file` a chunk's line
-//      range instead of running `git diff` themselves: shell output is capped
-//      at 30 000 chars (head 1/5 + tail 4/5), which on a large PR hides most
-//      of the diff from every agent at once. See `lib/diff-plan.ts`.
+//      range instead of running `git diff` themselves: Shell keeps a 30 000
+//      character persistence trigger but returns an approximately 4 000
+//      character head-and-tail model preview, which hides most of a large diff
+//      from every agent at once. See `lib/diff-plan.ts`.
 //   6. Emit a single JSON report describing the resulting state, which the
 //      LLM reads to drive the rest of Step 1.
 
@@ -29,6 +30,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { createReviewWorktreeLease } from '../../services/review-worktree-lease.js';
 import { ensureAuthenticated, gh, setGhHost } from './lib/gh.js';
 import { git, gitOpt, gitRaw, refExists, releaseWorktree } from './lib/git.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
@@ -59,6 +61,8 @@ interface PrMetadata {
   deletions: number;
   changedFiles: number;
   isCrossRepository: boolean;
+  /** The PR description, fetched only to detect the author's language. */
+  body?: string;
 }
 
 interface FetchPrArgs {
@@ -89,6 +93,14 @@ type FetchPrResult = PlanReport & {
   diffPath: string | null;
   /** Absolute path — `read_file` rejects relative paths. Agents use this. */
   diffPathAbsolute: string | null;
+  /**
+   * True when the PR description contains Han characters — the author writes
+   * Chinese. `compose-review` reads it from this report (its `planPath`) and
+   * renders the posted body bilingually, English first with the full Chinese
+   * version collapsed; the skill mirrors the format on inline comments. A
+   * local review's plan has no such field: nothing is posted there.
+   */
+  prDescriptionHasHan: boolean;
 };
 
 /** Count lines of `<ref>:<path>`, or 0 if it does not exist there. */
@@ -139,11 +151,21 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
 
   ensureAuthenticated();
 
+  const ref = reviewBranch(prNumber);
+  const wt = worktreePath(prNumber);
+  createReviewWorktreeLease({
+    sessionId: process.env['QWEN_CODE_SESSION_ID'],
+    promptId: process.env['QWEN_CODE_PROMPT_ID'],
+    target: `pr-${prNumber}`,
+    repositoryRoot: process.cwd(),
+    worktreePath: wt,
+    branch: ref,
+  });
+
   // 1. Clean any stale worktree / branch from an earlier run.
   cleanStale(prNumber);
 
   // 2. Fetch PR HEAD into a unique local ref.
-  const ref = reviewBranch(prNumber);
   try {
     git('fetch', remote, `pull/${prNumber}/head:${ref}`);
   } catch (err) {
@@ -164,7 +186,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       '--repo',
       ownerRepo,
       '--json',
-      'headRefName,headRefOid,baseRefName,additions,deletions,changedFiles,isCrossRepository',
+      'headRefName,headRefOid,baseRefName,additions,deletions,changedFiles,isCrossRepository,body',
     );
     meta = JSON.parse(json) as PrMetadata;
   } catch (err) {
@@ -178,7 +200,6 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   }
 
   // 4. Create the ephemeral worktree.
-  const wt = worktreePath(prNumber);
   try {
     mkdirSync(dirname(wt), { recursive: true });
     git('worktree', 'add', wt, ref);
@@ -275,6 +296,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     baseFetchFailed,
     diffPath,
     diffPathAbsolute,
+    prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
     ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path)),
   };
 

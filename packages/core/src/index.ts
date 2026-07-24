@@ -62,6 +62,7 @@ export {
   getRuntimeContentGenerator,
   runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,
+  runOutsideAgentContext,
 } from './agents/runtime/agent-context.js';
 export * from './core/reasoning-effort.js';
 export * from './core/coreToolScheduler.js';
@@ -75,6 +76,11 @@ export {
   decoratePlanModeShellConfirmation,
   validatePlanModeShellApproval,
 } from './core/plan-mode-shell-policy.js';
+/** @internal */
+export {
+  PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+  findPlanModeEntryBatchBoundaryIndex,
+} from './core/plan-mode-entry-policy.js';
 export * from './core/geminiChat.js';
 export * from './core/geminiRequest.js';
 export * from './core/inlineMediaLimit.js';
@@ -184,7 +190,16 @@ export type {
   TodoWriteParams,
 } from './tools/todoWrite.js';
 export type { WebFetchTool, WebFetchToolParams } from './tools/web-fetch.js';
+export type {
+  WebSearchTool,
+  WebSearchToolParams,
+  WebSearchSettings,
+} from './tools/web-search.js';
 export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
+// Exported for the cross-package contract test in packages/cli (see the
+// function's own doc comment) — the daemon's file-read route must resolve the
+// workspacePath this produces.
+export { buildRecordArtifactReminder } from './tools/write-file.js';
 export type {
   ArtifactTool,
   ArtifactToolParams,
@@ -223,7 +238,11 @@ export {
 } from './services/chatCompressionService.js';
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
-export type { DurableCronTask, CronTaskRun } from './services/cronTasksFile.js';
+export type {
+  CronTaskDelivery,
+  DurableCronTask,
+  CronTaskRun,
+} from './services/cronTasksFile.js';
 export {
   readCronTasks,
   updateCronTasks,
@@ -233,6 +252,8 @@ export {
   appendCronRun,
   taskHasLegacyCondition,
   MAX_TASK_RUNS,
+  MAX_CHANNEL_DELIVERY_NAME_LENGTH,
+  MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH,
 } from './services/cronTasksFile.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';
@@ -247,6 +268,7 @@ export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
 export * from './services/sessionService.js';
+export * from './services/session-writer-lease.js';
 export {
   decodeSessionTranscriptCursor,
   encodeSessionTranscriptCursor,
@@ -322,6 +344,7 @@ export * from './services/usageHistoryService.js';
 export * from './services/usage-dashboard-service.js';
 export * from './utils/bareMode.js';
 export * from './utils/safe-mode.js';
+export * from './utils/sanitize-child-env.js';
 export * from './utils/toolResultDisplayCompaction.js';
 
 // ============================================================================
@@ -489,6 +512,7 @@ export * from './utils/gitDirect.js';
 export * from './utils/gitIgnoreParser.js';
 export * from './utils/gitUtils.js';
 export * from './utils/ignorePatterns.js';
+export * from './utils/invocation-context.js';
 export {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
   QwenIgnoreParser,
@@ -524,6 +548,7 @@ export {
   detectRuntime,
   getOrCreateSharedDispatcher,
   isTlsVerificationDisabled,
+  preloadRuntimeFetchModule,
   redactProxyCredentials,
 } from './utils/runtimeFetchOptions.js';
 export * from './utils/runtimeStatus.js';
@@ -539,6 +564,7 @@ export * from './utils/textUtils.js';
 export * from './utils/thoughtUtils.js';
 export * from './utils/toml-to-markdown-converter.js';
 export * from './utils/tool-utils.js';
+export { finalizeToolResponses } from './utils/tool-response-finalizer.js';
 export * from './utils/workspaceContext.js';
 export * from './utils/yaml-parser.js';
 export * from './utils/btwUtils.js';

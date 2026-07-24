@@ -12,7 +12,9 @@ const mockAddChannelMemoryEntries = vi.hoisted(() => vi.fn());
 const mockUpdateChannelMemoryEntry = vi.hoisted(() => vi.fn());
 const mockRemoveChannelMemoryEntries = vi.hoisted(() => vi.fn());
 const mockClearChannelMemory = vi.hoisted(() => vi.fn());
+const mockRecordChannelMemoryRecallMetrics = vi.hoisted(() => vi.fn());
 const mockRegisterToolCallDispatch = vi.hoisted(() => vi.fn());
+const mockRegisterBackgroundResponseRelay = vi.hoisted(() => vi.fn());
 const mockRegisterPermissionRelay = vi.hoisted(() => vi.fn());
 const mockRegisterSessionCleanup = vi.hoisted(() => vi.fn());
 const mockSessionsPath = vi.hoisted(() => vi.fn(() => '/tmp/sessions.json'));
@@ -65,6 +67,17 @@ const mockSelectFirstModel = vi.hoisted(() =>
 );
 const mockSanitizeLogText = vi.hoisted(() =>
   vi.fn((value: unknown) => String(value).replace(/[\r\n]/g, ' ')),
+);
+const mockIsChannelProactiveDeliveryError = vi.hoisted(() =>
+  vi.fn(
+    (error: unknown) =>
+      typeof error === 'object' &&
+      error !== null &&
+      (error as { code?: unknown }).code ===
+        'channel_proactive_delivery_error' &&
+      ((error as { disposition?: unknown }).disposition === 'permanent' ||
+        (error as { disposition?: unknown }).disposition === 'transient'),
+  ),
 );
 const mockDefaultDaemonClientCapabilities = vi.hoisted(() =>
   vi.fn().mockResolvedValue({
@@ -150,6 +163,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   getChannelMemoryRevision: mockGetChannelMemoryRevision,
   listChannelMemoryEntries: mockListChannelMemoryEntries,
   readChannelMemory: mockReadChannelMemory,
+  recordChannelMemoryRecallMetrics: mockRecordChannelMemoryRecallMetrics,
   removeChannelMemoryEntries: mockRemoveChannelMemoryEntries,
   updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,
 }));
@@ -174,6 +188,7 @@ vi.mock('./runtime.js', () => ({
   loadChannelsConfig: mockLoadChannelsConfig,
   loadChannelsFromExtensions: mockLoadChannelsFromExtensions,
   parseConfiguredChannels: mockParseConfiguredChannels,
+  registerBackgroundResponseRelay: mockRegisterBackgroundResponseRelay,
   registerPermissionRelay: mockRegisterPermissionRelay,
   registerSessionCleanup: mockRegisterSessionCleanup,
   registerToolCallDispatch: mockRegisterToolCallDispatch,
@@ -187,6 +202,7 @@ vi.mock('./observed-contact-store.js', () => ({
 
 vi.mock('@qwen-code/channel-base', () => ({
   DaemonChannelBridge: mockDaemonChannelBridge,
+  isChannelProactiveDeliveryError: mockIsChannelProactiveDeliveryError,
   sanitizeLogText: mockSanitizeLogText,
   SessionRouter: mockSessionRouter,
 }));
@@ -229,6 +245,13 @@ const webhookTask = {
   targetRef: 'default',
   title: 'CI failed',
   payload: { runId: 123 },
+};
+
+const deliveryRequest = {
+  deliveryId: 'delivery-1',
+  channelName: 'telegram',
+  target: { type: 'chat' as const, id: 'group-1' },
+  text: 'inspection result',
 };
 
 function createSdk() {
@@ -708,6 +731,7 @@ describe('runChannelDaemonWorker', () => {
         memoryIntentClassifier: expect.objectContaining({
           classifyChannelMemoryIntent: expect.any(Function),
         }),
+        channelMemoryRecallObserver: mockRecordChannelMemoryRecallMetrics,
         observedContacts: {
           observe: expect.any(Function),
         },
@@ -729,6 +753,11 @@ describe('runChannelDaemonWorker', () => {
     channelOptions.observedContacts.observe('telegram', observation);
     expect(mockObserveContact).toHaveBeenCalledWith('telegram', observation);
     expect(mockRegisterPermissionRelay).toHaveBeenCalledWith(
+      bridgeFacade,
+      mockSessionRouter.mock.results[0]!.value,
+      expect.any(Map),
+    );
+    expect(mockRegisterBackgroundResponseRelay).toHaveBeenCalledWith(
       bridgeFacade,
       mockSessionRouter.mock.results[0]!.value,
       expect.any(Map),
@@ -1553,6 +1582,33 @@ describe('runChannelDaemonWorker', () => {
     expect(runWebhookTask).toHaveBeenCalledWith(webhookTask);
   });
 
+  it('delivers existing text on the matching channel without an agent turn', async () => {
+    const sdk = createSdk();
+    const deliverProactive = vi.fn().mockResolvedValue(undefined);
+    mockCreateChannel.mockResolvedValueOnce({
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
+      name: 'telegram',
+      validateWebhookTask: vi.fn(),
+      deliverProactive,
+    });
+
+    const handle = await runChannelDaemonWorker({
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      loadDaemonSdk: async () => sdk,
+    });
+
+    await handle.deliverChannelMessage(deliveryRequest);
+
+    expect(deliverProactive).toHaveBeenCalledWith(
+      { channelName: 'telegram', ...deliveryRequest.target },
+      deliveryRequest.text,
+    );
+    expect(mockBridgePrompt).not.toHaveBeenCalled();
+  });
+
   it('rejects webhook tasks for channels that are not running', async () => {
     const sdk = createSdk();
 
@@ -2158,6 +2214,261 @@ describe('daemonWorkerCommand', () => {
     }
   });
 
+  it('reports delivery success only after the adapter send completes', async () => {
+    const exit = mockProcessExitNoThrow();
+    const send = vi.fn();
+    const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
+    let resolveDelivery!: () => void;
+    const deliverProactive = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveDelivery = resolve;
+        }),
+    );
+    mockCreateChannel.mockResolvedValueOnce({
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
+      name: 'telegram',
+      validateWebhookTask: vi.fn(),
+      deliverProactive,
+    });
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+    const existingMessageListeners = process.listeners('message');
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'ready' }),
+        );
+      });
+      send.mockClear();
+
+      const listener = process
+        .listeners('message')
+        .find((candidate) => !existingMessageListeners.includes(candidate));
+      (listener as ((message: unknown) => void) | undefined)?.({
+        type: 'channel_delivery',
+        id: 'ipc-delivery-1',
+        expiresAt: Date.now() + 1000,
+        request: deliveryRequest,
+      });
+
+      expect(send).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'channel_delivery_result' }),
+      );
+      resolveDelivery();
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith({
+          type: 'channel_delivery_result',
+          id: 'ipc-delivery-1',
+          ok: true,
+        });
+      });
+      expect(mockBridgePrompt).not.toHaveBeenCalled();
+
+      process.emit('SIGTERM', 'SIGTERM');
+      await handler;
+      expect(exit).toHaveBeenCalledWith(0);
+    } finally {
+      restoreSend();
+    }
+  });
+
+  it('classifies permanent adapter failures without exposing control flow', async () => {
+    const exit = mockProcessExitNoThrow();
+    const send = vi.fn();
+    const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
+    const foreignError = Object.assign(new Error('recipient is invalid'), {
+      code: 'channel_proactive_delivery_error',
+      disposition: 'permanent',
+    });
+    mockCreateChannel.mockResolvedValueOnce({
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
+      name: 'telegram',
+      validateWebhookTask: vi.fn(),
+      deliverProactive: vi.fn().mockRejectedValue(foreignError),
+    });
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+    const existingMessageListeners = process.listeners('message');
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'ready' }),
+        );
+      });
+      send.mockClear();
+
+      const listener = process
+        .listeners('message')
+        .find((candidate) => !existingMessageListeners.includes(candidate));
+      (listener as ((message: unknown) => void) | undefined)?.({
+        type: 'channel_delivery',
+        id: 'ipc-delivery-invalid',
+        expiresAt: Date.now() + 1000,
+        request: deliveryRequest,
+      });
+
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith({
+          type: 'channel_delivery_result',
+          id: 'ipc-delivery-invalid',
+          ok: false,
+          code: 'channel_delivery_rejected',
+          error: 'recipient is invalid',
+        });
+      });
+
+      process.emit('SIGTERM', 'SIGTERM');
+      await handler;
+      expect(exit).toHaveBeenCalledWith(0);
+    } finally {
+      restoreSend();
+    }
+  });
+
+  it('rejects an expired delivery before calling the adapter', async () => {
+    const exit = mockProcessExitNoThrow();
+    const send = vi.fn();
+    const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
+    const deliverProactive = vi.fn().mockResolvedValue(undefined);
+    mockCreateChannel.mockResolvedValueOnce({
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
+      name: 'telegram',
+      validateWebhookTask: vi.fn(),
+      deliverProactive,
+    });
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+    const existingMessageListeners = process.listeners('message');
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'ready' }),
+        );
+      });
+      send.mockClear();
+
+      const listener = process
+        .listeners('message')
+        .find((candidate) => !existingMessageListeners.includes(candidate));
+      (listener as ((message: unknown) => void) | undefined)?.({
+        type: 'channel_delivery',
+        id: 'ipc-delivery-expired',
+        expiresAt: Date.now() - 1,
+        request: deliveryRequest,
+      });
+
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith({
+          type: 'channel_delivery_result',
+          id: 'ipc-delivery-expired',
+          ok: false,
+          code: 'channel_delivery_timeout',
+          error: 'Channel delivery IPC timed out.',
+        });
+      });
+      expect(deliverProactive).not.toHaveBeenCalled();
+
+      process.emit('SIGTERM', 'SIGTERM');
+      await handler;
+      expect(exit).toHaveBeenCalledWith(0);
+    } finally {
+      restoreSend();
+    }
+  });
+
+  it('rejects delivery when sixteen adapter sends are already active', async () => {
+    const exit = mockProcessExitNoThrow();
+    const send = vi.fn();
+    const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
+    const resolvers: Array<() => void> = [];
+    const deliverProactive = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+    mockCreateChannel.mockResolvedValueOnce({
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect: vi.fn(),
+      name: 'telegram',
+      validateWebhookTask: vi.fn(),
+      deliverProactive,
+    });
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+    const existingMessageListeners = process.listeners('message');
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'ready' }),
+        );
+      });
+      send.mockClear();
+
+      const listener = process
+        .listeners('message')
+        .find((candidate) => !existingMessageListeners.includes(candidate));
+      for (let index = 0; index < 17; index++) {
+        (listener as ((message: unknown) => void) | undefined)?.({
+          type: 'channel_delivery',
+          id: `ipc-delivery-${index}`,
+          expiresAt: Date.now() + 1000,
+          request: deliveryRequest,
+        });
+      }
+
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith({
+          type: 'channel_delivery_result',
+          id: 'ipc-delivery-16',
+          ok: false,
+          code: 'channel_delivery_queue_full',
+          error: 'Channel delivery queue is full.',
+        });
+      });
+      expect(deliverProactive).toHaveBeenCalledTimes(16);
+
+      for (const resolve of resolvers) resolve();
+      process.emit('SIGTERM', 'SIGTERM');
+      await handler;
+      expect(exit).toHaveBeenCalledWith(0);
+    } finally {
+      restoreSend();
+    }
+  });
+
   it('rejects webhook IPC messages for channels that are not running', async () => {
     const exit = mockProcessExitNoThrow();
     const send = vi.fn();
@@ -2634,6 +2945,71 @@ describe('daemonWorkerCommand', () => {
       expect(exit).toHaveBeenCalledWith(0);
     } finally {
       restoreSend();
+    }
+  });
+
+  it('uses one shutdown window for delivery and webhook tasks', async () => {
+    vi.useFakeTimers();
+    const exit = mockProcessExitNoThrow();
+    const send = vi.fn();
+    const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
+    const never = new Promise<void>(() => undefined);
+    const disconnect = vi.fn().mockResolvedValue(undefined);
+    mockCreateChannel.mockResolvedValueOnce({
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect,
+      name: 'telegram',
+      validateWebhookTask: vi.fn(),
+      runWebhookTask: vi.fn(() => never),
+      deliverProactive: vi.fn(() => never),
+    });
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+    const existingMessageListeners = process.listeners('message');
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'ready' }),
+        );
+      });
+      const listener = process
+        .listeners('message')
+        .find((candidate) => !existingMessageListeners.includes(candidate));
+      listener?.(
+        {
+          type: 'channel_delivery',
+          id: 'delivery-drain',
+          expiresAt: Date.now() + 1000,
+          request: deliveryRequest,
+        },
+        undefined,
+      );
+      listener?.(
+        {
+          type: 'webhook_task',
+          id: 'webhook-drain',
+          expiresAt: Date.now() + 1000,
+          task: webhookTask,
+        },
+        undefined,
+      );
+
+      process.emit('SIGTERM', 'SIGTERM');
+      await vi.advanceTimersByTimeAsync(10_000);
+      await handler;
+
+      expect(disconnect).toHaveBeenCalledOnce();
+      expect(exit).toHaveBeenCalledWith(0);
+    } finally {
+      restoreSend();
+      vi.useRealTimers();
     }
   });
 });

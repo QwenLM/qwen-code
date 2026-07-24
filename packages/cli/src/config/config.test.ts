@@ -1071,6 +1071,29 @@ describe('loadCliConfig', () => {
     expect(process.env['QWEN_DEBUG_LOG_FILE']).toBeUndefined();
   });
 
+  describe('usage statistics', () => {
+    it.each<[string, string | undefined, boolean | undefined, boolean]>([
+      ['defaults to enabled', undefined, undefined, true],
+      ['uses a disabled setting', undefined, false, false],
+      ['lets true override a disabled setting', 'true', false, true],
+      ['lets 1 override a disabled setting', '1', false, true],
+      ['lets false override an enabled setting', 'false', true, false],
+      ['lets 0 override an enabled setting', '0', true, false],
+    ])('%s', async (_name, envValue, settingValue, expected) => {
+      vi.stubEnv('QWEN_USAGE_STATISTICS_ENABLED', envValue);
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const settings: Settings =
+        settingValue === undefined
+          ? {}
+          : { privacy: { usageStatisticsEnabled: settingValue } };
+
+      const config = await loadCliConfig(settings, argv);
+
+      expect(config.getUsageStatisticsEnabled()).toBe(expected);
+    });
+  });
+
   it('should use configured context file name when settings.context.fileName is set', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -1691,6 +1714,116 @@ describe('loadCliConfig', () => {
       expect(config.getProxy()).toBe('http://localhost:7890');
     });
   });
+
+  describe('web search settings resolution', () => {
+    const loadWithSettings = async (settings: Settings) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      return loadCliConfig(settings, argv);
+    };
+
+    it('returns undefined when neither settings nor env configure web search', async () => {
+      const config = await loadWithSettings({});
+      expect(config.getWebSearchSettings()).toBeUndefined();
+    });
+
+    it('passes tools.webSearch through from settings', async () => {
+      const config = await loadWithSettings({
+        tools: { webSearch: { enabled: true, model: 'qwen3.6-plus' } },
+      });
+      expect(config.getWebSearchSettings()).toEqual({
+        enabled: true,
+        model: 'qwen3.6-plus',
+      });
+    });
+
+    it('lets ENABLE_WEB_SEARCH override the settings flag', async () => {
+      vi.stubEnv('ENABLE_WEB_SEARCH', 'false');
+      const config = await loadWithSettings({
+        tools: { webSearch: { enabled: true, model: 'qwen3.6-plus' } },
+      });
+      expect(config.getWebSearchSettings()?.enabled).toBe(false);
+    });
+
+    it('treats a set-but-empty ENABLE_WEB_SEARCH as unset', async () => {
+      vi.stubEnv('ENABLE_WEB_SEARCH', '');
+      const config = await loadWithSettings({
+        tools: { webSearch: { enabled: true, model: 'qwen3.6-plus' } },
+      });
+      expect(config.getWebSearchSettings()?.enabled).toBe(true);
+    });
+
+    it('lets WEB_SEARCH_MODEL and WEB_SEARCH_EXTRACTOR override settings', async () => {
+      vi.stubEnv('WEB_SEARCH_MODEL', 'env-model');
+      vi.stubEnv('WEB_SEARCH_EXTRACTOR', 'false');
+      const config = await loadWithSettings({
+        tools: {
+          webSearch: { enabled: true, model: 'settings-model' },
+        },
+      });
+      expect(config.getWebSearchSettings()).toEqual({
+        enabled: true,
+        model: 'env-model',
+        webExtractor: false,
+      });
+    });
+
+    it('resolves WEB_SEARCH_BASE_URL with the DASHSCOPE_API_KEY fallback', async () => {
+      vi.stubEnv(
+        'WEB_SEARCH_BASE_URL',
+        'https://dashscope.aliyuncs.com/api/v2',
+      );
+      const config = await loadWithSettings({});
+      expect(config.getWebSearchSettings()).toEqual({
+        baseUrl: 'https://dashscope.aliyuncs.com/api/v2',
+        apiKeyEnv: 'DASHSCOPE_API_KEY',
+      });
+    });
+
+    it('selects WEB_SEARCH_API_KEY when it is non-empty', async () => {
+      vi.stubEnv(
+        'WEB_SEARCH_BASE_URL',
+        'https://dashscope.aliyuncs.com/api/v2',
+      );
+      vi.stubEnv('WEB_SEARCH_API_KEY', 'sk-live');
+      const config = await loadWithSettings({});
+      expect(config.getWebSearchSettings()?.apiKeyEnv).toBe(
+        'WEB_SEARCH_API_KEY',
+      );
+    });
+
+    it('treats a whitespace-only WEB_SEARCH_API_KEY as unset', async () => {
+      vi.stubEnv(
+        'WEB_SEARCH_BASE_URL',
+        'https://dashscope.aliyuncs.com/api/v2',
+      );
+      vi.stubEnv('WEB_SEARCH_API_KEY', '   ');
+      const config = await loadWithSettings({});
+      expect(config.getWebSearchSettings()?.apiKeyEnv).toBe(
+        'DASHSCOPE_API_KEY',
+      );
+    });
+
+    it('disables web search in safe mode', async () => {
+      process.argv = ['node', 'script.js', '--safe-mode'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { tools: { webSearch: { enabled: true, model: 'qwen3.6-plus' } } },
+        argv,
+      );
+      expect(config.getWebSearchSettings()).toBeUndefined();
+    });
+
+    it('disables web search in bare mode', async () => {
+      process.argv = ['node', 'script.js', '--bare'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { tools: { webSearch: { enabled: true, model: 'qwen3.6-plus' } } },
+        argv,
+      );
+      expect(config.getWebSearchSettings()).toBeUndefined();
+    });
+  });
 });
 
 describe('loadCliConfig telemetry', () => {
@@ -1756,6 +1889,19 @@ describe('loadCliConfig telemetry', () => {
     expect(mockConfigConstructorParams).toHaveBeenCalledWith(
       expect.objectContaining({
         question: '',
+        deferTelemetryInitialization: true,
+      }),
+    );
+  });
+
+  it('should defer telemetry for ACP startup', async () => {
+    process.argv = ['node', 'script.js', '--acp', '--telemetry'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
         deferTelemetryInitialization: true,
       }),
     );
@@ -4273,5 +4419,83 @@ describe('loadCliConfig plansDirectory', () => {
     await expect(loadCliConfig(settings, argv, cwd)).rejects.toThrow(
       'plansDirectory must resolve within the project root',
     );
+  });
+});
+
+describe('loadCliConfig skills.directories', () => {
+  beforeEach(() => {
+    process.argv = ['node', 'script.js'];
+    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('should filter non-string and whitespace-only entries and trim valid ones', async () => {
+    const argv = await parseArguments();
+    const settings: Settings = {
+      skills: {
+        directories: [
+          '  ~/my-skills  ',
+          '',
+          '   ',
+          42 as unknown as string,
+          null as unknown as string,
+          '/abs/skills',
+        ],
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.getCustomSkillDirs()).toEqual(['~/my-skills', '/abs/skills']);
+  });
+
+  it('should return empty array when skills.directories is not set', async () => {
+    const argv = await parseArguments();
+
+    const config = await loadCliConfig({}, argv);
+
+    expect(config.getCustomSkillDirs()).toEqual([]);
+  });
+
+  it('should return empty array when skills.directories is a non-array value', async () => {
+    const argv = await parseArguments();
+    const settings = {
+      skills: {
+        directories: 'all',
+      },
+    } as unknown as Settings;
+
+    const config = await loadCliConfig(settings, argv);
+
+    expect(config.getCustomSkillDirs()).toEqual([]);
+  });
+
+  it('should ignore skills.directories in safe mode', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      skills: { directories: ['~/my-skills', '/abs/skills'] },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getCustomSkillDirs()).toEqual([]);
+  });
+
+  it('should ignore skills.directories in bare mode', async () => {
+    process.argv = ['node', 'script.js', '--bare'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      skills: { directories: ['~/my-skills', '/abs/skills'] },
+    };
+
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getCustomSkillDirs()).toEqual([]);
   });
 });

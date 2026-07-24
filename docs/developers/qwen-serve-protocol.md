@@ -187,9 +187,10 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'permission_mediation', 'prompt_absolute_deadline', 'writer_idle_timeout',
  'non_blocking_prompt', 'session_language', 'session_rewind',
  'workspace_hooks', 'session_hooks', 'workspace_extensions',
- 'session_branch', 'rate_limit', 'workspace_reload',
+ 'session_branch', 'rate_limit', 'workspace_reload', 'channel_delivery',
  'multi_workspace_sessions', 'multi_workspace_session_rewind',
  'multi_workspace_session_shell', 'persistent_workspace_registration',
+ 'workspace_display_name',
  'workspace_qualified_rest_core', 'workspace_qualified_voice',
  'extension_management_v2', 'workspace_persisted_transcript',
  'workspace_session_export', 'workspace_archived_session_export',
@@ -201,6 +202,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 `session_scope_override` is the negotiation handle for the per-request `sessionScope` field on `POST /session` (see below). Older daemons silently ignore the field, so SDK clients should pre-flight `caps.features` for this tag before sending it.
 
 `persistent_workspace_registration` advertises durable registration for workspaces added at runtime. `POST /workspaces` accepts `{ "cwd": "/absolute/path", "persist": true }`; success includes `persisted: true`. Registrations are scoped to the daemon's canonical primary workspace under the user's Qwen home and are restored on the next daemon start. Omitting `persist` preserves process-local registration. `GET /workspace-registrations` lists the stored desired set, and `DELETE /workspace-registrations/:id` forgets an entry for the next restart without hot-removing an active runtime.
+
+`workspace_display_name` advertises optional `displayName` input on `POST /workspaces`, workspace metadata updates through `PATCH /workspaces/:workspace`, and optional display-name fields in workspace projections. Names do not participate in lookup or routing: `id` and canonical `cwd` remain the only selectors, and duplicate names are allowed.
 
 `workspace_runtime_removal` advertises synchronous hot removal through `DELETE /workspaces/:workspace`. Capability workspace entries add optional `removable`; only rows with `removable: true` may be removed. Removal also forgets every persistent registration alias for the runtime, but never deletes files, settings, transcripts, or archives.
 
@@ -429,6 +432,7 @@ operator diagnostic snapshot documented below.
 | `session_shell_command`             | session shell execution is explicitly enabled.                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `session_artifacts_persistence`     | session artifact persistence is wired for the runtime.                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `session_generation`                | session generation helpers are available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `workspace_generation`              | workspace-scoped generation helpers are available.                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `rate_limit`                        | `--rate-limit` / `QWEN_SERVE_RATE_LIMIT=1` / `ServeOptions.rateLimit` is enabled.                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `workspace_reload`                  | workspace reload support is available in the embedded route configuration.                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `channel_reload`                    | a daemon-managed channel worker manager is enabled and can reload its current selection.                                                                                                                                                                                                                                                                                                                                                                                                                        |
@@ -436,7 +440,9 @@ operator diagnostic snapshot documented below.
 | `multi_workspace_sessions`          | more than one workspace runtime is registered, so session creation can select a trusted runtime by cwd.                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `multi_workspace_session_rewind`    | more than one workspace runtime is registered; singular live-session rewind routes resolve the owning runtime.                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `multi_workspace_session_shell`     | more than one workspace runtime is registered and session shell execution is explicitly enabled; singular REST shell resolves the owning runtime.                                                                                                                                                                                                                                                                                                                                                               |
+| `dynamic_workspace_registration`    | a workspace runtime factory is wired into the daemon, so an existing trusted directory can be registered as a secondary runtime at runtime.                                                                                                                                                                                                                                                                                                                                                                     |
 | `persistent_workspace_registration` | a workspace registration store is wired into the daemon. Production `runQwenServe` supplies the user-level store automatically; direct `createServeApp` embeds must inject one explicitly and own startup restoration of their workspace registry.                                                                                                                                                                                                                                                              |
+| `scratch_workspace_registration`    | managed scratch workspace creation is available — a runtime factory, a validated managed scratch root, and runtime disposal are wired, and every managed runtime respects the scratch root boundary.                                                                                                                                                                                                                                                                                                            |
 | `workspace_runtime_removal`         | removable dynamic or persistence-restored secondary runtimes can be drained and removed through the management route.                                                                                                                                                                                                                                                                                                                                                                                           |
 | `workspace_qualified_acp`           | ACP HTTP and multi-workspace runtimes are active, so the plural ACP endpoint can select a secondary runtime.                                                                                                                                                                                                                                                                                                                                                                                                    |
 | `workspace_qualified_voice`         | multi-workspace runtimes and the shared ACP/Voice WebSocket listener are active, so every workspace-qualified Voice modality is reachable for a secondary runtime.                                                                                                                                                                                                                                                                                                                                              |
@@ -582,6 +588,11 @@ Response shape:
   }
 }
 ```
+
+Multi-workspace responses also include top-level `workspaces[]` rows with
+`{ id, cwd, displayName?, primary, trusted }`. The optional display name is
+omitted when unset and remains presentation-only; status consumers must keep
+using `id` or `cwd` to correlate runtimes.
 
 `runtime.perf` is optional. When present, it reports daemon-process event loop
 lag, prompt FIFO queue wait samples, and daemon-child pipe byte counters only;
@@ -737,6 +748,89 @@ readers; single-workspace daemons keep the original single-worker shape. Worker
 stdout/stderr are forwarded into the daemon log with bearer tokens, sensitive
 worker environment values, and proxy URL credentials redacted.
 
+### Channel delivery and Notify
+
+`channel_delivery` advertises immediate, best-effort delivery support. It is a
+protocol capability, not a worker health signal. Delivery never starts a
+missing worker, falls back to another workspace, retries, persists an outbox,
+or replays historical notifications.
+
+Direct Notify bypasses Agent and Session and waits for one send attempt:
+
+```http
+POST /workspace/notify
+POST /workspaces/:workspace/notify
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "text": "service unavailable",
+  "delivery": {
+    "kind": "channel",
+    "target": {
+      "channelName": "dingtalk",
+      "type": "user",
+      "id": "platform-user-id"
+    }
+  }
+}
+```
+
+Both routes use the strict mutation gate. The qualified route resolves only a
+registered, trusted workspace. Success is `200 {delivered:true,deliveryId}`.
+`delivered:true` means the Channel send Promise resolved; it does not prove
+provider acceptance, user receipt, or a read receipt. Provider-specific
+response validation and consistent error-reason semantics across IM adapters
+are outside this V1 contract.
+Errors are `400 channel_delivery_invalid`, `503 channel_worker_unavailable` or
+`channel_delivery_queue_full`, `504 channel_delivery_timeout`, and `502
+channel_delivery_rejected` or `channel_delivery_failed`. A timeout has an
+unknown outcome and is not retried.
+There is intentionally no separate connectivity-test endpoint: a normal
+Notify call is the end-to-end test.
+
+The replayable result event contains only correlation and sanitized status:
+
+```json
+{
+  "type": "channel_delivery_result",
+  "promptId": "prompt-1",
+  "data": {
+    "sessionId": "session-1",
+    "deliveryId": "prompt-1",
+    "source": "prompt",
+    "status": "failed",
+    "promptId": "prompt-1",
+    "code": "channel_worker_unavailable",
+    "error": "Channel worker is not running."
+  }
+}
+```
+
+An empty successful Prompt final omits error fields:
+
+```json
+{
+  "type": "channel_delivery_result",
+  "promptId": "prompt-1",
+  "data": {
+    "sessionId": "session-1",
+    "deliveryId": "prompt-1",
+    "source": "prompt",
+    "status": "skipped",
+    "promptId": "prompt-1"
+  }
+}
+```
+
+`source` is `prompt` or `scheduled`; `status` is `delivered`, `failed`, or
+`skipped`. `skipped` means the eligible turn completed successfully but its
+last tool-free assistant response block was empty or whitespace-only. The
+daemon consumes the delivery authorization and publishes the event without
+resolving a Channel Worker. Scheduled correlation uses `taskId` and `firedAt`.
+The event never contains target IDs, message text, credentials, or webhook
+secrets.
+
 Security: the response never includes bearer tokens, client ids, full ACP
 connection ids, device-flow user codes, or verification URLs. Both detail
 levels may include additive `daemon.runId`, `daemon.logMode`, and
@@ -779,6 +873,7 @@ path-free `daemon_log_degraded` warning to the normal status rollup.
     {
       "id": "stable-secondary-workspace-id",
       "cwd": "/canonical/path/to/secondary-workspace",
+      "displayName": "Payments Production",
       "primary": false,
       "trusted": true
     }
@@ -794,16 +889,20 @@ Stable contract: when `v` increments the frame layout has changed in a backwards
 
 > **`workspaceCwd`** is the canonical absolute path for the daemon's primary workspace. Use it to omit `cwd` on `POST /session` (the route falls back to this primary path) and to keep old single-workspace clients compatible. Additive to v=1: pre-§02 v=1 daemons omit the field — clients that target older builds should null-check before consuming it.
 
-> **`workspaces[]`** lists every registered runtime. Newer single-workspace daemons include the primary runtime even when `multi_workspace_sessions` is absent so clients can discover the stable id required by workspace-qualified routes; older daemons may omit the array. Each entry is `{ id, cwd, primary, trusted, removable? }`. The first/primary workspace remains mirrored by `workspaceCwd`; new clients choose a non-primary runtime by passing that entry's `cwd` to `POST /session`. Untrusted workspaces are advertised for diagnostics but reject fresh session creation with `403 untrusted_workspace` until trust changes. `removable` is present on daemons that support runtime removal and is true only for process-dynamic or persistence-restored secondary runtimes.
+> **`workspaces[]`** lists every registered runtime. Newer single-workspace daemons include the primary runtime even when `multi_workspace_sessions` is absent so clients can discover the stable id required by workspace-qualified routes; older daemons may omit the array. Each entry is `{ id, cwd, displayName?, primary, trusted, removable? }`. `displayName` is presentation-only and omitted when unset. The first/primary workspace remains mirrored by `workspaceCwd`; new clients choose a non-primary runtime by passing that entry's `cwd` to `POST /session`. Untrusted workspaces are advertised for diagnostics but reject fresh session creation with `403 untrusted_workspace` until trust changes. `removable` is present on daemons that support runtime removal and is true only for process-dynamic or persistence-restored secondary runtimes.
 
 The workspace feature tags and `workspaces[]` are dynamic. Clients that add a workspace must fetch `/capabilities` again after the mutation completes; the daemon does not broadcast capability changes to clients that cached an earlier response. Forgetting persistence does not unload an active runtime, so that runtime remains advertised until restart.
 
 ### `POST /workspaces`
 
-Register an additional workspace runtime. The path must be an existing, accessible, absolute directory that does not duplicate or nest with another registered workspace. Registration is process-local unless the client sends `persist: true`; clients must pre-flight `persistent_workspace_registration` before requesting persistence.
+Register an additional workspace runtime. The path must be an existing, accessible, absolute directory that does not duplicate or nest with another registered workspace. Registration is process-local unless the client sends `persist: true`; clients must pre-flight `persistent_workspace_registration` before requesting persistence. When `workspace_display_name` is advertised, the request may also include an optional `displayName`.
 
 ```json
-{ "cwd": "/canonical/path/to/secondary-workspace", "persist": true }
+{
+  "cwd": "/canonical/path/to/secondary-workspace",
+  "persist": true,
+  "displayName": "Payments Production"
+}
 ```
 
 A newly created runtime returns `201`; promoting an already-active secondary workspace to persistent returns `200`. Persistent success includes `persisted: true`:
@@ -812,13 +911,28 @@ A newly created runtime returns `201`; promoting an already-active secondary wor
 {
   "id": "stable-workspace-id",
   "cwd": "/canonical/path/to/secondary-workspace",
+  "displayName": "Payments Production",
   "primary": false,
   "trusted": true,
   "persisted": true
 }
 ```
 
-Errors include `400 invalid_path` / `invalid_persist_flag` / `invalid_persist_target`, `409 workspace_exists` / `workspace_nested` / `workspace_limit_reached`, `500 workspace_registration_store_error` / `runtime_creation_failed`, and `501 persistence_not_available` / `not_implemented`.
+`displayName` must be a string no longer than 256 characters after surrounding whitespace is trimmed. An empty result is treated as no name, and internal C0 (`U+0000`–`U+001F`) or DEL (`U+007F`) control characters are rejected. JSON `null` is not a creation value and returns `400 invalid_display_name`; omit the field to supply no initial name. Duplicate display names are allowed. A name supplied with a process-local registration lasts only for that daemon process; `persist: true` stores it with the persistent registration so it can be restored after restart. Repeating the request for an already-persistent workspace is idempotent and does not rename it.
+
+Errors include `400 invalid_path` / `invalid_persist_flag` / `invalid_persist_target` / `invalid_display_name`, `409 workspace_exists` / `workspace_nested` / `workspace_limit_reached`, `500 workspace_registration_store_error` / `runtime_creation_failed`, and `501 persistence_not_available` / `not_implemented`.
+
+### `PATCH /workspaces/:workspace`
+
+Update an active workspace resource selected by workspace ID or URL-encoded absolute cwd. The endpoint currently supports only display-name metadata:
+
+```json
+{ "displayName": "Payments Production" }
+```
+
+Send `{ "displayName": null }` to clear the name. Here `null` is an update-only deletion sentinel; non-null values follow the same string normalization rules as `POST /workspaces`. The response is the updated `{ id, cwd, displayName?, primary, trusted, removable? }` workspace projection. Runtime metadata is always updated. If the runtime has matching persistent registration identities, every alias is updated atomically through the existing schema-v1 registration store; the endpoint never creates or promotes a persistent registration.
+
+Unsupported fields fail closed rather than being silently ignored. Errors include `400 empty_patch` / `invalid_display_name` / `unsupported_field` / `workspace_mismatch`, `409 workspace_registration_in_progress`, `500 workspace_registration_store_error`, and `503 daemon_shutting_down`.
 
 ### `DELETE /workspaces/:workspace`
 
@@ -851,6 +965,7 @@ An immediately busy non-force request returns a fast pre-drain activity snapshot
 
 List the persisted desired workspace set for this primary workspace. Entries remain visible with `active: false` when a stored directory could not be restored during the current start.
 An entry remains `active: true` while its runtime is draining because the runtime still owns live resources until removal completes.
+Entries include optional `displayName` when the persistent registration has one.
 
 ```json
 {
@@ -860,6 +975,7 @@ An entry remains `active: true` while its runtime is draining because the runtim
     {
       "id": "stable-registration-id",
       "cwd": "/canonical/path/to/secondary-workspace",
+      "displayName": "Payments Production",
       "active": true,
       "persisted": true
     }
@@ -2085,33 +2201,49 @@ Request:
 
 ```json
 {
-  "prompt": [{ "type": "text", "text": "What does src/main.ts do?" }]
+  "prompt": [{ "type": "text", "text": "What does src/main.ts do?" }],
+  "delivery": {
+    "kind": "channel",
+    "target": {
+      "channelName": "dingtalk",
+      "type": "user",
+      "id": "platform-user-id"
+    }
+  }
 }
 ```
+
+`delivery` is optional and requires the `channel_delivery` capability. The
+daemon still returns `202 {promptId,lastEventId}` when the prompt is admitted.
+After a successful `end_turn`, the session submits the visible final text to
+the exact workspace's already-running Channel Worker. The payload is only the
+last tool-free assistant response block; tool-call preambles, inter-tool
+narration, superseded retries, and earlier automatic-continuation blocks are
+excluded. An empty or whitespace-only final still produces a correlated
+`channel_delivery_result` with `status: "skipped"` after authorization is
+consumed, but it does not contact a worker. Delivery success or failure arrives
+later through the same replayable event and never changes `turn_complete` into
+`turn_error`. Cancellation, Agent failure, and token-limit termination do not
+send or publish a delivery result.
 
 Validation: `prompt` must be a non-empty array of objects. Other failures return `400` before reaching the bridge.
 
 Response:
 
 ```json
-{ "stopReason": "end_turn" }
+{ "promptId": "session-id########1", "lastEventId": 42 }
 ```
 
-Other stop reasons: `cancelled`, `max_tokens`, `error`, `length` (per ACP spec).
+The `202` response acknowledges admission, not Agent completion. Observe the
+session SSE stream after `lastEventId` and correlate `turn_complete` or
+`turn_error` by `promptId`. `turn_complete.data.stopReason` may be `end_turn`,
+`cancelled`, `max_tokens`, `error`, or `length`.
 
 If the HTTP client disconnects mid-prompt, the daemon sends an ACP `cancel` notification to the agent, which winds the prompt down with `stopReason: "cancelled"`.
 
-> **Stage 1 limitation — no server-side prompt timeout.** The bridge
-> only races the agent's `prompt()` against `transportClosedReject`
-> (the agent child crashing) and the caller's HTTP-disconnect
-> AbortSignal. A wedged-but-alive agent (e.g. a model call that
-> hangs) blocks the per-session FIFO until the HTTP client times out
-> on its end and disconnects. Long-running prompts are legitimate
-> (deep research, large-codebase analysis) so a default deadline is
-> deliberately not set; Stage 2 will expose a configurable
-> `promptTimeoutMs` opt-in. Until then, callers should set their own
-> client-side timeout and disconnect (or call
-> `POST /session/:id/cancel`) on expiry.
+When `prompt_absolute_deadline` is advertised, `deadlineMs` may shorten the
+configured server deadline. Expiry emits a correlated `turn_error` with
+`errorKind: "prompt_deadline_exceeded"`.
 
 ### `POST /session/:id/cancel`
 
@@ -2441,6 +2573,29 @@ Errors:
 - `409 {code: 'workspace_init_conflict', path, existingSize}` — file exists with non-whitespace content and `force` is omitted/false. Body carries the absolute path and size (bytes) so SDK clients can render an "overwrite N bytes?" prompt without re-stat'ing.
 
 SSE event (workspace-scoped): `workspace_initialized` with `{path, action, originatorClientId?}`.
+
+#### `POST /workspace/mcp/reload`
+
+Reload persisted MCP settings into the workspace discovery config and every
+active session. The workspace-qualified form is
+`POST /workspaces/:workspace/mcp/reload`.
+
+Request body:
+
+```json
+{ "forceReconnectAll": true }
+```
+
+`forceReconnectAll` is optional and defaults to `false`, preserving
+incremental reconciliation. When true, the daemon reconnects every eligible
+configured MCP server after the settings reconciliation. Alternatively, pass
+`forceReconnectWhich: ["server-a", "server-b"]` to reconnect only named
+servers. The options are mutually exclusive. A forced reconnect causes each
+transport to read credentials that another local Qwen Code process may have
+written to token storage; it does not start an OAuth authorization flow.
+
+The route returns `202 { "accepted": true }`; poll `GET /workspace/mcp` for
+the final connection status. Invalid option values return 400.
 
 #### `POST /workspace/mcp/:server/restart`
 

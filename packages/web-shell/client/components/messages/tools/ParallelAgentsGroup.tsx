@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ACPToolCall, PermissionRequest } from '../../../adapters/types';
 import { useI18n } from '../../../i18n';
+import { useSubagentDetails } from '../../../subagentDetailsContext';
 import {
   formatElapsed,
   formatLiveElapsed,
@@ -160,6 +161,7 @@ export function ParallelAgentsGroup({
   pendingApproval,
 }: ParallelAgentsGroupProps) {
   const { t } = useI18n();
+  const subagentDetails = useSubagentDetails();
   const [groupExpanded, setGroupExpanded] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -248,11 +250,14 @@ export function ParallelAgentsGroup({
               const track = timeline?.rows.get(agent.callId);
               return (
                 <div key={agent.callId}>
-                  <div
+                  <button
+                    type="button"
                     className={styles.row}
-                    onClick={() =>
-                      setExpandedId(isExpanded ? null : agent.callId)
-                    }
+                    aria-expanded={subagentDetails ? undefined : isExpanded}
+                    onClick={() => {
+                      if (subagentDetails) subagentDetails.onOpen(agent);
+                      else setExpandedId(isExpanded ? null : agent.callId);
+                    }}
                   >
                     <StatusIcon status={status} />
                     <span className={styles.rowDesc}>
@@ -264,7 +269,7 @@ export function ParallelAgentsGroup({
                       )}
                     </span>
                     {stats && <span className={styles.rowStats}>{stats}</span>}
-                  </div>
+                  </button>
                   {track && (
                     <div className={styles.track} aria-hidden="true">
                       <span
@@ -280,7 +285,7 @@ export function ParallelAgentsGroup({
                       />
                     </div>
                   )}
-                  {isExpanded && (
+                  {!subagentDetails && isExpanded && (
                     <div className={styles.detail}>
                       <SubAgentPanel tool={agent} hideHeader />
                     </div>

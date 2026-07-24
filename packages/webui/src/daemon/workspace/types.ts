@@ -15,6 +15,7 @@ import type {
   DaemonCapabilities,
   DaemonClient,
   DaemonCreateAgentRequest,
+  DaemonWorkspaceGenerationEvent,
   DaemonGeneratedAgentContent,
   DaemonDeviceFlowStartResult,
   DaemonDeviceFlowState,
@@ -38,6 +39,7 @@ import type {
   DaemonUpdateAgentRequest,
   DaemonWorkspaceAgentDetail,
   DaemonWorkspaceAgentsStatus,
+  DaemonWorkspaceAcpPreheatResult,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceExtensionsStatus,
   DaemonWorkspaceFile,
@@ -51,7 +53,9 @@ import type {
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryStatus,
+  DaemonWorkspaceCapability,
   DaemonWorkspaceRemovalResult,
+  DaemonWorkspaceUpdate,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
@@ -253,6 +257,7 @@ export interface DaemonUpdateScheduledTaskRequest {
 export interface DaemonAddWorkspaceResult {
   id: string;
   cwd: string;
+  displayName?: string;
   primary: boolean;
   trusted: boolean;
   persisted?: boolean;
@@ -394,6 +399,7 @@ export interface DaemonWorkspaceActions {
   loadExtensionsStatus(): Promise<DaemonWorkspaceExtensionsStatus>;
 
   // Tools
+  preheatAcp(timeoutMs?: number): Promise<DaemonWorkspaceAcpPreheatResult>;
   loadToolsStatus(): Promise<DaemonWorkspaceToolsStatus>;
   setWorkspaceToolEnabled(toolName: string, enabled: boolean): Promise<unknown>;
 
@@ -413,9 +419,17 @@ export interface DaemonWorkspaceActions {
   readWorkspaceFile(filePath: string): Promise<DaemonWorkspaceFile>;
   writeMemory(req: DaemonWriteMemoryRequest): Promise<DaemonWriteMemoryResult>;
 
+  generateContent(
+    prompt: string,
+    opts?: { signal?: AbortSignal },
+  ): AsyncGenerator<DaemonWorkspaceGenerationEvent>;
+
   // Agents (CRUD)
   listAgents(): Promise<DaemonWorkspaceAgentsStatus>;
-  getAgent(agentType: string): Promise<DaemonWorkspaceAgentDetail>;
+  getAgent(
+    agentType: string,
+    scope?: 'workspace' | 'global',
+  ): Promise<DaemonWorkspaceAgentDetail>;
   createAgent(
     req: DaemonCreateAgentRequest,
   ): Promise<DaemonAgentMutationResult>;
@@ -543,11 +557,16 @@ export interface DaemonWorkspaceActions {
   // Workspace management
   addWorkspace(
     cwd: string,
-    options?: { persist?: boolean },
+    options?: { persist?: boolean; displayName?: string },
   ): Promise<DaemonAddWorkspaceResult>;
+  addScratchWorkspace(): Promise<DaemonAddWorkspaceResult>;
   suggestWorkspacePaths(
     prefix: string,
   ): Promise<DaemonWorkspacePathSuggestions>;
+  updateWorkspace(
+    workspaceSelector: string,
+    update: DaemonWorkspaceUpdate,
+  ): Promise<DaemonWorkspaceCapability>;
   removeWorkspace(
     workspaceId: string,
     options?: { force?: boolean; timeoutMs?: number },

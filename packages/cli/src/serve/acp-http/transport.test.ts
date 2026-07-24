@@ -192,6 +192,7 @@ class FakeBridge {
   }
 
   loadShouldThrow = false;
+  loadError: unknown;
 
   async loadSession(req: {
     sessionId: string;
@@ -199,6 +200,7 @@ class FakeBridge {
     clientId?: string;
   }) {
     this.loadRequests.push(req);
+    if (this.loadError !== undefined) throw this.loadError;
     if (this.loadShouldThrow) throw new Error('load failed');
     if (this.gate) await this.gate;
     return {
@@ -228,17 +230,25 @@ class FakeBridge {
 
   subscribeThrows = false;
   /** Records every subscribeEvents call so tests can assert the resume cursor. */
-  subscribeCalls: Array<{ sessionId: string; lastEventId?: number }> = [];
+  subscribeCalls: Array<{
+    sessionId: string;
+    lastEventId?: number;
+    epoch?: string;
+  }> = [];
   /** Parallel to `subscribeCalls`: each subscription's abort signal, so a test
    * can detect when a closed stream's pump has actually stopped server-side. */
   subscribeSignals: Array<AbortSignal | undefined> = [];
 
   subscribeEvents(
     sessionId: string,
-    opts?: { signal?: AbortSignal; lastEventId?: number },
+    opts?: { signal?: AbortSignal; lastEventId?: number; epoch?: string },
   ) {
     if (this.subscribeThrows) throw new Error('subscribe failed');
-    this.subscribeCalls.push({ sessionId, lastEventId: opts?.lastEventId });
+    this.subscribeCalls.push({
+      sessionId,
+      lastEventId: opts?.lastEventId,
+      epoch: opts?.epoch,
+    });
     this.subscribeSignals.push(opts?.signal);
     const q = pushQueue(opts?.signal);
     this.queues.set(sessionId, q);
@@ -263,6 +273,15 @@ class FakeBridge {
   sessionLastEventId: number | undefined = undefined;
   getSessionLastEventId(_sessionId: string): number | undefined {
     return this.sessionLastEventId;
+  }
+
+  /**
+   * Bus epoch token advertised on the SSE response header and paired with
+   * resume cursors (DAEMON-001). Configurable per test.
+   */
+  sessionEventEpoch = 'fake-epoch';
+  getSessionEventEpoch(_sessionId: string): string {
+    return this.sessionEventEpoch;
   }
 
   respondToSessionPermission() {
@@ -1412,6 +1431,50 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       lastEventId: undefined,
     });
     await fresh.body?.cancel().catch(() => {});
+  });
+
+  it('GET X-Qwen-Event-Epoch flows to subscribeEvents; invalid values degrade to "not provided"', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+
+    // Reconnect carrying cursor + epoch → subscribeEvents gets both.
+    const resumed = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': '42',
+        'x-qwen-event-epoch': 'epoch-abc',
+      },
+    });
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'sess-1',
+      lastEventId: 42,
+      epoch: 'epoch-abc',
+    });
+    // The stream advertises the CURRENT bus epoch back to the client so it
+    // can pair future cursors with it (DAEMON-001).
+    expect(resumed.headers.get('x-qwen-event-epoch')).toBe('fake-epoch');
+    await resumed.body?.cancel().catch(() => {});
+
+    // An out-of-charset token is rejected (logged) → treated as absent.
+    const bad = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': '42',
+        'x-qwen-event-epoch': 'not a valid token!',
+      },
+    });
+    await waitUntil(() => bridge.subscribeCalls.length >= 2);
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'sess-1',
+      lastEventId: 42,
+      epoch: undefined,
+    });
+    await bad.body?.cancel().catch(() => {});
   });
 
   it('real close-then-reconnect order keeps ownership (no 403) + prompt alive, resumes via Last-Event-ID', async () => {
@@ -3353,6 +3416,75 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
+  it('emits the stderr breadcrumb only when the initial replay snapshot is degraded', async () => {
+    const makeSnapshot = (
+      sessionId: string,
+      degraded: boolean,
+    ): SessionReplaySnapshot => ({
+      lastEventId: 1,
+      compactedTurns: [
+        {
+          v: 1,
+          id: 1,
+          type: 'session_update',
+          data: {
+            sessionId,
+            update: { sessionUpdate: 'user_message_chunk' },
+          },
+        } as BridgeEvent,
+      ],
+      liveJournal: [],
+      ...(degraded ? { degraded: true } : {}),
+    });
+    const degradedLine = (calls: unknown[][]) =>
+      calls.some(
+        ([line]) =>
+          typeof line === 'string' && line.includes('DEGRADED snapshot'),
+      );
+
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    // One reply frame per session/load; await each BEFORE opening the
+    // session stream — the GET must not race conn.ownSession() or the
+    // handler 403s and subscribeEvents never fires.
+    const replies = frameReader(connStream);
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Healthy snapshot: no operator breadcrumb.
+    bridge.replaySnapshot = makeSnapshot('deg-0', false);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 30,
+      method: 'session/load',
+      params: { sessionId: 'deg-0' },
+    });
+    await replies.next();
+    stdioMocks.writeStderrLine.mockClear();
+    await openStream(connId, 'deg-0');
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    expect(degradedLine(stdioMocks.writeStderrLine.mock.calls)).toBe(false);
+
+    // Degraded snapshot (DAEMON-008): breadcrumb names the session.
+    bridge.replaySnapshot = makeSnapshot('deg-1', true);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 31,
+      method: 'session/load',
+      params: { sessionId: 'deg-1' },
+    });
+    await replies.next();
+    stdioMocks.writeStderrLine.mockClear();
+    await openStream(connId, 'deg-1');
+    await waitUntil(() => bridge.subscribeCalls.length >= 2);
+    expect(degradedLine(stdioMocks.writeStderrLine.mock.calls)).toBe(true);
+    expect(
+      stdioMocks.writeStderrLine.mock.calls.some(
+        ([line]) => typeof line === 'string' && line.includes('deg-1'),
+      ),
+    ).toBe(true);
+    replies.close();
+  });
+
   it('defers prompt replies until initial load replay completes', async () => {
     bridge.replaySnapshot = {
       lastEventId: 1,
@@ -3655,6 +3787,46 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(frame.id).toBe(212);
       expect(frame.error.code).toBe(-32603);
       expect(frame.error.data?.errorKind).toBe('session_conflict');
+    });
+  });
+
+  it('session/load preserves sanitized session writer RPC errors', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440322';
+      await writeStoredSession(sessionId);
+      bridge.loadError = Object.assign(new Error('private lock details'), {
+        code: -32020,
+        data: { errorKind: 'session_writer_conflict' },
+      });
+
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const got = takeFrames(connStream, 1);
+      await new Promise((r) => setTimeout(r, 50));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 213,
+        method: 'session/load',
+        params: { sessionId },
+      });
+
+      const [frame] = (await got) as Array<{
+        id: number;
+        error: {
+          code: number;
+          message: string;
+          data?: { errorKind?: string };
+        };
+      }>;
+      expect(frame).toEqual({
+        id: 213,
+        error: {
+          code: -32020,
+          message: 'This session is already open in another Qwen process.',
+          data: { errorKind: 'session_writer_conflict' },
+        },
+        jsonrpc: '2.0',
+      });
     });
   });
 
@@ -4544,6 +4716,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
 
   it('session/close runs local cleanup even if the bridge close throws', async () => {
     bridge.closeShouldThrow = true;
+    bridge.getSessionSummary = () => {
+      throw new Error('session already gone');
+    };
     const connId = await initialize();
     await newSession(connId); // creates + owns sess-1
     await new Promise((r) => setTimeout(r, 30));
@@ -4558,6 +4733,35 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     // Local teardown ran in `finally` despite the throw → session unowned now.
     const after = await openStream(connId, 'sess-1');
     expect(after.status).toBe(403);
+  });
+
+  it('session/close can be retried when the bridge reports a live refusal', async () => {
+    bridge.closeError = new Error('close drain refused');
+    const connId = await initialize();
+    await newSession(connId);
+
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 146,
+      method: 'session/close',
+      params: { sessionId: 'sess-1' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const stillOwned = await openStream(connId, 'sess-1');
+    expect(stillOwned.status).toBe(200);
+
+    bridge.closeError = undefined;
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 147,
+      method: 'session/close',
+      params: { sessionId: 'sess-1' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(bridge.closedSessions).toEqual(['sess-1', 'sess-1']);
+    const closed = await openStream(connId, 'sess-1');
+    expect(closed.status).toBe(403);
+    await stillOwned.body?.cancel().catch(() => {});
   });
 
   it('connection cap → 503 on initialize', async () => {

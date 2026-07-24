@@ -493,6 +493,18 @@ export interface ToolResult {
   llmContent: PartListUnion;
 
   /**
+   * Internal runtime metadata recording the producer persistence decision
+   * before final aggregation.
+   * `undefined` means no decision was made; `[]` means a decision was made but
+   * no reusable artifact exists; a non-empty array lists reusable producer
+   * artifact paths. Downstream finalization treats any defined value as a
+   * completed decision for this producer output and does not persist it again.
+   * Other artifact channels remain independent and may still be aggregated
+   * later.
+   */
+  persistedOutputFiles?: string[];
+
+  /**
    * Markdown string for user display.
    * This provides a user-friendly summary or visualization of the result.
    * NOTE: This might also be considered UI-specific and could potentially be
@@ -875,13 +887,22 @@ export interface ToolInfoConfirmationDetails {
   permissionRules?: string[];
 }
 
-export type ToolCallConfirmationDetails =
+export interface AutoModeFallbackConfirmation {
+  reason: 'classifier_unavailable';
+  message: string;
+}
+
+export type ToolCallConfirmationDetails = (
   | ToolEditConfirmationDetails
   | ToolExecuteConfirmationDetails
   | ToolMcpConfirmationDetails
   | ToolInfoConfirmationDetails
   | ToolPlanConfirmationDetails
-  | ToolAskUserQuestionConfirmationDetails;
+  | ToolAskUserQuestionConfirmationDetails
+) & {
+  /** Explains why an AUTO-mode call was routed to manual confirmation. */
+  autoModeFallback?: AutoModeFallbackConfirmation;
+};
 
 export interface ToolPlanConfirmationDetails {
   type: 'plan';
@@ -925,6 +946,8 @@ export interface ToolAskUserQuestionConfirmationDetails {
  */
 export enum ToolConfirmationOutcome {
   ProceedOnce = 'proceed_once',
+  /** Approve this call once and change the runtime session to Default mode. */
+  ProceedOnceAndSwitchToDefault = 'proceed_once_and_switch_to_default',
   ProceedAlways = 'proceed_always',
   /** @deprecated Use ProceedAlwaysProject or ProceedAlwaysUser instead. */
   ProceedAlwaysServer = 'proceed_always_server',
