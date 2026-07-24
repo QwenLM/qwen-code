@@ -65,8 +65,12 @@ function toOpenAPI30(schema: Record<string, unknown>): Record<string, unknown> {
     }
 
     // 2. Const Handling (Draft 6+) -> Enum (OpenAPI 3.0)
+    // Stringified for the same reason step 5 stringifies `enum`: this
+    // produces an enum, and Gemini requires those to be strings. Step 5
+    // cannot cover it, since it keys off `source['enum']`, which a
+    // const-only schema never sets.
     if (source['const'] !== undefined) {
-      target['enum'] = [source['const']];
+      target['enum'] = [String(source['const'])];
       delete target['const'];
     }
 
