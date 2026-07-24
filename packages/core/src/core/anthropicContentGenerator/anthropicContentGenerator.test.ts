@@ -23,12 +23,18 @@ const mockTokenizer = {
   dispose: vi.fn(),
 };
 const mockReportAnthropicRequest = vi.hoisted(() => vi.fn());
+const mockReportAnthropicFollowingRequest = vi.hoisted(() => vi.fn());
+const mockReportAnthropicResponse = vi.hoisted(() => vi.fn());
+const mockReportAnthropicEvent = vi.hoisted(() => vi.fn());
 
 vi.mock('../../utils/request-tokenizer/index.js', () => ({
   RequestTokenEstimator: vi.fn(() => mockTokenizer),
 }));
 vi.mock('../../telemetry/gen-ai-request.js', () => ({
   reportAnthropicRequest: mockReportAnthropicRequest,
+  reportAnthropicFollowingRequest: mockReportAnthropicFollowingRequest,
+  reportAnthropicResponse: mockReportAnthropicResponse,
+  reportAnthropicEvent: mockReportAnthropicEvent,
 }));
 
 type AnthropicCreateArgs = [
@@ -1190,6 +1196,8 @@ describe('AnthropicContentGenerator', () => {
         { ...baseConfig, reasoning: { effort: 'medium' } },
         mockConfig,
       );
+      const telemetryAttempt = {};
+      mockReportAnthropicRequest.mockReturnValueOnce(telemetryAttempt);
       const stream = await generator.generateContentStream({
         model: 'models/ignored',
         contents: 'Hi',
@@ -1210,6 +1218,10 @@ describe('AnthropicContentGenerator', () => {
       const [streamingRequest, options] =
         anthropicState.lastCreateArgs as AnthropicCreateArgs;
       expect(mockReportAnthropicRequest).toHaveBeenCalledWith(streamingRequest);
+      expect(mockReportAnthropicEvent).toHaveBeenCalledWith(
+        telemetryAttempt,
+        expect.objectContaining({ type: 'message_delta' }),
+      );
       const headers = ((options as { headers?: Record<string, string> })
         ?.headers || {}) as Record<string, string>;
       expect(headers['anthropic-beta']).toContain(
@@ -1392,6 +1404,8 @@ describe('AnthropicContentGenerator', () => {
         },
       };
 
+      const telemetryAttempt = {};
+      mockReportAnthropicRequest.mockReturnValueOnce(telemetryAttempt);
       const result = await generator.generateContent(request);
       expect(result.responseId).toBe('gemini-1');
 
@@ -1420,6 +1434,10 @@ describe('AnthropicContentGenerator', () => {
         }),
       );
       expect(mockReportAnthropicRequest).toHaveBeenCalledWith(anthropicRequest);
+      expect(mockReportAnthropicResponse).toHaveBeenCalledWith(
+        telemetryAttempt,
+        expect.objectContaining({ id: 'anthropic-1' }),
+      );
 
       expect(convertResponseSpy).toHaveBeenCalledTimes(1);
     });
@@ -3847,14 +3865,18 @@ describe('AnthropicContentGenerator', () => {
         expect.objectContaining({ stream: true }),
       );
       expect(fallbackRequest).not.toHaveProperty('stream');
-      expect(mockReportAnthropicRequest).toHaveBeenNthCalledWith(
-        2,
+      expect(mockReportAnthropicFollowingRequest).toHaveBeenCalledWith(
         fallbackRequest,
+        undefined,
       );
     });
 
     it('converts the non-streaming fallback response when an empty stream is recoverable', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
+      const streamingAttempt = { generation: 1 };
+      const fallbackAttempt = { generation: 2 };
+      mockReportAnthropicRequest.mockReturnValueOnce(streamingAttempt);
+      mockReportAnthropicFollowingRequest.mockReturnValueOnce(fallbackAttempt);
       anthropicState.createImpl
         .mockResolvedValueOnce(
           (async function* () {
@@ -3892,12 +3914,26 @@ describe('AnthropicContentGenerator', () => {
       }
 
       expect(anthropicState.createImpl).toHaveBeenCalledTimes(2);
+      const [fallbackRequest] = anthropicState.createImpl.mock
+        .calls[1] as AnthropicCreateArgs;
       expect(chunks).toHaveLength(1);
       expect(chunks[0]?.responseId).toBe('msg-fallback');
       expect(chunks[0]?.candidates?.[0]?.content?.parts).toEqual([
         { text: 'fallback ok' },
       ]);
       expect(chunks[0]?.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+      expect(mockReportAnthropicFollowingRequest).toHaveBeenCalledWith(
+        fallbackRequest,
+        streamingAttempt,
+      );
+      expect(mockReportAnthropicResponse).toHaveBeenCalledWith(
+        fallbackAttempt,
+        expect.objectContaining({ id: 'msg-fallback' }),
+      );
+      expect(mockReportAnthropicResponse).not.toHaveBeenCalledWith(
+        streamingAttempt,
+        expect.anything(),
+      );
     });
   });
 

@@ -22,9 +22,40 @@ import type {
   ContentGeneratorConfig,
 } from '../contentGenerator.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
-import { reportGeminiRequest } from '../../telemetry/gen-ai-request.js';
+import {
+  reportGeminiChunk,
+  reportGeminiRequest,
+  reportGeminiResponse,
+  type GenAiAttemptHandle,
+} from '../../telemetry/gen-ai-request.js';
 
 const debugLogger = createDebugLogger('GEMINI');
+
+function observeGeminiStream(
+  stream: AsyncIterable<GenerateContentResponse>,
+  telemetryAttempt: GenAiAttemptHandle | undefined,
+): AsyncGenerator<GenerateContentResponse> {
+  const iterator = stream[Symbol.asyncIterator]();
+  return {
+    async next() {
+      const result = await iterator.next();
+      if (!result.done) reportGeminiChunk(telemetryAttempt, result.value);
+      return result;
+    },
+    async return(value?: GenerateContentResponse) {
+      if (iterator.return) return iterator.return(value);
+      return { done: true, value };
+    },
+    async throw(error?: unknown) {
+      if (iterator.throw) return iterator.throw(error);
+      await iterator.return?.();
+      throw error;
+    },
+    [Symbol.asyncIterator]() {
+      return this;
+    },
+  };
+}
 
 /**
  * A wrapper for GoogleGenAI that implements the ContentGenerator interface.
@@ -194,8 +225,11 @@ export class GeminiContentGenerator implements ContentGenerator {
       contents: this.stripUnsupportedFields(request.contents),
       config: this.buildGenerateContentConfig(request),
     };
-    reportGeminiRequest(finalRequest);
-    return this.googleGenAI.models.generateContent(finalRequest);
+    const telemetryAttempt = reportGeminiRequest(finalRequest);
+    const response =
+      await this.googleGenAI.models.generateContent(finalRequest);
+    reportGeminiResponse(telemetryAttempt, response);
+    return response;
   }
 
   async generateContentStream(
@@ -207,8 +241,10 @@ export class GeminiContentGenerator implements ContentGenerator {
       contents: this.stripUnsupportedFields(request.contents),
       config: this.buildGenerateContentConfig(request),
     };
-    reportGeminiRequest(finalRequest);
-    return this.googleGenAI.models.generateContentStream(finalRequest);
+    const telemetryAttempt = reportGeminiRequest(finalRequest);
+    const stream =
+      await this.googleGenAI.models.generateContentStream(finalRequest);
+    return observeGeminiStream(stream, telemetryAttempt);
   }
 
   /**

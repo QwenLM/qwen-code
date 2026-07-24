@@ -147,15 +147,14 @@ import {
   endToolBlockedOnUserSpan,
   startHookSpan,
   endHookSpan,
-  addToolInputAttributes,
-  addToolResultAttributes,
+  addToolArgumentsAttributes,
+  addToolCallResultAttributes,
   truncateSpanError,
   type ToolBlockedDecision,
   type ToolBlockedSource,
   type StartHookSpanOptions,
   type HookSpanMetadata,
 } from '../telemetry/index.js';
-import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
 import {
   getRuntimeContentGenerator,
@@ -2322,12 +2321,16 @@ export class CoreToolScheduler {
         // the same migration window (review-2 DeepSeek Suggestion) so
         // pre-Phase-2 dashboards filtering on it don't silently stop
         // matching during the rollout.
-        const toolSpan = startToolSpan(canonicalName, {
-          'tool.call_id': reqInfo.callId,
-          'gen_ai.tool.call.id': reqInfo.providerCallId ?? reqInfo.callId,
-          call_id: reqInfo.callId,
-          tool_name: canonicalName,
-        });
+        const toolSpan = startToolSpan(
+          canonicalName,
+          {
+            'tool.call_id': reqInfo.callId,
+            'gen_ai.tool.call.id': reqInfo.providerCallId ?? reqInfo.callId,
+            call_id: reqInfo.callId,
+            tool_name: canonicalName,
+          },
+          toolCall.tool.description,
+        );
         this.toolSpans.set(reqInfo.callId, toolSpan);
         batchState.callIds.add(reqInfo.callId);
         this.callIdToBatch.set(reqInfo.callId, batchState);
@@ -3699,12 +3702,16 @@ export class CoreToolScheduler {
       // grouping by span name don't see two entries for migrated/MCP tools
       // when this defensive fallback fires (#4321 review).
       const canonical = canonicalToolName(toolName);
-      toolSpan = startToolSpan(canonical, {
-        'tool.call_id': callId,
-        'gen_ai.tool.call.id': scheduledCall.request.providerCallId ?? callId,
-        call_id: callId, // legacy alias — see _schedule for context
-        tool_name: canonical, // legacy alias — see _schedule for context
-      });
+      toolSpan = startToolSpan(
+        canonical,
+        {
+          'tool.call_id': callId,
+          'gen_ai.tool.call.id': scheduledCall.request.providerCallId ?? callId,
+          call_id: callId, // legacy alias — see _schedule for context
+          tool_name: canonical, // legacy alias — see _schedule for context
+        },
+        scheduledCall.tool.description,
+      );
       this.toolSpans.set(callId, toolSpan);
     }
     try {
@@ -3855,27 +3862,22 @@ export class CoreToolScheduler {
     }
   }
 
-  private safelyAddToolInputAttributes(
+  private safelyAddToolArgumentsAttributes(
     span: Span,
-    toolName: string,
-    toolInput: string,
+    argumentsValue: unknown,
   ): void {
     try {
-      addToolInputAttributes(this.config, span, toolName, toolInput);
+      addToolArgumentsAttributes(this.config, span, argumentsValue);
     } catch (error) {
-      debugLogger.warn('Failed to add tool input span attributes:', error);
+      debugLogger.warn('Failed to add tool arguments span attribute:', error);
     }
   }
 
-  private safelyAddToolResultAttributes(
-    span: Span,
-    toolName: string,
-    toolResult: string,
-  ): void {
+  private safelyAddToolCallResultAttributes(span: Span, result: unknown): void {
     try {
-      addToolResultAttributes(this.config, span, toolName, toolResult);
+      addToolCallResultAttributes(this.config, span, result);
     } catch (error) {
-      debugLogger.warn('Failed to add tool result span attributes:', error);
+      debugLogger.warn('Failed to add tool result span attribute:', error);
     }
   }
 
@@ -3906,17 +3908,6 @@ export class CoreToolScheduler {
           toolInput[key] = unescapePath(String(toolInput[key]).trim());
         }
       }
-    }
-
-    // Guard the JSON serialization — addToolInputAttributes early-returns
-    // when sensitive attributes are off, but the argument is computed
-    // before the call.
-    if (this.config.getTelemetryIncludeSensitiveSpanAttributes?.()) {
-      this.safelyAddToolInputAttributes(
-        span,
-        toolName,
-        safeJsonStringify(toolInput) ?? '{}',
-      );
     }
 
     // Generate unique tool_use_id for hook tracking. On a post-'ask'
@@ -4004,11 +3995,6 @@ export class CoreToolScheduler {
           scheduledCall.request,
           new Error(blockMessage),
           ToolErrorType.EXECUTION_DENIED,
-        );
-        this.safelyAddToolResultAttributes(
-          span,
-          toolName,
-          `BLOCKED: ${blockMessage}`,
         );
         this.setStatusInternal(callId, 'error', errorResponse);
         setToolSpanFailure(
@@ -4144,6 +4130,7 @@ export class CoreToolScheduler {
             promotableShells[0]?.request.callId === callId
           );
         };
+        this.safelyAddToolArgumentsAttributes(span, invocation.params);
         promise = invocation.execute(
           execSignal,
           liveOutputCallback,
@@ -4153,6 +4140,7 @@ export class CoreToolScheduler {
           canPromoteForegroundShell,
         );
       } else {
+        this.safelyAddToolArgumentsAttributes(span, invocation.params);
         promise = invocation.execute(
           execSignal,
           liveOutputCallback,
@@ -4251,11 +4239,6 @@ export class CoreToolScheduler {
           }
           failureHookArtifacts = failureHookResult.artifacts;
         }
-        this.safelyAddToolResultAttributes(
-          span,
-          toolName,
-          `CANCELLED: ${cancelMessage}`,
-        );
         this.setStatusInternal(
           callId,
           'cancelled',
@@ -4352,11 +4335,6 @@ export class CoreToolScheduler {
               scheduledCall.request,
               new Error(stopMessage),
               ToolErrorType.EXECUTION_DENIED,
-            );
-            this.safelyAddToolResultAttributes(
-              span,
-              toolName,
-              `STOPPED: ${stopMessage}`,
             );
             this.setStatusInternal(callId, 'error', errorResponse);
             setToolSpanFailure(
@@ -4603,19 +4581,6 @@ export class CoreToolScheduler {
           }
         }
 
-        // Guard the JSON serialization for non-string content. Tool
-        // results can contain Part[] with large inlineData/media payloads
-        // that we don't want to serialize when telemetry is off.
-        if (this.config.getTelemetryIncludeSensitiveSpanAttributes?.()) {
-          this.safelyAddToolResultAttributes(
-            span,
-            toolName,
-            typeof content === 'string'
-              ? content
-              : (safeJsonStringify(content) ?? ''),
-          );
-        }
-
         // Recompute AFTER truncation so it reflects the model-facing length;
         // the final batch pass recomputes it again after aggregate reduction.
         contentLength =
@@ -4654,6 +4619,12 @@ export class CoreToolScheduler {
           span.setAttribute('success', true);
         } catch {
           // OTel errors must not block API behavior.
+        }
+        const result = response.find(
+          (part) => part.functionResponse !== undefined,
+        )?.functionResponse?.response;
+        if (result !== undefined) {
+          this.safelyAddToolCallResultAttributes(span, result);
         }
       } else {
         // It is a failure
@@ -4724,11 +4695,6 @@ export class CoreToolScheduler {
             const error = part.functionResponse?.response?.['error'];
             return total + (typeof error === 'string' ? error.length : 0);
           }, 0);
-          this.safelyAddToolResultAttributes(
-            span,
-            toolName,
-            `ERROR: ${operationalErrorMessage}`,
-          );
           const artifacts = [
             ...(toolResult.artifacts ?? []),
             ...(failureHookArtifacts ?? []),
@@ -4786,12 +4752,6 @@ export class CoreToolScheduler {
             ]),
           );
         }
-
-        this.safelyAddToolResultAttributes(
-          span,
-          toolName,
-          `ERROR: ${errorMessage}`,
-        );
 
         const error = new Error(errorMessage);
         const errorResponse = createErrorResponse(
@@ -4868,11 +4828,6 @@ export class CoreToolScheduler {
           }
           failureHookArtifacts = failureHookResult.artifacts;
         }
-        this.safelyAddToolResultAttributes(
-          span,
-          toolName,
-          `CANCELLED: ${cancelMessage}`,
-        );
         this.setStatusInternal(
           callId,
           'cancelled',
@@ -4918,11 +4873,6 @@ export class CoreToolScheduler {
           }
           failureHookArtifacts = failureHookResult.artifacts;
         }
-        this.safelyAddToolResultAttributes(
-          span,
-          toolName,
-          `EXCEPTION: ${exceptionErrorMessage}`,
-        );
         this.setStatusInternal(
           callId,
           'error',

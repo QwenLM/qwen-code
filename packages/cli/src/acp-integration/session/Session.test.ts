@@ -54,6 +54,8 @@ const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
 const refreshMemoryAfterManagedWriteSpy = vi.hoisted(() => vi.fn());
 const transcribeVoiceAudioSpy = vi.hoisted(() => vi.fn());
 const startToolSpanSpy = vi.hoisted(() => vi.fn());
+const addToolArgumentsAttributesSpy = vi.hoisted(() => vi.fn());
+const addToolCallResultAttributesSpy = vi.hoisted(() => vi.fn());
 // Records every LoopTickResolver construction's deps so a test can assert what
 // Session computed (e.g. the home confinement root) without a private-field peek.
 const loopTickResolverDepsSpy = vi.hoisted(() => vi.fn());
@@ -76,6 +78,18 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     startToolSpan: (...args: Parameters<typeof actual.startToolSpan>) => {
       startToolSpanSpy(...args);
       return actual.startToolSpan(...args);
+    },
+    addToolArgumentsAttributes: (
+      ...args: Parameters<typeof actual.addToolArgumentsAttributes>
+    ) => {
+      addToolArgumentsAttributesSpy(...args);
+      return actual.addToolArgumentsAttributes(...args);
+    },
+    addToolCallResultAttributes: (
+      ...args: Parameters<typeof actual.addToolCallResultAttributes>
+    ) => {
+      addToolCallResultAttributesSpy(...args);
+      return actual.addToolCallResultAttributes(...args);
     },
     // Transparent recording wrapper: records the constructor deps, then behaves
     // exactly like the real resolver (subclass → instanceof + methods preserved).
@@ -443,6 +457,8 @@ describe('Session', () => {
 
   beforeEach(() => {
     startToolSpanSpy.mockClear();
+    addToolArgumentsAttributesSpy.mockClear();
+    addToolCallResultAttributesSpy.mockClear();
     runVisionBridgeSpy.mockReset();
     refreshMemoryAfterManagedWriteSpy.mockReset();
     refreshMemoryAfterManagedWriteSpy.mockResolvedValue(false);
@@ -11656,6 +11672,15 @@ describe('Session', () => {
         undefined,
       );
       expect(executeSpy).toHaveBeenCalledOnce();
+      expect(addToolArgumentsAttributesSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.anything(),
+        invocation.params,
+      );
+      expect(invocation.params).toMatchObject({
+        command: rawCommand,
+        directory: expect.any(String),
+      });
     });
 
     it('reports ACP Plan shell approval request failures accurately', async () => {
@@ -12288,6 +12313,8 @@ describe('Session', () => {
       expect(executeSpy).not.toHaveBeenCalled();
       // No permission dialog should have been opened
       expect(mockClient.requestPermission).not.toHaveBeenCalled();
+      expect(addToolArgumentsAttributesSpy).not.toHaveBeenCalled();
+      expect(addToolCallResultAttributesSpy).not.toHaveBeenCalled();
     });
 
     it('respects permission-request hook allow decisions without opening ACP permission dialog', async () => {
@@ -12362,6 +12389,11 @@ describe('Session', () => {
       );
       expect(invocation.params).toEqual({ path: '/tmp/updated.txt' });
       expect(executeSpy).toHaveBeenCalled();
+      expect(addToolArgumentsAttributesSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.anything(),
+        { path: '/tmp/updated.txt' },
+      );
     });
 
     it('keeps exit_plan_mode in PLAN until ACP approval executes and then notifies once', async () => {
@@ -15039,9 +15071,22 @@ describe('Session', () => {
           call_id: 'provider-call__qwen_dup_2',
           'gen_ai.tool.call.id': 'provider-call',
         }),
+        'read_file',
+      );
+      expect(addToolArgumentsAttributesSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.anything(),
+        {},
+      );
+      expect(addToolCallResultAttributesSpy).toHaveBeenCalledWith(
+        mockConfig,
+        expect.anything(),
+        { output: 'read' },
       );
 
       startToolSpanSpy.mockClear();
+      addToolArgumentsAttributesSpy.mockClear();
+      addToolCallResultAttributesSpy.mockClear();
       await (session as unknown as ToolCallInternals).runToolCalls(
         new AbortController().signal,
         'prompt-tool-span-fallback',
@@ -15059,6 +15104,7 @@ describe('Session', () => {
           'tool.call_id': 'internal-call',
           'gen_ai.tool.call.id': 'internal-call',
         }),
+        'read_file',
       );
     });
 

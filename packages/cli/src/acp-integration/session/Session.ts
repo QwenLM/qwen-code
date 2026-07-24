@@ -127,6 +127,8 @@ import {
   SessionWriterError,
   startToolSpan,
   endToolSpan,
+  addToolArgumentsAttributes,
+  addToolCallResultAttributes,
   runInToolSpanContext,
   startToolExecutionSpan,
   endToolExecutionSpan,
@@ -6589,15 +6591,19 @@ export class Session implements SessionContext {
         ? structuredClone(args)
         : args;
 
-    const toolSpan = startToolSpan(policyToolName, {
-      'tool.call_id': callId,
-      'gen_ai.tool.call.id': getProviderToolCallId(fc) ?? callId,
-      // Dual-emit the legacy call_id/tool_name aliases like CoreToolScheduler
-      // (coreToolScheduler.ts) so pre-Phase-2 dashboards keyed off call_id keep
-      // matching daemon/ACP tool spans during the migration window.
-      call_id: callId,
-      tool_name: policyToolName,
-    });
+    const toolSpan = startToolSpan(
+      policyToolName,
+      {
+        'tool.call_id': callId,
+        'gen_ai.tool.call.id': getProviderToolCallId(fc) ?? callId,
+        // Dual-emit the legacy call_id/tool_name aliases like CoreToolScheduler
+        // (coreToolScheduler.ts) so pre-Phase-2 dashboards keyed off call_id keep
+        // matching daemon/ACP tool spans during the migration window.
+        call_id: callId,
+        tool_name: policyToolName,
+      },
+      tool.description,
+    );
     let spanSuccess = false;
 
     try {
@@ -7418,6 +7424,11 @@ export class Session implements SessionContext {
               `Qwen Code is executing tool ${toolName}`,
             );
             try {
+              addToolArgumentsAttributes(
+                this.config,
+                toolSpan,
+                invocation.params,
+              );
               toolResult = await invocation.execute(
                 activeToolAbortSignal,
                 onToolProgress,
@@ -7654,6 +7665,14 @@ export class Session implements SessionContext {
           });
 
           spanSuccess = succeeded;
+          if (succeeded && !nestedPermissionCancelled) {
+            const result = responseParts.find(
+              (part) => part.functionResponse !== undefined,
+            )?.functionResponse?.response;
+            if (result !== undefined) {
+              addToolCallResultAttributes(this.config, toolSpan, result);
+            }
+          }
           if (toolResult.error) {
             spanError = toolResult.error.message;
           } else if (aborted) {

@@ -49,7 +49,13 @@ import {
   parsePositiveIntegerEnvValue,
 } from '../tokenLimits.js';
 import { setToolCallPreparations } from '../tool-call-preparation.js';
-import { reportAnthropicRequest } from '../../telemetry/gen-ai-request.js';
+import {
+  reportAnthropicEvent,
+  reportAnthropicFollowingRequest,
+  reportAnthropicRequest,
+  reportAnthropicResponse,
+  type GenAiAttemptHandle,
+} from '../../telemetry/gen-ai-request.js';
 
 const debugLogger = createDebugLogger('ANTHROPIC');
 
@@ -348,12 +354,13 @@ export class AnthropicContentGenerator implements ContentGenerator {
     try {
       const anthropicRequest = await this.buildRequest(request);
       runtimeDiagnostics.recordAnthropicWireRequest(anthropicRequest);
-      reportAnthropicRequest(anthropicRequest);
+      const telemetryAttempt = reportAnthropicRequest(anthropicRequest);
       const headers = this.buildPerRequestHeaders(anthropicRequest);
       response = (await this.client.messages.create(anthropicRequest, {
         signal: perRequestAc?.signal,
         ...(headers ? { headers } : {}),
       })) as Message;
+      reportAnthropicResponse(telemetryAttempt, response);
     } catch (error) {
       throw redactProxyError(error);
     } finally {
@@ -375,7 +382,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       stream: true,
     };
     runtimeDiagnostics.recordAnthropicWireRequest(streamingRequest);
-    reportAnthropicRequest(streamingRequest);
+    const telemetryAttempt = reportAnthropicRequest(streamingRequest);
 
     // Wrap the caller's signal in a per-request child so the Anthropic SDK's
     // leaked abort listener (core.mjs fetchWithTimeout registers one with no
@@ -405,6 +412,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
       anthropicRequest,
       perRequestAc.signal,
       headers,
+      telemetryAttempt,
     );
     // Abort the child once the stream is fully drained or abandoned; this
     // releases the SDK request and detaches the child's listener from the
@@ -1072,6 +1080,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
 
   private async *processStream(
     stream: AsyncIterable<RawMessageStreamEvent>,
+    telemetryAttempt: GenAiAttemptHandle | undefined,
   ): AsyncGenerator<GenerateContentResponse> {
     let messageId: string | undefined;
     let model: string | undefined;
@@ -1102,6 +1111,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     };
 
     for await (const event of stream) {
+      reportAnthropicEvent(telemetryAttempt, event);
       switch (event.type) {
         case 'message_start': {
           messageId = event.message.id ?? messageId;
@@ -1364,11 +1374,12 @@ export class AnthropicContentGenerator implements ContentGenerator {
     fallbackRequest: MessageCreateParamsWithThinking,
     abortSignal: AbortSignal | undefined,
     headers: Record<string, string> | undefined,
+    telemetryAttempt: GenAiAttemptHandle | undefined,
   ): AsyncGenerator<GenerateContentResponse> {
     let hasAssistantPayload = false;
     let hasFinishReason = false;
 
-    for await (const chunk of this.processStream(stream)) {
+    for await (const chunk of this.processStream(stream, telemetryAttempt)) {
       const candidates = chunk.candidates ?? [];
       hasFinishReason ||= candidates.some(
         (candidate) => candidate.finishReason !== undefined,
@@ -1397,11 +1408,15 @@ export class AnthropicContentGenerator implements ContentGenerator {
     let response: Message;
     try {
       runtimeDiagnostics.recordAnthropicWireRequest(fallbackRequest);
-      reportAnthropicRequest(fallbackRequest);
+      const fallbackAttempt = reportAnthropicFollowingRequest(
+        fallbackRequest,
+        telemetryAttempt,
+      );
       response = (await this.client.messages.create(fallbackRequest, {
         signal: abortSignal,
         ...(headers ? { headers } : {}),
       })) as Message;
+      reportAnthropicResponse(fallbackAttempt, response);
       yield this.converter.convertAnthropicResponseToGemini(response);
     } catch (error) {
       throw redactProxyError(error);
