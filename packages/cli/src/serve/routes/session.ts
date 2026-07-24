@@ -1280,6 +1280,11 @@ export function registerSessionRoutes(
               await new SessionService(runtime.workspaceCwd).removeSession(
                 session.sessionId,
               );
+              if (worktreeMeta) {
+                await new GitWorktreeService(workspaceCwd)
+                  .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
+                  .catch(() => {});
+              }
             }
           } catch {
             // Runtime disposal remains responsible for final containment.
