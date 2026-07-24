@@ -168,6 +168,7 @@ describe('POST /session/:id/approval-mode', () => {
     const body = await res.json();
     expect(body.code).toBe('invalid_approval_mode');
     expect(body.allowed).toContain('plan');
+    expect(ctx.stub.lastApprovalModeBody).toBeUndefined();
   });
 
   it('non-boolean persist → 400 invalid_persist_flag', async () => {
@@ -179,9 +180,10 @@ describe('POST /session/:id/approval-mode', () => {
     expect(res.status).toBe(400);
     const body = await res.json();
     expect(body.code).toBe('invalid_persist_flag');
+    expect(ctx.stub.lastApprovalModeBody).toBeUndefined();
   });
 
-  it('daemon 403 trust-gate passes through unchanged', async () => {
+  it('daemon 403 trust-gate passes through unchanged, falls back to generic human message', async () => {
     const ctx = await setup({
       approvalModeStatus: 403,
       approvalModeBody: { code: 'trust_gate', errorKind: 'auth_env_error' },
@@ -189,6 +191,26 @@ describe('POST /session/:id/approval-mode', () => {
     const res = await post(ctx.baseUrl, ctx.ownerToken, { mode: 'auto' });
     expect(res.status).toBe(403);
     const body = await res.json();
+    expect(body.code).toBe('trust_gate');
+    expect(body.errorKind).toBe('auth_env_error');
+    // No human message in the daemon body → generic fallback string.
+    expect(body.error).toBe('Approval mode blocked by folder trust');
+  });
+
+  it('daemon 403 with a human message → response error reflects the daemon message', async () => {
+    const ctx = await setup({
+      approvalModeStatus: 403,
+      approvalModeBody: {
+        code: 'trust_gate',
+        errorKind: 'auth_env_error',
+        error: 'Folder /repo/untrusted is not trusted',
+      },
+    });
+    const res = await post(ctx.baseUrl, ctx.ownerToken, { mode: 'auto' });
+    expect(res.status).toBe(403);
+    const body = await res.json();
+    expect(body.error).toBe('Folder /repo/untrusted is not trusted');
+    // code/errorKind still pass through faithfully alongside the message.
     expect(body.code).toBe('trust_gate');
     expect(body.errorKind).toBe('auth_env_error');
   });

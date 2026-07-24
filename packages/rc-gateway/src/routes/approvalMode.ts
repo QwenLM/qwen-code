@@ -148,14 +148,31 @@ async function handleApprovalMode(
   } catch (err) {
     const status = (err as { status?: unknown }).status;
     const eBody = (err as { body?: unknown }).body as
-      | { code?: unknown; errorKind?: unknown }
+      | {
+          code?: unknown;
+          errorKind?: unknown;
+          error?: unknown;
+          message?: unknown;
+        }
       | undefined;
     if (status === 403) {
       // Daemon trust gate (a power mode in an untrusted folder) — surface
       // unchanged so the remote client learns the folder is untrusted, not
-      // merely that its own scope was insufficient.
+      // merely that its own scope was insufficient. Prefer the daemon's own
+      // human-readable message (`error`, then `message`) when present, so
+      // the string is faithful to what the daemon actually said; otherwise
+      // fall back to the generic message below. Only that single string is
+      // copied — never the whole daemon body.
+      const humanError =
+        (typeof eBody?.error === 'string' && eBody.error.length > 0
+          ? eBody.error
+          : undefined) ??
+        (typeof eBody?.message === 'string' && eBody.message.length > 0
+          ? eBody.message
+          : undefined) ??
+        'Approval mode blocked by folder trust';
       res.status(403).json({
-        error: 'Approval mode blocked by folder trust',
+        error: humanError,
         code: typeof eBody?.code === 'string' ? eBody.code : 'trust_gate',
         ...(typeof eBody?.errorKind === 'string'
           ? { errorKind: eBody.errorKind }
