@@ -1,0 +1,117 @@
+name: DSW SWE-bench Verified Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing test/prerelease to receive the result
+        required: true
+        type: string
+      qwen_release_tag:
+        description: Published Qwen npm release to evaluate (defaults to release_tag)
+        required: false
+        type: string
+      instance_limit:
+        description: Number of Verified instances (500 is the full suite)
+        required: true
+        default: '1'
+        type: choice
+        options:
+          - '1'
+          - '5'
+          - '500'
+      executor_count:
+        description: Concurrent DSW executors
+        required: true
+        default: '10'
+        type: choice
+        options:
+          - '1'
+          - '4'
+          - '10'
+      instance_id:
+        description: Exact Verified instance when instance_limit is 1
+        required: false
+        default: sympy__sympy-20590
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: dsw-swe-verified-release
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    name: SWE-bench Verified on DSW
+    runs-on: [self-hosted, Linux, X64, qwen-benchmark-dsw]
+    timeout-minutes: 1440
+    env:
+      RELEASE_TAG: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.release_tag }}
+      QWEN_REF: ${{ github.event_name == 'release' && github.event.release.tag_name || inputs.qwen_release_tag || inputs.release_tag }}
+      INSTANCE_LIMIT: ${{ github.event_name == 'release' && '500' || inputs.instance_limit }}
+      EXECUTOR_COUNT: ${{ github.event_name == 'release' && '10' || inputs.executor_count }}
+      BENCHMARK_INSTANCE_ID: ${{ github.event_name == 'release' && '' || inputs.instance_id }}
+      RELEASE_ID: ${{ github.event_name == 'release' && github.event.release.id || '' }}
+      BENCHMARK_TRIGGER: ${{ github.event_name }}
+      BENCHMARK_IDEMPOTENCY_KEY: dsw-release-v1-${{ github.run_id }}
+      GITHUB_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+
+    steps:
+      - name: Checkout pipeline
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - name: Resolve release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" > release.json
+          test "$(jq -r .draft release.json)" = "false"
+          git fetch --force origin "refs/tags/${QWEN_REF}:refs/tags/${QWEN_REF}"
+          release_commit="$(git rev-list -n 1 "${QWEN_REF}^{commit}")"
+          release_id="$(jq -r .id release.json)"
+          {
+            echo "release_commit=${release_commit}"
+            echo "release_id=${release_id}"
+            echo "release_url=$(jq -r .html_url release.json)"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Run isolated DSW pool
+        id: benchmark
+        continue-on-error: true
+        env:
+          QWEN_COMMIT: ${{ steps.release.outputs.release_commit }}
+        run: |
+          .github/scripts/dsw-swe-verified/harden-harbor-qwen-adapter.py \
+            /mnt/workspace/qwen-benchmark-pool/venv/lib/python3.12/site-packages/harbor/agents/installed/qwen_code.py
+          .github/scripts/dsw-swe-verified/run-release-benchmark.sh
+
+      - name: Write result to Release
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_COMMIT: ${{ steps.release.outputs.release_commit }}
+          RELEASE_DATABASE_ID: ${{ steps.release.outputs.release_id }}
+          RELEASE_URL: ${{ steps.release.outputs.release_url }}
+          BENCHMARK_STEP_OUTCOME: ${{ steps.benchmark.outcome }}
+          GITHUB_RUN_URL: ${{ env.GITHUB_RUN_URL }}
+        run: |
+          .github/scripts/dsw-swe-verified/publish-release-result.sh
+
+      - name: Enforce publication gate
+        if: always()
+        env:
+          BENCHMARK_STEP_OUTCOME: ${{ steps.benchmark.outcome }}
+        run: |
+          status="$(jq -r '.status // "PIPELINE_ERROR"' benchmark-output/public-result.json)"
+          if [[ "${BENCHMARK_STEP_OUTCOME}" != "success" || "${status}" != "SUCCEEDED" ]]; then
+            echo "::error::Benchmark was published without a score because status=${status}"
+            exit 1
+          fi
