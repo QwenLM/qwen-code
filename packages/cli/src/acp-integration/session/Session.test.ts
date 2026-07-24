@@ -15108,6 +15108,44 @@ describe('Session', () => {
       );
     });
 
+    it('does not fail ACP tool execution when telemetry helpers throw', async () => {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'read',
+        returnDisplay: 'read',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(core.ToolNames.READ_FILE, execute),
+      );
+      addToolArgumentsAttributesSpy.mockImplementationOnce(() => {
+        throw new Error('arguments telemetry failed');
+      });
+      addToolCallResultAttributesSpy.mockImplementationOnce(() => {
+        throw new Error('result telemetry failed');
+      });
+
+      await expect(
+        (session as unknown as ToolCallInternals).runToolCalls(
+          new AbortController().signal,
+          'prompt-tool-telemetry-failure',
+          [
+            {
+              id: 'internal-call',
+              name: core.ToolNames.READ_FILE,
+              args: { file_path: 'test.ts' },
+            },
+          ],
+        ),
+      ).resolves.toBeDefined();
+
+      expect(execute).toHaveBeenCalledOnce();
+      expect(debugLoggerDebugSpy).toHaveBeenCalledWith(
+        '[Session.runTool] Failed to record tool arguments telemetry',
+      );
+      expect(debugLoggerDebugSpy).toHaveBeenCalledWith(
+        '[Session.runTool] Failed to record tool result telemetry',
+      );
+    });
+
     it('isolates enter_plan_mode from executable ACP siblings while preserving duplicate responses', async () => {
       const writeExecute = vi.fn().mockResolvedValue({
         llmContent: 'wrote',

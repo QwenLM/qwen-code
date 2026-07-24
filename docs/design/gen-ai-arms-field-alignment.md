@@ -53,6 +53,11 @@ removed without a dual-write period:
 | Tool `tool_result*`                                    | `gen_ai.tool.call.result`                                                                                             |
 | `tools_count`, hash/preview/length/truncation metadata | No standard equivalent; removed                                                                                       |
 
+`gen_ai.response.finish_reasons` now preserves the provider's raw strings for
+all candidates instead of the previous Gemini-normalized values. Existing
+queries that filter values such as `STOP` or `MAX_TOKENS` must migrate to the
+provider values, such as `stop`, `length`, `tool_calls`, or `end_turn`.
+
 ## Provider and operation resolution
 
 Resolution is a pure function over the effective content-generator config. It

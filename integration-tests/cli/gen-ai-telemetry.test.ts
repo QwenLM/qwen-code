@@ -357,16 +357,34 @@ describeLocal('GenAI telemetry fields', () => {
     expect(toolSpan?.attributes).not.toHaveProperty('tool_result');
   });
 
-  it('omits the default choice count from the exported span', async () => {
-    server = await startFakeOpenAIServer(() => ({
-      model: 'provider-model',
-      content: 'Done.',
-      usage: {
-        prompt_tokens: 10,
-        completion_tokens: 2,
-        total_tokens: 12,
-      },
-    }));
+  it('omits the default choice count and sensitive tool payloads', async () => {
+    server = await startFakeOpenAIServer(({ requestIndex }) =>
+      requestIndex === 0
+        ? {
+            model: 'provider-model-tool',
+            toolCalls: [
+              fakeToolCall(
+                'run_shell_command',
+                { command: 'pwd' },
+                'provider-call-sensitive-off',
+              ),
+            ],
+            usage: {
+              prompt_tokens: 10,
+              completion_tokens: 2,
+              total_tokens: 12,
+            },
+          }
+        : {
+            model: 'provider-model-final',
+            content: 'Done.',
+            usage: {
+              prompt_tokens: 15,
+              completion_tokens: 2,
+              total_tokens: 17,
+            },
+          },
+    );
 
     rig = new TestRig();
     rig.setup('gen-ai-default-choice-count', {
@@ -402,7 +420,11 @@ describeLocal('GenAI telemetry fields', () => {
     });
 
     try {
-      await rig.run('Reply with done.', '--output-format', 'json');
+      await rig.run(
+        'Run the requested tool and reply with done.',
+        '--output-format',
+        'json',
+      );
     } finally {
       restoreEnvironment();
     }
@@ -428,5 +450,17 @@ describeLocal('GenAI telemetry fields', () => {
       );
       expect(llmSpan.attributes).not.toHaveProperty('gen_ai.tool.definitions');
     }
+    const toolSpan = records.find(
+      (record) =>
+        record.name === 'qwen-code.tool' &&
+        record.attributes?.['gen_ai.tool.name'] === 'run_shell_command',
+    );
+    expect(toolSpan?.attributes?.['gen_ai.tool.description']).toEqual(
+      expect.any(String),
+    );
+    expect(toolSpan?.attributes).not.toHaveProperty(
+      'gen_ai.tool.call.arguments',
+    );
+    expect(toolSpan?.attributes).not.toHaveProperty('gen_ai.tool.call.result');
   });
 });

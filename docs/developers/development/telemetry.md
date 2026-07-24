@@ -91,6 +91,12 @@ other value will disable it.
 must be a positive integer when set. Invalid values fail telemetry configuration
 resolution instead of silently falling back.
 
+`gen_ai.tool.description` is non-sensitive static registry metadata and is
+emitted independently of `includeSensitiveSpanAttributes`. This includes
+descriptions supplied by MCP servers and other workspace tool providers. The
+value is limited to 4096 UTF-16 code units and never includes dynamic invocation
+details.
+
 **Sensitive span attributes:** When `includeSensitiveSpanAttributes` is enabled,
 two things happen:
 

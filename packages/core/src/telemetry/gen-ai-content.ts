@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createDebugLogger } from '../utils/debugLogger.js';
+
 type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
 export interface JsonObject {
@@ -50,6 +52,7 @@ const DRAFT_07_TYPES = new Set([
   'object',
   'string',
 ]);
+const debugLogger = createDebugLogger('GEN_AI_CONTENT');
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -1366,7 +1369,12 @@ export class GenAiOutputAccumulator {
       ([left], [right]) => left - right,
     )) {
       const finishReason = candidate.finishReason;
-      if (!finishReason) return undefined;
+      if (!finishReason) {
+        debugLogger.debug(
+          'Omitting GenAI output messages because a candidate has no finish reason',
+        );
+        return undefined;
+      }
       const parts: CanonicalPart[] = [];
       for (const part of candidate.parts.values()) {
         if (part.value) {
@@ -1495,6 +1503,8 @@ export class GenAiOutputAccumulator {
 
   private reserve(length: number): boolean {
     if (!this.enabled || this.overflow) return false;
+    // This is a cheap lower-bound memory guard. finalize() applies the exact
+    // compact-JSON length limit, including string escaping.
     this.estimatedLength += length;
     if (this.estimatedLength <= this.maxLength) return true;
     this.markOverflow();

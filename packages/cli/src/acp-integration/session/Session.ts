@@ -7424,11 +7424,17 @@ export class Session implements SessionContext {
               `Qwen Code is executing tool ${toolName}`,
             );
             try {
-              addToolArgumentsAttributes(
-                this.config,
-                toolSpan,
-                invocation.params,
-              );
+              try {
+                addToolArgumentsAttributes(
+                  this.config,
+                  toolSpan,
+                  invocation.params,
+                );
+              } catch {
+                debugLogger.debug(
+                  '[Session.runTool] Failed to record tool arguments telemetry',
+                );
+              }
               toolResult = await invocation.execute(
                 activeToolAbortSignal,
                 onToolProgress,
@@ -7670,7 +7676,13 @@ export class Session implements SessionContext {
               (part) => part.functionResponse !== undefined,
             )?.functionResponse?.response;
             if (result !== undefined) {
-              addToolCallResultAttributes(this.config, toolSpan, result);
+              try {
+                addToolCallResultAttributes(this.config, toolSpan, result);
+              } catch {
+                debugLogger.debug(
+                  '[Session.runTool] Failed to record tool result telemetry',
+                );
+              }
             }
           }
           if (toolResult.error) {
