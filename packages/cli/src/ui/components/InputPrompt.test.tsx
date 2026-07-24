@@ -2581,7 +2581,7 @@ describe('InputPrompt', () => {
     unmount();
   });
 
-  it('should switch category on left/right when availableCategories > 2', async () => {
+  it('should switch category on Ctrl+left/right when availableCategories > 2', async () => {
     const switchCategory = vi.fn();
     mockedUseCommandCompletion.mockReturnValue({
       ...mockCommandCompletion,
@@ -2601,15 +2601,46 @@ describe('InputPrompt', () => {
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
     await wait();
 
-    stdin.write('\x1b[C'); // right arrow
+    stdin.write('\x1b[1;5C'); // Ctrl+right arrow
     await wait();
 
     expect(switchCategory).toHaveBeenCalledWith(1);
 
-    stdin.write('\x1b[D'); // left arrow
+    stdin.write('\x1b[1;5D'); // Ctrl+left arrow
     await wait();
 
     expect(switchCategory).toHaveBeenCalledWith(-1);
+    unmount();
+  });
+
+  it('should NOT switch category on plain left/right when availableCategories > 2 (caret stays free)', async () => {
+    const switchCategory = vi.fn();
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'file.ts', value: 'file.ts', category: 'file' },
+        { label: 'sess', value: 'sess', category: 'session' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      availableCategories: ['all', 'file', 'session'],
+      switchCategory,
+    });
+    props.buffer.setText('@');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\x1b[C'); // plain right arrow
+    await wait();
+    stdin.write('\x1b[D'); // plain left arrow
+    await wait();
+
+    // Plain arrows must not be hijacked for tab switching, so they remain
+    // available to move the caret in the editable buffer.
+    expect(switchCategory).not.toHaveBeenCalled();
     unmount();
   });
 

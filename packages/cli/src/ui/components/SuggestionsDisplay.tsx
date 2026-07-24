@@ -188,7 +188,9 @@ export function SuggestionsDisplay({
             );
           })}
           <Box marginLeft={2}>
-            <Text color={theme.text.secondary}>{t('(←/→ to switch)')}</Text>
+            <Text color={theme.text.secondary}>
+              {t('(Ctrl+←/→ to switch)')}
+            </Text>
           </Box>
         </Box>
       )}
