@@ -224,9 +224,11 @@ export function getCustomSystemPrompt(
   }
 
   // Append user memory using the same pattern as getCoreSystemPrompt
-  const memorySuffix = buildSystemPromptSuffix(userMemory);
-
-  return `${instructionText}${memorySuffix}${buildSystemPromptSuffix(appendInstruction)}`;
+  return assembleSystemPrompt({
+    base: instructionText,
+    contextFiles: userMemory,
+    appendPrompt: appendInstruction,
+  });
 }
 
 export function getCoreSystemPrompt(
@@ -442,18 +444,59 @@ Interaction mode reminder: ${interaction.questions}
     fs.writeFileSync(writePath, basePrompt);
   }
 
-  const memorySuffix =
-    userMemory && userMemory.trim().length > 0
-      ? buildSystemPromptSuffix(userMemory)
-      : '';
-  const appendSuffix = buildSystemPromptSuffix(appendInstruction);
-
-  return `${basePrompt}${memorySuffix}${appendSuffix}`;
+  return assembleSystemPrompt({
+    base: basePrompt,
+    contextFiles: userMemory,
+    appendPrompt: appendInstruction,
+  });
 }
 
-export function buildSystemPromptSuffix(text?: string): string {
+function buildSystemPromptSuffix(text?: string): string {
   const trimmed = text?.trim();
   return trimmed ? `\n\n---\n\n${trimmed}` : '';
+}
+
+/**
+ * System prompt segments, one slot per segment, ordered stable → context →
+ * volatile. Callers only classify content into slots; `assembleSystemPrompt`
+ * is the single place that knows the order, so a segment cannot be appended
+ * in the wrong position at a call site.
+ */
+export interface SystemPromptLayers {
+  /**
+   * Stable layer: the base prompt (identity, mandates, tool guidance) —
+   * fixed for the whole session.
+   */
+  base: string;
+  /**
+   * Context layer: concatenated context files (QWEN.md hierarchy, baseline
+   * rules, extension files). Reloaded only on explicit refresh.
+   */
+  contextFiles?: string;
+  /** Context layer: caller-supplied append prompt (e.g. --append-system-prompt). */
+  appendPrompt?: string;
+  /**
+   * Context layer: repo snapshot (branch + recent commits), computed once
+   * per session. Joined without a `---` separator — it carries its own
+   * heading.
+   */
+  gitStatus?: string | null;
+  /**
+   * Volatile layer: the managed auto-memory section, rewritten in-session on
+   * every memory save. Always last, so a save invalidates the shortest
+   * possible cached prompt prefix.
+   */
+  autoMemory?: string;
+}
+
+export function assembleSystemPrompt(layers: SystemPromptLayers): string {
+  return (
+    layers.base +
+    buildSystemPromptSuffix(layers.contextFiles) +
+    buildSystemPromptSuffix(layers.appendPrompt) +
+    (layers.gitStatus ? `\n\n${layers.gitStatus}` : '') +
+    buildSystemPromptSuffix(layers.autoMemory)
+  );
 }
 
 /**

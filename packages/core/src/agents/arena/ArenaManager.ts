@@ -14,7 +14,7 @@ import {
   type Config,
 } from '../../config/config.js';
 import {
-  buildSystemPromptSuffix,
+  assembleSystemPrompt,
   getCoreSystemPrompt,
 } from '../../core/prompts.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
@@ -1078,13 +1078,16 @@ export class ArenaManager {
         approvalMode: toApprovalMode(this.arenaConfig?.approvalMode),
         runtimeConfig: {
           promptConfig: {
-            systemPrompt:
-              getCoreSystemPrompt(
-                this.config.getUserMemory(),
+            systemPrompt: assembleSystemPrompt({
+              base: getCoreSystemPrompt(
+                undefined,
                 model.modelId,
                 undefined,
                 'headless',
-              ) + buildSystemPromptSuffix(this.config.getAutoMemoryPrompt()),
+              ),
+              contextFiles: this.config.getUserMemory(),
+              autoMemory: this.config.getAutoMemoryPrompt(),
+            }),
           },
           modelConfig: { model: model.modelId },
           runConfig: {
