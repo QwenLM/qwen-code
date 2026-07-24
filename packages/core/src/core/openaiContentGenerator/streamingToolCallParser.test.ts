@@ -1012,6 +1012,99 @@ describe('StreamingToolCallParser', () => {
       });
     });
 
+    it('routes id-less continuation chunks to a slot claimed by a colliding opener delta', () => {
+      parser.addChunk(0, '{"a":1}', 'call_1', 'function1');
+
+      // The provider reuses index 0 for a second tool call whose id and name
+      // arrive together on an empty opener delta (the standard OpenAI streaming
+      // shape: function: { name, arguments: '' }).
+      const opener = parser.addChunk(0, '', 'call_2', 'function2');
+      expect(opener.actualIndex).toBe(1);
+
+      // The following id-less argument chunk must land on call_2's slot, not on
+      // a fresh orphan slot that would drop the arguments and get the call
+      // flagged as malformed.
+      const continuation = parser.addChunk(0, '{"b":2}');
+      expect(continuation.actualIndex).toBe(1);
+
+      expect(parser.getCompletedToolCalls()).toContainEqual({
+        id: 'call_2',
+        name: 'function2',
+        args: { b: 2 },
+        index: 1,
+      });
+      // call_1's arguments must survive the collision intact.
+      expect(parser.getCompletedToolCalls()).toContainEqual({
+        id: 'call_1',
+        name: 'function1',
+        args: { a: 1 },
+        index: 0,
+      });
+    });
+
+    it('routes id-less continuations after a content-bearing colliding opener', () => {
+      parser.addChunk(0, '{"a":1}', 'call_1', 'function1');
+
+      // Same collision as above, but call_2's opener already carries a partial
+      // arguments fragment alongside its id and name — the line-239 remap-record
+      // path, as opposed to the empty-opener early return.
+      const opener = parser.addChunk(0, '{"b":', 'call_2', 'function2');
+      expect(opener.actualIndex).toBe(1);
+
+      const continuation = parser.addChunk(0, '2}');
+      expect(continuation.actualIndex).toBe(1);
+
+      expect(parser.getCompletedToolCalls()).toContainEqual({
+        id: 'call_2',
+        name: 'function2',
+        args: { b: 2 },
+        index: 1,
+      });
+    });
+
+    it('does not let a brand-new tool-call id adopt a remap slot that already has an id', () => {
+      // Exercises the added `!toolCallMeta.get(remap)?.id` guard on pending-remap
+      // adoption: after call_2 claims the 0->1 remap (with its own id), a third
+      // tool call that reuses index 0 with a fresh id must NOT hijack call_2's
+      // slot via that remap — it has to fall through to collision handling and
+      // get its own slot.
+      parser.addChunk(0, '{"a":1}', 'call_1', 'function1');
+      parser.addChunk(0, '', 'call_2', 'function2');
+      parser.addChunk(0, '{"b":2}');
+
+      const third = parser.addChunk(0, '{"c":3}', 'call_3', 'function3');
+      expect(third.actualIndex).not.toBe(1);
+
+      const completed = parser.getCompletedToolCalls();
+      const call2 = completed.find((tc) => tc.id === 'call_2');
+      const call3 = completed.find((tc) => tc.id === 'call_3');
+      expect(call2?.args).toEqual({ b: 2 });
+      expect(call3?.args).toEqual({ c: 3 });
+    });
+
+    it('routes an id-less continuation to the newest of three colliding openers', () => {
+      // Three tool calls reuse provider index 0 in sequence, each opener remapping
+      // to a fresh slot. An id-less continuation after the third opener must land on
+      // the third call's slot. Guarding the remap overwrite to keep the *first*
+      // mapping would pin the remap at call_2's slot and misroute this chunk.
+      parser.addChunk(0, '{"a":1}', 'call_1', 'function1'); // slot 0
+      parser.addChunk(0, '', 'call_2', 'function2'); // opener -> slot 1
+      parser.addChunk(0, '{"b":2}'); // call_2 args -> slot 1
+      const opener3 = parser.addChunk(0, '', 'call_3', 'function3'); // opener -> slot 2
+      expect(opener3.actualIndex).toBe(2);
+
+      const continuation = parser.addChunk(0, '{"c":3}'); // id-less -> must be call_3's slot
+      expect(continuation.actualIndex).toBe(2);
+
+      const completed = parser.getCompletedToolCalls();
+      expect(completed.find((tc) => tc.id === 'call_3')?.args).toEqual({
+        c: 3,
+      });
+      expect(completed.find((tc) => tc.id === 'call_2')?.args).toEqual({
+        b: 2,
+      });
+    });
+
     it('should handle rapid tool call switching at same index', () => {
       // Rapid switching between different tool calls at index 0
       parser.addChunk(0, '{"step1":', 'call_1', 'function1');
