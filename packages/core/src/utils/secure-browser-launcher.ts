@@ -80,7 +80,7 @@ function validateUrl(
  * and resolves successfully to prevent application crashes.
  *
  * @param url - The URL to open.
- * @param options.allowFile - Allow file:// URLs for locally generated reports.
+ * @param browserOptions.allowFile - Allow file:// URLs for locally generated reports.
  * @returns A promise that resolves when the attempt is made (whether successful or logged).
  */
 export async function openBrowserSecurely(

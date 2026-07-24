@@ -24,7 +24,12 @@ import type {
   McpToolProgressData,
   FileDiff,
 } from '@qwen-code/qwen-code-core';
-import { ToolNames, ToolNamesMigration } from '@qwen-code/qwen-code-core';
+import {
+  formatVisionBridgeNoticeDisplay,
+  isVisionBridgeNoticeDisplay,
+  ToolNames,
+  ToolNamesMigration,
+} from '@qwen-code/qwen-code-core';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
@@ -90,7 +95,11 @@ function sliceTextForMaxHeight(
   text: string,
   maxHeight: number | undefined,
   maxWidth: number,
-): { text: string; hiddenLinesCount: number } {
+): {
+  text: string;
+  hiddenLinesCount: number;
+  sourceBoundaries?: Array<{ kind: 'soft' | 'hard'; joiner: string }>;
+} {
   if (maxHeight === undefined) {
     return { text, hiddenLinesCount: 0 };
   }
@@ -98,41 +107,49 @@ function sliceTextForMaxHeight(
   const targetMaxHeight = Math.max(Math.round(maxHeight), MINIMUM_MAX_HEIGHT);
   const visibleContentHeight = targetMaxHeight - 1;
   const visualWidth = Math.max(1, Math.floor(maxWidth));
-  const visibleLines: string[] = [];
+  const visibleLines: Array<{
+    text: string;
+    breakAfter: { kind: 'soft' | 'hard'; joiner: string } | null;
+  }> = [];
   let visualLineCount = 0;
   let currentLine = '';
   let currentLineWidth = 0;
 
-  const appendVisibleLine = (line: string) => {
+  const appendVisibleLine = (
+    line: string,
+    breakAfter: { kind: 'soft' | 'hard'; joiner: string } | null,
+  ) => {
     visualLineCount += 1;
-    visibleLines.push(line);
+    visibleLines.push({ text: line, breakAfter });
     if (visibleLines.length > visibleContentHeight) {
       visibleLines.shift();
     }
   };
 
-  const flushCurrentLine = () => {
-    appendVisibleLine(currentLine);
+  const flushCurrentLine = (
+    breakAfter: { kind: 'soft' | 'hard'; joiner: string } | null,
+  ) => {
+    appendVisibleLine(currentLine, breakAfter);
     currentLine = '';
     currentLineWidth = 0;
   };
 
   for (const char of toCodePoints(text)) {
     if (char === '\n') {
-      flushCurrentLine();
+      flushCurrentLine({ kind: 'hard', joiner: '\n' });
       continue;
     }
 
     const charWidth = Math.max(getCachedStringWidth(char), 1);
     if (currentLineWidth > 0 && currentLineWidth + charWidth > visualWidth) {
-      flushCurrentLine();
+      flushCurrentLine({ kind: 'soft', joiner: '' });
     }
 
     currentLine += char;
     currentLineWidth += charWidth;
   }
 
-  flushCurrentLine();
+  flushCurrentLine(null);
 
   if (visualLineCount <= targetMaxHeight) {
     return { text, hiddenLinesCount: 0 };
@@ -140,8 +157,11 @@ function sliceTextForMaxHeight(
 
   const hiddenLinesCount = visualLineCount - visibleContentHeight;
   return {
-    text: visibleLines.join('\n'),
+    text: visibleLines.map((line) => line.text).join('\n'),
     hiddenLinesCount,
+    sourceBoundaries: visibleLines
+      .slice(0, -1)
+      .map((line) => line.breakAfter ?? { kind: 'hard', joiner: '\n' }),
   };
 }
 
@@ -575,6 +595,7 @@ const StringResultRenderer: React.FC<{
       maxHeight={availableHeight}
       maxWidth={childWidth}
       additionalHiddenLinesCount={sliced.hiddenLinesCount}
+      sourceBoundaries={sliced.sourceBoundaries}
     >
       <Box>
         <Text wrap="wrap" color={theme.text.primary}>
@@ -803,9 +824,19 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         : detailedDisplay,
     [detailedDisplay, usingDetailedDisplay],
   );
+  const visionBridgeNoticeDisplay = isVisionBridgeNoticeDisplay(resultDisplay)
+    ? resultDisplay
+    : undefined;
+  const visionBridgeNoticeText = visionBridgeNoticeDisplay
+    ? sanitizeTerminalText(
+        formatVisionBridgeNoticeDisplay(visionBridgeNoticeDisplay),
+      )
+    : undefined;
   const effectiveResultDisplay = usingDetailedDisplay
     ? sanitizedDetailedDisplay
-    : resultDisplay;
+    : visionBridgeNoticeDisplay
+      ? undefined
+      : resultDisplay;
 
   // detailedDisplay is RAW tool output (file content, grep hits, directory
   // listings). Render it as plain text — Markdown formatting would turn the
@@ -855,6 +886,15 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         />
         {emphasis === 'high' && <TrailingIndicator />}
       </Box>
+      {visionBridgeNoticeText && (
+        <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%">
+          <StringResultRenderer
+            data={visionBridgeNoticeText}
+            renderAsMarkdown={false}
+            childWidth={innerWidth}
+          />
+        </Box>
+      )}
       {effectiveDisplayRenderer.type !== 'none' && !shouldCollapseResult && (
         <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%">
           <Box flexDirection="column">

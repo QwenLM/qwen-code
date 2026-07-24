@@ -36,6 +36,55 @@ interface RegisterWorkspaceMcpControlRoutesDeps {
   ) => string | undefined | null;
 }
 
+interface McpReloadOptions {
+  forceReconnectAll?: boolean;
+  forceReconnectWhich?: string[];
+}
+
+function parseMcpReloadOptions(
+  body: Record<string, unknown>,
+  res: Response,
+): McpReloadOptions | null {
+  const forceReconnectAll = body['forceReconnectAll'];
+  if (
+    forceReconnectAll !== undefined &&
+    typeof forceReconnectAll !== 'boolean'
+  ) {
+    res.status(400).json({
+      error: '`forceReconnectAll` must be a boolean',
+      code: 'invalid_force_reconnect_all_flag',
+    });
+    return null;
+  }
+  const forceReconnectWhich = body['forceReconnectWhich'];
+  if (
+    forceReconnectWhich !== undefined &&
+    (!Array.isArray(forceReconnectWhich) ||
+      forceReconnectWhich.some(
+        (serverName) =>
+          typeof serverName !== 'string' || serverName.length === 0,
+      ))
+  ) {
+    res.status(400).json({
+      error: '`forceReconnectWhich` must be an array of server names',
+      code: 'invalid_force_reconnect_which',
+    });
+    return null;
+  }
+  if (forceReconnectAll === true && forceReconnectWhich !== undefined) {
+    res.status(400).json({
+      error:
+        '`forceReconnectAll` and `forceReconnectWhich` cannot be used together',
+      code: 'conflicting_force_reconnect_options',
+    });
+    return null;
+  }
+  return {
+    forceReconnectAll,
+    forceReconnectWhich,
+  };
+}
+
 export function registerWorkspaceMcpControlRoutes(
   app: Application,
   deps: RegisterWorkspaceMcpControlRoutesDeps,
@@ -50,6 +99,34 @@ export function registerWorkspaceMcpControlRoutes(
     parseAndValidateClientId,
   } = deps;
   const buildWorkspaceCtx = createBuildWorkspaceCtx(boundWorkspace);
+
+  app.post(
+    '/workspace/mcp/initialize',
+    mutate({ strict: true }),
+    async (_req, res) => {
+      try {
+        const result = await bridge.initializeWorkspaceMcp();
+        res.status(202).json(result);
+      } catch (err) {
+        sendBridgeError(res, err, { route: 'POST /workspace/mcp/initialize' });
+      }
+    },
+  );
+
+  app.post(
+    '/workspace/mcp/reload',
+    mutate({ strict: true }),
+    async (req, res) => {
+      const options = parseMcpReloadOptions(safeBody(req), res);
+      if (!options) return;
+      try {
+        const result = await bridge.reloadWorkspaceMcp(options);
+        res.status(202).json(result);
+      } catch (err) {
+        sendBridgeError(res, err, { route: 'POST /workspace/mcp/reload' });
+      }
+    },
+  );
 
   app.post(
     '/workspace/mcp/:server/restart',
@@ -114,6 +191,7 @@ export function registerWorkspaceMcpControlRoutes(
   );
 
   for (const [routeAction, bridgeAction] of [
+    ['approve', 'approve'],
     ['enable', 'enable'],
     ['disable', 'disable'],
     ['authenticate', 'authenticate'],
@@ -249,6 +327,48 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
   },
 ): void {
   app.post(
+    '/workspaces/:workspace/mcp/initialize',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = resolveTrustedMcpRuntime(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime) return;
+      const route = 'POST /workspaces/:workspace/mcp/initialize';
+      try {
+        const result = await runtime.bridge.initializeWorkspaceMcp();
+        res.status(202).json(result);
+      } catch (err) {
+        deps.sendBridgeError(res, err, { route });
+      }
+    },
+  );
+
+  app.post(
+    '/workspaces/:workspace/mcp/reload',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = resolveTrustedMcpRuntime(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime) return;
+      const options = parseMcpReloadOptions(deps.safeBody(req), res);
+      if (!options) return;
+      const route = 'POST /workspaces/:workspace/mcp/reload';
+      try {
+        const result = await runtime.bridge.reloadWorkspaceMcp(options);
+        res.status(202).json(result);
+      } catch (err) {
+        deps.sendBridgeError(res, err, { route });
+      }
+    },
+  );
+
+  app.post(
     '/workspaces/:workspace/mcp/:server/restart',
     deps.mutate({ strict: true }),
     async (req, res) => {
@@ -319,6 +439,7 @@ export function registerWorkspaceQualifiedMcpControlRoutes(
   );
 
   for (const [routeAction, bridgeAction] of [
+    ['approve', 'approve'],
     ['enable', 'enable'],
     ['disable', 'disable'],
     ['authenticate', 'authenticate'],

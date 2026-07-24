@@ -46,6 +46,13 @@ Apply labels using existing labels only. Prefer one `type/*`, one `category/*`,
 relevant `scope/*`, one priority label, and status labels as needed. Apply
 labels with `gh issue edit --add-label`.
 
+If the issue is no longer unclear and currently has `status/need-information`,
+remove that label:
+
+```bash
+gh issue edit "$ISSUE_NUMBER" --repo "$REPO" --remove-label "status/need-information"
+```
+
 Post a single triage comment (bilingual, concise key points — see format
 below). This comment is updated in place by Stage 2; never post a second one.
 

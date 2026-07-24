@@ -19,6 +19,14 @@ on:
         required: true
         default: 'main'
         type: 'string'
+      linux_runner:
+        description: 'Linux runner to use for manual validation'
+        required: true
+        default: 'self-hosted'
+        type: 'choice'
+        options:
+          - 'self-hosted'
+          - 'hosted'
 
 concurrency:
   group: '${{ github.workflow }}-${{ github.head_ref || github.ref }}'
@@ -38,11 +46,16 @@ env:
   ACTIONLINT_VERSION: '1.7.12'
   SHELLCHECK_VERSION: '0.11.0'
   YAMLLINT_VERSION: '1.35.1'
+  # Single source of truth for the .github/scripts node:test suites — run by
+  # BOTH the github_ci_only helper step and the full-profile Test step, so a
+  # new helper test can't be added to one path and silently dropped from the
+  # other.
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs'
 
 jobs:
   classify_pr:
     name: 'Classify PR'
-    if: "${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}"
+    if: "${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' }}"
     # Gate runs on ECS for in-repo PRs and for the merge queue (which runs in the
     # base-repo context), else a busy hosted pool delays it and blocks the
     # ECS-bound jobs. The kill-switch is read here, so flipping it reverts
@@ -98,9 +111,14 @@ jobs:
           SAME_REPO: '${{ github.event.pull_request.head.repo.full_name == github.repository }}'
           ECS_DISABLED: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED }}'
           EVENT_NAME: '${{ github.event_name }}'
+          DISPATCH_LINUX_RUNNER: '${{ github.event.inputs.linux_runner }}'
         run: |-
           ubuntu_runner='["ubuntu-latest"]'
-          if [[ "${ECS_DISABLED}" != "true" && ( "${SAME_REPO}" == "true" || "${EVENT_NAME}" == "merge_group" ) ]]; then
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            if [[ "${ECS_DISABLED}" != "true" && "${DISPATCH_LINUX_RUNNER}" == "self-hosted" ]]; then
+              ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
+            fi
+          elif [[ "${ECS_DISABLED}" != "true" && ( "${SAME_REPO}" == "true" || "${EVENT_NAME}" == "merge_group" ) ]]; then
             ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
           fi
           echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
@@ -199,7 +217,7 @@ jobs:
           node scripts/lint.js --setup
           node scripts/lint.js --actionlint
           node scripts/lint.js --yamllint
-          node --test .github/scripts/pr-safety-precheck.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/resolve-sandbox-image.test.mjs
+          node --test ${{ env.HELPER_TESTS }}
 
       # Self-hosted can't reach nodejs.org reliably; reuse the machine's Node.
       - name: 'Set up Node.js 22.x (hosted)'
@@ -313,12 +331,37 @@ jobs:
           fi
           echo "Settings schema is up-to-date"
 
+      - name: 'Generate VS Code companion notices'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'npm run generate:notices --workspace=qwen-code-vscode-ide-companion'
+
+      - name: 'Check VS Code companion notices are up-to-date'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          if [[ -n $(git status --porcelain packages/vscode-ide-companion/NOTICES.txt) ]]; then
+            echo "Error: NOTICES.txt is out of date."
+            echo "Please run: npm run generate:notices --workspace=qwen-code-vscode-ide-companion"
+            echo "Then commit the updated file."
+            git diff --stat packages/vscode-ide-companion/NOTICES.txt
+            exit 1
+          fi
+          echo "NOTICES.txt is up-to-date"
+
       # Keep this Linux-only PR gate explicit. macOS/Windows merge-queue jobs run
       # npm run test:ci only, so they intentionally do not repeat this
       # platform-independent bundle closure check.
       - name: 'Check serve fast-path bundle closure'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'npm run check:serve-fast-path-bundle'
+
+      # The `github_ci_only` profile runs the .github/scripts helper tests, but a
+      # `full` PR that touches those scripts skips that path and `npm run
+      # test:ci` (vitest) does not collect `node:test` files — so run them here
+      # too, or a compositor/publisher change could pass CI without its
+      # regression tests. Linux-only (they're platform-independent).
+      - name: 'Run .github/scripts helper tests'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'node --test ${{ env.HELPER_TESTS }}'
 
       - name: 'Run tests and generate reports'
         id: 'unit_tests'
@@ -373,7 +416,7 @@ jobs:
     if: |-
       ${{
         !cancelled() &&
-        github.event_name == 'pull_request' &&
+        (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') &&
         needs.classify_pr.outputs.skip_ci != 'true' &&
         needs.test.outputs.ci_profile == 'full'
       }}
@@ -385,10 +428,11 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
-          ref: "${{ format('refs/pull/{0}/head', github.event.pull_request.number) }}"
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
           fetch-depth: 1
 
       - name: 'Verify checkout includes expected head commit'
+        if: "${{ github.event_name == 'pull_request' }}"
         env:
           EXPECTED_SHA: '${{ github.event.pull_request.head.sha }}'
         run: |-
@@ -440,8 +484,14 @@ jobs:
         run: |-
           npm ci --prefer-offline --no-audit --progress=false
 
-      - name: 'Install Playwright Chromium'
+      - name: 'Install Playwright Chromium (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
         run: 'npx playwright install --with-deps chromium'
+
+      - name: 'Install Playwright Chromium (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        # Self-hosted ECS runners already include system deps; --with-deps can race apt locks.
+        run: 'npx playwright install chromium'
 
       - name: 'Choose web-shell Playwright port'
         run: |-

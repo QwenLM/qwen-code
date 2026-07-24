@@ -18,6 +18,8 @@ import type {
   Config,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../../config/settings.js';
+import { getScreenBuffer } from '../../selection/screen-buffer.js';
+import { getSelectedText } from '../../selection/selection-text.js';
 
 // Global compact mode was removed (#5666); type-based tool rendering no longer
 // consumes a compact-mode context.
@@ -171,6 +173,100 @@ describe('<ToolMessage />', () => {
     expect(output).toContain('✓');
     expect(output).toContain('ReadFile');
     expect(output).not.toContain('MockMarkdown:Test result'); // collapsed
+  });
+
+  it('always shows the vision bridge disclosure for a completed read', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="ReadFile"
+        description="scanned.pdf"
+        resultDisplay={{
+          type: 'vision_bridge_notice',
+          summary: 'Transcribed PDF pages 20-23; remaining pages 24-25',
+          notice:
+            'Converted 4 images via qwen3-vl-plus (dashscope.aliyuncs.com).',
+        }}
+      />,
+      StreamingState.Idle,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('Transcribed PDF pages 20-23');
+    expect(output).toContain('remaining pages 24-25');
+    expect(output).toContain('qwen3-vl-plus');
+    expect(output).toContain('dashscope.aliyuncs.com');
+  });
+
+  it('sanitizes terminal controls in the vision bridge display summary', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="ReadFile"
+        description="scanned.pdf"
+        resultDisplay={{
+          type: 'vision_bridge_notice',
+          summary: 'Transcribed evil\x1b]52;c;ZXZpbA==\x07.pdf\u202e',
+          notice: 'Converted via qwen3-vl-plus.',
+        }}
+      />,
+      StreamingState.Idle,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('Transcribed evil');
+    expect(output).toContain('qwen3-vl-plus');
+    expect(output).not.toContain('\x1b]52;');
+    expect(output).not.toContain('\x07');
+    expect(output).not.toContain('\u202e');
+  });
+
+  it('keeps the vision bridge disclosure beside full read details', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="ReadFile"
+        description="scanned.pdf"
+        resultDisplay={{
+          type: 'vision_bridge_notice',
+          summary: 'Transcribed PDF pages 20-23',
+          notice:
+            'Converted 4 images via qwen3-vl-plus (dashscope.aliyuncs.com).',
+        }}
+        detailedDisplay="Page 20: transcribed content"
+        fullDetail
+        forceShowResult
+      />,
+      StreamingState.Idle,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('Transcribed PDF pages 20-23');
+    expect(output).toContain('dashscope.aliyuncs.com');
+    expect(output).toContain('Page 20: transcribed content');
+  });
+
+  it('shows the vision bridge disclosure when the PDF fallback is an error', () => {
+    const { lastFrame } = renderWithContext(
+      <ToolMessage
+        {...baseProps}
+        name="ReadFile"
+        description="scanned.pdf"
+        status={ToolCallStatus.Error}
+        resultDisplay={{
+          type: 'vision_bridge_notice',
+          summary: 'Failed to read PDF after rendering pages 20-23',
+          notice:
+            'Vision bridge (qwen3-vl-plus) failed after sending images to dashscope.aliyuncs.com.',
+        }}
+      />,
+      StreamingState.Idle,
+    );
+
+    const output = lastFrame();
+    expect(output).toContain('Failed to read PDF');
+    expect(output).toContain('qwen3-vl-plus');
+    expect(output).toContain('dashscope.aliyuncs.com');
   });
 
   it('collapses ANSI result for completed collapsible tool', () => {
@@ -374,7 +470,7 @@ describe('<ToolMessage />', () => {
       // The C0 strip regex intentionally skips \x09 (TAB) and \x0a (LF) so
       // multi-line / column-aligned file output still renders. Lock that in:
       // stripping them would collapse the segments together.
-      const { lastFrame } = renderWithContext(
+      const { lastFrame, stdout } = renderWithContext(
         <ToolMessage
           {...baseProps}
           name="ReadFile"
@@ -395,6 +491,17 @@ describe('<ToolMessage />', () => {
       expect(output).toContain('row2B');
       expect(output).not.toContain('colAcolB');
       expect(output).not.toContain('colBrow2A');
+      const frame = getScreenBuffer(
+        stdout as unknown as NodeJS.WriteStream,
+      )!.frame!;
+      expect(
+        getSelectedText(frame, {
+          sx: 0,
+          sy: 0,
+          ex: frame.width - 1,
+          ey: frame.height - 1,
+        }),
+      ).toContain('colA\tcolB\nrow2A\trow2B');
     });
 
     it('keeps the summary when forced but NOT in fullDetail mode (main-view force)', () => {

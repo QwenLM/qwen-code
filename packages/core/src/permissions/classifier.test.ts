@@ -131,14 +131,14 @@ describe('classifyAction — stage 1 escalates to stage 2', () => {
   });
 });
 
-describe('classifyAction — fail-closed on stage 1 failure', () => {
+describe('classifyAction — unavailable on stage 1 failure', () => {
   it('returns unavailable=true when stage 1 throws an API error', async () => {
     runSideQueryMock.mockRejectedValueOnce(new Error('API 500'));
     const result = await classifyAction(makeInput());
     expect(result.shouldBlock).toBe(true);
     expect(result.unavailable).toBe(true);
     expect(result.stage).toBe('fast');
-    expect(result.reason).toMatch(/blocked for safety/);
+    expect(result.reason).toBe('Classifier stage 1 unavailable');
   });
 
   it('surfaces a context-overflow reason when stage 1 fails with that error', async () => {
@@ -163,7 +163,7 @@ describe('classifyAction — fail-closed on stage 1 failure', () => {
   });
 });
 
-describe('classifyAction — fail-closed on stage 2 failure', () => {
+describe('classifyAction — unavailable on stage 2 failure', () => {
   it('honors stage 1 block when stage 2 fails (unavailable=true)', async () => {
     runSideQueryMock
       .mockResolvedValueOnce({ shouldBlock: true })
@@ -248,7 +248,7 @@ describe('classifier configuration', () => {
     );
   });
 
-  it('uses temperature 0 and max_output_tokens=32 with thinking disabled for stage 1', async () => {
+  it('uses temperature 0 and max_output_tokens=256 with thinking disabled for stage 1', async () => {
     runSideQueryMock.mockResolvedValueOnce({ shouldBlock: false });
     await classifyAction(makeInput());
     const opts = runSideQueryMock.mock.calls[0]?.[1] as {
@@ -259,7 +259,7 @@ describe('classifier configuration', () => {
       };
     };
     expect(opts.config?.temperature).toBe(0);
-    expect(opts.config?.maxOutputTokens).toBe(32);
+    expect(opts.config?.maxOutputTokens).toBe(256);
     expect(opts.config?.thinkingConfig?.includeThoughts).toBe(false);
   });
 

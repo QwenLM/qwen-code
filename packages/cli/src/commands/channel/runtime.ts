@@ -41,6 +41,16 @@ export function daemonSessionRoutesPath(workspaceCwd: string): string {
   );
 }
 
+export function daemonObservedContactsPath(workspaceCwd: string): string {
+  return path.join(
+    Storage.getGlobalQwenDir(),
+    'channels',
+    'daemon',
+    hashDaemonWorkspace(workspaceCwd),
+    'observed-contacts.json',
+  );
+}
+
 export function channelLoopPath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'channels', 'cron.json');
 }
@@ -173,6 +183,36 @@ export function registerToolCallDispatch(
         channel.dispatchToolCall(event);
       }
     }
+  });
+}
+
+export function registerBackgroundResponseRelay(
+  bridge: ChannelAgentBridge,
+  router: SessionRouter,
+  channels: Map<string, ChannelBase>,
+): void {
+  bridge.on('backgroundResponse', (sessionId: string, text: string) => {
+    const target = router.getTarget(sessionId);
+    if (!target) {
+      writeStderrLine(
+        `[Channel] No route for background response from session ${sanitizeLogText(sessionId, 128)}`,
+      );
+      return;
+    }
+    const channel = channels.get(target.channelName);
+    if (!channel) {
+      writeStderrLine(
+        `[Channel] No channel "${sanitizeLogText(target.channelName, 64)}" for background response from session ${sanitizeLogText(sessionId, 128)}`,
+      );
+      return;
+    }
+    void channel
+      .dispatchBackgroundResponse(sessionId, text)
+      .catch((err: unknown) => {
+        writeStderrLine(
+          `[Channel] Background response relay failed for session ${sanitizeLogText(sessionId, 128)}: ${err instanceof Error ? sanitizeLogText(err.message, 512) : sanitizeLogText(String(err), 512)}`,
+        );
+      });
   });
 }
 

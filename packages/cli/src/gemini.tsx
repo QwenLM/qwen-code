@@ -18,6 +18,7 @@ import {
   setStartupEventSink,
   createDebugLogger,
   persistSessionUsage,
+  PRIVATE_ACP_CAPABILITY_ENV,
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import dns from 'node:dns';
@@ -68,6 +69,11 @@ import {
   isStartupProfilerEnabled,
 } from './utils/startupProfiler.js';
 import {
+  isAcpStartupProfilerEnabled,
+  markAcpStartup,
+  recordAcpConfigStartupEvent,
+} from './utils/acp-startup-profiler.js';
+import {
   relaunchAppInChildProcess,
   relaunchOnExitCode,
 } from './utils/relaunch.js';
@@ -78,6 +84,12 @@ import { initializeWarningHandler } from './utils/warningHandler.js';
 import { writeStderrLine } from './utils/stdioHelpers.js';
 import { getHeadlessYoloSafetyWarning } from './utils/headlessSafetyWarnings.js';
 import { initializeLlmOutputLanguage } from './utils/languageUtils.js';
+import {
+  CUSTOM_SANDBOX_IMAGE_ENV_VAR,
+  HOST_UPDATE_RELAUNCH_ENV_VAR,
+  UPDATE_COMPLETE_EXIT_CODE,
+} from './utils/processUtils.js';
+import { getInstallationInfo } from './utils/installationInfo.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -169,6 +181,7 @@ Stack trace:
 ${reason.stack}`
         : ''
     }`;
+    debugLogger.error(errorMessage);
     appEvents.emit(AppEvent.LogError, errorMessage);
     if (!unhandledRejectionOccurred) {
       unhandledRejectionOccurred = true;
@@ -181,10 +194,31 @@ function getSignalExitCode(signal: NodeJS.Signals): number {
   return signal === 'SIGINT' ? 130 : 143;
 }
 
+// A real SIGINT only reaches the process-level handler while raw mode is
+// off (in raw mode Ctrl+C arrives as input and goes through the UI's
+// double-press guard). Terminals that toggle raw mode around subprocesses
+// (e.g. the PyCharm terminal) deliver real SIGINTs, so mirror the UI's
+// press-twice-to-exit window here instead of exiting on the first signal.
+const SIGINT_EXIT_CONFIRM_WINDOW_MS = 1000;
+
+// `when-exit` (pulled in via `atomically`) re-raises the signal from its own
+// once-handler after running its callbacks, so one physical Ctrl+C surfaces
+// as two SIGINT events microseconds apart. Repeats inside this gap are the
+// same press, not a confirmation; a human double-press is far slower.
+const SIGINT_RERAISE_IGNORE_MS = 50;
+
 function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
   let cleanupStarted = false;
+  let lastSigintAt = 0;
 
-  const handleSignal = (signal: NodeJS.Signals) => {
+  // The exit cleanup chain removes the named handlers below. Without a
+  // stand-in listener, a stray Ctrl+C during cleanup would fall back to
+  // Node's default SIGINT handling and kill the process before the
+  // terminal is restored (see #6776). Registered when cleanup begins;
+  // the process exits at the end of cleanup regardless.
+  const swallowSignalDuringCleanup = () => {};
+
+  const beginExit = (signal: NodeJS.Signals) => {
     if (process.stdin.isTTY) {
       process.stdin.setRawMode(wasRaw);
     }
@@ -193,6 +227,7 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
       return;
     }
     cleanupStarted = true;
+    process.on('SIGINT', swallowSignalDuringCleanup);
 
     void runExitCleanup()
       .catch((error) => {
@@ -204,14 +239,27 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
   };
 
   const handleSigterm = () => {
-    handleSignal('SIGTERM');
+    beginExit('SIGTERM');
   };
   const handleSigint = () => {
-    handleSignal('SIGINT');
+    if (cleanupStarted) {
+      return;
+    }
+    const now = Date.now();
+    const sincePrevious = now - lastSigintAt;
+    if (sincePrevious <= SIGINT_RERAISE_IGNORE_MS) {
+      return;
+    }
+    if (sincePrevious <= SIGINT_EXIT_CONFIRM_WINDOW_MS) {
+      beginExit('SIGINT');
+      return;
+    }
+    lastSigintAt = now;
+    writeStderrLine('Press Ctrl+C again to exit.');
   };
 
-  process.once('SIGTERM', handleSigterm);
-  process.once('SIGINT', handleSigint);
+  process.on('SIGTERM', handleSigterm);
+  process.on('SIGINT', handleSigint);
 
   return () => {
     process.removeListener('SIGTERM', handleSigterm);
@@ -221,6 +269,7 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
 
 export async function main() {
   profileCheckpoint('main_entry');
+  const acpStartupProfilerEnabled = isAcpStartupProfilerEnabled();
   // Bridge core-package startup events (Config.initialize, MCP discovery,
   // GeminiClient.setTools) into the cli's startup profiler. Gated on
   // `isStartupProfilerEnabled()` so that when QWEN_CODE_PROFILE_STARTUP is
@@ -228,11 +277,18 @@ export async function main() {
   // sees a null sink and short-circuits at the first comparison, instead
   // of going through this arrow wrapper and the profiler's own enabled
   // check.
-  if (isStartupProfilerEnabled()) {
-    setStartupEventSink((name, attrs) => recordStartupEvent(name, attrs));
+  const startupProfilerEnabled = isStartupProfilerEnabled();
+  if (startupProfilerEnabled || acpStartupProfilerEnabled) {
+    setStartupEventSink((name, attrs) => {
+      if (startupProfilerEnabled) recordStartupEvent(name, attrs);
+      if (acpStartupProfilerEnabled) recordAcpConfigStartupEvent(name);
+    });
   }
   setupUnhandledRejectionHandler();
   initializeWarningHandler();
+
+  const privateAcpParentCapability = process.env[PRIVATE_ACP_CAPABILITY_ENV];
+  delete process.env[PRIVATE_ACP_CAPABILITY_ENV];
 
   if (process.argv.includes('--bare')) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
@@ -242,17 +298,36 @@ export async function main() {
   // call `process.exit` before `loadSettings()` would otherwise bootstrap.
   preResolveHomeEnvOverrides();
 
+  markAcpStartup('argsParseStart');
   let argv = await parseArguments();
+  markAcpStartup('argsParseEnd');
   profileCheckpoint('after_parse_arguments');
+  const isAcpMode = argv.acp || argv.experimentalAcp;
+  const privateAcpChildEnv =
+    isAcpMode && privateAcpParentCapability !== undefined
+      ? { [PRIVATE_ACP_CAPABILITY_ENV]: privateAcpParentCapability }
+      : undefined;
+
+  if (
+    (argv.acp || argv.experimentalAcp) &&
+    process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] === '1'
+  ) {
+    delete process.env['ELECTRON_RUN_AS_NODE'];
+    if (process.env['QWEN_CODE_NO_RELAUNCH'] || process.env['SANDBOX']) {
+      delete process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'];
+    }
+  }
 
   if (isBareMode(argv.bare)) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
 
   // Load user settings — bare mode uses minimal config, normal mode loads full.
+  markAcpStartup('settingsLoadStart');
   const settings = isBareMode(argv.bare)
     ? createMinimalSettings()
     : loadSettings();
+  markAcpStartup('settingsLoadEnd');
 
   // Propagate corruption state to child process via env vars so
   // relaunchAppInChildProcess() doesn't lose the marker.
@@ -334,8 +409,45 @@ export async function main() {
     const memoryArgs = settings.merged.advanced?.autoConfigureMemory
       ? getNodeMemoryArgs(isDebugMode)
       : [];
+    const updateProjectRoot = process.cwd();
+    const onUpdateRelaunch = async (relaunchOnFailure: boolean) => {
+      await initializeI18n(
+        resolveLanguageSetting(settings.merged.general?.language as string),
+      );
+      const { updateBeforeRelaunch } = await import(
+        './utils/update-relaunch.js'
+      );
+      const shouldRelaunch = await updateBeforeRelaunch(
+        settings,
+        updateProjectRoot,
+        relaunchOnFailure,
+      );
+      return shouldRelaunch ? UPDATE_COMPLETE_EXIT_CODE : 0;
+    };
     const sandboxConfig = await loadSandboxConfig(settings.merged, argv);
-    // We intentially omit the list of extensions here because extensions
+    const customSandboxImage =
+      argv.sandboxImage ??
+      process.env['QWEN_SANDBOX_IMAGE'] ??
+      settings.merged.tools?.sandboxImage;
+    if (
+      sandboxConfig &&
+      sandboxConfig.command !== 'sandbox-exec' &&
+      customSandboxImage
+    ) {
+      // Images built before this handoff protocol must be rebuilt; they cannot
+      // be made to skip their in-process updater from the host.
+      process.env[CUSTOM_SANDBOX_IMAGE_ENV_VAR] = sandboxConfig.image;
+    } else if (sandboxConfig && sandboxConfig.command !== 'sandbox-exec') {
+      const hostInstallationInfo = getInstallationInfo(updateProjectRoot, true);
+      process.env[HOST_UPDATE_RELAUNCH_ENV_VAR] = String(
+        Boolean(
+          hostInstallationInfo.updateCommand ||
+            (hostInstallationInfo.isStandalone &&
+              hostInstallationInfo.standaloneDir),
+        ),
+      );
+    }
+    // We intentionally omit the list of extensions here because extensions
     // should not impact auth or setting up the sandbox.
     // TODO(jacobr): refactor loadCliConfig so there is a minimal version
     // that only initializes enough config to enable refreshAuth or find
@@ -442,8 +554,18 @@ export async function main() {
           )
         : injectStdinIntoArgs(process.argv, stdinData);
 
-      await relaunchOnExitCode(() =>
-        start_sandbox(sandboxConfig, memoryArgs, partialConfig, sandboxArgs),
+      await relaunchOnExitCode(
+        () =>
+          start_sandbox(
+            sandboxConfig,
+            memoryArgs,
+            partialConfig,
+            sandboxArgs,
+            privateAcpChildEnv,
+          ),
+        {
+          onUpdateRelaunch,
+        },
       );
       process.exit(0);
     } else {
@@ -451,6 +573,8 @@ export async function main() {
       // restarted if needed.
       await relaunchAppInChildProcess(memoryArgs, [], {
         afterSpawn: clearCorruptionEnvVars,
+        childEnv: privateAcpChildEnv,
+        onUpdateRelaunch,
       });
     }
   }
@@ -606,9 +730,12 @@ export async function main() {
       : new SettingsWatcher(settings);
     settingsWatcher?.startWatching();
 
+    markAcpStartup('configConstructionStart');
     const config = await loadCliConfig(
       settings.merged,
-      argv,
+      argv.acp || argv.experimentalAcp
+        ? { ...argv, chatRecording: false }
+        : argv,
       process.cwd(),
       argv.extensions,
       // Pass separated hooks for proper source attribution
@@ -620,6 +747,7 @@ export async function main() {
       undefined,
       settingsWatcher,
     );
+    markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
 
     // Subscribe the running Config to settings changes so MCP servers
@@ -802,14 +930,22 @@ export async function main() {
       !config.getExperimentalZedIntegration() &&
       !input &&
       !hasRemoteInput;
+    markAcpStartup('appInitializationStart');
     const initializationResult = await initializeApp(config, settings, {
       deferIdeConnection,
     });
+    markAcpStartup('appInitializationEnd');
     profileCheckpoint('after_initialize_app');
 
     if (config.getExperimentalZedIntegration()) {
+      markAcpStartup('acpImportStart');
       const { runAcpAgent } = await import('./acp-integration/acpAgent.js');
-      await runAcpAgent(config, settings, argv);
+      markAcpStartup('acpImportEnd');
+      await runAcpAgent(config, settings, argv, {
+        privateParentCapability: isAcpMode
+          ? privateAcpParentCapability
+          : undefined,
+      });
       // Clean up child processes and force exit, matching other non-interactive modes
       await runExitCleanup();
       process.exit(0);

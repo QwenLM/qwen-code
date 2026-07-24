@@ -68,6 +68,13 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   },
   useStreamingState: () => streamingStateValue,
   useTranscriptBlocks: () => [],
+  useTranscriptHistory: () => ({
+    hasMore: false,
+    loading: false,
+    capacityReached: false,
+    loadMore: vi.fn(),
+    release: vi.fn(),
+  }),
   useTranscriptStore: () => ({
     dispatch: transcriptDispatch,
   }),
@@ -199,6 +206,7 @@ vi.mock('./messages/AskUserQuestion', () => ({
   AskUserQuestion: (props: any) => (
     <button
       data-testid="ask-approval"
+      data-keyboard-active={String(props.keyboardActive)}
       onClick={() => props.onConfirm(props.request.id, 'opt')}
     >
       ask
@@ -297,14 +305,55 @@ describe('ChatPane', () => {
       workspaceCwd: '/work/web-shell',
       workspaces: [
         { id: 'w0', cwd: '/work/web-shell', primary: true, trusted: true },
-        { id: 'w1', cwd: '/work/api', primary: false, trusted: true },
+        {
+          id: 'w1',
+          cwd: '/work/api',
+          displayName: 'Payments API',
+          primary: false,
+          trusted: true,
+        },
       ],
     };
     // The split view hands each pane its own workspace explicitly.
     render({ title: 'Add pagination', workspaceCwd: '/work/api' });
     expect(latestChatEditorProps.visibleToolbarActions).toContain('workspace');
-    expect(latestChatEditorProps.workspaceName).toBe('api');
+    expect(latestChatEditorProps.workspaceName).toBe('Payments API');
     expect(latestChatEditorProps.workspaceTitle).toBe('/work/api');
+    // The chip carries the pane's stable accent color (api is the 2nd workspace
+    // → the 2nd palette color) so it stays distinct when it collapses to an icon.
+    expect(latestChatEditorProps.workspaceColor).toBe('green');
+  });
+
+  it('surfaces the workspace in the pane header on a multi-workspace daemon', () => {
+    connectionState.capabilities = {
+      features: [],
+      workspaceCwd: '/work/web-shell',
+      workspaces: [
+        { id: 'w0', cwd: '/work/web-shell', primary: true, trusted: true },
+        {
+          id: 'w1',
+          cwd: '/work/api',
+          displayName: 'Payments API',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    render({ title: 'Add pagination', workspaceCwd: '/work/api' });
+    // The header tag (always visible at the top, unlike the composer chip that
+    // collapses on a narrow split) names the workspace and carries its full cwd
+    // in a hover tooltip.
+    const tag = container!.querySelector('[data-web-shell-pane-workspace]');
+    expect(tag).not.toBeNull();
+    expect(tag!.textContent).toContain('Payments API');
+    expect(tag!.getAttribute('title')).toBe('/work/api');
+  });
+
+  it('omits the header workspace tag on a single-workspace daemon', () => {
+    render({ title: 'Refactor core', workspaceCwd: '/w' });
+    expect(
+      container!.querySelector('[data-web-shell-pane-workspace]'),
+    ).toBeNull();
   });
 
   it('reports loaded pane artifacts to the outer panel owner', async () => {
@@ -353,6 +402,87 @@ describe('ChatPane', () => {
     });
     expect(clearFollowup).not.toHaveBeenCalled();
     expect(enqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it('lets the host handle a slash command', () => {
+    const onSlashCommand = vi.fn(() => true);
+    render({ onSlashCommand });
+    let returned: boolean | undefined;
+
+    act(() => {
+      returned = latestOnSubmit!('/deploy production');
+    });
+
+    expect(returned).toBe(true);
+    expect(onSlashCommand).toHaveBeenCalledWith({
+      command: 'deploy',
+      args: 'production',
+      input: '/deploy production',
+    });
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it('forwards a slash command the host does not handle', () => {
+    const onSlashCommand = vi.fn();
+    render({ onSlashCommand });
+
+    act(() => {
+      latestOnSubmit!('/deploy staging');
+    });
+
+    expect(onSlashCommand).toHaveBeenCalledTimes(1);
+    expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
+      onAdmitted: expect.any(Function),
+    });
+  });
+
+  it('lets the host handle a slash command while the pane is disconnected', () => {
+    connectionState.status = 'disconnected';
+    const onSlashCommand = vi.fn(() => true);
+    render({ onSlashCommand });
+
+    act(() => {
+      latestOnSubmit!('/deploy staging');
+    });
+
+    expect(onSlashCommand).toHaveBeenCalledTimes(1);
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('reports a host slash command error and continues default handling', () => {
+    const error = new Error('host handler exploded');
+    const onSlashCommand = vi.fn(() => {
+      throw error;
+    });
+    const onError = vi.fn();
+    render({ onSlashCommand, onError });
+
+    act(() => {
+      latestOnSubmit!('/deploy staging');
+    });
+
+    expect(onError).toHaveBeenCalledWith(
+      error,
+      'onSlashCommand callback failed',
+    );
+    expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
+      onAdmitted: expect.any(Function),
+    });
+  });
+
+  it('does not treat an absolute path as a slash command', () => {
+    const onSlashCommand = vi.fn(() => true);
+    render({ onSlashCommand });
+
+    act(() => {
+      latestOnSubmit!('/usr/local/bin/tool');
+    });
+
+    expect(onSlashCommand).not.toHaveBeenCalled();
+    expect(sendPrompt).toHaveBeenCalledWith('/usr/local/bin/tool', {
+      onAdmitted: expect.any(Function),
+    });
   });
 
   it('commits an idle prompt only after daemon admission', () => {
@@ -464,6 +594,32 @@ describe('ChatPane', () => {
     expect(enqueuePrompt).not.toHaveBeenCalled();
   });
 
+  it('submits while disconnected when prompt SSE restart is enabled', () => {
+    connectionState.status = 'disconnected';
+    render({ restartSseOnPrompt: true });
+
+    act(() => {
+      latestOnSubmit!('hi');
+    });
+
+    expect(sendPrompt).toHaveBeenCalledWith(
+      'hi',
+      expect.objectContaining({ onAdmitted: expect.any(Function) }),
+    );
+  });
+
+  it('does not submit without a recoverable disconnected session', () => {
+    connectionState.status = 'disconnected';
+    connectionState.sessionId = undefined;
+    render({ restartSseOnPrompt: true });
+
+    act(() => {
+      latestOnSubmit!('hi');
+    });
+
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
   it('reports an idle prompt failure to the pane error handler', async () => {
     const onError = vi.fn();
     sendPrompt.mockRejectedValueOnce(new Error('disconnected'));
@@ -520,6 +676,12 @@ describe('ChatPane', () => {
     };
     render();
     expect(testid('ask-approval')).not.toBeNull();
+    // Like the tool-approval path, a pane's question must not auto-grab focus —
+    // several panes can show at once and stealing focus would yank it from the
+    // pane the user is in.
+    expect(testid('ask-approval')?.getAttribute('data-keyboard-active')).toBe(
+      'false',
+    );
     // AskUserQuestion is not a tool approval, so MessageList gets no inline one.
     expect(testid('pane-messages')?.getAttribute('data-approval')).toBe('no');
   });
@@ -532,6 +694,36 @@ describe('ChatPane', () => {
       closeBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true })),
     );
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders no maximize toggle without onToggleMaximize', () => {
+    render({ onClose: () => {} });
+    expect(container!.querySelector('[aria-label="Maximize pane"]')).toBeNull();
+    expect(container!.querySelector('[aria-label="Restore pane"]')).toBeNull();
+  });
+
+  it('invokes onToggleMaximize from the header maximize button', () => {
+    const onToggleMaximize = vi.fn();
+    render({ onToggleMaximize });
+    const maximizeBtn = container!.querySelector(
+      '[aria-label="Maximize pane"]',
+    );
+    expect(maximizeBtn).not.toBeNull();
+    // A toggle button always exposes its pressed state; not maximized here.
+    expect(maximizeBtn!.getAttribute('aria-pressed')).toBe('false');
+    act(() =>
+      maximizeBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(onToggleMaximize).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the restore affordance while maximized', () => {
+    render({ onToggleMaximize: () => {}, isMaximized: true });
+    const restoreBtn = container!.querySelector('[aria-label="Restore pane"]');
+    expect(restoreBtn).not.toBeNull();
+    expect(restoreBtn!.getAttribute('aria-pressed')).toBe('true');
+    // The label flips to "restore" — no stale "maximize" affordance remains.
+    expect(container!.querySelector('[aria-label="Maximize pane"]')).toBeNull();
   });
 
   it('cancels the active turn via the composer cancel action', () => {

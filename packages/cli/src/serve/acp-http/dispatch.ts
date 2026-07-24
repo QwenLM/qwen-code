@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import path from 'node:path';
 import {
   APPROVAL_MODES,
   type ApprovalMode,
@@ -13,6 +12,7 @@ import {
   GROUP_COLOR_OPTIONS,
   SessionService,
   SessionOrganizationError,
+  SESSION_WRITER_RPC_CODES,
   type SessionGroupColor,
   type SessionGroupPresetColor,
   BuiltinAgentRegistry,
@@ -41,6 +41,11 @@ import {
   UpstreamDeviceFlowError,
 } from '../auth/device-flow.js';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
+import { parseSessionSource } from '@qwen-code/acp-bridge';
+import {
+  translateAndCheckAbsoluteWorkspacePath,
+  canonicalizeWorkspace,
+} from '@qwen-code/acp-bridge/workspacePaths';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   SessionShellClientRequiredError,
@@ -51,7 +56,6 @@ import {
   SessionArtifactAuthorizationError,
   SessionArtifactValidationError,
 } from '@qwen-code/acp-bridge/sessionArtifacts';
-import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from '../fs/paths.js';
 import {
@@ -137,6 +141,53 @@ import {
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+const SESSION_WRITER_RPC_ERRORS = {
+  session_writer_conflict: {
+    code: SESSION_WRITER_RPC_CODES.session_writer_conflict,
+    message: 'This session is already open in another Qwen process.',
+  },
+  session_writer_lost: {
+    code: SESSION_WRITER_RPC_CODES.session_writer_lost,
+    message: 'Write ownership for this session was lost.',
+  },
+  session_transcript_changed: {
+    code: SESSION_WRITER_RPC_CODES.session_transcript_changed,
+    message: 'The session transcript changed outside its active writer.',
+  },
+  session_writer_unavailable: {
+    code: SESSION_WRITER_RPC_CODES.session_writer_unavailable,
+    message: 'Session write ownership could not be verified.',
+  },
+} as const;
+
+function sessionWriterRpcError(err: unknown):
+  | {
+      code: number;
+      message: string;
+      data: { errorKind: keyof typeof SESSION_WRITER_RPC_ERRORS };
+    }
+  | undefined {
+  if (!err || typeof err !== 'object') return undefined;
+  const candidate = err as Record<string, unknown>;
+  const data = isObject(candidate['data']) ? candidate['data'] : undefined;
+  const errorKind = data?.['errorKind'] ?? candidate['errorKind'];
+  if (
+    typeof errorKind !== 'string' ||
+    !(errorKind in SESSION_WRITER_RPC_ERRORS)
+  ) {
+    return undefined;
+  }
+  const typedKind = errorKind as keyof typeof SESSION_WRITER_RPC_ERRORS;
+  const expected = SESSION_WRITER_RPC_ERRORS[typedKind];
+  const code = candidate['code'] ?? candidate['rpcCode'];
+  if (code !== expected.code) return undefined;
+  return {
+    code: expected.code,
+    message: expected.message,
+    data: { errorKind: typedKind },
+  };
 }
 
 const debugLogger = createDebugLogger('ACP_HTTP_DISPATCH');
@@ -304,7 +355,9 @@ function parseOptionalSafeIntegerInRange(
  * Closes the body-amplification DoS the REST code documents. Returns the
  * bound workspace when omitted.
  */
-function parseOptionalWorkspaceCwd(
+// Exported for the sandbox-translation wiring test — this is the entry
+// point for every ACP JSON-RPC `cwd` (#7139).
+export function parseOptionalWorkspaceCwd(
   params: Record<string, unknown>,
   boundWorkspace: string,
 ): string {
@@ -320,13 +373,14 @@ function parseOptionalWorkspaceCwd(
       `\`cwd\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
     );
   }
-  // `path.isAbsolute` (platform-aware) — same as the REST route. A bare
-  // `startsWith('/')` would reject valid Windows `C:\…`/UNC paths a client
-  // gets back from `/capabilities.workspaceCwd`.
-  if (!path.isAbsolute(cwd)) {
+  // #7139: the shared helper maps a Windows-shaped cwd to its container
+  // bind mount before the (platform-aware) absolute-path check — same as
+  // the REST route.
+  const sandboxCwd = translateAndCheckAbsoluteWorkspacePath(cwd);
+  if (sandboxCwd === null) {
     throw new AcpParamError('`cwd` must be an absolute path when provided');
   }
-  return cwd;
+  return sandboxCwd;
 }
 
 /** Validate a `session/prompt` body before it reaches the bridge/agent. */
@@ -448,6 +502,8 @@ function toRpcError(err: unknown): {
   message: string;
   data?: Record<string, unknown>;
 } {
+  const writerError = sessionWriterRpcError(err);
+  if (writerError) return writerError;
   if (err instanceof AcpParamError || err instanceof InvalidCursorError) {
     return { code: RPC.INVALID_PARAMS, message: err.message };
   }
@@ -666,6 +722,7 @@ export class AcpDispatcher {
   constructor(
     private readonly bridge: HttpAcpBridge,
     private readonly boundWorkspace: string,
+    private readonly env: Readonly<NodeJS.ProcessEnv>,
     private readonly workspace: DaemonWorkspaceService,
     private readonly workspaceRememberLane: WorkspaceRememberTaskLane,
     private readonly fsFactory?: WorkspaceFileSystemFactory,
@@ -677,9 +734,19 @@ export class AcpDispatcher {
     this.agentManager = createDaemonSubagentManager(boundWorkspace);
   }
 
-  private killOrphanSession(sessionId: string): void {
+  private killOrphanSession(
+    sessionId: string,
+    removePersistedSession = false,
+  ): void {
     void this.bridge
       .killSession(sessionId, { requireZeroAttaches: true })
+      .then(async (killed) => {
+        if (killed && removePersistedSession) {
+          await new SessionService(this.boundWorkspace).removeSession(
+            sessionId,
+          );
+        }
+      })
       .catch((err) =>
         writeStderrLine(
           `qwen serve: /acp orphan killSession(${logSafe(sessionId)}) failed: ${logSafe(errMsg(err))}`,
@@ -1076,6 +1143,16 @@ export class AcpDispatcher {
 
         case 'session/new': {
           const cwd = parseOptionalWorkspaceCwd(params, this.boundWorkspace);
+          const source = parseSessionSource(
+            params['sourceType'],
+            params['sourceId'],
+          );
+          if ('error' in source) {
+            if (id !== undefined) {
+              conn.sendConn(error(id, RPC.INVALID_PARAMS, source.error));
+            }
+            return;
+          }
           // ACP standard: session/new MUST create a new isolated session.
           // Always use sessionScope 'thread' regardless of client params.
           // The REST surface (POST /session) supports 'single' for
@@ -1084,12 +1161,13 @@ export class AcpDispatcher {
             workspaceCwd: cwd,
             clientId: conn.clientId,
             sessionScope: 'thread',
+            ...source,
           });
           // Teardown raced the spawn: the connection was destroyed while the
           // bridge call was in flight, so nothing will tear this session down.
           // Kill the orphan (no other client could have attached yet).
           if (conn.destroyed) {
-            this.killOrphanSession(session.sessionId);
+            this.killOrphanSession(session.sessionId, true);
             return;
           }
           conn.getOrCreateSession(session.sessionId).clientId =
@@ -1097,7 +1175,7 @@ export class AcpDispatcher {
           conn.ownSession(session.sessionId);
           const configOptions = await this.configOptionsFor(session.sessionId);
           if (conn.destroyed) {
-            this.killOrphanSession(session.sessionId);
+            this.killOrphanSession(session.sessionId, true);
             return;
           }
           // Build ACP-standard models/modes from configOptions.
@@ -1107,6 +1185,13 @@ export class AcpDispatcher {
           const modes = this.extractModeState(configOptions);
           this.replyConn(conn, id, {
             sessionId: session.sessionId,
+            ...(session.sourceType ? { sourceType: session.sourceType } : {}),
+            ...(session.sourceId !== undefined
+              ? { sourceId: session.sourceId }
+              : {}),
+            ...(session.sourcePersisted !== undefined
+              ? { sourcePersisted: session.sourcePersisted }
+              : {}),
             ...(configOptions ? { configOptions } : {}),
             ...(models ? { models } : {}),
             ...(modes ? { modes } : {}),
@@ -1152,26 +1237,22 @@ export class AcpDispatcher {
               // Re-seed the persisted parent lineage so a restored sub-session
               // still reports its parent over the ACP transport (parity with the
               // REST restore handler); the bridge creates the entry without it.
-              const parentSessionId = await new SessionService(
+              const metadata = await new SessionService(
                 cwd,
-              ).readParentSessionId(sessionId);
+              ).readCreationMetadata(sessionId);
               return method === 'session/load'
                 ? await this.bridge.loadSession({
                     sessionId,
                     workspaceCwd: cwd,
                     clientId: conn.clientId,
                     historyReplay: 'response',
-                    ...(parentSessionId !== undefined
-                      ? { parentSessionId }
-                      : {}),
+                    ...metadata,
                   })
                 : await this.bridge.resumeSession({
                     sessionId,
                     workspaceCwd: cwd,
                     clientId: conn.clientId,
-                    ...(parentSessionId !== undefined
-                      ? { parentSessionId }
-                      : {}),
+                    ...metadata,
                   });
             },
           );
@@ -1315,6 +1396,13 @@ export class AcpDispatcher {
               );
             }
           }
+          const parsedSource = parseSessionSource(
+            params['sourceType'],
+            params['sourceId'],
+          );
+          if ('error' in parsedSource) {
+            throw new AcpParamError(parsedSource.error);
+          }
           const result = await listWorkspaceSessionsForResponse(
             this.bridge,
             workspaceCwd,
@@ -1325,6 +1413,7 @@ export class AcpDispatcher {
               view,
               group,
               parentSessionId,
+              ...parsedSource,
             },
           );
           this.replyConn(conn, id, {
@@ -1339,6 +1428,10 @@ export class AcpDispatcher {
               ...(s.parentSessionId !== undefined
                 ? { parentSessionId: s.parentSessionId }
                 : {}),
+              ...(s.sourceType !== undefined
+                ? { sourceType: s.sourceType }
+                : {}),
+              ...(s.sourceId !== undefined ? { sourceId: s.sourceId } : {}),
               clientCount: s.clientCount,
               hasActivePrompt: s.hasActivePrompt,
               isArchived: s.isArchived === true,
@@ -1364,25 +1457,21 @@ export class AcpDispatcher {
           conn.ownedSessions.delete(sessionId);
           conn.closingSessions.add(sessionId);
           let closeStarted = false;
+          const closeLocalSessionStream = () => {
+            try {
+              conn.closeSessionStream(sessionId);
+            } catch (teardownErr) {
+              writeStderrLine(
+                `qwen serve: /acp session/close local teardown failed (${logSafe(sessionId)}): ${logSafe(errMsg(teardownErr))}`,
+              );
+            }
+          };
           const closeSession = async () => {
             closeStarted = true;
-            try {
-              await this.bridge.closeSession(
-                sessionId,
-                this.sessionCtx(conn, sessionId, loopback),
-              );
-            } finally {
-              // Local teardown must run even if the bridge close throws —
-              // otherwise the SSE stream, abort controller, buffered frames and
-              // pending permissions leak until idle TTL.
-              try {
-                conn.closeSessionStream(sessionId);
-              } catch (teardownErr) {
-                writeStderrLine(
-                  `qwen serve: /acp session/close local teardown failed (${logSafe(sessionId)}): ${logSafe(errMsg(teardownErr))}`,
-                );
-              }
-            }
+            await this.bridge.closeSession(
+              sessionId,
+              this.sessionCtx(conn, sessionId, loopback),
+            );
           };
           try {
             try {
@@ -1408,11 +1497,19 @@ export class AcpDispatcher {
           } catch (err) {
             if (!closeStarted) {
               conn.ownedSessions.add(sessionId);
+            } else {
+              try {
+                this.bridge.getSessionSummary(sessionId);
+                conn.ownedSessions.add(sessionId);
+              } catch {
+                closeLocalSessionStream();
+              }
             }
             throw err;
           } finally {
             conn.closingSessions.delete(sessionId);
           }
+          closeLocalSessionStream();
           this.replyConn(conn, id, {});
           return;
         }
@@ -2372,7 +2469,7 @@ export class AcpDispatcher {
             const result = await setupGithub({
               cwd: this.boundWorkspace,
               workspaceRoot: this.boundWorkspace,
-              proxy: resolveSetupGithubProxy(this.boundWorkspace),
+              proxy: resolveSetupGithubProxy(this.boundWorkspace, this.env),
               abortSignal: conn.abortSignal,
               fileOps: createSetupGithubFileOps(
                 this.fsFactory,
@@ -3957,6 +4054,20 @@ export class AcpDispatcher {
   }
 
   /**
+   * Current epoch token of the session's event bus, or `undefined` when
+   * the session is unknown (torn down between ownership check and header
+   * write). The `/acp` GET route advertises it as `X-Qwen-Event-Epoch`
+   * BEFORE `stream.open()` flushes headers (DAEMON-001).
+   */
+  getSessionEventEpoch(sessionId: string): string | undefined {
+    try {
+      return this.bridge.getSessionEventEpoch(sessionId);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Bind a session-scoped SSE stream to the bridge's event stream,
    * translating each `BridgeEvent` into a JSON-RPC frame (design §4.2).
    */
@@ -3965,6 +4076,7 @@ export class AcpDispatcher {
     sessionId: string,
     signal: AbortSignal,
     lastEventId?: number,
+    epoch?: string,
   ): Promise<void> {
     try {
       // On resume, `attachSessionStream` defers id-less buffered replies (e.g. a
@@ -3998,6 +4110,14 @@ export class AcpDispatcher {
       if (conn.hasInitialReplayPending(sessionId)) {
         const snapshot = this.bridge.getSessionReplaySnapshot(sessionId);
         if (snapshot) {
+          if (snapshot.degraded) {
+            // Compaction failed at least once for this session, so the
+            // snapshot may lag behind live events. Same operator breadcrumb
+            // the REST surface gets via the bus-level log (DAEMON-008).
+            writeStderrLine(
+              `qwen serve: /acp initial replay used a DEGRADED snapshot (compaction failure) session=${logSafe(sessionId)}; replay may be incomplete`,
+            );
+          }
           const snapshotEvents = [
             ...snapshot.compactedTurns,
             ...snapshot.liveJournal,
@@ -4041,6 +4161,7 @@ export class AcpDispatcher {
         ...(subscribeFromEventId !== undefined
           ? { lastEventId: subscribeFromEventId }
           : {}),
+        ...(epoch !== undefined ? { epoch } : {}),
       });
       for await (const event of iterable) {
         if (signal.aborted) break;

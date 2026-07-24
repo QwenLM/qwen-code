@@ -26,6 +26,7 @@ import {
   type SchemaComplianceMode,
 } from '../../utils/schemaConverter.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { normalizeMcpToolName } from '../../utils/tool-name-utils.js';
 
 type AnthropicMessageParam = Anthropic.MessageParam;
 // `scope: 'global'` is sent under the `prompt-caching-scope-2026-01-05` beta
@@ -55,6 +56,13 @@ export interface ConvertGeminiRequestToAnthropicOptions {
    * Gemini-Part round trip.
    */
   normalizeAssistantThinkingSignature?: boolean;
+  /**
+   * Remove assistant thinking blocks whose opaque signature is missing or
+   * empty. Completed turns can safely omit thinking during replay. The active
+   * tool loop fails instead because Claude requires all of its thinking blocks
+   * to be passed back complete and unmodified.
+   */
+  dropUnsignedAssistantThinking?: boolean;
   /**
    * On assistant turns containing `tool_use` but lacking any thinking block,
    * prepend a synthetic empty thinking block. Required by DeepSeek's
@@ -106,16 +114,14 @@ export interface ConvertGeminiRequestToAnthropicOptions {
 }
 
 export class AnthropicContentConverter {
-  private model: string;
   private schemaCompliance: SchemaComplianceMode;
   private enableCacheControl: boolean;
 
   constructor(
-    model: string,
+    _model: string,
     schemaCompliance: SchemaComplianceMode = 'auto',
     enableCacheControl: boolean = true,
   ) {
-    this.model = model;
     this.schemaCompliance = schemaCompliance;
     this.enableCacheControl = enableCacheControl;
   }
@@ -159,6 +165,9 @@ export class AnthropicContentConverter {
     messages = mergeConsecutiveAssistantMessages(messages);
     messages = cleanOrphanedToolCalls(messages);
     messages = mergeConsecutiveAssistantMessages(messages);
+    if (options.dropUnsignedAssistantThinking) {
+      messages = this.dropUnsignedThinkingFromAssistantMessages(messages);
+    }
     if (options.stripAssistantThinking) {
       this.stripThinkingFromAssistantMessages(messages);
     }
@@ -342,7 +351,7 @@ export class AnthropicContentConverter {
     geminiResponse.candidates = [candidate];
     geminiResponse.responseId = response.id;
     geminiResponse.createTime = Date.now().toString();
-    geminiResponse.modelVersion = response.model || this.model;
+    geminiResponse.modelVersion = response.model || undefined;
     geminiResponse.promptFeedback = { safetyRatings: [] };
 
     if (response.usage) {
@@ -351,6 +360,10 @@ export class AnthropicContentConverter {
         cacheReadTokens: response.usage.cache_read_input_tokens || 0,
         cacheCreationTokens: response.usage.cache_creation_input_tokens || 0,
         outputTokens: response.usage.output_tokens || 0,
+        cacheReadTokensReported:
+          typeof response.usage.cache_read_input_tokens === 'number',
+        cacheCreationTokensReported:
+          typeof response.usage.cache_creation_input_tokens === 'number',
       });
     }
 
@@ -425,7 +438,7 @@ export class AnthropicContentConverter {
           contentBlocks.push({
             type: 'tool_use',
             id: part.functionCall.id || `tool_${toolCallIndex}`,
-            name: part.functionCall.name || '',
+            name: normalizeMcpToolName(part.functionCall.name || ''),
             input: (part.functionCall.args as Record<string, unknown>) || {},
           });
           toolCallIndex += 1;
@@ -478,6 +491,10 @@ export class AnthropicContentConverter {
       type: 'tool_result',
       tool_use_id: response.id || '',
       content,
+      ...(response.response &&
+      Object.prototype.hasOwnProperty.call(response.response, 'error')
+        ? { is_error: true }
+        : {}),
     };
   }
 
@@ -759,6 +776,77 @@ export class AnthropicContentConverter {
         message.content = normalized;
       }
     }
+  }
+
+  private dropUnsignedThinkingFromAssistantMessages(
+    messages: AnthropicMessageParam[],
+  ): AnthropicMessageParam[] {
+    const cleaned: AnthropicMessageParam[] = [];
+    const isUnsignedThinking = (block: AnthropicContentBlockParam) => {
+      const value = block as { type?: string; signature?: unknown };
+      return (
+        value.type === 'thinking' &&
+        (typeof value.signature !== 'string' || value.signature.length === 0)
+      );
+    };
+    const hasBlockType = (
+      message: AnthropicMessageParam,
+      type: 'tool_use' | 'tool_result',
+    ) =>
+      Array.isArray(message.content) &&
+      message.content.some(
+        (block) => (block as { type?: string }).type === type,
+      );
+    const activeToolUseTurns = new Set<number>();
+    let cursor = messages.length - 1;
+    while (cursor >= 0) {
+      let hasToolResult = false;
+      while (cursor >= 0 && messages[cursor]?.role === 'user') {
+        hasToolResult ||= hasBlockType(messages[cursor], 'tool_result');
+        cursor--;
+      }
+      const assistant = messages[cursor];
+      if (
+        !hasToolResult ||
+        !assistant ||
+        assistant.role !== 'assistant' ||
+        !hasBlockType(assistant, 'tool_use')
+      ) {
+        break;
+      }
+      activeToolUseTurns.add(cursor);
+      cursor--;
+    }
+
+    for (const [index, message] of messages.entries()) {
+      if (message.role !== 'assistant' || !Array.isArray(message.content)) {
+        cleaned.push(message);
+        continue;
+      }
+
+      if (!message.content.some(isUnsignedThinking)) {
+        cleaned.push(message);
+        continue;
+      }
+
+      if (activeToolUseTurns.has(index)) {
+        throw new Error(
+          'Anthropic-compatible proxy omitted the thinking signature for a ' +
+            'tool-use turn that is still in progress. Configure the proxy to ' +
+            'preserve thinking signatures, or start a new session with ' +
+            'reasoning disabled.',
+        );
+      }
+
+      const filtered = message.content.filter(
+        (block) => !isUnsignedThinking(block),
+      );
+      if (filtered.length > 0) {
+        cleaned.push({ ...message, content: filtered });
+      }
+    }
+
+    return cleaned;
   }
 
   /**

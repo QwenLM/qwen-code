@@ -471,7 +471,7 @@ if [[ "$OS" == "Darwin" && "$ARCH_RAW" == "x86_64" ]]; then
     fi
 fi
 
-# LABEL  = the release-asset tarball label (matches what cd-rust-cua-driver.yml
+# LABEL  = the release-asset tarball label (matches what cd-cua-driver.yml
 #          publishes; user-facing).
 # TARGET = the Rust target triple, used in the on-disk per-version dir name so
 #          a multi-arch dev can keep e.g. aarch64-apple-darwin and
@@ -513,7 +513,7 @@ done
 # the baked line hasn't been updated yet (dev / pre-release checkouts).
 #
 # ~~~ BAKED_VERSION: auto-updated by CD workflow after each release — do not edit ~~~
-CUA_DRIVER_RS_BAKED_VERSION="0.7.1"
+CUA_DRIVER_RS_BAKED_VERSION="0.7.3"
 # ~~~ END_BAKED_VERSION ~~~
 
 if [[ -n "${CUA_DRIVER_RS_VERSION:-}" ]]; then

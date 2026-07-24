@@ -2,10 +2,17 @@ import { EventEmitter } from 'node:events';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { ChannelWebhookTask } from '@qwen-code/channel-base';
 import {
+  ChannelWorkerStartupError,
   createChannelWorkerSupervisor,
   type ChannelWorkerChild,
 } from './channel-worker-supervisor.js';
 import { CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS } from './channel-worker-env.js';
+import { MAX_CHANNEL_STARTUP_FAILURES } from './channel-worker-startup-ipc.js';
+import {
+  CHANNEL_DELIVERY_IPC_TIMEOUT_MS,
+  MAX_CHANNEL_DELIVERIES_IN_FLIGHT,
+  type ChannelDeliveryRequest,
+} from './channel-delivery-ipc.js';
 
 const TEST_HEARTBEAT_TIMEOUT_MS = CHANNEL_WORKER_HEARTBEAT_INTERVAL_MS + 5;
 
@@ -37,6 +44,13 @@ const webhookTask: ChannelWebhookTask = {
   targetRef: 'default',
   title: 'CI failed',
   payload: { runId: 123 },
+};
+
+const deliveryRequest: ChannelDeliveryRequest = {
+  deliveryId: 'delivery-1',
+  channelName: 'telegram',
+  target: { type: 'chat', id: 'group-1' },
+  text: 'inspection result',
 };
 
 describe('createChannelWorkerSupervisor', () => {
@@ -147,6 +161,356 @@ describe('createChannelWorkerSupervisor', () => {
       state: 'running',
       channels: ['telegram'],
     });
+  });
+
+  it('stores and acknowledges startup failures before exposing a deep-copied running snapshot', async () => {
+    const child = new FakeChild();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram', 'feishu'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'channel_startup_failure',
+      failure: {
+        channel: 'telegram',
+        phase: 'connect',
+        code: 'ECONNREFUSED',
+        message: 'connection refused',
+      },
+    });
+    expect(child.send).toHaveBeenCalledWith(
+      { type: 'channel_startup_report_ack' },
+      expect.any(Function),
+    );
+    child.emit('message', {
+      type: 'ready',
+      channels: ['feishu'],
+      requestedChannels: ['telegram', 'feishu'],
+    });
+    await started;
+
+    const first = supervisor.snapshot();
+    expect(first.adapters).toEqual([
+      {
+        name: 'telegram',
+        state: 'error',
+        error: 'connection refused',
+      },
+      { name: 'feishu', state: 'connected' },
+    ]);
+    expect(first.startupFailures).toEqual([
+      {
+        channel: 'telegram',
+        phase: 'connect',
+        code: 'ECONNREFUSED',
+        message: 'connection refused',
+      },
+    ]);
+    first.startupFailures![0]!.message = 'mutated';
+    expect(supervisor.snapshot().startupFailures![0]!.message).toBe(
+      'connection refused',
+    );
+  });
+
+  it('retains accepted and redacted startup failures when the worker exits before ready', async () => {
+    const child = new FakeChild();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      daemonToken: 'daemon-secret',
+      workspace: '/trusted/workspace',
+      workerBaseEnv: { PROVIDER_API_KEY: '\tprovider-secret' },
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'channel_startup_failure',
+      failure: {
+        channel: 'telegram-provider-secret',
+        phase: 'connect',
+        code: 'daemon-secret',
+        message:
+          'prefix \tprovider-secret Authorization: Bearer abcdef123456 failed',
+      },
+    });
+    child.emit('exit', 1, null);
+
+    const error = await started.catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(ChannelWorkerStartupError);
+    expect(error).toMatchObject({
+      startupFailures: [
+        {
+          workspaceCwd: '/trusted/workspace',
+          channel: 'telegram-<redacted>',
+          phase: 'connect',
+          code: '<redacted>',
+        },
+      ],
+    });
+    expect(
+      (error as ChannelWorkerStartupError).startupFailures[0]!.message,
+    ).not.toContain('provider-secret');
+    expect(
+      (error as ChannelWorkerStartupError).startupFailures[0]!.message,
+    ).not.toContain('abcdef123456');
+    expect(supervisor.snapshot().startupFailures).toEqual(
+      (error as ChannelWorkerStartupError).startupFailures.map(
+        ({ workspaceCwd: _workspaceCwd, ...failure }) => failure,
+      ),
+    );
+  });
+
+  it('retains accepted startup failures across startup timeout', async () => {
+    const child = new FakeChild();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram', 'feishu'] },
+      startupTimeoutMs: 1,
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'channel_startup_failure',
+      failure: {
+        channel: 'telegram',
+        phase: 'connect',
+        message: 'failed before feishu hung',
+      },
+    });
+
+    const error = await started.catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(ChannelWorkerStartupError);
+    expect(error).toMatchObject({
+      startupFailures: [
+        expect.objectContaining({ message: 'failed before feishu hung' }),
+      ],
+    });
+    expect(supervisor.snapshot()).toMatchObject({
+      state: 'failed',
+      startupFailures: [
+        expect.objectContaining({ message: 'failed before feishu hung' }),
+      ],
+    });
+  });
+
+  it('terminates startup on malformed reports and acknowledgement failures', async () => {
+    const malformedChild = new FakeChild();
+    const malformedSupervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => malformedChild),
+    });
+    const malformedStart = malformedSupervisor.start();
+    malformedChild.emit('message', {
+      type: 'channel_startup_failure',
+      failure: { channel: '', phase: 'connect', message: 'invalid' },
+    });
+    await expect(malformedStart).rejects.toThrow(
+      'Channel worker startup IPC protocol error: invalid startup report.',
+    );
+    expect(malformedChild.kill).toHaveBeenCalledWith('SIGTERM');
+
+    const ackChild = new FakeChild();
+    ackChild.send.mockImplementation((_message, callback) => {
+      callback?.(new Error('ipc closed'));
+      return true;
+    });
+    const ackSupervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => ackChild),
+    });
+    const ackStart = ackSupervisor.start();
+    ackChild.emit('message', {
+      type: 'channel_startup_failure',
+      failure: {
+        channel: 'telegram',
+        phase: 'connect',
+        message: 'failed',
+      },
+    });
+    const ackError = await ackStart.catch((value: unknown) => value);
+    expect(ackError).toBeInstanceOf(ChannelWorkerStartupError);
+    expect((ackError as Error).message).toContain('acknowledgement failed');
+    expect(
+      (ackError as ChannelWorkerStartupError).startupFailures,
+    ).toHaveLength(1);
+
+    const markerChild = new FakeChild();
+    const markerSupervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => markerChild),
+    });
+    const markerStart = markerSupervisor.start();
+    markerChild.emit('message', {
+      type: 'channel_startup_failures_truncated',
+    });
+    await expect(markerStart).rejects.toThrow('invalid truncation marker');
+  });
+
+  it('retains an accepted failure when the child emits a pre-ready error', async () => {
+    const child = new FakeChild();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'channel_startup_failure',
+      failure: {
+        channel: 'telegram',
+        phase: 'connect',
+        message: 'provider failed',
+      },
+    });
+    child.emit('error', new Error('child IPC failed'));
+
+    const error = await started.catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(ChannelWorkerStartupError);
+    expect(error).toMatchObject({
+      startupFailures: [
+        expect.objectContaining({ message: 'provider failed' }),
+      ],
+    });
+  });
+
+  it('accepts exactly 64 failures followed by one truncation marker', async () => {
+    const child = new FakeChild();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    for (let index = 0; index < MAX_CHANNEL_STARTUP_FAILURES; index += 1) {
+      child.emit('message', {
+        type: 'channel_startup_failure',
+        failure: {
+          channel: `channel-${index}`,
+          phase: 'connect',
+          message: `failure-${index}`,
+        },
+      });
+    }
+    child.emit('message', { type: 'channel_startup_failures_truncated' });
+    child.emit('message', {
+      type: 'ready',
+      channels: ['connected'],
+    });
+    await started;
+
+    expect(supervisor.snapshot()).toMatchObject({
+      state: 'running',
+      startupFailuresTruncated: true,
+    });
+    expect(supervisor.snapshot().startupFailures).toHaveLength(
+      MAX_CHANNEL_STARTUP_FAILURES,
+    );
+    expect(child.send).toHaveBeenCalledTimes(MAX_CHANNEL_STARTUP_FAILURES + 1);
+  });
+
+  it('rejects a 65th startup failure without a truncation marker', async () => {
+    const child = new FakeChild();
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'all' },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    for (let index = 0; index < MAX_CHANNEL_STARTUP_FAILURES; index += 1) {
+      child.emit('message', {
+        type: 'channel_startup_failure',
+        failure: {
+          channel: `channel-${index}`,
+          phase: 'connect',
+          message: `failure-${index}`,
+        },
+      });
+    }
+    child.emit('message', {
+      type: 'channel_startup_failure',
+      failure: {
+        channel: 'channel-overflow',
+        phase: 'connect',
+        message: 'overflow',
+      },
+    });
+
+    const error = await started.catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(ChannelWorkerStartupError);
+    expect((error as Error).message).toContain('too many startup failures.');
+    expect((error as ChannelWorkerStartupError).startupFailures).toHaveLength(
+      MAX_CHANNEL_STARTUP_FAILURES,
+    );
+    expect(child.kill).toHaveBeenCalledWith('SIGTERM');
+    expect(child.send).toHaveBeenCalledTimes(MAX_CHANNEL_STARTUP_FAILURES);
+  });
+
+  it('clears startup failure details when a new generation starts', async () => {
+    const firstChild = new FakeChild();
+    const secondChild = new FakeChild();
+    const spawnWorker = vi
+      .fn()
+      .mockReturnValueOnce(firstChild)
+      .mockReturnValueOnce(secondChild);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram', 'feishu'] },
+      spawnWorker,
+    });
+
+    const firstStart = supervisor.start();
+    firstChild.emit('message', {
+      type: 'channel_startup_failure',
+      failure: {
+        channel: 'telegram',
+        phase: 'connect',
+        message: 'first generation failure',
+      },
+    });
+    firstChild.emit('message', { type: 'ready', channels: ['feishu'] });
+    await firstStart;
+    await supervisor.stop();
+
+    const secondStart = supervisor.start();
+    secondChild.emit('message', {
+      type: 'ready',
+      channels: ['telegram', 'feishu'],
+    });
+    await secondStart;
+
+    expect(supervisor.snapshot()).not.toHaveProperty('startupFailures');
+    expect(supervisor.snapshot()).not.toHaveProperty(
+      'startupFailuresTruncated',
+    );
   });
 
   it('rejects startup when the worker exits before ready', async () => {
@@ -1399,7 +1763,7 @@ describe('createChannelWorkerSupervisor', () => {
     ).not.toContain('ssword');
   });
 
-  it('decodes Uint8Array worker log chunks and preserves indentation', async () => {
+  it('decodes Uint8Array worker log chunks and preserves separation', async () => {
     const child = new FakeChild();
     child.stdout = new EventEmitter();
     const onLog = vi.fn();
@@ -1415,7 +1779,7 @@ describe('createChannelWorkerSupervisor', () => {
     const started = supervisor.start();
     child.stdout.emit(
       'data',
-      new Uint8Array(Buffer.from('\tat stack frame\n')),
+      new Uint8Array(Buffer.from('\tat stack frame\nmetric\tvalue\t42\n')),
     );
     child.emit('message', {
       type: 'ready',
@@ -1428,6 +1792,10 @@ describe('createChannelWorkerSupervisor', () => {
     expect(onLog).toHaveBeenCalledWith({
       stream: 'stdout',
       line: ' at stack frame',
+    });
+    expect(onLog).toHaveBeenCalledWith({
+      stream: 'stdout',
+      line: 'metric value 42',
     });
   });
 
@@ -2052,6 +2420,251 @@ describe('createChannelWorkerSupervisor', () => {
       pid: 22222,
       channels: ['telegram'],
       requestedChannels: ['telegram'],
+    });
+  });
+
+  it('delivers a channel message through a running worker', async () => {
+    const child = new FakeChild(false);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const delivered = supervisor.deliverChannelMessage!(deliveryRequest);
+    const sent = child.send.mock.calls[0]![0] as { id: string };
+    expect(sent).toMatchObject({
+      type: 'channel_delivery',
+      id: expect.any(String),
+      expiresAt: expect.any(Number),
+      request: deliveryRequest,
+    });
+    child.emit('message', {
+      type: 'channel_delivery_result',
+      id: sent.id,
+      ok: true,
+    });
+
+    await expect(delivered).resolves.toEqual({ delivered: true });
+  });
+
+  it('rejects channel delivery when the supervisor is full', async () => {
+    const child = new FakeChild(false);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const pending = Array.from(
+      { length: MAX_CHANNEL_DELIVERIES_IN_FLIGHT },
+      () => supervisor.deliverChannelMessage!(deliveryRequest),
+    );
+    const overflow = supervisor.deliverChannelMessage!(deliveryRequest).catch(
+      (error: unknown) => error,
+    );
+
+    expect(child.send).toHaveBeenCalledTimes(MAX_CHANNEL_DELIVERIES_IN_FLIGHT);
+    await expect(overflow).resolves.toMatchObject({
+      code: 'channel_delivery_queue_full',
+      message: 'Channel delivery queue is full.',
+    });
+
+    const first = child.send.mock.calls[0]![0] as { id: string };
+    child.emit('message', {
+      type: 'channel_delivery_result',
+      id: first.id,
+      ok: true,
+    });
+    await expect(pending[0]).resolves.toEqual({ delivered: true });
+
+    const replacement = supervisor.deliverChannelMessage!(deliveryRequest);
+    expect(child.send).toHaveBeenCalledTimes(
+      MAX_CHANNEL_DELIVERIES_IN_FLIGHT + 1,
+    );
+    child.emit('exit', 1, null);
+    await Promise.allSettled([...pending.slice(1), replacement]);
+  });
+
+  it('rejects channel delivery when the worker is not running', async () => {
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => new FakeChild()),
+    });
+
+    await expect(
+      supervisor.deliverChannelMessage!(deliveryRequest),
+    ).rejects.toMatchObject({
+      code: 'channel_worker_unavailable',
+      message: 'Channel worker is not running.',
+    });
+  });
+
+  it('rejects typed delivery errors reported by the worker', async () => {
+    const child = new FakeChild(false);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+    });
+    await started;
+
+    const delivered = supervisor.deliverChannelMessage!(deliveryRequest);
+    const sent = child.send.mock.calls[0]![0] as { id: string };
+    child.emit('message', {
+      type: 'channel_delivery_result',
+      id: sent.id,
+      ok: false,
+      code: 'channel_delivery_failed',
+      error: 'Platform send failed.',
+    });
+
+    await expect(delivered).rejects.toMatchObject({
+      code: 'channel_delivery_failed',
+      message: 'Platform send failed.',
+    });
+  });
+
+  it('rejects channel delivery when IPC send throws synchronously', async () => {
+    vi.useFakeTimers();
+    const child = new FakeChild(false);
+    child.send.mockImplementationOnce(() => {
+      throw new Error('send boom');
+    });
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const rejected = supervisor.deliverChannelMessage!(deliveryRequest).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    const error = await rejected;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe(
+      'Channel worker IPC send failed: send boom',
+    );
+    expect((error as { code?: string }).code).toBe(
+      'channel_worker_unavailable',
+    );
+  });
+
+  it('rejects channel delivery when the IPC send callback reports an error', async () => {
+    vi.useFakeTimers();
+    const child = new FakeChild(false);
+    child.send.mockImplementationOnce((_message, callback) => {
+      callback?.(new Error('callback boom'));
+      return true;
+    });
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const rejected = supervisor.deliverChannelMessage!(deliveryRequest).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    const error = await rejected;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe(
+      'Channel worker IPC send failed: callback boom',
+    );
+    expect((error as { code?: string }).code).toBe(
+      'channel_worker_unavailable',
+    );
+  });
+
+  it('times out delivery and rejects pending work when the worker exits', async () => {
+    vi.useFakeTimers();
+    const child = new FakeChild(false);
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+    });
+    await started;
+
+    const timedOut = supervisor.deliverChannelMessage!(deliveryRequest).catch(
+      (error: unknown) => error,
+    );
+    await vi.advanceTimersByTimeAsync(CHANNEL_DELIVERY_IPC_TIMEOUT_MS);
+    await expect(timedOut).resolves.toMatchObject({
+      code: 'channel_delivery_timeout',
+    });
+
+    const pending = supervisor.deliverChannelMessage!(deliveryRequest);
+    child.emit('exit', 1, null);
+    await expect(pending).rejects.toMatchObject({
+      code: 'channel_worker_unavailable',
+      message: 'Channel worker exited.',
     });
   });
 

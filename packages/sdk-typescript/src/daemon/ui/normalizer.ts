@@ -39,7 +39,11 @@ import {
  */
 type NormalizedEventBase = Pick<
   DaemonUiEvent,
-  'eventId' | 'serverTimestamp' | 'originatorClientId' | 'rawEvent'
+  | 'eventId'
+  | 'serverTimestamp'
+  | 'sourceRecordIds'
+  | 'originatorClientId'
+  | 'rawEvent'
 >;
 
 const DAEMON_ERROR_KIND_SET = new Set<string>(DAEMON_ERROR_KINDS);
@@ -48,6 +52,7 @@ const MCP_RESTART_REFUSED_REASONS = new Set<string>([
   'in_flight',
   'disabled',
   'budget_would_exceed',
+  'authentication_required',
 ]);
 
 const MALFORMED_MEMORY_CHANGED = 'malformed memory_changed payload';
@@ -341,6 +346,15 @@ export function normalizeDaemonEvent(
     case 'mcp_server_restart_refused':
       return normalizeMcpServerRestartRefused(event, base);
 
+    case 'mcp_server_added':
+      return normalizeMcpServerChanged(event, base, 'added');
+
+    case 'mcp_server_removed':
+      return normalizeMcpServerChanged(event, base, 'removed');
+
+    case 'mcp_server_changed':
+      return normalizeMcpServerChanged(event, base);
+
     case 'extensions_changed':
       return normalizeExtensionsChanged(event, base);
 
@@ -541,9 +555,11 @@ function createBase(
   opts: NormalizeDaemonEventOptions,
 ): NormalizedEventBase {
   const serverTimestamp = extractServerTimestamp(event);
+  const sourceRecordIds = extractSourceRecordIds(event);
   return {
     ...(event.id !== undefined ? { eventId: event.id } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
+    ...(sourceRecordIds ? { sourceRecordIds } : {}),
     ...(event.originatorClientId
       ? { originatorClientId: event.originatorClientId }
       : {}),
@@ -559,8 +575,8 @@ function createBase(
  *
  *   1. `event.serverTimestamp` — top-level, preferred when daemon adds it
  *   2. `event._meta.serverTimestamp` — Anthropic-style metadata convention
- *   3. `event.data._meta.serverTimestamp` — sessionUpdate nested location
- *   4. `event.data.update._meta.serverTimestamp|timestamp` — ACP update meta
+ *   3. nested `serverTimestamp` metadata
+ *   4. `timestamp` on direct transcript-page or nested ACP updates
  *
  * Returns undefined when none of them are present or all are non-finite.
  * Forward-compat: SDK reads whichever location the daemon eventually emits
@@ -575,25 +591,44 @@ export function extractServerTimestamp(event: DaemonEvent): number | undefined {
     if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
   }
   if (isRecord(event.data)) {
-    const dataMeta = (event.data as Record<string, unknown>)['_meta'];
+    const dataMeta = event.data['_meta'];
+    const update = event.data['update'];
+    const updateMeta = isRecord(update) ? update['_meta'] : undefined;
     if (isRecord(dataMeta)) {
       const ts = dataMeta['serverTimestamp'];
       if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
     }
-    const update = (event.data as Record<string, unknown>)['update'];
-    if (isRecord(update)) {
-      const updateMeta = update['_meta'];
-      if (isRecord(updateMeta)) {
-        const serverTs = updateMeta['serverTimestamp'];
-        if (typeof serverTs === 'number' && Number.isFinite(serverTs)) {
-          return serverTs;
-        }
-        const ts = updateMeta['timestamp'];
-        if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
+    if (isRecord(updateMeta)) {
+      const serverTs = updateMeta['serverTimestamp'];
+      if (typeof serverTs === 'number' && Number.isFinite(serverTs)) {
+        return serverTs;
       }
+    }
+    const timestampCandidates = [
+      isRecord(updateMeta) ? updateMeta['timestamp'] : undefined,
+      isRecord(update) ? update['timestamp'] : undefined,
+      isRecord(dataMeta) ? dataMeta['timestamp'] : undefined,
+      event.data['timestamp'],
+    ];
+    for (const candidate of timestampCandidates) {
+      const timestamp = parseTimestamp(candidate);
+      if (timestamp !== undefined) return timestamp;
     }
   }
   return undefined;
+}
+
+function parseTimestamp(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value !== 'string') return undefined;
+  // Date.parse misreads bare-integer strings ("2000" becomes year 2000 and a
+  // stringified epoch becomes NaN), so treat all-digit strings as epoch ms.
+  if (/^\d+$/.test(value)) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : undefined;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function normalizeSessionUpdate(
@@ -713,8 +748,21 @@ function normalizeSessionUpdate(
       ];
     }
     case 'tool_call':
-    case 'tool_call_update':
+    case 'tool_call_update': {
+      // Silent-shell liveness heartbeat: a meta-only in_progress frame with
+      // no kind/title/content. Normalizing it would overwrite the tool
+      // block's human-readable title with the bare tool name from _meta;
+      // the web UI has its own activity indicator, so drop the frame.
+      const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+      if (
+        getString(update, 'status') === 'in_progress' &&
+        getString(update, 'kind') === undefined &&
+        meta?.['shellProgress'] !== undefined
+      ) {
+        return [];
+      }
       return [normalizeToolUpdate(update, base)];
+    }
     case 'shell_output':
     case 'tool_output': {
       const text = getOutputText(update);
@@ -774,7 +822,30 @@ function extractUpdateMeta(
   update: Record<string, unknown>,
 ): Record<string, unknown> | undefined {
   const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
-  return meta ? { ...meta } : undefined;
+  if (!meta) return undefined;
+  const { qwenTranscript: _qwenTranscript, ...displayMeta } = meta;
+  return Object.keys(displayMeta).length > 0 ? displayMeta : undefined;
+}
+
+function extractSourceRecordIds(
+  event: DaemonEvent,
+): readonly string[] | undefined {
+  if (!isRecord(event.data)) return undefined;
+  const update = getSessionUpdatePayload(event.data);
+  const meta =
+    update && isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const transcript =
+    meta && isRecord(meta['qwenTranscript'])
+      ? meta['qwenTranscript']
+      : undefined;
+  const values = transcript?.['sourceRecordIds'];
+  if (!Array.isArray(values)) return undefined;
+  const ids = [
+    ...new Set(
+      values.filter((value): value is string => typeof value === 'string'),
+    ),
+  ];
+  return ids.length > 0 ? ids : undefined;
 }
 
 /**
@@ -813,7 +884,12 @@ function normalizeToolUpdate(
     (metadata ? getString(metadata, 'toolName') : undefined) ??
     (metadata ? getString(metadata, 'name') : undefined);
   const toolKind = getString(update, 'kind');
-  const title = getString(update, 'title') ?? toolName ?? toolKind;
+  const explicitTitle = getString(update, 'title');
+  const title =
+    explicitTitle ??
+    (getString(update, 'sessionUpdate') === 'tool_call'
+      ? (toolName ?? toolKind)
+      : undefined);
   const rawInputSource =
     update['rawInput'] ?? update['input'] ?? update['args'];
   const rawOutputSource =
@@ -899,14 +975,19 @@ function normalizePlanUpdate(
 ): DaemonUiEvent {
   const entries = Array.isArray(update['entries']) ? update['entries'] : [];
   const contentText = capDetails(formatPlanEntries(entries));
+  const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const transcript =
+    meta && isRecord(meta['qwenTranscript'])
+      ? meta['qwenTranscript']
+      : undefined;
   const planCallId =
-    base.eventId !== undefined
+    getString(transcript, 'planToolCallId') ??
+    (base.eventId !== undefined
       ? `${DAEMON_PLAN_TOOL_CALL_ID}-${base.eventId}`
-      : DAEMON_PLAN_TOOL_CALL_ID;
+      : DAEMON_PLAN_TOOL_CALL_ID);
   // Carry the cumulative-usage snapshot the agent stamps on each plan update
   // (PlanEmitter) through to rawOutput, so the web-shell can diff consecutive
   // todo snapshots into per-task token/time detail.
-  const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
   const stats = meta && isRecord(meta['stats']) ? meta['stats'] : undefined;
   return {
     ...base,
@@ -1581,7 +1662,50 @@ function normalizeMcpServerRestartRefused(
       ...base,
       type: 'workspace.mcp.server_restart_refused',
       serverName,
-      reason: reason as 'in_flight' | 'disabled' | 'budget_would_exceed',
+      reason: reason as
+        | 'in_flight'
+        | 'disabled'
+        | 'budget_would_exceed'
+        | 'authentication_required',
+    },
+  ];
+}
+
+function normalizeMcpServerChanged(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+  fixedAction?: 'added' | 'removed',
+): DaemonUiEvent[] {
+  const serverName = getString(event.data, fixedAction ? 'name' : 'serverName');
+  const action = fixedAction ?? getString(event.data, 'action');
+  if (
+    !serverName ||
+    !action ||
+    ![
+      'added',
+      'removed',
+      'approve',
+      'enable',
+      'disable',
+      'authenticate',
+      'clear-auth',
+    ].includes(action)
+  ) {
+    return fallbackDebug(event, base, `malformed ${event.type} payload`);
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.mcp.server_changed',
+      serverName,
+      action: action as
+        | 'added'
+        | 'removed'
+        | 'approve'
+        | 'enable'
+        | 'disable'
+        | 'authenticate'
+        | 'clear-auth',
     },
   ];
 }

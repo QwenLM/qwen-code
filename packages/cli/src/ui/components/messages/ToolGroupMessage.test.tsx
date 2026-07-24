@@ -1002,6 +1002,78 @@ describe('<ToolGroupMessage />', () => {
       );
       expect(lastFrame()).toMatchSnapshot();
     });
+
+    it('reserves wrapped compact summary height before sizing tool results', () => {
+      vi.mocked(ToolMessage).mockClear();
+      const toolCalls = [
+        createToolCall({
+          callId: 'read-long',
+          name: 'ReadFile',
+          description:
+            'packages/cli/src/ui/components/messages/CompactToolGroupDisplay.tsx',
+          status: ToolCallStatus.Success,
+        }),
+        createToolCall({
+          callId: 'shell-result',
+          name: 'Shell',
+          description: 'npm test',
+          status: ToolCallStatus.Success,
+          resultDisplay: 'shell output',
+        }),
+      ];
+
+      renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          contentWidth={30}
+          toolCalls={toolCalls}
+          availableTerminalHeight={12}
+        />,
+      );
+
+      const call = vi
+        .mocked(ToolMessage)
+        .mock.calls.find((c) => c[0].callId === 'shell-result');
+      expect(call?.[0].availableTerminalHeight).toBe(8);
+    });
+
+    it('reserves an active compact hint row before sizing tool results', () => {
+      vi.mocked(ToolMessage).mockClear();
+      const toolCalls = [
+        createToolCall({
+          callId: 'read-complete',
+          name: 'ReadFile',
+          description: 'a.ts',
+          status: ToolCallStatus.Success,
+        }),
+        createToolCall({
+          callId: 'read-pending',
+          name: 'ReadFile',
+          description: 'b.ts',
+          status: ToolCallStatus.Pending,
+        }),
+        createToolCall({
+          callId: 'shell-result',
+          name: 'Shell',
+          description: 'npm test',
+          status: ToolCallStatus.Success,
+          resultDisplay: 'shell output',
+        }),
+      ];
+
+      renderWithProviders(
+        <ToolGroupMessage
+          {...baseProps}
+          toolCalls={toolCalls}
+          availableTerminalHeight={12}
+        />,
+      );
+
+      const call = vi
+        .mocked(ToolMessage)
+        .mock.calls.find((c) => c[0].callId === 'shell-result');
+      expect(call?.[0].availableTerminalHeight).toBe(9);
+    });
   });
 
   describe('Confirmation Handling', () => {

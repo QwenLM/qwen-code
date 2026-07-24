@@ -5,6 +5,7 @@
  */
 
 import fs from 'node:fs';
+import { persistUsageBeforeTranscriptDeletion } from './usageHistoryService.js';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import {
@@ -26,6 +27,10 @@ import {
   type ConversationRecord,
 } from './sessionService.js';
 import {
+  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+  SessionTranscriptTooLargeError,
+} from './session-transcript-reader.js';
+import {
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   stableSessionArtifactId,
 } from './session-artifact-persistence.js';
@@ -34,6 +39,9 @@ import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 
+vi.mock('./usageHistoryService.js', () => ({
+  persistUsageBeforeTranscriptDeletion: vi.fn().mockResolvedValue(true),
+}));
 vi.mock('node:path');
 vi.mock('../utils/paths.js');
 vi.mock('../utils/runtimeStatus.js');
@@ -60,6 +68,9 @@ describe('SessionService', () => {
     });
 
     sessionService = new SessionService('/test/project/root');
+    // Module mocks are not reset by restoreAllMocks; clear the salvage spy
+    // so per-test call/order assertions never read stale invocations.
+    vi.mocked(persistUsageBeforeTranscriptDeletion).mockClear();
 
     readdirSyncSpy = vi.spyOn(fs, 'readdirSync').mockReturnValue([]);
     statSyncSpy = vi.spyOn(fs, 'statSync').mockImplementation(
@@ -234,6 +245,100 @@ describe('SessionService', () => {
       expect(vi.mocked(jsonl.readLines).mock.calls[0][0]).toContain(
         '/chats/archive/',
       );
+    });
+
+    it('getSessionInfoCounts aggregates active and archived membership', async () => {
+      readdirSyncSpy.mockImplementation((dir: fs.PathLike) => {
+        if (dir.toString().endsWith(`${path.sep}archive`)) {
+          return [`${sessionIdB}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>;
+        }
+        return [
+          `${sessionIdA}.jsonl`,
+          'archive',
+          'not-a-session.txt',
+        ] as unknown as Array<fs.Dirent<Buffer>>;
+      });
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes(sessionIdA)) return [recordA1];
+          if (filePath.includes(sessionIdB)) return [recordB1];
+          return [];
+        },
+      );
+
+      const result = await sessionService.getSessionInfoCounts();
+
+      expect(result).toEqual({
+        active: 1,
+        archived: 1,
+        total: 2,
+        truncated: false,
+      });
+      // Membership scan only needs the first record — never a deep read.
+      for (const [, lineLimit] of vi.mocked(jsonl.readLines).mock.calls) {
+        expect(lineLimit).toBe(1);
+      }
+    });
+
+    it('getSessionInfoCounts excludes sessions from other projects', async () => {
+      readdirSyncSpy.mockImplementation((dir: fs.PathLike) =>
+        dir.toString().endsWith(`${path.sep}archive`)
+          ? ([] as unknown as Array<fs.Dirent<Buffer>>)
+          : ([`${sessionIdA}.jsonl`] as unknown as Array<fs.Dirent<Buffer>>),
+      );
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        { ...recordA1, cwd: '/different/project' },
+      ]);
+      vi.mocked(getProjectHash).mockImplementation((cwd: string) =>
+        cwd === '/test/project/root'
+          ? 'test-project-hash'
+          : 'other-project-hash',
+      );
+
+      await expect(sessionService.getSessionInfoCounts()).resolves.toEqual({
+        active: 0,
+        archived: 0,
+        total: 0,
+        truncated: false,
+      });
+    });
+
+    it('getSessionInfoCounts returns zeros when chats dirs are missing', async () => {
+      const error = new Error('ENOENT') as NodeJS.ErrnoException;
+      error.code = 'ENOENT';
+      readdirSyncSpy.mockImplementation(() => {
+        throw error;
+      });
+
+      await expect(sessionService.getSessionInfoCounts()).resolves.toEqual({
+        active: 0,
+        archived: 0,
+        total: 0,
+        truncated: false,
+      });
+    });
+
+    it('marks counts truncated when a candidate session cannot be read', async () => {
+      readdirSyncSpy.mockImplementation((dir: fs.PathLike) =>
+        dir.toString().endsWith(`${path.sep}archive`)
+          ? ([] as unknown as Array<fs.Dirent<Buffer>>)
+          : ([`${sessionIdA}.jsonl`, `${sessionIdB}.jsonl`] as unknown as Array<
+              fs.Dirent<Buffer>
+            >),
+      );
+      vi.mocked(jsonl.readLines).mockImplementation(
+        async (filePath: string) => {
+          if (filePath.includes(sessionIdA)) return [recordA1];
+          throw new Error('unreadable');
+        },
+      );
+
+      await expect(sessionService.getSessionInfoCounts()).resolves.toEqual({
+        active: 1,
+        archived: 0,
+        total: 1,
+        truncated: true,
+      });
     });
 
     it('should extract prompt text from first record', async () => {
@@ -472,6 +577,85 @@ describe('SessionService', () => {
       expect(loaded?.conversation.messages[0].uuid).toBe('b1');
       expect(loaded?.conversation.messages[1].uuid).toBe('b2');
       expect(loaded?.lastCompletedUuid).toBe('b2');
+    });
+
+    it('reads archived sessions only through the explicit read-only method', async () => {
+      const now = Date.now();
+      statSyncSpy.mockReturnValue({
+        mtimeMs: now,
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.read).mockResolvedValue([recordB1, recordB2]);
+
+      const loaded = await sessionService.loadArchivedSession(sessionIdB, {
+        maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+      });
+
+      expect(loaded?.conversation.messages).toHaveLength(2);
+      expect(vi.mocked(jsonl.read)).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdB}.jsonl`),
+      );
+      expect(statSyncSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('accepts an archived session exactly at the requested size limit', async () => {
+      statSyncSpy.mockReturnValue({
+        size: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+      vi.mocked(jsonl.read).mockResolvedValue([recordB1, recordB2]);
+
+      await expect(
+        sessionService.loadArchivedSession(sessionIdB, {
+          maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        }),
+      ).resolves.toBeDefined();
+    });
+
+    it('rejects an archived session above the requested size limit', async () => {
+      const snapshotSize = SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1;
+      statSyncSpy.mockReturnValue({
+        size: snapshotSize,
+        mtimeMs: Date.now(),
+        isFile: () => true,
+      } as fs.Stats);
+
+      const load = sessionService.loadArchivedSession(sessionIdB, {
+        maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+      });
+
+      await expect(load).rejects.toEqual(
+        new SessionTranscriptTooLargeError(
+          sessionIdB,
+          snapshotSize,
+          SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        ),
+      );
+      expect(vi.mocked(jsonl.read)).not.toHaveBeenCalled();
+    });
+
+    it('rejects invalid archived session ids before accessing storage', async () => {
+      await expect(
+        sessionService.loadArchivedSession('../outside', {
+          maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        }),
+      ).resolves.toBeUndefined();
+      expect(statSyncSpy).not.toHaveBeenCalled();
+      expect(vi.mocked(jsonl.read)).not.toHaveBeenCalled();
+    });
+
+    it('returns undefined when the archived file is missing at the size check', async () => {
+      statSyncSpy.mockImplementationOnce(() => {
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      });
+
+      await expect(
+        sessionService.loadArchivedSession(sessionIdB, {
+          maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+        }),
+      ).resolves.toBeUndefined();
+      expect(vi.mocked(jsonl.read)).not.toHaveBeenCalled();
     });
 
     it('loads artifact side records attached to the active branch', async () => {
@@ -1262,10 +1446,32 @@ describe('SessionService', () => {
 
       expect(result).toBe(true);
       expect(unlinkSyncSpy).toHaveBeenCalled();
+      // #7384: the usage salvage must see the transcript BEFORE it is
+      // unlinked, or the summary is unrecoverable.
+      const salvage = vi.mocked(persistUsageBeforeTranscriptDeletion);
+      expect(salvage).toHaveBeenCalledWith(
+        expect.stringContaining(`${sessionIdA}.jsonl`),
+      );
+      expect(salvage.mock.invocationCallOrder[0]!).toBeLessThan(
+        unlinkSyncSpy.mock.invocationCallOrder[0]!,
+      );
       expect(rmSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`file-history/${sessionIdA}`),
         { recursive: true, force: true },
       );
+    });
+
+    it('still deletes the session when the usage salvage fails', async () => {
+      // Contract: the salvage must never block deletion.
+      vi.mocked(persistUsageBeforeTranscriptDeletion).mockRejectedValueOnce(
+        new Error('salvage exploded'),
+      );
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      await expect(sessionService.removeSession(sessionIdA)).resolves.toBe(
+        true,
+      );
+      expect(unlinkSyncSpy).toHaveBeenCalled();
     });
 
     it('should clear session organization when removing a session', async () => {
@@ -1398,6 +1604,15 @@ describe('SessionService', () => {
         expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
       );
       expect(unlinkSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+      );
+      // #7425 review follow-up: the archived copy's usage must be salvaged
+      // before deletion too — with a telemetry-less fresh active copy it is
+      // the only holder of the session's history. Pin the call so removing
+      // the "redundant-looking" archived salvage fails this test.
+      expect(
+        vi.mocked(persistUsageBeforeTranscriptDeletion),
+      ).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
       );
     });
@@ -2810,7 +3025,7 @@ describe('SessionService', () => {
       );
       fs.mkdirSync(chatsDir, { recursive: true });
       const file = realPath.join(chatsDir, `${sessionId}.jsonl`);
-      const lines = [
+      const lines: Array<Record<string, unknown>> = [
         {
           uuid: 'u1',
           parentUuid: null,
@@ -3450,7 +3665,7 @@ describe('SessionService', () => {
       );
     });
 
-    it('drops the source parent_session record so the fork inherits no lineage', async () => {
+    it('drops creation metadata so the fork inherits no lineage or source', async () => {
       // A fork is a fresh top-level session, not a sub-session. Copying the
       // source's parent_session record would make the fork report the original's
       // parent as its own. Seed the parent_session record on the active branch
@@ -3463,7 +3678,7 @@ describe('SessionService', () => {
       );
       fs.mkdirSync(chatsDir, { recursive: true });
       const srcFile = realPath.join(chatsDir, `${oldId}.jsonl`);
-      const lines = [
+      const lines: Array<Record<string, unknown>> = [
         {
           uuid: 'u1',
           parentUuid: null,
@@ -3487,7 +3702,7 @@ describe('SessionService', () => {
         },
         {
           uuid: 'u2',
-          parentUuid: 'up',
+          parentUuid: 'us',
           sessionId: oldId,
           type: 'assistant',
           timestamp: '2026-04-22T00:00:01.000Z',
@@ -3496,6 +3711,20 @@ describe('SessionService', () => {
           message: { role: 'model', parts: [{ text: 'hi' }] },
         },
       ];
+      lines.splice(2, 0, {
+        uuid: 'us',
+        parentUuid: 'up',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'session_source',
+        timestamp: '2026-04-22T00:00:00.750Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          sourceType: 'scheduled_task',
+          sourceId: 'task-123',
+        },
+      });
       fs.writeFileSync(
         srcFile,
         lines.map((l) => JSON.stringify(l)).join('\n') + '\n',
@@ -3513,10 +3742,20 @@ describe('SessionService', () => {
           (r) => r.type === 'system' && r.subtype === 'parent_session',
         ),
       ).toBe(false);
+      expect(
+        written.some(
+          (r) => r.type === 'system' && r.subtype === 'session_source',
+        ),
+      ).toBe(false);
 
       // The source keeps its lineage; the fork carries none of it.
       expect(await service.readParentSessionId(oldId)).toBe('P');
       expect(await service.readParentSessionId(newId)).toBeUndefined();
+      expect(await service.readCreationMetadata(oldId)).toMatchObject({
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      });
+      expect(await service.readCreationMetadata(newId)).toEqual({});
     });
   });
 
@@ -3695,6 +3934,56 @@ describe('SessionService', () => {
     });
   });
 
+  describe('listSessions worktree membership', () => {
+    const worktreeSessionId = '7ca8c920-e29b-41d4-a716-446655440001';
+
+    it('includes a session whose transcript cwd is a worktree under this project', async () => {
+      (path as unknown as Record<string, unknown>)['sep'] = '/';
+      readdirSyncSpy.mockReturnValue([
+        `${worktreeSessionId}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        {
+          ...recordA1,
+          sessionId: worktreeSessionId,
+          cwd: '/test/project/root/.qwen/worktrees/my-task',
+        },
+      ]);
+      // The full worktree cwd hashes differently from the repo root,
+      // so the first getProjectHash(recordCwd) check fails and the
+      // marker-based inference branch is exercised.
+      vi.mocked(getProjectHash).mockImplementation((p: string) =>
+        p === '/test/project/root' ? 'test-project-hash' : 'worktree-hash',
+      );
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].sessionId).toBe(worktreeSessionId);
+    });
+
+    it('excludes a session whose worktree belongs to a different project', async () => {
+      (path as unknown as Record<string, unknown>)['sep'] = '/';
+      readdirSyncSpy.mockReturnValue([
+        `${worktreeSessionId}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        {
+          ...recordA1,
+          sessionId: worktreeSessionId,
+          cwd: '/other/repo/.qwen/worktrees/my-task',
+        },
+      ]);
+      vi.mocked(getProjectHash).mockImplementation((p: string) =>
+        p.startsWith('/other/repo') ? 'other-hash' : 'test-project-hash',
+      );
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items).toHaveLength(0);
+    });
+  });
+
   describe('listSessions parentSessionId round-trip', () => {
     // Uses real disk like findSessionTitlesByPrefix — readParentSessionIdFromFile
     // does a synchronous tail/head scan of the file, so the mocked
@@ -3789,6 +4078,21 @@ describe('SessionService', () => {
       systemPayload: { parentSessionId },
     });
 
+    const sessionSourceLine = (sessionId: string) => ({
+      uuid: 'u3',
+      parentUuid: 'u2',
+      sessionId,
+      type: 'system',
+      subtype: 'session_source',
+      timestamp: '2026-04-22T00:00:02.000Z',
+      cwd,
+      version: 'test',
+      systemPayload: {
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      },
+    });
+
     const writeSession = (
       sessionId: string,
       lines: Array<Record<string, unknown>>,
@@ -3802,7 +4106,12 @@ describe('SessionService', () => {
     };
 
     const findItem = (
-      items: Array<{ sessionId: string; parentSessionId?: string }>,
+      items: Array<{
+        sessionId: string;
+        parentSessionId?: string;
+        sourceType?: string;
+        sourceId?: string;
+      }>,
       sessionId: string,
     ) => items.find((item) => item.sessionId === sessionId);
 
@@ -3818,6 +4127,46 @@ describe('SessionService', () => {
       const item = findItem(result.items, sessionId);
       expect(item).toBeDefined();
       expect(item?.parentSessionId).toBe('parent-abc');
+    });
+
+    it('rehydrates source metadata for lists and direct restore lookup', async () => {
+      const sessionId = '77777777-7777-7777-7777-777777777777';
+      writeSession(sessionId, [
+        userLine(sessionId, 'hello'),
+        parentSessionLine(sessionId, 'parent-abc'),
+        sessionSourceLine(sessionId),
+      ]);
+
+      const result = await service.listSessions();
+
+      expect(findItem(result.items, sessionId)).toMatchObject({
+        parentSessionId: 'parent-abc',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      });
+      expect(await service.readCreationMetadata(sessionId)).toEqual({
+        parentSessionId: 'parent-abc',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      });
+    });
+
+    it('keeps the first immutable source record', async () => {
+      const sessionId = '88888888-8888-8888-8888-888888888888';
+      writeSession(sessionId, [
+        userLine(sessionId, 'hello'),
+        sessionSourceLine(sessionId),
+        {
+          ...sessionSourceLine(sessionId),
+          uuid: 'u4',
+          systemPayload: { sourceType: 'api', sourceId: 'request-456' },
+        },
+      ]);
+
+      expect(await service.readCreationMetadata(sessionId)).toMatchObject({
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      });
     });
 
     it('leaves parentSessionId undefined when no parent_session record exists', async () => {

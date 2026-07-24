@@ -194,6 +194,7 @@ export default {
   'toolDisplayName.CronDelete': '删除定时任务',
   'toolDisplayName.LoopWakeup': '循环唤醒',
   'toolDisplayName.CreateSubSession': '创建子会话',
+  'toolDisplayName.ListAgents': '列出 Agent',
   'toolDisplayName.TaskCreate': '创建任务',
   'toolDisplayName.TaskUpdate': '更新任务',
   'toolDisplayName.TaskList': '任务列表',
@@ -276,6 +277,7 @@ export default {
     '正在连接到 MCP servers... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': '输入您的消息或 @ 文件路径',
   '? for shortcuts': '按 ? 查看快捷键',
+  'Pasting…': '正在粘贴…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "按 'i' 进入插入模式，按 'Esc' 进入普通模式",
   'Cancel operation / Clear input (double press)':
@@ -462,6 +464,8 @@ export default {
   'Manage existing subagents (view, edit, delete).':
     '管理现有子智能体（查看、编辑、删除）',
   'Create a new subagent with guided setup.': '通过引导式设置创建新的子智能体',
+  'Create a reusable skill from a knowledge source (file, URL, conversation, or text).':
+    '从知识源（文件、URL、对话或文本）创建可复用的技能。',
 
   // ============================================================================
   // Agents - Management Dialog
@@ -756,6 +760,7 @@ export default {
   'Tool Schema Compliance': 'Tool Schema 兼容性',
   // Settings enum options
   'Auto (detect from system)': '自动（从系统检测）',
+  'Auto (follow user input)': '自动（跟随用户输入）',
   'Auto (detect terminal theme)': '自动（检测终端主题）',
   Auto: '自动',
   Text: '文本',
@@ -909,7 +914,7 @@ export default {
     '请将要卸载的扩展名称作为位置参数。',
   'Enables an extension.': '启用扩展。',
   'The name of the extension to enable.': '要启用的扩展名称。',
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
     '启用扩展的作用域。如果未设置，将在所有作用域中启用。',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     '扩展 "{{name}}" 已在作用域 "{{scope}}" 中启用。',
@@ -919,7 +924,7 @@ export default {
     '无效的作用域：{{scope}}。请使用 {{scopes}} 之一。',
   'Disables an extension.': '禁用扩展。',
   'The name of the extension to disable.': '要禁用的扩展名称。',
-  'The scope to disable the extenison in.': '禁用扩展的作用域。',
+  'The scope to disable the extension in.': '禁用扩展的作用域。',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     '扩展 "{{name}}" 已在作用域 "{{scope}}" 中禁用。',
   'Extension "{{name}}" successfully updated: {{oldVersion}} → {{newVersion}}.':
@@ -1761,7 +1766,11 @@ export default {
   'Press Ctrl+C again to exit.': '再次按 Ctrl+C 退出',
   'Press Ctrl+D again to exit.': '再次按 Ctrl+D 退出',
   'Press Esc again to clear.': '再次按 Esc 清除',
-  'Press ↑ to edit queued messages': '按 ↑ 编辑排队消息',
+  'Ctrl+Q to queue · ↑ to edit queued messages':
+    'Ctrl+Q 排到下一轮 · ↑ 编辑排队消息',
+  'Enter to steer · Ctrl+Q to queue':
+    'Enter 追加到当前任务 · Ctrl+Q 排到下一轮',
+  'Queue message for the next turn': '将消息排到下一轮',
 
   // ============================================================================
   // MCP Status
@@ -2015,6 +2024,7 @@ export default {
   'Press Ctrl+Y to retry': '按 Ctrl+Y 重试。',
   'No failed request to retry.': '没有可重试的失败请求。',
   'to retry last request': '重试上一次请求',
+  'to queue for the next turn': '排到下一轮',
 
   // ============================================================================
   // Coding Plan Authentication
@@ -2391,8 +2401,14 @@ export default {
   'A new version of Qwen Code is available! {{current}} → {{latest}}':
     'Qwen Code 有新版本可用！{{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} 已是最新！',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    '检查更新失败。请检查网络或 registry 配置。',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    '检查更新失败（{{reason}}）。请检查网络或 registry 配置。',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    '已跳过更新检查（{{reason}}）— 可运行 /update 重试。',
+  'registry did not respond within {{seconds}}s':
+    'registry 在 {{seconds}} 秒内未响应',
+  'registry unreachable': 'registry 无法连接',
+  'registry error': 'registry 错误',
   'Unable to check for updates: {{reason}}': '无法检查更新：{{reason}}',
   'Update successful! The new version will be used on your next run.':
     '更新成功！新版本将在下次运行时生效。',
@@ -2427,6 +2443,15 @@ export default {
     '无法自动更新此独立安装。请从以下地址重新安装：',
   'Manual update required. Please reinstall Qwen Code.':
     '需要手动更新。请重新安装 Qwen Code。',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    '此会话使用自定义沙箱镜像 {{image}}。请更新该镜像并重启 Qwen Code。',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    '请在宿主机上更新 Qwen Code，然后重启沙箱。',
+  'The update will be installed after you exit this session.':
+    '退出当前会话后将自动安装更新。',
+  'Run /update to install the update on the host.':
+    '运行 /update 在宿主机上安装更新。',
+  'Run /update to install the update.': '运行 /update 安装更新。',
   '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
     '⚠️ 历史记录缺口：此处之前的会话记录已丢失（存储中断），且无法找回。',
 

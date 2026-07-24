@@ -16,6 +16,7 @@ vi.mock('../../utils/schemaConverter.js', () => ({
 
 import { convertSchema } from '../../utils/schemaConverter.js';
 import { AnthropicContentConverter } from './converter.js';
+import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 
 describe('AnthropicContentConverter', () => {
   let converter: AnthropicContentConverter;
@@ -233,6 +234,48 @@ describe('AnthropicContentConverter', () => {
       });
     });
 
+    it('normalizes legacy dotted MCP names before sending history', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-legacy-mcp',
+                  name: 'mcp__zybio__database.query_uniprot',
+                  args: { query: 'P12345' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call-legacy-mcp',
+                  name: 'mcp__zybio__database.query_uniprot',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+      const assistant = messages[0];
+      const toolUse = Array.isArray(assistant?.content)
+        ? assistant.content.find((block) => block.type === 'tool_use')
+        : undefined;
+
+      expect(toolUse?.type).toBe('tool_use');
+      if (toolUse?.type === 'tool_use') {
+        expect(toolUse.name).toMatch(/^[A-Za-z][A-Za-z0-9_-]*$/);
+        expect(toolUse.name).not.toContain('.');
+      }
+    });
+
     it('converts functionResponse parts into user tool_result messages', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
@@ -315,6 +358,7 @@ describe('AnthropicContentConverter', () => {
             type: 'tool_result',
             tool_use_id: 'call-1',
             content: 'boom',
+            is_error: true,
             cache_control: { type: 'ephemeral' },
           },
         ],
@@ -1203,6 +1247,210 @@ describe('AnthropicContentConverter', () => {
     });
   });
 
+  describe('unsigned proxy thinking history', () => {
+    it('drops unsigned thinking while preserving visible content and signed blocks', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'First' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: 'unsigned', thought: true },
+                {
+                  text: 'empty signature',
+                  thought: true,
+                  thoughtSignature: '',
+                },
+                {
+                  text: 'signed',
+                  thought: true,
+                  thoughtSignature: 'real-signature',
+                },
+                { text: 'Visible answer' },
+              ],
+            },
+            { role: 'user', parts: [{ text: 'Second' }] },
+          ],
+        },
+        {
+          dropUnsignedAssistantThinking: true,
+          enableCacheControl: false,
+        },
+      );
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          {
+            type: 'thinking',
+            thinking: 'signed',
+            signature: 'real-signature',
+          },
+          { type: 'text', text: 'Visible answer' },
+        ],
+      });
+    });
+
+    it('drops a thinking-only turn and merges the surrounding user turns', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'First' }] },
+            {
+              role: 'model',
+              parts: [{ text: 'unsigned', thought: true }],
+            },
+            { role: 'user', parts: [{ text: 'Second' }] },
+          ],
+        },
+        {
+          dropUnsignedAssistantThinking: true,
+          enableCacheControl: false,
+        },
+      );
+
+      expect(messages).toEqual([
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'First' },
+            { type: 'text', text: 'Second' },
+          ],
+        },
+      ]);
+    });
+
+    it('fails locally when an unsigned thinking block belongs to a tool-use turn', () => {
+      expect(() =>
+        converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: [
+              { role: 'user', parts: [{ text: 'Run tool' }] },
+              {
+                role: 'model',
+                parts: [
+                  { text: 'unsigned', thought: true },
+                  { functionCall: { id: 't1', name: 'tool', args: {} } },
+                ],
+              },
+              {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 't1',
+                      name: 'tool',
+                      response: { output: 'ok' },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+          { dropUnsignedAssistantThinking: true },
+        ),
+      ).toThrow('proxy omitted the thinking signature');
+    });
+
+    it('drops unsigned thinking from a completed tool-use turn', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Run tool' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: 'unsigned', thought: true },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+            { role: 'model', parts: [{ text: 'Finished' }] },
+            { role: 'user', parts: [{ text: 'Next' }] },
+          ],
+        },
+        { dropUnsignedAssistantThinking: true },
+      );
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 't1', name: 'tool', input: {} }],
+      });
+    });
+
+    it('fails when an earlier step in the active tool loop has unsigned thinking', () => {
+      expect(() =>
+        converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: [
+              { role: 'user', parts: [{ text: 'Run tools' }] },
+              {
+                role: 'model',
+                parts: [
+                  { text: 'unsigned', thought: true },
+                  { functionCall: { id: 't1', name: 'first', args: {} } },
+                ],
+              },
+              {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 't1',
+                      name: 'first',
+                      response: { output: 'one' },
+                    },
+                  },
+                ],
+              },
+              {
+                role: 'model',
+                parts: [
+                  {
+                    text: 'signed',
+                    thought: true,
+                    thoughtSignature: 'real-signature',
+                  },
+                  { functionCall: { id: 't2', name: 'second', args: {} } },
+                ],
+              },
+              {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 't2',
+                      name: 'second',
+                      response: { output: 'two' },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+          { dropUnsignedAssistantThinking: true },
+        ),
+      ).toThrow('proxy omitted the thinking signature');
+    });
+  });
+
   // https://github.com/QwenLM/qwen-code/issues/3786 — DeepSeek's
   // anthropic-compatible API rejects requests in thinking mode when a prior
   // assistant turn carrying `tool_use` omits a thinking block. Plain-text
@@ -1955,6 +2203,10 @@ describe('AnthropicContentConverter', () => {
         totalTokenCount: 8,
         cachedContentTokenCount: 0,
       });
+      expect(getGenAiUsageProvenance(response.usageMetadata)).toEqual({
+        cachedInputTokensReported: false,
+        cacheCreationInputTokens: undefined,
+      });
 
       const parts = response.candidates?.[0]?.content?.parts || [];
       expect(parts).toEqual([
@@ -2008,6 +2260,22 @@ describe('AnthropicContentConverter', () => {
         totalTokenCount: 43_688,
         cachedContentTokenCount: 32_088,
       });
+      expect(getGenAiUsageProvenance(response.usageMetadata)).toEqual({
+        cachedInputTokensReported: true,
+        cacheCreationInputTokens: 8_700,
+      });
+    });
+
+    it('does not substitute the request model when the provider omits its model', () => {
+      const response = converter.convertAnthropicResponseToGemini({
+        id: 'msg-no-model',
+        model: '',
+        stop_reason: 'end_turn',
+        content: [{ type: 'text', text: 'ok' }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      } as unknown as Anthropic.Message);
+
+      expect(response.modelVersion).toBeUndefined();
     });
   });
 

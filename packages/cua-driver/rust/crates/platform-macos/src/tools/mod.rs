@@ -180,13 +180,9 @@ impl ResizeRegistry {
 
 /// Runtime-mutable driver configuration persisted across calls within a session.
 ///
-/// `capture_mode` is per-call now (the `capture_mode` param). `capture_scope` is
-/// re-introduced here as a GLOBAL setting: it gates `get_desktop_state` (a
-/// full-display capture has no pid/window_id and therefore no per-call scope to
-/// key on — the only coherent gate is a global one), matching the Windows/Linux
-/// `DriverConfig.capture_scope`. Per-call tools (`click`/`scroll`) still accept a
-/// per-call `scope`; this global is the baseline the no-args desktop-capture
-/// tool reads. Default `"window"`.
+/// `capture_mode` is per-call. `capture_scope` is the persisted default layered
+/// beneath per-MCP-session overrides; `get_desktop_state`, `get_config`, and
+/// `set_config` all resolve the same effective session value. Default `"window"`.
 pub struct DriverConfig {
     /// Max screenshot dimension (0 = no limit). Applied during screenshot/zoom.
     /// Default 1568 matches Swift's `CuaDriverConfig.defaultMaxImageDimension` —
@@ -228,8 +224,8 @@ pub fn load_driver_config() -> DriverConfig {
         Err(_) => return cfg,  // malformed file — use defaults
     };
     // `capture_mode` is per-call now; an old on-disk `capture_mode` key is
-    // silently ignored. `capture_scope` IS a global setting again (gates
-    // get_desktop_state) — load it, accepting only window|desktop.
+    // silently ignored. Load the persisted capture_scope default, accepting
+    // only window|desktop; named sessions may override it in memory.
     if let Some(v) = json.get("max_image_dimension").and_then(|v| v.as_u64()) {
         if let Ok(v32) = u32::try_from(v) {
             cfg.max_image_dimension = v32;
@@ -243,24 +239,58 @@ pub fn load_driver_config() -> DriverConfig {
     cfg
 }
 
-/// Persist a single key/value pair to `~/.cua-driver/config.json`.
+/// Persist config updates to `~/.cua-driver/config.json`.
 /// Merges with any existing file contents so other keys are preserved.
+/// Runs `apply_in_memory` after the atomic rename but before releasing the
+/// process-wide commit lock, keeping concurrent disk and memory commits ordered.
 /// Returns `Err` if the directory cannot be created or the file cannot be written.
-pub fn write_driver_config_key(key: &str, value: &serde_json::Value) -> Result<(), String> {
-    let path = config_file_path();
-    let mut json: serde_json::Value = path
-        .exists()
-        .then(|| std::fs::read_to_string(&path).ok())
-        .flatten()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_else(|| serde_json::json!({}));
-    json[key] = value.clone();
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let body = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
-    std::fs::write(&path, body).map_err(|e| e.to_string())?;
-    Ok(())
+static DRIVER_CONFIG_COMMIT_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
+    std::sync::OnceLock::new();
+
+pub(super) fn with_driver_config_commit_lock<T>(
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _guard = DRIVER_CONFIG_COMMIT_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .map_err(|e| e.to_string())?;
+    operation()
+}
+
+pub fn write_driver_config_updates<T>(
+    updates: &[(&str, serde_json::Value)],
+    apply_in_memory: impl FnOnce() -> T,
+) -> Result<T, String> {
+    write_driver_config_updates_at_path(&config_file_path(), updates, apply_in_memory)
+}
+
+fn write_driver_config_updates_at_path<T>(
+    path: &std::path::Path,
+    updates: &[(&str, serde_json::Value)],
+    apply_in_memory: impl FnOnce() -> T,
+) -> Result<T, String> {
+    with_driver_config_commit_lock(|| {
+        let mut json: serde_json::Value = path
+            .exists()
+            .then(|| std::fs::read_to_string(path).ok())
+            .flatten()
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_else(|| serde_json::json!({}));
+        for (key, value) in updates {
+            json[*key] = value.clone();
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let body = serde_json::to_string_pretty(&json).map_err(|e| e.to_string())?;
+        let temp_path = path.with_extension(format!("json.tmp-{}", std::process::id()));
+        std::fs::write(&temp_path, body).map_err(|e| e.to_string())?;
+        if let Err(e) = std::fs::rename(&temp_path, path) {
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(e.to_string());
+        }
+        Ok(apply_in_memory())
+    })
 }
 
 /// Per-session config overrides layered over the global persisted `DriverConfig`.
@@ -268,14 +298,15 @@ pub fn write_driver_config_key(key: &str, value: &serde_json::Value) -> Result<(
 /// The cua-driver daemon is one shared process: every `cua-driver mcp` proxy
 /// connects to it and shares its `ToolState`. `DriverConfig` is therefore
 /// multi-tenant AND persisted to disk — so without session scoping, session A's
-/// `set_config capture_mode=vision` clobbers session B's value and flips the
-/// on-disk default under everyone. These overrides fix that: a named MCP session
+/// `set_config` clobbers session B's value and flips the on-disk default under
+/// everyone. These overrides fix that: a named MCP session
 /// gets an in-memory, non-persisted override keyed by its `_session_id`; the
 /// anonymous session (CLI / one-shot `call`) still writes the shared global +
 /// disk. `None` fields mean "fall through to the global layer".
 #[derive(Clone, Default)]
 pub struct ConfigOverrides {
     pub max_image_dimension: Option<u32>,
+    pub capture_scope: Option<String>,
 }
 
 /// Thread-safe map of `session_id` → `ConfigOverrides`, mirroring
@@ -304,6 +335,9 @@ impl SessionConfigRegistry {
         if delta.max_image_dimension.is_some() {
             entry.max_image_dimension = delta.max_image_dimension;
         }
+        if delta.capture_scope.is_some() {
+            entry.capture_scope = delta.capture_scope;
+        }
     }
 
     /// Resolve the effective `max_image_dimension` for `session`, layering its
@@ -314,6 +348,27 @@ impl SessionConfigRegistry {
         match ov {
             Some(ov) => ov.max_image_dimension.unwrap_or(global.max_image_dimension),
             None => global.max_image_dimension,
+        }
+    }
+
+    pub fn effective_capture_scope(&self, session: Option<&str>, global: &DriverConfig) -> String {
+        let ov = session.and_then(|s| self.inner.lock().unwrap().get(s).cloned());
+        ov.and_then(|o| o.capture_scope)
+            .unwrap_or_else(|| global.capture_scope.clone())
+    }
+
+    pub fn effective_config(
+        &self,
+        session: Option<&str>,
+        global: &DriverConfig,
+    ) -> (u32, String) {
+        let ov = session.and_then(|s| self.inner.lock().unwrap().get(s).cloned());
+        match ov {
+            Some(ov) => (
+                ov.max_image_dimension.unwrap_or(global.max_image_dimension),
+                ov.capture_scope.unwrap_or_else(|| global.capture_scope.clone()),
+            ),
+            None => (global.max_image_dimension, global.capture_scope.clone()),
         }
     }
 
@@ -367,6 +422,11 @@ impl Default for ToolState {
 /// variant — same name, stricter args, window-scoped JPEG @ 85% + a text
 /// note telling the caller to use pixel-addressed tools.
 pub fn register_all(registry: &mut ToolRegistry, compat: bool) {
+    if let Err(error) = crate::ax::bindings::set_global_messaging_timeout(
+        crate::ax::bindings::AX_MESSAGING_TIMEOUT_SECS as f32,
+    ) {
+        tracing::warn!(error, "failed to configure process-wide AX messaging timeout");
+    }
     let state = Arc::new(ToolState::default());
     // Share the element cache with the recording-hook layer so it can
     // resolve element_index → window-local screenshot coords for click.png.
@@ -416,7 +476,7 @@ pub fn register_all(registry: &mut ToolRegistry, compat: bool) {
     // triggers Claude Code's computer-use beta-tool injection (see cli.rs).
     let _ = compat;
     registry.register(Box::new(get_screen_size::GetScreenSizeTool));
-    registry.register(Box::new(get_desktop_state::GetDesktopStateTool));
+    registry.register(Box::new(get_desktop_state::GetDesktopStateTool::new(state.clone())));
     registry.register(Box::new(get_cursor_position::GetCursorPositionTool));
     registry.register(Box::new(move_cursor::MoveCursorTool::new(state.clone())));
     registry.register(Box::new(cursor_tools::SetAgentCursorEnabledTool::new(state.clone())));
@@ -459,9 +519,10 @@ pub fn register_all(registry: &mut ToolRegistry, compat: bool) {
 mod session_config_guard_tests {
     use super::*;
     use cua_driver_core::session::fire_session_end;
+    use std::sync::{mpsc, Mutex};
 
     fn overrides(max_dim: u32) -> ConfigOverrides {
-        ConfigOverrides { max_image_dimension: Some(max_dim) }
+        ConfigOverrides { max_image_dimension: Some(max_dim), capture_scope: None }
     }
 
     #[test]
@@ -489,6 +550,84 @@ mod session_config_guard_tests {
         reg.set(sid, overrides(800));
         let dim = reg.effective_max_image_dimension(Some(sid), &global);
         assert_eq!(dim, 800, "live session override must apply");
+    }
+
+    #[test]
+    fn capture_scope_is_isolated_per_session() {
+        let reg = SessionConfigRegistry::new();
+        let global = DriverConfig::default();
+        let desktop = "wb-scope-desktop-B1C2D3";
+        let window = "wb-scope-window-E4F5G6";
+        reg.set(desktop, ConfigOverrides {
+            max_image_dimension: None,
+            capture_scope: Some("desktop".to_owned()),
+        });
+        reg.set(window, ConfigOverrides {
+            max_image_dimension: None,
+            capture_scope: Some("window".to_owned()),
+        });
+
+        assert_eq!(reg.effective_capture_scope(Some(desktop), &global), "desktop");
+        assert_eq!(reg.effective_capture_scope(Some(window), &global), "window");
+        assert_eq!(reg.effective_capture_scope(None, &global), "window");
+    }
+
+    #[test]
+    fn disk_and_memory_config_commits_keep_the_same_order() {
+        let dir = std::env::temp_dir().join(format!(
+            "qwen-cua-driver-config-order-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let path = dir.join("config.json");
+        let memory = Arc::new(Mutex::new(String::new()));
+        let (a_started_tx, a_started_rx) = mpsc::channel();
+        let (release_a_tx, release_a_rx) = mpsc::channel();
+        let (b_done_tx, b_done_rx) = mpsc::channel();
+
+        let path_a = path.clone();
+        let memory_a = memory.clone();
+        let writer_a = std::thread::spawn(move || {
+            write_driver_config_updates_at_path(
+                &path_a,
+                &[("capture_scope", serde_json::json!("window"))],
+                || {
+                    a_started_tx.send(()).unwrap();
+                    release_a_rx.recv().unwrap();
+                    *memory_a.lock().unwrap() = "window".to_owned();
+                },
+            )
+            .unwrap();
+        });
+        a_started_rx.recv().unwrap();
+
+        let path_b = path.clone();
+        let memory_b = memory.clone();
+        let writer_b = std::thread::spawn(move || {
+            write_driver_config_updates_at_path(
+                &path_b,
+                &[("capture_scope", serde_json::json!("desktop"))],
+                || {
+                    *memory_b.lock().unwrap() = "desktop".to_owned();
+                    b_done_tx.send(()).unwrap();
+                },
+            )
+            .unwrap();
+        });
+
+        let b_overtook_a = b_done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .is_ok();
+        release_a_tx.send(()).unwrap();
+        writer_a.join().unwrap();
+        writer_b.join().unwrap();
+
+        let disk: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let memory = memory.lock().unwrap().clone();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(!b_overtook_a, "a later disk write must wait for the earlier memory commit");
+        assert_eq!(disk["capture_scope"], memory);
     }
 }
 

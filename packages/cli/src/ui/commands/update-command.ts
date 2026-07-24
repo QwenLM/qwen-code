@@ -17,13 +17,17 @@ export const updateCommand: SlashCommand = {
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context) => {
     const [
-      { checkForUpdatesDetailed },
-      { handleAutoUpdate },
+      { checkForUpdatesDetailed, describeUpdateCheckFailure },
+      {
+        CUSTOM_SANDBOX_IMAGE_ENV_VAR,
+        HOST_UPDATE_RELAUNCH_ENV_VAR,
+        relaunchForUpdate,
+      },
       { performStandaloneUpdate },
       installationInfo,
     ] = await Promise.all([
       import('../utils/updateCheck.js'),
-      import('../../utils/handleAutoUpdate.js'),
+      import('../../utils/processUtils.js'),
       import('../../utils/standalone-update.js'),
       import('../../utils/installationInfo.js'),
     ]);
@@ -50,7 +54,8 @@ export const updateCommand: SlashCommand = {
         type: 'message' as const,
         messageType: 'error' as const,
         content: t(
-          'Failed to check for updates. Please check your network or registry configuration.',
+          'Failed to check for updates ({{reason}}). Please check your network or registry configuration.',
+          { reason: describeUpdateCheckFailure(updateCheck.error) },
         ),
       };
     }
@@ -82,13 +87,38 @@ export const updateCommand: SlashCommand = {
     };
 
     if (context.executionMode === 'interactive' && projectRoot) {
+      const customSandboxImage = process.env[CUSTOM_SANDBOX_IMAGE_ENV_VAR];
+      if (customSandboxImage) {
+        return {
+          type: 'message' as const,
+          messageType: 'info' as const,
+          content: `${info.message}\n${t(
+            'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.',
+            { image: customSandboxImage },
+          )}`,
+        };
+      }
+      const hostUpdateRelaunch = process.env[HOST_UPDATE_RELAUNCH_ENV_VAR];
       const isAutoUpdateEnabled =
         settings.merged.general?.enableAutoUpdate !== false;
+      if (hostUpdateRelaunch === 'true' && isAutoUpdateEnabled) {
+        await relaunchForUpdate();
+        return;
+      }
+      if (hostUpdateRelaunch !== undefined) {
+        return {
+          type: 'message' as const,
+          messageType: 'info' as const,
+          content: `${info.message}\n${t(
+            'Update Qwen Code on the host, then restart the sandbox.',
+          )}`,
+        };
+      }
       const canAutoUpdate =
         installInfo.updateCommand ||
         (installInfo.isStandalone && installInfo.standaloneDir);
       if (isAutoUpdateEnabled && canAutoUpdate) {
-        handleAutoUpdate(info, settings, projectRoot);
+        await relaunchForUpdate();
         return;
       }
       return manualInstructions();

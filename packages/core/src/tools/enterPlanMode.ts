@@ -17,6 +17,7 @@ import {
   buildSubagentPlanToolBlockedResult,
   isPlanLifecycleToolUnavailableInSubagent,
 } from '../agents/runtime/subagent-plan-tool-policy.js';
+import { getPlanModeSystemReminder } from '../core/prompts.js';
 
 const debugLogger = createDebugLogger('ENTER_PLAN_MODE');
 
@@ -134,13 +135,8 @@ class EnterPlanModeToolInvocation extends BaseToolInvocation<
     try {
       // Idempotent: only switch when not already in plan mode so we never
       // overwrite the saved prePlanMode.
-      // Mark this entry as model-initiated so exit_plan_mode runs the Plan
-      // Approval Gate for AUTO/YOLO sessions. User-initiated entries (Shift+Tab,
-      // /plan) leave this false and always get the confirmation dialog (#5574).
       if (this.config.getApprovalMode() !== ApprovalMode.PLAN) {
-        this.config.setApprovalMode(ApprovalMode.PLAN, {
-          enteredByModel: true,
-        });
+        this.config.setApprovalMode(ApprovalMode.PLAN);
       }
     } catch (error) {
       const errorMessage =
@@ -187,8 +183,7 @@ class EnterPlanModeToolInvocation extends BaseToolInvocation<
     }
 
     return {
-      llmContent:
-        'Plan mode is now active. Continue with read-only investigation, ask the user when needed, and use exit_plan_mode when the plan is ready.',
+      llmContent: getPlanModeSystemReminder(this.config.getSdkMode()),
       returnDisplay: 'Entered plan mode.',
     };
   }
@@ -199,6 +194,10 @@ export class EnterPlanModeTool extends BaseDeclarativeTool<
   ToolResult
 > {
   static readonly Name: string = ToolNames.ENTER_PLAN_MODE;
+
+  override get maxOutputChars(): number {
+    return Number.POSITIVE_INFINITY;
+  }
 
   constructor(private readonly config: Config) {
     super(

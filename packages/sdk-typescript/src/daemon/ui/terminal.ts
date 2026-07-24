@@ -24,7 +24,7 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
     case 'tool.update':
       return terminalLine(
         `tool ${event.status}`,
-        `${event.title}${event.details ? ` ${event.details}` : ''}`,
+        `${event.title ?? event.toolName ?? event.toolKind ?? 'Tool'}${event.details ? ` ${event.details}` : ''}`,
         '38;5;75',
       );
     case 'shell.output':
@@ -176,6 +176,8 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
         `${event.serverName} restart refused: ${event.reason}`,
         '33',
       );
+    case 'workspace.mcp.server_changed':
+      return terminalLine('mcp', `${event.serverName} ${event.action}`, '36');
     case 'workspace.extensions.changed':
       if (event.status === 'failed') {
         return terminalLine(

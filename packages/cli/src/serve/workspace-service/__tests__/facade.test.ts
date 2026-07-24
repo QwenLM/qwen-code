@@ -88,6 +88,7 @@ const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 
 vi.mock('../../../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
+  writeStderrLineSafe: mockWriteStderrLine,
 }));
 
 const { createDaemonWorkspaceService } = await import('../index.js');
@@ -205,6 +206,17 @@ async function withIsolatedWorkspace<T>(
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T | PromiseLike<T>) => void;
+} {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
 
 describe('createDaemonWorkspaceService', () => {
   beforeEach(() => {
@@ -657,6 +669,42 @@ describe('createDaemonWorkspaceService', () => {
 
       expect(result.workspaceCwd).toBe('/my/ws');
       expect(result.initialized).toBe(false);
+      expect(result.servers).toEqual([]);
+    });
+
+    it('does not replay a stale MCP snapshot when the status provider is idle', async () => {
+      const liveStatus = {
+        v: 1 as const,
+        workspaceCwd: '/ws',
+        initialized: true,
+        discoveryState: 'completed' as const,
+        servers: [
+          {
+            kind: 'mcp_server' as const,
+            status: 'ok' as const,
+            name: 'docs',
+            mcpStatus: 'connected' as const,
+            transport: 'stdio' as const,
+            disabled: false,
+            hasOAuthTokens: false,
+          },
+        ],
+      };
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockResolvedValueOnce(liveStatus)
+        .mockImplementationOnce((_m: string, idle: () => unknown) =>
+          Promise.resolve(idle()),
+        );
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, boundWorkspace: '/ws' }),
+      );
+
+      await svc.getWorkspaceMcpStatus(makeCtx());
+      const result = await svc.getWorkspaceMcpStatus(makeCtx());
+
+      expect(result.initialized).toBe(false);
+      expect(result.discoveryState).toBe('not_started');
       expect(result.servers).toEqual([]);
     });
 
@@ -1285,6 +1333,10 @@ describe('createDaemonWorkspaceService', () => {
       });
 
     it('uses the canonical skill name and refreshes every active session', async () => {
+      const invalidate = vi.fn();
+      const workspaceSkillsStatusProvider = Object.assign(vi.fn(), {
+        invalidate,
+      });
       const persistDisabledSkills = vi.fn().mockResolvedValue({
         changed: true,
         disabled: ['review'],
@@ -1297,6 +1349,7 @@ describe('createDaemonWorkspaceService', () => {
       const svc = createDaemonWorkspaceService(
         makeDeps({
           queryWorkspaceStatus: statusQuery(),
+          workspaceSkillsStatusProvider,
           persistDisabledSkills,
           invokeWorkspaceCommand,
           publishWorkspaceEvent,
@@ -1315,6 +1368,7 @@ describe('createDaemonWorkspaceService', () => {
         'review',
         false,
       );
+      expect(invalidate).toHaveBeenCalledWith('/workspace');
       expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
         'qwen/control/workspace/skills/refresh',
         { cwd: '/workspace' },
@@ -1678,6 +1732,19 @@ describe('createDaemonWorkspaceService', () => {
       expect(preheatAcpChild).not.toHaveBeenCalled();
     });
 
+    it('returns an error when ACP preheat is unavailable', async () => {
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ isChannelLive: () => false }),
+      );
+
+      await expect(svc.preheatAcpChild(makeCtx())).resolves.toMatchObject({
+        ready: false,
+        channelLive: false,
+        reason: 'error',
+        error: 'ACP preheat is unavailable',
+      });
+    });
+
     it('preheats the ACP child when the channel is not live', async () => {
       let live = false;
       const preheatAcpChild = vi.fn().mockImplementation(async () => {
@@ -1712,9 +1779,92 @@ describe('createDaemonWorkspaceService', () => {
         channelLive: false,
         reason: 'timeout',
       });
-      expect(preheatAcpChild).toHaveBeenCalledTimes(2);
+      expect(preheatAcpChild).toHaveBeenCalledOnce();
       expect(mockWriteStderrLine).toHaveBeenCalledWith(
         'qwen serve: ACP preheat timed out after 1ms',
+      );
+    });
+
+    it('lets concurrent waiters share one preheat attempt', async () => {
+      const pending = deferred<void>();
+      let live = false;
+      const preheatAcpChild = vi.fn(() => pending.promise);
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ isChannelLive: () => live, preheatAcpChild }),
+      );
+
+      const first = svc.preheatAcpChild(makeCtx(), { timeoutMs: 1000 });
+      const second = svc.preheatAcpChild(makeCtx(), { timeoutMs: 1000 });
+      live = true;
+      pending.resolve();
+
+      await expect(Promise.all([first, second])).resolves.toEqual([
+        expect.objectContaining({ ready: true, channelLive: true }),
+        expect.objectContaining({ ready: true, channelLive: true }),
+      ]);
+      expect(preheatAcpChild).toHaveBeenCalledOnce();
+    });
+
+    it('allows a new attempt after the shared preheat settles', async () => {
+      const firstAttempt = deferred<void>();
+      let live = false;
+      const preheatAcpChild = vi
+        .fn()
+        .mockImplementationOnce(() => firstAttempt.promise)
+        .mockImplementationOnce(async () => {
+          live = true;
+        });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ isChannelLive: () => live, preheatAcpChild }),
+      );
+
+      await svc.preheatAcpChild(makeCtx(), { timeoutMs: 1 });
+      firstAttempt.resolve();
+      await firstAttempt.promise;
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+      const retry = await svc.preheatAcpChild(makeCtx(), { timeoutMs: 1000 });
+
+      expect(retry).toMatchObject({ ready: true, channelLive: true });
+      expect(preheatAcpChild).toHaveBeenCalledTimes(2);
+    });
+
+    it('returns ready when the channel becomes live at the timeout boundary', async () => {
+      let live = false;
+      const preheatAcpChild = vi.fn(() => new Promise<void>(() => undefined));
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ isChannelLive: () => live, preheatAcpChild }),
+      );
+
+      const resultPromise = svc.preheatAcpChild(makeCtx(), { timeoutMs: 1 });
+      live = true;
+
+      await expect(resultPromise).resolves.toMatchObject({
+        ready: true,
+        channelLive: true,
+      });
+      const result = await resultPromise;
+      expect(result).not.toHaveProperty('reason');
+      expect(result).not.toHaveProperty('error');
+    });
+
+    it('returns an error when preheat resolves without a live channel', async () => {
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          isChannelLive: () => false,
+          preheatAcpChild: vi.fn().mockResolvedValue(undefined),
+        }),
+      );
+
+      await expect(
+        svc.preheatAcpChild(makeCtx(), { timeoutMs: 1000 }),
+      ).resolves.toMatchObject({
+        ready: false,
+        channelLive: false,
+        reason: 'error',
+        error: 'ACP preheat did not produce a live channel',
+      });
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'qwen serve: ACP preheat resolved without a live channel',
       );
     });
 
@@ -1732,7 +1882,34 @@ describe('createDaemonWorkspaceService', () => {
         ready: false,
         channelLive: false,
         reason: 'error',
+        error: 'ACP preheat failed',
       });
+      expect(Number.isInteger(result.durationMs)).toBe(true);
+      expect(result.durationMs).toBeGreaterThanOrEqual(0);
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'qwen serve: ACP preheat failed: preheat failed',
+      );
+    });
+
+    it('sanitizes a synchronous bridge failure', async () => {
+      const preheatAcpChild = vi.fn(() => {
+        throw new Error('child command contained a secret');
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ isChannelLive: () => false, preheatAcpChild }),
+      );
+
+      await expect(
+        svc.preheatAcpChild(makeCtx(), { timeoutMs: 1000 }),
+      ).resolves.toMatchObject({
+        ready: false,
+        channelLive: false,
+        reason: 'error',
+        error: 'ACP preheat failed',
+      });
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'qwen serve: ACP preheat failed: child command contained a secret',
+      );
     });
   });
 

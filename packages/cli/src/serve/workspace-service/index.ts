@@ -57,7 +57,15 @@ import {
   WorkspaceVoiceError,
   type WorkspaceVoiceSettingsWrite,
 } from '../../services/voice-service.js';
-import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStderrLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
+import {
+  deleteWorkspaceSkill,
+  installWorkspaceSkill,
+  WorkspaceSkillManagementError,
+} from '../workspace-skill-management.js';
 
 import {
   WorkspacePermissionRulesSessionRequiredError,
@@ -76,6 +84,9 @@ import type {
   WorkspaceAcpPreheatResult,
   WorkspaceAcpStatusResult,
   WorkspaceSkillToggleResult,
+  WorkspaceSkillInstallRequest,
+  WorkspaceSkillMutationResult,
+  WorkspaceSkillScope,
 } from './types.js';
 
 // Re-export types for consumers.
@@ -207,6 +218,7 @@ export function createDaemonWorkspaceService(
     persistDisabledSkills,
     persistSetting,
     persistSettings,
+    skillInstallEnv,
     voiceEnv,
     voiceSettingsScope,
     preheatAcpChild: preheatAcpChildOnBridge,
@@ -266,6 +278,27 @@ export function createDaemonWorkspaceService(
       return status;
     };
 
+  const refreshWorkspaceSkillsAfterMutation = async (): Promise<void> => {
+    lastWorkspaceSkillsStatus = undefined;
+    workspaceSkillsStatusProvider?.invalidate?.(boundWorkspace);
+    if (!(isChannelLive?.() ?? false)) return;
+    try {
+      await invokeWorkspaceCommand<ServeWorkspaceSkillsRefreshResult>(
+        SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+        { cwd: boundWorkspace },
+      );
+    } catch (err) {
+      if (
+        !(err instanceof SessionNotFoundError) &&
+        !(err instanceof BridgeChannelClosedError)
+      ) {
+        writeStderrLine(
+          `qwen serve: workspace skill refresh after mutation failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+  };
+
   // -- Facade --
   return {
     // -- Status queries (delegate to ACP child via queryWorkspaceStatus) --
@@ -307,13 +340,13 @@ export function createDaemonWorkspaceService(
       _ctx: WorkspaceRequestContext,
       opts?: { timeoutMs?: number },
     ): Promise<WorkspaceAcpPreheatResult> {
-      const startedAt = Date.now();
+      const startedAt = performance.now();
       const channelLive = () => isChannelLive?.() ?? false;
       const finish = (
         result: Omit<WorkspaceAcpPreheatResult, 'durationMs'>,
       ): WorkspaceAcpPreheatResult => ({
         ...result,
-        durationMs: Date.now() - startedAt,
+        durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
       });
 
       if (channelLive()) {
@@ -324,46 +357,75 @@ export function createDaemonWorkspaceService(
           ready: false,
           channelLive: false,
           reason: 'error',
-          error: 'ACP preheat is not wired',
+          error: 'ACP preheat is unavailable',
         });
       }
 
       if (!inFlightAcpPreheat) {
-        inFlightAcpPreheat = preheatAcpChildOnBridge().finally(() => {
-          inFlightAcpPreheat = undefined;
-        });
-        void inFlightAcpPreheat.catch((err) => {
-          writeStderrLine(
-            `qwen serve: ACP preheat failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        });
+        const promise = Promise.resolve().then(preheatAcpChildOnBridge);
+        inFlightAcpPreheat = promise;
+        void promise.then(
+          () => {
+            if (inFlightAcpPreheat === promise) {
+              inFlightAcpPreheat = undefined;
+            }
+          },
+          (err) => {
+            try {
+              writeStderrLineSafe(
+                `qwen serve: ACP preheat failed: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            } finally {
+              if (inFlightAcpPreheat === promise) {
+                inFlightAcpPreheat = undefined;
+              }
+            }
+          },
+        );
       }
 
+      const sharedPreheat = inFlightAcpPreheat;
       try {
         await withTimeout(
-          inFlightAcpPreheat,
+          sharedPreheat,
           opts?.timeoutMs ?? 5_000,
           'ACP preheat',
         );
       } catch (err) {
         if (err instanceof TimeoutError) {
-          inFlightAcpPreheat = undefined;
-          writeStderrLine(
+          writeStderrLineSafe(
             `qwen serve: ACP preheat timed out after ${opts?.timeoutMs ?? 5_000}ms`,
           );
         }
         const live = channelLive();
-        const message = err instanceof Error ? err.message : String(err);
+        if (live) {
+          return finish({ ready: true, channelLive: true });
+        }
         return finish({
-          ready: live,
-          channelLive: live,
+          ready: false,
+          channelLive: false,
           reason: err instanceof TimeoutError ? 'timeout' : 'error',
-          error: message,
+          error:
+            err instanceof TimeoutError
+              ? 'ACP preheat did not complete before the timeout'
+              : 'ACP preheat failed',
         });
       }
 
       const live = channelLive();
-      return finish({ ready: live, channelLive: live });
+      if (!live) {
+        writeStderrLineSafe(
+          'qwen serve: ACP preheat resolved without a live channel',
+        );
+      }
+      return live
+        ? finish({ ready: true, channelLive: true })
+        : finish({
+            ready: false,
+            channelLive: false,
+            reason: 'error',
+            error: 'ACP preheat did not produce a live channel',
+          });
     },
 
     async getWorkspaceAcpStatus(
@@ -700,6 +762,7 @@ export function createDaemonWorkspaceService(
 
       if (persisted.changed) {
         lastWorkspaceSkillsStatus = undefined;
+        workspaceSkillsStatusProvider?.invalidate?.(boundWorkspace);
         if (channelLive) {
           try {
             const refreshed =
@@ -746,6 +809,48 @@ export function createDaemonWorkspaceService(
         sessionsRefreshed,
         sessionsFailed,
       };
+    },
+
+    async installWorkspaceSkill(
+      _ctx: WorkspaceRequestContext,
+      request: WorkspaceSkillInstallRequest,
+    ): Promise<WorkspaceSkillMutationResult> {
+      const result = await installWorkspaceSkill(
+        boundWorkspace,
+        request,
+        skillInstallEnv?.['GH_TOKEN'] ?? skillInstallEnv?.['GITHUB_TOKEN'],
+      );
+      await refreshWorkspaceSkillsAfterMutation();
+      return result;
+    },
+
+    async deleteWorkspaceSkill(
+      _ctx: WorkspaceRequestContext,
+      requestedSkillName: string,
+      scope: WorkspaceSkillScope,
+    ): Promise<WorkspaceSkillMutationResult> {
+      const normalizedName = requestedSkillName.trim().toLowerCase();
+      const status = await getWorkspaceSkillsStatus();
+      const skill = status.skills.find(
+        (candidate) => candidate.name.trim().toLowerCase() === normalizedName,
+      );
+      if (!skill) throw new WorkspaceSkillNotFoundError(requestedSkillName);
+      const expectedLevel = scope === 'workspace' ? 'project' : 'user';
+      if (skill.level !== expectedLevel || !skill.installedPath) {
+        throw new WorkspaceSkillManagementError(
+          'skill_not_managed',
+          'Skill is not managed in the requested scope',
+          409,
+        );
+      }
+      const result = await deleteWorkspaceSkill(
+        boundWorkspace,
+        scope,
+        skill.name,
+        skill.installedPath,
+      );
+      await refreshWorkspaceSkillsAfterMutation();
+      return result;
     },
 
     async initWorkspace(

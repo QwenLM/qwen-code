@@ -10,10 +10,9 @@
 //!   - **MCP** (`McpDriver`) is one long-lived connection — a `set_config` is
 //!     visible to later calls on the SAME driver within the session.
 //!
-//! Uses `max_image_dimension` as the persisted key. `capture_mode` /
-//! `capture_scope` are NO LONGER settings (they are per-call params now —
-//! the modality-ladder refactor), so `max_image_dimension` is the remaining
-//! disk-persisted config field and the right probe for this transport behavior.
+//! Uses `max_image_dimension` as the persisted key. `capture_mode` is per-call;
+//! `capture_scope` is session-scoped over a persisted default. The numeric field
+//! remains the simplest probe for this transport behavior.
 //!
 //! Both tests are `#[ignore]`: they mutate the real on-disk config, so they
 //! save the prior value and restore it. Run explicitly:

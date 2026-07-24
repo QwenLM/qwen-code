@@ -396,6 +396,7 @@ export default {
   'Tool Output Truncation Lines': 'ツール出力の切り詰め行数',
   'Tool Schema Compliance': 'Tool Schema 準拠',
   'Auto (detect from system)': '自動(システムから検出)',
+  'Auto (follow user input)': '自動(ユーザー入力に従う)',
   'Auto (detect terminal theme)': '自動（端末テーマを検出）',
   Auto: '自動',
   'Show model-specific usage statistics.': 'モデル別の使用統計を表示',
@@ -1487,6 +1488,7 @@ export default {
   'to paste images': '画像を貼り付け',
   'for external editor': '外部エディタ用',
   '? for shortcuts': '? でショートカット表示',
+  'Pasting…': '貼り付け中…',
   'Invalid approval mode "{{arg}}". Valid modes: {{modes}}':
     '無効な承認モード "{{arg}}" です。有効なモード: {{modes}}',
   'Approval mode set to "{{mode}}"': '承認モードを "{{mode}}" に設定しました',
@@ -1686,7 +1688,7 @@ export default {
     'アンインストールする拡張機能名を位置引数として指定してください。',
   'Enables an extension.': '拡張機能を有効にします。',
   'The name of the extension to enable.': '有効化する拡張機能の名前。',
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
     '拡張機能を有効化するスコープ。未指定の場合はすべてのスコープで有効化されます。',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     'スコープ "{{scope}}" で拡張機能 "{{name}}" を正常に有効化しました。',
@@ -1696,7 +1698,7 @@ export default {
     '無効なスコープです: {{scope}}。{{scopes}} のいずれかを指定してください。',
   'Disables an extension.': '拡張機能を無効にします。',
   'The name of the extension to disable.': '無効化する拡張機能の名前。',
-  'The scope to disable the extenison in.': '拡張機能を無効化するスコープ。',
+  'The scope to disable the extension in.': '拡張機能を無効化するスコープ。',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     'スコープ "{{scope}}" で拡張機能 "{{name}}" を正常に無効化しました。',
   'Extension "{{name}}" successfully updated: {{oldVersion}} → {{newVersion}}.':
@@ -1911,8 +1913,14 @@ export default {
   'A new version of Qwen Code is available! {{current}} → {{latest}}':
     'Qwen Code の新しいバージョンがあります！{{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} は最新です！',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    'アップデートの確認に失敗しました。ネットワークまたはレジストリ設定を確認してください。',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    'アップデートの確認に失敗しました（{{reason}}）。ネットワークまたはレジストリ設定を確認してください。',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    'アップデートの確認をスキップしました（{{reason}}）— /update で再試行できます。',
+  'registry did not respond within {{seconds}}s':
+    'レジストリが {{seconds}} 秒以内に応答しませんでした',
+  'registry unreachable': 'レジストリに接続できません',
+  'registry error': 'レジストリエラー',
   'Unable to check for updates: {{reason}}':
     'アップデートを確認できません: {{reason}}',
   'Update successful! The new version will be used on your next run.':
@@ -1951,6 +1959,16 @@ export default {
     'このスタンドアロンインストールを自動更新できません。以下から再インストールしてください：',
   'Manual update required. Please reinstall Qwen Code.':
     '手動更新が必要です。Qwen Codeを再インストールしてください。',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    'このセッションではカスタムサンドボックスイメージ {{image}} を使用しています。イメージを更新して Qwen Code を再起動してください。',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    'ホスト上の Qwen Code を更新してから、サンドボックスを再起動してください。',
+  'The update will be installed after you exit this session.':
+    'このセッションを終了すると、更新が自動的にインストールされます。',
+  'Run /update to install the update on the host.':
+    '/update を実行してホストに更新をインストールしてください。',
+  'Run /update to install the update.':
+    '/update を実行して更新をインストールしてください。',
 
   // ============================================================================
   // reload-plugins command

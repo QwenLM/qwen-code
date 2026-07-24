@@ -12,12 +12,16 @@ import type {
   ChannelWorkerSupervisor,
   CreateChannelWorkerSupervisorOptions,
 } from './channel-worker-supervisor.js';
-import { ChannelWorkerStopError } from './channel-worker-supervisor.js';
+import {
+  ChannelWorkerStartupError,
+  ChannelWorkerStopError,
+} from './channel-worker-supervisor.js';
 import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from './workspace-registry.js';
+import type { ChannelDeliveryRequest } from './channel-delivery-ipc.js';
 
 const PRIMARY = '/ws/primary';
 const SECONDARY = '/ws/secondary';
@@ -85,6 +89,7 @@ interface RecordedSupervisor {
     stop: ReturnType<typeof vi.fn>;
     restart: ReturnType<typeof vi.fn>;
     killAllSync: ReturnType<typeof vi.fn>;
+    deliverChannelMessage: ReturnType<typeof vi.fn>;
     enqueueWebhookTask: ReturnType<typeof vi.fn>;
   };
 }
@@ -100,6 +105,7 @@ function makeCreateSupervisor(
       restart: vi.fn(async () => snapshotFor(opts.workspace)),
       killAllSync: vi.fn(),
       snapshot: () => snapshotFor(opts.workspace),
+      deliverChannelMessage: vi.fn().mockRejectedValue(new Error('unused')),
       enqueueWebhookTask: vi.fn().mockRejectedValue(new Error('unused')),
     };
     recorded.push({ opts, supervisor });
@@ -123,7 +129,113 @@ const webhookTask: ChannelWebhookTask = {
   payload: { runId: 123 },
 };
 
+const deliveryRequest: ChannelDeliveryRequest = {
+  deliveryId: 'delivery-1',
+  channelName: 'b',
+  target: { type: 'chat', id: 'group-1' },
+  text: 'inspection result',
+};
+
 describe('createChannelWorkerGroup', () => {
+  it('routes delivery to the exact workspace owner', async () => {
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['b'] } },
+        {
+          workspaceCwd: SECONDARY,
+          selection: { mode: 'names', names: ['b'] },
+        },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    recorded[1]!.supervisor.deliverChannelMessage.mockResolvedValueOnce({
+      delivered: true,
+    });
+
+    await expect(
+      group.deliverChannelMessage(deliveryRequest, SECONDARY),
+    ).resolves.toEqual({ delivered: true });
+    expect(
+      recorded[0]!.supervisor.deliverChannelMessage,
+    ).not.toHaveBeenCalled();
+    expect(recorded[1]!.supervisor.deliverChannelMessage).toHaveBeenCalledWith(
+      deliveryRequest,
+    );
+  });
+
+  it('does not fall back when the selected workspace lacks the channel', async () => {
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['b'] } },
+        {
+          workspaceCwd: SECONDARY,
+          selection: { mode: 'names', names: ['a'] },
+        },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+
+    const error = await group
+      .deliverChannelMessage(deliveryRequest, SECONDARY)
+      .catch((value: unknown) => value);
+    expect(error).toMatchObject({ code: 'channel_worker_unavailable' });
+    expect((error as Error).message).not.toContain(SECONDARY);
+    expect(
+      recorded[0]!.supervisor.deliverChannelMessage,
+    ).not.toHaveBeenCalled();
+    expect(
+      recorded[1]!.supervisor.deliverChannelMessage,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('rejects delivery while the owning workspace is draining', async () => {
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+    ]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+        {
+          workspaceCwd: SECONDARY,
+          selection: { mode: 'names', names: ['b'] },
+        },
+      ],
+      registry,
+      createSupervisor,
+      shared,
+    });
+    group.beginWorkspaceDrain(SECONDARY);
+
+    await expect(
+      group.deliverChannelMessage(deliveryRequest, SECONDARY),
+    ).rejects.toMatchObject({ code: 'channel_worker_unavailable' });
+    expect(
+      recorded[1]!.supervisor.deliverChannelMessage,
+    ).not.toHaveBeenCalled();
+  });
+
   it('routes webhook tasks to the supervisor that owns the channel', async () => {
     const registry = fakeRegistry([
       fakeRuntime(PRIMARY, true),
@@ -797,6 +909,7 @@ describe('createChannelWorkerGroup', () => {
         restart: vi.fn(async () => snapshot({})),
         killAllSync: vi.fn(),
         snapshot: () => snapshot({}),
+        deliverChannelMessage: vi.fn().mockRejectedValue(new Error('unused')),
         enqueueWebhookTask: vi.fn().mockRejectedValue(new Error('unused')),
       };
     };
@@ -927,6 +1040,54 @@ describe('createChannelWorkerGroup', () => {
     expect(recorded[1]!.supervisor.start).toHaveBeenCalledTimes(1);
   });
 
+  it('force-reconciles only the targeted workspace', async () => {
+    const third = '/ws/third';
+    const registry = fakeRegistry([
+      fakeRuntime(PRIMARY, true),
+      fakeRuntime(SECONDARY, false),
+      fakeRuntime(third, false),
+    ]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const groups: ChannelWorkspaceGroup[] = [
+      { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+      { workspaceCwd: SECONDARY, selection: { mode: 'names', names: ['b'] } },
+    ];
+    const group = createChannelWorkerGroup({
+      groups,
+      registry,
+      createSupervisor,
+      shared,
+    });
+    await group.start();
+
+    await group.reconcile(
+      [
+        groups[0]!,
+        {
+          workspaceCwd: SECONDARY,
+          selection: { mode: 'names', names: ['changed-elsewhere'] },
+        },
+        {
+          workspaceCwd: third,
+          selection: { mode: 'names', names: ['new-elsewhere'] },
+        },
+      ],
+      { forceWorkspaceCwd: PRIMARY },
+    );
+
+    expect(recorded).toHaveLength(3);
+    expect(recorded[0]!.supervisor.stop).toHaveBeenCalledOnce();
+    expect(recorded[1]!.supervisor.stop).not.toHaveBeenCalled();
+    expect(recorded[2]!.opts.workspace).toBe(PRIMARY);
+    expect(recorded[2]!.supervisor.start).toHaveBeenCalledOnce();
+
+    await group.restoreWorkspace(third);
+    expect(recorded).toHaveLength(3);
+    expect(group.snapshots()).toHaveLength(2);
+  });
+
   it('coalesces concurrent reconciles onto the in-flight operation', async () => {
     const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
     let releaseReplacement!: () => void;
@@ -1037,6 +1198,7 @@ describe('createChannelWorkerGroup', () => {
         restart: vi.fn(async () => snapshot({})),
         killAllSync: vi.fn(),
         snapshot: () => snapshot({}),
+        deliverChannelMessage: vi.fn().mockRejectedValue(new Error('unused')),
         enqueueWebhookTask: vi.fn().mockRejectedValue(new Error('unused')),
       };
       recorded.push({ opts, supervisor });
@@ -1060,6 +1222,72 @@ describe('createChannelWorkerGroup', () => {
     expect(recorded[1]!.supervisor.stop).toHaveBeenCalledTimes(1);
     expect(recorded[0]!.supervisor.start).toHaveBeenCalledTimes(2);
     expect(group.snapshots()[0]!.workspaceCwd).toBe(PRIMARY);
+  });
+
+  it('preserves attempted startup failures when rollback restoration also fails', async () => {
+    const registry = fakeRegistry([fakeRuntime(PRIMARY, true)]);
+    const { createSupervisor, recorded } = makeCreateSupervisor(() =>
+      snapshot({}),
+    );
+    const createSupervisorWithFailure = (
+      opts: CreateChannelWorkerSupervisorOptions,
+    ) => {
+      const supervisor = createSupervisor(opts);
+      if (
+        opts.selection.mode === 'names' &&
+        opts.selection.names.includes('replacement')
+      ) {
+        supervisor.start.mockRejectedValueOnce(
+          new ChannelWorkerStartupError('replacement failed', {
+            workspaceCwd: opts.workspace,
+            startupFailures: [
+              {
+                channel: 'replacement',
+                phase: 'connect',
+                code: 'ECONNREFUSED',
+                message: 'connection refused',
+              },
+            ],
+          }),
+        );
+      }
+      return supervisor;
+    };
+    const group = createChannelWorkerGroup({
+      groups: [
+        { workspaceCwd: PRIMARY, selection: { mode: 'names', names: ['a'] } },
+      ],
+      registry,
+      createSupervisor: createSupervisorWithFailure,
+      shared,
+    });
+    await group.start();
+    recorded[0]!.supervisor.start.mockRejectedValueOnce(
+      new Error('old worker restore failed'),
+    );
+
+    const error = await group
+      .reconcile([
+        {
+          workspaceCwd: PRIMARY,
+          selection: { mode: 'names', names: ['replacement'] },
+        },
+      ])
+      .catch((value: unknown) => value);
+
+    expect(error).toMatchObject({
+      rolledBack: false,
+      rollbackError: 'old worker restore failed',
+      startupFailures: [
+        {
+          workspaceCwd: PRIMARY,
+          channel: 'replacement',
+          phase: 'connect',
+          code: 'ECONNREFUSED',
+          message: 'connection refused',
+        },
+      ],
+    });
   });
 
   it('attempts to restore every stopped worker after a rollback failure', async () => {
@@ -1225,6 +1453,7 @@ describe('createChannelWorkerGroup', () => {
         restart: vi.fn(async () => snapshot({})),
         killAllSync: vi.fn(),
         snapshot: () => snapshot({}),
+        deliverChannelMessage: vi.fn().mockRejectedValue(new Error('unused')),
         enqueueWebhookTask: vi.fn().mockRejectedValue(new Error('unused')),
       };
     };

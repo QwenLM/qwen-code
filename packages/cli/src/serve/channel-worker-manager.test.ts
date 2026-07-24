@@ -14,15 +14,52 @@ import {
   ChannelWorkerControlError,
   createChannelWorkerManager,
 } from './channel-worker-manager.js';
+import { ChannelWorkerStartupError } from './channel-worker-supervisor.js';
 import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type { ServeChannelSelection } from './types.js';
 
 const PRIMARY = '/ws/primary';
+const SECONDARY = '/ws/secondary';
 
 function workspaceGroups(
   selection: ServeChannelSelection,
 ): ChannelWorkspaceGroup[] {
   return [{ workspaceCwd: PRIMARY, selection }];
+}
+
+function splitWorkspaceGroups(
+  selection: ServeChannelSelection,
+): ChannelWorkspaceGroup[] {
+  if (selection.mode === 'all') {
+    return [
+      { workspaceCwd: PRIMARY, selection },
+      { workspaceCwd: SECONDARY, selection },
+    ];
+  }
+  const primary = selection.names.filter(
+    (name) => !name.startsWith('secondary-'),
+  );
+  const secondary = selection.names.filter((name) =>
+    name.startsWith('secondary-'),
+  );
+  return [
+    ...(primary.length > 0
+      ? [
+          {
+            workspaceCwd: PRIMARY,
+            selection: { mode: 'names' as const, names: primary },
+          },
+        ]
+      : []),
+    ...(secondary.length > 0
+      ? [
+          {
+            workspaceCwd: SECONDARY,
+            selection: { mode: 'names' as const, names: secondary },
+          },
+        ]
+      : []),
+  ];
 }
 
 function workerSnapshot(
@@ -59,6 +96,7 @@ function fakeGroup(
     workspaceActivity: vi.fn(() => 0),
     removeWorkspace: vi.fn(async () => {}),
     restoreWorkspace: vi.fn(async () => {}),
+    deliverChannelMessage: vi.fn(async () => ({ delivered: true as const })),
     enqueueWebhookTask: vi.fn(async () => ({ accepted: true as const })),
     ...overrides,
   };
@@ -94,6 +132,73 @@ function setup(group = fakeGroup()) {
 }
 
 describe('createChannelWorkerManager', () => {
+  it('exposes committed channel names in selection order', async () => {
+    const test = setup();
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram', 'feishu'],
+    };
+
+    expect(test.manager.committedChannelNames()).toEqual([]);
+    await test.manager.setSelection(selection);
+
+    const names = test.manager.committedChannelNames();
+    expect(names).toEqual(['telegram', 'feishu']);
+    names.reverse();
+    expect(test.manager.committedChannelNames()).toEqual([
+      'telegram',
+      'feishu',
+    ]);
+  });
+
+  it('serializes concurrent owner-scoped channel starts', async () => {
+    const test = setup();
+    const manager = test.manager;
+    test.resolveGroups.mockImplementation(async (selection) =>
+      splitWorkspaceGroups(selection),
+    );
+    await manager.setSelection({ mode: 'names', names: ['telegram'] });
+
+    await Promise.all([
+      manager.setChannelEnabled(
+        { name: 'primary-bot', workspaceCwd: PRIMARY },
+        true,
+      ),
+      manager.setChannelEnabled(
+        { name: 'secondary-bot', workspaceCwd: SECONDARY },
+        true,
+      ),
+    ]);
+
+    expect(manager.committedChannelNames()).toEqual([
+      'telegram',
+      'primary-bot',
+      'secondary-bot',
+    ]);
+  });
+
+  it('serializes an owner-scoped start with a concurrent stop', async () => {
+    const test = setup();
+    const manager = test.manager;
+    test.resolveGroups.mockImplementation(async (selection) =>
+      splitWorkspaceGroups(selection),
+    );
+    await manager.setSelection({ mode: 'names', names: ['telegram'] });
+
+    await Promise.all([
+      manager.setChannelEnabled(
+        { name: 'secondary-bot', workspaceCwd: SECONDARY },
+        true,
+      ),
+      manager.setChannelEnabled(
+        { name: 'telegram', workspaceCwd: PRIMARY },
+        false,
+      ),
+    ]);
+
+    expect(manager.committedChannelNames()).toEqual(['secondary-bot']);
+  });
+
   it('enables a disabled manager and makes an equal healthy PUT idempotent', async () => {
     const test = setup();
     const selection: ServeChannelSelection = {
@@ -397,6 +502,180 @@ describe('createChannelWorkerManager', () => {
     );
   });
 
+  it('reloads only the requested workspace worker', async () => {
+    const primary = workerSnapshot();
+    const secondary = workerSnapshot({
+      workspaceId: 'secondary',
+      workspaceCwd: '/ws/secondary',
+      primary: false,
+    });
+    const initialGroups: ChannelWorkspaceGroup[] = [
+      {
+        workspaceCwd: PRIMARY,
+        selection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        workspaceCwd: '/ws/secondary',
+        selection: { mode: 'names', names: ['feishu'] },
+      },
+    ];
+    const targetGroups: ChannelWorkspaceGroup[] = [
+      initialGroups[0]!,
+      {
+        workspaceCwd: '/ws/secondary',
+        selection: { mode: 'names', names: ['changed-elsewhere'] },
+      },
+    ];
+    const group = fakeGroup({ snapshots: vi.fn(() => [primary, secondary]) });
+    const test = setup(group);
+    test.resolveGroups
+      .mockResolvedValueOnce(initialGroups)
+      .mockResolvedValueOnce(targetGroups);
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['telegram', 'feishu'],
+    });
+
+    await expect(
+      test.manager.reloadWorkspace(PRIMARY, 'telegram'),
+    ).resolves.toEqual(primary);
+
+    expect(group.reconcile).toHaveBeenLastCalledWith(targetGroups, {
+      forceWorkspaceCwd: PRIMARY,
+      onRollingBack: expect.any(Function),
+    });
+    expect(test.onCommittedSelection).toHaveBeenLastCalledWith(
+      { mode: 'names', names: ['telegram', 'feishu'] },
+      initialGroups,
+    );
+  });
+
+  it.each([
+    {
+      label: 'moves to another workspace',
+      targetGroups: [
+        {
+          workspaceCwd: PRIMARY,
+          selection: { mode: 'names' as const, names: ['other'] },
+        },
+        {
+          workspaceCwd: '/ws/secondary',
+          selection: { mode: 'names' as const, names: ['feishu', 'bot'] },
+        },
+      ],
+    },
+    {
+      label: 'becomes ownerless',
+      targetGroups: [
+        {
+          workspaceCwd: PRIMARY,
+          selection: { mode: 'names' as const, names: ['other'] },
+        },
+        {
+          workspaceCwd: '/ws/secondary',
+          selection: { mode: 'names' as const, names: ['feishu'] },
+        },
+      ],
+    },
+  ])(
+    'rejects targeted reload when the edited channel $label',
+    async ({ targetGroups }) => {
+      const initialGroups: ChannelWorkspaceGroup[] = [
+        {
+          workspaceCwd: PRIMARY,
+          selection: { mode: 'names', names: ['bot', 'other'] },
+        },
+        {
+          workspaceCwd: '/ws/secondary',
+          selection: { mode: 'names', names: ['feishu'] },
+        },
+      ];
+      const test = setup();
+      test.resolveGroups
+        .mockResolvedValueOnce(initialGroups)
+        .mockResolvedValueOnce(targetGroups);
+      await test.manager.setSelection({
+        mode: 'names',
+        names: ['bot', 'other', 'feishu'],
+      });
+      vi.mocked(test.group.reconcile).mockClear();
+
+      await expect(
+        test.manager.reloadWorkspace(PRIMARY, 'bot'),
+      ).rejects.toMatchObject({ code: 'channel_runtime_owner_mismatch' });
+
+      expect(test.group.reconcile).not.toHaveBeenCalled();
+      expect(test.onCommittedSelection).toHaveBeenLastCalledWith(
+        { mode: 'names', names: ['bot', 'other', 'feishu'] },
+        initialGroups,
+      );
+    },
+  );
+
+  it('rejects a required owner mismatch before reconciling selection', async () => {
+    const test = setup();
+    test.resolveGroups.mockResolvedValueOnce([
+      {
+        workspaceCwd: '/ws/secondary',
+        selection: { mode: 'names', names: ['bot'] },
+      },
+    ]);
+
+    await expect(
+      test.manager.setSelection(
+        { mode: 'names', names: ['bot'] },
+        { name: 'bot', workspaceCwd: PRIMARY },
+      ),
+    ).rejects.toMatchObject({ code: 'channel_runtime_owner_mismatch' });
+
+    expect(test.createGroup).not.toHaveBeenCalled();
+    expect(test.group.reconcile).not.toHaveBeenCalled();
+    expect(test.reserveLease).not.toHaveBeenCalled();
+    expect(test.onStateChange).not.toHaveBeenCalled();
+  });
+
+  it('preserves workspace-attributed startup failures from reload', async () => {
+    const test = setup();
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram'],
+    };
+    await test.manager.setSelection(selection);
+    vi.mocked(test.group.reconcile).mockRejectedValueOnce(
+      new ChannelWorkerReconcileError('reload failed', {
+        rolledBack: true,
+        startupFailures: [
+          {
+            workspaceCwd: '/ws/secondary',
+            channel: 'telegram',
+            phase: 'connect',
+            code: 'ECONNREFUSED',
+            message: 'connection refused',
+          },
+        ],
+      }),
+    );
+
+    await expect(test.manager.reload()).rejects.toMatchObject({
+      code: 'channel_worker_start_failed',
+      rolledBack: true,
+      startupFailures: [
+        {
+          workspaceCwd: '/ws/secondary',
+          channel: 'telegram',
+          phase: 'connect',
+          code: 'ECONNREFUSED',
+          message: 'connection refused',
+        },
+      ],
+    });
+    expect(test.manager.state()).toMatchObject({
+      enabled: true,
+      selection,
+      transition: 'idle',
+    });
+  });
+
   it('does not reconcile after forced shutdown interrupts reload resolution', async () => {
     const test = setup();
     const selection: ServeChannelSelection = {
@@ -485,7 +764,18 @@ describe('createChannelWorkerManager', () => {
 
   it('retains a failed first-start group and lease until DELETE confirms stop', async () => {
     const group = fakeGroup();
-    vi.mocked(group.start).mockRejectedValueOnce(new Error('spawn failed'));
+    vi.mocked(group.start).mockRejectedValueOnce(
+      new ChannelWorkerStartupError('spawn failed', {
+        workspaceCwd: PRIMARY,
+        startupFailures: [
+          {
+            channel: 'telegram',
+            phase: 'connect',
+            message: 'provider failed',
+          },
+        ],
+      }),
+    );
     vi.mocked(group.stop)
       .mockRejectedValueOnce(new Error('exit not observed'))
       .mockResolvedValueOnce(undefined);
@@ -496,6 +786,13 @@ describe('createChannelWorkerManager', () => {
     ).rejects.toMatchObject({
       code: 'channel_worker_start_failed',
       rolledBack: false,
+      rollbackError: 'exit not observed',
+      startupFailures: [
+        expect.objectContaining({
+          workspaceCwd: PRIMARY,
+          message: 'provider failed',
+        }),
+      ],
     });
     expect(test.manager.state()).toMatchObject({
       enabled: true,
@@ -509,6 +806,89 @@ describe('createChannelWorkerManager', () => {
     });
     expect(group.stop).toHaveBeenCalledTimes(2);
     expect(test.releaseLease).toHaveBeenCalledTimes(1);
+  });
+
+  it('returns attempted startup failures while current state reflects successful rollback', async () => {
+    const group = fakeGroup();
+    const startupError = new ChannelWorkerStartupError('worker failed', {
+      workspaceCwd: PRIMARY,
+      startupFailures: [
+        {
+          channel: 'telegram',
+          phase: 'connect',
+          code: 'ECONNREFUSED',
+          message: 'connection refused',
+        },
+      ],
+      startupFailuresTruncated: true,
+    });
+    vi.mocked(group.start).mockRejectedValueOnce(startupError);
+    const test = setup(group);
+
+    const error = await test.manager
+      .setSelection({ mode: 'names', names: ['telegram'] })
+      .catch((value: unknown) => value);
+
+    expect(error).toMatchObject({
+      code: 'channel_worker_start_failed',
+      rolledBack: true,
+      startupFailuresTruncated: true,
+      startupFailures: [
+        {
+          workspaceCwd: PRIMARY,
+          channel: 'telegram',
+          phase: 'connect',
+          code: 'ECONNREFUSED',
+          message: 'connection refused',
+        },
+      ],
+    });
+    expect(test.manager.state()).toEqual({
+      enabled: false,
+      selection: null,
+      transition: 'idle',
+      workers: [],
+    });
+    (error as ChannelWorkerControlError).startupFailures![0]!.message =
+      'mutated';
+    expect(startupError.startupFailures![0]!.message).toBe(
+      'connection refused',
+    );
+  });
+
+  it('does not replace attempted failures with a reconcile rollback error', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'names', names: ['telegram'] });
+    vi.mocked(group.reconcile).mockRejectedValueOnce(
+      new ChannelWorkerReconcileError('replacement failed', {
+        rolledBack: false,
+        rollbackError: 'restore failed',
+        startupFailures: [
+          {
+            workspaceCwd: PRIMARY,
+            channel: 'discord',
+            phase: 'connect',
+            message: 'invalid token',
+          },
+        ],
+      }),
+    );
+
+    await expect(
+      test.manager.setSelection({ mode: 'names', names: ['discord'] }),
+    ).rejects.toMatchObject({
+      code: 'channel_worker_start_failed',
+      rolledBack: false,
+      rollbackError: 'restore failed',
+      startupFailures: [
+        expect.objectContaining({
+          workspaceCwd: PRIMARY,
+          channel: 'discord',
+          message: 'invalid token',
+        }),
+      ],
+    });
   });
 
   it('keeps a lease-only failure enabled so DELETE can retry its release', async () => {
@@ -599,6 +979,59 @@ describe('createChannelWorkerManager', () => {
       }),
     ).rejects.toMatchObject({ code: 'channel_worker_unavailable' });
     expect(group.enqueueWebhookTask).not.toHaveBeenCalled();
+  });
+
+  it('rejects delivery while shutdown is draining workers', async () => {
+    let releaseStop!: () => void;
+    const group = fakeGroup({
+      stop: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseStop = resolve;
+          }),
+      ),
+    });
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'names', names: ['telegram'] });
+
+    const shutdown = test.manager.shutdown();
+    await vi.waitFor(() => expect(group.stop).toHaveBeenCalled());
+
+    await expect(
+      test.manager.deliverChannelMessage(PRIMARY, {
+        deliveryId: 'task-1:1000',
+        channelName: 'telegram',
+        target: { type: 'chat', id: 'group-42' },
+        text: 'daily result',
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_worker_unavailable',
+      message: 'Daemon is shutting down.',
+    });
+    expect(group.deliverChannelMessage).not.toHaveBeenCalled();
+
+    releaseStop();
+    await shutdown;
+  });
+
+  it('routes delivery through the committed group and exact workspace', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['telegram'],
+    });
+    const delivery = {
+      deliveryId: 'task-1:1000',
+      channelName: 'telegram',
+      target: { type: 'chat' as const, id: 'group-42' },
+      text: 'daily result',
+    };
+
+    await expect(
+      test.manager.deliverChannelMessage(PRIMARY, delivery),
+    ).resolves.toEqual({ delivered: true });
+    expect(group.deliverChannelMessage).toHaveBeenCalledWith(delivery, PRIMARY);
   });
 
   it('serializes mutations and rejects queued work once shutdown latches', async () => {

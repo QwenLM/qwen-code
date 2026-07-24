@@ -89,20 +89,64 @@ Controls how conversation sessions are managed:
 
 ### Channel Memory
 
-Channel memory lets accepted channel senders save stable context for one chat or thread. Qwen Code injects that memory when a fresh channel session starts, including after `/clear`.
+Channel memory stores durable context for one chat or thread. Entries have stable
+IDs, so a list response can be used for deterministic follow-up operations.
 
-Natural-language examples:
+- `记住：默认使用 staging 环境` is the deterministic form and saves exactly one
+  scalar entry for the current chat or thread.
+- To save several separate facts in one request, use a natural phrase routed
+  through the classifier. For example:
+  `请记住这三条约定：使用 staging；发布前测试；优先中文回复` creates entries
+  that you can manage independently. Exact duplicate facts are skipped and
+  reported without creating another entry. Requests containing credential-like
+  text are rejected; remove secrets and save the non-sensitive facts separately.
+- `查看记忆` lists entries and their stable IDs. Use `查看第 2 页记忆` to view
+  a later page, `查看记忆 <id>` to view one entry, or a natural filtered
+  request such as `只看中文偏好` to list the matching entries.
+- `查看刚才那条记忆`, `把关于 staging 的记忆改成默认使用 production`, and
+  `忘掉刚才那条` work when the natural reference resolves to exactly one entry.
+  Natural updates and removals first show the proposed change. Confirm an
+  update with `确认更新记忆` or `confirm memory update`, or a removal with
+  `确认删除记忆` or `confirm memory removal`, within 60 seconds. Exact-ID
+  updates and removals remain immediate and do not need confirmation.
+- `清空记忆` starts the clear-all confirmation flow; `确认清空记忆` completes
+  it.
 
-- `记住：默认使用 staging 环境` saves memory for the current chat or thread.
-- `你记一下以后回复前要说 1122` saves the extracted durable memory.
-- `你现在都记住了什么` shows saved memory for the current chat or thread.
-- `把这个聊天的记忆清空` starts the clear flow; `确认清空记忆` confirms it.
+When a natural inspect, update, or removal request matches multiple entries,
+the bot returns the candidate IDs and previews without changing memory. There
+is no pending selection for an ambiguous result: retry the request with one
+exact ID, such as `忘掉 m-a31f0d82c7e4`. Exact-ID operations remain the
+deterministic fast path. A natural request with no match reports that no entry
+matched.
 
-Channel memory follows the channel access gates. Any message accepted by `senderPolicy`, `dmPolicy`, `groupPolicy`, group settings, pairing, and mention requirements can read, write, or clear memory for that chat or thread.
+Pending update, removal, and clear confirmations apply only to the sender and
+chat or thread that created them. A newer clear, natural update, or natural
+removal proposal replaces an older pending one for that sender and target.
+Pending confirmations are discarded when the channel process restarts.
 
-In open groups, any accepted member can update shared channel memory for that group. Use `allowlist` or `pairing` policies when memory should be limited to trusted senders.
+The legacy slash aliases `/remember-channel`, `/channel-memory`, and
+`/forget-channel` have been removed. They are no longer channel-memory
+commands.
 
-Memory is keyed to the current chat or thread, so it is not injected into `single` session scope, where every chat shares one channel-wide agent session.
+Channel memory follows the channel access gates. Any message accepted by
+`senderPolicy`, `dmPolicy`, `groupPolicy`, group settings, pairing, and mention
+requirements can read, write, update, or clear memory for that chat or thread.
+Accepted members of the same group share that group's target store. Use
+`allowlist` or `pairing` policies when group memory should be limited to trusted
+senders.
+
+Existing legacy `CHANNEL.md` memory is migrated automatically to structured
+`CHANNEL.json` storage on the first mutation. Structured memory persists across
+standalone channel and daemon-managed channel restarts, and is injected when a
+fresh target-scoped session starts, including after `/clear`.
+
+Memory remains keyed to the current chat or thread. It is not injected into a
+`sessionScope: single` session, because that session is shared across the whole
+channel rather than scoped to one target.
+
+Channel memory does not automatically learn facts from normal conversation or
+accept `第一个` as confirmation for an ambiguous natural reference. Use a clear
+remember request and an exact entry ID when a natural reference is ambiguous.
 
 ### Token Security
 
@@ -129,7 +173,7 @@ When `senderPolicy` is set to `"pairing"`, unknown senders go through an approva
 qwen channel pairing approve my-channel VEQDDWXJ
 ```
 
-Once approved, the user's ID is saved to `~/.qwen/channels/<name>-allowlist.json` and all future messages go through normally.
+Once approved, the user's ID is saved to the channel's workspace-scoped allowlist (`~/.qwen/channels/<workspace-scope>/<name>-allowlist.json`) and all future messages go through normally. Pairing state is scoped per workspace, so two workspaces using the same channel name keep separate approvals.
 
 ### Pairing CLI Commands
 
@@ -141,13 +185,15 @@ qwen channel pairing list my-channel
 qwen channel pairing approve my-channel <CODE>
 ```
 
+Run these from the channel's workspace directory (or pass `--cwd <dir>`) — pairing state is stored per workspace.
+
 ### Pairing Rules
 
 - Codes are 8 characters, uppercase, using an unambiguous alphabet (no `0`/`O`/`1`/`I`)
 - Codes expire after 1 hour
 - Maximum 3 pending requests per channel at a time — additional requests are ignored until one expires or is approved
 - Users listed in `allowedUsers` in `settings.json` always skip pairing
-- Approved users are stored in `~/.qwen/channels/<name>-allowlist.json` — treat this file as sensitive
+- Approved users are stored per workspace in `~/.qwen/channels/<workspace-scope>/<name>-allowlist.json` — treat this file as sensitive
 
 ## Group Chats
 
@@ -421,7 +467,12 @@ Example channel config:
           "github-ci": {
             "secretEnv": "QWEN_CHANNEL_GITHUB_CI_SECRET",
             "targets": {
-              "default": {
+              "operator": {
+                "chatId": "DINGTALK_USER_ID",
+                "senderId": "webhook:github-ci",
+                "isGroup": false
+              },
+              "team": {
                 "chatId": "OPEN_CONVERSATION_ID",
                 "senderId": "webhook:github-ci",
                 "isGroup": true
@@ -435,7 +486,49 @@ Example channel config:
 }
 ```
 
-For DingTalk, `chatId` must be the group `openConversationId`; other adapters may require their own proactive target shape.
+For DingTalk, set `isGroup` explicitly on every target. A direct-message target uses the DingTalk user ID as `chatId` with `isGroup: false`; a group target uses the group `openConversationId` with `isGroup: true`. Other adapters may require their own proactive target shape.
+
+Daemon-managed DingTalk, Feishu, Telegram, and WeCom channels dynamically observe contacts from authorized inbound messages. List contacts observed in the primary workspace during the default seven-day freshness window:
+
+```bash
+curl -H "Authorization: Bearer $QWEN_SERVER_TOKEN" \
+  http://127.0.0.1:4170/workspace/channel/observed-contacts
+```
+
+Use `GET /workspaces/:workspace/channel/observed-contacts` to select another registered, trusted workspace. Add `?freshWithinSeconds=N` to choose a window from one second through 365 days. The daemon advertises this API with the `workspace_channel_observed_contacts` capability.
+
+The response returns complete platform IDs and labels. Group labels use names already present in accepted inbound messages when available: DingTalk supplies `conversationTitle`, and Telegram supplies `chat.title`. Feishu and WeCom group labels currently fall back to their complete IDs; no platform directory or group-detail API is queried. Topic labels also fall back to complete IDs. Each `lastObservedAt` is a canonical ISO 8601 UTC timestamp with millisecond precision; clients can convert it to the user's local time zone for display. Top-level `users` contains users observed in direct messages. `groups` contains observed group conversations, `groups[].users` contains users observed in each group, and `groups[].topics[].users` contains users observed in Feishu or Telegram topics:
+
+```json
+{
+  "users": [
+    {
+      "channelName": "feishu-main",
+      "label": "Example User",
+      "id": "ou_complete_user_id",
+      "lastObservedAt": "2026-07-17T08:00:00.000Z"
+    }
+  ],
+  "groups": [
+    {
+      "channelName": "feishu-main",
+      "label": "oc_complete_chat_id",
+      "id": "oc_complete_chat_id",
+      "lastObservedAt": "2026-07-17T08:05:00.000Z",
+      "users": [
+        {
+          "label": "Example User",
+          "id": "ou_complete_user_id",
+          "lastObservedAt": "2026-07-17T08:05:00.000Z"
+        }
+      ],
+      "topics": []
+    }
+  ]
+}
+```
+
+These nested users are observed participants, not authoritative group membership. Only messages that pass direct/group, mention, sender, and pairing gates are recorded. Repeated observations refresh labels and timestamps; passive observation cannot detect a leave or deletion until the relationship becomes stale. Message content is never stored. The bounded registry lives under `$QWEN_HOME/channels/daemon/<workspaceHash>/observed-contacts.json`, outside the workspace checkout and partitioned per workspace. Its 500-observation limit is shared by all channels and conversations in that workspace, and observations older than 365 days are removed on the next accepted write. If the registry becomes malformed or uses an unsupported version, delete that file to reset it; accepted traffic recreates it. Webhook configuration and delivery are unchanged.
 
 Start `qwen serve` with the channel worker enabled:
 
@@ -451,7 +544,7 @@ curl -X POST "http://127.0.0.1:4170/channels/dingtalk-main/webhooks/github-ci" \
   -H "Content-Type: application/json" \
   -d '{
     "eventType": "push",
-    "targetRef": "default",
+    "targetRef": "operator",
     "title": "CI pipeline finished",
     "payload": {
       "targetRef": "refs/heads/main",

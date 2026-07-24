@@ -29,6 +29,12 @@
   border-radius: 3px;
 }
 
+.historyStatus {
+  color: var(--muted-foreground);
+  text-align: center;
+  padding: 4px 0 12px;
+}
+
 .list > * {
   width: min(
     100%,
@@ -170,23 +176,6 @@
 
 .turnContentRow {
   min-width: 0;
-}
-
-.turnContentClip {
-  display: grid;
-  grid-template-rows: 1fr;
-  min-height: 0;
-  overflow: hidden;
-  transition: grid-template-rows 180ms ease;
-}
-
-.turnContentCollapsed {
-  grid-template-rows: 0fr;
-}
-
-.turnContentInner {
-  min-height: 0;
-  overflow: hidden;
 }
 
 .sessionTimelineLayer {

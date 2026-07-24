@@ -1,13 +1,19 @@
 import type { CommandModule } from 'yargs';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import {
-  appendChannelMemory,
+  addChannelMemoryEntries,
   clearChannelMemory,
+  getChannelMemoryRevision,
+  listChannelMemoryEntries,
   readChannelMemory,
+  recordChannelMemoryRecallMetrics,
+  removeChannelMemoryEntries,
+  updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import {
   DaemonChannelBridge,
+  isChannelProactiveDeliveryError,
   sanitizeLogText,
   SessionRouter,
 } from '@qwen-code/channel-base';
@@ -34,15 +40,34 @@ import {
   isChannelWebhookTaskMessage,
   type ChannelWebhookEnqueueErrorCode,
 } from '../../serve/channel-webhook-ipc.js';
+import {
+  ChannelDeliveryError,
+  isChannelDeliveryError,
+  isChannelDeliveryMessage,
+  MAX_CHANNEL_DELIVERIES_IN_FLIGHT,
+  type ChannelDeliveryErrorCode,
+  type ChannelDeliveryRequest,
+} from '../../serve/channel-delivery-ipc.js';
+import { sanitizeWorkerDiagnostic } from '../../serve/channel-worker-diagnostics.js';
+import {
+  isChannelStartupReportAckMessage,
+  MAX_CHANNEL_STARTUP_FAILURES,
+  MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
+  MAX_CHANNEL_STARTUP_FAILURE_CODE_LENGTH,
+  MAX_CHANNEL_STARTUP_FAILURE_MESSAGE_LENGTH,
+  type ChannelStartupReportMessage,
+} from '../../serve/channel-worker-startup-ipc.js';
 import { isLoopbackBind } from '../../serve/loopback-binds.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { resolveProxyUrl } from './proxy.js';
 import {
   createChannel,
+  daemonObservedContactsPath,
   daemonSessionRoutesPath,
   loadChannelsConfig,
   loadChannelsFromExtensions,
   parseConfiguredChannels,
+  registerBackgroundResponseRelay,
   registerPermissionRelay,
   registerSessionCleanup,
   registerToolCallDispatch,
@@ -50,16 +75,17 @@ import {
   type ParsedChannel,
 } from './runtime.js';
 import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
+import { ObservedChannelContactStore } from './observed-contact-store.js';
 
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
-const WEBHOOK_TASK_SHUTDOWN_DRAIN_MS = 10_000;
+const WORKER_SHUTDOWN_DRAIN_MS = 10_000;
 
 interface DaemonCapabilitiesLike {
   features: string[];
   workspaceCwd?: string;
   /**
-   * Registered runtimes on a multi-workspace daemon (Phase 2a `/capabilities`).
+   * Registered runtimes advertised by a multi-workspace daemon.
    * Absent on legacy single-workspace daemons, where `workspaceCwd` is used.
    */
   workspaces?: Array<{
@@ -82,6 +108,8 @@ interface DaemonSessionClientStaticLike {
       modelServiceId?: string;
       sessionScope: 'thread';
       approvalMode?: string;
+      sourceType?: string;
+      sourceId?: string;
     },
     clientId?: string,
   ): Promise<DaemonChannelSessionClient>;
@@ -114,6 +142,7 @@ interface ChannelDaemonWorkerReady {
 
 export interface ChannelDaemonWorkerHandle {
   readonly channels: string[];
+  deliverChannelMessage(request: ChannelDeliveryRequest): Promise<void>;
   validateWebhookTask(task: ChannelWebhookTask): void;
   runWebhookTask(
     task: ChannelWebhookTask,
@@ -129,6 +158,7 @@ export interface RunChannelDaemonWorkerOptions {
   selection: ServeChannelSelection;
   loadDaemonSdk?: () => Promise<DaemonSdkLike>;
   sendReady?: (ready: ChannelDaemonWorkerReady) => void;
+  reportStartup?: (message: ChannelStartupReportMessage) => Promise<void>;
   startupSignal?: AbortSignal;
 }
 
@@ -163,7 +193,16 @@ export function createDaemonSessionFactory({
     }
     return await DaemonSessionClient.createOrAttach(
       client,
-      daemonReq,
+      {
+        ...daemonReq,
+        sourceType: 'channel',
+        // sourceId = channel instance name (e.g. feishu-main): distinguishes
+        // channel instances on the daemon data plane; the channel kind
+        // (dingtalk/feishu) is derivable from the name via the channel config.
+        // The load branch above deliberately omits it: loading never re-stamps
+        // creation attribution.
+        ...(req.sourceId ? { sourceId: req.sourceId } : {}),
+      },
       clientId,
     );
   };
@@ -283,6 +322,50 @@ function throwIfStartupAborted(signal: AbortSignal | undefined): void {
   }
 }
 
+function readConnectErrorMessage(error: unknown): string {
+  if (
+    (typeof error === 'object' && error !== null) ||
+    typeof error === 'function'
+  ) {
+    try {
+      const message = Reflect.get(error, 'message');
+      if (typeof message === 'string' && message.length > 0) {
+        return message;
+      }
+    } catch {
+      return 'Channel connection failed.';
+    }
+  }
+  try {
+    const message = String(error);
+    return message.length > 0 ? message : 'Channel connection failed.';
+  } catch {
+    return 'Channel connection failed.';
+  }
+}
+
+function readConnectErrorCode(error: unknown): string | undefined {
+  if (
+    !(
+      (typeof error === 'object' && error !== null) ||
+      typeof error === 'function'
+    )
+  ) {
+    return undefined;
+  }
+  try {
+    const code = Reflect.get(error, 'code');
+    if (typeof code === 'string') {
+      return code.trim().length > 0 ? code : undefined;
+    }
+    return typeof code === 'number' && Number.isFinite(code)
+      ? String(code)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export async function runChannelDaemonWorker(
   opts: RunChannelDaemonWorkerOptions,
 ): Promise<ChannelDaemonWorkerHandle> {
@@ -352,6 +435,9 @@ export async function runChannelDaemonWorker(
   );
   validateChannelWorkspaces(parsed, daemonWorkspace);
   const modelServiceId = selectFirstModel(parsed, 'Daemon worker');
+  const observedContacts = new ObservedChannelContactStore(
+    daemonObservedContactsPath(daemonWorkspace),
+  );
 
   const bridge = new DaemonChannelBridge({
     cwd: daemonWorkspace,
@@ -365,6 +451,11 @@ export async function runChannelDaemonWorker(
 
   const channels = new Map<string, ChannelBase>();
   const connected: string[] = [];
+  let connectFailureCount = 0;
+  const diagnosticRedaction = {
+    ...(opts.daemonToken ? { daemonToken: opts.daemonToken } : {}),
+    workerEnv: process.env,
+  };
   const disconnectAll = () => {
     for (const channel of channels.values()) {
       try {
@@ -415,19 +506,30 @@ export async function runChannelDaemonWorker(
             router: createdRouter,
             channelMemory: {
               readChannelMemory,
-              appendChannelMemory,
+              getChannelMemoryRevision,
+              listChannelMemoryEntries,
+              addChannelMemoryEntries,
+              updateChannelMemoryEntry,
+              removeChannelMemoryEntries,
               clearChannelMemory,
             },
             memoryIntentClassifier: new BridgeChannelMemoryIntentClassifier(
               bridgeFacade,
               config.cwd,
             ),
+            channelMemoryRecallObserver: recordChannelMemoryRecallMetrics,
+            observedContacts: {
+              observe: (channelName, observation) => {
+                observedContacts.observe(channelName, observation);
+              },
+            },
           }),
           startupSignal,
         ),
       );
     }
     registerToolCallDispatch(bridgeFacade, createdRouter, channels);
+    registerBackgroundResponseRelay(bridgeFacade, createdRouter, channels);
     registerPermissionRelay(bridgeFacade, createdRouter, channels);
     registerSessionCleanup(bridgeFacade, createdRouter, channels);
 
@@ -443,10 +545,9 @@ export async function runChannelDaemonWorker(
         if (startupSignal?.aborted) {
           throw err;
         }
-        const safeMessage = sanitizeLogText(
-          err instanceof Error ? err.message : String(err),
-          512,
-        );
+        const message = readConnectErrorMessage(err);
+        const code = readConnectErrorCode(err);
+        const safeMessage = sanitizeLogText(message, 512);
         writeStderrLine(
           `[Channel] Failed to connect "${safeName}": ${safeMessage}`,
         );
@@ -454,6 +555,46 @@ export async function runChannelDaemonWorker(
           channel.disconnect();
         } catch {
           // best-effort
+        }
+        connectFailureCount += 1;
+        if (connectFailureCount <= MAX_CHANNEL_STARTUP_FAILURES) {
+          const reportMessage =
+            sanitizeWorkerDiagnostic(
+              message,
+              MAX_CHANNEL_STARTUP_FAILURE_MESSAGE_LENGTH,
+              diagnosticRedaction,
+            ) || 'Channel connection failed.';
+          const reportCode = code
+            ? sanitizeWorkerDiagnostic(
+                code,
+                MAX_CHANNEL_STARTUP_FAILURE_CODE_LENGTH,
+                diagnosticRedaction,
+              )
+            : undefined;
+          await abortableStartup(
+            opts.reportStartup?.({
+              type: 'channel_startup_failure',
+              failure: {
+                channel:
+                  sanitizeWorkerDiagnostic(
+                    name,
+                    MAX_CHANNEL_STARTUP_FAILURE_CHANNEL_LENGTH,
+                    diagnosticRedaction,
+                  ) || '<unnamed>',
+                phase: 'connect',
+                ...(reportCode ? { code: reportCode } : {}),
+                message: reportMessage,
+              },
+            }),
+            startupSignal,
+          );
+        } else if (connectFailureCount === MAX_CHANNEL_STARTUP_FAILURES + 1) {
+          await abortableStartup(
+            opts.reportStartup?.({
+              type: 'channel_startup_failures_truncated',
+            }),
+            startupSignal,
+          );
         }
       }
     }
@@ -470,6 +611,19 @@ export async function runChannelDaemonWorker(
 
     return {
       channels: connected,
+      async deliverChannelMessage(request: ChannelDeliveryRequest) {
+        const channel = channels.get(request.channelName);
+        if (!channel || !connected.includes(request.channelName)) {
+          throw new ChannelDeliveryError(
+            'channel_worker_unavailable',
+            `Channel "${request.channelName}" is not running.`,
+          );
+        }
+        await channel.deliverProactive(
+          { channelName: request.channelName, ...request.target },
+          request.text,
+        );
+      },
       validateWebhookTask(task: ChannelWebhookTask): void {
         const channel = channels.get(task.channelName);
         if (!channel || !connected.includes(task.channelName)) {
@@ -558,6 +712,57 @@ function assertInternalDaemonWorkerInvocation(): void {
   }
 }
 
+function reportStartupToSupervisor(
+  message: ChannelStartupReportMessage,
+  signal: AbortSignal,
+): Promise<void> {
+  if (signal.aborted) {
+    return Promise.reject(startupAbortError());
+  }
+  const send = process.send;
+  if (!send) {
+    return Promise.reject(new Error('Channel worker IPC is unavailable.'));
+  }
+  return new Promise<void>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      process.removeListener('message', onMessage);
+      process.removeListener('disconnect', onDisconnect);
+      signal.removeEventListener('abort', onAbort);
+    };
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve();
+    };
+    const onMessage = (value: unknown) => {
+      if (isChannelStartupReportAckMessage(value)) {
+        finish();
+      }
+    };
+    const onDisconnect = () => {
+      finish(new Error('Channel worker IPC disconnected during startup.'));
+    };
+    const onAbort = () => {
+      finish(startupAbortError());
+    };
+    process.on('message', onMessage);
+    process.once('disconnect', onDisconnect);
+    signal.addEventListener('abort', onAbort, { once: true });
+    try {
+      send.call(process, message, (error) => {
+        if (error) {
+          finish(new Error('Channel worker startup report failed.'));
+        }
+      });
+    } catch {
+      finish(new Error('Channel worker startup report failed.'));
+    }
+  });
+}
+
 export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
   command: 'daemon-worker',
   describe: false,
@@ -608,6 +813,8 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
         workspace,
         selection,
         startupSignal: startupAbortController.signal,
+        reportStartup: (message) =>
+          reportStartupToSupervisor(message, startupAbortController.signal),
         sendReady: (ready) => {
           process.send?.({ type: 'ready', ...ready });
         },
@@ -635,8 +842,74 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
           // Supervisor will time out if the IPC channel is already closed.
         }
       };
+      const sendChannelDeliveryResult = (
+        id: string,
+        result:
+          | { ok: true }
+          | {
+              ok: false;
+              code: ChannelDeliveryErrorCode;
+              error: string;
+            },
+      ) => {
+        try {
+          process.send?.({
+            type: 'channel_delivery_result',
+            id,
+            ...result,
+          });
+        } catch {
+          // The supervisor times out if the IPC channel is already closed.
+        }
+      };
       const activeWebhookTasks = new Map<string, Promise<void>>();
+      const activeChannelDeliveries = new Map<string, Promise<void>>();
       const onMessage = (message: unknown) => {
+        if (isChannelDeliveryMessage(message)) {
+          if (message.expiresAt <= Date.now()) {
+            sendChannelDeliveryResult(message.id, {
+              ok: false,
+              code: 'channel_delivery_timeout',
+              error: 'Channel delivery IPC timed out.',
+            });
+            return;
+          }
+          if (
+            activeChannelDeliveries.size >= MAX_CHANNEL_DELIVERIES_IN_FLIGHT
+          ) {
+            sendChannelDeliveryResult(message.id, {
+              ok: false,
+              code: 'channel_delivery_queue_full',
+              error: 'Channel delivery queue is full.',
+            });
+            return;
+          }
+          const deliveryId = message.id;
+          const delivery = handle
+            .deliverChannelMessage(message.request)
+            .then(() => {
+              sendChannelDeliveryResult(deliveryId, { ok: true });
+            })
+            .catch((error: unknown) => {
+              sendChannelDeliveryResult(deliveryId, {
+                ok: false,
+                code: classifyChannelDeliveryError(error),
+                error: sanitizeWorkerDiagnostic(
+                  error instanceof Error ? error.message : String(error),
+                  512,
+                  {
+                    ...(daemonToken ? { daemonToken } : {}),
+                    workerEnv: process.env,
+                  },
+                ),
+              });
+            })
+            .finally(() => {
+              activeChannelDeliveries.delete(deliveryId);
+            });
+          activeChannelDeliveries.set(deliveryId, delivery);
+          return;
+        }
         if (!isChannelWebhookTaskMessage(message)) return;
         if (message.expiresAt <= Date.now()) {
           sendWebhookTaskResult(message.id, {
@@ -724,17 +997,26 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
           clearHeartbeat();
           process.removeListener('message', onMessage);
           try {
-            if (activeWebhookTasks.size > 0) {
+            const deliveryCount = activeChannelDeliveries.size;
+            const webhookCount = activeWebhookTasks.size;
+            if (deliveryCount > 0) {
               writeStderrLine(
-                `[Channel] shutdown: draining ${activeWebhookTasks.size} webhook task(s)...`,
+                `[Channel] shutdown: draining ${deliveryCount} channel delivery task(s)...`,
               );
+            }
+            if (webhookCount > 0) {
+              writeStderrLine(
+                `[Channel] shutdown: draining ${webhookCount} webhook task(s)...`,
+              );
+            }
+            if (deliveryCount > 0 || webhookCount > 0) {
               await Promise.race([
-                Promise.allSettled(activeWebhookTasks.values()),
+                Promise.allSettled([
+                  ...activeChannelDeliveries.values(),
+                  ...activeWebhookTasks.values(),
+                ]),
                 new Promise<void>((resolve) => {
-                  const timer = setTimeout(
-                    resolve,
-                    WEBHOOK_TASK_SHUTDOWN_DRAIN_MS,
-                  );
+                  const timer = setTimeout(resolve, WORKER_SHUTDOWN_DRAIN_MS);
                   timer.unref();
                 }),
               ]);
@@ -809,4 +1091,19 @@ function classifyWebhookTaskValidationError(
     return 'channel_worker_unavailable';
   }
   return 'channel_webhook_enqueue_failed';
+}
+
+function classifyChannelDeliveryError(
+  error: unknown,
+): ChannelDeliveryErrorCode {
+  if (isChannelDeliveryError(error)) {
+    return error.code;
+  }
+  if (
+    isChannelProactiveDeliveryError(error) &&
+    error.disposition === 'permanent'
+  ) {
+    return 'channel_delivery_rejected';
+  }
+  return 'channel_delivery_failed';
 }

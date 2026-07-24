@@ -43,12 +43,16 @@ interface CreateServeFeaturesDeps {
   boundWorkspace: string;
   persistSettingAvailable: boolean;
   sessionArtifactsPersistenceAvailable: boolean;
+  sessionGenerationAvailable: () => boolean;
+  workspaceGenerationAvailable: () => boolean;
   reloadAvailable: boolean;
   channelReloadAvailable: () => boolean;
   channelControlAvailable: boolean;
   sessionShellCommandEnabled: boolean;
   multiWorkspaceSessionsEnabled: () => boolean;
+  dynamicWorkspaceRegistrationAvailable: boolean;
   persistentWorkspaceRegistrationAvailable: boolean;
+  scratchWorkspaceRegistrationAvailable: () => boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
   env?: Readonly<Record<string, string | undefined>>;
 }
@@ -67,12 +71,16 @@ export function createServeFeatures(
     boundWorkspace,
     persistSettingAvailable,
     sessionArtifactsPersistenceAvailable,
+    sessionGenerationAvailable,
+    workspaceGenerationAvailable,
     reloadAvailable,
     channelReloadAvailable,
     channelControlAvailable,
     sessionShellCommandEnabled,
     multiWorkspaceSessionsEnabled,
+    dynamicWorkspaceRegistrationAvailable,
     persistentWorkspaceRegistrationAvailable,
+    scratchWorkspaceRegistrationAvailable,
     workspaceRuntimeRemovalAvailable,
   } = deps;
   const env = deps.env ?? process.env;
@@ -108,12 +116,17 @@ export function createServeFeatures(
         persistSettingAvailable,
         sessionShellCommandEnabled,
         sessionArtifactsPersistenceAvailable,
+        sessionGenerationAvailable: sessionGenerationAvailable(),
+        workspaceGenerationAvailable: workspaceGenerationAvailable(),
         rateLimit: opts.rateLimit === true,
         reloadAvailable,
         channelReloadAvailable: channelReloadAvailable(),
         channelControlAvailable,
         multiWorkspaceSessionsEnabled: multiWorkspaceSessionsEnabled(),
+        dynamicWorkspaceRegistrationAvailable,
         persistentWorkspaceRegistrationAvailable,
+        scratchWorkspaceRegistrationAvailable:
+          scratchWorkspaceRegistrationAvailable(),
         workspaceRuntimeRemovalAvailable,
         acpHttpEnabled: resolveAcpHttpEnabled(),
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,

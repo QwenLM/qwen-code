@@ -6,10 +6,12 @@
 
 import type {
   BackgroundTaskStatus,
+  ConcurrencyBatch,
   Config,
   CronJob,
   CronScheduler,
   ToolCallRequestInfo,
+  ToolCallResponseInfo,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
 import { isInlineModelOverrideAllowed } from './utils/acpModelUtils.js';
@@ -37,9 +39,17 @@ import {
   ApprovalMode,
   ToolConfirmationOutcome,
   createDuplicateProviderToolCallResponse,
+  findPlanModeEntryBatchBoundaryIndex,
   isSystemReminderContent,
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
+  isToolCallConcurrencySafe,
+  canonicalToolName,
+  parsePositiveIntegerEnv,
+  partitionByConcurrencySafety,
+  PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+  ToolErrorType,
+  finalizeToolResponses,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -63,8 +73,12 @@ import {
   settleChatRecording,
   subscribeToHeadlessChatRecordingFailures,
 } from './utils/chat-recording-failure.js';
+import { registerCleanup } from './utils/cleanup.js';
+import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
+
+const restoredBackgroundAgentSessions = new WeakMap<Config, Set<string>>();
 
 /**
  * Maximum wait, in milliseconds, for in-flight background tasks to emit
@@ -140,7 +154,7 @@ const LOOP_TYPE_LABELS: Record<LoopType, string> = {
   [LoopType.ALTERNATING_TOOL_CALL_PATTERN]:
     'the model alternated between the same two tool calls in a repeating pattern',
   [LoopType.TURN_TOOL_CALL_CAP]:
-    'the model exceeded the maximum number of tool calls allowed in a single turn',
+    'the turn reached the per-turn tool-call limit',
   [LoopType.INVALID_TOOL_PARAMS_STAGNATION]:
     'the model repeatedly sent invalid tool parameters without correcting them',
 };
@@ -159,7 +173,7 @@ function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
     loopType === LoopType.INVALID_TOOL_PARAMS_STAGNATION;
   const hint =
     loopType === LoopType.TURN_TOOL_CALL_CAP
-      ? ' Raise the `model.maxToolCallsPerTurn` setting to allow longer turns, or set it to 0 to disable the cap.'
+      ? ' A per-turn tool-call cap was reached. The default is adaptive (allows up to 1000 diverse calls, halting only on repeated calls); an explicitly set `model.maxToolCallsPerTurn` is a hard cap. If the model was repeating the same call, investigate the repetition; otherwise unset the value to use the adaptive default, or raise it (set 0 to disable).'
       : isAlwaysOn
         ? ' This is an always-on guard and cannot be disabled via `model.skipLoopDetection`.'
         : ' Set the `model.skipLoopDetection` setting to true to disable.';
@@ -300,6 +314,37 @@ export interface RunNonInteractiveOptions {
 }
 
 /**
+ * Partition headless tool-call requests into consecutive batches by
+ * concurrency safety, mirroring the interactive scheduler
+ * (CoreToolScheduler). Consecutive concurrency-safe calls (independent
+ * sub-agents, read-only shells, pure reads) merge into a single parallel
+ * batch; every unsafe call (edits, writes, mutating shells) forms its own
+ * sequential batch. Request order is preserved.
+ *
+ * Reuses core's `partitionByConcurrencySafety` so the headless and
+ * interactive runtimes share one partition algorithm and can't diverge on
+ * which tool sets they parallelize. Kinds are resolved from the registry
+ * under the tool's canonical name (via `canonicalToolName`, as execution and
+ * the interactive scheduler do) so a legacy alias — e.g. `search_file_content`
+ * for `grep` — classifies with the same safety and doesn't parallelize
+ * differently from the TUI. An unregistered tool resolves to `undefined`,
+ * which {@link isToolCallConcurrencySafe} treats as unsafe.
+ */
+function partitionHeadlessToolCalls(
+  requests: ToolCallRequestInfo[],
+  config: Config,
+): Array<ConcurrencyBatch<ToolCallRequestInfo>> {
+  const registry = config.getToolRegistry();
+  return partitionByConcurrencySafety(requests, (request) =>
+    isToolCallConcurrencySafe(
+      request.name,
+      registry.getTool(canonicalToolName(request.name))?.kind,
+      request.args,
+    ),
+  );
+}
+
+/**
  * Executes the non-interactive CLI flow for a single request.
  */
 export async function runNonInteractive(
@@ -350,6 +395,16 @@ export async function runNonInteractive(
     // Get readonly values once at the start
     const sessionId = config.getSessionId();
     const permissionMode = config.getApprovalMode() as PermissionMode;
+    const cleanupReviewWorktrees = (gitTimeout?: number) =>
+      cleanupReviewWorktreeLeases({
+        sessionId,
+        promptId: prompt_id,
+        repositoryRoot: config.getProjectRoot(),
+        gitTimeout,
+      });
+    const unregisterReviewWorktreeCleanup = registerCleanup(() =>
+      cleanupReviewWorktrees(1_000),
+    );
 
     let turnCount = 0;
     let totalApiDurationMs = 0;
@@ -401,6 +456,7 @@ export async function runNonInteractive(
       displayText: string;
       modelText: string;
       sendMessageType: SendMessageType;
+      monitorId?: string;
       sdkNotification?: {
         task_id: string;
         tool_use_id?: string;
@@ -414,6 +470,13 @@ export async function runNonInteractive(
     }
     const localQueue: LocalQueueItem[] = [];
     const sdkOnlyMonitorQueue: LocalQueueItem[] = [];
+    const isCancelledMonitorEvent = (item: LocalQueueItem) =>
+      Boolean(
+        item.monitorId &&
+          item.sdkNotification?.status === 'running' &&
+          config.getMonitorRegistry().get(item.monitorId)?.status ===
+            'cancelled',
+      );
     const emitNotificationToSdk = (item: LocalQueueItem) => {
       if (item.sendMessageType !== SendMessageType.Notification) return;
       adapter.emitUserMessage([{ text: item.displayText }]);
@@ -423,7 +486,10 @@ export async function runNonInteractive(
     };
     const flushQueuedNotificationsToSdk = (queue: LocalQueueItem[]) => {
       while (queue.length > 0) {
-        emitNotificationToSdk(queue.shift()!);
+        const item = queue.shift()!;
+        if (!isCancelledMonitorEvent(item)) {
+          emitNotificationToSdk(item);
+        }
       }
     };
     let captureMonitorTurnsInLocalQueue = true;
@@ -524,7 +590,13 @@ export async function runNonInteractive(
           // hangs until its 600s stall timeout fires.
           approvalListener = (event) => {
             const mode = config.getApprovalMode();
-            if (mode === ApprovalMode.YOLO) {
+            const confirmationDetails = event.confirmationDetails;
+            const requiresExplicitHostApproval =
+              confirmationDetails?.type !== 'plan' &&
+              confirmationDetails !== undefined &&
+              'hideAlwaysAllow' in confirmationDetails &&
+              confirmationDetails.hideAlwaysAllow === true;
+            if (mode === ApprovalMode.YOLO && !requiresExplicitHostApproval) {
               // `respond` may reject if the teammate terminates between the
               // approval request and our response — catch it so it doesn't
               // become an unhandledRejection that can crash the process.
@@ -540,11 +612,11 @@ export async function runNonInteractive(
             }
             // Surface a clear reason on stderr — otherwise the
             // failure looks like the teammate gave up for no reason.
-            const reason =
-              `Auto-cancelling tool ${event.toolName} requested by ` +
-              `teammate "${event.teammateName}": current approval mode ` +
-              `(${mode}) cannot prompt in non-stream-json mode. ` +
-              `Use --yolo or stream-json to allow teammate tool calls.`;
+            const reason = requiresExplicitHostApproval
+              ? mode === ApprovalMode.YOLO
+                ? `Auto-cancelling tool ${event.toolName} requested by teammate "${event.teammateName}": this request requires an explicit interactive approval surface and cannot be bypassed by YOLO mode.`
+                : `Auto-cancelling tool ${event.toolName} requested by teammate "${event.teammateName}": this request requires an explicit interactive approval surface, which is unavailable in non-stream-json mode with the current approval mode (${mode}). Use --input-format stream-json --output-format stream-json to review it.`
+              : `Auto-cancelling tool ${event.toolName} requested by teammate "${event.teammateName}": current approval mode (${mode}) cannot prompt in non-stream-json mode. Use --yolo or stream-json to allow teammate tool calls.`;
             process.stderr.write(`[team] ${reason}\n`);
             // Also surface to the leader's LLM, otherwise it just
             // sees the teammate fail without any signal that an
@@ -590,6 +662,17 @@ export async function runNonInteractive(
         permissionMode,
       );
       adapter.emitMessage(systemMessage);
+
+      const resumedSessionData = config.getResumedSessionData();
+      if (resumedSessionData) {
+        const restoredSessions =
+          restoredBackgroundAgentSessions.get(config) ?? new Set<string>();
+        if (!restoredSessions.has(sessionId)) {
+          await config.loadPausedBackgroundAgents(sessionId);
+          restoredSessions.add(sessionId);
+          restoredBackgroundAgentSessions.set(config, restoredSessions);
+        }
+      }
 
       let initialPartList: PartListUnion | null = extractPartsFromUserMessage(
         options.userMessage,
@@ -773,10 +856,7 @@ export async function runNonInteractive(
         adapter.emitSystemMessage('worktree_started', {
           notice: startupNotice,
         });
-      } else if (
-        !options.continueInterrupted &&
-        config.getResumedSessionData()
-      ) {
+      } else if (!options.continueInterrupted && resumedSessionData) {
         try {
           const sessionPath = config
             .getSessionService()
@@ -798,6 +878,16 @@ export async function runNonInteractive(
         } catch (error) {
           debugLogger.warn(`worktree restore failed (non-fatal):`, error);
         }
+      }
+
+      const recoveredAgentsNotice =
+        resumedSessionData &&
+        !options.continueInterrupted &&
+        !isSlashCommand(input)
+          ? config.consumePendingRecoveredAgentsNotice()
+          : null;
+      if (recoveredAgentsNotice) {
+        initialPartList = withReminder(initialPartList, recoveredAgentsNotice);
       }
 
       const initialParts = normalizePartList(initialPartList);
@@ -856,6 +946,7 @@ export async function runNonInteractive(
               displayText,
               modelText,
               sendMessageType: SendMessageType.Notification,
+              monitorId: meta.monitorId,
               sdkNotification: {
                 task_id: meta.monitorId,
                 tool_use_id: meta.toolUseId,
@@ -1025,7 +1116,14 @@ export async function runNonInteractive(
         batchRequests: ToolCallRequestInfo[],
         setModelOverride: (override: string | undefined) => void,
       ): Promise<ToolCallBatchResult> => {
-        const toolResponseParts: Part[] = [];
+        const responseByRequest = new Map<
+          ToolCallRequestInfo,
+          ToolCallResponseInfo
+        >();
+        const statusByResponse = new Map<
+          ToolCallResponseInfo,
+          'success' | 'error' | 'cancelled'
+        >();
         const structuredOutputActive =
           config.getJsonSchema() &&
           batchRequests.some((r) => r.name === ToolNames.STRUCTURED_OUTPUT);
@@ -1076,8 +1174,6 @@ export async function runNonInteractive(
 
         const respondedRequests = new Set<ToolCallRequestInfo>();
         const executableBatchRequests: ToolCallRequestInfo[] = [];
-        const duplicatePendingResponses: Part[] = [];
-
         for (const requestInfo of uniqueBatchRequests) {
           const providerCallId = getProviderResponseId(requestInfo);
           if (!providerCallId) {
@@ -1103,13 +1199,8 @@ export async function runNonInteractive(
           );
           respondedRequests.add(requestInfo);
           adapter.emitToolResult(requestInfo, toolResponse);
-          duplicatePendingResponses.push(...toolResponse.responseParts);
+          responseByRequest.set(requestInfo, toolResponse);
         }
-
-        // Duplicate responses must always reach the model. They pair with a
-        // tool call the provider already emitted, even when structured_output
-        // is the only executable sibling in this batch.
-        toolResponseParts.push(...duplicatePendingResponses);
 
         // Pre-scan: when --json-schema is active and the model emitted
         // a `structured_output` call alongside other tools in the same
@@ -1124,13 +1215,79 @@ export async function runNonInteractive(
             (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
           );
         }
+        const planModeEntryBoundaryIndex = findPlanModeEntryBatchBoundaryIndex(
+          requestsToExecute.map((request) => request.name),
+        );
+        const planModeEntryBoundary =
+          planModeEntryBoundaryIndex === undefined
+            ? undefined
+            : requestsToExecute[planModeEntryBoundaryIndex];
         const executedRequests = new Set<ToolCallRequestInfo>(
           respondedRequests,
         );
 
-        for (const requestInfo of requestsToExecute) {
-          executedRequests.add(requestInfo);
+        // Partition this batch by concurrency safety, then run each
+        // partition. Tools that are safe to run concurrently (agent
+        // sub-agents, read-only shell, pure reads) run in parallel;
+        // everything with side effects (edits, writes, mutating shell)
+        // runs sequentially in original order. This mirrors the
+        // interactive CoreToolScheduler (partitionToolCalls /
+        // runConcurrently) via the shared isToolCallConcurrencySafe rule,
+        // so `qwen -p` and the TUI agree on which tools parallelise — a
+        // model turn that emits N parallel agent calls no longer executes
+        // them one-at-a-time. Regardless of execution order, results are
+        // finalised (emitted, recorded, appended to `toolResponseParts`)
+        // strictly in original request order, so the model and the event
+        // log always see a deterministic sequence.
+        const toolBatches = partitionHeadlessToolCalls(
+          requestsToExecute,
+          config,
+        );
 
+        // Tick BEFORE the call so that --max-tool-calls=N caps the run
+        // at exactly N executions: the (N+1)th tick aborts before the
+        // tool runs. Ticking after would let the (N+1)th tool execute
+        // and only then abort. See issue #4103. In a parallel batch the
+        // tick still runs serially and in order before each launch, so
+        // the cap fires on the same call it would serially.
+        //
+        // Exempt `structured_output` ONLY when `--json-schema` is
+        // active: under --json-schema this is the terminal "I'm done"
+        // contract tool, not real work, and counting it would abort
+        // an otherwise-valid completion at the budget edge (budget=3,
+        // model used 3 tools then emits structured_output as call #4
+        // → exit 55 instead of success). Guarding on
+        // `getJsonSchema()` keeps the exemption tied to the feature
+        // that owns the tool name — an MCP server that registers an
+        // unrelated tool literally named `structured_output` would
+        // otherwise inherit a free pass.
+        //
+        // Caveat: failed structured_output calls (Ajv validation
+        // failure) also skip the tick, so a model stuck in a
+        // validation-retry loop is not bounded by --max-tool-calls.
+        // Documented in docs/users/features/headless.md → "Scope".
+        // Combine with --max-session-turns or --max-wall-time.
+        const isBudgetExempt = (requestInfo: ToolCallRequestInfo): boolean =>
+          requestInfo.name === ToolNames.STRUCTURED_OUTPUT &&
+          config.getJsonSchema?.() !== undefined;
+
+        // Build the progress/permission callbacks and START a tool call,
+        // returning the in-flight promise. Budget ticking and abort
+        // checks are the caller's responsibility (sequenced before the
+        // launch) so --max-tool-calls stays exact even in a parallel
+        // batch. `async` so a synchronous throw while building the
+        // callbacks (e.g. getInputFormat / getToolCallUpdateCallback)
+        // surfaces as a rejected promise that Promise.allSettled collects
+        // below, instead of aborting the launch loop and leaving the
+        // already-launched siblings as unawaited fire-and-forget. The
+        // launch/settle debug lines identify which call in a parallel batch
+        // is slow or stuck (the serial path made that obvious for free).
+        const launchToolCall = async (
+          requestInfo: ToolCallRequestInfo,
+        ): Promise<ToolCallResponseInfo> => {
+          debugLogger.debug(
+            `[runNonInteractive] launching tool call ${requestInfo.callId} (${requestInfo.name})`,
+          );
           const inputFormat =
             typeof config.getInputFormat === 'function'
               ? config.getInputFormat()
@@ -1153,46 +1310,38 @@ export async function runNonInteractive(
               )
             : createToolProgressHandler(requestInfo, adapter);
 
-          // Tick BEFORE the call so that --max-tool-calls=N caps the run
-          // at exactly N executions: the (N+1)th tick aborts before the
-          // tool runs. Ticking after would let the (N+1)th tool execute
-          // and only then abort. See issue #4103.
-          //
-          // Exempt `structured_output` ONLY when `--json-schema` is
-          // active: under --json-schema this is the terminal "I'm done"
-          // contract tool, not real work, and counting it would abort
-          // an otherwise-valid completion at the budget edge (budget=3,
-          // model used 3 tools then emits structured_output as call #4
-          // → exit 55 instead of success). Guarding on
-          // `getJsonSchema()` keeps the exemption tied to the feature
-          // that owns the tool name — an MCP server that registers an
-          // unrelated tool literally named `structured_output` would
-          // otherwise inherit a free pass.
-          //
-          // Caveat: failed structured_output calls (Ajv validation
-          // failure) also skip the tick, so a model stuck in a
-          // validation-retry loop is not bounded by --max-tool-calls.
-          // Documented in docs/users/features/headless.md → "Scope".
-          // Combine with --max-session-turns or --max-wall-time.
-          const isStructuredOutputExempt =
-            requestInfo.name === ToolNames.STRUCTURED_OUTPUT &&
-            config.getJsonSchema?.() !== undefined;
-          if (!isStructuredOutputExempt) {
-            budgetEnforcer.tickToolCall();
-          }
-          if (abortController.signal.aborted) await routeAbort();
-          const toolResponse = await executeToolCall(
+          const response = await executeToolCall(
             config,
             requestInfo,
             abortController.signal,
             {
+              recordToolResult: false,
               outputUpdateHandler,
+              onAllToolCallsComplete: async (completedCalls) => {
+                for (const call of completedCalls) {
+                  statusByResponse.set(call.response, call.status);
+                }
+              },
               ...(toolCallUpdateCallback && {
                 onToolCallsUpdate: toolCallUpdateCallback,
               }),
             },
           );
+          debugLogger.debug(
+            `[runNonInteractive] tool call ${requestInfo.callId} (${requestInfo.name}) settled${
+              response.error ? ' with error' : ''
+            }`,
+          );
+          return response;
+        };
 
+        // Emit + record a completed tool call in the caller's order.
+        // Returns true when this was the terminal structured_output
+        // success (the "first valid call ends the session" contract).
+        const finalizeToolCall = (
+          requestInfo: ToolCallRequestInfo,
+          toolResponse: ToolCallResponseInfo,
+        ): boolean => {
           if (toolResponse.error) {
             // In JSON/STREAM_JSON mode, tool errors are tolerated and
             // formatted as tool_result blocks. handleToolError detects
@@ -1211,16 +1360,13 @@ export async function runNonInteractive(
           }
 
           adapter.emitToolResult(requestInfo, toolResponse);
+          responseByRequest.set(requestInfo, toolResponse);
           config
             .getGeminiClient()
             .recordCompletedToolCall(
               requestInfo.name,
               requestInfo.args as Record<string, unknown>,
             );
-
-          if (toolResponse.responseParts) {
-            toolResponseParts.push(...toolResponse.responseParts);
-          }
 
           // Capture model override from skill tool results.
           // Use `in` so that undefined (from inherit/no-model skills)
@@ -1235,12 +1381,158 @@ export async function runNonInteractive(
             !toolResponse.error
           ) {
             // Honour the "first valid call ends the session" contract.
-            // The break is after the responseParts/modelOverride capture
+            // Captured after the responseParts/modelOverride handling
             // above so future changes to SyntheticOutputTool can't
             // silently drop those signals. structuredSubmission is the
             // session-scoped binding from the enclosing scope.
             structuredSubmission = requestInfo.args;
-            break;
+            return true;
+          }
+          return false;
+        };
+
+        const finalizePlanModeEntrySiblingSkip = (
+          requestInfo: ToolCallRequestInfo,
+        ): void => {
+          const error = new Error(PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE);
+          const responseParts: Part[] = [
+            {
+              functionResponse: {
+                id: requestInfo.callId,
+                name: requestInfo.name,
+                response: { error: error.message },
+              },
+            },
+          ];
+          adapter.emitToolResult(requestInfo, {
+            callId: requestInfo.callId,
+            responseParts,
+            resultDisplay: error.message,
+            error,
+            errorType: ToolErrorType.EXECUTION_DENIED,
+          });
+          responseByRequest.set(requestInfo, {
+            callId: requestInfo.callId,
+            responseParts,
+            resultDisplay: error.message,
+            error,
+            errorType: ToolErrorType.EXECUTION_DENIED,
+          });
+          executedRequests.add(requestInfo);
+        };
+
+        const maxToolConcurrency = parsePositiveIntegerEnv(
+          process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'],
+          10,
+        );
+
+        let sessionEnded = false;
+        for (const batch of toolBatches) {
+          if (sessionEnded) break;
+
+          if (batch.concurrent && batch.calls.length > 1) {
+            // Parallel batch. Tick the budget for each call serially and
+            // in order (so --max-tool-calls caps at exactly N and the
+            // abort fires on the same call it would serially), launch only
+            // the calls that fit the budget — capped at
+            // QWEN_CODE_MAX_TOOL_CONCURRENCY in flight — then finalise in
+            // request order once all launched calls have settled.
+            const launched: Array<{
+              requestInfo: ToolCallRequestInfo;
+              promise: Promise<ToolCallResponseInfo>;
+            }> = [];
+            const inFlight = new Set<Promise<void>>();
+            for (const requestInfo of batch.calls) {
+              if (
+                planModeEntryBoundary &&
+                requestInfo !== planModeEntryBoundary
+              ) {
+                finalizePlanModeEntrySiblingSkip(requestInfo);
+                continue;
+              }
+              if (!isBudgetExempt(requestInfo)) {
+                budgetEnforcer.tickToolCall();
+              }
+              // A tick that trips the budget (or an external SIGINT) aborts
+              // here; stop launching and route the abort after the
+              // already-launched calls settle. Mark the request executed
+              // only once it is actually launched, so a
+              // budget-tripped-but-unlaunched call still lands in
+              // unexecutedCalls and gets a synthetic skipped-output response
+              // (matters only if routeAbort ever becomes resumable — today it
+              // throws before that synthesis runs).
+              if (abortController.signal.aborted) break;
+              executedRequests.add(requestInfo);
+              const promise = launchToolCall(requestInfo);
+              launched.push({ requestInfo, promise });
+              // Track a never-rejecting settle marker for the in-flight
+              // cap so Promise.race can't throw mid-launch and abandon
+              // siblings. The real outcome is read from `promise` below.
+              const marker = promise
+                .then(
+                  () => {},
+                  () => {},
+                )
+                .finally(() => {
+                  inFlight.delete(marker);
+                });
+              inFlight.add(marker);
+              if (inFlight.size >= maxToolConcurrency) {
+                await Promise.race(inFlight);
+              }
+            }
+
+            const settled = await Promise.allSettled(
+              launched.map((l) => l.promise),
+            );
+            for (let i = 0; i < launched.length; i++) {
+              const outcome = settled[i];
+              if (outcome.status === 'rejected') {
+                // Preserve the serial contract: an unexpected rejection
+                // (a scheduling failure, not a tool-level error, which
+                // surfaces as toolResponse.error) aborts the turn.
+                throw outcome.reason;
+              }
+              if (finalizeToolCall(launched[i].requestInfo, outcome.value)) {
+                sessionEnded = true;
+                break;
+              }
+            }
+
+            if (!sessionEnded && abortController.signal.aborted) {
+              // A budget overrun (or SIGINT) tripped mid-launch; finalise the
+              // launched calls above, then unwind. Note this is not fully
+              // equivalent to the serial path: serial awaits each in-budget
+              // call to completion before the tick that trips, whereas here
+              // the in-budget siblings were launched before the aborting tick,
+              // so when their execution reaches the scheduler's abort re-check
+              // they resolve as cancelled rather than completing. The run still
+              // exits identically (budget overrun → 55, SIGINT → 130;
+              // routeAbort discerns) and sends nothing to the model.
+              await routeAbort();
+            }
+          } else {
+            // Sequential batch (a single tool, or a side-effecting tool):
+            // identical to the pre-parallelisation behaviour.
+            for (const requestInfo of batch.calls) {
+              if (
+                planModeEntryBoundary &&
+                requestInfo !== planModeEntryBoundary
+              ) {
+                finalizePlanModeEntrySiblingSkip(requestInfo);
+                continue;
+              }
+              if (!isBudgetExempt(requestInfo)) {
+                budgetEnforcer.tickToolCall();
+              }
+              if (abortController.signal.aborted) await routeAbort();
+              executedRequests.add(requestInfo);
+              const toolResponse = await launchToolCall(requestInfo);
+              if (finalizeToolCall(requestInfo, toolResponse)) {
+                sessionEnded = true;
+                break;
+              }
+            }
           }
         }
 
@@ -1270,14 +1562,15 @@ export async function runNonInteractive(
                 },
               },
             ];
-            adapter.emitToolResult(call, {
+            const toolResponse: ToolCallResponseInfo = {
               callId: call.callId,
               responseParts,
               resultDisplay: skippedOutput,
               error: undefined,
               errorType: undefined,
-            });
-            toolResponseParts.push(...responseParts);
+            };
+            adapter.emitToolResult(call, toolResponse);
+            responseByRequest.set(call, toolResponse);
           }
         }
 
@@ -1292,7 +1585,38 @@ export async function runNonInteractive(
           const toolResponse =
             createDuplicateProviderToolCallResponse(requestInfo);
           adapter.emitToolResult(requestInfo, toolResponse);
-          toolResponseParts.push(...toolResponse.responseParts);
+          responseByRequest.set(requestInfo, toolResponse);
+        }
+
+        const orderedResponses = batchRequests.flatMap((request) => {
+          const response = responseByRequest.get(request);
+          return response ? [{ request, response }] : [];
+        });
+        const finalized = await finalizeToolResponses(
+          config,
+          orderedResponses.map(({ request, response }) => ({
+            callId: request.callId,
+            toolName: request.name,
+            responseParts: response.responseParts,
+            persistedOutputFiles: response.persistedOutputFiles,
+          })),
+        );
+
+        const chatRecordingService = config.getChatRecordingService?.();
+        const toolResponseParts: Part[] = [];
+        for (let index = 0; index < orderedResponses.length; index++) {
+          const { request, response } = orderedResponses[index];
+          const finalizedParts = finalized[index].responseParts;
+          toolResponseParts.push(...finalizedParts);
+          chatRecordingService?.recordToolResult?.(finalizedParts, {
+            callId: request.callId,
+            status:
+              statusByResponse.get(response) ??
+              (response.error ? 'error' : 'success'),
+            resultDisplay: response.resultDisplay,
+            error: response.error,
+            errorType: response.errorType,
+          });
         }
 
         return {
@@ -1572,7 +1896,9 @@ export async function runNonInteractive(
                 splitIdx++;
               }
             }
-            const batch = localQueue.splice(0, splitIdx);
+            const batch = localQueue
+              .splice(0, splitIdx)
+              .filter((item) => !isCancelledMonitorEvent(item));
 
             if (batch.length === 0) return;
 
@@ -2043,6 +2369,8 @@ export async function runNonInteractive(
       }
       await handleError(error, config);
     } finally {
+      cleanupReviewWorktrees();
+      unregisterReviewWorktreeCleanup();
       // Unsubscribe the leader message callback and approval
       // listener, but do NOT tear down the team itself — in
       // stream-json sessions the same Config is reused across

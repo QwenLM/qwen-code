@@ -115,8 +115,9 @@ export function registerWorkspaceStatusRoutes(
           ? Number(timeoutMsRaw)
           : undefined;
       if (
-        timeoutMs !== undefined &&
-        (!Number.isFinite(timeoutMs) ||
+        timeoutMsRaw !== undefined &&
+        (timeoutMs === undefined ||
+          !Number.isFinite(timeoutMs) ||
           !Number.isInteger(timeoutMs) ||
           timeoutMs <= 0 ||
           timeoutMs > MAX_ACP_PREHEAT_TIMEOUT_MS)

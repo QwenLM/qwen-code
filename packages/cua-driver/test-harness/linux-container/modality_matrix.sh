@@ -54,7 +54,7 @@ PY
 case "${1:-help}" in
   setup)
     pkill -9 -f 'cua-driver serve' 2>/dev/null; pkill -9 -f galculator 2>/dev/null; sleep 2
-    rm -f /home/cua/.cache/cua-driver/cua-driver.sock
+    rm -f /home/cua/.cache/qwen-cua-driver/qwen-cua-driver.sock
     gsettings set org.gnome.desktop.interface toolkit-accessibility true 2>/dev/null
     pgrep -f at-spi-bus-launcher >/dev/null || (setsid /usr/libexec/at-spi-bus-launcher --launch-immediately >/tmp/atspi.log 2>&1 &)
     sleep 1

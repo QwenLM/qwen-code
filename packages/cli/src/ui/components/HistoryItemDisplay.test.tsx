@@ -19,6 +19,11 @@ import { LoadedSettings } from '../../config/settings.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
 import { VirtualViewportContext } from '../contexts/VirtualViewportContext.js';
+import type { MouseEvent } from '../utils/mouse.js';
+import {
+  layoutRowForEvent,
+  measureElementPosition,
+} from '../utils/measure-element-position.js';
 
 // Mock child components
 vi.mock('./messages/ToolGroupMessage.js', () => ({
@@ -27,6 +32,11 @@ vi.mock('./messages/ToolGroupMessage.js', () => ({
 
 vi.mock('../hooks/useMouseEvents.js', () => ({
   useMouseEvents: vi.fn(),
+}));
+
+vi.mock('../utils/measure-element-position.js', () => ({
+  layoutRowForEvent: vi.fn(),
+  measureElementPosition: vi.fn(),
 }));
 
 import { useMouseEvents } from '../hooks/useMouseEvents.js';
@@ -591,6 +601,42 @@ describe('<HistoryItemDisplay />', () => {
         new Set(),
       );
 
+    const mouseEvent = (name: MouseEvent['name'], col: number): MouseEvent => ({
+      name,
+      col,
+      row: 1,
+      shift: false,
+      meta: false,
+      ctrl: false,
+      button: 'left',
+    });
+
+    const renderThoughtWithToggle = (toggle: (headId: number) => void) => {
+      vi.mocked(measureElementPosition).mockReturnValue({
+        x: 0,
+        y: 0,
+        width: 80,
+        height: 3,
+      });
+      vi.mocked(layoutRowForEvent).mockImplementation((_node, row) => row - 1);
+      renderWithProviders(
+        <ThoughtExpandedProvider
+          value={{
+            allExpanded: false,
+            expandedHeadIds: new Set<number>(),
+            toggle,
+          }}
+        >
+          <HistoryItemDisplay
+            item={thoughtItem}
+            terminalWidth={100}
+            isPending={false}
+          />
+        </ThoughtExpandedProvider>,
+      );
+      return vi.mocked(useMouseEvents).mock.calls.at(-1)?.[0];
+    };
+
     it('subscribes the click handler without bypassVpGate (stays VP-gated)', () => {
       vi.mocked(useMouseEvents).mockClear();
       renderWithProviders(
@@ -635,6 +681,27 @@ describe('<HistoryItemDisplay />', () => {
       );
 
       expect(lastFrame()).not.toContain(`click or ${toggleKeyHint} to expand`);
+    });
+
+    it('toggles on a complete click', () => {
+      const toggle = vi.fn();
+      const handler = renderThoughtWithToggle(toggle);
+
+      handler?.(mouseEvent('left-press', 5));
+      expect(toggle).not.toHaveBeenCalled();
+      handler?.(mouseEvent('left-release', 5));
+      expect(toggle).toHaveBeenCalledWith(thoughtItem.id);
+    });
+
+    it('does not toggle when selecting text by dragging', () => {
+      const toggle = vi.fn();
+      const handler = renderThoughtWithToggle(toggle);
+
+      handler?.(mouseEvent('left-press', 5));
+      handler?.(mouseEvent('move', 20));
+      handler?.(mouseEvent('left-release', 20));
+
+      expect(toggle).not.toHaveBeenCalled();
     });
   });
 });

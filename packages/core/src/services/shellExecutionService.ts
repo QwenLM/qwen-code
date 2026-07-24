@@ -21,6 +21,7 @@ import {
   type AnsiOutput,
 } from '../utils/terminalSerializer.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
+import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -194,6 +195,22 @@ export interface ShellExecutionHandle {
   pid: number | undefined;
   /** A promise that resolves with the complete execution result. */
   result: Promise<ShellExecutionResult>;
+}
+
+function createPreSpawnAbortedHandle(): ShellExecutionHandle {
+  return {
+    pid: undefined,
+    result: Promise.resolve({
+      rawOutput: Buffer.alloc(0),
+      output: '',
+      exitCode: null,
+      signal: null,
+      error: null,
+      aborted: true,
+      pid: undefined,
+      executionMethod: 'none',
+    }),
+  };
 }
 
 export interface ShellExecutionConfig {
@@ -658,8 +675,37 @@ export class ShellExecutionService {
     shellExecutionConfig: ShellExecutionConfig,
     options: ShellExecuteOptions = {},
   ): Promise<ShellExecutionHandle> {
+    if (abortSignal.aborted) {
+      return createPreSpawnAbortedHandle();
+    }
+
     if (shouldUseNodePty) {
-      const ptyInfo = await getPty();
+      let removeAbortListener: (() => void) | undefined;
+      const ptyResult = Promise.resolve(getPty()).then(
+        (value) => ({ kind: 'resolved' as const, value }),
+        (error: unknown) => ({ kind: 'rejected' as const, error }),
+      );
+      const aborted = new Promise<{ kind: 'aborted' }>((resolve) => {
+        const onAbort = () => resolve({ kind: 'aborted' });
+        abortSignal.addEventListener('abort', onAbort, { once: true });
+        removeAbortListener = () =>
+          abortSignal.removeEventListener('abort', onAbort);
+        if (abortSignal.aborted) onAbort();
+      });
+      const ptyOutcome = await Promise.race([ptyResult, aborted]);
+      removeAbortListener?.();
+
+      if (ptyOutcome.kind === 'aborted') {
+        return createPreSpawnAbortedHandle();
+      }
+      if (ptyOutcome.kind === 'rejected') {
+        throw ptyOutcome.error;
+      }
+      if (abortSignal.aborted) {
+        return createPreSpawnAbortedHandle();
+      }
+
+      const ptyInfo = ptyOutcome.value;
       if (ptyInfo) {
         try {
           return this.executeWithPty(
@@ -719,7 +765,7 @@ export class ShellExecutionService {
         detached: !isWindows,
         windowsHide: isWindows,
         env: {
-          ...normalizePathEnvForWindows(process.env),
+          ...normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
           ...getShellPagerEnv(pager, {
@@ -1422,7 +1468,7 @@ export class ShellExecutionService {
         cols,
         rows,
         env: {
-          ...normalizePathEnvForWindows(process.env),
+          ...normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
           ...getShellPagerEnv(shellExecutionConfig.pager, {

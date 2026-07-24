@@ -5,7 +5,12 @@
  */
 
 import { describe, it, expect, beforeEach } from 'vitest';
-import { TextTokenizer } from './textTokenizer.js';
+import {
+  estimateTextTokens,
+  estimateTextTokenUnits,
+  TextTokenizer,
+  TOKEN_ESTIMATE_UNITS_PER_TOKEN,
+} from './textTokenizer.js';
 
 describe('TextTokenizer', () => {
   let tokenizer: TextTokenizer;
@@ -28,6 +33,16 @@ describe('TextTokenizer', () => {
   });
 
   describe('calculateTokens', () => {
+    it('keeps token-unit estimates aligned with token estimates', () => {
+      for (const text of ['', 'Hello', '你好世界', 'Hello 世界']) {
+        expect(
+          Math.ceil(
+            estimateTextTokenUnits(text) / TOKEN_ESTIMATE_UNITS_PER_TOKEN,
+          ),
+        ).toBe(estimateTextTokens(text));
+      }
+    });
+
     it('should return 0 for empty text', async () => {
       const result = await tokenizer.calculateTokens('');
       expect(result).toBe(0);

@@ -202,6 +202,7 @@ export default {
   'toolDisplayName.CronDelete': 'toolDisplayName.CronDelete',
   'toolDisplayName.LoopWakeup': 'toolDisplayName.LoopWakeup',
   'toolDisplayName.CreateSubSession': 'toolDisplayName.CreateSubSession',
+  'toolDisplayName.ListAgents': 'toolDisplayName.ListAgents',
   'toolDisplayName.TaskCreate': 'toolDisplayName.TaskCreate',
   'toolDisplayName.TaskUpdate': 'toolDisplayName.TaskUpdate',
   'toolDisplayName.TaskList': 'toolDisplayName.TaskList',
@@ -286,6 +287,7 @@ export default {
     'Connecting to MCP servers... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': 'Type your message or @path/to/file',
   '? for shortcuts': '? for shortcuts',
+  'Pasting…': 'Pasting…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.",
   'Cancel operation / Clear input (double press)':
@@ -479,6 +481,8 @@ export default {
     'Manage existing subagents (view, edit, delete).',
   'Create a new subagent with guided setup.':
     'Create a new subagent with guided setup.',
+  'Create a reusable skill from a knowledge source (file, URL, conversation, or text).':
+    'Create a reusable skill from a knowledge source (file, URL, conversation, or text).',
 
   // ============================================================================
   // Agents - Management Dialog
@@ -755,6 +759,7 @@ export default {
   'Tool Schema Compliance': 'Tool Schema Compliance',
   // Settings enum options
   'Auto (detect from system)': 'Auto (detect from system)',
+  'Auto (follow user input)': 'Auto (follow user input)',
   'Auto (detect terminal theme)': 'Auto (detect terminal theme)',
   Auto: 'Auto',
   Text: 'Text',
@@ -926,8 +931,8 @@ export default {
   'Enables an extension.': 'Enables an extension.',
   'The name of the extension to enable.':
     'The name of the extension to enable.',
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
-    'The scope to enable the extenison in. If not set, will be enabled in all scopes.',
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
+    'The scope to enable the extension in. If not set, will be enabled in all scopes.',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     'Extension "{{name}}" successfully enabled for scope "{{scope}}".',
   'Extension "{{name}}" successfully enabled in all scopes.':
@@ -937,8 +942,8 @@ export default {
   'Disables an extension.': 'Disables an extension.',
   'The name of the extension to disable.':
     'The name of the extension to disable.',
-  'The scope to disable the extenison in.':
-    'The scope to disable the extenison in.',
+  'The scope to disable the extension in.':
+    'The scope to disable the extension in.',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     'Extension "{{name}}" successfully disabled for scope "{{scope}}".',
   'Extension "{{name}}" successfully updated: {{oldVersion}} → {{newVersion}}.':
@@ -1839,7 +1844,10 @@ export default {
   'Press Ctrl+C again to exit.': 'Press Ctrl+C again to exit.',
   'Press Ctrl+D again to exit.': 'Press Ctrl+D again to exit.',
   'Press Esc again to clear.': 'Press Esc again to clear.',
-  'Press ↑ to edit queued messages': 'Press ↑ to edit queued messages',
+  'Ctrl+Q to queue · ↑ to edit queued messages':
+    'Ctrl+Q to queue · ↑ to edit queued messages',
+  'Enter to steer · Ctrl+Q to queue': 'Enter to steer · Ctrl+Q to queue',
+  'Queue message for the next turn': 'Queue message for the next turn',
 
   // ============================================================================
   // MCP Status
@@ -2226,6 +2234,7 @@ export default {
   'Press Ctrl+Y to retry': 'Press Ctrl+Y to retry',
   'No failed request to retry.': 'No failed request to retry.',
   'to retry last request': 'to retry last request',
+  'to queue for the next turn': 'to queue for the next turn',
 
   // ============================================================================
   // Coding Plan Authentication
@@ -2597,8 +2606,14 @@ export default {
     'A new version of Qwen Code is available! {{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!':
     'Qwen Code {{version}} is up to date!',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    'Failed to check for updates. Please check your network or registry configuration.',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    'Failed to check for updates ({{reason}}). Please check your network or registry configuration.',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    'Update check skipped ({{reason}}) — run /update to retry.',
+  'registry did not respond within {{seconds}}s':
+    'registry did not respond within {{seconds}}s',
+  'registry unreachable': 'registry unreachable',
+  'registry error': 'registry error',
   'Unable to check for updates: {{reason}}':
     'Unable to check for updates: {{reason}}',
   'Update successful! The new version will be used on your next run.':
@@ -2635,6 +2650,15 @@ export default {
     'Unable to auto-update this standalone installation. Please reinstall from:',
   'Manual update required. Please reinstall Qwen Code.':
     'Manual update required. Please reinstall Qwen Code.',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    'Update Qwen Code on the host, then restart the sandbox.',
+  'The update will be installed after you exit this session.':
+    'The update will be installed after you exit this session.',
+  'Run /update to install the update on the host.':
+    'Run /update to install the update on the host.',
+  'Run /update to install the update.': 'Run /update to install the update.',
   '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
     '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.',
 

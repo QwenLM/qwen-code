@@ -8,17 +8,24 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
-import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import { Storage } from '../config/storage.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
 import type { ChatRecord } from './chatRecordingService.js';
+import {
+  aggregateTranscriptRecordFragments,
+  isTranscriptConversationRecord,
+  type TranscriptRecordInput,
+  validateTranscriptRecord,
+  walkTranscriptUuidChain,
+} from '../utils/transcript-records.js';
 
 export const SESSION_TRANSCRIPT_DEFAULT_LIMIT = 100;
 export const SESSION_TRANSCRIPT_MAX_LIMIT = 500;
 export const SESSION_TRANSCRIPT_CURSOR_VERSION = 1 as const;
 export const SESSION_TRANSCRIPT_MAX_INDEX_BYTES = 256 * 1024 * 1024;
+export const SESSION_TRANSCRIPT_MAX_PAGE_BYTES = 4 * 1024 * 1024;
 
 export class InvalidSessionTranscriptCursorError extends Error {
   constructor(message = 'Invalid transcript cursor') {
@@ -66,6 +73,8 @@ export interface SessionTranscriptCursorState {
   fileIdentity: SessionTranscriptFileIdentity;
   snapshotSize: number;
   position: number;
+  /** Omitted for legacy oldest-to-newest cursors. */
+  direction?: 'backward';
   leafUuid: string;
   startTime: string;
   lastUpdated: string;
@@ -74,6 +83,10 @@ export interface SessionTranscriptCursorState {
 
 export interface SessionTranscriptReadPageOptions {
   cursor?: string;
+  /** Start a newest-to-oldest snapshot immediately before this active record. */
+  beforeRecordId?: string;
+  /** Start at the persisted tail and page newest-to-oldest. */
+  direction?: 'backward';
   limit?: number;
   maxBytes?: number;
 }
@@ -84,6 +97,7 @@ export interface SessionTranscriptRecordPage {
   records: ChatRecord[];
   gaps: HistoryGap[];
   hasMore: boolean;
+  direction?: 'backward';
   nextCursorState?: SessionTranscriptCursorState;
   replay?: unknown;
   startTime: string;
@@ -104,6 +118,8 @@ interface RecordSegment {
 
 interface UuidIndexEntry {
   parentUuid: string | null;
+  type: ChatRecord['type'];
+  subtype?: TranscriptRecordInput['subtype'];
   segments: RecordSegment[];
 }
 
@@ -181,6 +197,7 @@ function cursorPayload(
     },
     snapshotSize: state.snapshotSize,
     position: state.position,
+    ...(state.direction === 'backward' ? { direction: 'backward' } : {}),
     leafUuid: state.leafUuid,
     startTime: state.startTime,
     lastUpdated: state.lastUpdated,
@@ -310,6 +327,8 @@ function decodeCursorState(
       !isFiniteNonNegativeInteger(fileIdentity['ino']) ||
       !isFiniteNonNegativeInteger(parsed['snapshotSize']) ||
       !isFiniteNonNegativeInteger(parsed['position']) ||
+      (parsed['direction'] !== undefined &&
+        parsed['direction'] !== 'backward') ||
       typeof parsed['leafUuid'] !== 'string' ||
       typeof parsed['startTime'] !== 'string' ||
       typeof parsed['lastUpdated'] !== 'string' ||
@@ -327,6 +346,9 @@ function decodeCursorState(
       },
       snapshotSize: parsed['snapshotSize'],
       position: parsed['position'],
+      ...(parsed['direction'] === 'backward'
+        ? { direction: 'backward' as const }
+        : {}),
       leafUuid: parsed['leafUuid'],
       startTime: parsed['startTime'],
       lastUpdated: parsed['lastUpdated'],
@@ -447,6 +469,95 @@ function selectPageUuids(
   return selected;
 }
 
+function isReplayTurnStart(index: TranscriptIndex, uuid: string): boolean {
+  const entry = index.byUuid.get(uuid);
+  return entry?.type === 'user' && entry.subtype !== 'mid_turn_user_message';
+}
+
+function selectBackwardPageUuids(
+  index: TranscriptIndex,
+  sessionId: string,
+  position: number,
+  limit: number,
+  maxBytes: number | undefined,
+): { uuids: string[]; nextPosition: number } {
+  let start = Math.max(0, position - limit);
+  for (let i = start; i < position; i++) {
+    if (isReplayTurnStart(index, index.activeUuids[i]!)) {
+      start = i;
+      break;
+    }
+  }
+  while (start > 0 && !isReplayTurnStart(index, index.activeUuids[start]!)) {
+    start--;
+  }
+
+  let selectedStart = position;
+  let selectedBytes = 0;
+  for (let i = position - 1; i >= start; i--) {
+    const uuid = index.activeUuids[i]!;
+    const bytes = recordSegmentBytes(index, uuid);
+    if (
+      selectedStart === position &&
+      maxBytes !== undefined &&
+      bytes > maxBytes
+    ) {
+      throw new SessionTranscriptPageTooLargeError(sessionId, bytes, maxBytes);
+    }
+    if (maxBytes !== undefined && selectedBytes + bytes > maxBytes) break;
+    selectedStart = i;
+    selectedBytes += bytes;
+  }
+
+  let alignedToReplayBoundary = false;
+  for (let i = selectedStart; i < position; i++) {
+    if (isReplayTurnStart(index, index.activeUuids[i]!)) {
+      selectedStart = i;
+      alignedToReplayBoundary = true;
+      break;
+    }
+  }
+  let expandedSelection = false;
+  if (alignedToReplayBoundary && selectedStart > 0) {
+    let previousTurnStart = selectedStart - 1;
+    while (
+      previousTurnStart >= 0 &&
+      !isReplayTurnStart(index, index.activeUuids[previousTurnStart]!)
+    ) {
+      previousTurnStart--;
+    }
+    if (previousTurnStart < 0) {
+      selectedStart = 0;
+      expandedSelection = true;
+    }
+  } else if (!alignedToReplayBoundary) {
+    while (
+      selectedStart > 0 &&
+      !isReplayTurnStart(index, index.activeUuids[selectedStart]!)
+    ) {
+      selectedStart--;
+    }
+    expandedSelection = true;
+  }
+  if (expandedSelection && maxBytes !== undefined) {
+    const alignedBytes = index.activeUuids
+      .slice(selectedStart, position)
+      .reduce((total, uuid) => total + recordSegmentBytes(index, uuid), 0);
+    if (alignedBytes > maxBytes) {
+      throw new SessionTranscriptPageTooLargeError(
+        sessionId,
+        alignedBytes,
+        maxBytes,
+      );
+    }
+  }
+
+  return {
+    uuids: index.activeUuids.slice(selectedStart, position),
+    nextPosition: selectedStart,
+  };
+}
+
 function fileIdentityFromStats(stats: fs.Stats): SessionTranscriptFileIdentity {
   return { dev: stats.dev, ino: stats.ino };
 }
@@ -541,21 +652,6 @@ function pruneCache(now = Date.now()): void {
   }
 }
 
-function isChatRecord(value: unknown): value is ChatRecord {
-  if (!isObjectRecord(value)) return false;
-  const type = value['type'];
-  return (
-    typeof value['uuid'] === 'string' &&
-    (typeof value['parentUuid'] === 'string' || value['parentUuid'] === null) &&
-    typeof value['sessionId'] === 'string' &&
-    typeof value['timestamp'] === 'string' &&
-    (type === 'user' ||
-      type === 'assistant' ||
-      type === 'tool_result' ||
-      type === 'system')
-  );
-}
-
 async function forEachLineInSnapshot(
   filePath: string,
   snapshotSize: number,
@@ -634,8 +730,13 @@ async function readSegmentRecords(
   const line = buffer.toString('utf8').trim();
   if (line.length === 0) return [];
   const records = jsonl
-    .parseLineTolerant<ChatRecord>(line, filePath)
-    .filter((record) => isChatRecord(record));
+    .parseLineTolerant<unknown>(line, filePath)
+    .flatMap((value): ChatRecord[] => {
+      const record = validateTranscriptRecord(value).record;
+      return record && isTranscriptConversationRecord(record)
+        ? [record as unknown as ChatRecord]
+        : [];
+    });
   const anomalySessionId = path.basename(filePath, '.jsonl');
   const record = records[segment.fragmentIndex];
   if (!record) {
@@ -659,50 +760,6 @@ async function readSegmentRecords(
   return [record];
 }
 
-function aggregateRecords(records: ChatRecord[]): ChatRecord {
-  if (records.length === 0) {
-    throw new Error('Cannot aggregate empty transcript record array');
-  }
-
-  const base = { ...records[0] };
-
-  // Match SessionService.aggregateRecords so paged replay and /load restore
-  // interpret append-only same-uuid fragments identically: message parts are
-  // appended, latest usage/timestamp win, and stable identity/result fields
-  // keep their first populated value.
-  for (let i = 1; i < records.length; i++) {
-    const record = records[i];
-    if (record.message !== undefined) {
-      if (base.message === undefined) {
-        base.message = record.message;
-      } else {
-        base.message = {
-          role: base.message.role,
-          parts: [
-            ...(base.message.parts ?? []),
-            ...(record.message.parts ?? []),
-          ],
-        };
-      }
-    }
-    if (record.usageMetadata) {
-      base.usageMetadata =
-        record.usageMetadata as GenerateContentResponseUsageMetadata;
-    }
-    if (record.toolCallResult && !base.toolCallResult) {
-      base.toolCallResult = record.toolCallResult;
-    }
-    if (record.model && !base.model) {
-      base.model = record.model;
-    }
-    if (record.timestamp > base.timestamp) {
-      base.timestamp = record.timestamp;
-    }
-  }
-
-  return base;
-}
-
 async function readAggregatedRecords(
   index: TranscriptIndex,
   uuids: string[],
@@ -720,7 +777,7 @@ async function readAggregatedRecords(
         );
       }
       if (physicalRecords.length > 0) {
-        records.push(aggregateRecords(physicalRecords));
+        records.push(aggregateTranscriptRecordFragments(physicalRecords));
       }
     }
     return records;
@@ -763,12 +820,12 @@ async function buildIndex(params: {
       const text = line.toString('utf8').trim();
       if (text.length === 0) return;
       let fragmentIndex = 0;
-      for (const record of jsonl.parseLineTolerant<ChatRecord>(
-        text,
-        filePath,
-      )) {
-        if (!isChatRecord(record)) continue;
-        startTime ??= record.timestamp;
+      for (const value of jsonl.parseLineTolerant<unknown>(text, filePath)) {
+        const record = validateTranscriptRecord(value).record;
+        if (!record || !isTranscriptConversationRecord(record)) {
+          continue;
+        }
+        if (record.timestamp) startTime ??= record.timestamp;
         leafUuid = record.uuid;
         const existing = byUuid.get(record.uuid);
         const segment = {
@@ -783,6 +840,10 @@ async function buildIndex(params: {
         } else {
           byUuid.set(record.uuid, {
             parentUuid: record.parentUuid,
+            type: record.type,
+            ...(record.subtype !== undefined
+              ? { subtype: record.subtype }
+              : {}),
             segments: [segment],
           });
         }
@@ -790,46 +851,33 @@ async function buildIndex(params: {
     },
   );
 
-  if (!leafUuid || !startTime) {
+  if (!leafUuid) {
     debugLogger.warn(
       `index build failed: no transcript records session=${sessionId}`,
     );
     throw new SessionTranscriptSnapshotUnavailableError(sessionId);
   }
+  startTime ??= lastUpdated;
 
-  const activeUuids: string[] = [];
-  const gaps: HistoryGap[] = [];
-  const visited = new Set<string>();
-  let currentUuid: string | null = leafUuid;
-  while (currentUuid && !visited.has(currentUuid)) {
-    visited.add(currentUuid);
-    const entry = byUuid.get(currentUuid);
-    if (!entry) {
-      debugLogger.debug(
-        `active chain terminated: missing uuid session=${sessionId} ` +
-          `uuid=${currentUuid}`,
-      );
-      break;
-    }
-    activeUuids.push(currentUuid);
-    const parentUuid = entry.parentUuid;
-    if (!parentUuid) break;
-    if (!byUuid.has(parentUuid)) {
-      gaps.push({ childUuid: currentUuid, missingParentUuid: parentUuid });
-      debugLogger.debug(
-        `active chain gap session=${sessionId} child=${currentUuid} ` +
-          `missingParent=${parentUuid}`,
-      );
-      break;
-    }
-    currentUuid = parentUuid;
-  }
-  if (currentUuid && visited.has(currentUuid)) {
+  const chain = walkTranscriptUuidChain(leafUuid, (uuid) => {
+    const entry = byUuid.get(uuid);
+    return entry
+      ? {
+          uuid,
+          parentUuid: entry.parentUuid,
+          sessionId,
+          timestamp: startTime,
+          type: 'system',
+        }
+      : undefined;
+  });
+  const activeUuids = [...chain.uuids];
+  const gaps: HistoryGap[] = [...chain.gaps];
+  if (chain.cycleUuid) {
     debugLogger.debug(
-      `active chain terminated: cycle session=${sessionId} uuid=${currentUuid}`,
+      `active chain terminated: cycle session=${sessionId} uuid=${chain.cycleUuid}`,
     );
   }
-  activeUuids.reverse();
 
   debugLogger.debug(
     `index build complete session=${sessionId} records=${byUuid.size} ` +
@@ -944,6 +992,12 @@ export class SessionTranscriptReader {
         ? (this.cursorCodec?.decode(options.cursor) ??
           decodeSessionTranscriptCursor(options.cursor, this.workspaceCwd))
         : undefined;
+    if (
+      cursor &&
+      (options.beforeRecordId !== undefined || options.direction !== undefined)
+    ) {
+      throw new InvalidSessionTranscriptCursorError();
+    }
     if (cursor && cursor.sessionId !== sessionId) {
       debugLogger.debug(
         `cursor session mismatch requested=${sessionId} cursor=${cursor.sessionId}`,
@@ -983,7 +1037,22 @@ export class SessionTranscriptReader {
       throw new SessionTranscriptSnapshotUnavailableError(sessionId);
     }
 
-    const position = cursor?.position ?? 0;
+    const direction =
+      cursor?.direction ??
+      options.direction ??
+      (options.beforeRecordId !== undefined ? 'backward' : 'forward');
+    let position =
+      cursor?.position ??
+      (direction === 'backward' ? index.activeUuids.length : 0);
+    if (!cursor && options.beforeRecordId !== undefined) {
+      if (options.beforeRecordId.length === 0) {
+        throw new InvalidSessionTranscriptCursorError();
+      }
+      position = index.activeUuids.indexOf(options.beforeRecordId);
+      if (position < 0) {
+        throw new InvalidSessionTranscriptCursorError();
+      }
+    }
     if (position > index.activeUuids.length) {
       debugLogger.debug(
         `cursor position out of range session=${sessionId} ` +
@@ -991,16 +1060,20 @@ export class SessionTranscriptReader {
       );
       throw new InvalidSessionTranscriptCursorError();
     }
-    const pageUuids = selectPageUuids(
-      index,
-      sessionId,
-      position,
-      limit,
-      maxBytes,
-    );
-    const nextPosition = position + pageUuids.length;
+    const backwardPage =
+      direction === 'backward'
+        ? selectBackwardPageUuids(index, sessionId, position, limit, maxBytes)
+        : undefined;
+    const pageUuids =
+      backwardPage?.uuids ??
+      selectPageUuids(index, sessionId, position, limit, maxBytes);
+    const nextPosition =
+      backwardPage?.nextPosition ?? position + pageUuids.length;
     const records = await readAggregatedRecords(index, pageUuids);
-    const hasMore = nextPosition < index.activeUuids.length;
+    const hasMore =
+      direction === 'backward'
+        ? nextPosition > 0
+        : nextPosition < index.activeUuids.length;
     const nextCursorState: SessionTranscriptCursorState | undefined = hasMore
       ? {
           v: SESSION_TRANSCRIPT_CURSOR_VERSION,
@@ -1008,6 +1081,9 @@ export class SessionTranscriptReader {
           fileIdentity,
           snapshotSize,
           position: nextPosition,
+          ...(direction === 'backward'
+            ? { direction: 'backward' as const }
+            : {}),
           leafUuid: index.leafUuid,
           startTime: index.startTime,
           lastUpdated: index.lastUpdated,
@@ -1026,6 +1102,7 @@ export class SessionTranscriptReader {
       records,
       gaps: index.gaps,
       hasMore,
+      ...(direction === 'backward' ? { direction: 'backward' as const } : {}),
       ...(nextCursorState ? { nextCursorState } : {}),
       ...(cursor?.replay !== undefined ? { replay: cursor.replay } : {}),
       startTime: index.startTime,

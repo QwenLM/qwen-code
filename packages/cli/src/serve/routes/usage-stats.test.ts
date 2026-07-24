@@ -112,7 +112,7 @@ describe('usage-stats route (cache + range + clamping)', () => {
     const p2 = request(app)
       .get('/usage/dashboard')
       .then((r) => r);
-    await new Promise((r) => setTimeout(r, 20));
+    await new Promise((r) => setTimeout(r, 200));
     resolveLoad([rec({ sessionId: 'a', timestamp: now, totalTokens: 5 })]);
     const [r1, r2] = await Promise.all([p1, p2]);
     expect(r1.status).toBe(200);

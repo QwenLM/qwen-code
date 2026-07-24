@@ -244,6 +244,20 @@ describe('deriveSessionCards', () => {
     expect(cards[0].model).toBe('qwen-max');
     expect(cards[0].clientCount).toBe(2);
   });
+
+  it('does not expose opaque route ids as model names', () => {
+    const cards = deriveSessionCards(
+      [session('s')],
+      [
+        statusSession('s', {
+          currentModelId: 'qwen-route:v1:abcdefghijklmnop',
+        }),
+      ],
+      undefined,
+    );
+
+    expect(cards[0].model).toBeUndefined();
+  });
 });
 
 describe('SessionOverviewPanel', () => {
@@ -446,7 +460,13 @@ describe('SessionOverviewPanel', () => {
       workspaceCwd: '/w',
       workspaces: [
         { id: 'w0', cwd: '/w', primary: true, trusted: true },
-        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+        {
+          id: 'w1',
+          cwd: '/wsB',
+          displayName: 'Payments API',
+          primary: false,
+          trusted: true,
+        },
       ],
     };
     sessionsState.sessions = [session('s-run', { displayName: 'Alpha' })];
@@ -457,10 +477,11 @@ describe('SessionOverviewPanel', () => {
     await flushAsync(); // let the other-workspace fan-out resolve
     // The non-primary session shows up as its own card…
     expect(cardLabels()).toContain('Beta');
-    // …tagged with its workspace basename…
-    expect(container!.textContent).toContain('wsB');
-    // …while the primary card carries the localized "Primary" badge.
-    expect(container!.textContent).toContain('Primary');
+    // …tagged with its workspace display name…
+    expect(container!.textContent).toContain('Payments API');
+    // …while the primary card no longer carries a localized "Primary" word
+    // (it now shows its own basename, like every other card).
+    expect(container!.textContent).not.toContain('Primary');
   });
 
   it('does not query other workspaces on a single-workspace daemon', async () => {

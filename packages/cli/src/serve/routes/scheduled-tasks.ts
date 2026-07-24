@@ -43,11 +43,18 @@ import {
   SessionService,
   stripTerminalControlSequences,
   MAX_JOBS,
+  type CronTaskDelivery,
   type DurableCronTask,
   type CronTaskRun,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { isChannelDeliveryError } from '../channel-delivery-ipc.js';
+import {
+  parseChannelDelivery,
+  type PublicChannelDelivery,
+} from '../channel-delivery.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
+import type { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
@@ -71,6 +78,8 @@ export interface ScheduledTasksSessionBridge {
   spawnOrAttach(req: {
     workspaceCwd: string;
     sessionScope?: 'single' | 'thread';
+    sourceType?: string;
+    sourceId?: string;
   }): Promise<{ sessionId: string }>;
   closeSession(sessionId: string): Promise<unknown>;
   /** Give the task's session a readable name so it's recognizable in the
@@ -142,6 +151,7 @@ interface RegisterScheduledTaskCrudRoutesDeps {
   resolveTarget: ResolveScheduledTaskTarget;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
+  channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
 }
 
 interface RegisterScheduledTasksRoutesDeps {
@@ -154,12 +164,14 @@ interface RegisterScheduledTasksRoutesDeps {
    * fall back to the shared per-project durable-owner firing model.
    */
   bridge?: ScheduledTasksSessionBridge;
+  channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
 }
 
 interface RegisterWorkspaceQualifiedScheduledTasksRoutesDeps {
   workspaceRegistry: WorkspaceRegistry;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
+  channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
   /**
    * When true, a task created through a qualified route binds to a dedicated
    * session in the target workspace (its bridge mints one). Must mirror the
@@ -185,6 +197,7 @@ interface ScheduledTaskView {
   nextRunAt: number | null;
   sessionId: string | null;
   runs: CronTaskRun[];
+  delivery?: CronTaskDelivery;
 }
 
 /** Next scheduled fire (epoch ms) for an enabled task, or null when the task
@@ -227,6 +240,7 @@ function toView(task: DurableCronTask): ScheduledTaskView {
     // Absent runs (tool-created / never-fired) normalizes to [] so the client
     // never special-cases undefined.
     runs: Array.isArray(task.runs) ? task.runs : [],
+    ...(task.delivery !== undefined ? { delivery: task.delivery } : {}),
   };
 }
 
@@ -275,7 +289,13 @@ function registerScheduledTaskCrudRoutes(
   app: Application,
   deps: RegisterScheduledTaskCrudRoutesDeps,
 ): void {
-  const { prefix, resolveTarget, mutate, safeBody } = deps;
+  const {
+    prefix,
+    resolveTarget,
+    mutate,
+    safeBody,
+    channelDeliveryAuthorizations,
+  } = deps;
   const base = `${prefix}/scheduled-tasks`;
 
   // ── List ──────────────────────────────────────────────────────────
@@ -367,6 +387,16 @@ function registerScheduledTaskCrudRoutes(
       });
       return;
     }
+    let delivery: PublicChannelDelivery | undefined;
+    if (body['delivery'] !== undefined) {
+      try {
+        delivery = parseChannelDelivery(body['delivery']);
+      } catch (err) {
+        if (!isChannelDeliveryError(err)) throw err;
+        res.status(400).json({ error: err.message, code: err.code });
+        return;
+      }
+    }
     const removedField = findRemovedTaskField(body);
     if (removedField) {
       res.status(400).json(removedFieldError(removedField));
@@ -374,6 +404,7 @@ function registerScheduledTaskCrudRoutes(
     }
     const recurring = body['recurring'] !== false;
     const enabled = body['enabled'] !== false;
+    const taskId = generateCronTaskId();
 
     // Mint the task's dedicated session up front. The task is BOUND to it and
     // fires only inside it — its transcript becomes the task's run history, and
@@ -409,6 +440,8 @@ function registerScheduledTaskCrudRoutes(
         const session = await bridge.spawnOrAttach({
           workspaceCwd,
           sessionScope: 'thread',
+          sourceType: 'scheduled_task',
+          sourceId: taskId,
         });
         boundSessionId = session.sessionId;
         // Name the session after the task so it's recognizable in the session
@@ -434,7 +467,7 @@ function registerScheduledTaskCrudRoutes(
 
     const now = Date.now();
     const task: DurableCronTask = {
-      id: generateCronTaskId(),
+      id: taskId,
       cron,
       prompt,
       recurring,
@@ -443,6 +476,7 @@ function registerScheduledTaskCrudRoutes(
       // minute the task was created — same guard cronScheduler.create uses.
       lastFiredAt: now - (now % 60_000),
       enabled,
+      ...(delivery !== undefined ? { delivery } : {}),
       ...(boundSessionId !== undefined ? { sessionId: boundSessionId } : {}),
       ...(nameResult.value !== undefined ? { name: nameResult.value } : {}),
     };
@@ -493,10 +527,19 @@ function registerScheduledTaskCrudRoutes(
       });
       return;
     }
+    if (task.delivery && task.sessionId) {
+      channelDeliveryAuthorizations?.registerScheduledTask(workspaceCwd, {
+        sessionId: task.sessionId,
+        taskId: task.id,
+        target: task.delivery.target,
+        recurring: task.recurring,
+        lastFiredAt: task.lastFiredAt ?? undefined,
+      });
+    }
     res.status(201).json(toView(task));
   });
 
-  // ── Update (name / enabled / cron / prompt / recurring) ────────────
+  // ── Update (name / enabled / cron / prompt / recurring / delivery) ──
   app.patch(`${base}/:id`, mutate(), async (req, res) => {
     const target = resolveTarget(req, res);
     if (!target) return;
@@ -515,6 +558,7 @@ function registerScheduledTaskCrudRoutes(
     // would mean holding the lock to reject a bad request.
     const patch: Partial<DurableCronTask> = {};
     let clearName = false;
+    let clearDelivery = false;
 
     const removedPatchField = findRemovedTaskField(body);
     if (removedPatchField) {
@@ -582,7 +626,20 @@ function registerScheduledTaskCrudRoutes(
       }
       patch.enabled = body['enabled'];
     }
-    if (Object.keys(patch).length === 0 && !clearName) {
+    if ('delivery' in body) {
+      if (body['delivery'] === null) {
+        clearDelivery = true;
+      } else {
+        try {
+          patch.delivery = parseChannelDelivery(body['delivery']);
+        } catch (err) {
+          if (!isChannelDeliveryError(err)) throw err;
+          res.status(400).json({ error: err.message, code: err.code });
+          return;
+        }
+      }
+    }
+    if (Object.keys(patch).length === 0 && !clearName && !clearDelivery) {
       res.status(400).json({
         error: 'No updatable fields provided',
         code: 'empty_patch',
@@ -625,6 +682,7 @@ function registerScheduledTaskCrudRoutes(
         // `name: null/""` clears the field rather than storing an empty name,
         // so toView reports it as unnamed and isValidTask never sees a "".
         if (clearName) delete next.name;
+        if (clearDelivery) delete next.delivery;
         // Re-seat the task's schedule anchor to "now" whenever an edit would
         // otherwise let the scheduler retroactively fire an already-past slot.
         const justReEnabled =
@@ -722,6 +780,22 @@ function registerScheduledTaskCrudRoutes(
         // non-critical — the schedule change already persisted
       }
     }
+    if (updated.delivery && updated.sessionId) {
+      channelDeliveryAuthorizations?.registerScheduledTask(workspaceCwd, {
+        sessionId: updated.sessionId,
+        taskId: updated.id,
+        target: updated.delivery.target,
+        recurring: updated.recurring,
+        lastFiredAt: updated.lastFiredAt ?? undefined,
+      });
+    }
+    if (clearDelivery && updated.sessionId) {
+      channelDeliveryAuthorizations?.revokeScheduledTask(
+        workspaceCwd,
+        updated.sessionId,
+        updated.id,
+      );
+    }
     res.status(200).json(toView(updated));
   });
 
@@ -771,6 +845,13 @@ function registerScheduledTaskCrudRoutes(
     // Stop the now-orphaned session (keeps its transcript on disk as history).
     if (boundSessionId && bridge) {
       await bridge.closeSession(boundSessionId).catch(() => {});
+    }
+    if (boundSessionId) {
+      channelDeliveryAuthorizations?.revokeScheduledTask(
+        workspaceCwd,
+        boundSessionId,
+        id,
+      );
     }
     res.status(200).json({ deleted: true, id });
   });
@@ -894,12 +975,19 @@ export function registerScheduledTasksRoutes(
   app: Application,
   deps: RegisterScheduledTasksRoutesDeps,
 ): void {
-  const { boundWorkspace, mutate, safeBody, bridge } = deps;
+  const {
+    boundWorkspace,
+    mutate,
+    safeBody,
+    bridge,
+    channelDeliveryAuthorizations,
+  } = deps;
   registerScheduledTaskCrudRoutes(app, {
     prefix: '',
     resolveTarget: () => ({ workspaceCwd: boundWorkspace, bridge }),
     mutate,
     safeBody,
+    channelDeliveryAuthorizations,
   });
 }
 
@@ -915,8 +1003,13 @@ export function registerWorkspaceQualifiedScheduledTasksRoutes(
   app: Application,
   deps: RegisterWorkspaceQualifiedScheduledTasksRoutesDeps,
 ): void {
-  const { workspaceRegistry, mutate, safeBody, manageScheduledTaskSessions } =
-    deps;
+  const {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    manageScheduledTaskSessions,
+    channelDeliveryAuthorizations,
+  } = deps;
   registerScheduledTaskCrudRoutes(app, {
     prefix: '/workspaces/:workspace',
     resolveTarget: (req, res) => {
@@ -936,6 +1029,7 @@ export function registerWorkspaceQualifiedScheduledTasksRoutes(
     },
     mutate,
     safeBody,
+    channelDeliveryAuthorizations,
   });
 }
 

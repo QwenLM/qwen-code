@@ -13,6 +13,48 @@ describe('workspace actions', () => {
     vi.useRealTimers();
   });
 
+  it('forwards workspace updates to the daemon client', async () => {
+    const workspace = {
+      id: 'secondary',
+      cwd: '/ws/secondary',
+      displayName: 'Payments',
+      primary: false,
+      trusted: true,
+    };
+    const updateWorkspace = vi.fn().mockResolvedValue(workspace);
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ updateWorkspace }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+
+    await expect(
+      actions.updateWorkspace('secondary', { displayName: 'Payments' }),
+    ).resolves.toEqual(workspace);
+    expect(updateWorkspace).toHaveBeenCalledWith('secondary', {
+      displayName: 'Payments',
+    });
+  });
+
+  it('preheats ACP with the requested timeout', async () => {
+    const workspaceAcpPreheat = vi.fn().mockResolvedValue({
+      ready: true,
+      channelLive: true,
+      durationMs: 2,
+    });
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ workspaceAcpPreheat }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+
+    await expect(actions.preheatAcp(5_000)).resolves.toMatchObject({
+      ready: true,
+      channelLive: true,
+    });
+    expect(workspaceAcpPreheat).toHaveBeenCalledWith(5_000);
+  });
+
   it('applies the action timeout to workspace removal', async () => {
     vi.useFakeTimers();
     const remove = vi.fn(() => new Promise<never>(() => {}));
@@ -127,6 +169,18 @@ describe('workspace actions', () => {
       operations: [],
     });
     expect(activeExtensionOperations).toHaveBeenCalledOnce();
+  });
+
+  it('reloads MCP settings through the daemon client', async () => {
+    const reloadWorkspaceMcp = vi.fn().mockResolvedValue({ accepted: true });
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ reloadWorkspaceMcp }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/workspace',
+      baseUrl: 'http://daemon',
+    });
+
+    await expect(actions.reloadMcp()).resolves.toEqual({ accepted: true });
+    expect(reloadWorkspaceMcp).toHaveBeenCalledOnce();
   });
 
   it('forwards an extension interaction response to the daemon client', async () => {

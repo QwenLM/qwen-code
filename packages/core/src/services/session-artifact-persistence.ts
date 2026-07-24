@@ -5,6 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { isTranscriptArtifactRecord } from '../utils/transcript-records.js';
 
 export const SESSION_ARTIFACT_PERSISTENCE_VERSION = 2 as const;
 const CONTENT_ID_PATTERN = /^[0-9a-f]{64}-[0-9a-f]{16}$/;
@@ -152,19 +153,10 @@ export interface SessionArtifactChatRecordLike {
   systemPayload?: unknown;
 }
 
-const ARTIFACT_RECORD_SUBTYPES = new Set([
-  'session_artifact_event',
-  'session_artifact_snapshot',
-]);
-
 export function isSessionArtifactRecord(
   record: SessionArtifactChatRecordLike,
 ): boolean {
-  return (
-    record.type === 'system' &&
-    typeof record.subtype === 'string' &&
-    ARTIFACT_RECORD_SUBTYPES.has(record.subtype)
-  );
+  return isTranscriptArtifactRecord(record);
 }
 
 export function stableSessionArtifactId(

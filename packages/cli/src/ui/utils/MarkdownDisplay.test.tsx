@@ -11,6 +11,18 @@ import { LoadedSettings } from '../../config/settings.js';
 import { renderWithProviders } from '../../test-utils/render.js';
 import { renderMermaidVisual } from './mermaidVisualRenderer.js';
 import { RenderModeProvider } from '../contexts/RenderModeContext.js';
+import { getScreenBuffer } from '../selection/screen-buffer.js';
+import { getSelectedText } from '../selection/selection-text.js';
+
+function copiedFrame(stdout: NodeJS.WriteStream): string {
+  const frame = getScreenBuffer(stdout)!.frame!;
+  return getSelectedText(frame, {
+    sx: 0,
+    sy: 0,
+    ex: frame.width - 1,
+    ey: frame.height - 1,
+  });
+}
 
 describe('<MarkdownDisplay />', () => {
   const baseProps = {
@@ -74,6 +86,25 @@ describe('<MarkdownDisplay />', () => {
         <MarkdownDisplay {...baseProps} text={text} />,
       );
       expect(lastFrame()).toMatchSnapshot();
+    });
+
+    it('continues gutter numbering for a fence carrying the start-line directive', () => {
+      // A tail produced by splitFencedMarkdown after 16 lines were committed.
+      const text =
+        '```javascript qwen-code:start-line=17\nconst a = 1;\nconst b = 2;\n```'.replace(
+          /\n/g,
+          eol,
+        );
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} />,
+      );
+      const frame = lastFrame() ?? '';
+      // Gutter continues at 17/18 instead of restarting at 1/2.
+      expect(frame).toContain('17');
+      expect(frame).toContain('18');
+      // The internal directive lives on the (unrendered) fence line, so it must
+      // never surface on screen.
+      expect(frame).not.toContain('qwen-code');
     });
 
     it('handles unclosed (pending) code blocks', () => {
@@ -146,6 +177,119 @@ describe('<MarkdownDisplay />', () => {
           text={text}
           isPending={false}
           availableTerminalHeight={10}
+        />,
+      );
+      expect(lastFrame() ?? '').toContain('line 60');
+    });
+
+    it('clips a non-pending message when enforceHeightBudget is set (#6867)', () => {
+      // Regression for #6867: the `exit_plan_mode` confirmation dialog renders
+      // a non-pending plan body inside MainContent's `maxHeight` +
+      // `overflow="hidden"` wrapper. Ink clips the BOTTOM (newest content) so
+      // without a height-aware pre-slice, a long plan silently loses its tail
+      // (including the option buttons rendered after it). `enforceHeightBudget`
+      // lets bounded-container callers opt into the same slice the streaming
+      // path uses.
+      const text = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join(
+        eol,
+      );
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={false}
+          availableTerminalHeight={10}
+          enforceHeightBudget
+        />,
+      );
+      const output = lastFrame() ?? '';
+      const lineCount = output.split('\n').length;
+      // Budget = availableTerminalHeight - 2 headroom = 8; the slice keeps
+      // roughly that many content lines and a single truncation-cue row is
+      // appended, so the total stays within the terminal's row budget. Without
+      // the fix this would render all 60 lines.
+      expect(lineCount).toBeLessThanOrEqual(10);
+      // Head of the plan is preserved.
+      expect(output).toContain('line 1');
+      // Tail is dropped.
+      expect(output).not.toContain('line 60');
+    });
+
+    it('shows a truncation cue when a non-streaming plan is clipped (#6867)', () => {
+      // Without a visible cue, a model-authored plan could hide dangerous
+      // steps past the viewport budget and users would approve them blind.
+      // For a COMPLETE plan (enforceHeightBudget + !isPending), the cue must
+      // appear so approvers know content is missing.
+      const text = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join(
+        eol,
+      );
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={false}
+          availableTerminalHeight={10}
+          enforceHeightBudget
+        />,
+      );
+      const output = lastFrame() ?? '';
+      // Cue names the count of dropped source lines and the reason.
+      expect(output).toMatch(/\d+ more lines? not shown/);
+      expect(output).toContain('viewport too small');
+    });
+
+    it('does not show a truncation cue when streaming (isPending=true)', () => {
+      // While streaming, the tail IS still on its way (incremental commit
+      // pushes it into <Static> in real time). Emitting "N more lines not
+      // shown" during streaming would be misleading — content is not missing,
+      // just not here yet. Guards against the cue leaking into the streaming
+      // path.
+      const text = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join(
+        eol,
+      );
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={true}
+          availableTerminalHeight={10}
+        />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).not.toMatch(/more lines? not shown/);
+    });
+
+    it('does not show a truncation cue when nothing was actually dropped', () => {
+      // A short plan that fits under the budget must not display the cue.
+      const text = 'a short plan line';
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={false}
+          availableTerminalHeight={10}
+          enforceHeightBudget
+        />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('a short plan line');
+      expect(output).not.toMatch(/more lines? not shown/);
+    });
+
+    it('leaves a non-pending message full when enforceHeightBudget is false', () => {
+      // Committed non-pending renders (transcript, tool result markdown) must
+      // stay uncapped. Guards against enforceHeightBudget defaulting to true
+      // or the isPending gate being accidentally dropped.
+      const text = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join(
+        eol,
+      );
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={false}
+          availableTerminalHeight={10}
+          enforceHeightBudget={false}
         />,
       );
       expect(lastFrame() ?? '').toContain('line 60');
@@ -243,10 +387,13 @@ describe('<MarkdownDisplay />', () => {
 * item B
 + item C
 `.replace(/\n/g, eol);
-      const { lastFrame } = renderWithProviders(
+      const { lastFrame, stdout } = renderWithProviders(
         <MarkdownDisplay {...baseProps} text={text} />,
       );
       expect(lastFrame()).toMatchSnapshot();
+      expect(copiedFrame(stdout as unknown as NodeJS.WriteStream)).toContain(
+        '- item A\n* item B\n+ item C',
+      );
     });
 
     it('renders nested unordered lists', () => {
@@ -293,10 +440,13 @@ Test
 | Cell 1   | Cell 2   |
 | Cell 3   | Cell 4   |
 `.replace(/\n/g, eol);
-      const { lastFrame } = renderWithProviders(
+      const { lastFrame, stdout } = renderWithProviders(
         <MarkdownDisplay {...baseProps} text={text} />,
       );
       expect(lastFrame()).toMatchSnapshot();
+      expect(copiedFrame(stdout as unknown as NodeJS.WriteStream)).toContain(
+        '│ Cell 1   │  Cell 2  │',
+      );
     });
 
     it('handles a table at the end of the input', () => {

@@ -15,6 +15,7 @@ import type {
   DaemonCapabilities,
   DaemonClient,
   DaemonCreateAgentRequest,
+  DaemonWorkspaceGenerationEvent,
   DaemonGeneratedAgentContent,
   DaemonDeviceFlowStartResult,
   DaemonDeviceFlowState,
@@ -32,9 +33,13 @@ import type {
   DaemonMcpRestartResult,
   DaemonMcpManageAction,
   DaemonMcpManageResult,
+  DaemonRuntimeMcpAddRequest,
+  DaemonRuntimeMcpAddResult,
+  DaemonRuntimeMcpRemoveResult,
   DaemonUpdateAgentRequest,
   DaemonWorkspaceAgentDetail,
   DaemonWorkspaceAgentsStatus,
+  DaemonWorkspaceAcpPreheatResult,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceExtensionsStatus,
   DaemonWorkspaceFile,
@@ -44,13 +49,20 @@ import type {
   DaemonWorkspaceFileWriteRequest,
   DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceMcpStatus,
+  DaemonWorkspaceMcpInitializeResult,
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryStatus,
+  DaemonWorkspaceCapability,
   DaemonWorkspaceRemovalResult,
+  DaemonWorkspaceUpdate,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
+  DaemonSkillToggleResult,
+  DaemonSkillInstallRequest,
+  DaemonSkillMutationResult,
+  DaemonSkillScope,
   DaemonWorkspaceToolsStatus,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
@@ -245,9 +257,59 @@ export interface DaemonUpdateScheduledTaskRequest {
 export interface DaemonAddWorkspaceResult {
   id: string;
   cwd: string;
+  displayName?: string;
   primary: boolean;
   trusted: boolean;
   persisted?: boolean;
+}
+
+/**
+ * One session's active `/goal`. Goals live in the owning session's memory and
+ * only advance while it is resident, so this list covers exactly the goals that
+ * are actually running — a session that isn't loaded contributes nothing.
+ */
+export interface DaemonGoal {
+  /** The session driving this goal; its transcript is the goal's history. */
+  sessionId: string;
+  /** The session's label, or null — the UI falls back to the id. */
+  displayName: string | null;
+  condition: string;
+  /** Judge turns completed; 0 before the first stop-hook evaluation. */
+  iterations: number;
+  setAt: number;
+  /** The judge's verdict on the most recent turn, when it has run. */
+  lastReason?: string;
+  /**
+   * The owning session is mid-turn. For a goal session that is almost always
+   * the loop working, but a manual prompt in the same session sets it too.
+   */
+  hasActivePrompt: boolean;
+}
+
+/** The `GET /goals` payload. */
+export interface DaemonGoalList {
+  goals: DaemonGoal[];
+  /**
+   * Sessions whose goal could not be probed (wedged or dying child). Their
+   * goals are missing from `goals`, so a non-zero count means this list is
+   * incomplete rather than empty.
+   */
+  droppedCount: number;
+}
+
+export interface DaemonWorkspacePathSuggestion {
+  name: string;
+  path: string;
+}
+
+export interface DaemonWorkspacePathSuggestions {
+  kind: 'workspace-path-suggestions';
+  /** Directory the suggestions were listed from. */
+  dir: string;
+  /** Path separator of the daemon host, for appending on accept. */
+  sep: string;
+  suggestions: DaemonWorkspacePathSuggestion[];
+  truncated: boolean;
 }
 
 export interface DaemonWorkspaceActions {
@@ -292,6 +354,8 @@ export interface DaemonWorkspaceActions {
 
   // MCP
   loadMcpStatus(): Promise<DaemonWorkspaceMcpStatus>;
+  initializeMcp(): Promise<DaemonWorkspaceMcpInitializeResult>;
+  reloadMcp(): Promise<DaemonWorkspaceMcpInitializeResult>;
   loadMcpTools(serverName: string): Promise<DaemonWorkspaceMcpToolsStatus>;
   loadMcpResources(
     serverName: string,
@@ -301,6 +365,10 @@ export interface DaemonWorkspaceActions {
     serverName: string,
     action: DaemonMcpManageAction,
   ): Promise<DaemonMcpManageResult>;
+  addRuntimeMcpServer(
+    request: DaemonRuntimeMcpAddRequest,
+  ): Promise<DaemonRuntimeMcpAddResult>;
+  removeRuntimeMcpServer(name: string): Promise<DaemonRuntimeMcpRemoveResult>;
 
   // Daemon status (read-only)
   loadDaemonStatus(
@@ -313,13 +381,25 @@ export interface DaemonWorkspaceActions {
     heatmapDays?: number;
   }): Promise<DaemonUsageDashboard>;
 
-  // Skills (read-only)
+  // Skills
   loadSkillsStatus(): Promise<DaemonWorkspaceSkillsStatus>;
+  setWorkspaceSkillEnabled(
+    skillName: string,
+    enabled: boolean,
+  ): Promise<DaemonSkillToggleResult>;
+  installWorkspaceSkill(
+    request: DaemonSkillInstallRequest,
+  ): Promise<DaemonSkillMutationResult>;
+  deleteWorkspaceSkill(
+    skillName: string,
+    scope: DaemonSkillScope,
+  ): Promise<DaemonSkillMutationResult>;
 
   // Extensions
   loadExtensionsStatus(): Promise<DaemonWorkspaceExtensionsStatus>;
 
   // Tools
+  preheatAcp(timeoutMs?: number): Promise<DaemonWorkspaceAcpPreheatResult>;
   loadToolsStatus(): Promise<DaemonWorkspaceToolsStatus>;
   setWorkspaceToolEnabled(toolName: string, enabled: boolean): Promise<unknown>;
 
@@ -329,6 +409,9 @@ export interface DaemonWorkspaceActions {
     scope: 'workspace' | 'user',
     key: string,
     value: unknown,
+    options?: {
+      mcpServerMutation?: { operation: 'set' | 'remove'; name: string };
+    },
   ): Promise<DaemonSettingUpdateResult>;
 
   // Memory
@@ -336,9 +419,17 @@ export interface DaemonWorkspaceActions {
   readWorkspaceFile(filePath: string): Promise<DaemonWorkspaceFile>;
   writeMemory(req: DaemonWriteMemoryRequest): Promise<DaemonWriteMemoryResult>;
 
+  generateContent(
+    prompt: string,
+    opts?: { signal?: AbortSignal },
+  ): AsyncGenerator<DaemonWorkspaceGenerationEvent>;
+
   // Agents (CRUD)
   listAgents(): Promise<DaemonWorkspaceAgentsStatus>;
-  getAgent(agentType: string): Promise<DaemonWorkspaceAgentDetail>;
+  getAgent(
+    agentType: string,
+    scope?: 'workspace' | 'global',
+  ): Promise<DaemonWorkspaceAgentDetail>;
   createAgent(
     req: DaemonCreateAgentRequest,
   ): Promise<DaemonAgentMutationResult>;
@@ -386,6 +477,11 @@ export interface DaemonWorkspaceActions {
     workspaceId?: string,
   ): Promise<DaemonScheduledTask>;
   deleteScheduledTask(id: string, workspaceId?: string): Promise<void>;
+
+  // Goals (session-scoped Stop hooks, listed workspace-wide)
+  listGoals(): Promise<DaemonGoalList>;
+  /** Drop a session's goal hook. No-op when that session has no active goal. */
+  clearGoal(sessionId: string): Promise<{ cleared: boolean }>;
 
   // Providers / env (read-only diagnostics)
   loadProviders(): Promise<DaemonWorkspaceProvidersStatus>;
@@ -461,8 +557,16 @@ export interface DaemonWorkspaceActions {
   // Workspace management
   addWorkspace(
     cwd: string,
-    options?: { persist?: boolean },
+    options?: { persist?: boolean; displayName?: string },
   ): Promise<DaemonAddWorkspaceResult>;
+  addScratchWorkspace(): Promise<DaemonAddWorkspaceResult>;
+  suggestWorkspacePaths(
+    prefix: string,
+  ): Promise<DaemonWorkspacePathSuggestions>;
+  updateWorkspace(
+    workspaceSelector: string,
+    update: DaemonWorkspaceUpdate,
+  ): Promise<DaemonWorkspaceCapability>;
   removeWorkspace(
     workspaceId: string,
     options?: { force?: boolean; timeoutMs?: number },

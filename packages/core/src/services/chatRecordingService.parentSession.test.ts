@@ -15,6 +15,7 @@ import {
   type ChatRecord,
 } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import type { SessionWriterLease } from './session-writer-lease.js';
 
 vi.mock('node:path');
 vi.mock('node:child_process');
@@ -31,6 +32,7 @@ vi.mock('../utils/jsonl-utils.js');
 describe('ChatRecordingService - recordParentSession', () => {
   let chatRecordingService: ChatRecordingService;
   let mockConfig: Config;
+  let mockLease: SessionWriterLease;
 
   let uuidCounter = 0;
 
@@ -78,10 +80,19 @@ describe('ChatRecordingService - recordParentSession', () => {
     vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
     vi.spyOn(fs, 'existsSync').mockReturnValue(false);
 
-    chatRecordingService = new ChatRecordingService(mockConfig);
-
     // writeLine is async; mockResolvedValue lets the writeChain settle on flush.
     vi.mocked(jsonl.writeLine).mockResolvedValue(undefined);
+    mockLease = {
+      sessionId: 'test-session-id',
+      ownerId: 'test-owner-id',
+      appendJsonLine: vi.fn((record: unknown) =>
+        jsonl.writeLine('/test/session.jsonl', record),
+      ),
+      assertOwnedAndUnchanged: vi.fn().mockResolvedValue(undefined),
+      release: vi.fn().mockResolvedValue(undefined),
+    } as unknown as SessionWriterLease;
+    chatRecordingService = new ChatRecordingService(mockConfig);
+    chatRecordingService.activate(mockLease);
   });
 
   afterEach(() => {
@@ -103,6 +114,56 @@ describe('ChatRecordingService - recordParentSession', () => {
       parentSessionId: 'parent-abc',
     });
     expect(writtenRecord.sessionId).toBe('test-session-id');
+  });
+
+  it('records immutable session source metadata', async () => {
+    const first = await chatRecordingService.recordSessionSource(
+      'scheduled_task',
+      'task-123',
+    );
+    const second = await chatRecordingService.recordSessionSource(
+      'scheduled_task',
+      'task-123',
+    );
+    await chatRecordingService.flush();
+
+    expect(first).toBe(true);
+    expect(second).toBe(true);
+    expect(jsonl.writeLine).toHaveBeenCalledOnce();
+    const writtenRecord = vi.mocked(jsonl.writeLine).mock
+      .calls[0][1] as ChatRecord;
+    expect(writtenRecord).toMatchObject({
+      type: 'system',
+      subtype: 'session_source',
+      systemPayload: {
+        sourceType: 'scheduled_task',
+        sourceId: 'task-123',
+      },
+    });
+  });
+
+  it('rejects a different session source after the first write', async () => {
+    await expect(
+      chatRecordingService.recordSessionSource('scheduled_task', 'task-123'),
+    ).resolves.toBe(true);
+    await expect(
+      chatRecordingService.recordSessionSource('web_shell', 'window-1'),
+    ).resolves.toBe(false);
+    await chatRecordingService.flush();
+
+    expect(jsonl.writeLine).toHaveBeenCalledOnce();
+  });
+
+  it('reports a session source write failure', async () => {
+    const writeError = new Error('disk full');
+    vi.mocked(jsonl.writeLine).mockRejectedValueOnce(writeError);
+
+    await expect(
+      chatRecordingService.recordSessionSource('scheduled_task', 'task-123'),
+    ).resolves.toBe(false);
+    await expect(chatRecordingService.flush()).rejects.toBe(writeError);
+
+    expect(jsonl.writeLine).toHaveBeenCalledOnce();
   });
 
   it('includes the standard record metadata', async () => {

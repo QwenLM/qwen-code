@@ -1,10 +1,15 @@
 import type { CommandModule } from 'yargs';
 import {
-  appendChannelMemory,
+  addChannelMemoryEntries,
   clearChannelMemory,
+  getChannelMemoryRevision,
+  listChannelMemoryEntries,
   nextFireTime,
   parseCron,
   readChannelMemory,
+  recordChannelMemoryRecallMetrics,
+  removeChannelMemoryEntries,
+  updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -32,6 +37,7 @@ import {
   loadChannelsConfig,
   loadChannelsFromExtensions,
   parseConfiguredChannels,
+  registerBackgroundResponseRelay,
   registerPermissionRelay,
   registerSessionCleanup,
   registerToolCallDispatch,
@@ -58,17 +64,25 @@ function isFileExistsError(err: unknown): boolean {
 function channelMemoryOptions(
   getBridge: () => AcpBridge,
   cwd: string,
-): Pick<ChannelBaseOptions, 'channelMemory' | 'memoryIntentClassifier'> {
+): Pick<
+  ChannelBaseOptions,
+  'channelMemory' | 'memoryIntentClassifier' | 'channelMemoryRecallObserver'
+> {
   return {
     channelMemory: {
       readChannelMemory,
-      appendChannelMemory,
+      getChannelMemoryRevision,
+      listChannelMemoryEntries,
+      addChannelMemoryEntries,
+      updateChannelMemoryEntry,
+      removeChannelMemoryEntries,
       clearChannelMemory,
     },
     memoryIntentClassifier: new BridgeChannelMemoryIntentClassifier(
       getBridge,
       cwd,
     ),
+    channelMemoryRecallObserver: recordChannelMemoryRecallMetrics,
   };
 }
 
@@ -224,6 +238,7 @@ async function startSingle(
       })
     : undefined;
   registerToolCallDispatch(bridge, router, channels);
+  registerBackgroundResponseRelay(bridge, router, channels);
   registerPermissionRelay(bridge, router, channels);
   registerSessionCleanup(bridge, router, channels);
 
@@ -278,6 +293,7 @@ async function startSingle(
         channel.disconnect();
         await channel.connect();
         registerToolCallDispatch(bridge, router, channels);
+        registerBackgroundResponseRelay(bridge, router, channels);
         registerPermissionRelay(bridge, router, channels);
         registerSessionCleanup(bridge, router, channels);
         attachDisconnectHandler(bridge);
@@ -387,6 +403,7 @@ async function startAll(
     );
   }
   registerToolCallDispatch(bridge, router, channels);
+  registerBackgroundResponseRelay(bridge, router, channels);
   registerPermissionRelay(bridge, router, channels);
   registerSessionCleanup(bridge, router, channels);
 
@@ -486,6 +503,7 @@ async function startAll(
           process.exit(1);
         }
         registerToolCallDispatch(bridge, router, channels);
+        registerBackgroundResponseRelay(bridge, router, channels);
         registerPermissionRelay(bridge, router, channels);
         registerSessionCleanup(bridge, router, channels);
         attachDisconnectHandler(bridge);
@@ -547,7 +565,7 @@ export const startCommand: CommandModule<object, { name?: string }> = {
     }),
   handler: async (argv) => {
     const settings = loadSettings(process.cwd());
-    const proxy = resolveProxy(
+    const proxy = await resolveProxy(
       (argv as Record<string, unknown>)['proxy'] as string | undefined,
       settings.merged.proxy as string | undefined,
     );

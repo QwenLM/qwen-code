@@ -13,9 +13,10 @@
 
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, unlinkSync } from 'node:fs';
+import { existsSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { clearReviewWorktreeLease } from '../../services/review-worktree-lease.js';
 import { refExists, releaseWorktree } from './lib/git.js';
 import {
   worktreePath,
@@ -29,7 +30,7 @@ interface CleanupArgs {
   target: string;
 }
 
-function runCleanup(target: string): void {
+export function runCleanup(target: string): void {
   let removedAny = false;
   // Tracked separately from `removedAny`, because a failure is neither. Without
   // it, a run that could not delete something goes on to announce "Nothing to
@@ -79,6 +80,7 @@ function runCleanup(target: string): void {
         writeStderrLine(
           `Failed to delete branch ${branch}: ${(err as Error).message}`,
         );
+        failedAny = true;
       }
     }
   }
@@ -98,13 +100,21 @@ function runCleanup(target: string): void {
     if (!file.startsWith(prefix)) continue;
     const full = join(REVIEW_TMP_DIR, file);
     try {
-      unlinkSync(full);
+      // Not every side file is a file. `agent-prompt` records what it handed each
+      // agent in `<plan>-prompts/`, a directory under this same prefix, and
+      // `unlinkSync` on a directory is an EISDIR — which this loop would have
+      // reported as a cleanup failure on every single review.
+      rmSync(full, { recursive: true, force: true });
       writeStdoutLine(`Removed temp file: ${full}`);
       removedAny = true;
     } catch (err) {
       writeStderrLine(`Failed to remove ${full}: ${(err as Error).message}`);
       failedAny = true;
     }
+  }
+
+  if (!failedAny) {
+    clearReviewWorktreeLease(process.cwd(), target);
   }
 
   // "Nothing to clean" is a claim about the tree, not about this run's luck. It

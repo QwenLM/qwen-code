@@ -70,6 +70,7 @@ export default {
   'Type your message or @path/to/file':
     'Digite sua mensagem ou @caminho/do/arquivo',
   '? for shortcuts': '? para atalhos',
+  'Pasting…': 'Colando…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Pressione 'i' para modo INSERÇÃO e 'Esc' para modo NORMAL.",
   'Cancel operation / Clear input (double press)':
@@ -472,6 +473,7 @@ export default {
 
   // Settings enum options
   'Auto (detect from system)': 'Automático (detectar do sistema)',
+  'Auto (follow user input)': 'Automático (seguir entrada do usuário)',
   'Auto (detect terminal theme)': 'Automático (detectar tema do terminal)',
   Auto: 'Automático',
   Text: 'Texto',
@@ -606,7 +608,7 @@ export default {
     'Inclua o nome da extensão para desinstalar como um argumento posicional.',
   'Enables an extension.': 'Ativa uma extensão.',
   'The name of the extension to enable.': 'O nome da extensão para ativar.',
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
     'O escopo para ativar a extensão. Se não definido, será ativada em todos os escopos.',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     'Extensão "{{name}}" ativada com sucesso para o escopo "{{scope}}".',
@@ -616,7 +618,7 @@ export default {
     'Escopo inválido: {{scope}}. Use um de {{scopes}}.',
   'Disables an extension.': 'Desativa uma extensão.',
   'The name of the extension to disable.': 'O nome da extensão para desativar.',
-  'The scope to disable the extenison in.':
+  'The scope to disable the extension in.':
     'O escopo para desativar a extensão.',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     'Extensão "{{name}}" desativada com sucesso para o escopo "{{scope}}".',
@@ -2132,8 +2134,14 @@ export default {
     'Uma nova versão do Qwen Code está disponível! {{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!':
     'Qwen Code {{version}} está atualizado!',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    'Falha ao verificar atualizações. Verifique sua rede ou configuração do registro.',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    'Falha ao verificar atualizações ({{reason}}). Verifique sua rede ou configuração do registro.',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    'Verificação de atualização ignorada ({{reason}}) — execute /update para tentar novamente.',
+  'registry did not respond within {{seconds}}s':
+    'o registro não respondeu em {{seconds}}s',
+  'registry unreachable': 'registro inacessível',
+  'registry error': 'erro no registro',
   'Unable to check for updates: {{reason}}':
     'Não foi possível verificar atualizações: {{reason}}',
   'Update successful! The new version will be used on your next run.':
@@ -2170,6 +2178,16 @@ export default {
     'Não foi possível atualizar automaticamente esta instalação independente. Reinstale de:',
   'Manual update required. Please reinstall Qwen Code.':
     'Atualização manual necessária. Reinstale o Qwen Code.',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    'Esta sessão usa a imagem de sandbox personalizada {{image}}. Atualize a imagem e reinicie o Qwen Code.',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    'Atualize o Qwen Code no host e reinicie o sandbox.',
+  'The update will be installed after you exit this session.':
+    'A atualização será instalada após você sair desta sessão.',
+  'Run /update to install the update on the host.':
+    'Execute /update para instalar a atualização no host.',
+  'Run /update to install the update.':
+    'Execute /update para instalar a atualização.',
 
   // ============================================================================
   // reload-plugins command

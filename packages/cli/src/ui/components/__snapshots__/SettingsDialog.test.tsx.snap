@@ -9,9 +9,9 @@ exports[`SettingsDialog > Snapshot Tests > should render default state correctly
 │ │ ⌕ Search settings…                                                                           │ │
 │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
 │                                                                                                  │
-│ ● Tool Approval Mode                                                             Ask permissions │
+│ ● Tool Approval Mode                                                                        Auto │
 │   Language: UI                                                         Auto (detect from system) │
-│   Language: Model                                                                           auto │
+│   Language: Model                                                       Auto (follow user input) │
 │   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                 false │
 │   Interactive Shell (PTY)                                                                   true │
@@ -34,9 +34,9 @@ exports[`SettingsDialog > Snapshot Tests > should render focused on scope select
 │ │ ⌕ Search settings…                                                                           │ │
 │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
 │                                                                                                  │
-│ ● Tool Approval Mode                                                             Ask permissions │
+│ ● Tool Approval Mode                                                                        Auto │
 │   Language: UI                                                         Auto (detect from system) │
-│   Language: Model                                                                           auto │
+│   Language: Model                                                       Auto (follow user input) │
 │   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                 false │
 │   Interactive Shell (PTY)                                                                   true │
@@ -59,9 +59,9 @@ exports[`SettingsDialog > Snapshot Tests > should render with accessibility sett
 │ │ ⌕ Search settings…                                                                           │ │
 │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
 │                                                                                                  │
-│ ● Tool Approval Mode                                                             Ask permissions │
+│ ● Tool Approval Mode                                                                        Auto │
 │   Language: UI                                                         Auto (detect from system) │
-│   Language: Model                                                                           auto │
+│   Language: Model                                                       Auto (follow user input) │
 │   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                 true* │
 │   Interactive Shell (PTY)                                                                   true │
@@ -84,9 +84,9 @@ exports[`SettingsDialog > Snapshot Tests > should render with all boolean settin
 │ │ ⌕ Search settings…                                                                           │ │
 │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
 │                                                                                                  │
-│ ● Tool Approval Mode                                                             Ask permissions │
+│ ● Tool Approval Mode                                                                        Auto │
 │   Language: UI                                                         Auto (detect from system) │
-│   Language: Model                                                                           auto │
+│   Language: Model                                                       Auto (follow user input) │
 │   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                false* │
 │   Interactive Shell (PTY)                                                                   true │
@@ -109,9 +109,9 @@ exports[`SettingsDialog > Snapshot Tests > should render with different scope se
 │ │ ⌕ Search settings…                                                                           │ │
 │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
 │                                                                                                  │
-│ ● Tool Approval Mode                                                             Ask permissions │
+│ ● Tool Approval Mode                                                                        Auto │
 │   Language: UI                                                         Auto (detect from system) │
-│   Language: Model                                                                           auto │
+│   Language: Model                                                       Auto (follow user input) │
 │   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode (Modified in System)                                                            false │
 │   Interactive Shell (PTY)                                                                   true │
@@ -134,9 +134,9 @@ exports[`SettingsDialog > Snapshot Tests > should render with different scope se
 │ │ ⌕ Search settings…                                                                           │ │
 │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
 │                                                                                                  │
-│ ● Tool Approval Mode                                                             Ask permissions │
+│ ● Tool Approval Mode                                                                        Auto │
 │   Language: UI                                                         Auto (detect from system) │
-│   Language: Model                                                                           auto │
+│   Language: Model                                                       Auto (follow user input) │
 │   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode (Modified in Workspace)                                                         false │
 │   Interactive Shell (PTY)                                                                   true │
@@ -159,9 +159,9 @@ exports[`SettingsDialog > Snapshot Tests > should render with file filtering set
 │ │ ⌕ Search settings…                                                                           │ │
 │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
 │                                                                                                  │
-│ ● Tool Approval Mode                                                             Ask permissions │
+│ ● Tool Approval Mode                                                                        Auto │
 │   Language: UI                                                         Auto (detect from system) │
-│   Language: Model                                                                           auto │
+│   Language: Model                                                       Auto (follow user input) │
 │   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                 false │
 │   Interactive Shell (PTY)                                                                   true │
@@ -184,9 +184,9 @@ exports[`SettingsDialog > Snapshot Tests > should render with mixed boolean and 
 │ │ ⌕ Search settings…                                                                           │ │
 │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
 │                                                                                                  │
-│ ● Tool Approval Mode                                                             Ask permissions │
+│ ● Tool Approval Mode                                                                        Auto │
 │   Language: UI                                                         Auto (detect from system) │
-│   Language: Model                                                                           auto │
+│   Language: Model                                                       Auto (follow user input) │
 │   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                false* │
 │   Interactive Shell (PTY)                                                                   true │
@@ -209,9 +209,9 @@ exports[`SettingsDialog > Snapshot Tests > should render with tools and security
 │ │ ⌕ Search settings…                                                                           │ │
 │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
 │                                                                                                  │
-│ ● Tool Approval Mode                                                             Ask permissions │
+│ ● Tool Approval Mode                                                                        Auto │
 │   Language: UI                                                         Auto (detect from system) │
-│   Language: Model                                                                           auto │
+│   Language: Model                                                       Auto (follow user input) │
 │   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                 false │
 │   Interactive Shell (PTY)                                                                   true │
@@ -234,9 +234,9 @@ exports[`SettingsDialog > Snapshot Tests > should render with various boolean se
 │ │ ⌕ Search settings…                                                                           │ │
 │ ╰──────────────────────────────────────────────────────────────────────────────────────────────╯ │
 │                                                                                                  │
-│ ● Tool Approval Mode                                                             Ask permissions │
+│ ● Tool Approval Mode                                                                        Auto │
 │   Language: UI                                                         Auto (detect from system) │
-│   Language: Model                                                                           auto │
+│   Language: Model                                                       Auto (follow user input) │
 │   Theme                                                                              Qwen Dark ▸ │
 │   Vim Mode                                                                                 true* │
 │   Interactive Shell (PTY)                                                                   true │

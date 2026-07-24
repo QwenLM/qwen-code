@@ -45,7 +45,6 @@ export {
 } from './mcp-status.js';
 
 import type { FunctionDeclaration } from '@google/genai';
-import { mcpToTool } from '@google/genai';
 import { existsSync } from 'node:fs';
 import { basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -56,9 +55,16 @@ import type { OAuthCredentials } from '../mcp/token-storage/types.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { ResourceRegistry } from '../resources/resource-registry.js';
 import { getErrorMessage, getErrorStatus } from '../utils/errors.js';
+import {
+  getOrCreateMcpDispatcher,
+  loadUndici,
+  preloadRuntimeFetchModule,
+  resetDispatcherCache,
+} from '../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { retryWithBackoff } from './mcp-retry.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
+import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 import type {
   Unsubscribe,
   WorkspaceContext,
@@ -77,6 +83,19 @@ export const MCP_DEFAULT_TIMEOUT_MSEC = 10 * 60 * 1000; // default to 10 minutes
 
 const debugLogger = createDebugLogger('MCP');
 const AUTOMATIC_MCP_OAUTH_TIMEOUT_MS = 60_000;
+
+const invocationContextTransports = new WeakSet<Transport>();
+const invocationContextClients = new WeakSet<Client>();
+
+function bindInvocationContextPolicy(
+  client: Client,
+  transport: Transport,
+): void {
+  invocationContextClients.delete(client);
+  if (invocationContextTransports.has(transport)) {
+    invocationContextClients.add(client);
+  }
+}
 
 const STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES = new Set([400]);
 const STREAMABLE_HTTP_GET_SSE_ERROR_BODY_LIMIT = 512;
@@ -199,7 +218,8 @@ function isStreamableHttpGetSseRequest(init?: RequestInit): boolean {
 }
 
 /**
- * Wraps fetch to normalize Spring AI-style 400 responses to the SDK's
+ * Wraps fetch to preserve OAuth challenges before the SDK discards response
+ * metadata and to normalize Spring AI-style 400 responses to the SDK's
  * unsupported sentinel for the optional Streamable HTTP GET SSE request.
  *
  * SDK coupling: `StreamableHTTPClientTransport._startOrAuthSse()` treats a
@@ -209,9 +229,21 @@ function isStreamableHttpGetSseRequest(init?: RequestInit): boolean {
 export function createStreamableHttpCompatibilityFetch(
   mcpServerName: string,
   fetchFn: typeof fetch = globalThis.fetch.bind(globalThis),
+  mcpServerConfig?: MCPServerConfig,
 ): typeof fetch {
   return async (input, init) => {
     const response = await fetchFn(input, init);
+    if (
+      response.status === 401 &&
+      mcpServerConfig &&
+      supportsMcpOAuth(mcpServerConfig)
+    ) {
+      setMcpOAuthRequirement(
+        mcpServerName,
+        mcpServerConfig,
+        response.headers.get('www-authenticate') ?? '',
+      );
+    }
     if (
       !isStreamableHttpGetSseRequest(init) ||
       !STREAMABLE_HTTP_GET_SSE_FALLBACK_STATUSES.has(response.status)
@@ -235,6 +267,58 @@ export function createStreamableHttpCompatibilityFetch(
       statusText: 'Method Not Allowed',
     });
   };
+}
+
+// Streamable HTTP servers hold a long-lived GET SSE stream open for the
+// lifetime of the connection (the SDK transport opens it after
+// `notifications/initialized`, per the MCP spec). Against some servers,
+// Node's built-in fetch stalls subsequent same-origin POSTs
+// (tools/resources/prompts discovery) behind that stream until the SDK's
+// request timeout fires (#7147 — reproduced by the reporter against
+// Fastmail's MCP endpoint on Node 26.4). The transport therefore pins
+// undici's own fetch with a dedicated dispatcher — both loaded lazily via
+// loadUndici() so undici stays out of the eager startup closure (#7264),
+// and the dispatcher shared through runtimeFetchOptions so MCP traffic
+// honors an explicit --proxy or HTTP(S)_PROXY/NO_PROXY environment and
+// uses the same disabled header/body timeouts as the LLM path (#7195).
+const mcpUndiciFetch: typeof fetch = (async (
+  input: Parameters<typeof fetch>[0],
+  init?: Parameters<typeof fetch>[1],
+) => {
+  // preload populates the sync cache the shared dispatcher builders read.
+  await preloadRuntimeFetchModule();
+  const { fetch: undiciFetch } = await loadUndici();
+  return undiciFetch(input as Parameters<typeof undiciFetch>[0], {
+    ...(init as Parameters<typeof undiciFetch>[1]),
+    dispatcher: getOrCreateMcpDispatcher(),
+  });
+}) as unknown as typeof fetch;
+
+// Test-only override: unit tests stub `globalThis.fetch`, which the
+// dedicated undici fetch above deliberately bypasses. Follows the
+// `_reset*ForTest` convention (see utils/cleanup.ts).
+let mcpFetchOverrideForTest: typeof fetch | undefined;
+export function _setMcpFetchForTest(fn?: typeof fetch): void {
+  mcpFetchOverrideForTest = fn;
+}
+
+// Test-only: clears the shared dispatcher cache so a test can re-evaluate
+// `isTlsVerificationDisabled()` / proxy configuration under a different
+// environment. Kept under its historical name; delegates to the shared
+// runtimeFetchOptions cache the MCP dispatcher now lives in.
+export function _resetMcpFetchDispatcherForTest(): void {
+  resetDispatcherCache();
+}
+
+function createMcpStreamableHttpFetch(
+  mcpServerName: string,
+  mcpServerConfig: MCPServerConfig,
+): typeof fetch {
+  return createStreamableHttpCompatibilityFetch(
+    mcpServerName,
+    mcpFetchOverrideForTest ?? mcpUndiciFetch,
+    mcpServerConfig,
+  );
 }
 
 export type DiscoveredMCPPrompt = Prompt & {
@@ -313,6 +397,7 @@ export class McpClient {
    */
   async connect(): Promise<void> {
     this.isDisconnecting = false;
+    invocationContextClients.delete(this.client);
     clearMcpOAuthRequirement(this.serverName, this.serverConfig);
     // clear stale upstream error from
     // any prior connect/disconnect cycle. The silent-drop reader
@@ -367,6 +452,7 @@ export class McpClient {
         timeout: this.serverConfig.timeout,
       });
       this.instructions = this.client.getInstructions();
+      bindInvocationContextPolicy(this.client, this.transport);
 
       this.updateStatus(MCPServerStatus.CONNECTED);
     } catch (error) {
@@ -743,7 +829,10 @@ function setMcpOAuthRequirement(
   const key = oauthRecoveryKey(mcpServerName, mcpServerConfig);
   mcpServerOAuthProbeCandidates.delete(key);
   mcpServerOAuthRequirements.add(key);
-  mcpServerOAuthChallenges.set(key, wwwAuthenticate);
+  mcpServerOAuthChallenges.set(
+    key,
+    wwwAuthenticate || mcpServerOAuthChallenges.get(key) || '',
+  );
   mcpServerRequiresOAuth.set(mcpServerName, true);
 }
 
@@ -1014,7 +1103,7 @@ async function createTransportWithOAuth(
     if (mcpServerConfig.httpUrl) {
       // Create HTTP transport with OAuth token
       const oauthTransportOptions: StreamableHTTPClientTransportOptions = {
-        fetch: createStreamableHttpCompatibilityFetch(mcpServerName),
+        fetch: createMcpStreamableHttpFetch(mcpServerName, mcpServerConfig),
         requestInit: {
           headers: {
             ...mcpServerConfig.headers,
@@ -1213,6 +1302,7 @@ export async function discoverTools(
   opts?: { applyConfigFilters?: boolean },
 ): Promise<DiscoveredMCPTool[]> {
   try {
+    const { mcpToTool } = await import('@google/genai');
     const mcpCallableTool = mcpToTool(mcpClient, {
       timeout: mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
     });
@@ -1286,6 +1376,7 @@ export async function discoverTools(
             cliConfig?.getMcpToolIdleTimeoutMs?.(),
             annotationsMap.get(funcDecl.name!),
             mcpServerConfig.alwaysLoadTools === true,
+            invocationContextClients.has(mcpClient),
           ),
         );
       } catch (error) {
@@ -1626,6 +1717,7 @@ export async function connectToMcpServer(
       await mcpClient.connect(transport, {
         timeout: mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
       });
+      bindInvocationContextPolicy(mcpClient, transport);
       clearMcpOAuthRequirement(mcpServerName, mcpServerConfig);
       return mcpClient;
     } catch (error) {
@@ -1972,7 +2064,7 @@ export async function createTransport(
 
     if (mcpServerConfig.httpUrl) {
       (transportOptions as StreamableHTTPClientTransportOptions).fetch =
-        createStreamableHttpCompatibilityFetch(mcpServerName);
+        createMcpStreamableHttpFetch(mcpServerName, mcpServerConfig);
       return new StreamableHTTPClientTransport(
         new URL(mcpServerConfig.httpUrl),
         transportOptions,
@@ -2000,7 +2092,7 @@ export async function createTransport(
     };
     if (mcpServerConfig.httpUrl) {
       (transportOptions as StreamableHTTPClientTransportOptions).fetch =
-        createStreamableHttpCompatibilityFetch(mcpServerName);
+        createMcpStreamableHttpFetch(mcpServerName, mcpServerConfig);
       return new StreamableHTTPClientTransport(
         new URL(mcpServerConfig.httpUrl),
         transportOptions,
@@ -2063,7 +2155,7 @@ export async function createTransport(
 
   if (mcpServerConfig.httpUrl) {
     const transportOptions: StreamableHTTPClientTransportOptions = {
-      fetch: createStreamableHttpCompatibilityFetch(mcpServerName),
+      fetch: createMcpStreamableHttpFetch(mcpServerName, mcpServerConfig),
     };
 
     // Set up headers with OAuth token if available
@@ -2121,7 +2213,7 @@ export async function createTransport(
     // config providing its own PATH fully replaces the parent value instead of
     // being merged with a stale case-variant.
     const env = {
-      ...normalizePathEnvForWindows({ ...process.env }),
+      ...normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
       ...(mcpServerConfig.env || {}),
     };
 
@@ -2132,6 +2224,7 @@ export async function createTransport(
       cwd: mcpServerConfig.cwd,
       stderr: 'pipe',
     });
+    invocationContextTransports.add(transport);
     if (debugMode) {
       transport.stderr!.on('data', (data) => {
         const stderrStr = data.toString().trim();

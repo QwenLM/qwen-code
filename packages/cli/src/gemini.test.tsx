@@ -34,6 +34,8 @@ const mockHandleListExtensions = vi.hoisted(() => vi.fn());
 const mockStartEarlyStartupPrefetches = vi.hoisted(() => vi.fn());
 const mockStartPostRenderPrefetches = vi.hoisted(() => vi.fn());
 const mockRunAcpAgent = vi.hoisted(() => vi.fn());
+const mockUpdateBeforeRelaunch = vi.hoisted(() => vi.fn());
+const mockGetInstallationInfo = vi.hoisted(() => vi.fn());
 const lspConfigWatcherMock = vi.hoisted(() => ({
   instances: [] as Array<{
     listener?: (event: unknown) => void | Promise<void>;
@@ -160,6 +162,15 @@ vi.mock('./startup/startup-prefetch.js', () => ({
     mockStartPostRenderPrefetches(...args),
 }));
 
+vi.mock('./utils/update-relaunch.js', () => ({
+  updateBeforeRelaunch: (...args: unknown[]) =>
+    mockUpdateBeforeRelaunch(...args),
+}));
+
+vi.mock('./utils/installationInfo.js', () => ({
+  getInstallationInfo: (...args: unknown[]) => mockGetInstallationInfo(...args),
+}));
+
 vi.mock('./acp-integration/acpAgent.js', () => ({
   runAcpAgent: (...args: unknown[]) => mockRunAcpAgent(...args),
 }));
@@ -226,18 +237,29 @@ function withLspDisabledConfig<T extends object>(
 describe('gemini.tsx main function', () => {
   let originalEnvGeminiSandbox: string | undefined;
   let originalEnvSandbox: string | undefined;
+  let originalEnvQwenSandboxImage: string | undefined;
   let originalEnvQwenCodeSimple: string | undefined;
   let initialUnhandledRejectionListeners: NodeJS.UnhandledRejectionListener[] =
     [];
 
   beforeEach(() => {
     lspConfigWatcherMock.instances.length = 0;
+    mockUpdateBeforeRelaunch.mockResolvedValue(true);
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: 'npm install -g @qwen-code/qwen-code@latest',
+    });
     // Store and clear sandbox-related env variables to ensure a consistent test environment
     originalEnvGeminiSandbox = process.env['QWEN_SANDBOX'];
     originalEnvSandbox = process.env['SANDBOX'];
+    // QWEN_SANDBOX_IMAGE selects the custom-image relaunch branch in main(),
+    // which skips the host-update capability computation; CI environments that
+    // export a resolved sandbox image (e.g. the autofix runner) would otherwise
+    // flip these tests' code path.
+    originalEnvQwenSandboxImage = process.env['QWEN_SANDBOX_IMAGE'];
     originalEnvQwenCodeSimple = process.env['QWEN_CODE_SIMPLE'];
     delete process.env['QWEN_SANDBOX'];
     delete process.env['SANDBOX'];
+    delete process.env['QWEN_SANDBOX_IMAGE'];
     delete process.env['QWEN_CODE_SIMPLE'];
 
     initialUnhandledRejectionListeners =
@@ -255,6 +277,11 @@ describe('gemini.tsx main function', () => {
       process.env['SANDBOX'] = originalEnvSandbox;
     } else {
       delete process.env['SANDBOX'];
+    }
+    if (originalEnvQwenSandboxImage !== undefined) {
+      process.env['QWEN_SANDBOX_IMAGE'] = originalEnvQwenSandboxImage;
+    } else {
+      delete process.env['QWEN_SANDBOX_IMAGE'];
     }
     if (originalEnvQwenCodeSimple !== undefined) {
       process.env['QWEN_CODE_SIMPLE'] = originalEnvQwenCodeSimple;
@@ -342,6 +369,11 @@ describe('gemini.tsx main function', () => {
     // For the sandbox case we still have to load a partial cli config.
     // we can authorize outside the sandbox.
     expect(callOrder).toEqual(['relaunch', 'loadCliConfig']);
+    expect(relaunchAppInChildProcess).toHaveBeenCalledWith(
+      expect.any(Array),
+      [],
+      expect.objectContaining({ onUpdateRelaunch: expect.any(Function) }),
+    );
     processExitSpy.mockRestore();
   });
 
@@ -390,6 +422,65 @@ describe('gemini.tsx main function', () => {
 
     processExitSpy.mockRestore();
   });
+
+  it.each([
+    ['before the ACP relaunch', { acp: true }, {}, undefined, '1'],
+    [
+      'in the relaunched ACP process',
+      { acp: true },
+      { QWEN_CODE_NO_RELAUNCH: 'true' },
+      undefined,
+      undefined,
+    ],
+    [
+      'in the sandboxed ACP process',
+      { acp: true },
+      { SANDBOX: 'sandbox-exec' },
+      undefined,
+      undefined,
+    ],
+    [
+      'outside managed ACP startup',
+      {},
+      { QWEN_CODE_NO_RELAUNCH: 'true' },
+      '1',
+      '1',
+    ],
+    [
+      'ACP without bootstrap marker',
+      { acp: true },
+      { QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE: undefined },
+      '1',
+      undefined,
+    ],
+  ])(
+    'manages Electron bootstrap env %s',
+    async (_name, argv, extraEnv, expectedElectron, expectedMarker) => {
+      vi.stubEnv('ELECTRON_RUN_AS_NODE', '1');
+      vi.stubEnv('QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE', '1');
+      vi.stubEnv('QWEN_CODE_NO_RELAUNCH', '');
+      for (const [key, value] of Object.entries(extraEnv)) {
+        vi.stubEnv(key, value);
+      }
+
+      const { parseArguments } = await import('./config/config.js');
+      const { loadSettings } = await import('./config/settings.js');
+      vi.mocked(parseArguments).mockResolvedValue(argv as CliArgs);
+      vi.mocked(loadSettings).mockImplementation(() => {
+        expect(process.env['ELECTRON_RUN_AS_NODE']).toBe(expectedElectron);
+        expect(process.env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE']).toBe(
+          expectedMarker,
+        );
+        throw new Error('stop after env check');
+      });
+
+      try {
+        await expect(main()).rejects.toThrow('stop after env check');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it('should skip full settings discovery in bare mode', async () => {
     const originalArgv = process.argv;
@@ -794,6 +885,7 @@ describe('gemini.tsx main function', () => {
   const runSandboxRelaunch = async (
     argv: string[],
     sessionId = '123e4567-e89b-12d3-a456-426614174000',
+    command: 'docker' | 'podman' | 'sandbox-exec' = 'sandbox-exec',
   ): Promise<string[]> => {
     const originalArgv = process.argv;
     process.argv = argv;
@@ -809,8 +901,10 @@ describe('gemini.tsx main function', () => {
     const { loadSettings } = await import('./config/settings.js');
     const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
     const { start_sandbox } = await import('./utils/sandbox.js');
+    const { relaunchOnExitCode } = await import('./utils/relaunch.js');
 
     vi.mocked(start_sandbox).mockClear();
+    vi.mocked(relaunchOnExitCode).mockClear();
     vi.mocked(parseArguments).mockResolvedValue({
       debug: true,
       prompt: 'hello',
@@ -830,8 +924,8 @@ describe('gemini.tsx main function', () => {
       getProjectHooks: () => undefined,
     } as never);
     vi.mocked(loadSandboxConfig).mockResolvedValue({
-      command: 'sandbox-exec',
-      image: '',
+      command,
+      image: 'ghcr.io/qwenlm/qwen-code:1.0.0',
     });
     vi.mocked(loadCliConfig).mockResolvedValue({
       getModelsConfig: () => ({ getCurrentAuthType: () => null }),
@@ -850,6 +944,9 @@ describe('gemini.tsx main function', () => {
     }
 
     expect(start_sandbox).toHaveBeenCalledOnce();
+    expect(relaunchOnExitCode).toHaveBeenCalledWith(expect.any(Function), {
+      onUpdateRelaunch: expect.any(Function),
+    });
     return vi.mocked(start_sandbox).mock.calls[0]![3]!;
   };
 
@@ -864,6 +961,44 @@ describe('gemini.tsx main function', () => {
     expect(idx).not.toBe(-1);
     expect(sandboxArgs[idx + 1]).toBe(sessionId);
     expect(sandboxArgs).not.toContain('--session-id');
+  });
+
+  it('starts a fresh CLI after the host update completes', async () => {
+    await runSandboxRelaunch(['node', 'script.js', '--debug', '-p', 'hello']);
+    const { relaunchOnExitCode } = await import('./utils/relaunch.js');
+    const [, options] = vi.mocked(relaunchOnExitCode).mock.calls[0]!;
+
+    await expect(options?.onUpdateRelaunch?.(true)).resolves.toBe(44);
+
+    expect(mockUpdateBeforeRelaunch).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.any(String),
+      true,
+    );
+  });
+
+  it('passes host update capability into a container sandbox', async () => {
+    const originalCapability = process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH'];
+
+    try {
+      await runSandboxRelaunch(
+        ['node', 'script.js', '--debug', '-p', 'hello'],
+        '',
+        'docker',
+      );
+
+      expect(mockGetInstallationInfo).toHaveBeenCalledWith(
+        expect.any(String),
+        true,
+      );
+      expect(process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH']).toBe('true');
+    } finally {
+      if (originalCapability === undefined) {
+        delete process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH'];
+      } else {
+        process.env['QWEN_CODE_HOST_UPDATE_RELAUNCH'] = originalCapability;
+      }
+    }
   });
 
   it('does not pass an empty session ID into the sandbox child process', async () => {
@@ -999,7 +1134,7 @@ describe('gemini.tsx main function', () => {
     );
 
     vi.mocked(cleanupModule.cleanupCheckpoints).mockResolvedValue(undefined);
-    vi.mocked(cleanupModule.registerCleanup).mockImplementation(() => {});
+    vi.mocked(cleanupModule.registerCleanup).mockImplementation(() => () => {});
     const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
     runExitCleanupMock.mockResolvedValue(undefined);
     vi.spyOn(initializerModule, 'initializeApp').mockResolvedValue({
@@ -1670,35 +1805,23 @@ describe('gemini.tsx main function kitty protocol', () => {
       expect.any(Object),
       expect.any(Object),
       expect.any(Object),
+      {
+        privateParentCapability: undefined,
+      },
     );
     expect(mockStartEarlyStartupPrefetches).toHaveBeenCalledWith(
       expect.any(Object),
     );
   });
 
-  it('should run cleanup before exiting on interactive SIGINT', async () => {
-    const { loadCliConfig, parseArguments } = await import(
-      './config/config.js'
-    );
-    const { loadSettings } = await import('./config/settings.js');
-    const cleanupModule = await import('./utils/cleanup.js');
-    const signalHandlers = new Map<string, (...args: unknown[]) => void>();
-    const processOnceSpy = vi.spyOn(process, 'once').mockImplementation(((
-      eventName: string | symbol,
-      listener: (...args: unknown[]) => void,
-    ) => {
-      if (eventName === 'SIGTERM' || eventName === 'SIGINT') {
-        signalHandlers.set(eventName, listener);
-      }
-      return process;
-    }) as typeof process.once);
-    const processExitSpy = vi
-      .spyOn(process, 'exit')
-      .mockImplementation((() => undefined) as unknown as typeof process.exit);
-    const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
-    runExitCleanupMock.mockResolvedValue(undefined);
-
-    vi.mocked(loadCliConfig).mockResolvedValue({
+  // Shared config/settings mocks for the interactive signal-handler tests.
+  function applyInteractiveSigintConfigMocks(
+    loadCliConfig: unknown,
+    loadSettings: unknown,
+  ) {
+    vi.mocked(
+      loadCliConfig as (typeof import('./config/config.js'))['loadCliConfig'],
+    ).mockResolvedValue({
       isInteractive: () => true,
       getQuestion: () => '',
       getSandbox: () => false,
@@ -1723,7 +1846,9 @@ describe('gemini.tsx main function kitty protocol', () => {
       getSessionId: () => 'test-session-id',
       isTelemetryInitializationDeferred: () => true,
     } as unknown as Config);
-    vi.mocked(loadSettings).mockReturnValue({
+    vi.mocked(
+      loadSettings as (typeof import('./config/settings.js'))['loadSettings'],
+    ).mockReturnValue({
       errors: [],
       merged: {
         advanced: {},
@@ -1736,20 +1861,198 @@ describe('gemini.tsx main function kitty protocol', () => {
       getUserHooks: () => undefined,
       getProjectHooks: () => undefined,
     } as never);
+  }
+
+  it('exits on interactive SIGINT only after a second press inside the confirm window', async () => {
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const cleanupModule = await import('./utils/cleanup.js');
+    const signalHandlers = new Map<string, (...args: unknown[]) => void>();
+    const realProcessOn = process.on.bind(process);
+    const processOnSpy = vi.spyOn(process, 'on').mockImplementation(((
+      eventName: string | symbol,
+      listener: (...args: unknown[]) => void,
+    ) => {
+      if (eventName === 'SIGTERM' || eventName === 'SIGINT') {
+        // Keep only the first (named) handler per signal; the swallow
+        // listener registered when cleanup begins is tracked separately.
+        if (!signalHandlers.has(eventName as string)) {
+          signalHandlers.set(eventName as string, listener);
+        }
+        return process;
+      }
+      return realProcessOn(
+        eventName as string,
+        listener as (...args: unknown[]) => void,
+      );
+    }) as typeof process.on);
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as unknown as typeof process.exit);
+    const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
+    runExitCleanupMock.mockResolvedValue(undefined);
+
+    applyInteractiveSigintConfigMocks(loadCliConfig, loadSettings);
+    vi.mocked(parseArguments).mockResolvedValue({
+      extensions: undefined,
+    } as never);
+
+    const nowSpy = vi.spyOn(Date, 'now');
+    try {
+      await main();
+
+      // First SIGINT: no cleanup, no exit — just the press-again hint.
+      mockWriteStderrLine.mockClear();
+      nowSpy.mockReturnValue(100_000);
+      signalHandlers.get('SIGINT')?.();
+      await Promise.resolve();
+      expect(runExitCleanupMock).not.toHaveBeenCalled();
+      expect(processExitSpy).not.toHaveBeenCalled();
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        'Press Ctrl+C again to exit.',
+      );
+
+      // `when-exit` re-raises the signal microseconds later — the repeat is
+      // the same press, not a confirmation.
+      nowSpy.mockReturnValue(100_002);
+      signalHandlers.get('SIGINT')?.();
+      await Promise.resolve();
+      expect(runExitCleanupMock).not.toHaveBeenCalled();
+      expect(processExitSpy).not.toHaveBeenCalled();
+
+      // Second real press inside the confirm window: cleanup once, exit 130.
+      nowSpy.mockReturnValue(100_400);
+      signalHandlers.get('SIGINT')?.();
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(setRawModeSpy).toHaveBeenCalledWith(false);
+      expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
+      expect(processExitSpy).toHaveBeenCalledWith(130);
+      // Cleanup registered a stand-in SIGINT listener so a stray Ctrl+C
+      // while cleanup runs cannot fall back to Node's default handler
+      // (#6776).
+      expect(
+        processOnSpy.mock.calls.filter(([event]) => event === 'SIGINT').length,
+      ).toBeGreaterThan(1);
+
+      // Further SIGINTs during cleanup are ignored (single cleanup pass).
+      nowSpy.mockReturnValue(100_800);
+      signalHandlers.get('SIGINT')?.();
+      await Promise.resolve();
+      expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
+    } finally {
+      nowSpy.mockRestore();
+      processOnSpy.mockRestore();
+      processExitSpy.mockRestore();
+    }
+  });
+
+  it('re-arms the SIGINT confirm window after it expires', async () => {
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const cleanupModule = await import('./utils/cleanup.js');
+    const signalHandlers = new Map<string, (...args: unknown[]) => void>();
+    const realProcessOn = process.on.bind(process);
+    const processOnSpy = vi.spyOn(process, 'on').mockImplementation(((
+      eventName: string | symbol,
+      listener: (...args: unknown[]) => void,
+    ) => {
+      if (eventName === 'SIGTERM' || eventName === 'SIGINT') {
+        if (!signalHandlers.has(eventName as string)) {
+          signalHandlers.set(eventName as string, listener);
+        }
+        return process;
+      }
+      return realProcessOn(
+        eventName as string,
+        listener as (...args: unknown[]) => void,
+      );
+    }) as typeof process.on);
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as unknown as typeof process.exit);
+    const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
+    runExitCleanupMock.mockResolvedValue(undefined);
+    applyInteractiveSigintConfigMocks(loadCliConfig, loadSettings);
+    vi.mocked(parseArguments).mockResolvedValue({
+      extensions: undefined,
+    } as never);
+
+    const nowSpy = vi.spyOn(Date, 'now');
+    try {
+      await main();
+
+      nowSpy.mockReturnValue(100_000);
+      signalHandlers.get('SIGINT')?.();
+      // 1.5s later — outside the window, so this press re-arms instead of
+      // exiting…
+      nowSpy.mockReturnValue(101_500);
+      signalHandlers.get('SIGINT')?.();
+      await Promise.resolve();
+      expect(runExitCleanupMock).not.toHaveBeenCalled();
+      expect(processExitSpy).not.toHaveBeenCalled();
+
+      // …and a press right after it lands inside the fresh window.
+      nowSpy.mockReturnValue(101_900);
+      signalHandlers.get('SIGINT')?.();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
+      expect(processExitSpy).toHaveBeenCalledWith(130);
+    } finally {
+      nowSpy.mockRestore();
+      processOnSpy.mockRestore();
+      processExitSpy.mockRestore();
+    }
+  });
+
+  it('still exits on the first SIGTERM with code 143', async () => {
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const cleanupModule = await import('./utils/cleanup.js');
+    const signalHandlers = new Map<string, (...args: unknown[]) => void>();
+    const realProcessOn = process.on.bind(process);
+    const processOnSpy = vi.spyOn(process, 'on').mockImplementation(((
+      eventName: string | symbol,
+      listener: (...args: unknown[]) => void,
+    ) => {
+      if (eventName === 'SIGTERM' || eventName === 'SIGINT') {
+        if (!signalHandlers.has(eventName as string)) {
+          signalHandlers.set(eventName as string, listener);
+        }
+        return process;
+      }
+      return realProcessOn(
+        eventName as string,
+        listener as (...args: unknown[]) => void,
+      );
+    }) as typeof process.on);
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((() => undefined) as unknown as typeof process.exit);
+    const runExitCleanupMock = vi.mocked(cleanupModule.runExitCleanup);
+    runExitCleanupMock.mockResolvedValue(undefined);
+    applyInteractiveSigintConfigMocks(loadCliConfig, loadSettings);
     vi.mocked(parseArguments).mockResolvedValue({
       extensions: undefined,
     } as never);
 
     await main();
-    signalHandlers.get('SIGINT')?.();
+    signalHandlers.get('SIGTERM')?.();
     await Promise.resolve();
     await Promise.resolve();
 
-    expect(setRawModeSpy).toHaveBeenCalledWith(false);
     expect(runExitCleanupMock).toHaveBeenCalledTimes(1);
-    expect(processExitSpy).toHaveBeenCalledWith(130);
+    expect(processExitSpy).toHaveBeenCalledWith(143);
 
-    processOnceSpy.mockRestore();
+    processOnSpy.mockRestore();
     processExitSpy.mockRestore();
   });
 
@@ -1906,6 +2209,7 @@ describe('startInteractiveUI', () => {
   vi.mock('./ui/utils/kittyProtocolDetector.js', () => ({
     detectAndEnableKittyProtocol: vi.fn(() => Promise.resolve(true)),
     disableKittyProtocol: vi.fn(),
+    pushKittyProtocolFlags: vi.fn(),
   }));
 
   vi.mock('./utils/cleanup.js', () => ({
@@ -2261,6 +2565,46 @@ describe('startInteractiveUI', () => {
       mockSettings,
       { connectIde: false, initializeTelemetry: false },
     );
+  });
+
+  // Regression for #6776: the kitty keyboard flags are tracked per screen
+  // (main vs alternate). The protocol is enabled on the main screen before
+  // render, so the pop must be written after Ink unmounts — i.e. after the
+  // alternate screen (when enabled) has been left — or the main screen's
+  // flags survive the exit and the shell receives kitty escape codes.
+  it('disables the Kitty keyboard protocol only after Ink has unmounted', async () => {
+    const unmount = vi.fn();
+    const { render } = await import('ink');
+    vi.mocked(render).mockReturnValue({ unmount } as never);
+    const { disableKittyProtocol } = await import(
+      './ui/utils/kittyProtocolDetector.js'
+    );
+
+    await startInteractiveUI(
+      mockConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      {
+        authError: null,
+        themeError: null,
+        shouldOpenAuthDialog: false,
+        geminiMdFileCount: 0,
+      },
+    );
+
+    const { registerCleanup } = await import('./utils/cleanup.js');
+    const cleanupFn = vi.mocked(registerCleanup).mock.calls.at(-1)?.[0] as
+      | (() => Promise<void> | void)
+      | undefined;
+    expect(cleanupFn).toBeTypeOf('function');
+    await cleanupFn?.();
+
+    expect(unmount).toHaveBeenCalledTimes(1);
+    expect(disableKittyProtocol).toHaveBeenCalledTimes(1);
+    expect(
+      vi.mocked(disableKittyProtocol).mock.invocationCallOrder[0],
+    ).toBeGreaterThan(unmount.mock.invocationCallOrder[0]);
   });
 
   describe('periodic memory-pressure check', () => {

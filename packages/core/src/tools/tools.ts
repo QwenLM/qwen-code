@@ -11,6 +11,7 @@ import { SchemaValidator } from '../utils/schemaValidator.js';
 import { type AgentStatsSummary } from '../agents/runtime/agent-statistics.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 import type { PermissionDecision } from '../permissions/types.js';
+import type { VisionBridgeNoticeDisplay } from '../services/visionBridge/vision-bridge-service.js';
 
 /**
  * Represents a validated and ready-to-execute tool call.
@@ -24,6 +25,9 @@ export interface ToolInvocation<
    * The validated parameters for this specific invocation.
    */
   params: TParams;
+
+  /** Historical names accepted only when evaluating persisted permissions. */
+  readonly permissionAliases?: readonly string[];
 
   /**
    * Gets a pre-execution description of the tool operation.
@@ -50,6 +54,13 @@ export interface ToolInvocation<
    * overridden by PermissionManager rules at L4.
    */
   getDefaultPermission(): Promise<PermissionDecision>;
+
+  /**
+   * Whether this invocation must be approved through an explicit host/user
+   * interaction. Permission rules and automatic approval modes cannot satisfy
+   * this requirement.
+   */
+  requiresUserInteraction?(): boolean;
 
   /**
    * Constructs the confirmation dialog details for this invocation.
@@ -98,6 +109,10 @@ export abstract class BaseToolInvocation<
    */
   getDefaultPermission(): Promise<PermissionDecision> {
     return Promise.resolve('allow');
+  }
+
+  requiresUserInteraction(): boolean {
+    return false;
   }
 
   /**
@@ -478,6 +493,18 @@ export interface ToolResult {
   llmContent: PartListUnion;
 
   /**
+   * Internal runtime metadata recording the producer persistence decision
+   * before final aggregation.
+   * `undefined` means no decision was made; `[]` means a decision was made but
+   * no reusable artifact exists; a non-empty array lists reusable producer
+   * artifact paths. Downstream finalization treats any defined value as a
+   * completed decision for this producer output and does not persist it again.
+   * Other artifact channels remain independent and may still be aggregated
+   * later.
+   */
+  persistedOutputFiles?: string[];
+
+  /**
    * Markdown string for user display.
    * This provides a user-friendly summary or visualization of the result.
    * NOTE: This might also be considered UI-specific and could potentially be
@@ -651,6 +678,39 @@ export interface McpToolProgressData {
   message?: string;
 }
 
+/**
+ * Structured heartbeat for silent foreground shell commands, emitted through
+ * the updateOutput channel while no display update has fired for
+ * `tools.shell.heartbeatIntervalMs` (default 10s). Carries liveness stats
+ * only — never command output — and never enters model context. Consumers
+ * that render live output (TUI, subagent views) ignore it; the ACP session
+ * and stream-json adapters forward it so headless gateways can distinguish
+ * "still running" from a dead execution chain.
+ */
+export interface ShellProgressData {
+  type: 'shell_progress';
+  /** Monotonic elapsed time since the process spawned (post-PTY-init), in ms. */
+  elapsedMs: number;
+  /** Monotonic age of the last output chunk, in ms; absent = no output yet. */
+  lastOutputAgeMs?: number;
+  /** Cumulative output stats; only present on the PTY/AnsiOutput path. */
+  totalLines?: number;
+  totalBytes?: number;
+  /** Effective timeout governing this command (including the 120s default); absent when disabled. */
+  timeoutMs?: number;
+}
+
+export function isShellProgressData(
+  display: unknown,
+): display is ShellProgressData {
+  return (
+    typeof display === 'object' &&
+    display !== null &&
+    'type' in display &&
+    (display as ShellProgressData).type === 'shell_progress'
+  );
+}
+
 export type ToolResultDisplay =
   | string
   | FileDiff
@@ -660,7 +720,9 @@ export type ToolResultDisplay =
   | TeamResultDisplay
   | TaskListResultDisplay
   | AnsiOutputDisplay
-  | McpToolProgressData;
+  | McpToolProgressData
+  | VisionBridgeNoticeDisplay
+  | ShellProgressData;
 
 export interface TeamResultDisplay {
   type: 'team_result';
@@ -730,8 +792,8 @@ export interface ToolEditConfirmationDetails {
   ) => Promise<void>;
   /**
    * When true, the UI should not show "Always allow" options (ProceedAlwaysProject/User).
-   * Set by coreToolScheduler when PM has an explicit 'ask' rule that would override
-   * any 'allow' rule the user might add.
+   * Set when an explicit interaction or PM 'ask' rule cannot be replaced by
+   * a persisted allow rule.
    */
   hideAlwaysAllow?: boolean;
   fileName: string;
@@ -742,6 +804,10 @@ export interface ToolEditConfirmationDetails {
   isModifying?: boolean;
   /** Hide UI affordances that let the user edit the proposed content. */
   hideModify?: boolean;
+  /** Skip opening or resolving an IDE diff for this confirmation. */
+  skipIdeDiff?: boolean;
+  /** Informational warnings to render alongside the proposed diff. */
+  warnings?: string[];
 }
 
 export interface ToolConfirmationPayload {
@@ -821,13 +887,22 @@ export interface ToolInfoConfirmationDetails {
   permissionRules?: string[];
 }
 
-export type ToolCallConfirmationDetails =
+export interface AutoModeFallbackConfirmation {
+  reason: 'classifier_unavailable';
+  message: string;
+}
+
+export type ToolCallConfirmationDetails = (
   | ToolEditConfirmationDetails
   | ToolExecuteConfirmationDetails
   | ToolMcpConfirmationDetails
   | ToolInfoConfirmationDetails
   | ToolPlanConfirmationDetails
-  | ToolAskUserQuestionConfirmationDetails;
+  | ToolAskUserQuestionConfirmationDetails
+) & {
+  /** Explains why an AUTO-mode call was routed to manual confirmation. */
+  autoModeFallback?: AutoModeFallbackConfirmation;
+};
 
 export interface ToolPlanConfirmationDetails {
   type: 'plan';
@@ -871,6 +946,8 @@ export interface ToolAskUserQuestionConfirmationDetails {
  */
 export enum ToolConfirmationOutcome {
   ProceedOnce = 'proceed_once',
+  /** Approve this call once and change the runtime session to Default mode. */
+  ProceedOnceAndSwitchToDefault = 'proceed_once_and_switch_to_default',
   ProceedAlways = 'proceed_always',
   /** @deprecated Use ProceedAlwaysProject or ProceedAlwaysUser instead. */
   ProceedAlwaysServer = 'proceed_always_server',
