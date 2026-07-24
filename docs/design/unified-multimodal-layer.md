@@ -33,6 +33,19 @@ ingest images, and a multimodal main model still benefits from divide-and-conque
 over a long video. Concurrency is bounded; a failed segment degrades to an error
 note rather than failing the whole call.
 
+**Prompt + memory-first caching.** `media_dispatch` takes a `prompt` parameter —
+what to extract per segment (default: a general factual description; the model
+sets it to target the question, e.g. "identify any team/brand/logo/credits").
+Results are cached per **(content hash, prompt)**: asking the _same_ question in
+a later session returns the stored understanding instantly with **no model
+calls**; a _different_ question is a cache miss that runs a fresh targeted
+analysis and **accumulates** into the same file's memory (增厚). Pass
+`force: true` to re-analyze. This realizes the intended flow — answer from
+memory first, only re-analyze when the question needs information not yet
+captured. (Recall still depends on the model passing a comparable prompt or
+calling `media_grep`; the harness caches, it does not judge semantic
+equivalence.)
+
 ## Memory: when it saves / loads
 
 - **Save**: after every successful `image_view` / `media_watch` / `media_extract`

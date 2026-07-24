@@ -21,6 +21,8 @@ import { MediaReadError } from '../../utils/media/reader-registry.js';
 export interface MediaDispatchParams {
   file_path: string;
   segments?: number;
+  prompt?: string;
+  force?: boolean;
 }
 
 class MediaDispatchInvocation extends BaseToolInvocation<
@@ -51,6 +53,8 @@ class MediaDispatchInvocation extends BaseToolInvocation<
       result = await dispatchMediaSegments(this.params.file_path, this.config, {
         signal,
         ...(this.params.segments ? { segments: this.params.segments } : {}),
+        ...(this.params.prompt ? { prompt: this.params.prompt } : {}),
+        ...(this.params.force ? { force: true } : {}),
       });
     } catch (err) {
       if (err instanceof MediaReadError) {
@@ -61,6 +65,23 @@ class MediaDispatchInvocation extends BaseToolInvocation<
         });
       }
       throw err;
+    }
+
+    // Cache hit: return the stored cross-session understanding without re-work.
+    if (result.fromMemory) {
+      return buildMediaDelivery(
+        `Recalled prior understanding of ${result.path} from media memory (no re-analysis):\n\n${result.memoryBody ?? ''}`,
+        {
+          path: result.path,
+          hash: result.hash,
+          modality: 'video',
+          scope: 'recalled from cross-session media memory',
+          precision:
+            'cached understanding from a previous analysis — pass force=true to re-analyze the video',
+          readMore:
+            'Call media_dispatch with force=true to re-run the parallel analysis, or media_watch a time range for raw fidelity.',
+        },
+      );
     }
 
     const body = result.segments
@@ -99,7 +120,7 @@ export class MediaDispatchTool extends BaseDeclarativeTool<
     super(
       MediaDispatchTool.Name,
       ToolDisplayNames.MEDIA_DISPATCH,
-      'Understand a long video by splitting it into time segments and understanding each in parallel (keyframes per segment), then aggregating the notes into media memory. Use for videos too long or large to watch in one pass.',
+      'Understand a long video by splitting it into time segments and understanding each in parallel (keyframes per segment), then aggregating the notes into media memory. If the same video was analyzed in a previous session, the stored understanding is returned instantly (pass force=true to re-analyze). Use for videos too long or large to watch in one pass.',
       Kind.Read,
       {
         type: 'object',
@@ -112,6 +133,16 @@ export class MediaDispatchTool extends BaseDeclarativeTool<
             type: 'integer',
             description:
               'Optional number of time segments to split into (default ~1 per 30s, max 12).',
+          },
+          prompt: {
+            type: 'string',
+            description:
+              'Optional: what to extract from each segment. Defaults to a general factual description. Set it to target the question you need answered (e.g. "identify any team, brand, studio, logo, or credits shown"). Analyses are cached per (file, prompt) and accumulate in media memory.',
+          },
+          force: {
+            type: 'boolean',
+            description:
+              'Re-analyze even if a prior understanding for this same prompt exists in media memory (default false).',
           },
         },
         required: ['file_path'],

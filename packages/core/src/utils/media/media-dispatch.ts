@@ -37,6 +37,16 @@ export interface DispatchOptions {
   framesPerSegment?: number;
   /** Max concurrent segment understandings. */
   concurrency?: number;
+  /**
+   * What to extract per segment (the understanding instruction). Defaults to a
+   * generic factual description; set it to target specific information
+   * (e.g. "identify any team/brand/studio/logo/credits shown"). Caching is
+   * keyed by (file, prompt): the same prompt is recalled instantly, a new
+   * prompt runs a fresh targeted analysis that accumulates into memory.
+   */
+  prompt?: string;
+  /** Re-analyze even if a prior understanding for this prompt exists. */
+  force?: boolean;
   signal: AbortSignal;
 }
 
@@ -53,11 +63,22 @@ export interface DispatchResult {
   durationSec: number;
   hash: string;
   path: string;
+  /** True when the result was recalled from media memory (no re-analysis). */
+  fromMemory?: boolean;
+  /** The accumulated understanding text, when recalled from memory. */
+  memoryBody?: string;
 }
 
 const DEFAULT_FRAMES_PER_SEGMENT = 6;
 const DEFAULT_CONCURRENCY = 3;
 const MAX_SEGMENTS = 12;
+const DEFAULT_FOCUS_KEY = 'overview';
+
+/** Normalize a prompt into a stable cache key (per-file, per-question). */
+function focusKeyOf(prompt: string | undefined): string {
+  const t = (prompt ?? '').trim().toLowerCase().replace(/\s+/g, ' ');
+  return t.length > 0 ? t.slice(0, 80) : DEFAULT_FOCUS_KEY;
+}
 
 /** Pick an image-capable model: the main model when multimodal, else a vision model. */
 function pickUnderstandingModel(config: Config): string | undefined {
@@ -102,13 +123,17 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-function segmentPrompt(range: [number, number], durationSec: number): string {
-  return (
-    `These keyframes are sampled from the video segment t=${range[0]}s–${range[1]}s ` +
-    `(of a ${Math.round(durationSec)}s video). Describe concisely and factually what ` +
-    `happens in this segment: key objects, actions, on-screen text, scene changes. ` +
-    `Only describe what the frames actually show; do not speculate.`
-  );
+function segmentPrompt(
+  range: [number, number],
+  durationSec: number,
+  focus: string,
+): string {
+  const base = `These keyframes are sampled from the video segment t=${range[0]}s–${range[1]}s (of a ${Math.round(durationSec)}s video).`;
+  const instruction =
+    focus.length > 0
+      ? focus
+      : 'Describe concisely and factually what happens in this segment: key objects, actions, on-screen text, scene changes.';
+  return `${base} ${instruction} Only describe what the frames actually show; do not speculate.`;
 }
 
 async function understandSegment(
@@ -117,6 +142,7 @@ async function understandSegment(
   index: number,
   model: string,
   framesPerSegment: number,
+  focus: string,
   config: Config,
   signal: AbortSignal,
 ): Promise<SegmentUnderstanding> {
@@ -128,7 +154,7 @@ async function understandSegment(
     });
     const parts: Part[] = [
       ...frames.parts,
-      { text: segmentPrompt(range, probe.durationSec ?? 0) },
+      { text: segmentPrompt(range, probe.durationSec ?? 0, focus) },
     ];
     const contents: Content[] = [{ role: 'user', parts }];
     const response = await config
@@ -167,6 +193,31 @@ export async function dispatchMediaSegments(
       'Use media_watch for a single image/audio file.',
     );
   }
+
+  const focus = (opts.prompt ?? '').trim();
+  const focusKey = focusKeyOf(opts.prompt);
+
+  // Cache-first, keyed by (content hash, prompt): a prior understanding for THIS
+  // question is returned instantly so a new session does not redo it. A new/
+  // different prompt is a cache miss and runs a fresh targeted analysis that
+  // accumulates into the same file's memory. Pass force to always re-analyze.
+  if (!opts.force) {
+    const prior = await getMediaMemory()
+      .get(probe.hash)
+      .catch(() => undefined);
+    if (prior?.body?.includes(`[dispatch-focus] ${focusKey}`)) {
+      return {
+        segments: [],
+        model: '(recalled from memory)',
+        durationSec: probe.durationSec ?? 0,
+        hash: probe.hash,
+        path: probe.path,
+        fromMemory: true,
+        memoryBody: prior.body,
+      };
+    }
+  }
+
   const durationSec = probe.durationSec;
   if (!durationSec || durationSec <= 0) {
     throw new MediaReadError(
@@ -201,33 +252,40 @@ export async function dispatchMediaSegments(
         index,
         model,
         framesPerSegment,
+        focus,
         config,
         opts.signal,
       ),
   );
 
-  // Record the combined understanding in cross-session memory (增厚).
+  // Record the combined understanding in cross-session memory (增厚). The
+  // `[dispatch-focus]` marker keys this analysis to its prompt so the same
+  // question can be recalled without re-work while new questions still run.
   try {
     const memory = getMediaMemory();
     const links = computeAutoLinks(
       { hash: probe.hash, path: probe.path },
       await memory.list(),
     );
-    const body = segments
-      .map(
-        (s) =>
-          `### Segment ${s.index + 1} · t=${s.range[0]}s–${s.range[1]}s (${s.frameCount} frames)\n${s.note}`,
-      )
-      .join('\n\n');
+    const header = `[dispatch-focus] ${focusKey}\nquestion: ${focus || '(general overview)'}`;
+    const body =
+      header +
+      '\n\n' +
+      segments
+        .map(
+          (s) =>
+            `### Segment ${s.index + 1} · t=${s.range[0]}s–${s.range[1]}s (${s.frameCount} frames)\n${s.note}`,
+        )
+        .join('\n\n');
     await memory.put({
       hash: probe.hash,
       modality: 'video',
       path: probe.path,
-      summary: `parallel understanding of ${count} segments over ${Math.round(durationSec)}s`,
+      summary: `${focus || 'overview'} — ${count} segments over ${Math.round(durationSec)}s`,
       body,
       readerId: 'media-dispatch',
       cost: `${count} segment model calls`,
-      params: { segments: count, model },
+      params: { segments: count, model, focus: focusKey },
       links,
     });
   } catch {

@@ -90,6 +90,7 @@ describe('media_dispatch', () => {
     const config = fakeConfig(captured, { multimodal: true });
     const result = await dispatchMediaSegments(videoPath, config, {
       segments: 3,
+      force: true,
       signal: new AbortController().signal,
     });
 
@@ -117,13 +118,14 @@ describe('media_dispatch', () => {
     const config = fakeConfig([], { multimodal: true });
     await dispatchMediaSegments(videoPath, config, {
       segments: 2,
+      force: true,
       signal: new AbortController().signal,
     });
     const probe = await probeMedia(videoPath);
     const rec = await getMediaMemory().get(probe.hash);
     expect(rec?.body).toContain('Segment 1');
     expect(rec?.body).toContain('Segment 2');
-    expect(rec?.summary).toContain('parallel understanding');
+    expect(rec?.body).toContain('[dispatch-focus] overview');
   });
 
   it('uses a vision model when the main model is not multimodal', async () => {
@@ -135,6 +137,7 @@ describe('media_dispatch', () => {
     });
     const result = await dispatchMediaSegments(videoPath, config, {
       segments: 2,
+      force: true,
       signal: new AbortController().signal,
     });
     expect(result.model).toBe('vision-x');
@@ -146,8 +149,53 @@ describe('media_dispatch', () => {
     const config = fakeConfig([], { multimodal: false });
     await expect(
       dispatchMediaSegments(videoPath, config, {
+        force: true,
         signal: new AbortController().signal,
       }),
     ).rejects.toThrow(/image-capable model/);
+  });
+
+  it('recalls the same prompt from memory but re-runs a different prompt', async () => {
+    if (!ffmpegOk) return;
+    // First analysis for a specific question -> real model calls.
+    const cap1: Captured[] = [];
+    await dispatchMediaSegments(
+      videoPath,
+      fakeConfig(cap1, { multimodal: true }),
+      {
+        segments: 2,
+        prompt: 'count the distinct songs',
+        signal: new AbortController().signal,
+      },
+    );
+    expect(cap1.length).toBeGreaterThan(0);
+
+    // Same prompt, new call -> served from memory, no model calls.
+    const cap2: Captured[] = [];
+    const cached = await dispatchMediaSegments(
+      videoPath,
+      fakeConfig(cap2, { multimodal: true }),
+      {
+        segments: 2,
+        prompt: 'count the distinct songs',
+        signal: new AbortController().signal,
+      },
+    );
+    expect(cached.fromMemory).toBe(true);
+    expect(cap2).toHaveLength(0);
+
+    // A different prompt -> cache miss -> real model calls again.
+    const cap3: Captured[] = [];
+    const fresh = await dispatchMediaSegments(
+      videoPath,
+      fakeConfig(cap3, { multimodal: true }),
+      {
+        segments: 2,
+        prompt: 'identify the team or brand behind this video',
+        signal: new AbortController().signal,
+      },
+    );
+    expect(fresh.fromMemory).toBeFalsy();
+    expect(cap3.length).toBeGreaterThan(0);
   });
 });
