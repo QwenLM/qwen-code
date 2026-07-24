@@ -211,8 +211,16 @@ function createMockToolSpan(
 
 vi.mock('../telemetry/session-tracing.js', () => ({
   startToolSpan: vi.fn(
-    (name: string, attrs?: Record<string, string | number | boolean>) =>
-      createMockToolSpan(`tool.${name}`, { tool_name: name, ...attrs }),
+    (
+      name: string,
+      attrs?: Record<string, string | number | boolean>,
+      description?: string,
+    ) =>
+      createMockToolSpan(`tool.${name}`, {
+        tool_name: name,
+        ...attrs,
+        ...(description ? { 'gen_ai.tool.description': description } : {}),
+      }),
   ),
   endToolSpan: vi.fn(
     (
@@ -8832,6 +8840,46 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(fallbackSpan.attributes['gen_ai.tool.call.id']).toBe('span-call');
   });
 
+  it('records static description and final successful arguments/result', async () => {
+    mockTelemetrySdkState.initialized = true;
+    const { spanRecord } = await runSingleTool({
+      includeSensitiveSpanAttributes: true,
+    });
+
+    expect(spanRecord.attributes['gen_ai.tool.description']).toBe('mockTool');
+    expect(
+      JSON.parse(
+        spanRecord.spanAttributes['gen_ai.tool.call.arguments'] as string,
+      ),
+    ).toEqual({ input: '/secret/path' });
+    expect(
+      JSON.parse(
+        spanRecord.spanAttributes['gen_ai.tool.call.result'] as string,
+      ),
+    ).toEqual({ output: 'ok' });
+    expect(spanRecord.spanAttributes).not.toHaveProperty('tool_input');
+    expect(spanRecord.spanAttributes).not.toHaveProperty('tool_result');
+  });
+
+  it('keeps executed arguments but omits result for soft errors', async () => {
+    mockTelemetrySdkState.initialized = true;
+    const { spanRecord } = await runSingleTool({
+      includeSensitiveSpanAttributes: true,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'failed',
+        returnDisplay: 'failed',
+        error: { message: 'failed', type: ToolErrorType.EXECUTION_FAILED },
+      }),
+    });
+
+    expect(
+      spanRecord.spanAttributes['gen_ai.tool.call.arguments'],
+    ).toBeDefined();
+    expect(
+      spanRecord.spanAttributes['gen_ai.tool.call.result'],
+    ).toBeUndefined();
+  });
+
   it('acquires the sleep inhibitor around actual tool execution', async () => {
     mockAcquireSleepInhibitor.mockClear();
     mockSleepInhibitorRelease.mockClear();
@@ -9412,14 +9460,12 @@ describe('CoreToolScheduler telemetry spans', () => {
 
     expect(completedCalls[0].status).toBe('success');
     expect(spanRecord.ended).toBe(true);
-    expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
-      'Failed to add tool input span attributes:',
-      expect.any(TypeError),
-    );
-    expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
-      'Failed to add tool result span attributes:',
-      expect.any(TypeError),
-    );
+    expect(
+      spanRecord.spanAttributes['gen_ai.tool.call.arguments'],
+    ).toBeUndefined();
+    expect(
+      spanRecord.spanAttributes['gen_ai.tool.call.result'],
+    ).toBeUndefined();
   });
 
   it('marks successful tool calls with OK status via endToolSpan', async () => {
