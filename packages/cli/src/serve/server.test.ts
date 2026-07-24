@@ -18005,6 +18005,73 @@ describe('createServeApp', () => {
       ]);
       spy.mockRestore();
     });
+
+    it('clears the branch session entry on workspace-scoped batch delete', async () => {
+      const BRANCH_SID = 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee';
+      const bridge = fakeBridge({
+        spawnImpl: async (req) => ({
+          sessionId: BRANCH_SID,
+          workspaceCwd: req.workspaceCwd,
+          attached: false,
+          clientId: 'client-0',
+        }),
+        summaryImpl: (sessionId: string) => ({
+          sessionId,
+          workspaceCwd: wsDir,
+          attached: true,
+          clientId: 'client-0',
+        }),
+      });
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-primary',
+          workspaceCwd: wsDir,
+          primary: true,
+          bridge,
+        }),
+      ]);
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+        workspaceRegistry: registry,
+      });
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('abc123');
+
+      try {
+        // Create a branch session.
+        const first = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/first' } });
+        expect(first.status).toBe(200);
+        const sessionId = first.body.sessionId as string;
+
+        // Write a transcript so removeSession finds the session on disk.
+        await writeSession(sessionId);
+
+        // Batch-delete via the workspace-scoped route.
+        const del = await request(app)
+          .post('/workspaces/ws-primary/sessions/delete')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sessionIds: [sessionId] });
+        expect(del.status).toBe(200);
+        expect(del.body.removed).toEqual([sessionId]);
+
+        // Creating another branch session for the same workspace succeeds.
+        const second = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/second' } });
+        expect(second.status).toBe(200);
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+      }
+    });
   });
 
   describe('POST /sessions/archive and /sessions/unarchive', () => {
