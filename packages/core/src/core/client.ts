@@ -49,7 +49,7 @@ const debugLogger = createDebugLogger('CLIENT');
 import { GeminiChat } from './geminiChat.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
-  buildSystemPromptSuffix,
+  assembleSystemPrompt,
   getArenaSystemReminder,
   getCoreSystemPrompt,
   getCustomSystemPrompt,
@@ -865,30 +865,22 @@ export class GeminiClient {
   }
 
   private getMainSessionSystemInstruction(): string {
-    const userMemory = this.config.getUserMemory();
     const overrideSystemPrompt = this.config.getSystemPrompt();
-    const appendSystemPrompt = this.config.getAppendSystemPrompt();
-    const gitStatus = this.getCachedGitStatus();
-
     const base = overrideSystemPrompt
-      ? getCustomSystemPrompt(
-          overrideSystemPrompt,
-          userMemory,
-          appendSystemPrompt,
-        )
+      ? getCustomSystemPrompt(overrideSystemPrompt)
       : getCoreSystemPrompt(
-          userMemory,
+          undefined,
           this.config.getModel(),
-          appendSystemPrompt,
+          undefined,
           resolveInteractionMode(this.config),
         );
-    const withGitStatus = gitStatus ? base + '\n\n' + gitStatus : base;
-    // The auto-memory section is the volatile layer — rewritten in-session on
-    // every memory save. It goes after all stable/context content so a save
-    // invalidates the shortest possible cached prompt prefix.
-    return (
-      withGitStatus + buildSystemPromptSuffix(this.config.getAutoMemoryPrompt())
-    );
+    return assembleSystemPrompt({
+      base,
+      contextFiles: this.config.getUserMemory(),
+      appendPrompt: this.config.getAppendSystemPrompt(),
+      gitStatus: this.getCachedGitStatus(),
+      autoMemory: this.config.getAutoMemoryPrompt(),
+    });
   }
 
   async refreshStartupContextReminder(): Promise<void> {
@@ -3148,12 +3140,12 @@ export class GeminiClient {
     let currentAttemptModel: string = model;
 
     try {
-      const userMemory = this.config.getUserMemory();
       const finalSystemInstruction = generationConfig.systemInstruction
-        ? getCustomSystemPrompt(
-            generationConfig.systemInstruction,
-            userMemory,
-          ) + buildSystemPromptSuffix(this.config.getAutoMemoryPrompt())
+        ? assembleSystemPrompt({
+            base: getCustomSystemPrompt(generationConfig.systemInstruction),
+            contextFiles: this.config.getUserMemory(),
+            autoMemory: this.config.getAutoMemoryPrompt(),
+          })
         : this.getMainSessionSystemInstruction();
 
       const requestConfig: GenerateContentConfig = {
