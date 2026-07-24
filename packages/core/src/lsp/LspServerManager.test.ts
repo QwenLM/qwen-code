@@ -1216,12 +1216,93 @@ describe('LspServerManager', () => {
     handle!.connection = connection;
     handle!.process = process as unknown as ChildProcess;
     handle!.status = 'READY';
+    handle!.cachedDiagnostics.set('file:///workspace/index.ts', []);
 
     await manager.stopAll();
 
     expect(connection.shutdown).toHaveBeenCalledOnce();
     expect(connection.end).toHaveBeenCalledOnce();
     expect(process.kill).toHaveBeenCalledOnce();
+    expect(handle!.cachedDiagnostics.size).toBe(0);
+  });
+
+  it('caches publishDiagnostics notifications from the server', async () => {
+    const manager = createTrustedManager();
+    const initialize = vi.fn(async () => ({}));
+    let notificationHandler:
+      | ((message: {
+          method?: string;
+          params?: { uri: string; diagnostics: Array<Record<string, unknown>> };
+        }) => void)
+      | undefined;
+    const connection = createMockConnection({
+      initialize,
+      onNotification: vi.fn((handler) => {
+        notificationHandler = handler as typeof notificationHandler;
+      }),
+    });
+    vi.spyOn(
+      manager as unknown as {
+        checkWorkspaceTrust: () => Promise<boolean>;
+      },
+      'checkWorkspaceTrust',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        isPathSafe: () => boolean;
+      },
+      'isPathSafe',
+    ).mockReturnValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        commandExists: () => Promise<boolean>;
+      },
+      'commandExists',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        createLspConnection: (
+          config: LspServerConfig,
+        ) => Promise<LspConnectionResult>;
+      },
+      'createLspConnection',
+    ).mockResolvedValue({
+      connection,
+      process: createMockProcess() as unknown as ChildProcess,
+      shutdown: vi.fn(async () => {}),
+      exit: vi.fn(),
+      initialize,
+    } as unknown as LspConnectionResult);
+
+    manager.setServerConfigs([serverConfig]);
+    await manager.startAll();
+
+    expect(initialize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        capabilities: expect.objectContaining({
+          textDocument: expect.objectContaining({
+            publishDiagnostics: {
+              relatedInformation: true,
+              tagSupport: { valueSet: [1, 2] },
+              codeDescriptionSupport: true,
+              dataSupport: true,
+            },
+          }),
+        }),
+      }),
+    );
+
+    notificationHandler?.({
+      method: 'textDocument/publishDiagnostics',
+      params: {
+        uri: 'file:///workspace/index.ts',
+        diagnostics: [{ message: 'bad type' }],
+      },
+    });
+
+    expect(manager.getHandles().get('clangd')?.cachedDiagnostics).toEqual(
+      new Map([['file:///workspace/index.ts', [{ message: 'bad type' }]]]),
+    );
   });
 
   it('cancels an in-flight socket startup retry when stopped', async () => {

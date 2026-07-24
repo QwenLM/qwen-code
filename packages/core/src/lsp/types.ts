@@ -611,6 +611,8 @@ export interface LspServerHandle {
   processDiagnostics?: LspProcessDiagnostics;
   /** Lock to prevent concurrent startup attempts */
   startingPromise?: Promise<void>;
+  /** Cache of diagnostics keyed by document URI */
+  cachedDiagnostics: Map<string, Array<Record<string, unknown>>>;
   /** Cancels an in-flight startup attempt */
   startupAbortController?: AbortController;
   /** Whether the owned process exited unexpectedly during the current startup */
@@ -643,4 +645,17 @@ export interface LspConnectionResult {
   exit: () => void;
   /** Send initialize request */
   initialize: (params: unknown) => Promise<unknown>;
+}
+
+export function isPublishDiagnosticsParams(
+  value: unknown,
+): value is { uri: string; diagnostics: Array<Record<string, unknown>> } {
+  return (
+    typeof value === 'object' &&
+    value !== null &&
+    'uri' in value &&
+    typeof value['uri'] === 'string' &&
+    'diagnostics' in value &&
+    Array.isArray(value['diagnostics'])
+  );
 }
