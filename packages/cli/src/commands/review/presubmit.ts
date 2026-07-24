@@ -125,6 +125,41 @@ interface PresubmitArgs {
   'new-findings'?: string;
 }
 
+/**
+ * Read the `--new-findings` file into a validated anchor list, or `null` when
+ * it cannot be trusted. `null` is the fail-safe value: `classifyHeadDrift`
+ * treats an unknown finding set as at-risk, so a malformed file downgrades
+ * the verdict rather than proving a false all-clear. A shorter-than-real list
+ * would be the dangerous outcome (a dropped finding reads as disjoint), so
+ * any entry lacking a string `path` rejects the WHOLE file rather than being
+ * skipped.
+ */
+export function parseFindingsFile(path: string): FindingAnchor[] | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const out: FindingAnchor[] = [];
+  for (const entry of parsed) {
+    if (
+      typeof entry !== 'object' ||
+      entry === null ||
+      typeof (entry as { path?: unknown }).path !== 'string'
+    ) {
+      return null;
+    }
+    const e = entry as { path: string; line?: unknown };
+    out.push({
+      path: e.path,
+      line: typeof e.line === 'number' ? e.line : 0,
+    });
+  }
+  return out;
+}
+
 /** Best-effort delta between the reviewed SHA and the live head. */
 export interface CompareSummary {
   /** GitHub compare `status`: ahead | behind | diverged | identical.
@@ -449,12 +484,14 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
 
   // Parsed before drift classification: the findings' file set is what
   // anchorsAtRisk intersects against (absent file = unknown = fail-safe).
-  let newFindings: FindingAnchor[] | null = null;
-  if (newFindingsPath) {
-    newFindings = JSON.parse(
-      readFileSync(newFindingsPath, 'utf8'),
-    ) as FindingAnchor[];
-  }
+  // This list is used as a SAFETY PROOF — a disjoint intersection lets the
+  // review submit past drift — so it is validated, not trusted: a file that
+  // will not parse, is not an array, or holds an entry without a string
+  // `path` collapses to `null` (unknown → fail-safe at-risk), never to a
+  // silently-shorter set that could make a real overlap read as disjoint.
+  const newFindings = newFindingsPath
+    ? parseFindingsFile(newFindingsPath)
+    : null;
 
   const { headDrift, downgradeReason: driftReason } = classifyHeadDrift(
     commitSha,

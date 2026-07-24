@@ -9,6 +9,7 @@ import {
   presubmitCommand,
   classifyCi,
   classifyHeadDrift,
+  parseFindingsFile,
   type CompareSummary,
 } from './presubmit.js';
 
@@ -548,6 +549,43 @@ describe('presubmitCommand', () => {
     expect(result.headDrift.anchorsAtRisk).toBe(true);
   });
 
+  it('fails safe (anchorsAtRisk) when the findings file is malformed, even on disjoint files', async () => {
+    // The drift touches a file the (garbage) findings do not name. A trusted
+    // empty/valid list would rule disjoint → submit; a malformed one must not
+    // prove that all-clear.
+    ghMock.mockImplementation((...args: string[]) => {
+      const path = String(args[1] ?? '');
+      if (path.includes('/compare/')) {
+        return JSON.stringify({
+          status: 'ahead',
+          aheadBy: 1,
+          files: ['src/unrelated.ts'],
+        });
+      }
+      return '{"author":"contributor","headSha":"def456"}';
+    });
+    ghApiMock.mockReturnValue(null);
+    readFileSyncMock.mockImplementation((path: string) =>
+      String(path).includes('findings')
+        ? '[{"line":5}]' // entry without a string path → whole file rejected
+        : '[]',
+    );
+
+    const handler = presubmitCommand.handler;
+    if (!handler) throw new Error('presubmit handler missing');
+    await handler({
+      ...baseArgs,
+      'new-findings': '/tmp/findings.json',
+    } as unknown as Parameters<typeof handler>[0]);
+
+    const [, content] = writeFileSyncMock.mock.calls.find(
+      ([path]) => path === '/tmp/presubmit.json',
+    ) ?? [null, null];
+    const result = JSON.parse(String(content));
+
+    expect(result.headDrift.anchorsAtRisk).toBe(true);
+  });
+
   it('ignores the running Qwen PR review check when deciding whether CI is still pending', async () => {
     ghApiAllNestedMock.mockImplementation((path: string) =>
       path.endsWith('/check-runs')
@@ -729,5 +767,32 @@ describe('classifyHeadDrift', () => {
   it('fails safe when no findings list was supplied to intersect against', () => {
     const got = classifyHeadDrift('sha-old', 'sha-new', ahead, null);
     expect(got.headDrift.anchorsAtRisk).toBe(true);
+  });
+});
+
+// The --new-findings list is a SAFETY PROOF (a disjoint intersection lets a
+// review submit past head drift), so a malformed file must fail safe to
+// `null` (unknown → at-risk), never to a silently-shorter set.
+describe('parseFindingsFile (via mocked fs)', () => {
+  // A tiny fs shim scoped to this block; the handler tests above mock the
+  // module already, so reuse it by importing the mocked readFileSync.
+  const cases: Array<[string, unknown]> = [
+    ['not json {', null],
+    ['{"path":"a.ts"}', null], // object, not array
+    ['[{"line":5}]', null], // entry without a string path → reject WHOLE file
+    ['[{"path":"a.ts","line":5}]', [{ path: 'a.ts', line: 5 }]],
+    ['[{"path":"a.ts"}]', [{ path: 'a.ts', line: 0 }]], // missing line → 0
+    ['[]', []],
+  ];
+  it.each(cases)('rejects/normalizes %s', (raw, expected) => {
+    readFileSyncMock.mockReturnValue(raw as string);
+    expect(parseFindingsFile('/tmp/findings.json')).toEqual(expected);
+  });
+
+  it('returns null when the file cannot be read at all', () => {
+    readFileSyncMock.mockImplementation(() => {
+      throw new Error('ENOENT');
+    });
+    expect(parseFindingsFile('/tmp/missing.json')).toBeNull();
   });
 });
