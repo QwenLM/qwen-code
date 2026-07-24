@@ -18,6 +18,7 @@ import {
 } from './CompactToolGroupDisplay.js';
 import { InlineParallelAgentsDisplay } from './InlineParallelAgentsDisplay.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
+import { ICON } from '../../constants.js';
 import type { AgentResultDisplay } from '@qwen-code/qwen-code-core';
 
 function isAgentWithPendingConfirmation(
@@ -347,7 +348,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
         {readCount > 0 && (
           <Box paddingLeft={1}>
             <Text dimColor>
-              {'● '}
+              {ICON.CIRCLE_FILLED + ' '}
               Recalled {readCount} {readCount === 1 ? 'memory' : 'memories'}
             </Text>
           </Box>
@@ -355,7 +356,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
         {writeCount > 0 && (
           <Box paddingLeft={1}>
             <Text dimColor>
-              {'● '}
+              {ICON.CIRCLE_FILLED + ' '}
               Wrote {writeCount} {writeCount === 1 ? 'memory' : 'memories'}
             </Text>
           </Box>
@@ -405,7 +406,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   const memoryBadge = hasMemoryBadge ? (
     <Box paddingLeft={1}>
       <Text dimColor>
-        {'● '}
+        {ICON.CIRCLE_FILLED + ' '}
         {[
           (memoryReadCount ?? 0) > 0 &&
             `Recalled ${memoryReadCount} ${memoryReadCount === 1 ? 'memory' : 'memories'}`,

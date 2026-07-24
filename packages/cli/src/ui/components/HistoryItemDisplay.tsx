@@ -68,6 +68,7 @@ import {
   layoutRowForEvent,
 } from '../utils/measure-element-position.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
+import { ICON } from '../constants.js';
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
@@ -405,7 +406,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'tool_use_summary' && (
         <Box flexDirection="row">
           <Box width={2} flexShrink={0}>
-            <Text dimColor>●</Text>
+            <Text dimColor>{ICON.CIRCLE_FILLED}</Text>
           </Box>
           <Text dimColor>{itemForDisplay.summary}</Text>
         </Box>

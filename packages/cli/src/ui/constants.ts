@@ -27,3 +27,22 @@ export const TOOL_STATUS = {
   CANCELED: '-',
   ERROR: 'x',
 } as const;
+
+// Variation Selector 15 forces narrow (text) presentation for
+// East-Asian-Width "Ambiguous" glyphs so the terminal cursor advance
+// matches string-width's default (ambiguousIsNarrow: true).
+// Without this, CJK terminals render these glyphs as 2 columns while
+// Ink's layout engine allocates 1, causing a 1-column visual drift.
+const _VS15 = '\uFE0E';
+export const ICON = {
+  DIAMOND: `◆${_VS15}`,
+  CIRCLE_FILLED: `●${_VS15}`,
+  TRIANGLE: `△${_VS15}`,
+  CIRCLE_EMPTY: `○${_VS15}`,
+  BULLSEYE: `◎${_VS15}`,
+  REFERENCE: `※${_VS15}`,
+  THEREFORE: `∴${_VS15}`,
+  BECAUSE: `∵${_VS15}`,
+  STAR: `★${_VS15}`,
+  RADIO_FILLED: `◉${_VS15}`,
+} as const;

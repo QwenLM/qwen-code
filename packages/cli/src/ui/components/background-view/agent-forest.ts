@@ -23,6 +23,8 @@
  * sort semantics for roots while keeping trees contiguous.
  */
 
+import { ICON } from '../../constants.js';
+
 /**
  * Minimal structural view of a task entry — satisfied by both `AgentTask`
  * (registry entries) and the CLI's `DialogEntry` union, so the helpers can
@@ -244,7 +246,7 @@ export function treeRowPrefix(
 export function statusGlyph(status: string): string {
   switch (status) {
     case 'running':
-      return '○';
+      return ICON.CIRCLE_EMPTY;
     case 'paused':
       return '⏸';
     case 'completed':
@@ -253,6 +255,6 @@ export function statusGlyph(status: string): string {
     case 'cancelled':
       return '✖';
     default:
-      return '○';
+      return ICON.CIRCLE_EMPTY;
   }
 }

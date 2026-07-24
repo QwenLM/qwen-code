@@ -11,6 +11,7 @@ import { theme } from '../../semantic-colors.js';
 import { SCREEN_READER_MODEL_PREFIX } from '../../textConstants.js';
 import { CompressionStatus } from '@qwen-code/qwen-code-core';
 import { t } from '../../../i18n/index.js';
+import { ICON } from '../../constants.js';
 
 export interface CompressionDisplayProps {
   compression: CompressionProps;
@@ -72,7 +73,7 @@ export function CompressionMessage({
         {isPending ? (
           <Spinner type="dots" />
         ) : (
-          <Text color={theme.text.accent}>◆</Text>
+          <Text color={theme.text.accent}>{ICON.DIAMOND}</Text>
         )}
       </Box>
       <Box flexGrow={1}>

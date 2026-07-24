@@ -7,6 +7,7 @@
 import type React from 'react';
 import { Box, Text } from 'ink';
 import type { HistoryItemMemorySaved } from '../../types.js';
+import { ICON } from '../../constants.js';
 
 interface MemorySavedMessageProps {
   item: HistoryItemMemorySaved;
@@ -28,7 +29,7 @@ export const MemorySavedMessage: React.FC<MemorySavedMessageProps> = ({
   return (
     <Box flexDirection="row">
       <Box width={2} flexShrink={0}>
-        <Text dimColor>●</Text>
+        <Text dimColor>{ICON.CIRCLE_FILLED}</Text>
       </Box>
       <Text dimColor>
         {verb} {n} {label}

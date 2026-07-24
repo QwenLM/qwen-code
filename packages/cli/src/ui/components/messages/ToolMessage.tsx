@@ -33,7 +33,7 @@ import {
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
-import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
+import { SHELL_COMMAND_NAME, SHELL_NAME, ICON } from '../../constants.js';
 import { isCollapsibleTool } from './CompactToolGroupDisplay.js';
 import { localizeToolDisplayName } from '../../../i18n/index.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
@@ -343,7 +343,7 @@ const SubagentApprovalContext: React.FC<{
             ? '✖'
             : call.status === 'success'
               ? '✔'
-              : '○';
+              : ICON.CIRCLE_EMPTY;
         const displayName = localizeToolDisplayName(
           TOOL_DISPLAY_BY_NAME[call.name] ?? call.name,
         );
