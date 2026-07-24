@@ -784,9 +784,23 @@ if "!EXPECTED_HASH!"=="" (
 
 set "ACTUAL_HASH="
 set "QWEN_HASH_FILE=!ARCHIVE_FILE!"
-for /f "delims=" %%H in ('powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; (Get-FileHash -Algorithm SHA256 -LiteralPath $env:QWEN_HASH_FILE).Hash" 2^>nul') do (
-    if "!ACTUAL_HASH!"=="" set "ACTUAL_HASH=%%H"
+
+where pwsh.exe >nul 2>&1
+if !ERRORLEVEL! EQU 0 (
+    for /f "delims=" %%H in ('pwsh.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; (Get-FileHash -Algorithm SHA256 -LiteralPath $env:QWEN_HASH_FILE).Hash"') do (
+        if "!ACTUAL_HASH!"=="" set "ACTUAL_HASH=%%H"
+    )
 )
+
+if "!ACTUAL_HASH!"=="" (
+    where powershell.exe >nul 2>&1
+    if !ERRORLEVEL! EQU 0 (
+        for /f "delims=" %%H in ('powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'Stop'; (Get-FileHash -Algorithm SHA256 -LiteralPath $env:QWEN_HASH_FILE).Hash"') do (
+            if "!ACTUAL_HASH!"=="" set "ACTUAL_HASH=%%H"
+        )
+    )
+)
+
 set "QWEN_HASH_FILE="
 
 if not "!TEMP_CHECKSUM!"=="" del /F /Q "!TEMP_CHECKSUM!" >nul 2>&1
