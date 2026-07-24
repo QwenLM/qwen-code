@@ -18,6 +18,7 @@ import type {
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
+  sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
 
 export function registerWorkspaceGitRoutes(
@@ -27,13 +28,29 @@ export function registerWorkspaceGitRoutes(
     bridge: AcpSessionBridge;
     gitState: WorkspaceGitState;
     sendBridgeError: SendBridgeError;
+    isWorkspaceTrusted?: () => boolean;
+    captureGenerationAssertion?: () => (() => void) | undefined;
   },
 ): void {
   app.get('/workspace/git', async (_req, res) => {
+    const assertGenerationOpen = deps.captureGenerationAssertion?.();
     try {
-      res
-        .status(200)
-        .json(await deps.gitState.getStatus(deps.boundWorkspace, deps.bridge));
+      assertGenerationOpen?.();
+    } catch (err) {
+      deps.sendBridgeError(res, err, { route: 'GET /workspace/git' });
+      return;
+    }
+    if (deps.isWorkspaceTrusted?.() === false) {
+      sendUntrustedWorkspaceResponse(res);
+      return;
+    }
+    try {
+      const status = await deps.gitState.getStatus(
+        deps.boundWorkspace,
+        deps.bridge,
+      );
+      assertGenerationOpen?.();
+      res.status(200).json(status);
     } catch (err) {
       deps.sendBridgeError(res, err, { route: 'GET /workspace/git' });
     }
@@ -62,6 +79,12 @@ export function registerWorkspaceQualifiedGitRoutes(
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
     const route = 'GET /workspaces/:workspace/git';
+    try {
+      runtime.generationGuard?.assertOpen();
+    } catch (err) {
+      deps.sendBridgeError(res, err, { route });
+      return;
+    }
     // Optional ?cwd= override for worktree sessions whose working directory
     // differs from the workspace root. Canonicalize both paths with realpath
     // to prevent symlink escape, then validate containment.
@@ -85,6 +108,7 @@ export function registerWorkspaceQualifiedGitRoutes(
         // creating a watcher entry in WorkspaceGitState (which would leak
         // one fs watcher per worktree path, never disposed).
         const status = await getGitWorkingTreeStatus(gitCwd).catch(() => null);
+        runtime.generationGuard?.assertOpen();
         res.status(200).json(
           status
             ? {
@@ -106,9 +130,9 @@ export function registerWorkspaceQualifiedGitRoutes(
             : { v: 2, workspaceCwd: gitCwd, branch: null },
         );
       } else {
-        res
-          .status(200)
-          .json(await deps.gitState.getStatus(gitCwd, runtime.bridge));
+        const status = await deps.gitState.getStatus(gitCwd, runtime.bridge);
+        runtime.generationGuard?.assertOpen();
+        res.status(200).json(status);
       }
     } catch (err) {
       deps.sendBridgeError(res, err, { route });

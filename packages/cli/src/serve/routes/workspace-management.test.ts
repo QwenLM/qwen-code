@@ -73,6 +73,16 @@ function createMockRegistry(
       return runtime && !draining.has(runtime) ? runtime : undefined;
     },
     getManagedByWorkspaceId: (id: string) => byId.get(id),
+    syncRuntimeMetadata: vi.fn((runtime: WorkspaceRuntime) => {
+      const current = byCwd.get(runtime.workspaceCwd);
+      if (!current || current === runtime) return;
+      if (runtime.displayName === undefined) {
+        delete current.displayName;
+      } else {
+        current.displayName = runtime.displayName;
+      }
+      current.registrationIds = [...(runtime.registrationIds ?? [])];
+    }),
     resolveWorkspaceCwd: () => undefined,
     resolveLiveSessionOwner: () => ({ kind: 'not_found' }),
     beginDrain: vi.fn((runtime: WorkspaceRuntime) => {
@@ -81,6 +91,7 @@ function createMockRegistry(
       return true;
     }),
     cancelDrain: vi.fn((runtime: WorkspaceRuntime) => draining.delete(runtime)),
+    commitDrain: vi.fn(),
     completeDrain: vi.fn((runtime: WorkspaceRuntime) => {
       draining.delete(runtime);
       const index = runtimes.indexOf(runtime);
@@ -777,6 +788,41 @@ describe('POST /workspaces', () => {
     expect(runtime.displayName).toBe('Old name');
   });
 
+  it('validates trust under the topology gate before publishing a runtime', async () => {
+    const registry = createMockRegistry([makeRuntime('/some-other-dir')]);
+    const created = makeRuntime(REAL_DIR, { trusted: true });
+    const validated = makeRuntime(REAL_DIR, { trusted: false });
+    const events: string[] = [];
+    const validateWorkspaceRuntimeForPublication = vi.fn(async (runtime) => {
+      expect(runtime).toBe(created);
+      events.push('validated');
+      return validated;
+    });
+    const runWorkspaceTrustOperation = vi.fn(async (operation) => {
+      expect(registry.getByWorkspaceCwd(REAL_DIR)).toBeUndefined();
+      events.push('gate-entered');
+      const result = await operation();
+      events.push('gate-exited');
+      return result;
+    });
+    const { app } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime: vi.fn().mockResolvedValue(created),
+      validateWorkspaceRuntimeForPublication,
+      runWorkspaceTrustOperation,
+    });
+    const requestTrustReconcile = vi.fn().mockResolvedValue(undefined);
+    app.locals['requestTrustReconcile'] = requestTrustReconcile;
+
+    const res = await request(app).post('/workspaces').send({ cwd: REAL_DIR });
+
+    expect(res.status).toBe(201);
+    expect(res.body.trusted).toBe(false);
+    expect(registry.getByWorkspaceCwd(REAL_DIR)).toBe(validated);
+    expect(events).toEqual(['gate-entered', 'validated', 'gate-exited']);
+    expect(requestTrustReconcile).toHaveBeenCalledOnce();
+  });
+
   it('does not double-count a runtime while its addition hook is pending', async () => {
     const firstDir = await mkdtemp(join(REAL_DIR, 'qws-capacity-a-'));
     const secondDir = await mkdtemp(join(REAL_DIR, 'qws-capacity-b-'));
@@ -1441,6 +1487,8 @@ describe('DELETE /workspaces/:workspace', () => {
       runtimeRemoval,
       getAcpHandle: () => acpHandle as never,
     });
+    const requestTrustReconcile = vi.fn().mockResolvedValue(undefined);
+    app.locals['requestTrustReconcile'] = requestTrustReconcile;
 
     const res = await request(app).delete(
       `/workspaces/${encodeURIComponent(runtime.workspaceId)}`,
@@ -1459,6 +1507,7 @@ describe('DELETE /workspaces/:workspace', () => {
     expect(deps.workspaceRegistry.getByWorkspaceId(runtime.workspaceId)).toBe(
       runtime,
     );
+    expect(requestTrustReconcile).toHaveBeenCalledOnce();
   });
 
   it('continues rolling gates back when cancel hooks throw', async () => {
@@ -1588,6 +1637,12 @@ describe('DELETE /workspaces/:workspace', () => {
       runtime,
       'workspace_removed',
     );
+    expect(deps.workspaceRegistry.commitDrain).toHaveBeenCalledWith(runtime);
+    expect(
+      vi.mocked(deps.workspaceRegistry.commitDrain).mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(runtimeRemoval.disposeRuntime).mock.invocationCallOrder[0]!,
+    );
     expect(runtimeRemoval.completeDrain).toHaveBeenCalledWith(runtime);
     expect(acpHandle.commitWorkspaceRemoval).toHaveBeenCalledWith(
       runtime.workspaceId,
@@ -1651,6 +1706,41 @@ describe('DELETE /workspaces/:workspace', () => {
     expect(
       deps.workspaceRegistry.getManagedByWorkspaceId(runtime.workspaceId),
     ).toBeUndefined();
+  });
+
+  it('continues cleanup when registry drain commit fails after persistence commits', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    const registry = createMockRegistry([runtime]);
+    vi.mocked(registry.commitDrain).mockImplementationOnce(() => {
+      throw new Error('registry commit failed');
+    });
+    const runtimeRemoval = createRemovalController();
+    const { app } = createApp({
+      workspaceRegistry: registry,
+      runtimeRemoval,
+      workspaceRegistrationStore: {
+        removeByIds: vi.fn().mockResolvedValue(1),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app)
+      .delete(`/workspaces/${encodeURIComponent(runtime.workspaceId)}`)
+      .send({ force: true });
+
+    expect(res.status).toBe(200);
+    expect(runtimeRemoval.disposeRuntime).toHaveBeenCalledWith(
+      runtime,
+      'workspace_removed',
+    );
+    expect(runtimeRemoval.completeDrain).toHaveBeenCalledWith(runtime);
+    expect(registry.completeDrain).toHaveBeenCalledWith(runtime);
+    expect(registry.cancelDrain).not.toHaveBeenCalled();
+    expect(
+      registry.getManagedByWorkspaceId(runtime.workspaceId),
+    ).toBeUndefined();
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: failed to commit workspace registry drain: registry commit failed',
+    );
   });
 
   it('accepts a URL-encoded absolute cwd selector', async () => {

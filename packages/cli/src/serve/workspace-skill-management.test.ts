@@ -100,6 +100,34 @@ describe('workspace Skill management', () => {
     ).rejects.toThrow();
   });
 
+  it('does not create Skill directories after the generation closes', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const source = await temporaryDirectory('qwen-skill-source-');
+    await fs.writeFile(
+      path.join(source, 'SKILL.md'),
+      skillMarkdown('demo-skill'),
+    );
+    let checks = 0;
+
+    await expect(
+      installWorkspaceSkill(
+        workspace,
+        {
+          name: 'demo-skill',
+          scope: 'workspace',
+          source: { type: 'folder', path: source },
+        },
+        undefined,
+        () => {
+          checks += 1;
+          if (checks === 3) throw new Error('generation closed');
+        },
+      ),
+    ).rejects.toThrow('generation closed');
+
+    await expect(fs.access(path.join(workspace, '.qwen'))).rejects.toThrow();
+  });
+
   it('installs a ZIP into the global Skill directory', async () => {
     const workspace = await temporaryDirectory('qwen-skill-workspace-');
     const globalDirectory = await temporaryDirectory('qwen-skill-global-');
@@ -619,6 +647,53 @@ describe('workspace Skill management', () => {
         source: { type: 'folder', path: replacement },
       }),
     ).rejects.toThrow('commit failed');
+    await expect(
+      fs.readFile(installed.installedPath!, 'utf8'),
+    ).resolves.not.toContain('Replacement instructions.');
+  });
+
+  it('rolls back a replacement when the generation closes at commit', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const source = await temporaryDirectory('qwen-skill-source-');
+    const replacement = await temporaryDirectory('qwen-skill-source-');
+    await fs.writeFile(
+      path.join(source, 'SKILL.md'),
+      skillMarkdown('stable-skill'),
+    );
+    await fs.writeFile(
+      path.join(replacement, 'SKILL.md'),
+      `${skillMarkdown('stable-skill')}Replacement instructions.`,
+    );
+    const installed = await installWorkspaceSkill(workspace, {
+      name: 'stable-skill',
+      scope: 'workspace',
+      source: { type: 'folder', path: source },
+    });
+    let generationClosed = false;
+    const rename = fs.rename.bind(fs);
+    vi.spyOn(fs, 'rename').mockImplementation(
+      async (sourcePath, targetPath) => {
+        await rename(sourcePath, targetPath);
+        if (String(sourcePath).includes('.installing-')) {
+          generationClosed = true;
+        }
+      },
+    );
+
+    await expect(
+      installWorkspaceSkill(
+        workspace,
+        {
+          name: 'stable-skill',
+          scope: 'workspace',
+          source: { type: 'folder', path: replacement },
+        },
+        undefined,
+        () => {
+          if (generationClosed) throw new Error('generation closed');
+        },
+      ),
+    ).rejects.toThrow('generation closed');
     await expect(
       fs.readFile(installed.installedPath!, 'utf8'),
     ).resolves.not.toContain('Replacement instructions.');

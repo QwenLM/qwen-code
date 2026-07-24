@@ -17,6 +17,7 @@ import {
 import {
   getWorkspaceRouteContext,
   resolveWorkspaceRuntimeFromParam,
+  sendGenerationClosedError,
   setWorkspaceRouteContext,
 } from '../workspace-route-runtime.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
@@ -91,6 +92,7 @@ export function applyReadHeaders(res: Response): void {
  */
 export function sendFsError(res: Response, err: unknown, route: string): void {
   applyReadHeaders(res);
+  if (sendGenerationClosedError(res, err)) return;
   if (isFsError(err)) {
     const fs: FsError = err;
     res.status(fs.status).json({

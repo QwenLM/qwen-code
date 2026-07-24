@@ -189,7 +189,16 @@ export const cdCommand: SlashCommand = {
       };
     }
     if (trustedTargetPath) {
-      loadTrustedFolders().setValue(trustedTargetPath, TrustLevel.TRUST_FOLDER);
+      try {
+        loadTrustedFolders().setValue(
+          trustedTargetPath,
+          TrustLevel.TRUST_FOLDER,
+        );
+      } catch (error) {
+        warnings.push(
+          `Trust setting update failed: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     }
 
     try {

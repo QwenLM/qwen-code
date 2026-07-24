@@ -8,6 +8,7 @@ import path from 'node:path';
 import type { Request, Response } from 'express';
 import { canonicalizeWorkspace } from './acp-session-bridge.js';
 import type {
+  WorkspaceEntry,
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from './workspace-registry.js';
@@ -15,6 +16,57 @@ import type {
 export interface WorkspaceRouteContext {
   readonly runtime: WorkspaceRuntime;
   readonly routePrefix: string;
+}
+
+export function resolveWorkspaceEntryFromParam(
+  registry: WorkspaceRegistry,
+  req: Request,
+  res: Response,
+  paramName = 'workspace',
+): WorkspaceEntry | null {
+  const selector = req.params[paramName] ?? '';
+  const byId = registry.getEntryByWorkspaceId(selector);
+  if (byId) return byId;
+
+  if (!isPortableAbsolutePath(selector)) {
+    res.status(400).json({
+      error: `\`:${paramName}\` must decode to a workspace id or absolute path`,
+      code: 'workspace_mismatch',
+    });
+    return null;
+  }
+
+  const exact = registry.getEntryByWorkspaceCwd(selector);
+  if (exact) return exact;
+  if (path.isAbsolute(selector) && !isUncPath(selector)) {
+    try {
+      const canonicalSelector = canonicalizeWorkspace(selector);
+      const canonicalMatch = registry.getEntryByWorkspaceCwd(canonicalSelector);
+      if (canonicalMatch) return canonicalMatch;
+      for (const candidate of registry.listEntries()) {
+        if (
+          canonicalizeWorkspace(candidate.workspaceCwd) === canonicalSelector
+        ) {
+          return candidate;
+        }
+      }
+    } catch {
+      // Fall through to lexical matching for unavailable paths.
+    }
+  }
+  const normalizedSelector = normalizePortableAbsolutePath(selector);
+  const entry = registry
+    .listEntries()
+    .find(
+      (candidate) =>
+        normalizePortableAbsolutePath(candidate.workspaceCwd) ===
+        normalizedSelector,
+    );
+  if (!entry) {
+    sendWorkspaceMismatch(res, registry);
+    return null;
+  }
+  return entry;
 }
 
 export function isPortableAbsolutePath(value: string): boolean {
@@ -108,27 +160,46 @@ export function resolveWorkspaceRuntimeFromParam(
   res: Response,
   paramName = 'workspace',
 ): WorkspaceRuntime | null {
-  const selector = req.params[paramName] ?? '';
-  const byId = registry.getByWorkspaceId(selector);
-  if (byId) return byId;
-
-  if (!isPortableAbsolutePath(selector)) {
-    res.status(400).json({
-      error: `\`:${paramName}\` must decode to a workspace id or absolute path`,
-      code: 'workspace_mismatch',
-    });
-    return null;
-  }
-
-  const runtime = resolveRegisteredWorkspaceRuntimeByPathSelector(
-    registry,
-    selector,
-  );
+  const entry = resolveWorkspaceEntryFromParam(registry, req, res, paramName);
+  if (!entry) return null;
+  const runtime = entry.state === 'active' ? entry.current?.runtime : undefined;
   if (!runtime) {
-    sendWorkspaceMismatch(res, registry);
+    sendWorkspaceRuntimeUnavailable(res, entry);
     return null;
   }
   return runtime;
+}
+
+export function sendWorkspaceRuntimeUnavailable(
+  res: Response,
+  entry?: Pick<WorkspaceEntry, 'workspaceCwd' | 'workspaceId'>,
+): void {
+  res.set('Retry-After', '1');
+  res.status(503).json({
+    error: 'Workspace runtime is not active.',
+    code: 'workspace_runtime_unavailable',
+    ...(entry
+      ? { workspaceCwd: entry.workspaceCwd, workspaceId: entry.workspaceId }
+      : {}),
+  });
+}
+
+export function isGenerationClosedError(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      error.code === 'workspace_generation_closed',
+  );
+}
+
+export function sendGenerationClosedError(
+  res: Response,
+  error: unknown,
+): boolean {
+  if (!isGenerationClosedError(error)) return false;
+  sendWorkspaceRuntimeUnavailable(res);
+  return true;
 }
 
 export function resolveManagedWorkspaceRuntimeFromParam(
@@ -204,11 +275,10 @@ export function sendWorkspaceMismatch(
   res: Response,
   registry: WorkspaceRegistry,
 ): void {
-  const runtimes = registry.list();
   res.status(400).json({
     error:
       'Workspace mismatch: the requested workspace is not registered with this daemon.',
     code: 'workspace_mismatch',
-    workspaceCount: runtimes.length,
+    workspaceCount: registry.listEntries().length,
   });
 }

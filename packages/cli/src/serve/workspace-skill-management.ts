@@ -696,6 +696,7 @@ function skillBaseDir(workspace: string, scope: WorkspaceSkillScope): string {
 async function removeInstallArtifacts(
   baseDir: string,
   skillName: string,
+  assertGenerationOpen?: () => void,
 ): Promise<void> {
   const workDir = path.dirname(baseDir);
   const workPrefix = `.${path.basename(baseDir)}-${skillName}`;
@@ -716,18 +717,20 @@ async function removeInstallArtifacts(
         .filter((entry) =>
           prefixes.some((prefix) => entry.name.startsWith(prefix)),
         )
-        .map((entry) =>
-          fs.rm(path.join(directory, entry.name), {
+        .map(async (entry) => {
+          assertGenerationOpen?.();
+          await fs.rm(path.join(directory, entry.name), {
             recursive: true,
             force: true,
-          }),
-        ),
+          });
+        }),
     );
   }
 }
 
 async function ensureDirectoryWithoutSymlinks(
   directory: string,
+  assertGenerationOpen?: () => void,
 ): Promise<void> {
   const missing: string[] = [];
   let current = directory;
@@ -746,19 +749,26 @@ async function ensureDirectoryWithoutSymlinks(
       current = parent;
     }
   }
-  for (const entry of missing.reverse()) await fs.mkdir(entry);
+  for (const entry of missing.reverse()) {
+    assertGenerationOpen?.();
+    await fs.mkdir(entry);
+  }
 }
 
 export async function installWorkspaceSkill(
   workspace: string,
   request: WorkspaceSkillInstallRequest,
   githubToken?: string,
+  assertGenerationOpen?: () => void,
 ): Promise<WorkspaceSkillMutationResult> {
+  assertGenerationOpen?.();
   const skillName = validateWorkspaceSkillName(request.name);
   const files = await filesFromSource(request.source, githubToken);
   const baseDir = skillBaseDir(workspace, request.scope);
-  await ensureDirectoryWithoutSymlinks(baseDir);
-  await removeInstallArtifacts(baseDir, skillName);
+  assertGenerationOpen?.();
+  await ensureDirectoryWithoutSymlinks(baseDir, assertGenerationOpen);
+  assertGenerationOpen?.();
+  await removeInstallArtifacts(baseDir, skillName, assertGenerationOpen);
   const destination = path.join(baseDir, skillName);
   const existing = await fs.lstat(destination).catch(() => undefined);
   if (existing?.isSymbolicLink() || (existing && !existing.isDirectory())) {
@@ -766,15 +776,19 @@ export async function installWorkspaceSkill(
   }
   const workDir = path.dirname(baseDir);
   const workPrefix = `.${path.basename(baseDir)}-${skillName}`;
+  assertGenerationOpen?.();
   const staging = await fs.mkdtemp(
     path.join(workDir, `${workPrefix}.installing-`),
   );
   const backup = path.join(workDir, `${workPrefix}.backup-${Date.now()}`);
   let movedExisting = false;
+  let committedStaging = false;
   try {
     for (const file of files) {
       const target = path.join(staging, ...file.relativePath.split('/'));
+      assertGenerationOpen?.();
       await fs.mkdir(path.dirname(target), { recursive: true });
+      assertGenerationOpen?.();
       await fs.writeFile(target, file.content);
     }
     const skillFile = path.join(staging, 'SKILL.md');
@@ -798,13 +812,20 @@ export async function installWorkspaceSkill(
       );
     }
     if (existing) {
+      assertGenerationOpen?.();
       await fs.rename(destination, backup);
       movedExisting = true;
     }
+    assertGenerationOpen?.();
     await fs.rename(staging, destination);
+    committedStaging = true;
+    assertGenerationOpen?.();
   } catch (error) {
     await fs
-      .rm(staging, { recursive: true, force: true })
+      .rm(committedStaging ? destination : staging, {
+        recursive: true,
+        force: true,
+      })
       .catch(() => undefined);
     if (movedExisting) {
       await fs.rename(backup, destination).catch(() => undefined);
@@ -828,7 +849,9 @@ export async function deleteWorkspaceSkill(
   scope: WorkspaceSkillScope,
   skillNameInput: string,
   installedPath: string,
+  assertGenerationOpen?: () => void,
 ): Promise<WorkspaceSkillMutationResult> {
+  assertGenerationOpen?.();
   const skillName = validateWorkspaceSkillName(skillNameInput);
   const skillDir = path.resolve(path.dirname(installedPath));
   const skillFile = path.resolve(installedPath);
@@ -875,6 +898,7 @@ export async function deleteWorkspaceSkill(
       'Skill name does not match its installed directory',
     );
   }
+  assertGenerationOpen?.();
   await fs.rm(skillDir, { recursive: true, force: true });
   return { skillName, scope, deleted: true };
 }

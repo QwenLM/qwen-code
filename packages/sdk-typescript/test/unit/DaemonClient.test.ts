@@ -3897,6 +3897,20 @@ describe('DaemonClient', () => {
       expect(calls[0]?.method).toBe('GET');
     });
 
+    it('requests v2 trust status without breaking v1 fallback responses', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, trustStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.workspaceTrust({ statusVersion: 2 });
+
+      expect(result).toEqual(trustStatus);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/trust?statusVersion=2',
+      );
+    });
+
     it('requestWorkspaceTrustChange posts desired state and reason', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(202, {

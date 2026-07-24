@@ -52,15 +52,15 @@ function fakeRegistry(runtimes: WorkspaceRuntime[]): WorkspaceRegistry {
     list: () => runtimes,
     listManaged: () => runtimes,
     add: vi.fn(),
-    getByWorkspaceCwd: (cwd) =>
+    getByWorkspaceCwd: (cwd: string) =>
       runtimes.find((runtime) => runtime.workspaceCwd === cwd),
-    getByWorkspaceId: (id) =>
+    getByWorkspaceId: (id: string) =>
       runtimes.find((runtime) => runtime.workspaceId === id),
-    getManagedByWorkspaceCwd: (cwd) =>
+    getManagedByWorkspaceCwd: (cwd: string) =>
       runtimes.find((runtime) => runtime.workspaceCwd === cwd),
-    getManagedByWorkspaceId: (id) =>
+    getManagedByWorkspaceId: (id: string) =>
       runtimes.find((runtime) => runtime.workspaceId === id),
-    resolveWorkspaceCwd: (cwd) =>
+    resolveWorkspaceCwd: (cwd: string | undefined) =>
       cwd === undefined
         ? runtimes.find((runtime) => runtime.primary)
         : runtimes.find((runtime) => runtime.workspaceCwd === cwd),
@@ -68,7 +68,7 @@ function fakeRegistry(runtimes: WorkspaceRuntime[]): WorkspaceRegistry {
     beginDrain: vi.fn(() => true),
     cancelDrain: vi.fn(),
     completeDrain: vi.fn(),
-  };
+  } as unknown as WorkspaceRegistry;
 }
 
 function snapshot(

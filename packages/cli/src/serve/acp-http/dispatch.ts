@@ -278,6 +278,63 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}workspace/agents/delete`,
 ];
 
+const TRUSTED_WORKSPACE_METHODS = new Set<string>([
+  `${QWEN_METHOD_NS}workspace/mcp`,
+  `${QWEN_METHOD_NS}workspace/skills`,
+  `${QWEN_METHOD_NS}workspace/providers`,
+  `${QWEN_METHOD_NS}workspace/env`,
+  `${QWEN_METHOD_NS}workspace/preflight`,
+  `${QWEN_METHOD_NS}workspace/init`,
+  `${QWEN_METHOD_NS}workspace/permissions`,
+  `${QWEN_METHOD_NS}workspace/permissions/set`,
+  `${QWEN_METHOD_NS}workspace/voice`,
+  `${QWEN_METHOD_NS}workspace/voice/set`,
+  `${QWEN_METHOD_NS}workspace/setup-github`,
+  `${QWEN_METHOD_NS}workspace/set_tool_enabled`,
+  `${QWEN_METHOD_NS}workspace/restart_mcp_server`,
+  `${QWEN_METHOD_NS}workspace/memory`,
+  `${QWEN_METHOD_NS}workspace/memory/write`,
+  `${QWEN_METHOD_NS}workspace/memory/remember`,
+  `${QWEN_METHOD_NS}workspace/memory/remember/get`,
+  `${QWEN_METHOD_NS}workspace/memory/forget`,
+  `${QWEN_METHOD_NS}workspace/memory/forget/get`,
+  `${QWEN_METHOD_NS}workspace/memory/dream`,
+  `${QWEN_METHOD_NS}workspace/memory/dream/get`,
+  `${QWEN_METHOD_NS}file/write`,
+  `${QWEN_METHOD_NS}file/edit`,
+  `${QWEN_METHOD_NS}workspace/tools`,
+  `${QWEN_METHOD_NS}workspace/mcp/tools`,
+  `${QWEN_METHOD_NS}workspace/mcp/resources`,
+  `${QWEN_METHOD_NS}workspace/mcp/servers/add`,
+  `${QWEN_METHOD_NS}workspace/mcp/servers/remove`,
+  `${QWEN_METHOD_NS}workspace/agents/list`,
+  `${QWEN_METHOD_NS}workspace/agents/get`,
+  `${QWEN_METHOD_NS}workspace/agents/create`,
+  `${QWEN_METHOD_NS}workspace/agents/update`,
+  `${QWEN_METHOD_NS}workspace/agents/delete`,
+]);
+
+const WORKSPACE_GENERATION_MUTATION_METHODS = new Set<string>([
+  `${QWEN_METHOD_NS}workspace/init`,
+  `${QWEN_METHOD_NS}workspace/trust/request`,
+  `${QWEN_METHOD_NS}workspace/permissions/set`,
+  `${QWEN_METHOD_NS}workspace/voice/set`,
+  `${QWEN_METHOD_NS}workspace/setup-github`,
+  `${QWEN_METHOD_NS}workspace/set_tool_enabled`,
+  `${QWEN_METHOD_NS}workspace/restart_mcp_server`,
+  `${QWEN_METHOD_NS}workspace/memory/write`,
+  `${QWEN_METHOD_NS}workspace/memory/remember`,
+  `${QWEN_METHOD_NS}workspace/memory/forget`,
+  `${QWEN_METHOD_NS}workspace/memory/dream`,
+  `${QWEN_METHOD_NS}file/write`,
+  `${QWEN_METHOD_NS}file/edit`,
+  `${QWEN_METHOD_NS}workspace/mcp/servers/add`,
+  `${QWEN_METHOD_NS}workspace/mcp/servers/remove`,
+  `${QWEN_METHOD_NS}workspace/agents/create`,
+  `${QWEN_METHOD_NS}workspace/agents/update`,
+  `${QWEN_METHOD_NS}workspace/agents/delete`,
+]);
+
 function advertisedQwenVendorMethods(
   sessionShellCommandEnabled: boolean,
 ): string[] {
@@ -663,6 +720,16 @@ function toRpcError(err: unknown): {
           retryable: true,
         },
       };
+    case 'WorkspaceGenerationClosedError':
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: 'Workspace runtime is not active.',
+        data: {
+          errorKind: 'workspace_runtime_unavailable',
+          httpStatus: 503,
+          retryable: true,
+        },
+      };
     case 'TotalSessionLimitExceededError':
       return {
         code: RPC.INTERNAL_ERROR,
@@ -722,7 +789,7 @@ export class AcpDispatcher {
   constructor(
     private readonly bridge: HttpAcpBridge,
     private readonly boundWorkspace: string,
-    private readonly env: Readonly<NodeJS.ProcessEnv>,
+    private readonly getEnv: () => Readonly<NodeJS.ProcessEnv>,
     private readonly workspace: DaemonWorkspaceService,
     private readonly workspaceRememberLane: WorkspaceRememberTaskLane,
     private readonly fsFactory?: WorkspaceFileSystemFactory,
@@ -730,6 +797,10 @@ export class AcpDispatcher {
     private readonly sessionShellCommandEnabled: boolean = false,
     private readonly registry?: ConnectionRegistry,
     private readonly archiveCoordinator: SessionArchiveCoordinator = new SessionArchiveCoordinator(),
+    private readonly isWorkspaceTrusted: () => boolean = () => true,
+    private readonly captureGenerationAssertion: () =>
+      | (() => void)
+      | undefined = () => undefined,
   ) {
     this.agentManager = createDaemonSubagentManager(boundWorkspace);
   }
@@ -1112,6 +1183,32 @@ export class AcpDispatcher {
       unknown
     >;
     const id = isRequest(msg) ? msg.id : undefined;
+
+    const generationScoped =
+      TRUSTED_WORKSPACE_METHODS.has(method) ||
+      WORKSPACE_GENERATION_MUTATION_METHODS.has(method);
+    const assertGenerationOpen = generationScoped
+      ? this.captureGenerationAssertion()
+      : undefined;
+    try {
+      assertGenerationOpen?.();
+    } catch (error) {
+      if (id !== undefined) {
+        conn.sendConn(rpcErrorFrame(id, error));
+      }
+      return;
+    }
+    if (TRUSTED_WORKSPACE_METHODS.has(method) && !this.isWorkspaceTrusted()) {
+      if (id !== undefined) {
+        conn.sendConn(
+          error(id, -32003, 'Workspace is not trusted.', {
+            errorKind: 'untrusted_workspace',
+            httpStatus: 403,
+          }),
+        );
+      }
+      return;
+    }
 
     // RFD §2.3: when both are present the `Acp-Session-Id` header and the
     // `sessionId` param MUST agree — reject divergence rather than let a
@@ -2207,49 +2304,49 @@ export class AcpDispatcher {
         }
 
         case `${QWEN_METHOD_NS}workspace/mcp`:
-          this.replyConn(
-            conn,
-            id,
-            await this.workspace.getWorkspaceMcpStatus(
+          {
+            const result = await this.workspace.getWorkspaceMcpStatus(
               this.wsCtx(conn, method),
-            ),
-          );
+            );
+            assertGenerationOpen?.();
+            this.replyConn(conn, id, result);
+          }
           return;
         case `${QWEN_METHOD_NS}workspace/skills`:
-          this.replyConn(
-            conn,
-            id,
-            await this.workspace.getWorkspaceSkillsStatus(
+          {
+            const result = await this.workspace.getWorkspaceSkillsStatus(
               this.wsCtx(conn, method),
-            ),
-          );
+            );
+            assertGenerationOpen?.();
+            this.replyConn(conn, id, result);
+          }
           return;
         case `${QWEN_METHOD_NS}workspace/providers`:
-          this.replyConn(
-            conn,
-            id,
-            await this.workspace.getWorkspaceProvidersStatus(
+          {
+            const result = await this.workspace.getWorkspaceProvidersStatus(
               this.wsCtx(conn, method),
-            ),
-          );
+            );
+            assertGenerationOpen?.();
+            this.replyConn(conn, id, result);
+          }
           return;
         case `${QWEN_METHOD_NS}workspace/env`:
-          this.replyConn(
-            conn,
-            id,
-            await this.workspace.getWorkspaceEnvStatus(
+          {
+            const result = await this.workspace.getWorkspaceEnvStatus(
               this.wsCtx(conn, method),
-            ),
-          );
+            );
+            assertGenerationOpen?.();
+            this.replyConn(conn, id, result);
+          }
           return;
         case `${QWEN_METHOD_NS}workspace/preflight`:
-          this.replyConn(
-            conn,
-            id,
-            await this.workspace.getWorkspacePreflightStatus(
+          {
+            const result = await this.workspace.getWorkspacePreflightStatus(
               this.wsCtx(conn, method),
-            ),
-          );
+            );
+            assertGenerationOpen?.();
+            this.replyConn(conn, id, result);
+          }
           return;
 
         case `${QWEN_METHOD_NS}workspace/init`: {
@@ -2271,6 +2368,7 @@ export class AcpDispatcher {
             this.wsCtx(conn, method),
             { force },
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -2328,10 +2426,12 @@ export class AcpDispatcher {
             }
             return;
           }
+          assertGenerationOpen?.();
           const result = await this.workspace.requestWorkspaceTrustChange(ctx, {
             desiredState,
             ...(reason !== undefined ? { reason } : {}),
           });
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -2340,6 +2440,7 @@ export class AcpDispatcher {
           const result = await this.workspace.getWorkspacePermissionsStatus(
             this.wsCtx(conn, method),
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -2375,7 +2476,12 @@ export class AcpDispatcher {
 
           let rules: string[];
           try {
-            const settings = loadSettings(this.boundWorkspace);
+            const workspaceTrusted = this.isWorkspaceTrusted();
+            const settings = loadSettings(this.boundWorkspace, {
+              skipLoadEnvironment: true,
+              skipWorkspaceSettings: !workspaceTrusted,
+              workspaceTrusted,
+            });
             const scopeSettings =
               scope === 'workspace'
                 ? settings.workspace.settings
@@ -2415,6 +2521,7 @@ export class AcpDispatcher {
             }
             throw err;
           }
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -2423,6 +2530,7 @@ export class AcpDispatcher {
           const result = await this.workspace.getWorkspaceVoiceStatus(
             this.wsCtx(conn, method),
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -2440,6 +2548,7 @@ export class AcpDispatcher {
             this.wsCtx(conn, method),
             update,
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -2466,17 +2575,25 @@ export class AcpDispatcher {
             return;
           }
           try {
+            const fileOps = createSetupGithubFileOps(
+              this.fsFactory,
+              `ACP ${method}`,
+              conn.clientId,
+              assertGenerationOpen,
+            );
+            fileOps.assertCanWrite();
             const result = await setupGithub({
               cwd: this.boundWorkspace,
               workspaceRoot: this.boundWorkspace,
-              proxy: resolveSetupGithubProxy(this.boundWorkspace, this.env),
-              abortSignal: conn.abortSignal,
-              fileOps: createSetupGithubFileOps(
-                this.fsFactory,
-                `ACP ${method}`,
-                conn.clientId,
+              proxy: resolveSetupGithubProxy(
+                this.boundWorkspace,
+                this.getEnv(),
+                true,
               ),
+              abortSignal: conn.abortSignal,
+              fileOps,
             });
+            assertGenerationOpen?.();
             this.bridge.publishWorkspaceEvent({
               type: 'github_setup_completed',
               data: setupGithubEventData(result),
@@ -2532,6 +2649,7 @@ export class AcpDispatcher {
             toolName,
             params['enabled'] === true,
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -2573,6 +2691,7 @@ export class AcpDispatcher {
             serverName,
             rawIdx !== undefined ? { entryIndex: rawIdx } : undefined,
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -2757,6 +2876,7 @@ export class AcpDispatcher {
           const result = await collectWorkspaceMemoryStatus(
             this.boundWorkspace,
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -2823,7 +2943,9 @@ export class AcpDispatcher {
             mode,
             content,
             projectRoot: this.boundWorkspace,
+            assertCanCommit: assertGenerationOpen,
           });
+          assertGenerationOpen?.();
           this.replyConn(conn, id, {
             ok: true,
             filePath: wr.filePath,
@@ -2891,6 +3013,7 @@ export class AcpDispatcher {
           try {
             const available =
               await this.bridge.isWorkspaceMemoryRememberAvailable();
+            assertGenerationOpen?.();
             if (!available) {
               if (id !== undefined) {
                 conn.sendConn(
@@ -2911,6 +3034,7 @@ export class AcpDispatcher {
               content: content.trim(),
               contextMode: rawContextMode,
               ...(conn.clientId ? { originatorClientId: conn.clientId } : {}),
+              ...(assertGenerationOpen ? { assertGenerationOpen } : {}),
             });
             this.replyConn(conn, id, task);
           } catch (err) {
@@ -2992,6 +3116,7 @@ export class AcpDispatcher {
           try {
             const available =
               await this.bridge.isWorkspaceMemoryRememberAvailable();
+            assertGenerationOpen?.();
             if (!available) {
               if (id !== undefined) {
                 conn.sendConn(
@@ -3011,6 +3136,7 @@ export class AcpDispatcher {
             const task = this.workspaceRememberLane.enqueueForget({
               query: trimmedQuery,
               ...(conn.clientId ? { originatorClientId: conn.clientId } : {}),
+              ...(assertGenerationOpen ? { assertGenerationOpen } : {}),
             });
             this.replyConn(conn, id, task);
           } catch (err) {
@@ -3064,6 +3190,7 @@ export class AcpDispatcher {
           try {
             const available =
               await this.bridge.isWorkspaceMemoryRememberAvailable();
+            assertGenerationOpen?.();
             if (!available) {
               if (id !== undefined) {
                 conn.sendConn(
@@ -3082,6 +3209,7 @@ export class AcpDispatcher {
             }
             const task = this.workspaceRememberLane.enqueueDream({
               ...(conn.clientId ? { originatorClientId: conn.clientId } : {}),
+              ...(assertGenerationOpen ? { assertGenerationOpen } : {}),
             });
             this.replyConn(conn, id, task);
           } catch (err) {
@@ -3402,6 +3530,7 @@ export class AcpDispatcher {
             return;
           }
           await fs.writeTextOverwrite(resolved, params['content'] as string);
+          assertGenerationOpen?.();
           this.replyConn(conn, id, { ok: true, path: p });
           return;
         }
@@ -3444,6 +3573,7 @@ export class AcpDispatcher {
             params['oldText'] as string,
             params['newText'] as string,
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, { ok: true, path: p, ...result } as unknown);
           return;
         }
@@ -3591,6 +3721,7 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}workspace/tools`: {
           const result = await this.bridge.getWorkspaceToolsStatus();
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -3606,6 +3737,7 @@ export class AcpDispatcher {
           }
           const result =
             await this.bridge.getWorkspaceMcpToolsStatus(serverName);
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -3621,6 +3753,7 @@ export class AcpDispatcher {
           }
           const result =
             await this.bridge.getWorkspaceMcpResourcesStatus(serverName);
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -3655,6 +3788,7 @@ export class AcpDispatcher {
             config as Record<string, unknown>,
             conn.clientId,
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -3676,6 +3810,7 @@ export class AcpDispatcher {
             name,
             conn.clientId,
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -3741,6 +3876,7 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}workspace/agents/list`: {
           const agents = await this.agentManager.listSubagents({ force: true });
+          assertGenerationOpen?.();
           this.replyConn(conn, id, {
             v: 1,
             workspaceCwd: this.boundWorkspace,
@@ -3759,6 +3895,7 @@ export class AcpDispatcher {
             return;
           }
           const config = await this.agentManager.loadSubagent(agentType);
+          assertGenerationOpen?.();
           if (!config) {
             if (id !== undefined)
               conn.sendConn(
@@ -3810,6 +3947,7 @@ export class AcpDispatcher {
               );
             return;
           }
+          assertGenerationOpen?.();
           await this.agentManager.createSubagent(
             {
               name,
@@ -3830,9 +3968,11 @@ export class AcpDispatcher {
                   ? params['model']
                   : undefined,
             },
-            { level },
+            { level, assertCanCommit: assertGenerationOpen },
           );
+          assertGenerationOpen?.();
           const created = await this.agentManager.loadSubagent(name, level);
+          assertGenerationOpen?.();
           this.replyConn(conn, id, {
             ok: true,
             agent: created ? agentToDetail(created) : null,
@@ -3944,15 +4084,19 @@ export class AcpDispatcher {
               );
             return;
           }
+          assertGenerationOpen?.();
           await this.agentManager.updateSubagent(
             agentType,
             updates,
             existing.level,
+            { assertCanCommit: assertGenerationOpen },
           );
+          assertGenerationOpen?.();
           const updated = await this.agentManager.loadSubagent(
             agentType,
             existing.level,
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, {
             ok: true,
             agent: updated ? agentToDetail(updated) : null,
@@ -4001,7 +4145,14 @@ export class AcpDispatcher {
               );
             return;
           }
-          await this.agentManager.deleteSubagent(agentType, existing.level);
+          assertGenerationOpen?.();
+          await this.agentManager.deleteSubagent(
+            agentType,
+            existing.level,
+            undefined,
+            { assertCanCommit: assertGenerationOpen },
+          );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, { ok: true });
           try {
             this.bridge.publishWorkspaceEvent({

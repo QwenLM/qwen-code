@@ -30,6 +30,7 @@ import { createServeApp } from '../server.js';
 import type { ServeOptions } from '../types.js';
 import { registerWorkspaceVoiceRoutes } from './workspace-voice.js';
 import { WorkspaceSettingsPartialPersistError } from '../workspace-service/types.js';
+import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 
@@ -228,6 +229,67 @@ describe('workspace voice routes', () => {
     expect(serialized).not.toContain('envKey');
   });
 
+  it('GET returns 503 while the workspace generation is closed', async () => {
+    const app = express();
+    registerWorkspaceVoiceRoutes(app, {
+      boundWorkspace: h.workspace,
+      mutate: () => (_req: Request, _res: Response, next: NextFunction) =>
+        next(),
+      safeBody: () => ({}),
+      persistSetting: h.persistSetting,
+      broadcastSettingsChanged: vi.fn(),
+      parseAndValidateClientId: vi.fn(),
+      captureGenerationAssertion: () => () => {
+        throw new WorkspaceGenerationClosedError();
+      },
+    });
+
+    const res = await request(app).get('/workspace/voice');
+
+    expect(res.status).toBe(503);
+    expect(res.headers['retry-after']).toBe('1');
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+  });
+
+  it('GET skips workspace voice settings for an untrusted runtime without an env snapshot', async () => {
+    const originalTrustLeak = process.env['VOICE_TRUST_LEAK'];
+    delete process.env['VOICE_TRUST_LEAK'];
+    await writeJson(path.join(h.home, 'settings.json'), {
+      general: { voice: { enabled: false } },
+    });
+    await writeWorkspaceVoiceEnabled(h, true);
+    await fsp.writeFile(
+      path.join(h.workspace, '.env'),
+      'VOICE_TRUST_LEAK=project-value',
+      'utf8',
+    );
+    const app = express();
+    registerWorkspaceVoiceRoutes(app, {
+      boundWorkspace: h.workspace,
+      mutate: () => (_req: Request, _res: Response, next: NextFunction) =>
+        next(),
+      safeBody: () => ({}),
+      persistSetting: h.persistSetting,
+      broadcastSettingsChanged: vi.fn(),
+      parseAndValidateClientId: vi.fn(),
+      isWorkspaceTrusted: () => false,
+    });
+
+    try {
+      const res = await request(app).get('/workspace/voice');
+
+      expect(res.status).toBe(200);
+      expect(res.body.enabled).toBe(false);
+      expect(process.env['VOICE_TRUST_LEAK']).toBeUndefined();
+    } finally {
+      if (originalTrustLeak === undefined) {
+        delete process.env['VOICE_TRUST_LEAK'];
+      } else {
+        process.env['VOICE_TRUST_LEAK'] = originalTrustLeak;
+      }
+    }
+  });
+
   it('GET returns a structured error when Voice settings are unreadable', async () => {
     await fsp.mkdir(path.join(h.home, 'settings.json'));
 
@@ -263,24 +325,28 @@ describe('workspace voice routes', () => {
       SettingScope.User,
       'voiceModel',
       'qwen3-asr-flash',
+      expect.any(Function),
     );
     expect(h.persistSetting).toHaveBeenCalledWith(
       h.workspace,
       SettingScope.User,
       'general.voice.mode',
       'hold',
+      expect.any(Function),
     );
     expect(h.persistSetting).toHaveBeenCalledWith(
       h.workspace,
       SettingScope.User,
       'general.voice.language',
       'english',
+      expect.any(Function),
     );
     expect(h.persistSetting).toHaveBeenCalledWith(
       h.workspace,
       SettingScope.User,
       'general.voice.enabled',
       true,
+      expect.any(Function),
     );
   });
 
@@ -304,12 +370,14 @@ describe('workspace voice routes', () => {
       SettingScope.User,
       'general.voice.mode',
       'tap',
+      expect.any(Function),
     );
     expect(h.persistSetting).toHaveBeenCalledWith(
       h.workspace,
       SettingScope.User,
       'general.voice.enabled',
       true,
+      expect.any(Function),
     );
   });
 
@@ -334,12 +402,14 @@ describe('workspace voice routes', () => {
       SettingScope.Workspace,
       'general.voice.mode',
       'tap',
+      expect.any(Function),
     );
     expect(h.persistSetting).toHaveBeenCalledWith(
       h.workspace,
       SettingScope.Workspace,
       'general.voice.enabled',
       true,
+      expect.any(Function),
     );
   });
 
@@ -362,12 +432,14 @@ describe('workspace voice routes', () => {
       SettingScope.User,
       'general.voice.mode',
       'tap',
+      expect.any(Function),
     );
     expect(h.persistSetting).toHaveBeenCalledWith(
       h.workspace,
       SettingScope.User,
       'general.voice.enabled',
       true,
+      expect.any(Function),
     );
   });
 
@@ -699,6 +771,7 @@ describe('workspace voice routes', () => {
       SettingScope.User,
       'general.voice.enabled',
       false,
+      expect.any(Function),
     );
   });
 

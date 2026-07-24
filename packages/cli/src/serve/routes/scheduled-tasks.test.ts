@@ -15,6 +15,7 @@ import {
   SessionService,
   Storage,
   getCronFilePath,
+  readCronTasks,
 } from '@qwen-code/qwen-code-core';
 import {
   registerScheduledTasksRoutes,
@@ -98,7 +99,10 @@ interface Harness {
   channelDeliveryAuthorizations: ChannelDeliveryAuthorizationStore;
 }
 
-async function makeHarness(): Promise<Harness> {
+async function makeHarness(
+  runtimeTrusted?: boolean,
+  generationGuard?: WorkspaceRuntime['generationGuard'],
+): Promise<Harness> {
   const scratch = await fsp.mkdtemp(path.join(os.tmpdir(), 'sched-route-'));
   const workspace = path.join(scratch, 'workspace');
   await fsp.mkdir(workspace, { recursive: true });
@@ -107,6 +111,18 @@ async function makeHarness(): Promise<Harness> {
   Storage.setRuntimeBaseDir(scratch);
 
   const bridge = makeStubBridge();
+  const getRuntime =
+    runtimeTrusted === undefined
+      ? undefined
+      : () =>
+          ({
+            workspaceId: 'primary',
+            workspaceCwd: workspace,
+            primary: true,
+            trusted: runtimeTrusted,
+            bridge,
+            generationGuard,
+          }) as unknown as WorkspaceRuntime;
   const channelDeliveryAuthorizations = new ChannelDeliveryAuthorizationStore();
   const app = express();
   app.use(express.json());
@@ -116,6 +132,7 @@ async function makeHarness(): Promise<Harness> {
     mutate: () => (_req, _res, next) => next(),
     safeBody,
     bridge,
+    ...(getRuntime ? { getRuntime } : {}),
     channelDeliveryAuthorizations,
   });
   return {
@@ -132,6 +149,28 @@ async function teardown(h: Harness): Promise<void> {
   await fsp.rm(h.scratch, { recursive: true, force: true });
 }
 
+function closeGenerationDuringCronCommit(): WorkspaceRuntime['generationGuard'] {
+  let open = true;
+  let checks = 0;
+  return {
+    get closed() {
+      return !open;
+    },
+    assertOpen() {
+      checks += 1;
+      if (!open) {
+        throw Object.assign(new Error('generation closed'), {
+          code: 'workspace_generation_closed',
+        });
+      }
+      if (checks === 3) queueMicrotask(() => (open = false));
+    },
+    close() {
+      open = false;
+    },
+  };
+}
+
 describe('scheduled-tasks routes', () => {
   let h: Harness;
 
@@ -141,6 +180,117 @@ describe('scheduled-tasks routes', () => {
 
   afterEach(async () => {
     await teardown(h);
+  });
+
+  it('rejects primary scheduled-task writes after trust is revoked', async () => {
+    await teardown(h);
+    h = await makeHarness(false);
+
+    const res = await request(h.app)
+      .post('/scheduled-tasks')
+      .send({ cron: '* * * * *', prompt: 'blocked' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('untrusted_workspace');
+    expect(h.bridge.spawned).toHaveLength(0);
+  });
+
+  it('returns 503 and removes the new session when generation closes after spawn', async () => {
+    await teardown(h);
+    let generationOpen = true;
+    h = await makeHarness(true, {
+      get closed() {
+        return !generationOpen;
+      },
+      assertOpen() {
+        if (!generationOpen) {
+          throw Object.assign(new Error('generation closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+      },
+      close() {
+        generationOpen = false;
+      },
+    });
+    const spawn = h.bridge.spawnOrAttach.bind(h.bridge);
+    h.bridge.spawnOrAttach = async (input) => {
+      const session = await spawn(input);
+      generationOpen = false;
+      return session;
+    };
+
+    const res = await request(h.app)
+      .post('/scheduled-tasks')
+      .send({ cron: '* * * * *', prompt: 'stale' });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+    expect(h.bridge.closed).toEqual(['sess-1']);
+    await expect(
+      fsp.readFile(getCronFilePath(h.workspace), 'utf8'),
+    ).rejects.toThrow();
+  });
+
+  it('does not spawn a session when generation closes during the cap precheck', async () => {
+    await teardown(h);
+    let checks = 0;
+    h = await makeHarness(true, {
+      closed: false,
+      assertOpen() {
+        checks += 1;
+        if (checks === 2) {
+          throw Object.assign(new Error('generation closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+      },
+      close() {},
+    });
+
+    const res = await request(h.app)
+      .post('/scheduled-tasks')
+      .send({ cron: '* * * * *', prompt: 'stale' });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+    expect(h.bridge.spawned).toEqual([]);
+  });
+
+  it('rolls back the task and session when generation closes after commit', async () => {
+    await teardown(h);
+    let checks = 0;
+    let generationOpen = true;
+    h = await makeHarness(true, {
+      get closed() {
+        return !generationOpen;
+      },
+      assertOpen() {
+        checks += 1;
+        if (!generationOpen) {
+          throw Object.assign(new Error('generation closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+        if (checks === 5) {
+          queueMicrotask(() => {
+            generationOpen = false;
+          });
+        }
+      },
+      close() {
+        generationOpen = false;
+      },
+    });
+
+    const res = await request(h.app)
+      .post('/scheduled-tasks')
+      .send({ cron: '* * * * *', prompt: 'stale' });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+    expect(h.bridge.closed).toEqual(['sess-1']);
+    expect(await readCronTasks(h.workspace)).toEqual([]);
   });
 
   const create = (body: Record<string, unknown>) =>
@@ -381,6 +531,35 @@ describe('scheduled-tasks routes', () => {
     expect(list.body.tasks[0].sessionId).toBe(h.bridge.spawned[0]);
     // No teardown on the happy path.
     expect(h.bridge.closed).toEqual([]);
+  });
+
+  it('uses the bridge from the captured runtime generation', async () => {
+    const runtimeBridge = makeStubBridge();
+    const liveBridge = makeStubBridge();
+    const app = express();
+    app.use(express.json());
+    registerScheduledTasksRoutes(app, {
+      boundWorkspace: h.workspace,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody,
+      bridge: liveBridge,
+      getRuntime: () =>
+        ({
+          workspaceId: 'primary',
+          workspaceCwd: h.workspace,
+          primary: true,
+          trusted: true,
+          bridge: runtimeBridge,
+        }) as unknown as WorkspaceRuntime,
+    });
+
+    const res = await request(app)
+      .post('/scheduled-tasks')
+      .send({ cron: '0 9 * * *', prompt: 'p' });
+
+    expect(res.status).toBe(201);
+    expect(runtimeBridge.spawned).toEqual([res.body.sessionId]);
+    expect(liveBridge.spawned).toEqual([]);
   });
 
   it('creates an UNBOUND task (no session) when no bridge is provided', async () => {
@@ -674,6 +853,40 @@ describe('scheduled-tasks routes', () => {
     expect(t.lastFiredAt).toBe(1_700_000_000_000);
   });
 
+  it('preserves a no-write legacy rejection when the generation closes', async () => {
+    await teardown(h);
+    let checks = 0;
+    h = await makeHarness(true, {
+      closed: false,
+      assertOpen() {
+        checks += 1;
+        if (checks > 1) {
+          throw Object.assign(new Error('generation closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+      },
+      close() {},
+    });
+    await seedTask({
+      id: 'legacy-run',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: 1_700_000_000_000,
+      enabled: true,
+      sessionId: 'sess-legacy-run',
+      condition: 'only when files changed',
+    });
+
+    const res = await request(h.app).post('/scheduled-tasks/legacy-run/run');
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('task_legacy_unsupported');
+    expect(checks).toBe(1);
+  });
+
   it('refuses to enable a legacy guarded task via PATCH (409 task_legacy_unsupported)', async () => {
     // `toView` reports the task disabled, so the only PATCH the UI sends is the
     // Enable toggle. Accepting it (200) would read back disabled again — an
@@ -934,6 +1147,56 @@ describe('scheduled-tasks routes', () => {
     await fsp.mkdir(path.dirname(file), { recursive: true });
     await fsp.writeFile(file, JSON.stringify([task]), 'utf8');
   };
+
+  const staleMutationTask = () => ({
+    id: 'stale-task',
+    cron: '0 9 * * *',
+    prompt: 'original',
+    recurring: true,
+    createdAt: 1_700_000_000_000,
+    lastFiredAt: 1_700_000_000_000,
+    enabled: true,
+    sessionId: 'stale-session',
+  });
+
+  it('rolls back a PATCH that commits while the generation closes', async () => {
+    await teardown(h);
+    h = await makeHarness(true, closeGenerationDuringCronCommit());
+    const original = staleMutationTask();
+    await seedTask(original);
+
+    const res = await request(h.app)
+      .patch('/scheduled-tasks/stale-task')
+      .send({ prompt: 'stale update' });
+
+    expect(res.status).toBe(503);
+    expect(await readCronTasks(h.workspace)).toEqual([original]);
+  });
+
+  it('rolls back a DELETE that commits while the generation closes', async () => {
+    await teardown(h);
+    h = await makeHarness(true, closeGenerationDuringCronCommit());
+    const original = staleMutationTask();
+    await seedTask(original);
+
+    const res = await request(h.app).delete('/scheduled-tasks/stale-task');
+
+    expect(res.status).toBe(503);
+    expect(await readCronTasks(h.workspace)).toEqual([original]);
+    expect(h.bridge.closed).toEqual([]);
+  });
+
+  it('rolls back a manual run that commits while the generation closes', async () => {
+    await teardown(h);
+    h = await makeHarness(true, closeGenerationDuringCronCommit());
+    const original = staleMutationTask();
+    await seedTask(original);
+
+    const res = await request(h.app).post('/scheduled-tasks/stale-task/run');
+
+    expect(res.status).toBe(503);
+    expect(await readCronTasks(h.workspace)).toEqual([original]);
+  });
 
   it('normalizes a legacy task (no name/enabled) on GET', async () => {
     // Pre-fields format, as tool-created tasks were written before this PR.
@@ -1386,8 +1649,34 @@ interface QualifiedHarness {
  * lookup by id, lookup by cwd, and list (for the mismatch fallback). */
 function makeStubRegistry(runtimes: QualifiedRuntime[]): WorkspaceRegistry {
   const asRuntime = (r: QualifiedRuntime) => r as unknown as WorkspaceRuntime;
+  const entries = runtimes.map((runtime, index) => ({
+    workspaceId: runtime.workspaceId,
+    workspaceCwd: runtime.workspaceCwd,
+    primary: index === 0,
+    removable: index !== 0,
+    registrationIds: [],
+    lastGenerationId: 1,
+    state: 'active' as const,
+    current: {
+      generationId: 1,
+      policyRevision: 'test',
+      runtime: asRuntime(runtime),
+      guard: {
+        closed: false,
+        assertOpen: () => {},
+        close: () => {},
+      },
+    },
+    configuredRevision: 'test',
+    appliedRevision: 'test',
+  }));
   return {
     list: () => runtimes.map(asRuntime),
+    listEntries: () => entries,
+    getEntryByWorkspaceId: (id: string) =>
+      entries.find((entry) => entry.workspaceId === id),
+    getEntryByWorkspaceCwd: (cwd: string) =>
+      entries.find((entry) => entry.workspaceCwd === cwd),
     getByWorkspaceId: (id: string) => {
       const found = runtimes.find((r) => r.workspaceId === id);
       return found ? asRuntime(found) : undefined;

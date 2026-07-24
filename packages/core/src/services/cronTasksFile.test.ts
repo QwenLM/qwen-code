@@ -443,6 +443,26 @@ describe('cronTasksFile', () => {
       expect(stat.mtimeMs).toBeLessThan(Date.now() - 30_000);
     });
 
+    it('checks the caller guard at the commit boundary', async () => {
+      await writeCronTasks(tmpDir, [makeTask({ id: 'existing' })]);
+      const assertCanCommit = vi.fn(() => {
+        throw new Error('generation closed');
+      });
+
+      await expect(
+        updateCronTasks(
+          tmpDir,
+          (tasks) => [...tasks, makeTask({ id: 'stale' })],
+          { assertCanCommit },
+        ),
+      ).rejects.toThrow('generation closed');
+
+      expect(assertCanCommit).toHaveBeenCalledOnce();
+      expect((await readCronTasks(tmpDir)).map((task) => task.id)).toEqual([
+        'existing',
+      ]);
+    });
+
     it('steals a stale update lock left by a crashed holder', async () => {
       const lockPath = `${getCronFilePath(tmpDir)}.lock`;
       await fs.mkdir(path.dirname(lockPath), { recursive: true });

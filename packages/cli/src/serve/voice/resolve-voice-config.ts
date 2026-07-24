@@ -74,11 +74,29 @@ function buildModelsConfig(
  */
 export function loadDaemonVoiceContext(
   workspaceCwd: string,
-  options: { env?: Readonly<Record<string, string | undefined>> } = {},
+  options: {
+    env?: Readonly<Record<string, string | undefined>>;
+    workspaceTrusted?: boolean;
+  } = {},
 ): DaemonVoiceContext {
   const settings = loadSettings(
     workspaceCwd,
-    options.env ? { skipLoadEnvironment: true } : true,
+    options.env
+      ? {
+          skipLoadEnvironment: true,
+          skipWorkspaceSettings: options.workspaceTrusted === false,
+          workspaceTrusted: options.workspaceTrusted,
+        }
+      : options.workspaceTrusted === false
+        ? {
+            consumeCorruptionEnvVars: true,
+            skipLoadEnvironment: true,
+            skipWorkspaceSettings: true,
+            workspaceTrusted: false,
+          }
+        : options.workspaceTrusted === true
+          ? { workspaceTrusted: true }
+          : true,
   );
   const voiceModel = readVoiceModel(settings);
   if (!voiceModel) {

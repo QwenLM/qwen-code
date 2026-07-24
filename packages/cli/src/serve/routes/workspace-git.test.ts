@@ -11,6 +11,7 @@ import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { sendBridgeError } from '../server/error-response.js';
 import type { WorkspaceGitState } from '../workspace-git-state.js';
 import {
+  createWorkspaceGenerationGuard,
   createWorkspaceRegistry,
   type WorkspaceRegistry,
   type WorkspaceRuntime,
@@ -129,6 +130,29 @@ describe('workspace Git routes', () => {
 
     expect(response.status).toBe(403);
     expect(response.body.code).toBe('untrusted_workspace');
+    expect(getStatus).not.toHaveBeenCalled();
+  });
+
+  it('rejects a closed generation before reading Git status', async () => {
+    const generationGuard = createWorkspaceGenerationGuard();
+    generationGuard.close();
+    const app = express();
+    const primary = runtime('primary', '/work/main', true);
+    const secondary = {
+      ...runtime('secondary', '/work/secondary', true),
+      generationGuard,
+    };
+    const getStatus = vi.fn();
+    registerWorkspaceQualifiedGitRoutes(app, {
+      workspaceRegistry: registry([primary, secondary]),
+      gitState: { getStatus } as unknown as WorkspaceGitState,
+      sendBridgeError,
+    });
+
+    const response = await request(app).get('/workspaces/secondary/git');
+
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('workspace_runtime_unavailable');
     expect(getStatus).not.toHaveBeenCalled();
   });
 

@@ -9,6 +9,7 @@ import express from 'express';
 import request from 'supertest';
 import { registerWorkspaceSettingsRoutes } from './workspace-settings.js';
 import { loadSettings } from '../../config/settings.js';
+import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
 
 vi.mock('../../config/settings.js', async (importOriginal) => {
   const actual =
@@ -25,11 +26,18 @@ beforeEach(() => {
   } as never);
 });
 
-function makeApp() {
+function makeApp(
+  overrides: {
+    captureGenerationAssertion?: () => (() => void) | undefined;
+    afterPersist?: () => void;
+  } = {},
+) {
   const app = express();
   app.use(express.json());
 
-  const persistSetting = vi.fn(async () => {});
+  const persistSetting = vi.fn(async () => {
+    overrides.afterPersist?.();
+  });
   const broadcastSettingsChanged = vi.fn();
 
   registerWorkspaceSettingsRoutes(app, {
@@ -40,12 +48,35 @@ function makeApp() {
     persistSetting,
     broadcastSettingsChanged,
     parseAndValidateClientId: () => undefined,
+    captureGenerationAssertion: overrides.captureGenerationAssertion,
   });
 
   return { app, persistSetting, broadcastSettingsChanged };
 }
 
 describe('POST /workspace/settings', () => {
+  it('returns 503 without broadcasting when the runtime closes after persist', async () => {
+    let generationOpen = true;
+    const { app, broadcastSettingsChanged } = makeApp({
+      captureGenerationAssertion: () => () => {
+        if (!generationOpen) throw new WorkspaceGenerationClosedError();
+      },
+      afterPersist: () => {
+        generationOpen = false;
+      },
+    });
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'general.cleanupPeriodDays',
+      value: 7,
+    });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+    expect(broadcastSettingsChanged).not.toHaveBeenCalled();
+  });
+
   it('rejects negative general.cleanupPeriodDays values', async () => {
     const { app, persistSetting, broadcastSettingsChanged } = makeApp();
 
