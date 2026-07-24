@@ -21,7 +21,8 @@
   },
   "dependencies": {
     "@qwen-code/channel-base": "file:../base",
-    "@octokit/rest": "^21.1.1"
+    "@octokit/rest": "^21.1.1",
+    "https-proxy-agent": "^7.0.6"
   },
   "devDependencies": {
     "typescript": "^5.0.0"

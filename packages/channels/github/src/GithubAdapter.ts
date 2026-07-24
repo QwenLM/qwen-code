@@ -1,5 +1,6 @@
 import process from 'node:process';
 import { Octokit } from '@octokit/rest';
+import { HttpsProxyAgent } from 'https-proxy-agent';
 import type {
   ChannelAgentBridge,
   ChannelBaseOptions,
@@ -42,6 +43,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     this.octokit = new Octokit({
       auth: cfg.token,
       baseUrl,
+      ...(this.proxy
+        ? { request: { agent: new HttpsProxyAgent(this.proxy) } }
+        : {}),
     });
     try {
       const { data } = await this.octokit.rest.users.getAuthenticated();
