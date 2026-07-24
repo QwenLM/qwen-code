@@ -16,6 +16,7 @@ import {
   estimateModalityTokens,
   getMediaProfile,
 } from '../../../core/media/provider-media-profiles.js';
+import { extractKeyframes } from '../keyframe-extractor.js';
 import type {
   MediaReadContext,
   MediaReader,
@@ -73,7 +74,7 @@ class NativeInlineReader implements MediaReader {
 
   async read(
     probe: MediaProbe,
-    _params: MediaReadParams,
+    params: MediaReadParams,
     ctx: MediaReadContext,
   ): Promise<MediaReadResult> {
     const cost = costFor(probe, ctx.config);
@@ -98,7 +99,9 @@ class NativeInlineReader implements MediaReader {
       };
     }
 
-    // Too large to inline: must upload so the provider can fetch a fileUri.
+    // Too large to inline: prefer uploading so the provider can fetch a
+    // fileUri. If no upload backend is configured, fall back to a lossy local
+    // representation rather than failing outright.
     const uploader = determineUploader(ctx.config);
     try {
       const uploaded = await uploader.upload(probe);
@@ -116,11 +119,59 @@ class NativeInlineReader implements MediaReader {
         readMore: 'Delivered by reference to the uploaded file.',
       };
     } catch (err) {
-      if (err instanceof UploadNotConfiguredError) {
-        throw new MediaReadError('over-budget', err.message, err.remedy);
-      }
-      throw err;
+      if (!(err instanceof UploadNotConfiguredError)) throw err;
+      return this.oversizedFallback(probe, params, ctx, err);
     }
+  }
+
+  /**
+   * No upload backend, file too large to inline. For video we can still show
+   * the model the content via downsampled keyframes (lossy, no audio). Anything
+   * else fails closed with the upload remedy.
+   */
+  private async oversizedFallback(
+    probe: MediaProbe,
+    params: MediaReadParams,
+    ctx: MediaReadContext,
+    uploadErr: UploadNotConfiguredError,
+  ): Promise<MediaReadResult> {
+    if (probe.modality !== 'video') {
+      throw new MediaReadError(
+        'over-budget',
+        uploadErr.message,
+        uploadErr.remedy,
+      );
+    }
+    let frames;
+    try {
+      frames = await extractKeyframes(probe, {
+        ...(params.range ? { range: params.range } : {}),
+        signal: ctx.signal,
+      });
+    } catch (kfErr) {
+      throw new MediaReadError(
+        'over-budget',
+        `${probe.path} is too large to inline and no upload backend is configured; keyframe fallback also failed: ${kfErr instanceof Error ? kfErr.message : String(kfErr)}`,
+        uploadErr.remedy,
+      );
+    }
+    const durationNote = probe.durationSec
+      ? ` from a ${Math.round(probe.durationSec)}s video`
+      : '';
+    const everyNote = frames.intervalSec
+      ? ` (~1 frame every ${frames.intervalSec.toFixed(1)}s)`
+      : '';
+    return {
+      content: frames.parts,
+      scope: `${frames.frameCount} downsampled keyframes${durationNote}${everyNote}`,
+      precision: `LOSSY: keyframes only (no audio, no motion), downscaled to ${frames.longEdge}px — the full video was not sent because it exceeds the inline limit and no upload backend is configured`,
+      cost: {
+        tokens: frames.frameCount * getMediaProfile(ctx.config).tokensPerImage,
+        note: `${frames.frameCount} frames`,
+      },
+      readMore:
+        'For full fidelity (audio + all motion) configure a media upload backend, or request a specific time range to sample it more densely.',
+    };
   }
 }
 

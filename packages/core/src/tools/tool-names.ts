@@ -60,6 +60,7 @@ export const ToolNames = {
   MEDIA_WATCH: 'media_watch',
   MEDIA_GREP: 'media_grep',
   MEDIA_EXTRACT: 'media_extract',
+  MEDIA_DISPATCH: 'media_dispatch',
   // Computer Use tools (computer_use__*) are intentionally NOT enumerated here.
   // Their full 35-tool surface is generated into computer-use/schemas.ts and
   // registered via computer-use/index.ts (cast to ToolName). Duplicating a
@@ -119,6 +120,7 @@ export const ToolDisplayNames = {
   MEDIA_WATCH: 'MediaWatch',
   MEDIA_GREP: 'MediaGrep',
   MEDIA_EXTRACT: 'MediaExtract',
+  MEDIA_DISPATCH: 'MediaDispatch',
   // computer_use__* display names are not enumerated here (see ToolNames).
   WORKFLOW: 'Workflow',
   ARTIFACT: 'Artifact',

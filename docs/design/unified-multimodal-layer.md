@@ -12,11 +12,42 @@ core hotspot (`geminiChat`, `coreToolScheduler` media pass-through,
 `converter.ts`) changed behavior; media reaches the model over the existing
 tool-result media path.
 
+## Large files & oversized video
+
+Probe fills duration/resolution/audio-track best-effort via `ffprobe`. Files
+past the inline limit try the upload backend first; when none is configured, a
+video falls back to **local `ffmpeg` keyframe extraction** — a handful of
+downsampled frames delivered inline, with an explicit LOSSY precision note. This
+makes large videos (e.g. 170MB+) usable without an upload backend. Audio/other
+modalities still fail closed with the upload remedy.
+
+## media_dispatch (parallel time-segment understanding)
+
+`media_dispatch` splits a video into time segments and understands each in
+parallel: per segment it extracts keyframes (`ffmpeg -ss/-to`) and runs one
+understanding call, then aggregates the notes and records a combined
+understanding in media memory (searchable via `media_grep`). It picks the
+understanding model as: the **main model when it is multimodal**, otherwise a
+configured vision model — so it works whether or not the main model can natively
+ingest images, and a multimodal main model still benefits from divide-and-conquer
+over a long video. Concurrency is bounded; a failed segment degrades to an error
+note rather than failing the whole call.
+
+## Memory: when it saves / loads
+
+- **Save**: after every successful `image_view` / `media_watch` / `media_extract`
+  read (provenance + any derived note), and once per `media_dispatch` run (the
+  combined per-segment understanding). Keyed by content hash; understandings
+  accumulate rather than overwrite.
+- **Load**: (1) automatically — reading a file already in memory surfaces its
+  prior understanding as a note on the result; (2) explicitly — the model calls
+  `media_grep`.
+
 ## Layers and seams
 
 ```
-tools/media/*            L1 orchestration (image_view, media_watch, media_grep, media_extract)
-utils/media/*            L2 provider-agnostic core (Seam A: reader registry, probe, policy, C10)
+tools/media/*            L1 orchestration (image_view, media_watch, media_grep, media_extract, media_dispatch)
+utils/media/*            L2 provider-agnostic core (Seam A: reader registry, probe, policy, C10, keyframe extractor, dispatch)
 core/media/*             Pattern P provider-coupled hard logic (transport, uploader, profiles)
 memory/media/*           Seam C: cross-session media memory (store, index, links, recall)
 ```

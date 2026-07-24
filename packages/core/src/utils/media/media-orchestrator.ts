@@ -129,6 +129,14 @@ export async function readMedia(input: ReadMediaInput): Promise<ToolResult> {
     });
   }
 
+  // Auto-load: surface any prior cross-session understanding of THIS file
+  // (same content hash) before the read, so re-encountering a file brings back
+  // accumulated understanding cheaply (检索是快路径). The read still runs — the
+  // original bytes remain the source of truth.
+  const prior = await getMediaMemory()
+    .get(probe.hash)
+    .catch(() => undefined);
+
   let result;
   try {
     result = await reader.read(probe, params, ctx);
@@ -159,6 +167,10 @@ export async function readMedia(input: ReadMediaInput): Promise<ToolResult> {
     // because persistence hiccuped.
   }
 
+  const priorNote = prior
+    ? `recalled prior understanding of this file from media memory — "${prior.summary}" (call media_grep for the full accumulated notes)`
+    : undefined;
+
   return buildMediaDelivery(result.content, {
     path: probe.path,
     hash: probe.hash,
@@ -167,5 +179,6 @@ export async function readMedia(input: ReadMediaInput): Promise<ToolResult> {
     precision: result.precision,
     cost: result.cost,
     readMore: result.readMore,
+    ...(priorNote ? { notes: priorNote } : {}),
   });
 }

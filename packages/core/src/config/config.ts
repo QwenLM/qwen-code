@@ -6938,6 +6938,12 @@ export class Config {
       );
       return new MediaExtractTool(this);
     });
+    await registerLazy(ToolNames.MEDIA_DISPATCH, async () => {
+      const { MediaDispatchTool } = await import(
+        '../tools/media/media-dispatch.js'
+      );
+      return new MediaDispatchTool(this);
+    });
 
     if (this.getUseRipgrep()) {
       let useRipgrep = false;

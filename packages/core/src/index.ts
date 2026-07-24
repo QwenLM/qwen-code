@@ -141,10 +141,12 @@ export * from './tools/modifiable-tool.js';
 export * from './utils/media/types.js';
 export * from './utils/media/media-result.js';
 export * from './utils/media/probe.js';
+export * from './utils/media/keyframe-extractor.js';
 export * from './utils/media/reader-registry.js';
 export * from './utils/media/decision-policy.js';
 export * from './utils/media/media-config.js';
 export * from './utils/media/media-orchestrator.js';
+export * from './utils/media/media-dispatch.js';
 export * from './utils/media/media-security.js';
 export * from './utils/media/readers/native-inline.js';
 export * from './utils/media/readers/delegated-reader.js';
@@ -160,6 +162,7 @@ export * from './tools/media/image-view.js';
 export * from './tools/media/media-watch.js';
 export * from './tools/media/media-grep.js';
 export * from './tools/media/media-extract.js';
+export * from './tools/media/media-dispatch.js';
 
 // Selective re-exports of types/utilities from tool files (avoids loading full tool modules)
 export {

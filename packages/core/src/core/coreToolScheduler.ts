@@ -500,6 +500,7 @@ const FS_PATH_TOOL_NAMES: ReadonlySet<string> = new Set<string>([
   ToolNames.IMAGE_VIEW,
   ToolNames.MEDIA_WATCH,
   ToolNames.MEDIA_EXTRACT,
+  ToolNames.MEDIA_DISPATCH,
 ]);
 
 /**

@@ -5,6 +5,7 @@
  */
 
 import { createHash } from 'node:crypto';
+import { execFile } from 'node:child_process';
 import { createReadStream } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
@@ -18,10 +19,10 @@ import type { Modality, MediaProbe } from './types.js';
  * decision (capability gating, reader pick, transport, memory identity) depends
  * on. It is A-class and its output shape is stable across implementations.
  *
- * v1 keeps probe dependency-free: identity (content hash), modality, mime, and
- * byte size are always derivable cheaply. Duration / resolution / frame-rate are
- * left undefined here and filled in by a delegated probe backend only when a
- * decision proves it needs them (信念二: start simple, add on proof).
+ * Identity (content hash), modality, mime and byte size are always derivable
+ * cheaply. Duration / resolution / audio-track are filled in best-effort via
+ * `ffprobe` when it is on PATH; if it is absent those fields stay undefined and
+ * downstream code degrades gracefully.
  */
 
 /** Map a mime type to the modality the media layer reasons about, or undefined. */
@@ -44,6 +45,63 @@ export async function hashFile(filePath: string): Promise<string> {
   return hash.digest('hex');
 }
 
+interface FfprobeFacts {
+  durationSec?: number;
+  width?: number;
+  height?: number;
+  hasAudio?: boolean;
+}
+
+/**
+ * Best-effort ffprobe. Returns `{}` when ffprobe is unavailable or the file is
+ * unreadable by it — never throws, so probe stays robust without the binary.
+ */
+export async function ffprobeFacts(filePath: string): Promise<FfprobeFacts> {
+  const json = await new Promise<string>((resolve) => {
+    execFile(
+      'ffprobe',
+      [
+        '-v',
+        'quiet',
+        '-print_format',
+        'json',
+        '-show_format',
+        '-show_streams',
+        filePath,
+      ],
+      { timeout: 30_000, maxBuffer: 8 * 1024 * 1024 },
+      (err, stdout) => resolve(err ? '' : stdout.toString()),
+    );
+  });
+  if (!json) return {};
+  try {
+    const parsed = JSON.parse(json) as {
+      format?: { duration?: string };
+      streams?: Array<{
+        codec_type?: string;
+        width?: number;
+        height?: number;
+      }>;
+    };
+    const streams = parsed.streams ?? [];
+    const video = streams.find((s) => s.codec_type === 'video');
+    const hasAudio = streams.some((s) => s.codec_type === 'audio');
+    const durationRaw = parsed.format?.duration;
+    const durationSec =
+      durationRaw !== undefined && Number.isFinite(Number(durationRaw))
+        ? Number(durationRaw)
+        : undefined;
+    return {
+      durationSec,
+      width: video?.width,
+      height: video?.height,
+      hasAudio,
+    };
+  } catch {
+    return {};
+  }
+}
+
 /**
  * Probe a media file. Throws if the path is missing/not a file, or the mime type
  * is not a media modality — callers translate that into a fail-closed media
@@ -63,11 +121,18 @@ export async function probeMedia(filePath: string): Promise<MediaProbe> {
     );
   }
   const hash = await hashFile(resolved);
+  // Duration/resolution/audio-track matter for audio+video decisions; ffprobe
+  // is cheap and best-effort. Skip it for images (size is enough there).
+  const facts = modality === 'image' ? {} : await ffprobeFacts(resolved);
   return {
     path: resolved,
     hash,
     modality,
     mimeType,
     sizeBytes: stat.size,
+    ...(facts.durationSec !== undefined && { durationSec: facts.durationSec }),
+    ...(facts.width !== undefined && { width: facts.width }),
+    ...(facts.height !== undefined && { height: facts.height }),
+    ...(facts.hasAudio !== undefined && { hasAudio: facts.hasAudio }),
   };
 }
