@@ -709,7 +709,7 @@ export interface RunHandle {
   close(): Promise<void>;
 }
 
-type CoreRuntime = typeof import('@qwen-code/qwen-code-core');
+type CoreRuntime = typeof import('./core-runtime.js');
 type ProviderConfig = NonNullable<ReturnType<CoreRuntime['findProviderById']>>;
 type SettingsRuntime = typeof import('../config/settings.js');
 type EnvironmentRuntime = typeof import('../config/environment.js');
@@ -945,7 +945,7 @@ function shouldPreheatBridge(deps: RunQwenServeDeps): boolean {
 
 let coreRuntimePromise: Promise<CoreRuntime> | undefined;
 function loadCoreRuntime(): Promise<CoreRuntime> {
-  coreRuntimePromise ??= import('@qwen-code/qwen-code-core');
+  coreRuntimePromise ??= import('./core-runtime.js');
   return coreRuntimePromise;
 }
 

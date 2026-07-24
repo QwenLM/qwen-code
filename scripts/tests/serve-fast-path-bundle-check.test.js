@@ -503,6 +503,48 @@ describe('ACP import boundary check', () => {
     expect(findAcpImportBoundaryOffenders(metafile)).toEqual([]);
   });
 
+  it('reports first-use dependency packages reached through static imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [staticImport('dist/chunks/first-use-dependencies.js')],
+      }),
+      'dist/chunks/first-use-dependencies.js': output({
+        inputs: [
+          'node_modules/iconv-lite/lib/index.js',
+          'node_modules/@xterm/headless/lib-headless/xterm-headless.js',
+          'node_modules/simple-git/dist/esm/index.js',
+        ],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: 'iconv-lite encoding tables' }),
+        expect.objectContaining({ label: 'xterm headless runtime' }),
+        expect.objectContaining({ label: 'simple-git runtime' }),
+      ]),
+    );
+  });
+
+  it('allows first-use dependency packages behind dynamic imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [dynamicImport('dist/chunks/first-use-dependencies.js')],
+      }),
+      'dist/chunks/first-use-dependencies.js': output({
+        inputs: [
+          'node_modules/iconv-lite/lib/index.js',
+          'node_modules/@xterm/headless/lib-headless/xterm-headless.js',
+          'node_modules/simple-git/dist/esm/index.js',
+        ],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual([]);
+  });
+
   it('reads a metafile path and returns ACP boundary offenders', () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'acp-import-boundary-'));
     try {

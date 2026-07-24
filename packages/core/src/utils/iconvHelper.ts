@@ -23,6 +23,8 @@ interface IconvLite {
 import iconvModule from 'iconv-lite';
 const iconvLite: IconvLite = iconvModule as unknown as IconvLite;
 
+export { isUtf8CompatibleEncoding } from './encoding.js';
+
 /**
  * Decode a buffer using the specified encoding.
  * @param buffer The buffer to decode
@@ -59,7 +61,3 @@ export function iconvEncodingExists(encoding: string): boolean {
  * @param encoding The encoding name to check
  * @returns True if the encoding is UTF-8 or ASCII compatible
  */
-export function isUtf8CompatibleEncoding(encoding: string): boolean {
-  const lower = encoding.toLowerCase().replace(/[^a-z0-9]/g, '');
-  return lower === 'utf8' || lower === 'ascii' || lower === 'usascii';
-}

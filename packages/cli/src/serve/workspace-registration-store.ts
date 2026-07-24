@@ -518,7 +518,9 @@ export class WorkspaceRegistrationStore {
   private async update(
     mutate: (snapshot: WorkspaceRegistrationSnapshot) => boolean,
   ): Promise<boolean> {
-    const { atomicWriteFile } = await import('@qwen-code/qwen-code-core');
+    const { atomicWriteFile } = await import(
+      '../utils/deferred-core-runtime.js'
+    );
     return withInProcessLock(this.filePath, async () => {
       const lock = await acquireFileLock(this.filePath);
       let committed = false;

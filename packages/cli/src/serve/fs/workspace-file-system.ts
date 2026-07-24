@@ -19,9 +19,9 @@ import { glob as globAsync } from 'glob';
 
 import {
   StandardFileSystemService,
-  decodeBufferWithEncodingInfo,
+  decodeBufferWithEncodingInfoAsync,
   detectLineEnding,
-  encodeTextFileContent,
+  encodeTextFileContentAsync,
   loadIgnoreRules,
   isWithinRoot,
   type Ignore,
@@ -1398,7 +1398,7 @@ async function readTextSnapshotFromResolvedFile(
     });
   }
 
-  const decoded = decodeBufferWithEncodingInfo(raw);
+  const decoded = await decodeBufferWithEncodingInfoAsync(raw);
   const startLineIndex = opts.line !== undefined ? opts.line - 1 : 0;
   const sliced = sliceDecodedText(
     decoded.content,
@@ -1645,7 +1645,7 @@ async function writeEncodedTextTemp(input: {
   meta: ReadMeta;
   handle: Awaited<ReturnType<typeof fsp.open>>;
 }): Promise<AtomicWriteTextOutcome> {
-  const buf = encodeTextFileContent(
+  const buf = await encodeTextFileContentAsync(
     input.targetPath,
     input.content,
     buildWriteMeta(input.meta),
