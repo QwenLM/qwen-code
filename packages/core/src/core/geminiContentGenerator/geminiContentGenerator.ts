@@ -22,6 +22,7 @@ import type {
   ContentGeneratorConfig,
 } from '../contentGenerator.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { reportGeminiRequest } from '../../telemetry/gen-ai-request.js';
 
 const debugLogger = createDebugLogger('GEMINI');
 
@@ -193,6 +194,7 @@ export class GeminiContentGenerator implements ContentGenerator {
       contents: this.stripUnsupportedFields(request.contents),
       config: this.buildGenerateContentConfig(request),
     };
+    reportGeminiRequest(finalRequest);
     return this.googleGenAI.models.generateContent(finalRequest);
   }
 
@@ -205,6 +207,7 @@ export class GeminiContentGenerator implements ContentGenerator {
       contents: this.stripUnsupportedFields(request.contents),
       config: this.buildGenerateContentConfig(request),
     };
+    reportGeminiRequest(finalRequest);
     return this.googleGenAI.models.generateContentStream(finalRequest);
   }
 
