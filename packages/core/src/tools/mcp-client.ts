@@ -55,6 +55,12 @@ import type { OAuthCredentials } from '../mcp/token-storage/types.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { ResourceRegistry } from '../resources/resource-registry.js';
 import { getErrorMessage, getErrorStatus } from '../utils/errors.js';
+import {
+  getOrCreateMcpDispatcher,
+  loadUndici,
+  preloadRuntimeFetchModule,
+  resetDispatcherCache,
+} from '../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { retryWithBackoff } from './mcp-retry.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
@@ -263,13 +269,54 @@ export function createStreamableHttpCompatibilityFetch(
   };
 }
 
+// Streamable HTTP servers hold a long-lived GET SSE stream open for the
+// lifetime of the connection (the SDK transport opens it after
+// `notifications/initialized`, per the MCP spec). Against some servers,
+// Node's built-in fetch stalls subsequent same-origin POSTs
+// (tools/resources/prompts discovery) behind that stream until the SDK's
+// request timeout fires (#7147 — reproduced by the reporter against
+// Fastmail's MCP endpoint on Node 26.4). The transport therefore pins
+// undici's own fetch with a dedicated dispatcher — both loaded lazily via
+// loadUndici() so undici stays out of the eager startup closure (#7264),
+// and the dispatcher shared through runtimeFetchOptions so MCP traffic
+// honors an explicit --proxy or HTTP(S)_PROXY/NO_PROXY environment and
+// uses the same disabled header/body timeouts as the LLM path (#7195).
+const mcpUndiciFetch: typeof fetch = (async (
+  input: Parameters<typeof fetch>[0],
+  init?: Parameters<typeof fetch>[1],
+) => {
+  // preload populates the sync cache the shared dispatcher builders read.
+  await preloadRuntimeFetchModule();
+  const { fetch: undiciFetch } = await loadUndici();
+  return undiciFetch(input as Parameters<typeof undiciFetch>[0], {
+    ...(init as Parameters<typeof undiciFetch>[1]),
+    dispatcher: getOrCreateMcpDispatcher(),
+  });
+}) as unknown as typeof fetch;
+
+// Test-only override: unit tests stub `globalThis.fetch`, which the
+// dedicated undici fetch above deliberately bypasses. Follows the
+// `_reset*ForTest` convention (see utils/cleanup.ts).
+let mcpFetchOverrideForTest: typeof fetch | undefined;
+export function _setMcpFetchForTest(fn?: typeof fetch): void {
+  mcpFetchOverrideForTest = fn;
+}
+
+// Test-only: clears the shared dispatcher cache so a test can re-evaluate
+// `isTlsVerificationDisabled()` / proxy configuration under a different
+// environment. Kept under its historical name; delegates to the shared
+// runtimeFetchOptions cache the MCP dispatcher now lives in.
+export function _resetMcpFetchDispatcherForTest(): void {
+  resetDispatcherCache();
+}
+
 function createMcpStreamableHttpFetch(
   mcpServerName: string,
   mcpServerConfig: MCPServerConfig,
 ): typeof fetch {
   return createStreamableHttpCompatibilityFetch(
     mcpServerName,
-    globalThis.fetch.bind(globalThis),
+    mcpFetchOverrideForTest ?? mcpUndiciFetch,
     mcpServerConfig,
   );
 }
