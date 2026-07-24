@@ -68,6 +68,7 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { GeminiChat } from '../../core/geminiChat.js';
+import { buildSystemPromptSuffix } from '../../core/prompts.js';
 import {
   dedupeToolCallsById,
   getProviderToolCallId,
@@ -2155,11 +2156,12 @@ Important Rules:
     }
 
     // Volatile layer last: the auto-memory section is rewritten on every
-    // memory save, so it must follow the stable context content above.
-    const autoMemoryPrompt = this.runtimeContext.getAutoMemoryPrompt();
-    if (autoMemoryPrompt) {
-      finalPrompt += `\n\n---\n\n${autoMemoryPrompt}`;
-    }
+    // memory save, so it must follow the stable context content above. Reuse
+    // buildSystemPromptSuffix so the separator and trimming stay in sync with
+    // the other assembly sites (client.ts, ArenaManager.ts).
+    finalPrompt += buildSystemPromptSuffix(
+      this.runtimeContext.getAutoMemoryPrompt(),
+    );
 
     return finalPrompt;
   }

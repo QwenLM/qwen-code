@@ -1491,6 +1491,27 @@ describe('Gemini Client (client.ts)', () => {
         PermissionMode.AutoEdit,
       );
     });
+
+    it('appends the auto-memory section after all stable/context content', async () => {
+      // The auto-memory section is the volatile layer and must be the last
+      // block of the main-session system instruction (after the base prompt
+      // and git status). Guard the append with a non-empty getAutoMemoryPrompt
+      // so a future refactor dropping it fails here instead of silently
+      // shipping a prompt without managed memory.
+      vi.mocked(getCoreSystemPrompt).mockReturnValue('Base instruction');
+      vi.mocked(mockConfig.getAutoMemoryPrompt).mockReturnValue(
+        '# auto memory\nMEMORY_INDEX_MARKER',
+      );
+
+      await client.startChat();
+
+      const systemInstruction = client.getChat()['generationConfig']
+        .systemInstruction as string;
+      expect(systemInstruction).toBe(
+        'Base instruction\n\n---\n\n# auto memory\nMEMORY_INDEX_MARKER',
+      );
+      expect(systemInstruction.endsWith('MEMORY_INDEX_MARKER')).toBe(true);
+    });
   });
 
   describe('refreshStartupContextReminder', () => {
