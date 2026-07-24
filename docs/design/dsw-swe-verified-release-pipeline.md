@@ -9,8 +9,7 @@ PR #7584.
 
 ## Production behavior
 
-- A published Release starts the workflow after this workflow has landed on the
-  default branch.
+- A published Release starts the workflow from the Release tag's target commit.
 - The Release tag is resolved to its immutable Git commit.
 - The DSW preflight removes Harbor's CLI key argument so the model key is passed
   to Qwen Code only through the process environment.
@@ -39,13 +38,16 @@ artifacts do not share paths or tables with another benchmark pipeline.
 
 ## Branch validation
 
-GitHub only evaluates `release.published` workflows that already exist on the
-default branch. Before merge, use `workflow_dispatch` from this branch with an
-isolated test prerelease as `release_tag`. When that test tag has no matching npm
-package, set `qwen_release_tag` to an existing nightly release. This exercises
-the same DSW job and Release writeback path without changing an official
-Release; after merge, the published-Release event invokes it automatically with
-`instance_limit=500` and `executor_count=10`.
+Publish an isolated prerelease whose target commit is on this branch. GitHub
+then evaluates this branch's `release.published` workflow and automatically
+starts the DSW job with `instance_limit=500` and `executor_count=10`; no manual
+DSW dispatch is involved.
 
-Manual validation defaults to one instance to bound time and model cost. Select
-500 only when intentionally starting a full run.
+For an event-driven test prerelease, a single body line such as
+`Benchmark-Qwen-Ref: v0.20.0-nightly.20260722.b98306b7e` selects an existing
+published Qwen npm version while keeping the result on the isolated POC Release.
+This override is accepted only for prereleases. A normal Release always evaluates
+its own tag.
+
+`workflow_dispatch` remains available for explicit diagnostics and reruns.
+Manual validation defaults to one instance to bound time and model cost.

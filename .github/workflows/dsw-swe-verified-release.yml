@@ -64,7 +64,7 @@ jobs:
       - name: Checkout pipeline
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Resolve release
         id: release
@@ -74,10 +74,22 @@ jobs:
           set -euo pipefail
           gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}" > release.json
           test "$(jq -r .draft release.json)" = "false"
-          git fetch --force origin "refs/tags/${QWEN_REF}:refs/tags/${QWEN_REF}"
-          release_commit="$(git rev-list -n 1 "${QWEN_REF}^{commit}")"
+          qwen_ref="${QWEN_REF}"
+          if [[ "$(jq -r .prerelease release.json)" == "true" ]]; then
+            override="$(
+              jq -r '.body // ""' release.json \
+                | sed -nE 's/^Benchmark-Qwen-Ref:[[:space:]]*(v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?)[[:space:]]*$/\1/p' \
+                | head -n 1
+            )"
+            if [[ -n "${override}" ]]; then
+              qwen_ref="${override}"
+            fi
+          fi
+          git fetch --depth=1 --force origin "refs/tags/${qwen_ref}:refs/tags/${qwen_ref}"
+          release_commit="$(git rev-list -n 1 "${qwen_ref}^{commit}")"
           release_id="$(jq -r .id release.json)"
           {
+            echo "qwen_ref=${qwen_ref}"
             echo "release_commit=${release_commit}"
             echo "release_id=${release_id}"
             echo "release_url=$(jq -r .html_url release.json)"
@@ -87,6 +99,7 @@ jobs:
         id: benchmark
         continue-on-error: true
         env:
+          QWEN_REF: ${{ steps.release.outputs.qwen_ref }}
           QWEN_COMMIT: ${{ steps.release.outputs.release_commit }}
         run: |
           .github/scripts/dsw-swe-verified/harden-harbor-qwen-adapter.py \
