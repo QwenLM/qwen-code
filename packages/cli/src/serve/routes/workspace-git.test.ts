@@ -62,7 +62,32 @@ describe('workspace Git routes', () => {
       workspaceCwd: '/work/main',
       branch: 'main',
     });
-    expect(getStatus).toHaveBeenCalledWith('/work/main', bridge);
+    expect(getStatus).toHaveBeenCalledWith('/work/main', bridge, {
+      wait: false,
+    });
+  });
+
+  it('passes wait:true through to the bound workspace git state', async () => {
+    const app = express();
+    const bridge = runtime('primary', '/work/main', true).bridge;
+    const getStatus = vi.fn(async () => ({
+      v: 1 as const,
+      workspaceCwd: '/work/main',
+      branch: 'main',
+    }));
+    registerWorkspaceGitRoutes(app, {
+      boundWorkspace: '/work/main',
+      bridge,
+      gitState: { getStatus } as unknown as WorkspaceGitState,
+      sendBridgeError,
+    });
+
+    const response = await request(app).get('/workspace/git?wait=1');
+
+    expect(response.status).toBe(200);
+    expect(getStatus).toHaveBeenCalledWith('/work/main', bridge, {
+      wait: true,
+    });
   });
 
   it('returns a structured error when bound Git status fails', async () => {
@@ -111,6 +136,33 @@ describe('workspace Git routes', () => {
     expect(getStatus).toHaveBeenCalledWith(
       secondary.workspaceCwd,
       secondary.bridge,
+      { wait: false },
+    );
+  });
+
+  it('passes wait:true through to the qualified workspace git state', async () => {
+    const app = express();
+    const primary = runtime('primary', '/work/main', true);
+    const getStatus = vi.fn(async () => ({
+      v: 1 as const,
+      workspaceCwd: primary.workspaceCwd,
+      branch: 'main',
+    }));
+    registerWorkspaceQualifiedGitRoutes(app, {
+      workspaceRegistry: registry([primary]),
+      gitState: { getStatus } as unknown as WorkspaceGitState,
+      sendBridgeError,
+    });
+
+    const response = await request(app).get('/workspaces/primary/git?wait=1');
+
+    expect(response.status).toBe(200);
+    expect(getStatus).toHaveBeenCalledWith(
+      primary.workspaceCwd,
+      primary.bridge,
+      {
+        wait: true,
+      },
     );
   });
 

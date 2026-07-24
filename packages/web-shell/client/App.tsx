@@ -1492,20 +1492,39 @@ export function App({
     }
     let cancelled = false;
     const fetchStatus = () => {
-      void workspace.client
-        .workspaceByCwd(activeWorkspaceCwd)
-        .workspaceGit(sessionWorktree?.path)
-        .then((git) => {
-          if (!cancelled) setSelectedWorkspaceGitStatus(git);
+      const git = workspace.client.workspaceByCwd(activeWorkspaceCwd);
+      // Fast path: last-known cache (branch-only on a cold start) paints the
+      // chip immediately.
+      void git
+        .workspaceGit({ cwd: sessionWorktree?.path })
+        .then((status) => {
+          if (!cancelled) setSelectedWorkspaceGitStatus(status);
         })
         .catch(() => {
           if (!cancelled) setSelectedWorkspaceGitStatus(undefined);
         });
+      // Fresh path: resolves when the daemon's recomputation lands, so the
+      // enriched counters fill in without depending on SSE — the
+      // `git_status_changed` push only flows on a per-session event stream,
+      // which doesn't exist before the first prompt (deferred connect).
+      // Daemon-side in-flight dedup shares one `git status` computation
+      // across both requests. Worktree `?cwd=` reads always compute
+      // directly, so a second request would be a duplicate there.
+      if (!sessionWorktree) {
+        void git
+          .workspaceGit({ wait: true })
+          .then((status) => {
+            if (!cancelled) setSelectedWorkspaceGitStatus(status);
+          })
+          .catch(() => {});
+      }
     };
     fetchStatus();
-    // The enriched working-tree summary isn't pushed over SSE, so refresh it on
-    // focus and on a slow poll for the active workspace only. A live branch
-    // change re-runs this effect via the connection.gitBranch dependency.
+    // Refresh triggers stay on focus and on a slow poll for the active
+    // workspace only. A live branch change re-runs this effect via the
+    // connection.gitBranch dependency. With an active session the daemon's
+    // `git_status_changed` push (mirrored by the effect below) additionally
+    // covers realtime updates between polls.
     const onFocus = () => fetchStatus();
     window.addEventListener('focus', onFocus);
     const poll = window.setInterval(() => {
@@ -1522,6 +1541,17 @@ export function App({
     workspace.client,
     sessionWorktree,
   ]);
+  // Mirror the daemon's `git_status_changed` push (surfaced as
+  // connection.gitStatus by the session provider) into the chip state so the
+  // enriched counters fill in right after the branch-only first paint.
+  // Worktree sessions bypass the daemon cache/SSE path — their status comes
+  // from the ?cwd= fetch above.
+  useEffect(() => {
+    const status = connection.gitStatus;
+    if (!status || sessionWorktree) return;
+    if (status.workspaceCwd !== activeWorkspaceCwd) return;
+    setSelectedWorkspaceGitStatus(status);
+  }, [connection.gitStatus, activeWorkspaceCwd, sessionWorktree]);
   const onToastRef = useRef(onToast);
   onToastRef.current = onToast;
   const toastIdRef = useRef(0);

@@ -310,6 +310,9 @@ export function normalizeDaemonEvent(
     case 'git_branch_changed':
       return [];
 
+    case 'git_status_changed':
+      return [];
+
     case 'memory_changed':
       return normalizeMemoryChanged(event, base);
 

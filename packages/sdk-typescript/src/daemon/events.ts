@@ -157,6 +157,11 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   // clients can seed their reducer without an extra round-trip.
   'session_snapshot',
   'git_branch_changed',
+  // Enriched working-tree summary push: the daemon recomputes `git status`
+  // in the background (stale-while-revalidate on `GET …/git`) and publishes
+  // this only when the summary changed. `data` is a DaemonWorkspaceGitStatus.
+  // Old SDK consumers silently drop it via `asKnownDaemonEvent`.
+  'git_status_changed',
 ] as const;
 
 const DAEMON_KNOWN_EVENT_TYPES: ReadonlySet<string> = new Set<string>(

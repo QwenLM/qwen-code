@@ -231,7 +231,12 @@ export function WorkspaceSection({
   const loadGitStatus = useCallback(async () => {
     if (!gitStatusEnabled || !workspace.trusted || !gitPollCwd) return;
     try {
-      const status = await client.workspaceByCwd(gitPollCwd).workspaceGit();
+      // wait: the sidebar chip shows the enriched counters and has no SSE
+      // fill-in path, so it keeps the blocking semantics instead of the
+      // composer's last-known fast path.
+      const status = await client
+        .workspaceByCwd(gitPollCwd)
+        .workspaceGit({ wait: true });
       gitPollFailed.current = false;
       setGitStatus(status);
     } catch (err) {

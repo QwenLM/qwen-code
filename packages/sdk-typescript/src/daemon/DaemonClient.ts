@@ -1089,9 +1089,11 @@ export class DaemonClient {
     );
   }
 
-  async workspaceGit(): Promise<DaemonWorkspaceGitStatus> {
+  async workspaceGit(opts?: {
+    wait?: boolean;
+  }): Promise<DaemonWorkspaceGitStatus> {
     return await this.jsonRequest<DaemonWorkspaceGitStatus>(
-      '/workspace/git',
+      `/workspace/git${opts?.wait ? '?wait=1' : ''}`,
       'GET /workspace/git',
       { mode: 'rest' },
     );
@@ -4433,8 +4435,15 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  workspaceGit(cwd?: string): Promise<DaemonWorkspaceGitStatus> {
-    const suffix = cwd ? `/git?cwd=${encodeURIComponent(cwd)}` : '/git';
+  workspaceGit(opts?: {
+    cwd?: string;
+    wait?: boolean;
+  }): Promise<DaemonWorkspaceGitStatus> {
+    const params = new URLSearchParams();
+    if (opts?.cwd) params.set('cwd', opts.cwd);
+    if (opts?.wait) params.set('wait', '1');
+    const query = params.toString();
+    const suffix = query ? `/git?${query}` : '/git';
     return this.client.workspaceJsonRequest<DaemonWorkspaceGitStatus>(
       this.workspaceSelector,
       suffix,
