@@ -34,7 +34,18 @@ if [[ ! -f "${result_markdown}" ]]; then
 EOF
 fi
 
-release_json="$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}")"
+github_api() {
+  curl --fail --silent --show-error --location \
+    --header "Accept: application/vnd.github+json" \
+    --header "Authorization: Bearer ${GH_TOKEN}" \
+    --header "X-GitHub-Api-Version: 2022-11-28" \
+    "$@"
+}
+
+release_json="$(
+  github_api \
+    "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/tags/${RELEASE_TAG}"
+)"
 current_body="$(jq -r '.body // ""' <<< "${release_json}")"
 clean_body="$(
   BODY="${current_body}" START="${marker_start}" END="${marker_end}" python3 - <<'PY'
@@ -57,11 +68,35 @@ if [[ -n "${new_body}" ]]; then
 fi
 new_body+="${marker_start}"$'\n'"${benchmark_body}"$'\n'"${marker_end}"
 
-jq -n --arg body "${new_body}" '{body: $body}' \
-  | gh api --method PATCH "repos/${GITHUB_REPOSITORY}/releases/${RELEASE_DATABASE_ID}" --input -
+payload_path="${output_root}/release-update.json"
+jq -n --arg body "${new_body}" '{body: $body}' > "${payload_path}"
+github_api \
+  --request PATCH \
+  --header "Content-Type: application/json" \
+  --data-binary "@${payload_path}" \
+  "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_DATABASE_ID}" \
+  > "${output_root}/release-update-response.json"
 
 asset_name="swe-bench-verified-${RELEASE_TAG}.json"
 cp "${result_json}" "${output_root}/${asset_name}"
-gh release upload "${RELEASE_TAG}" "${output_root}/${asset_name}" \
-  --repo "${GITHUB_REPOSITORY}" \
-  --clobber
+asset_id="$(
+  jq -r --arg name "${asset_name}" \
+    '.assets[]? | select(.name == $name) | .id' \
+    <<< "${release_json}" \
+    | head -n 1
+)"
+if [[ -n "${asset_id}" ]]; then
+  github_api \
+    --request DELETE \
+    "https://api.github.com/repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}" \
+    > /dev/null
+fi
+curl --fail --silent --show-error --location \
+  --request POST \
+  --header "Accept: application/vnd.github+json" \
+  --header "Authorization: Bearer ${GH_TOKEN}" \
+  --header "X-GitHub-Api-Version: 2022-11-28" \
+  --header "Content-Type: application/json" \
+  --data-binary "@${output_root}/${asset_name}" \
+  "https://uploads.github.com/repos/${GITHUB_REPOSITORY}/releases/${RELEASE_DATABASE_ID}/assets?name=${asset_name}" \
+  > "${output_root}/release-asset-response.json"
