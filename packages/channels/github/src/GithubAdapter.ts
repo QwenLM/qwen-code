@@ -9,9 +9,6 @@ import type {
 import { PollingChannelBase } from '@qwen-code/channel-base';
 import { testBotMention, stripBotMention } from './mention.js';
 
-const MIN_POLL_INTERVAL = 60_000;
-const DEFAULT_POLL_INTERVAL = 60_000;
-
 interface GithubConfig extends ChannelConfig {
   pollInterval?: number;
   baseUrl?: string;
@@ -38,12 +35,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
   protected createInitialCursor(): GithubCursor {
     return { lastProcessedAt: new Date().toISOString() };
-  }
-
-  protected override get pollInterval(): number {
-    const configured = (this.config as GithubConfig).pollInterval;
-    if (configured && configured >= MIN_POLL_INTERVAL) return configured;
-    return DEFAULT_POLL_INTERVAL;
   }
 
   private get requireMention(): boolean {

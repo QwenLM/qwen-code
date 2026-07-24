@@ -484,25 +484,21 @@ describe('GithubChannel', () => {
   });
 
   describe('pollInterval', () => {
-    it('enforces minimum 60s', () => {
+    it('respects configured pollInterval', () => {
       const ch = new TestableGithubChannel(
         'test',
-        makeConfig({ pollInterval: 5000 }),
+        makeConfig({ pollInterval: 30000 }),
         makeBridge(),
       );
       expect((ch as unknown as { pollInterval: number }).pollInterval).toBe(
-        60000,
+        30000,
       );
     });
 
-    it('respects configured interval above minimum', () => {
-      const ch = new TestableGithubChannel(
-        'test',
-        makeConfig({ pollInterval: 120000 }),
-        makeBridge(),
-      );
+    it('defaults to 60000 when not configured', () => {
+      const ch = new TestableGithubChannel('test', makeConfig(), makeBridge());
       expect((ch as unknown as { pollInterval: number }).pollInterval).toBe(
-        120000,
+        60000,
       );
     });
   });

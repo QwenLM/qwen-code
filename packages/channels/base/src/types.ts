@@ -74,6 +74,9 @@ export interface ChannelConfig {
   /** Dispatch mode for concurrent messages. Default: 'steer' (resolved in ChannelBase.handleInbound). */
   dispatchMode?: DispatchMode;
 
+  /** Poll interval in ms for polling adapters. Default: 60000. */
+  pollInterval?: number;
+
   /** Enable block streaming — emit completed blocks as separate messages. */
   blockStreaming?: 'on' | 'off';
   /** Chunk size bounds for block streaming. */

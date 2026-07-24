@@ -45,6 +45,7 @@ Correctness comes from `unread` filtering + `last_read_at` watermark. The global
 `PollingChannelBase<Cursor>` (in `packages/channels/base/`) extends `ChannelBase` and provides the poll loop infrastructure:
 
 - **Poll loop**: start/stop via `startPollLoop()`/`stopPollLoop()`, called from `connect()`/`disconnect()`
+- **Poll interval**: read from channel config `pollInterval` (ms), defaults to 60000
 - **Cursor persistence**: JSON cursor saved atomically after each successful `pollOnce()`; loaded on construction (corrupt → fallback to `createInitialCursor()`)
 - **Backoff**: exponential 2s → 30s on poll errors, reset on success
 

@@ -147,4 +147,30 @@ describe('PollingChannelBase', () => {
     poller.disconnect();
     stderrSpy.mockRestore();
   });
+
+  it('uses configured pollInterval from config', () => {
+    const poller = new TestPoller(
+      'interval',
+      { ...makeConfig(), pollInterval: 30_000 },
+      makeBridge(),
+    );
+    const base = Object.getOwnPropertyDescriptor(
+      PollingChannelBase.prototype,
+      'pollInterval',
+    )!.get!;
+    expect(base.call(poller)).toBe(30_000);
+  });
+
+  it('defaults to 60000 when pollInterval not configured', () => {
+    const poller = new TestPoller(
+      'default-interval',
+      makeConfig(),
+      makeBridge(),
+    );
+    const base = Object.getOwnPropertyDescriptor(
+      PollingChannelBase.prototype,
+      'pollInterval',
+    )!.get!;
+    expect(base.call(poller)).toBe(60_000);
+  });
 });

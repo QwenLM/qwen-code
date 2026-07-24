@@ -61,7 +61,7 @@ For GitHub Enterprise Server, set `baseUrl`:
 | Option           | Default                  | Description                                |
 | ---------------- | ------------------------ | ------------------------------------------ |
 | `token`          | (required)               | GitHub PAT or fine-grained token           |
-| `pollInterval`   | `60000`                  | Poll interval in ms (minimum 60000)        |
+| `pollInterval`   | `60000`                  | Poll interval in ms                        |
 | `baseUrl`        | `https://api.github.com` | API base URL (for GHE)                     |
 | `requireMention` | `true`                   | Only respond when @mentioned               |
 | `groupPolicy`    | `"disabled"`             | Must be `"open"` for notifications to flow |

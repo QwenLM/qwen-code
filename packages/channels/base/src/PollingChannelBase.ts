@@ -48,7 +48,7 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
   protected abstract createInitialCursor(): Cursor;
 
   protected get pollInterval(): number {
-    return 60_000;
+    return this.config.pollInterval ?? 60_000;
   }
 
   protected saveCursor(): void {
