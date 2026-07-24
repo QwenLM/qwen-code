@@ -57,6 +57,47 @@ function getWorkflowStep(job, stepName) {
 }
 
 describe('package scripts', () => {
+  it('rejects explicit releases without curated Whats New highlights before versioning', () => {
+    const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-version-bin-'));
+    const logFile = path.join(binDir, 'commands.log');
+    writeFileSync(logFile, '');
+
+    try {
+      if (process.platform === 'win32') {
+        writeFileSync(
+          path.join(binDir, 'npm.cmd'),
+          '@echo npm %* >> "%VERSION_LOG_FILE%"\r\n',
+        );
+      } else {
+        writeFileSync(
+          path.join(binDir, 'npm'),
+          '#!/bin/sh\necho "npm $*" >> "$VERSION_LOG_FILE"\n',
+        );
+        chmodSync(path.join(binDir, 'npm'), 0o755);
+      }
+
+      const result = spawnSync(
+        process.execPath,
+        [path.join(root, 'scripts/version.js'), '9.9.9'],
+        {
+          cwd: root,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ''}`,
+            VERSION_LOG_FILE: logFile,
+          },
+        },
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('release version 9.9.9');
+      expect(readFileSync(logFile, 'utf8')).toBe('');
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
   it('keeps the serve fast-path bundle check outside unit test scripts', () => {
     const packageJson = readPackageJson();
 
