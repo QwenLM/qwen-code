@@ -1340,6 +1340,27 @@ describe('DaemonClient', () => {
       });
     });
 
+    it('encodes a before-record transcript boundary', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          sessionId: 'with/slash',
+          events: [],
+          hasMore: false,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.getSessionTranscriptPage('with/slash', {
+        beforeRecordId: 'record/1',
+        limit: 2,
+      });
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/with%2Fslash/transcript?beforeRecordId=record%2F1&limit=2',
+      );
+    });
+
     it('uses direct REST fetch even when an ACP transport is configured', async () => {
       const { fetch, calls } = recordingFetch(() =>
         jsonResponse(200, {
