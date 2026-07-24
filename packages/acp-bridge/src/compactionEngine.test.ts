@@ -293,6 +293,36 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(data.update.content.text).toBe('How are you?');
       expect(snap.compactedTurns[0]!.id).toBe(1);
     });
+
+    it('keeps promptId and originatorClientId on merged text chunks', () => {
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest({
+        ...makeTextChunk(1, 'Hello'),
+        promptId: 'prompt-1',
+        originatorClientId: 'client-a',
+      });
+      engine.ingest({
+        ...makeTextChunk(2, ' world'),
+        promptId: 'prompt-1',
+        originatorClientId: 'client-a',
+      });
+      engine.ingest(makeTurnComplete(3));
+
+      const textEvent = engine.snapshot().compactedTurns[0]!;
+      expect(textEvent.promptId).toBe('prompt-1');
+      expect(textEvent.originatorClientId).toBe('client-a');
+    });
+
+    it('omits attribution on merged chunks whose sources carried none', () => {
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest(makeTextChunk(1, 'Hello'));
+      engine.ingest(makeTextChunk(2, ' world'));
+      engine.ingest(makeTurnComplete(3));
+
+      const textEvent = engine.snapshot().compactedTurns[0]!;
+      expect(textEvent.promptId).toBeUndefined();
+      expect(textEvent.originatorClientId).toBeUndefined();
+    });
   });
 
   describe('tool call folding', () => {
@@ -364,6 +394,25 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(
         (toolEvents[1]!.data as { update: { title: string } }).update.title,
       ).toBe('Tool B');
+    });
+
+    it('keeps promptId and originatorClientId on folded tool calls', () => {
+      const engine = new TurnBoundaryCompactionEngine();
+      engine.ingest({
+        ...makeToolCall(1, 'tc1', 'running', { title: 'Read file' }),
+        promptId: 'prompt-1',
+        originatorClientId: 'client-a',
+      });
+      engine.ingest({
+        ...makeToolCallUpdate(2, 'tc1', 'done', { rawOutput: 'contents' }),
+        promptId: 'prompt-1',
+        originatorClientId: 'client-a',
+      });
+      engine.ingest(makeTurnComplete(3));
+
+      const toolEvent = engine.snapshot().compactedTurns[0]!;
+      expect(toolEvent.promptId).toBe('prompt-1');
+      expect(toolEvent.originatorClientId).toBe('client-a');
     });
   });
 
