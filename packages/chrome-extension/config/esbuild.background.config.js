@@ -27,28 +27,51 @@ function resolveEntry(relativePathWithoutExt) {
   return path.join(projectRoot, `${relativePathWithoutExt}.js`);
 }
 
-const entryPoints = [resolveEntry('src/background/service-worker')];
+const builds = [
+  {
+    entryPoints: [resolveEntry('src/background/service-worker')],
+  },
+  {
+    entryPoints: [resolveEntry('src/sidepanel/capability-status')],
+    globalName: 'QwenCapabilityStatus',
+  },
+];
 
 async function build() {
-  const ctx = await esbuild.context({
-    entryPoints,
-    bundle: true,
-    platform: 'browser',
-    format: 'iife',
-    target: ['chrome115'],
-    minify: isProduction,
-    sourcemap: !isProduction,
-    outdir: path.join(projectRoot, outDir),
-    outbase: path.join(projectRoot, 'src'),
-    logLevel: 'info',
-  });
+  const contexts = await Promise.all(
+    builds.map((buildOptions) =>
+      esbuild.context({
+        ...buildOptions,
+        bundle: true,
+        platform: 'browser',
+        format: 'iife',
+        target: ['chrome115'],
+        minify: isProduction,
+        sourcemap: !isProduction,
+        metafile: !isWatch,
+        outdir: path.join(projectRoot, outDir),
+        outbase: path.join(projectRoot, 'src'),
+        logLevel: 'info',
+      }),
+    ),
+  );
 
   if (isWatch) {
     console.log('Watching background/content scripts...');
-    await ctx.watch();
+    await Promise.all(contexts.map((ctx) => ctx.watch()));
   } else {
-    await ctx.rebuild();
-    await ctx.dispose();
+    const results = await Promise.all(contexts.map((ctx) => ctx.rebuild()));
+    const metafile = results.reduce(
+      (combined, result) => ({
+        inputs: { ...combined.inputs, ...result.metafile.inputs },
+        outputs: { ...combined.outputs, ...result.metafile.outputs },
+      }),
+      { inputs: {}, outputs: {} },
+    );
+    const metafilePath = path.join(projectRoot, 'dist/esbuild.json');
+    fs.mkdirSync(path.dirname(metafilePath), { recursive: true });
+    fs.writeFileSync(metafilePath, JSON.stringify(metafile, null, 2));
+    await Promise.all(contexts.map((ctx) => ctx.dispose()));
     console.log('Background/content build complete!');
   }
 }

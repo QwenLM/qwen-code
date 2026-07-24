@@ -109,6 +109,68 @@ describe('CdpBrowserEmulator (Plan C #5626)', () => {
     });
   });
 
+  it('creates and forwards an explicitly attached page session', async () => {
+    const { emu, replies, forwardToTab } = setup(async () => ({ value: 2 }));
+    await emu.handleFromClient({
+      id: 7,
+      method: 'Target.attachToTarget',
+      params: { targetId: 'qwen-cdp-page', flatten: true },
+    });
+    const attached = replies.find(
+      (reply) => reply.method === 'Target.attachedToTarget',
+    );
+    const sessionId = (attached?.params as { sessionId?: string })?.sessionId;
+    expect(sessionId).toBeTruthy();
+    expect(replies.at(-1)).toMatchObject({ id: 7, result: { sessionId } });
+
+    replies.length = 0;
+    await emu.handleFromClient({
+      id: 8,
+      method: 'Runtime.evaluate',
+      params: { expression: '1+1' },
+      sessionId,
+    });
+    expect(forwardToTab).toHaveBeenCalledWith('Runtime.evaluate', {
+      expression: '1+1',
+    });
+    expect(replies[0]).toMatchObject({
+      id: 8,
+      sessionId,
+      result: { value: 2 },
+    });
+
+    replies.length = 0;
+    await emu.handleFromClient({
+      id: 9,
+      method: 'Target.detachFromTarget',
+      params: { sessionId },
+    });
+    expect(replies[0]).toEqual({
+      method: 'Target.detachedFromTarget',
+      params: { sessionId, targetId: 'qwen-cdp-page' },
+    });
+    expect(replies[1]).toEqual({ id: 9, result: {} });
+    await emu.handleFromClient({
+      id: 10,
+      method: 'Runtime.evaluate',
+      sessionId,
+    });
+    expect(replies[2]).toMatchObject({
+      id: 10,
+      error: { message: `Unknown CDP session: ${sessionId}` },
+    });
+  });
+
+  it('reports that the selected page has no DevTools target', async () => {
+    const { emu, replies } = setup();
+    await emu.handleFromClient({
+      id: 11,
+      method: 'Target.getDevToolsTarget',
+      params: { targetId: 'qwen-cdp-page' },
+    });
+    expect(replies[0]).toEqual({ id: 11, result: {} });
+  });
+
   it('surfaces a forward failure as a CDP error to the client', async () => {
     const { emu, replies } = setup(async () => {
       throw { code: -32000, message: 'Not allowed' };

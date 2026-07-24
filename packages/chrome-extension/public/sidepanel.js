@@ -11,7 +11,7 @@
  * Static asset (no bundler). Constants intentionally duplicate daemon/config.ts
  * (which the bundled service worker uses) to stay standalone.
  */
-/* global chrome, document, fetch, AbortController, navigator, setTimeout, clearTimeout, setInterval, URL */
+/* global chrome, document, fetch, AbortController, navigator, setTimeout, clearTimeout, setInterval, URL, QwenCapabilityStatus */
 
 const DEFAULT_BASE_URL = 'http://127.0.0.1:4170';
 const STORAGE_KEY = 'qwen.daemon';
@@ -33,7 +33,10 @@ const els = {
   cmdRow: document.getElementById('cmd-row'),
   copy: document.getElementById('copy'),
   copyLabel: document.getElementById('copy-label'),
+  warning: document.getElementById('capability-warning'),
 };
+
+const { deriveCapabilityStatus } = QwenCapabilityStatus;
 
 /** Whether a URL points at the local loopback interface. */
 function isLoopback(baseUrl) {
@@ -89,20 +92,24 @@ async function probeJson(url, token) {
 /** Probe `/health` then `/capabilities` and reduce to an onboarding state. */
 async function probeState(baseUrl, token) {
   const health = await probeJson(`${baseUrl}/health`, token);
-  if (!health) return 'down';
+  if (!health) return deriveCapabilityStatus(false, []);
   const caps = await probeJson(`${baseUrl}/capabilities`, token);
   const features = Array.isArray(caps?.features) ? caps.features : [];
-  return features.includes('allow_origin') ? 'ready' : 'needs-allow-origin';
+  const mcpSnapshot = features.includes('browser_automation_mcp')
+    ? await probeJson(`${baseUrl}/workspace/mcp`, token)
+    : undefined;
+  return deriveCapabilityStatus(true, features, mcpSnapshot);
 }
 
 /** Render the welcome screen for a non-ready state. */
-function showWelcome(state, command) {
+function showWelcome(status, command) {
   framedUrl = null;
   els.iframe.removeAttribute('src');
   els.iframe.classList.add('hidden');
+  els.warning.classList.add('hidden');
   els.welcome.classList.remove('hidden');
   els.cmd.textContent = command;
-  if (state === 'down') {
+  if (status.state === 'down') {
     els.title.textContent = 'Start qwen serve';
     els.desc.textContent =
       'No local qwen serve daemon is reachable. Run this in a terminal and ' +
@@ -130,7 +137,7 @@ function postShellAuth(baseUrl, token) {
 }
 
 /** Swap to the Web Shell iframe; only (re)assigns src when the URL changes. */
-function showShell(baseUrl, token) {
+function showShell(baseUrl, token, status) {
   framedMisses = 0;
   els.welcome.classList.add('hidden');
   els.iframe.onload = () => postShellAuth(baseUrl, token);
@@ -141,6 +148,8 @@ function showShell(baseUrl, token) {
     postShellAuth(baseUrl, token);
   }
   els.iframe.classList.remove('hidden');
+  els.warning.textContent = status.warning || '';
+  els.warning.classList.toggle('hidden', !status.warning);
 }
 
 /**
@@ -149,24 +158,24 @@ function showShell(baseUrl, token) {
  */
 let ticking = false;
 async function tick() {
-  // Reentrancy guard: probeState runs two sequential fetches (up to ~4s) but
-  // setInterval fires every 2s. Overlapping ticks would each bump framedMisses,
+  // Reentrancy guard: probeState can run three sequential fetches (up to ~6s),
+  // but setInterval fires every 2s. Overlapping ticks would each bump framedMisses,
   // burning the FRAMED_MISS_LIMIT tolerance at ~2× and flashing the welcome
   // screen (clearing the user's in-flight chat) while the daemon is just slow.
   if (ticking) return;
   ticking = true;
   try {
     const { baseUrl, token } = await readConfig();
-    const state = await probeState(baseUrl, token);
-    if (state === 'ready') {
-      showShell(baseUrl, token);
+    const status = await probeState(baseUrl, token);
+    if (status.shellReady) {
+      showShell(baseUrl, token, status);
     } else {
       if (framedUrl && framedMisses < FRAMED_MISS_LIMIT) {
         framedMisses += 1;
         return;
       }
       framedMisses = 0;
-      showWelcome(state, allowOriginCommand(chrome.runtime.id));
+      showWelcome(status, allowOriginCommand(chrome.runtime.id));
     }
   } finally {
     ticking = false;

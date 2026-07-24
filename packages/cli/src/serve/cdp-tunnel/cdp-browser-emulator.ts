@@ -70,6 +70,8 @@ export interface CdpTabInfo {
 
 export class CdpBrowserEmulator {
   readonly pageSessionId = PAGE_SESSION_ID;
+  private readonly attachedPageSessions = new Set<string>();
+  private nextPageSessionId = 1;
 
   constructor(
     private readonly cb: CdpEmulatorCallbacks,
@@ -164,6 +166,48 @@ export class CdpBrowserEmulator {
             id,
             result: { targetInfo: this.pageTargetInfo() },
           });
+        case 'Target.getDevToolsTarget':
+          return this.cb.reply({ id, result: {} });
+        case 'Target.attachToTarget': {
+          const targetId = params?.['targetId'];
+          if (targetId !== PAGE_TARGET_ID) {
+            return this.cb.reply({
+              id,
+              error: {
+                code: SERVER_ERROR,
+                message: `Unknown CDP target: ${String(targetId)}`,
+              },
+            });
+          }
+          const attachedSessionId = `qwen-cdp-page-session-${this.nextPageSessionId++}`;
+          this.attachedPageSessions.add(attachedSessionId);
+          this.cb.reply({
+            method: 'Target.attachedToTarget',
+            params: {
+              targetInfo: this.pageTargetInfo(),
+              sessionId: attachedSessionId,
+              waitingForDebugger: false,
+            },
+          });
+          return this.cb.reply({
+            id,
+            result: { sessionId: attachedSessionId },
+          });
+        }
+        case 'Target.detachFromTarget': {
+          const attachedSessionId = params?.['sessionId'];
+          if (typeof attachedSessionId === 'string') {
+            this.attachedPageSessions.delete(attachedSessionId);
+            this.cb.reply({
+              method: 'Target.detachedFromTarget',
+              params: {
+                sessionId: attachedSessionId,
+                targetId: PAGE_TARGET_ID,
+              },
+            });
+          }
+          return this.cb.reply({ id, result: {} });
+        }
         default:
           // TODO(#5626): return SERVER_ERROR once the emulator covers every
           // browser-level command a CDP client sends. Until then the
@@ -195,7 +239,10 @@ export class CdpBrowserEmulator {
     }
 
     // ── page session: forward to the real tab via the extension ──
-    if (sessionId === PAGE_SESSION_ID) {
+    if (
+      sessionId === PAGE_SESSION_ID ||
+      this.attachedPageSessions.has(sessionId)
+    ) {
       try {
         const result = await this.cb.forwardToTab(method ?? '', params);
         return this.cb.reply({ id, sessionId, result });
@@ -235,5 +282,8 @@ export class CdpBrowserEmulator {
     params: Record<string, unknown> | undefined,
   ): void {
     this.cb.reply({ method, params, sessionId: PAGE_SESSION_ID });
+    for (const sessionId of this.attachedPageSessions) {
+      this.cb.reply({ method, params, sessionId });
+    }
   }
 }
