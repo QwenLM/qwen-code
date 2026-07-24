@@ -557,6 +557,15 @@ describe('createChannelManagementService', () => {
     expect(manager.reload).not.toHaveBeenCalled();
   });
 
+  it('rejects restart of a configured channel that is not enabled', async () => {
+    const { service, manager } = setup({ committedNames: [] });
+
+    await expect(service.restart('bot')).rejects.toMatchObject({
+      code: 'channel_worker_not_enabled',
+    });
+    expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+  });
+
   it('rejects an inactive cross-workspace start before lifecycle mutation', async () => {
     const { service, manager } = setup({ committedNames: [] });
     vi.mocked(manager.setChannelEnabled).mockRejectedValueOnce(
@@ -690,8 +699,8 @@ describe('createChannelManagementService', () => {
     expect(store.remove).toHaveBeenCalledOnce();
   });
 
-  it('rejects restart and start for a nonexistent channel', async () => {
-    const { service } = setup({ committedNames: [] });
+  it('rejects lifecycle operations for a nonexistent channel', async () => {
+    const { service, manager } = setup({ committedNames: [] });
 
     await expect(service.restart('nonexistent')).rejects.toMatchObject({
       code: 'channel_instance_not_found',
@@ -699,6 +708,13 @@ describe('createChannelManagementService', () => {
     await expect(service.start('nonexistent')).rejects.toMatchObject({
       code: 'channel_instance_not_found',
     });
+    await expect(
+      service.remove('nonexistent', { expectedRevision: 'rev-1' }),
+    ).rejects.toMatchObject({ code: 'channel_instance_not_found' });
+    await expect(service.stop('nonexistent')).rejects.toMatchObject({
+      code: 'channel_instance_not_found',
+    });
+    expect(manager.setChannelEnabled).not.toHaveBeenCalled();
   });
 
   it('rejects setStartup for a nonexistent channel', async () => {

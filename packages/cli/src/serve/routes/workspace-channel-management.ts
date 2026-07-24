@@ -288,7 +288,8 @@ export function registerWorkspaceChannelManagementRoutes(
     ) => deps.parseAndValidateClientId(req, res, runtime) !== null;
 
     app.get(`${prefix}/channel-types`, async (req, res) => {
-      if (!(await target(req, res))) return;
+      const runtime = resolveRuntime(req, res);
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
       try {
         noStore(res);
         res.status(200).json(await supportedChannelCatalog());

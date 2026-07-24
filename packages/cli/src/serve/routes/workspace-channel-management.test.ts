@@ -127,6 +127,29 @@ describe('workspace Channel management routes', () => {
     expect(primaryService.list).toHaveBeenCalledOnce();
   });
 
+  it('serves the channel-type catalog without the management service', async () => {
+    const primary = runtime('primary', '/work/primary');
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceChannelManagementRoutes(app, {
+      primaryRuntime: primary,
+      workspaceRegistry: createWorkspaceRegistry([primary]),
+      resolveService: () => undefined,
+      mutate: () => (req, res, next) => next(),
+      safeBody: (req) => (req.body ?? {}) as Record<string, unknown>,
+      parseAndValidateClientId: () => undefined,
+    });
+
+    const response = await request(app).get('/workspace/channel-types');
+
+    expect(response.status).toBe(200);
+    expect(response.body).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: 'dingtalk', manageable: true }),
+      ]),
+    );
+  });
+
   it('routes strict CRUD and lifecycle mutations to the primary service', async () => {
     const { app, primaryService } = mount();
 
