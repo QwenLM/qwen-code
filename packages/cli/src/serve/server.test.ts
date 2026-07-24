@@ -9126,7 +9126,7 @@ describe('createServeApp', () => {
       ]);
     });
 
-    it('surfaces partial response-mode replay details from load', async () => {
+    it('surfaces response-mode replay details from load', async () => {
       const bridge = fakeBridge({
         loadImpl: async (req) => ({
           sessionId: req.sessionId,
@@ -9136,6 +9136,8 @@ describe('createServeApp', () => {
           state: {},
           partial: true,
           replayError: 'replay boom',
+          eventEpoch: 'epoch-load',
+          replayDegraded: true,
         }),
       });
       const app = createServeApp(baseOpts, undefined, { bridge });
@@ -9145,8 +9147,12 @@ describe('createServeApp', () => {
         .send({});
 
       expect(res.status).toBe(200);
-      expect(res.body.partial).toBe(true);
-      expect(res.body.replayError).toBe('replay boom');
+      expect(res.body).toMatchObject({
+        partial: true,
+        replayError: 'replay boom',
+        eventEpoch: 'epoch-load',
+        replayDegraded: true,
+      });
       expect(bridge.loadCalls).toEqual([
         {
           sessionId: 'persisted-partial',
