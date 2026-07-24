@@ -403,6 +403,93 @@ describe('bootstrap import boundaries', () => {
     expect(source).toContain('UPDATE_COMPLETE_EXIT_CODE = 44');
   });
 
+  it('publishes the daemon compile cache without overriding user policy', () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-compile-cache-'));
+    const entryPath = path.join(tempDir, 'cli-entry.mjs');
+    const unsupportedEntryPath = path.join(
+      tempDir,
+      'unsupported-cli-entry.mjs',
+    );
+    const probeEntryPath = path.join(tempDir, 'compile-cache-probe.mjs');
+    try {
+      copyFileSync('../../scripts/cli-entry.js', entryPath);
+      writeFileSync(
+        unsupportedEntryPath,
+        readFileSync('../../scripts/cli-entry.js', 'utf8').replace(
+          "const { default: module } = await import('node:module');",
+          'const module = {};',
+        ),
+      );
+      writeFileSync(
+        probeEntryPath,
+        [
+          "import module from 'node:module';",
+          'const result = module.enableCompileCache?.();',
+          'process.stdout.write(JSON.stringify(Boolean(',
+          '  result?.status === module.constants?.compileCacheStatus?.ENABLED &&',
+          '    result?.directory,',
+          ')));',
+        ].join('\n'),
+      );
+      writeFileSync(
+        path.join(tempDir, 'cli.js'),
+        [
+          'process.stdout.write(JSON.stringify({',
+          '  cacheDir: process.env.NODE_COMPILE_CACHE,',
+          '  pendingCacheDir: process.env.QWEN_CODE_PENDING_COMPILE_CACHE,',
+          '}));',
+        ].join('\n'),
+      );
+      const baseEnv = { ...process.env };
+      delete baseEnv['NODE_COMPILE_CACHE'];
+      delete baseEnv['NODE_DISABLE_COMPILE_CACHE'];
+      const runEntry = (
+        env: NodeJS.ProcessEnv,
+        args: string[] = ['serve'],
+        selectedEntryPath = entryPath,
+      ) =>
+        JSON.parse(
+          execFileSync(process.execPath, [selectedEntryPath, ...args], {
+            encoding: 'utf8',
+            env,
+          }),
+        );
+
+      const canEnableCompileCache = JSON.parse(
+        execFileSync(process.execPath, [probeEntryPath], {
+          encoding: 'utf8',
+          env: baseEnv,
+        }),
+      );
+      if (canEnableCompileCache) {
+        expect(runEntry(baseEnv)).toEqual({
+          pendingCacheDir: expect.any(String),
+        });
+      } else {
+        expect(runEntry(baseEnv)).toEqual({});
+      }
+      expect(runEntry(baseEnv, ['serve'], unsupportedEntryPath)).toEqual({});
+      expect(runEntry(baseEnv, ['mcp', 'list'])).toEqual({});
+
+      const configuredCacheDir = path.join(tempDir, 'configured-cache');
+      expect(
+        runEntry({
+          ...baseEnv,
+          NODE_COMPILE_CACHE: configuredCacheDir,
+        }),
+      ).toEqual({ cacheDir: configuredCacheDir });
+
+      expect(
+        runEntry({
+          ...baseEnv,
+          NODE_DISABLE_COMPILE_CACHE: '1',
+        }),
+      ).toEqual({});
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('reloads the CLI through a stable shim after an update', () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-cli-update-'));
     const wrongDir = mkdtempSync(path.join(tmpdir(), 'qwen-cli-wrong-'));

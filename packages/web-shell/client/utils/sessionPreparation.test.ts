@@ -257,6 +257,28 @@ describe('createAndAttachSessionForPrompt', () => {
     });
   });
 
+  it('forwards branch to createSession and returns the created branch', async () => {
+    const actions = createActions({
+      createSession: vi.fn(async () => ({
+        ...sessionResult,
+        branch: { name: 'feat/x', baseBranch: 'main' },
+      })),
+    });
+
+    await expect(
+      prepareSession({
+        sessionActions: actions,
+        branch: { name: 'feat/x' },
+      }),
+    ).resolves.toEqual({ branch: { name: 'feat/x', baseBranch: 'main' } });
+
+    expect(actions.createSession).toHaveBeenCalledWith({
+      workspaceCwd: undefined,
+      sourceType: 'default',
+      branch: { name: 'feat/x' },
+    });
+  });
+
   it('waits for onSessionCreated before attaching the session', async () => {
     const order: string[] = [];
     const callbackFinished = createDeferred<void>();

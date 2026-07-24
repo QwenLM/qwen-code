@@ -8,6 +8,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { GeminiContentGenerator } from './geminiContentGenerator.js';
 import { GoogleGenAI } from '@google/genai';
 
+const mockReportGeminiRequest = vi.hoisted(() => vi.fn());
+
 vi.mock('@google/genai', () => {
   const mockGenerateContent = vi.fn();
   const mockGenerateContentStream = vi.fn();
@@ -25,6 +27,9 @@ vi.mock('@google/genai', () => {
     })),
   };
 });
+vi.mock('../../telemetry/gen-ai-request.js', () => ({
+  reportGeminiRequest: mockReportGeminiRequest,
+}));
 
 describe('GeminiContentGenerator', () => {
   let generator: GeminiContentGenerator;
@@ -94,6 +99,9 @@ describe('GeminiContentGenerator', () => {
         }),
       }),
     );
+    expect(mockReportGeminiRequest).toHaveBeenCalledWith(
+      mockGoogleGenAI.models.generateContent.mock.calls[0][0],
+    );
     expect(response).toBe(expectedResponse);
   });
 
@@ -144,6 +152,9 @@ describe('GeminiContentGenerator', () => {
           },
         }),
       }),
+    );
+    expect(mockReportGeminiRequest).toHaveBeenCalledWith(
+      mockGoogleGenAI.models.generateContentStream.mock.calls[0][0],
     );
     expect(stream).toBe(mockStream);
   });

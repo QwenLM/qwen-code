@@ -1400,6 +1400,23 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       }
 
       if (showCompletionSuggestions) {
+        // Category tab switching for the tabbed `@` completion UI. Only consume
+        // Ctrl+←/→ (per the COMPLETION_TAB_* bindings) and only when there are
+        // more than two tabs (at least 3 entries including 'all'). Plain ←/→ are
+        // never consumed here, so they always move the caret in the editable buffer.
+        if ((completion.availableCategories?.length ?? 0) > 2) {
+          if (keyMatchers[Command.COMPLETION_TAB_RIGHT](key)) {
+            completion.switchCategory(1);
+            setExpandedSuggestionIndex(-1);
+            return true;
+          }
+          if (keyMatchers[Command.COMPLETION_TAB_LEFT](key)) {
+            completion.switchCategory(-1);
+            setExpandedSuggestionIndex(-1);
+            return true;
+          }
+        }
+
         if (completion.suggestions.length > 1) {
           const isCompletionUpKey = keyMatchers[Command.COMPLETION_UP](key);
           const isCompletionDownKey = keyMatchers[Command.COMPLETION_DOWN](key);
@@ -2233,6 +2250,20 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             }
             expandedIndex={expandedSuggestionIndex}
             mouseEnabled={mouseInteractionsEnabled}
+            activeCategory={
+              suggestionsFromExport ||
+              commandSearchActive ||
+              reverseSearchActive
+                ? undefined
+                : completion.activeCategory
+            }
+            availableCategories={
+              suggestionsFromExport ||
+              commandSearchActive ||
+              reverseSearchActive
+                ? undefined
+                : completion.availableCategories
+            }
             onHoverIndex={
               suggestionsFromExport ? undefined : handleSuggestionHover
             }

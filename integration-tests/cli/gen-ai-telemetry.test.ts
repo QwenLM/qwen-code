@@ -106,7 +106,20 @@ describeLocal('GenAI telemetry fields', () => {
     rig.setup('gen-ai-telemetry', {
       settings: {
         security: { auth: { selectedType: 'openai' } },
-        model: { name: 'request-model' },
+        model: {
+          name: 'request-model',
+          generationConfig: {
+            samplingParams: {
+              n: 2,
+              max_tokens: 128,
+              temperature: 0,
+              top_p: 0.8,
+              frequency_penalty: -0.1,
+              presence_penalty: 0.2,
+              stop: ['END', 'DONE'],
+            },
+          },
+        },
         ui: { enableFollowupSuggestions: false },
       },
     });
@@ -151,6 +164,13 @@ describeLocal('GenAI telemetry fields', () => {
       'gen_ai.operation.name': 'chat',
       'gen_ai.provider.name': 'openai',
       'gen_ai.request.model': 'request-model',
+      'gen_ai.request.choice.count': 2,
+      'gen_ai.request.max_tokens': 128,
+      'gen_ai.request.temperature': 0,
+      'gen_ai.request.top_p': 0.8,
+      'gen_ai.request.frequency_penalty': -0.1,
+      'gen_ai.request.presence_penalty': 0.2,
+      'gen_ai.request.stop_sequences': ['END', 'DONE'],
       'gen_ai.response.model': 'provider-model-tool',
       'gen_ai.response.finish_reasons': ['STOP'],
       'gen_ai.usage.input_tokens': 20,
@@ -160,6 +180,13 @@ describeLocal('GenAI telemetry fields', () => {
     expect(secondLlm).toMatchObject({
       'gen_ai.operation.name': 'chat',
       'gen_ai.provider.name': 'openai',
+      'gen_ai.request.choice.count': 2,
+      'gen_ai.request.max_tokens': 128,
+      'gen_ai.request.temperature': 0,
+      'gen_ai.request.top_p': 0.8,
+      'gen_ai.request.frequency_penalty': -0.1,
+      'gen_ai.request.presence_penalty': 0.2,
+      'gen_ai.request.stop_sequences': ['END', 'DONE'],
       'gen_ai.response.model': 'provider-model-final',
       'gen_ai.response.finish_reasons': ['STOP'],
       'gen_ai.usage.input_tokens': 30,
@@ -181,6 +208,26 @@ describeLocal('GenAI telemetry fields', () => {
         'gen_ai.server.time_to_first_token',
       );
       expect(attributes).not.toHaveProperty('gen_ai.usage.reasoning_tokens');
+      expect(attributes).not.toHaveProperty('choice_count');
+      expect(attributes).not.toHaveProperty('max_tokens');
+      expect(attributes).not.toHaveProperty('temperature');
+      expect(attributes).not.toHaveProperty('top_p');
+      expect(attributes).not.toHaveProperty('frequency_penalty');
+      expect(attributes).not.toHaveProperty('presence_penalty');
+      expect(attributes).not.toHaveProperty('stop_sequences');
+    }
+
+    expect(server.requests).toHaveLength(2);
+    for (const { body } of server.requests) {
+      expect(body).toMatchObject({
+        n: 2,
+        max_tokens: 128,
+        temperature: 0,
+        top_p: 0.8,
+        frequency_penalty: -0.1,
+        presence_penalty: 0.2,
+        stop: ['END', 'DONE'],
+      });
     }
 
     const toolSpan = records.find(
@@ -196,5 +243,71 @@ describeLocal('GenAI telemetry fields', () => {
       'tool.call_id': 'provider-call-123',
     });
     expect(toolSpan?.attributes).not.toHaveProperty('tool.name');
+  });
+
+  it('omits the default choice count from the exported span', async () => {
+    server = await startFakeOpenAIServer(() => ({
+      model: 'provider-model',
+      content: 'Done.',
+      usage: {
+        prompt_tokens: 10,
+        completion_tokens: 2,
+        total_tokens: 12,
+      },
+    }));
+
+    rig = new TestRig();
+    rig.setup('gen-ai-default-choice-count', {
+      settings: {
+        security: { auth: { selectedType: 'openai' } },
+        model: {
+          name: 'request-model',
+          generationConfig: {
+            samplingParams: { n: 1 },
+          },
+        },
+        ui: { enableFollowupSuggestions: false },
+      },
+    });
+
+    const restoreEnvironment = setEnvironment({
+      HOME: rig.testDir!,
+      QWEN_HOME: join(rig.testDir!, '.qwen'),
+      OPENAI_API_KEY: 'fake-key',
+      OPENAI_BASE_URL: server.baseUrl,
+      OPENAI_MODEL: 'request-model',
+      QWEN_MODEL: 'request-model',
+      NO_PROXY: '127.0.0.1,localhost',
+      no_proxy: '127.0.0.1,localhost',
+      HTTP_PROXY: undefined,
+      HTTPS_PROXY: undefined,
+      ALL_PROXY: undefined,
+      http_proxy: undefined,
+      https_proxy: undefined,
+      all_proxy: undefined,
+      DASHSCOPE_PROXY_BASE_URL: undefined,
+    });
+
+    try {
+      await rig.run('Reply with done.', '--output-format', 'json');
+    } finally {
+      restoreEnvironment();
+    }
+
+    expect(server.requests.length).toBeGreaterThan(0);
+    for (const { body } of server.requests) {
+      expect(body).toMatchObject({ n: 1 });
+    }
+
+    const records = parseTelemetry(rig.readFile('telemetry.log'));
+    const llmSpans = records.filter(
+      (record) => record.name === 'qwen-code.llm_request',
+    );
+    expect(llmSpans).toHaveLength(server.requests.length);
+    for (const llmSpan of llmSpans) {
+      expect(llmSpan.attributes).not.toHaveProperty(
+        'gen_ai.request.choice.count',
+      );
+    }
   });
 });

@@ -37,6 +37,8 @@ import java.util.function.Supplier;
 
 /** Java 11 client for the {@code qwen serve} REST and SSE transport. */
 public final class DaemonClient implements AutoCloseable {
+    static final String EVENT_EPOCH_HEADER = "X-Qwen-Event-Epoch";
+
     private static final AtomicLong CLIENT_SEQUENCE = new AtomicLong();
 
     private final String baseUrl;
@@ -307,18 +309,23 @@ public final class DaemonClient implements AutoCloseable {
     }
 
     HttpResponse<InputStream> openSse(String path, String clientId, long lastEventId,
-            Duration observationRemaining)
+            String eventEpoch, Duration observationRemaining)
             throws IOException, InterruptedException {
-        HttpRequest request = requestBuilder(path, clientId)
+        HttpRequest.Builder request = requestBuilder(path, clientId)
                 .header("Accept", "text/event-stream")
                 .header("Accept-Encoding", "identity")
                 .header("Cache-Control", "no-cache")
-                .header("Last-Event-ID", Long.toString(lastEventId))
+                .header("Last-Event-ID", Long.toString(lastEventId));
+        if (eventEpoch != null) {
+            request.header(EVENT_EPOCH_HEADER, eventEpoch);
+        }
+        HttpRequest builtRequest = request
                 .timeout(shorter(requestTimeout, observationRemaining))
                 .GET()
                 .build();
         try {
-            return httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
+            return httpClient.send(builtRequest,
+                    HttpResponse.BodyHandlers.ofInputStream());
         } catch (RejectedExecutionException e) {
             throw new IOException("HTTP executor is saturated", e);
         }
