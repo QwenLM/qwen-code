@@ -101,6 +101,7 @@ import {
   type HookConfig,
   type McpBudgetEvent,
   type McpBudgetMode,
+  type McpClientManager,
   type McpTransportKind,
   type ProviderConfig,
   type ProviderModelConfig,
@@ -2642,6 +2643,116 @@ export async function deliverClientMcpMessage(
     );
   }
   return payload as JSONRPCMessage;
+}
+
+interface RuntimeMcpRequest {
+  name: string;
+  runtimeClientId: string;
+}
+
+interface RuntimeMcpAddRequest extends RuntimeMcpRequest {
+  config: MCPServerConfig;
+}
+
+function readRuntimeMcpRequest(
+  params: Record<string, unknown>,
+): RuntimeMcpRequest {
+  const name = params['name'];
+  if (typeof name !== 'string' || name.length === 0) {
+    throw RequestError.invalidParams(undefined, 'Invalid or missing name');
+  }
+  if (!isValidServerName(name)) {
+    throw RequestError.invalidParams(
+      undefined,
+      'Server name must be ≤256 chars, alphanumeric + underscore/hyphen, and not a reserved JS property name',
+    );
+  }
+  const originatorClientId = params['originatorClientId'];
+  return {
+    name,
+    runtimeClientId:
+      typeof originatorClientId === 'string' && originatorClientId.length > 0
+        ? originatorClientId
+        : 'daemon',
+  };
+}
+
+function readRuntimeMcpAddRequest(
+  params: Record<string, unknown>,
+): RuntimeMcpAddRequest {
+  const request = readRuntimeMcpRequest(params);
+  const config = params['config'];
+  if (!config || typeof config !== 'object' || Array.isArray(config)) {
+    throw RequestError.invalidParams(undefined, 'Invalid or missing config');
+  }
+  // Runtime callers cannot grant trust, inject credentials, change tool
+  // filters, or choose a process working directory.
+  const {
+    trust: _trust,
+    authProviderType: _auth,
+    includeTools: _inc,
+    excludeTools: _exc,
+    cwd: _cwd,
+    env: _env,
+    oauth: _oauth,
+    headers: _headers,
+    type: _type,
+    [CLIENT_MCP_OVER_WS_CONFIG_FLAG]: clientMcpOverWs,
+    ...safeConfig
+  } = config as ClientMcpOverWsRuntimeConfig;
+  if (clientMcpOverWs === true) {
+    (safeConfig as Record<string, unknown>)['type'] = 'sdk';
+  }
+  return {
+    ...request,
+    config: safeConfig as MCPServerConfig,
+  };
+}
+
+function getRuntimeMcpManager(config: Config): McpClientManager {
+  const manager = config.getToolRegistry()?.getMcpClientManager();
+  if (!manager) {
+    throw RequestError.internalError(
+      undefined,
+      'McpClientManager unavailable on this Config',
+    );
+  }
+  return manager;
+}
+
+async function addRuntimeMcpServer(
+  manager: McpClientManager,
+  request: RuntimeMcpAddRequest,
+): Promise<Record<string, unknown>> {
+  try {
+    return (await manager.addRuntimeMcpServer(
+      request.name,
+      request.config,
+      request.runtimeClientId,
+    )) as unknown as Record<string, unknown>;
+  } catch (err) {
+    if (err instanceof McpBudgetWouldExceedError) {
+      throw new RequestError(-32099, err.message, {
+        errorKind: err.code,
+        serverName: err.serverName,
+      });
+    }
+    if (err instanceof McpServerSpawnFailedError) {
+      throw new RequestError(-32099, err.message, {
+        errorKind: err.code,
+        serverName: err.serverName,
+        ...err.details,
+      });
+    }
+    if (err instanceof InvalidMcpConfigError) {
+      throw new RequestError(-32099, err.message, {
+        errorKind: err.code,
+        serverName: err.serverName,
+        reason: err.reason,
+      });
+    }
+    throw err;
+  }
 }
 
 export async function runAcpAgent(
@@ -9083,174 +9194,44 @@ class QwenAgent implements Agent {
         return result;
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeAdd: {
-        const name = params['name'];
-        const config = params['config'];
-        const originatorClientId = params['originatorClientId'];
-        if (typeof name !== 'string' || name.length === 0) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Invalid or missing name',
-          );
-        }
-        if (!isValidServerName(name)) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Server name must be ≤256 chars, alphanumeric + underscore/hyphen, and not a reserved JS property name',
-          );
-        }
-        if (!config || typeof config !== 'object' || Array.isArray(config)) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Invalid or missing config',
-          );
-        }
-        const runtimeClientId =
-          typeof originatorClientId === 'string' &&
-          originatorClientId.length > 0
-            ? originatorClientId
-            : 'daemon';
-        const manager = this.config.getToolRegistry()?.getMcpClientManager();
-        if (!manager) {
-          throw RequestError.internalError(
-            undefined,
-            'McpClientManager unavailable on this Config',
-          );
-        }
-        try {
-          // Strip security-sensitive fields — runtime-added servers must
-          // not bypass permission gates via trust:true, leak cloud creds
-          // via authProviderType, manipulate tool filtering, or spawn in
-          // arbitrary directories
-          const {
-            trust: _trust,
-            authProviderType: _auth,
-            includeTools: _inc,
-            excludeTools: _exc,
-            cwd: _cwd,
-            env: _env,
-            oauth: _oauth,
-            headers: _headers,
-            type: _type,
-            // Reverse tool channel marker (issue #5626, Phase 2). The parent
-            // serve process stamps this on a client-hosted (extension) MCP
-            // server's runtime config; it never reaches the transport itself.
-            [CLIENT_MCP_OVER_WS_CONFIG_FLAG]: clientMcpOverWs,
-            ...safeConfig
-          } = config as ClientMcpOverWsRuntimeConfig;
-          // Client-hosted MCP servers (#5626) MUST keep `type: 'sdk'` so the
-          // manager binds an `SdkControlClientTransport` whose `sendMcpMessage`
-          // routes back over the daemon WS via `sendSdkMcpMessage` — which the
-          // session manager wires to the `client_mcp/message` ext-method. For
-          // every other runtime server the type stays stripped (no SDK process
-          // backs them). Trust/creds/filters/cwd remain stripped regardless.
-          if (clientMcpOverWs === true) {
-            (safeConfig as Record<string, unknown>)['type'] = 'sdk';
-          }
-          const result = await manager.addRuntimeMcpServer(
-            name,
-            safeConfig as MCPServerConfig,
-            runtimeClientId,
-          );
-          // Reverse tool channel (issue #5626, Phase 2). The add above lands
-          // the server in the BOOTSTRAP/workspace Config — which is what
-          // discovery and `GET /workspace/mcp/<server>/tools` read, and what a
-          // session created LATER inherits (see `newSessionConfig`). But a
-          // prompt runs against a PER-SESSION Config whose tool registry +
-          // `sendSdkMcpMessage` are independent: an ALREADY-ACTIVE session would
-          // not see the server and a model-driven `tools/call` for a
-          // client-hosted tool would fail with "not found in registry", never
-          // reaching the WS client. Fan the add out to each live session's
-          // manager so the tool lands in that session's registry AND binds that
-          // session's `sendSdkMcpMessage` (the `__clientMcpOverWs` reverse
-          // path). Best-effort + additive: a per-session failure is logged but
-          // does not fail the registration (the bootstrap add already
-          // succeeded and is the result we return); no active sessions ⇒ no-op.
-          await Promise.all(
-            this.getActiveSessions().map(async (session) => {
-              const sessionManager = session
-                .getConfig()
-                .getToolRegistry()
-                ?.getMcpClientManager();
-              if (!sessionManager) return;
-              // `addRuntimeMcpServer` is idempotent on an identical fingerprint
-              // (same name + config) — it updates the overlay without transport
-              // churn — so a session that already inherited this server at
-              // creation re-adds harmlessly.
-              try {
-                await sessionManager.addRuntimeMcpServer(
-                  name,
-                  safeConfig as MCPServerConfig,
-                  runtimeClientId,
-                );
-              } catch (sessionErr) {
-                debugLogger.warn(
-                  `workspaceMcpRuntimeAdd: failed to add runtime MCP server ` +
-                    `'${name}' to active session ${session.getConfig().getSessionId()}: ` +
-                    `${
-                      sessionErr instanceof Error
-                        ? sessionErr.message
-                        : String(sessionErr)
-                    }`,
-                );
-              }
-            }),
-          );
-          return result as unknown as Record<string, unknown>;
-        } catch (err) {
-          if (err instanceof McpBudgetWouldExceedError) {
-            throw new RequestError(-32099, err.message, {
-              errorKind: err.code,
-              serverName: err.serverName,
-            });
-          }
-          if (err instanceof McpServerSpawnFailedError) {
-            throw new RequestError(-32099, err.message, {
-              errorKind: err.code,
-              serverName: err.serverName,
-              ...err.details,
-            });
-          }
-          if (err instanceof InvalidMcpConfigError) {
-            throw new RequestError(-32099, err.message, {
-              errorKind: err.code,
-              serverName: err.serverName,
-              reason: err.reason,
-            });
-          }
-          throw err;
-        }
+        const request = readRuntimeMcpAddRequest(params);
+        const result = await addRuntimeMcpServer(
+          getRuntimeMcpManager(this.config),
+          request,
+        );
+        await Promise.all(
+          this.getActiveSessions().map(async (session) => {
+            const sessionManager = session
+              .getConfig()
+              .getToolRegistry()
+              ?.getMcpClientManager();
+            if (!sessionManager) return;
+            try {
+              await sessionManager.addRuntimeMcpServer(
+                request.name,
+                request.config,
+                request.runtimeClientId,
+              );
+            } catch (sessionErr) {
+              debugLogger.warn(
+                `workspaceMcpRuntimeAdd: failed to add runtime MCP server ` +
+                  `'${request.name}' to active session ${session.getConfig().getSessionId()}: ` +
+                  `${
+                    sessionErr instanceof Error
+                      ? sessionErr.message
+                      : String(sessionErr)
+                  }`,
+              );
+            }
+          }),
+        );
+        return result;
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRuntimeRemove: {
-        const name = params['name'];
-        const originatorClientId = params['originatorClientId'];
-        if (typeof name !== 'string' || name.length === 0) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Invalid or missing name',
-          );
-        }
-        if (!isValidServerName(name)) {
-          throw RequestError.invalidParams(
-            undefined,
-            'Server name must be ≤256 chars, alphanumeric + underscore/hyphen, and not a reserved JS property name',
-          );
-        }
-        const runtimeClientId =
-          typeof originatorClientId === 'string' &&
-          originatorClientId.length > 0
-            ? originatorClientId
-            : 'daemon';
-        const manager = this.config.getToolRegistry()?.getMcpClientManager();
-        if (!manager) {
-          throw RequestError.internalError(
-            undefined,
-            'McpClientManager unavailable on this Config',
-          );
-        }
-        const result = await manager.removeRuntimeMcpServer(
-          name,
-          runtimeClientId,
-        );
+        const request = readRuntimeMcpRequest(params);
+        const result = await getRuntimeMcpManager(
+          this.config,
+        ).removeRuntimeMcpServer(request.name, request.runtimeClientId);
         // Mirror of the add fan-out (#5626): the runtime server was also
         // registered on each active session's manager, so deregistering it
         // must tear it down there too — otherwise an active session keeps a
@@ -9267,13 +9248,13 @@ class QwenAgent implements Agent {
             if (!sessionManager) return;
             try {
               await sessionManager.removeRuntimeMcpServer(
-                name,
-                runtimeClientId,
+                request.name,
+                request.runtimeClientId,
               );
             } catch (sessionErr) {
               debugLogger.warn(
                 `workspaceMcpRuntimeRemove: failed to remove runtime MCP server ` +
-                  `'${name}' from active session ${session.getConfig().getSessionId()}: ` +
+                  `'${request.name}' from active session ${session.getConfig().getSessionId()}: ` +
                   `${
                     sessionErr instanceof Error
                       ? sessionErr.message
@@ -9283,6 +9264,35 @@ class QwenAgent implements Agent {
             }
           }),
         );
+        return result as unknown as Record<string, unknown>;
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeAdd: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        return addRuntimeMcpServer(
+          getRuntimeMcpManager(session.getConfig()),
+          readRuntimeMcpAddRequest(params),
+        );
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeRemove: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const request = readRuntimeMcpRequest(params);
+        const result = await getRuntimeMcpManager(
+          session.getConfig(),
+        ).removeRuntimeMcpServer(request.name, request.runtimeClientId);
         return result as unknown as Record<string, unknown>;
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh: {

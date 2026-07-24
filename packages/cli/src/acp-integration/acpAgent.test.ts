@@ -10076,6 +10076,85 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('mutates runtime MCP state on only the selected live session', async () => {
+    const firstConfig = await setupSessionMocks('session-mcp-a');
+    const firstManager = {
+      addRuntimeMcpServer: vi.fn(),
+      removeRuntimeMcpServer: vi.fn(),
+    };
+    Object.assign(firstConfig, {
+      getToolRegistry: vi.fn().mockReturnValue({
+        getMcpClientManager: vi.fn().mockReturnValue(firstManager),
+      }),
+    });
+    const secondManager = {
+      addRuntimeMcpServer: vi.fn().mockResolvedValue({
+        name: 'channel-loop',
+        transport: 'sdk',
+        replaced: false,
+        shadowedSettings: false,
+        toolCount: 1,
+        originatorClientId: 'daemon-channel',
+      }),
+      removeRuntimeMcpServer: vi.fn().mockResolvedValue({
+        name: 'channel-loop',
+        removed: true,
+        wasShadowingSettings: false,
+        originatorClientId: 'daemon-channel',
+      }),
+    };
+    const secondConfig = {
+      ...firstConfig,
+      getSessionId: vi.fn().mockReturnValue('session-mcp-b'),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getMcpClientManager: vi.fn().mockReturnValue(secondManager),
+      }),
+    };
+    vi.mocked(loadCliConfig)
+      .mockResolvedValueOnce(firstConfig as unknown as Config)
+      .mockResolvedValueOnce(secondConfig as unknown as Config);
+
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeAdd, {
+        sessionId: 'session-mcp-b',
+        name: 'channel-loop',
+        config: {
+          type: 'sdk',
+          __clientMcpOverWs: true,
+          trust: true,
+          cwd: '/untrusted',
+        },
+        originatorClientId: 'daemon-channel',
+      }),
+    ).resolves.toMatchObject({ name: 'channel-loop', transport: 'sdk' });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeRemove, {
+        sessionId: 'session-mcp-b',
+        name: 'channel-loop',
+        originatorClientId: 'daemon-channel',
+      }),
+    ).resolves.toMatchObject({ name: 'channel-loop', removed: true });
+
+    expect(firstManager.addRuntimeMcpServer).not.toHaveBeenCalled();
+    expect(firstManager.removeRuntimeMcpServer).not.toHaveBeenCalled();
+    expect(secondManager.addRuntimeMcpServer).toHaveBeenCalledWith(
+      'channel-loop',
+      { type: 'sdk' },
+      'daemon-channel',
+    );
+    expect(secondManager.removeRuntimeMcpServer).toHaveBeenCalledWith(
+      'channel-loop',
+      'daemon-channel',
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('first ACP session fires SessionStart only from the real session initialize path', async () => {
     const innerConfig = await setupSessionMocks(
       'session-no-direct-session-start',

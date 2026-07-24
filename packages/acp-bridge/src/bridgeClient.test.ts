@@ -2834,6 +2834,90 @@ describe('BridgeClient — reverse tool channel (qwen/control/client_mcp/message
     expect((result as { payload?: unknown }).payload).toBeDefined();
   });
 
+  it('forwards the originating session id to the client MCP sender', async () => {
+    const contexts: unknown[] = [];
+    const sender: ClientMcpMessageSender = () => async (_payload, context) => {
+      contexts.push(context);
+      return { jsonrpc: '2.0', id: 1, result: {} };
+    };
+    const client = new BridgeClient(
+      (() => undefined) as never,
+      (() => undefined) as never,
+      { request: thrower } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      sender,
+    );
+
+    await client.extMethod('qwen/control/client_mcp/message', {
+      server: 'channel-loop',
+      sessionId: 'session-channel-1',
+      payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+    });
+
+    expect(contexts).toEqual([{ sessionId: 'session-channel-1' }]);
+  });
+
+  it('rejects a malformed optional session id', async () => {
+    const sender: ClientMcpMessageSender = () => async () => ({
+      jsonrpc: '2.0',
+      id: 1,
+      result: {},
+    });
+    const client = new BridgeClient(
+      (() => undefined) as never,
+      (() => undefined) as never,
+      { request: thrower } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      sender,
+    );
+
+    await expect(
+      client.extMethod('qwen/control/client_mcp/message', {
+        server: 'channel-loop',
+        sessionId: '',
+        payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      }),
+    ).rejects.toMatchObject({ code: -32602 });
+  });
+
+  it('rejects a session id owned by another ACP channel', async () => {
+    const send = vi.fn().mockResolvedValue({
+      jsonrpc: '2.0',
+      id: 1,
+      result: {},
+    });
+    const sender: ClientMcpMessageSender = () => send;
+    const client = new BridgeClient(
+      (() => undefined) as never,
+      (() => undefined) as never,
+      { request: thrower } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      sender,
+      () => false,
+    );
+
+    await expect(
+      client.extMethod('qwen/control/client_mcp/message', {
+        server: 'channel-loop',
+        sessionId: 'foreign-session',
+        payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      }),
+    ).rejects.toMatchObject({ code: -32602 });
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it('rejects (invalidParams) when the named server is not connected', async () => {
     const registrar = new ClientMcpRegistrar({ sendFrame: () => {} });
     // No registerServer call — the lookup returns undefined.

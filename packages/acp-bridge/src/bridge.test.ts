@@ -11826,6 +11826,110 @@ describe('createAcpSessionBridge', () => {
     });
   });
 
+  describe('session-scoped runtime MCP servers', () => {
+    it('routes add and remove to the selected live session only', async () => {
+      const calls: Array<{
+        method: string;
+        params: Record<string, unknown>;
+      }> = [];
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const agent = new FakeAgent({
+          extMethodImpl: (method, params) => {
+            calls.push({ method, params });
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeAdd) {
+              return Promise.resolve({
+                name: params['name'],
+                transport: 'sdk',
+                replaced: false,
+                shadowedSettings: false,
+                toolCount: 1,
+                originatorClientId: params['originatorClientId'],
+              });
+            }
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeRemove) {
+              return Promise.resolve({
+                name: params['name'],
+                removed: true,
+                wasShadowingSettings: false,
+                originatorClientId: params['originatorClientId'],
+              });
+            }
+            return Promise.resolve({});
+          },
+        });
+        new AgentSideConnection(() => agent as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({
+        sessionScope: 'thread',
+        channelFactory: factory,
+      });
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const target = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.addSessionRuntimeMcpServer(
+        target.sessionId,
+        'channel-loop',
+        { type: 'sdk' },
+        'daemon-channel',
+      );
+      await bridge.removeSessionRuntimeMcpServer(
+        target.sessionId,
+        'channel-loop',
+        'daemon-channel',
+      );
+
+      expect(calls.slice(-2)).toEqual([
+        {
+          method: SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeAdd,
+          params: {
+            sessionId: target.sessionId,
+            name: 'channel-loop',
+            config: { type: 'sdk' },
+            originatorClientId: 'daemon-channel',
+          },
+        },
+        {
+          method: SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeRemove,
+          params: {
+            sessionId: target.sessionId,
+            name: 'channel-loop',
+            originatorClientId: 'daemon-channel',
+          },
+        },
+      ]);
+      await bridge.shutdown();
+    });
+
+    it('rejects an unknown session without falling back to a live channel', async () => {
+      const extMethodImpl = vi.fn().mockResolvedValue({});
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel({ extMethodImpl }).channel,
+      });
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.addSessionRuntimeMcpServer('missing-session', 'channel-loop', {
+          type: 'sdk',
+        }),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+      expect(extMethodImpl).not.toHaveBeenCalledWith(
+        SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeAdd,
+        expect.anything(),
+      );
+      await bridge.shutdown();
+    });
+  });
+
   describe('removeRuntimeMcpServer (T2.8 #4514)', () => {
     /**
      * Build a channel factory whose ACP `extMethod` handler returns a

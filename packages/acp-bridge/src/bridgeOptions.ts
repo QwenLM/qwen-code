@@ -464,9 +464,15 @@ export interface BridgeOptions {
  * package free of an MCP-SDK dependency; the serve layer passes a
  * `JSONRPCMessage`.
  */
+export interface ClientMcpMessageContext {
+  sessionId?: string;
+}
+
 export type ClientMcpMessageSender = (
   serverName: string,
-) => ((payload: unknown) => Promise<unknown>) | undefined;
+) =>
+  | ((payload: unknown, context?: ClientMcpMessageContext) => Promise<unknown>)
+  | undefined;
 
 /** Ceiling on a sub-session prompt arriving over `extMethod`. The child is a
  * separate process, so this is a trust boundary — mirrors the scheduled-task

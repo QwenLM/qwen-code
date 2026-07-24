@@ -1300,7 +1300,26 @@ export class BridgeClient implements Client {
         `client-hosted MCP server '${server}' is not currently connected`,
       );
     }
-    const response = await send(payload);
+    const sessionId = params['sessionId'];
+    if (
+      sessionId !== undefined &&
+      (typeof sessionId !== 'string' || sessionId.length === 0)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`sessionId` must be a non-empty string when provided',
+      );
+    }
+    if (typeof sessionId === 'string' && !this.ownsSession(sessionId)) {
+      throw RequestError.invalidParams(
+        undefined,
+        `Session not owned by this channel: ${sessionId}`,
+      );
+    }
+    const response = await send(
+      payload,
+      typeof sessionId === 'string' ? { sessionId } : undefined,
+    );
     return { payload: response as Record<string, unknown> };
   }
 

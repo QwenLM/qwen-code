@@ -133,6 +133,8 @@ import type {
   BridgeSessionTranscriptPageRequest,
   BridgeGenerationStreamEvent,
   BridgeWorkspaceGenerationStreamEvent,
+  RuntimeMcpServerAddResult,
+  RuntimeMcpServerRemoveResult,
 } from './bridgeTypes.js';
 import type {
   BridgeFreshSessionAdmissionContext,
@@ -8167,6 +8169,27 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         });
       }
       return response;
+    },
+
+    async addSessionRuntimeMcpServer(
+      sessionId,
+      name,
+      config,
+      originatorClientId,
+    ) {
+      return requestSessionStatus<RuntimeMcpServerAddResult>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeAdd,
+        { name, config, originatorClientId },
+      );
+    },
+
+    async removeSessionRuntimeMcpServer(sessionId, name, originatorClientId) {
+      return requestSessionStatus<RuntimeMcpServerRemoveResult>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeRemove,
+        { name, originatorClientId },
+      );
     },
 
     async killSession(sessionId, opts) {
