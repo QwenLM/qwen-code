@@ -392,7 +392,7 @@ maintainer can trigger it. Everything below applies to local invocation (no
 
 **Mandatory on local runs, for PRs with user-visible behavioral changes.** Unit tests don't substitute. Unrelated build failure ≠ excuse to skip.
 
-**⛔ The tmux output IS the review.** The maintainer reads your Stage 2 comment and decides approve/reject from it. You **must** paste the actual `capture-pane` terminal output inline in the comment — inside a fenced code block. Not a file path, not "see attached log", not a text summary. If you didn't inline the output, the review is worthless.
+**⛔ The tmux output IS the review** (for PRs with user-visible behavioral changes). The maintainer reads your Stage 2 comment and decides approve/reject from it. You **must** paste the actual `capture-pane` terminal output inline in the comment — inside a fenced code block — **or state `N/A` for docs/types/refactor PRs with nothing user-visible**. Not a file path, not "see attached log", not a text summary. If you didn't inline the output (or the N/A substitution), the review is worthless.
 
 Drive the real product in tmux, using the `tmux-real-user-testing` skill. Capture the terminal at key moments with `capture-pane` — these are the evidence that makes the review actionable.
 
