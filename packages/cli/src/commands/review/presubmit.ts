@@ -125,6 +125,64 @@ interface PresubmitArgs {
   'new-findings'?: string;
 }
 
+/** Best-effort delta between the reviewed SHA and the live head. */
+export interface CompareSummary {
+  /** GitHub compare `status`: ahead | behind | diverged | identical.
+   * `diverged` means the reviewed commit is no longer an ancestor — a
+   * force-push rewrote the history the review read. */
+  status: string;
+  aheadBy: number;
+  /** Files the unreviewed commits touched (capped) — what Step 7 intersects
+   * with its findings' paths to decide whether anchors are at risk. */
+  filesTouched: string[];
+}
+
+export interface HeadDrift {
+  reviewedSha: string;
+  liveHeadSha: string;
+  drifted: boolean;
+  compare: CompareSummary | null;
+}
+
+/**
+ * Did the PR advance while the review ran, and what does that do to the
+ * verdict?
+ *
+ * A drifted head means commits exist on the PR that no agent read; an
+ * Approve issued past them certifies code nobody reviewed. Dogfooded on a
+ * live PR whose head moved four times in one day: the run that noticed did
+ * so by luck (a context compression happened to trigger a re-fetch), and
+ * runs that would not have noticed had no gate. So drift is detected here,
+ * at the submission gate, and the downgrade rides the machinery that
+ * already exists rather than a new rule the model must remember.
+ *
+ * Kept pure for unit testing; the gh calls stay in `runPresubmit`.
+ */
+export function classifyHeadDrift(
+  reviewedSha: string,
+  liveHeadSha: string,
+  compare: CompareSummary | null,
+): { headDrift: HeadDrift; downgradeReason?: string } {
+  const drifted = liveHeadSha !== '' && reviewedSha !== liveHeadSha;
+  if (!drifted) {
+    return {
+      headDrift: { reviewedSha, liveHeadSha, drifted: false, compare: null },
+    };
+  }
+  const detail =
+    compare === null
+      ? ''
+      : compare.status === 'diverged'
+        ? ' (history rewritten — the reviewed commit is no longer on the PR)'
+        : ` (+${compare.aheadBy} unreviewed commit(s) touching ${compare.filesTouched.length} file(s))`;
+  return {
+    headDrift: { reviewedSha, liveHeadSha, drifted: true, compare },
+    downgradeReason:
+      `PR head advanced during review: reviewed ${reviewedSha.slice(0, 8)}, ` +
+      `PR is now at ${liveHeadSha.slice(0, 8)}${detail}`,
+  };
+}
+
 export function classifyCi(checkRuns: CheckRun[], statuses: CommitStatus[]) {
   const failedCheckNames: string[] = [];
   let hasPending = false;
@@ -279,15 +337,47 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
 
   ensureAuthenticated();
 
-  // --- Self-PR detection -------------------------------------------------
-  const author = gh(
-    'api',
-    `repos/${owner}/${repo}/pulls/${prNumber}`,
-    '--jq',
-    '.user.login',
-  );
+  // --- Self-PR detection + live head (one fetch) -------------------------
+  const prMeta = JSON.parse(
+    gh(
+      'api',
+      `repos/${owner}/${repo}/pulls/${prNumber}`,
+      '--jq',
+      '{author: .user.login, headSha: .head.sha}',
+    ),
+  ) as { author: string; headSha: string };
   const me = currentUser();
-  const isSelfPr = author.toLowerCase() === me.toLowerCase();
+  const isSelfPr = prMeta.author.toLowerCase() === me.toLowerCase();
+
+  // --- Head drift ---------------------------------------------------------
+  // Detail is best-effort: the drift itself (and its downgrade) never
+  // depends on the compare call succeeding — a force-pushed-away reviewed
+  // SHA can make compare 404, and that case is precisely `drifted`.
+  let compare: CompareSummary | null = null;
+  if (prMeta.headSha && prMeta.headSha !== commitSha) {
+    try {
+      const c = JSON.parse(
+        gh(
+          'api',
+          `repos/${owner}/${repo}/compare/${commitSha}...${prMeta.headSha}`,
+          '--jq',
+          '{status, aheadBy: .ahead_by, files: [.files[].filename]}',
+        ),
+      ) as { status: string; aheadBy: number; files: string[] };
+      compare = {
+        status: c.status,
+        aheadBy: c.aheadBy,
+        filesTouched: (c.files ?? []).slice(0, 50),
+      };
+    } catch {
+      /* detail only — drift stands without it */
+    }
+  }
+  const { headDrift, downgradeReason: driftReason } = classifyHeadDrift(
+    commitSha,
+    prMeta.headSha,
+    compare,
+  );
 
   // --- CI status ---------------------------------------------------------
   // Paginate: a busy CI matrix produces more than 30 check runs on one commit,
@@ -353,6 +443,7 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
       `CI did not run: every check was skipped (${ciStatus.skippedCheckNames.join(', ')})`,
     );
   }
+  if (driftReason) downgradeReasons.push(driftReason);
 
   const result = {
     prNumber,
@@ -381,10 +472,13 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
       isSelfPr ||
       ciStatus.class === 'any_failure' ||
       ciStatus.class === 'all_pending' ||
-      (ciStatus.class === 'no_checks' && ciStatus.totalChecks > 0),
+      (ciStatus.class === 'no_checks' && ciStatus.totalChecks > 0) ||
+      // Commits nobody reviewed are on the PR — an Approve would certify them.
+      headDrift.drifted,
     downgradeRequestChanges: isSelfPr,
     downgradeReasons,
     blockOnExistingComments: buckets.overlap.length > 0,
+    headDrift,
   };
 
   writeFileSync(outPath, JSON.stringify(result, null, 2) + '\n', 'utf8');

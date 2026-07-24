@@ -5,7 +5,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { presubmitCommand, classifyCi } from './presubmit.js';
+import {
+  presubmitCommand,
+  classifyCi,
+  classifyHeadDrift,
+  type CompareSummary,
+} from './presubmit.js';
 
 // A `skipped` check run arrives as `status: completed` with `conclusion:
 // "skipped"`. It used to fall through both branches of the classifier and land
@@ -340,7 +345,10 @@ describe('presubmitCommand', () => {
     vi.clearAllMocks();
     ensureAuthenticatedMock.mockReturnValue(undefined);
     currentUserMock.mockReturnValue('qwen-code-ci-bot');
-    ghMock.mockReturnValue('contributor');
+    // The pulls fetch returns author + live head in one jq projection; a live
+    // head equal to baseArgs' commit_sha means "no drift" for tests that are
+    // not about drift.
+    ghMock.mockReturnValue('{"author":"contributor","headSha":"abc123"}');
     ghApiAllMock.mockReturnValue([]);
     ghApiAllNestedMock.mockReturnValue([]);
     readFileSyncMock.mockReturnValue('[]');
@@ -385,6 +393,39 @@ describe('presubmitCommand', () => {
     expect(result.downgradeReasons.join(' ')).toContain('CI did not run');
   });
 
+  it('downgrades the Approve and reports headDrift when the PR advanced mid-review', async () => {
+    // Two gh('api', …) calls now: the pulls fetch (author + live head) and,
+    // once drift is seen, the compare fetch for detail.
+    ghMock.mockImplementation((...args: string[]) => {
+      const path = args[1] ?? '';
+      if (path.includes('/compare/')) {
+        return '{"status":"ahead","aheadBy":2,"files":["src/x.ts"]}';
+      }
+      return '{"author":"contributor","headSha":"def456"}';
+    });
+    ghApiMock.mockReturnValue(null);
+
+    const handler = presubmitCommand.handler;
+    if (!handler) throw new Error('presubmit handler missing');
+    await handler(baseArgs as Parameters<typeof handler>[0]);
+
+    const [, content] = writeFileSyncMock.mock.calls.find(
+      ([path]) => path === '/tmp/presubmit.json',
+    ) ?? [null, null];
+    const result = JSON.parse(String(content));
+
+    expect(result.headDrift).toEqual({
+      reviewedSha: 'abc123',
+      liveHeadSha: 'def456',
+      drifted: true,
+      compare: { status: 'ahead', aheadBy: 2, filesTouched: ['src/x.ts'] },
+    });
+    expect(result.downgradeApprove).toBe(true);
+    expect(result.downgradeReasons.join(' ')).toContain(
+      'PR head advanced during review',
+    );
+  });
+
   it('ignores the running Qwen PR review check when deciding whether CI is still pending', async () => {
     ghApiAllNestedMock.mockImplementation((path: string) =>
       path.endsWith('/check-runs')
@@ -426,7 +467,7 @@ describe('presubmitCommand', () => {
     ghApiAllMock.mockReturnValue([]);
     ghApiAllNestedMock.mockReturnValue([]);
     currentUserMock.mockReturnValue('someone');
-    ghMock.mockReturnValue('{}');
+    ghMock.mockReturnValue('{"author":"someone","headSha":"abc123"}');
 
     const handler = presubmitCommand.handler;
     if (!handler) throw new Error('presubmit handler missing');
@@ -448,5 +489,57 @@ describe('presubmitCommand', () => {
       // same
     }
     expect(setGhHostMock).toHaveBeenCalledWith(undefined);
+  });
+});
+
+// The PR advancing mid-review means commits exist that no agent read. An
+// Approve issued past them certifies unreviewed code — dogfooded on a live PR
+// whose head moved four times in one day, where the only run that noticed did
+// so by accident. Drift is a fact about two SHAs; the classifier is pure.
+describe('classifyHeadDrift', () => {
+  const ahead: CompareSummary = {
+    status: 'ahead',
+    aheadBy: 3,
+    filesTouched: ['src/a.ts', 'src/b.ts'],
+  };
+
+  it('reports no drift when the head has not moved', () => {
+    const got = classifyHeadDrift('sha-aaa', 'sha-aaa', null);
+    expect(got.headDrift.drifted).toBe(false);
+    expect(got.downgradeReason).toBeUndefined();
+  });
+
+  it('does not claim drift when the live head could not be read', () => {
+    const got = classifyHeadDrift('sha-aaa', '', null);
+    expect(got.headDrift.drifted).toBe(false);
+  });
+
+  it('names both SHAs even when the compare detail is unavailable', () => {
+    const got = classifyHeadDrift(
+      '57a9273ade45a43b9f16ae1f84cc3ba448a87429',
+      '08ede5645612adca7d4193c1503d9c9e0f4387fb',
+      null,
+    );
+    expect(got.headDrift.drifted).toBe(true);
+    expect(got.headDrift.compare).toBeNull();
+    expect(got.downgradeReason).toContain('57a9273a');
+    expect(got.downgradeReason).toContain('08ede564');
+    expect(got.downgradeReason).not.toContain('(');
+  });
+
+  it('carries the unreviewed-commit count and touched-file count', () => {
+    const got = classifyHeadDrift('sha-old', 'sha-new', ahead);
+    expect(got.downgradeReason).toContain('+3 unreviewed commit(s)');
+    expect(got.downgradeReason).toContain('2 file(s)');
+    expect(got.headDrift.compare).toEqual(ahead);
+  });
+
+  it('calls out a force-push as rewritten history', () => {
+    const got = classifyHeadDrift('sha-old', 'sha-new', {
+      status: 'diverged',
+      aheadBy: 1,
+      filesTouched: [],
+    });
+    expect(got.downgradeReason).toContain('history rewritten');
   });
 });
