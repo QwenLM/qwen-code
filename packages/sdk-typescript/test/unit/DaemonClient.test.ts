@@ -7045,6 +7045,7 @@ describe('DaemonClient', () => {
       );
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
 
+      await client.workspaceChannelTypes();
       await client.workspaceChannels({ clientId: 'reader' });
       await client.upsertWorkspaceChannel(
         'bot/name',
@@ -7070,6 +7071,7 @@ describe('DaemonClient', () => {
       });
 
       expect(calls.map(({ method, url }) => [method, url])).toEqual([
+        ['GET', 'http://daemon/workspace/channel-types'],
         ['GET', 'http://daemon/workspace/channels'],
         ['PUT', 'http://daemon/workspace/channels/bot%2Fname'],
         ['DELETE', 'http://daemon/workspace/channels/bot%2Fname'],
@@ -7083,8 +7085,8 @@ describe('DaemonClient', () => {
           'http://daemon/workspace/channels/bot%2Fname/pairing-requests/approve',
         ],
       ]);
-      expect(calls[0]?.headers['x-qwen-client-id']).toBe('reader');
-      expect(calls[1]?.headers['x-qwen-client-id']).toBe('writer');
+      expect(calls[1]?.headers['x-qwen-client-id']).toBe('reader');
+      expect(calls[2]?.headers['x-qwen-client-id']).toBe('writer');
     });
 
     it('uses the exact qualified workspace routes', async () => {
@@ -7097,6 +7099,11 @@ describe('DaemonClient', () => {
       await workspace.workspaceChannelTypes();
       await workspace.workspaceChannels({ clientId: 'reader' });
       await workspace.startWorkspaceChannel('bot', { clientId: 'writer' });
+      await workspace.upsertWorkspaceChannel('bot', {
+        expectedRevision: 'r1',
+        config: { type: 'dingtalk' },
+      });
+      await workspace.workspaceChannelPairingRequests('bot');
 
       expect(calls.map(({ method, url }) => [method, url])).toEqual([
         ['GET', 'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channel-types'],
@@ -7104,6 +7111,11 @@ describe('DaemonClient', () => {
         [
           'POST',
           'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot/start',
+        ],
+        ['PUT', 'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot'],
+        [
+          'GET',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot/pairing-requests',
         ],
       ]);
       expect(calls[1]?.headers['x-qwen-client-id']).toBe('reader');

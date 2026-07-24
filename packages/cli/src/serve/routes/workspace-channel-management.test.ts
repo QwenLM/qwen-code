@@ -114,6 +114,7 @@ describe('workspace Channel management routes', () => {
     const channels = await request(app).get('/workspace/channels');
 
     expect(catalog.status).toBe(200);
+    expect(catalog.headers['cache-control']).toBe('no-store');
     expect(catalog.body).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ type: 'dingtalk', manageable: true }),
@@ -189,6 +190,25 @@ describe('workspace Channel management routes', () => {
     expect(response.body.code).toBe('untrusted_workspace');
     expect(primaryService.list).not.toHaveBeenCalled();
     expect(secondaryService.list).not.toHaveBeenCalled();
+  });
+
+  it('returns 503 when the channel management service is unavailable', async () => {
+    const primary = runtime('primary', '/work/primary');
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceChannelManagementRoutes(app, {
+      primaryRuntime: primary,
+      workspaceRegistry: createWorkspaceRegistry([primary]),
+      resolveService: () => undefined,
+      mutate: () => (req, res, next) => next(),
+      safeBody: (req) => (req.body ?? {}) as Record<string, unknown>,
+      parseAndValidateClientId: () => undefined,
+    });
+
+    const response = await request(app).get('/workspace/channels');
+
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('channel_management_unavailable');
   });
 
   it('lists and approves pairing requests in the selected workspace', async () => {

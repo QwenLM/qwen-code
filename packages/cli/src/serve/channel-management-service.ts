@@ -198,8 +198,22 @@ export function createChannelManagementService(
     return matches;
   };
 
+  const workspaceCommittedNames = (): string[] => {
+    const globalNames = opts.manager.committedChannelNames();
+    const workers = opts.manager.state().workers;
+    return globalNames.filter((name) =>
+      workers.some(
+        (worker) =>
+          worker.workspaceCwd === opts.workspaceCwd &&
+          (worker.adapters?.some((adapter) => adapter.name === name) ||
+            worker.requestedChannels?.includes(name) ||
+            worker.channels.includes(name)),
+      ),
+    );
+  };
+
   const assertOwnedRuntime = (name: string): void => {
-    if (!opts.manager.committedChannelNames().includes(name)) return;
+    if (!workspaceCommittedNames().includes(name)) return;
     const workers = workerFor(name);
     if (
       workers.length !== 1 ||
@@ -215,14 +229,14 @@ export function createChannelManagementService(
   const runtimeFor = (name: string): ChannelRuntimeState => {
     const retainedError = diagnostics.get(name);
     if (retainedError) return { state: 'error', lastError: retainedError };
-    const committed = opts.manager.committedChannelNames();
-    if (!committed.includes(name)) return { state: 'stopped' };
+    if (!workspaceCommittedNames().includes(name)) {
+      return { state: 'stopped' };
+    }
     const state = opts.manager.state();
-    const workers = workerFor(name);
-    if (
-      workers.length !== 1 ||
-      workers[0]!.workspaceCwd !== opts.workspaceCwd
-    ) {
+    const workers = workerFor(name).filter(
+      (worker) => worker.workspaceCwd === opts.workspaceCwd,
+    );
+    if (workers.length !== 1) {
       return {
         state: 'error',
         lastError: 'Channel runtime owner is unknown or ambiguous.',
@@ -369,13 +383,14 @@ export function createChannelManagementService(
 
   const pairingStoreFor = (name: string): PairingStore => {
     assertManageableInstanceName(name);
-    const config = opts.store.snapshot().channels[name];
-    if (!config) {
+    const channels = opts.store.snapshot().channels;
+    if (!Object.hasOwn(channels, name)) {
       throw new ChannelManagementError(
         'channel_instance_not_found',
         `Channel "${name}" is not configured in this workspace.`,
       );
     }
+    const config = channels[name]!;
     assertWorkspaceConfig(config);
     if (config['senderPolicy'] !== 'pairing') {
       throw new ChannelManagementError(
@@ -393,8 +408,7 @@ export function createChannelManagementService(
     async upsert(name, request) {
       assertManageableInstanceName(name);
       assertWorkspaceConfig(request.config);
-      const committedNames = opts.manager.committedChannelNames();
-      const active = committedNames.includes(name);
+      const active = workspaceCommittedNames().includes(name);
       if (active) assertOwnedRuntime(name);
       const persisted = await opts.store.upsert(name, request);
       diagnostics.delete(name);
@@ -415,20 +429,17 @@ export function createChannelManagementService(
     async remove(name, request) {
       assertManageableInstanceName(name);
       const current = opts.store.snapshot();
+      if (!Object.hasOwn(current.channels, name)) {
+        throw new ChannelManagementError(
+          'channel_instance_not_found',
+          `Channel "${name}" is not configured in this workspace.`,
+        );
+      }
+      assertWorkspaceConfig(current.channels[name]!);
       assertExpectedRevision(current, request.expectedRevision);
-      if (!isAllChannelSelectionName(name)) {
-        if (!Object.hasOwn(current.channels, name)) {
-          throw new ChannelManagementError(
-            'channel_instance_not_found',
-            `Channel "${name}" is not configured in this workspace.`,
-          );
-        }
-        assertWorkspaceConfig(current.channels[name]!);
-        const committedNames = opts.manager.committedChannelNames();
-        if (committedNames.includes(name)) {
-          assertOwnedRuntime(name);
-          await stopChannel(name);
-        }
+      if (workspaceCommittedNames().includes(name)) {
+        assertOwnedRuntime(name);
+        await stopChannel(name);
       }
       const persisted = await opts.store.remove(name, request);
       diagnostics.delete(name);
@@ -507,7 +518,7 @@ export function createChannelManagementService(
         );
       }
       assertWorkspaceConfig(persisted.channels[name]!);
-      if (!opts.manager.committedChannelNames().includes(name)) {
+      if (!workspaceCommittedNames().includes(name)) {
         throw new ChannelManagementError(
           'channel_worker_not_enabled',
           `Channel "${name}" is not running.`,

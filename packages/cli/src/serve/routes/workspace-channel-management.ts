@@ -290,6 +290,7 @@ export function registerWorkspaceChannelManagementRoutes(
     app.get(`${prefix}/channel-types`, async (req, res) => {
       if (!(await target(req, res))) return;
       try {
+        noStore(res);
         res.status(200).json(await supportedChannelCatalog());
       } catch (error) {
         sendManagementError(res, error);
@@ -360,7 +361,7 @@ export function registerWorkspaceChannelManagementRoutes(
     app.delete(`${prefix}/channels/:name`, remove, async (req, res) => {
       const resolved = await target(req, res);
       if (!resolved || !validateClient(req, res, resolved.runtime)) return;
-      const name = parseInstanceName(req, res, true);
+      const name = parseInstanceName(req, res);
       const request = parseRevision(deps.safeBody(req), res);
       if (!name || !request) return;
       try {

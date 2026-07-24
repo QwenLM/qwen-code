@@ -545,14 +545,14 @@ describe('createChannelManagementService', () => {
     },
   );
 
-  it('fails closed when an active instance belongs to another workspace', async () => {
+  it('rejects restart of a channel not running in this workspace', async () => {
     const { service, manager } = setup({
       committedNames: ['bot'],
       workspaceCwd: '/ws/secondary',
     });
 
     await expect(service.restart('bot')).rejects.toMatchObject({
-      code: 'channel_runtime_owner_mismatch',
+      code: 'channel_worker_not_enabled',
     });
     expect(manager.reload).not.toHaveBeenCalled();
   });
@@ -606,5 +606,101 @@ describe('createChannelManagementService', () => {
       { name: 'bot', workspaceCwd: WORKSPACE },
       false,
     );
+  });
+
+  it('scopes committed names so same-name channels across workspaces do not collide', async () => {
+    const { service, store, manager } = setup({ committedNames: ['bot'] });
+    vi.mocked(manager.state).mockReturnValue({
+      enabled: true,
+      selection: { mode: 'names' as const, names: ['bot'] },
+      transition: 'idle' as const,
+      workers: [
+        {
+          enabled: true,
+          state: 'running' as const,
+          channels: ['bot'],
+          requestedChannels: ['bot'],
+          adapters: [{ name: 'bot', state: 'connected' as const }],
+          workspaceId: 'other',
+          workspaceCwd: '/ws/other',
+          primary: false,
+        },
+      ],
+    });
+
+    const result = await service.list();
+    expect(result.instances['bot']?.runtime).toEqual({ state: 'stopped' });
+
+    const upserted = await service.upsert('bot', {
+      expectedRevision: 'rev-1',
+      config: { type: 'dingtalk', clientId: 'new-id' },
+    });
+    expect(upserted.instance.config).toMatchObject({ clientId: 'new-id' });
+    expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+    expect(store.upsert).toHaveBeenCalledOnce();
+  });
+
+  it('rejects restart and start for a nonexistent channel', async () => {
+    const { service } = setup({ committedNames: [] });
+
+    await expect(service.restart('nonexistent')).rejects.toMatchObject({
+      code: 'channel_instance_not_found',
+    });
+    await expect(service.start('nonexistent')).rejects.toMatchObject({
+      code: 'channel_instance_not_found',
+    });
+  });
+
+  it('rejects setStartup for a nonexistent channel', async () => {
+    const { service } = setup({ committedNames: [] });
+
+    await expect(
+      service.setStartup('nonexistent', {
+        expectedRevision: 'rev-1',
+        enabled: true,
+      }),
+    ).rejects.toMatchObject({ code: 'channel_instance_not_found' });
+  });
+
+  it('rejects approval of an unknown pairing code', async () => {
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const qwenHome = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'channel-management-pairing-'),
+    );
+    process.env['QWEN_HOME'] = qwenHome;
+    try {
+      const { service } = setup({
+        snapshot: settingsSnapshot({
+          channels: {
+            bot: { type: 'dingtalk', senderPolicy: 'pairing' },
+          },
+        }),
+      });
+
+      await expect(
+        service.approvePairing('bot', 'ZZZZZZZZ'),
+      ).rejects.toMatchObject({ code: 'channel_pairing_request_not_found' });
+    } finally {
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+      await fs.rm(qwenHome, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects pairing operations on a channel without pairing mode', async () => {
+    const { service } = setup({
+      snapshot: settingsSnapshot({
+        channels: {
+          bot: { type: 'dingtalk', senderPolicy: 'open' },
+        },
+      }),
+    });
+
+    await expect(service.pairingRequests('bot')).rejects.toMatchObject({
+      code: 'channel_pairing_not_enabled',
+    });
+    await expect(
+      service.approvePairing('bot', 'ABCDEFGH'),
+    ).rejects.toMatchObject({ code: 'channel_pairing_not_enabled' });
   });
 });
