@@ -430,12 +430,20 @@ for (const theme of THEMES) {
       ).toBeVisible();
       await captureScreenshot(page, `git-mode-popover-${theme}`);
 
-      // #7668 keeps this sub-state open; its input is the visual regression guard.
-      // Match by role — the label spans multiple elements, so getByText is ambiguous.
-      await page.getByRole('radio', { name: /New branch/ }).click();
+      // #7668 keeps this sub-state open. Match the option by role — its label
+      // spans a name + description span, so getByText is ambiguous.
+      const popover = page.locator('[data-slot="popover-content"]');
+      await popover.getByRole('radio', { name: /New branch/ }).click();
       const branchInput = page.locator('[data-testid="git-mode-branch-input"]');
       await expect(branchInput).toBeVisible();
       await branchInput.fill('feat/my-feature');
+      // Regression guard for #7668: the input flashes visible on click, but the
+      // pre-fix dismissal landed ~100ms later, so an immediate assertion still
+      // passed. Settle past that window and re-assert, so a re-dismissal hard-fails
+      // here — mirroring the functional web-shell.git-mode.spec.ts.
+      await page.waitForTimeout(300);
+      await expect(popover).toBeVisible();
+      await expect(branchInput).toBeVisible();
       await expect(
         page.locator('[data-testid="git-mode-confirm-branch"]'),
       ).toBeEnabled();
