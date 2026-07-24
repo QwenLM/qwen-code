@@ -444,7 +444,9 @@ export function WorkspaceSection({
                     role="note"
                     aria-label={`${label}${time ? `, ${time}` : ''}. ${trustToOpenLabel}`}
                   >
-                    <span className={styles.sessionName}>{label}</span>
+                    <span className={styles.sessionName} title={label}>
+                      {label}
+                    </span>
                     {time && <span className={styles.sessionTime}>{time}</span>}
                   </div>
                 );

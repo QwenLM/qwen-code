@@ -70,6 +70,7 @@ function renderSection(
     onOpenGitDiff: (cwd: string) => void;
     client: DaemonClient;
     reloadToken: number;
+    expanded: boolean;
   }> = {},
 ): void {
   act(() => {
@@ -79,6 +80,7 @@ function renderSection(
           workspace={overrides.workspace ?? trustedWorkspace}
           client={overrides.client ?? makeClient()}
           reloadToken={overrides.reloadToken ?? 0}
+          expanded={overrides.expanded}
           untrustedLabel="Untrusted"
           readOnlyLabel="Read-only"
           trustToOpenLabel="Trust to open"
@@ -131,6 +133,34 @@ describe('WorkspaceSection label', () => {
 
     expect(container.textContent).toContain('Payments API');
     expect(container.textContent).not.toContain('project');
+  });
+
+  it('shows the complete read-only session name in a native tooltip', async () => {
+    const listWorkspaceSessions = vi.fn().mockResolvedValue([
+      {
+        sessionId: 'session-1',
+        displayName: 'A very long session name',
+        createdAt: '2026-01-01T00:00:00.000Z',
+      } as DaemonSessionSummary,
+    ]);
+    const client = {
+      workspaceByCwd: vi.fn(() => ({
+        workspaceGit,
+        listWorkspaceSessions,
+        listSessionGroups: vi.fn().mockResolvedValue({ groups: [] }),
+      })),
+    } as unknown as DaemonClient;
+
+    renderSection({
+      workspace: untrustedWorkspace,
+      client,
+      expanded: true,
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[title="A very long session name"]'),
+    ).not.toBeNull();
   });
 });
 
