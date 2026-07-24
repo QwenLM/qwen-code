@@ -9,6 +9,7 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.format.DateTimeParseException;
 import java.util.Collections;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -24,6 +25,7 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.regex.Pattern;
 
 /** One independently attached daemon session. */
 public final class DaemonSessionClient implements AutoCloseable {
@@ -39,6 +41,8 @@ public final class DaemonSessionClient implements AutoCloseable {
             "slow_client_warning", "replay_complete");
     private static final Set<Integer> RETRYABLE_SSE_STATUS = Set.of(
             408, 429, 500, 502, 503, 504);
+    private static final Pattern EVENT_EPOCH_PATTERN = Pattern.compile(
+            "[A-Za-z0-9_-]{1,64}");
 
     private final DaemonClient client;
     private final DaemonSession session;
@@ -641,7 +645,10 @@ public final class DaemonSessionClient implements AutoCloseable {
                 return new PromptAcceptance(
                         JsonSupport.requiredString(json, "promptId", "prompt admission"),
                         JsonSupport.requiredNonNegativeLong(json, "lastEventId",
-                                "prompt admission"));
+                                "prompt admission"),
+                        validateEventEpoch(
+                                JsonSupport.optionalString(json, "eventEpoch"),
+                                "prompt admission.eventEpoch"));
             } catch (DaemonProtocolException e) {
                 throw new PromptAdmissionUnknownException(e);
             }
@@ -652,6 +659,7 @@ public final class DaemonSessionClient implements AutoCloseable {
                     client.promptObservationTimeout());
             long deadline = deadlineAfter(timeout);
             long cursor = admitted.getLastEventId();
+            String eventEpoch = admitted.getEventEpoch();
             int consecutiveFailures = 0;
             Duration serverRetry = null;
             while (true) {
@@ -661,7 +669,7 @@ public final class DaemonSessionClient implements AutoCloseable {
                 HttpResponse<InputStream> response;
                 try {
                     response = client.openSse(sessionPath() + "/events",
-                            session.getClientId(), cursor,
+                            session.getClientId(), cursor, eventEpoch,
                             Duration.ofMillis(remainingMillis(deadline)));
                 } catch (IOException e) {
                     reconnectOrThrow(++consecutiveFailures,
@@ -719,6 +727,15 @@ public final class DaemonSessionClient implements AutoCloseable {
                 try {
                     checkStoppedOrExpired(deadline);
                     validateSseHeaders(response.headers());
+                    String responseEpoch = responseEventEpoch(response.headers());
+                    if (eventEpoch != null && responseEpoch != null
+                            && !eventEpoch.equals(responseEpoch)) {
+                        throw new DaemonProtocolException(
+                                "SSE event epoch changed during prompt observation");
+                    }
+                    if (responseEpoch != null) {
+                        eventEpoch = responseEpoch;
+                    }
                     watchdog = scheduleIdleWatchdog(stream,
                             lastActivity, idleClosed);
                     deadlineWatchdog = scheduleDeadlineWatchdog(deadline);
@@ -1057,6 +1074,30 @@ public final class DaemonSessionClient implements AutoCloseable {
             throw new DaemonProtocolException("SSE response used unsupported Content-Encoding: "
                     + contentEncoding);
         }
+    }
+
+    private static String responseEventEpoch(HttpHeaders headers) {
+        List<String> values = headers.allValues(DaemonClient.EVENT_EPOCH_HEADER);
+        if (values.isEmpty()) {
+            return null;
+        }
+        if (values.size() != 1) {
+            throw new DaemonProtocolException(
+                    "SSE response contained multiple event epoch headers");
+        }
+        return validateEventEpoch(values.get(0),
+                "SSE response " + DaemonClient.EVENT_EPOCH_HEADER);
+    }
+
+    private static String validateEventEpoch(String epoch, String context) {
+        if (epoch == null) {
+            return null;
+        }
+        if (!EVENT_EPOCH_PATTERN.matcher(epoch).matches()) {
+            throw new DaemonProtocolException(context
+                    + " must match [A-Za-z0-9_-]{1,64}");
+        }
+        return epoch;
     }
 
     private static Duration retryAfter(HttpHeaders headers) {

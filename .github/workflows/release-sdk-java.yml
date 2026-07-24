@@ -17,6 +17,7 @@ jobs:
   release:
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
     runs-on: 'ubuntu-latest'
+    timeout-minutes: 60
     environment:
       name: "${{ inputs.dry_run && 'sdk-java-dry-run' || 'production-release' }}"
       url: '${{ github.server_url }}/${{ github.repository }}/releases'
@@ -126,6 +127,25 @@ jobs:
           echo "tag_state=${tag_state}" >> "${GITHUB_OUTPUT}"
           echo "artifact_state=${artifact_state}" >> "${GITHUB_OUTPUT}"
 
+      - name: 'Require publishing credentials'
+        if: "${{ !inputs.dry_run && steps.preflight.outputs.artifact_state == 'missing' }}"
+        env:
+          CENTRAL_USERNAME: '${{ secrets.CENTRAL_USERNAME }}'
+          CENTRAL_PASSWORD: '${{ secrets.CENTRAL_PASSWORD }}'
+          MAVEN_GPG_PRIVATE_KEY: '${{ secrets.MAVEN_GPG_PRIVATE_KEY }}'
+          MAVEN_GPG_PASSPHRASE: '${{ secrets.MAVEN_GPG_PASSPHRASE }}'
+        run: |-
+          set -euo pipefail
+          missing=()
+          [[ -n "${CENTRAL_USERNAME}" ]] || missing+=('CENTRAL_USERNAME')
+          [[ -n "${CENTRAL_PASSWORD}" ]] || missing+=('CENTRAL_PASSWORD')
+          [[ -n "${MAVEN_GPG_PRIVATE_KEY}" ]] || missing+=('MAVEN_GPG_PRIVATE_KEY')
+          [[ -n "${MAVEN_GPG_PASSPHRASE}" ]] || missing+=('MAVEN_GPG_PASSPHRASE')
+          if (( ${#missing[@]} > 0 )); then
+            printf 'Missing production-release environment secret: %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
+
       - name: 'Verify release build'
         working-directory: '${{ env.SDK_DIRECTORY }}'
         run: 'mvn --batch-mode --no-transfer-progress clean verify -Dgpg.skip=true'
@@ -155,6 +175,7 @@ jobs:
         env:
           GH_TOKEN: '${{ github.token }}'
         run: |-
+          set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git tag -a "${RELEASE_TAG}" -m "Java SDK ${SDK_VERSION}"
@@ -187,13 +208,14 @@ jobs:
       - name: 'Verify Maven Central availability'
         if: '${{ !inputs.dry_run }}'
         run: |-
+          set -euo pipefail
           artifact_url="https://repo1.maven.org/maven2/com/alibaba/qwencode-sdk/${SDK_VERSION}/qwencode-sdk-${SDK_VERSION}.pom"
-          for attempt in {1..30}; do
-            if curl --fail --silent --show-error --location --output /dev/null "${artifact_url}"; then
+          for attempt in {1..40}; do
+            if curl --fail --silent --show-error --location --connect-timeout 10 --max-time 10 --output /dev/null "${artifact_url}"; then
               exit 0
             fi
-            if [[ "${attempt}" -lt 30 ]]; then
-              sleep 10
+            if [[ "${attempt}" -lt 40 ]]; then
+              sleep 30
             fi
           done
           echo "Published artifact is not available at ${artifact_url}." >&2
@@ -204,6 +226,7 @@ jobs:
         env:
           GH_TOKEN: '${{ github.token }}'
         run: |-
+          set -euo pipefail
           git fetch origin "refs/tags/${RELEASE_TAG}:refs/tags/${RELEASE_TAG}" --force
           if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
             echo "GitHub Release ${RELEASE_TAG} already exists."

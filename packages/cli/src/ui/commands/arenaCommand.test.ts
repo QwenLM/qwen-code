@@ -86,6 +86,42 @@ describe('arenaCommand localization', () => {
   });
 });
 
+describe('arenaCommand start subcommand', () => {
+  it('rejects image-only models passed explicitly', async () => {
+    const context = createMockCommandContext({
+      executionMode: 'interactive',
+      services: {
+        config: {
+          getArenaManager: vi.fn(() => null),
+          getContentGeneratorConfig: vi.fn(() => undefined),
+          getModelsConfig: vi.fn(() => ({
+            getAvailableModelsForAuthType: vi.fn(() => [
+              {
+                id: 'qwen-image-2.0',
+                label: 'Qwen Image 2.0',
+                imageOnly: true,
+              },
+              { id: 'qwen-plus', label: 'Qwen Plus' },
+            ]),
+          })),
+        } as never,
+      },
+    });
+
+    const result = await getArenaSubCommand('start').action!(
+      context,
+      '--models qwen-image-2.0,qwen-plus "build a feature"',
+    );
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        "Image-only model 'qwen-image-2.0' cannot be used in an Arena session.",
+    });
+  });
+});
+
 describe('arenaCommand stop subcommand', () => {
   let mockContext: CommandContext;
   let mockConfig: {

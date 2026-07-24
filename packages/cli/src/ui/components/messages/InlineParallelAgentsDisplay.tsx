@@ -39,6 +39,7 @@ import {
 } from '../../utils/textUtils.js';
 import { TOOL_DISPLAY_BY_NAME } from '../../utils/tool-display-map.js';
 import { localizeToolDisplayName } from '../../../i18n/index.js';
+import { ICON } from '../../constants.js';
 
 interface InlineParallelAgentsDisplayProps {
   toolCalls: readonly IndividualToolCallDisplay[];
@@ -130,7 +131,7 @@ function statusGlyph(status: AgentResultDisplay['status']): {
   switch (status) {
     case 'running':
     case 'background':
-      return { glyph: '○', color: theme.status.warning };
+      return { glyph: ICON.CIRCLE_EMPTY, color: theme.status.warning };
     case 'completed':
       return { glyph: '✔', color: theme.status.success };
     case 'failed':

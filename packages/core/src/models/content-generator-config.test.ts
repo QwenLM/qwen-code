@@ -241,6 +241,21 @@ describe('buildAgentContentGeneratorConfig', () => {
 
       expect(result.thinkingMandatory).toBeUndefined();
     });
+
+    it('rejects image-only models for agent content generation', () => {
+      const config = createMockConfig(parentConfig, {
+        ...resolvedModel,
+        imageOnly: true,
+      });
+
+      expect(() =>
+        buildAgentContentGeneratorConfig(config, 'registry-model-id', {
+          authType: 'anthropic',
+        }),
+      ).toThrow(
+        "Image-only model 'registry-model-id' cannot be used for content generation",
+      );
+    });
   });
 
   describe('edge cases', () => {

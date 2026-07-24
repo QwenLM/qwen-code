@@ -7,6 +7,7 @@
 import type React from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../semantic-colors.js';
+import { ICON } from '../constants.js';
 import { fmtTokens, getSeriesColors } from './stats-helpers.js';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import { computeSessionStats } from '../utils/computeStats.js';
@@ -199,7 +200,9 @@ export const SessionTab: React.FC = () => {
           </Text>
           {Object.entries(metrics.models).map(([name, m], i) => (
             <Box key={name}>
-              <Text color={SERIES_COLORS[i % SERIES_COLORS.length]}>● </Text>
+              <Text color={SERIES_COLORS[i % SERIES_COLORS.length]}>
+                {ICON.CIRCLE_FILLED + ' '}
+              </Text>
               <Text color={theme.text.primary}>{name} </Text>
               <Text color={theme.text.secondary}>
                 {m.api.totalRequests} {t('reqs')} · {t('in')}=

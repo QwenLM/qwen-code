@@ -22,7 +22,10 @@ const TRACKED_ENV = [
   'RUNTIME_SETTINGS_ONLY',
   'BASH_ENV',
   'NODE_OPTIONS',
+  'NODE_COMPILE_CACHE',
+  'NODE_DISABLE_COMPILE_CACHE',
   'QWEN_HOME',
+  'QWEN_CODE_PENDING_COMPILE_CACHE',
   'QWEN_RUNTIME_DIR',
   'QWEN_SERVER_TOKEN',
 ] as const;
@@ -169,6 +172,50 @@ describe('buildRuntimeEnvironment', () => {
 });
 
 describe('loadEnvironment', () => {
+  it('preserves settings.env compile cache over the pending default', () => {
+    const workspace = makeWorkspace();
+    process.env['QWEN_CODE_PENDING_COMPILE_CACHE'] = '/tmp/generated-cache';
+
+    loadEnvironment(
+      testSettings({
+        env: {
+          NODE_COMPILE_CACHE: '/tmp/operator-cache',
+        },
+      }),
+      workspace,
+    );
+
+    expect(process.env['NODE_COMPILE_CACHE']).toBe('/tmp/operator-cache');
+    expect(process.env['QWEN_CODE_PENDING_COMPILE_CACHE']).toBeUndefined();
+  });
+
+  it('publishes the pending compile cache after environment loading', () => {
+    const workspace = makeWorkspace();
+    process.env['QWEN_CODE_PENDING_COMPILE_CACHE'] = '/tmp/generated-cache';
+
+    loadEnvironment(testSettings({}), workspace);
+
+    expect(process.env['NODE_COMPILE_CACHE']).toBe('/tmp/generated-cache');
+    expect(process.env['QWEN_CODE_PENDING_COMPILE_CACHE']).toBeUndefined();
+  });
+
+  it('does not publish the pending compile cache when disabled by settings.env', () => {
+    const workspace = makeWorkspace();
+    process.env['QWEN_CODE_PENDING_COMPILE_CACHE'] = '/tmp/generated-cache';
+
+    loadEnvironment(
+      testSettings({
+        env: {
+          NODE_DISABLE_COMPILE_CACHE: '1',
+        },
+      }),
+      workspace,
+    );
+
+    expect(process.env['NODE_COMPILE_CACHE']).toBeUndefined();
+    expect(process.env['QWEN_CODE_PENDING_COMPILE_CACHE']).toBeUndefined();
+  });
+
   it('filters reload-excluded keys from settings.env on initial load', () => {
     const workspace = makeWorkspace();
 

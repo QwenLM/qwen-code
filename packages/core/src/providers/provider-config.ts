@@ -122,6 +122,7 @@ function specToModelConfig(
     ...(spec.description ? { description: spec.description } : {}),
     baseUrl,
     envKey,
+    ...(spec.imageOnly ? { imageOnly: true } : {}),
     ...(genConfig ? { generationConfig: genConfig } : {}),
   };
 }

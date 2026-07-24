@@ -37,6 +37,8 @@ import java.util.function.Supplier;
 
 /** Java 11 client for the {@code qwen serve} REST and SSE transport. */
 public final class DaemonClient implements AutoCloseable {
+    static final String EVENT_EPOCH_HEADER = "X-Qwen-Event-Epoch";
+
     private static final AtomicLong CLIENT_SEQUENCE = new AtomicLong();
 
     private final String baseUrl;
@@ -76,7 +78,11 @@ public final class DaemonClient implements AutoCloseable {
         this.heartbeatInterval = builder.heartbeatInterval;
         long clientNumber = CLIENT_SEQUENCE.incrementAndGet();
         this.promptSlots = new Semaphore(builder.maximumConcurrentPrompts);
-        int streamLifecycleCapacity = builder.maximumConcurrentPrompts;
+        // A prompt publishes its terminal once the prompt slot is released, while
+        // its stream keeps closing asynchronously, so admission must tolerate one
+        // draining cleanup per prompt slot.
+        int streamLifecycleCapacity = (int) Math.min(Integer.MAX_VALUE,
+                builder.maximumConcurrentPrompts * 2L);
         this.streamLifecycleSlots = new Semaphore(streamLifecycleCapacity);
         this.executor = new ThreadPoolExecutor(builder.maximumConcurrentPrompts,
                 builder.maximumConcurrentPrompts, 0L, TimeUnit.MILLISECONDS,
@@ -303,18 +309,23 @@ public final class DaemonClient implements AutoCloseable {
     }
 
     HttpResponse<InputStream> openSse(String path, String clientId, long lastEventId,
-            Duration observationRemaining)
+            String eventEpoch, Duration observationRemaining)
             throws IOException, InterruptedException {
-        HttpRequest request = requestBuilder(path, clientId)
+        HttpRequest.Builder request = requestBuilder(path, clientId)
                 .header("Accept", "text/event-stream")
                 .header("Accept-Encoding", "identity")
                 .header("Cache-Control", "no-cache")
-                .header("Last-Event-ID", Long.toString(lastEventId))
+                .header("Last-Event-ID", Long.toString(lastEventId));
+        if (eventEpoch != null) {
+            request.header(EVENT_EPOCH_HEADER, eventEpoch);
+        }
+        HttpRequest builtRequest = request
                 .timeout(shorter(requestTimeout, observationRemaining))
                 .GET()
                 .build();
         try {
-            return httpClient.send(request, HttpResponse.BodyHandlers.ofInputStream());
+            return httpClient.send(builtRequest,
+                    HttpResponse.BodyHandlers.ofInputStream());
         } catch (RejectedExecutionException e) {
             throw new IOException("HTTP executor is saturated", e);
         }
