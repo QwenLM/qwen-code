@@ -97,6 +97,13 @@ describe('qwen-triage-finalize workflow', () => {
     expect(script.indexOf('update_status "$PR" stale')).toBeLessThan(
       script.indexOf('update_status "$PR" red'),
     );
+    // The status comment is not SHA-scoped, so a late firing for an old SHA
+    // must not overwrite it once the new head's re-review (whose sha= markers
+    // sit in bot comments) owns it.
+    expect(script).toContain('sha=${CURRENT_HEAD}');
+    expect(script.indexOf('sha=${CURRENT_HEAD}')).toBeLessThan(
+      script.indexOf('update_status "$PR" stale'),
+    );
     // Still-pending is visible, not silent.
     expect(script).toContain('update_status "$PR" deferred');
     // Re-running finalize must not stack approvals.

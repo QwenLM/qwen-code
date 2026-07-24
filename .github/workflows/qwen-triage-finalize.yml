@@ -342,9 +342,26 @@ jobs:
             CURRENT_HEAD="$(jq -r '.head.sha' <<<"$PR_STATE_JSON")"
             PR_STATE="$(jq -r '.state' <<<"$PR_STATE_JSON")"
             PR_DRAFT="$(jq -r '.draft' <<<"$PR_STATE_JSON")"
-            if [ "$CURRENT_HEAD" != "$HEAD_SHA" ] || [ "$PR_STATE" != "open" ] || [ "$PR_DRAFT" = "true" ]; then
-              echo "PR #$PR: head moved or PR closed/draft since the review; failing closed."
-              update_status "$PR" stale
+            if [ "$CURRENT_HEAD" != "$HEAD_SHA" ]; then
+              # The status comment is deliberately NOT SHA-scoped (the triage
+              # workflow creates it unscoped, and scoping only this side would
+              # orphan the pairing), so a late firing for an old SHA must not
+              # overwrite the comment once a newer review owns it. Proxy for
+              # ownership: the new head's re-review leaves sha= markers in
+              # bot-authored comments; if they exist, stay silent.
+              NEW_HEAD_MARKED="$(jq -r --arg bot "$BOT_LOGIN" --arg m "sha=${CURRENT_HEAD}" \
+                '[.[] | select(.user.login == $bot) | select(.body | contains($m))] | length' \
+                "/tmp/comments-$PR.json")"
+              if [ "${NEW_HEAD_MARKED:-0}" -gt 0 ] 2>/dev/null; then
+                echo "PR #$PR: head moved to a re-reviewed commit; leaving the status comment to the newer review."
+              else
+                echo "PR #$PR: head moved since the review with no re-review yet; posting the stale note."
+                update_status "$PR" stale
+              fi
+              continue
+            fi
+            if [ "$PR_STATE" != "open" ] || [ "$PR_DRAFT" = "true" ]; then
+              echo "PR #$PR: closed or draft; approval stays withheld."
               continue
             fi
             # An unavailable gate or an empty run list is "cannot attest", not
