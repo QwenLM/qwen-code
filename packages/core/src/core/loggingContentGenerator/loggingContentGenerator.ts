@@ -207,6 +207,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     prompt_id: string,
     usageMetadata?: GenerateContentResponseUsageMetadata,
     responseText?: string,
+    ttftMs?: number,
   ): void {
     logApiResponse(
       this.config,
@@ -219,6 +220,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         usageMetadata,
         responseText,
         subagentNameContext.getStore(),
+        ttftMs,
       ),
     );
   }
@@ -275,6 +277,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     prompt_id: string,
     usageMetadata?: GenerateContentResponseUsageMetadata,
     responseText?: string,
+    ttftMs?: number,
   ): void {
     try {
       this._logApiResponse(
@@ -284,6 +287,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         prompt_id,
         usageMetadata,
         responseText,
+        ttftMs,
       );
     } catch (loggingError) {
       debugLogger.warn('Failed to log API response:', loggingError);
@@ -755,6 +759,7 @@ export class LoggingContentGenerator implements ContentGenerator {
             userPromptId,
             lastUsageMetadata,
             streamResponseText,
+            ttftMs,
           ),
         );
         if (shouldCollectSensitiveSpanAttributes && span) {

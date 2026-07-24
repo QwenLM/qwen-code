@@ -367,6 +367,8 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
   response_text?: string;
   prompt_id: string;
   auth_type?: string;
+  /** Time from stream dispatch to first user-visible content. */
+  ttft_ms?: number;
   /**
    * Name of the subagent that issued this request, or undefined when the
    * request originates from the main conversation.
@@ -382,6 +384,7 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
     usage_data?: GenerateContentResponseUsageMetadata,
     response_text?: string,
     subagent_name?: string,
+    ttft_ms?: number,
   ) {
     this['event.name'] = 'api_response';
     this['event.timestamp'] = new Date().toISOString();
@@ -398,6 +401,7 @@ export class ApiResponseEvent implements BaseTelemetryEvent {
     this.prompt_id = prompt_id;
     this.auth_type = auth_type;
     this.subagent_name = subagent_name;
+    this.ttft_ms = ttft_ms;
   }
 }
 
