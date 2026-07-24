@@ -110,8 +110,7 @@ import type {
 import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
 import type { AcpHttpHandle } from './acp-http/index.js';
-import { createChannelManagementService } from './channel-management-service.js';
-import { WorkspaceChannelSettingsStore } from './channel-settings-store.js';
+import type { ChannelManagementService } from './channel-management-service.js';
 import type { WorkspaceRuntimeRemovalController } from './routes/workspace-management.js';
 import {
   allowOriginMode,
@@ -4544,11 +4543,11 @@ async function runQwenServeImpl(
 
     const channelManagementServices = new WeakMap<
       WorkspaceRuntime,
-      Promise<ReturnType<typeof createChannelManagementService>>
+      Promise<ChannelManagementService>
     >();
     const channelManagementService = (
       targetRuntime: WorkspaceRuntime,
-    ): Promise<ReturnType<typeof createChannelManagementService>> => {
+    ): Promise<ChannelManagementService> => {
       const existing = channelManagementServices.get(targetRuntime);
       if (existing) return existing;
       const pending = (async () => {
@@ -4558,6 +4557,13 @@ async function runQwenServeImpl(
             { code: 'channel_worker_unavailable' },
           );
         }
+        const [
+          { createChannelManagementService },
+          { WorkspaceChannelSettingsStore },
+        ] = await Promise.all([
+          import('./channel-management-service.js'),
+          import('./channel-settings-store.js'),
+        ]);
         return createChannelManagementService({
           workspaceCwd: targetRuntime.workspaceCwd,
           store: new WorkspaceChannelSettingsStore(targetRuntime.workspaceCwd),
