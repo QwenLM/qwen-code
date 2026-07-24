@@ -52,9 +52,14 @@ equivalence.)
   read (provenance + any derived note), and once per `media_dispatch` run (the
   combined per-segment understanding). Keyed by content hash; understandings
   accumulate rather than overwrite.
-- **Load**: (1) automatically — reading a file already in memory surfaces its
-  prior understanding as a note on the result; (2) explicitly — the model calls
-  `media_grep`.
+- **Load**: (1) **memory-first on read** — reading a media file too large to
+  inline (e.g. via an `@`-mention → `read_file`) no longer returns a bare "too
+  large" error; it returns any prior cross-session understanding of that exact
+  file (or explicitly states there is none) plus which media tool to use. So the
+  model answers from memory when it can, and only analyzes when memory lacks the
+  answer. (2) automatically — reading a file already in memory via
+  `media_watch`/`image_view` surfaces its prior understanding as a note. (3)
+  explicitly — the model calls `media_grep`.
 
 ## Layers and seams
 
