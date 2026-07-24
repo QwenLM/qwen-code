@@ -239,6 +239,8 @@ export {
   addModelOutputAttributes,
   addToolInputAttributes,
   addToolResultAttributes,
+  addToolArgumentsAttributes,
+  addToolCallResultAttributes,
   areSensitiveSpanAttributesEnabled,
   truncateContent,
 } from './detailed-span-attributes.js';

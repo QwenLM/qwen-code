@@ -1,0 +1,6 @@
+{
+  "additionalProperties": true,
+  "description": "Represents object-like arguments passed to a tool call.",
+  "title": "ToolCallArguments",
+  "type": "object"
+}

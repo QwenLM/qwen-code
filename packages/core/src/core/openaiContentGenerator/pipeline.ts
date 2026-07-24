@@ -33,7 +33,12 @@ import { logProtocolTagSanitized } from '../../telemetry/loggers.js';
 import { ProtocolTagSanitizedEvent } from '../../telemetry/types.js';
 import { getErrorMessage, getErrorStatus } from '../../utils/errors.js';
 import { getRateLimitErrorDetails } from '../../utils/rateLimit.js';
-import { reportOpenAiRequest } from '../../telemetry/gen-ai-request.js';
+import {
+  reportOpenAiChunk,
+  reportOpenAiRequest,
+  reportOpenAiResponse,
+  type GenAiAttemptHandle,
+} from '../../telemetry/gen-ai-request.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
 
@@ -315,7 +320,7 @@ export class ContentGenerationPipeline {
       request,
       userPromptId,
       false,
-      async (openaiRequest, context) => {
+      async (openaiRequest, context, telemetryAttempt) => {
         // Wrap in a per-request child so the OpenAI SDK's leaked abort
         // listener (client.mjs fetchWithTimeout — no {once:true}, no
         // removeEventListener) stays on a short-lived signal instead of
@@ -331,6 +336,7 @@ export class ContentGenerationPipeline {
               signal: perRequestAc?.signal,
             },
           )) as OpenAI.Chat.ChatCompletion;
+          reportOpenAiResponse(telemetryAttempt, openaiResponse);
 
           const geminiResponse =
             OpenAIContentConverter.convertOpenAIResponseToGemini(
@@ -354,7 +360,7 @@ export class ContentGenerationPipeline {
       request,
       userPromptId,
       true,
-      async (openaiRequest, context) => {
+      async (openaiRequest, context, telemetryAttempt) => {
         // Always use a per-request controller so the inactivity watchdog can
         // abort the SDK request even when the caller did not provide a signal.
         const parentSignal = request.config?.abortSignal;
@@ -459,6 +465,7 @@ export class ContentGenerationPipeline {
           context,
           request,
           userPromptId,
+          telemetryAttempt,
         );
         async function* drainThenCleanup(): AsyncGenerator<GenerateContentResponse> {
           try {
@@ -485,6 +492,7 @@ export class ContentGenerationPipeline {
     context: RequestContext,
     request: GenerateContentParameters,
     userPromptId: string,
+    telemetryAttempt: GenAiAttemptHandle | undefined,
   ): AsyncGenerator<GenerateContentResponse> {
     // State for handling chunk merging.
     // pendingFinishResponse holds a finish chunk waiting to be merged with
@@ -525,6 +533,7 @@ export class ContentGenerationPipeline {
     try {
       // Stage 2a: Convert and yield each chunk while preserving original
       for await (const chunk of stream) {
+        reportOpenAiChunk(telemetryAttempt, chunk);
         // Detect API errors returned as stream content.
         // Some providers return errors (e.g., TPM throttling) as a normal SSE chunk
         // with finish_reason="error_finish" and the error in delta.content,
@@ -1103,6 +1112,7 @@ export class ContentGenerationPipeline {
     executor: (
       openaiRequest: OpenAI.Chat.ChatCompletionCreateParams,
       context: RequestContext,
+      telemetryAttempt: GenAiAttemptHandle | undefined,
     ) => Promise<T>,
   ): Promise<T> {
     const context = this.createRequestContext(request, isStreaming);
@@ -1120,9 +1130,9 @@ export class ContentGenerationPipeline {
       // so the logger sees the exact bytes sent on the wire.
       openaiRequestCaptureContext.getStore()?.(openaiRequest);
       runtimeDiagnostics.recordOpenAIWireRequest(openaiRequest);
-      reportOpenAiRequest(openaiRequest);
+      const telemetryAttempt = reportOpenAiRequest(openaiRequest);
 
-      return executor(openaiRequest, context);
+      return executor(openaiRequest, context, telemetryAttempt);
     };
 
     try {

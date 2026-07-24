@@ -1,0 +1,6 @@
+{
+  "additionalProperties": true,
+  "description": "Represents object-like results returned by a tool call.",
+  "title": "ToolCallResult",
+  "type": "object"
+}

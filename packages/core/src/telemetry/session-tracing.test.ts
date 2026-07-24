@@ -1093,6 +1093,25 @@ describe('session-tracing', () => {
       expect(mockSpans[0]!.statuses[0]!.code).toBe(SpanStatusCode.OK);
     });
 
+    it('records and surrogate-safely bounds static tool descriptions', () => {
+      startToolSpan('Read', undefined, 'a'.repeat(4096));
+      expect(mockSpans[0]!.attributes['gen_ai.tool.description']).toHaveLength(
+        4096,
+      );
+
+      startToolSpan('Write', undefined, `${'a'.repeat(4095)}😀`);
+      expect(mockSpans[1]!.attributes['gen_ai.tool.description']).toBe(
+        `${'a'.repeat(4095)}…[truncated]`,
+      );
+    });
+
+    it('omits an empty tool description', () => {
+      startToolSpan('Read', undefined, '');
+      expect(
+        mockSpans[0]!.attributes['gen_ai.tool.description'],
+      ).toBeUndefined();
+    });
+
     it('records error on tool failure', () => {
       const span = startToolSpan('Bash');
       endToolSpan(span, { success: false, error: 'command failed' });

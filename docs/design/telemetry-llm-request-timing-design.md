@@ -542,7 +542,9 @@ Rollback path: revert the single PR (or each of 4a/4b/4c independently). All new
 
 - **After Phase 3 (#4410, in review)**: not a hard dependency. Phase 4 attributes attach to `qwen-code.llm_request` spans regardless of whether they're under a `qwen-code.subagent` (Phase 3) or `qwen-code.interaction` (Phase 1) parent. Recommend Phase 3 land first so per-attempt aggregation under subagent subtrees works naturally.
 - **Independent of #4384** (`traceparent` + `X-Qwen-Code-Session-Id` outbound propagation). They touch the HTTP layer; Phase 4 touches the stream/retry/metric layer.
-- **Independent of `clearDetailedSpanState` chat-compression follow-up** (#4097 follow-up). Different surface.
+- **Independent of GenAI content capture**. Chat compression no longer resets
+  process-global sensitive-attribute hash state because that state was removed;
+  request timing remains a separate surface.
 
 ## Open questions
 
