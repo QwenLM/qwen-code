@@ -25,6 +25,8 @@ const sandboxImageResolverScript = readFileSync(
   '.github/scripts/resolve-sandbox-image.mjs',
   'utf8',
 );
+const autofixContractsScriptPath = '.github/scripts/check-autofix-contracts.sh';
+const autofixContractsScript = readFileSync(autofixContractsScriptPath, 'utf8');
 const autofixRunnerScriptPath = '.qwen/skills/autofix/scripts/run-agent.mjs';
 const checkBotCredentialsStep =
   workflow.match(
@@ -4103,6 +4105,12 @@ describe('qwen-autofix workflow', () => {
       expect(step).not.toContain(
         'bash .github/scripts/check-settings-schema.sh',
       );
+      expect(step).toContain(
+        'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
+      );
+      expect(step).not.toContain(
+        'bash .github/scripts/check-autofix-contracts.sh',
+      );
       // The owning-package resolver is likewise a shared script staged from the
       // trusted base, invoked (not inlined) so the two gates cannot drift into
       // resolving packages differently. The old inline detection must be gone.
@@ -4123,6 +4131,11 @@ describe('qwen-autofix workflow', () => {
     expect(
       workflow.match(
         /cp \.github\/scripts\/check-settings-schema\.sh "\$\{RUNNER_TEMP\}\/check-settings-schema\.sh"/g,
+      ) ?? [],
+    ).toHaveLength(2);
+    expect(
+      workflow.match(
+        /cp \.github\/scripts\/check-autofix-contracts\.sh "\$\{RUNNER_TEMP\}\/check-autofix-contracts\.sh"/g,
       ) ?? [],
     ).toHaveLength(2);
     // The owning-package resolver is staged the same way, in the same steps.
@@ -4201,6 +4214,88 @@ describe('qwen-autofix workflow', () => {
         'bash "${RUNNER_TEMP}/check-settings-schema.sh"',
       ),
     ).toBeLessThan(reviewVerifyGate.indexOf('outcome=noop'));
+    expect(
+      reviewVerifyGate.indexOf(
+        'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
+      ),
+    ).toBeLessThan(reviewVerifyGate.indexOf('outcome=noop'));
+    expect(autofixContractsScript).toContain('npm run check-i18n');
+    expect(autofixContractsScript).toContain(
+      'packages/core/src/tools/tool-names.ts',
+    );
+    expect(autofixContractsScript).toContain(
+      'client/components/messages/toolFormatting.drift.test.ts',
+    );
+    expect(autofixContractsScript).toContain('outcome=failed');
+    expect(ciWorkflow).toContain("run: 'npm run check-i18n'");
+    expect(ciWorkflow).toContain('npm run test:ci');
+  });
+
+  it('runs cross-package autofix contracts only when their source changes', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-contracts-'));
+    const npmLog = join(dir, 'npm.log');
+    try {
+      writeFileSync(
+        join(dir, 'npm'),
+        [
+          '#!/usr/bin/env bash',
+          'printf \'%s\\n\' "$*" >> "${NPM_LOG}"',
+          'if [[ "$*" == "run check-i18n" ]]; then',
+          '  exit "${I18N_EXIT:-0}"',
+          'fi',
+          'exit "${DRIFT_EXIT:-0}"',
+          '',
+        ].join('\n'),
+      );
+      chmodSync(join(dir, 'npm'), 0o755);
+
+      const run = (changedFiles, extraEnv = {}) =>
+        spawnSync('bash', [resolve(autofixContractsScriptPath)], {
+          input: changedFiles,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            NPM_LOG: npmLog,
+            ...extraEnv,
+          },
+        });
+
+      expect(run('packages/core/src/config/config.ts\n').status).toBe(0);
+      expect(readFileSync(npmLog, 'utf8').trim().split('\n')).toEqual([
+        'run check-i18n',
+      ]);
+
+      writeFileSync(npmLog, '');
+      expect(run('packages/core/src/tools/tool-names.ts\n').status).toBe(0);
+      expect(readFileSync(npmLog, 'utf8').trim().split('\n')).toEqual([
+        'run check-i18n',
+        'run test --workspace packages/web-shell -- client/components/messages/toolFormatting.drift.test.ts',
+      ]);
+
+      writeFileSync(npmLog, '');
+      const output = join(dir, 'output');
+      expect(
+        run('packages/core/src/tools/tool-names.ts\n', {
+          GITHUB_OUTPUT: output,
+          I18N_EXIT: '1',
+        }).status,
+      ).toBe(1);
+      expect(readFileSync(npmLog, 'utf8').trim()).toBe('run check-i18n');
+      expect(readFileSync(output, 'utf8')).toContain('outcome=failed');
+
+      writeFileSync(npmLog, '');
+      writeFileSync(output, '');
+      expect(
+        run('packages/core/src/tools/tool-names.ts\n', {
+          GITHUB_OUTPUT: output,
+          DRIFT_EXIT: '1',
+        }).status,
+      ).toBe(1);
+      expect(readFileSync(output, 'utf8')).toContain('outcome=failed');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('passes model credentials directly to qwen subprocesses', () => {
