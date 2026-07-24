@@ -41,6 +41,7 @@ import type {
   ToolArtifact,
   VisionBridgeResult,
   MemoryWriteCandidate,
+  CronTaskDelivery,
   InvocationContextV1,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -159,10 +160,14 @@ import {
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
 // so a rename can't desync caller and answerer into a silent -32601 latch.
-import { MID_TURN_QUEUE_DRAIN_METHOD } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  DAEMON_CHANNEL_DELIVERY_META_KEY,
+  MID_TURN_QUEUE_DRAIN_METHOD,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
+import { normalizeChannelDeliveryText } from '../../serve/channel-delivery.js';
 import { readVoiceModel } from '../../services/voice-settings.js';
 import {
   MAX_AUDIO_BYTES,
@@ -778,12 +783,81 @@ interface CronFire {
    * calling `onFire` and writes the run record under the same value, so it
    * identifies this fire's entry in `runs[]`. */
   lastFiredAt?: number;
+  delivery?: CronTaskDelivery;
 }
 
 interface CronQueueItem {
   prompt: string;
   source: 'cron' | 'loop';
   taskId?: string;
+  firedAt?: number;
+  delivery?: CronTaskDelivery;
+}
+
+interface PromptChannelDelivery {
+  deliveryId: string;
+  target: CronTaskDelivery['target'];
+}
+
+interface ChannelDeliveryCapture {
+  finalText: string;
+}
+
+function beginChannelDeliveryResponseBlock(
+  capture: ChannelDeliveryCapture | undefined,
+): string[] | undefined {
+  if (!capture) return undefined;
+  capture.finalText = '';
+  return [];
+}
+
+function commitChannelDeliveryResponseBlock(
+  capture: ChannelDeliveryCapture | undefined,
+  responseBlock: string[] | undefined,
+  hasFunctionCalls: boolean,
+): void {
+  if (capture && responseBlock && !hasFunctionCalls) {
+    capture.finalText = responseBlock.join('');
+  }
+}
+
+function parsePromptChannelDelivery(
+  params: PromptRequest,
+): PromptChannelDelivery | undefined {
+  const meta = (params as { _meta?: Record<string, unknown> })._meta;
+  const value = meta?.[DAEMON_CHANNEL_DELIVERY_META_KEY];
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const delivery = value as Record<string, unknown>;
+  const target = delivery['target'];
+  if (
+    typeof delivery['deliveryId'] !== 'string' ||
+    delivery['deliveryId'].length === 0 ||
+    typeof target !== 'object' ||
+    target === null ||
+    Array.isArray(target)
+  ) {
+    return undefined;
+  }
+  const targetRecord = target as Record<string, unknown>;
+  if (
+    typeof targetRecord['channelName'] !== 'string' ||
+    targetRecord['channelName'].length === 0 ||
+    (targetRecord['type'] !== 'user' && targetRecord['type'] !== 'chat') ||
+    typeof targetRecord['id'] !== 'string' ||
+    targetRecord['id'].length === 0
+  ) {
+    return undefined;
+  }
+  return {
+    deliveryId: delivery['deliveryId'],
+    target: {
+      channelName: targetRecord['channelName'],
+      type: targetRecord['type'],
+      id: targetRecord['id'],
+    },
+  };
 }
 
 const MAX_NOTIFICATION_QUEUE = 20;
@@ -1125,7 +1199,6 @@ export class Session implements SessionContext {
     apiTimeMs: 0,
   };
   private readonly runtimeBaseDir: string;
-
   // Cron scheduling state
   private cronQueue: CronQueueItem[] = [];
   private cronProcessing = false;
@@ -2081,6 +2154,10 @@ export class Session implements SessionContext {
     }
 
     this.duplicateProviderToolCallResponseIds.clear();
+    const channelDelivery = parsePromptChannelDelivery(params);
+    const channelDeliveryCapture = channelDelivery
+      ? { finalText: '' }
+      : undefined;
 
     // Track this prompt's completion for the next prompt to await
     let resolveCompletion!: () => void;
@@ -2092,6 +2169,7 @@ export class Session implements SessionContext {
       const result = await this.#executePrompt(
         params,
         pendingSend,
+        channelDeliveryCapture,
         invocationContext,
       );
       releasePendingSend();
@@ -2099,6 +2177,18 @@ export class Session implements SessionContext {
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
       this.#maybeEmitFollowupSuggestion(result);
+      if (channelDelivery && result.stopReason === 'end_turn') {
+        this.#scheduleChannelDelivery({
+          sessionId: this.sessionId,
+          deliveryId: channelDelivery.deliveryId,
+          source: 'prompt',
+          target: channelDelivery.target,
+          text: normalizeChannelDeliveryText(
+            channelDeliveryCapture?.finalText ?? '',
+          ),
+          promptId: channelDelivery.deliveryId,
+        });
+      }
       return result;
     } catch (error) {
       if (error instanceof SessionWriterError) {
@@ -2292,6 +2382,7 @@ export class Session implements SessionContext {
   async #executePrompt(
     params: PromptRequest,
     pendingSend: AbortController,
+    channelDeliveryCapture?: ChannelDeliveryCapture,
     invocationContext?: InvocationContextV1,
   ): Promise<PromptResponse> {
     const sessionId = this.config.getSessionId();
@@ -2310,7 +2401,7 @@ export class Session implements SessionContext {
     // the first session created in this process.
     return runWithInvocationContext(invocationContext, () =>
       sessionIdContext.run(sessionId, () =>
-        this.#executePromptInner(params, pendingSend),
+        this.#executePromptInner(params, pendingSend, channelDeliveryCapture),
       ),
     );
   }
@@ -2318,6 +2409,7 @@ export class Session implements SessionContext {
   async #executePromptInner(
     params: PromptRequest,
     pendingSend: AbortController,
+    channelDeliveryCapture?: ChannelDeliveryCapture,
   ): Promise<PromptResponse> {
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
@@ -2646,6 +2738,7 @@ export class Session implements SessionContext {
                 const messageDisplay = this.#createMessageDisplayDispatcher(
                   pendingSend.signal,
                 );
+                let channelDeliveryResponseBlock: string[] | undefined;
 
                 try {
                   const sendResult =
@@ -2670,6 +2763,10 @@ export class Session implements SessionContext {
                   }
                   const responseStream = sendResult.responseStream;
                   nextMessage = null;
+                  channelDeliveryResponseBlock =
+                    beginChannelDeliveryResponseBlock(channelDeliveryCapture);
+                  const channelDeliveryCheckpoint =
+                    channelDeliveryResponseBlock?.length ?? 0;
 
                   let streamFailed = false;
                   try {
@@ -2696,6 +2793,7 @@ export class Session implements SessionContext {
                             part.thought,
                           );
                           if (!part.thought) {
+                            channelDeliveryResponseBlock?.push(part.text);
                             messageDisplay?.addChunk(part.text);
                           }
                         }
@@ -2719,6 +2817,15 @@ export class Session implements SessionContext {
                         resp.type === StreamEventType.RETRY ||
                         resp.type === StreamEventType.MODEL_FALLBACK
                       ) {
+                        if (
+                          resp.type === StreamEventType.MODEL_FALLBACK ||
+                          !resp.isContinuation
+                        ) {
+                          if (channelDeliveryResponseBlock) {
+                            channelDeliveryResponseBlock.length =
+                              channelDeliveryCheckpoint;
+                          }
+                        }
                         await finalizeToolCallPreparations(
                           preparationTracker,
                           true,
@@ -2810,6 +2917,12 @@ export class Session implements SessionContext {
                   await messageDisplay?.finish();
                 }
 
+                commitChannelDeliveryResponseBlock(
+                  channelDeliveryCapture,
+                  channelDeliveryResponseBlock,
+                  functionCalls.length > 0,
+                );
+
                 if (usageMetadata) {
                   this.#recordPromptTokenCount(usageMetadata);
                   // Kick off rewrite in background (non-blocking, runs parallel to tools)
@@ -2884,6 +2997,7 @@ export class Session implements SessionContext {
                 messageBus,
                 true,
                 fullTurnModelOverride,
+                channelDeliveryCapture,
               );
             } finally {
               logConversationFinishedEvent(
@@ -2909,6 +3023,7 @@ export class Session implements SessionContext {
     messageBus: MessageBus | undefined,
     allowExternalHooks = true,
     modelOverride?: string,
+    channelDeliveryCapture?: ChannelDeliveryCapture,
   ): Promise<{ stopReason: PromptResponse['stopReason'] }> {
     const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     let stopHookIterationCount = 0;
@@ -2956,6 +3071,7 @@ export class Session implements SessionContext {
             {
               onFullTurnModel,
               getModelOverride: () => modelOverride,
+              channelDeliveryCapture,
             },
           );
           if (continuation.kind === 'terminal') {
@@ -3034,6 +3150,7 @@ export class Session implements SessionContext {
               {
                 onFullTurnModel,
                 getModelOverride: () => modelOverride,
+                channelDeliveryCapture,
               },
             );
             if (continuation.kind === 'terminal') {
@@ -3144,6 +3261,7 @@ export class Session implements SessionContext {
             : {}),
           onFullTurnModel,
           getModelOverride: () => modelOverride,
+          channelDeliveryCapture,
         },
       );
       if (continuation.supersededAutomaticContinuation && externalReason) {
@@ -3168,6 +3286,7 @@ export class Session implements SessionContext {
       onAutomaticContinuationValidated?: () => Promise<void>;
       onFullTurnModel?: (model: string) => boolean;
       getModelOverride?: () => string | undefined;
+      channelDeliveryCapture?: ChannelDeliveryCapture;
     } = {},
   ): Promise<StopContinuationResult> {
     let nextMessage: Content | null = { role: 'user', parts };
@@ -3208,6 +3327,7 @@ export class Session implements SessionContext {
       const messageDisplay = this.#createMessageDisplayDispatcher(
         pendingSend.signal,
       );
+      let channelDeliveryResponseBlock: string[] | undefined;
 
       try {
         const sendResult = await this.#sendMessageStreamWithAutoCompression(
@@ -3386,6 +3506,11 @@ export class Session implements SessionContext {
 
         const responseStream = sendResult.responseStream;
         nextMessage = null;
+        channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
+          options.channelDeliveryCapture,
+        );
+        const channelDeliveryCheckpoint =
+          channelDeliveryResponseBlock?.length ?? 0;
         initialSend = false;
         if (guardForThisSend) {
           const guardCommitted = this.todoStopGuard.commitContinuation(
@@ -3424,7 +3549,10 @@ export class Session implements SessionContext {
                 'assistant',
                 part.thought,
               );
-              if (!part.thought) messageDisplay?.addChunk(part.text);
+              if (!part.thought) {
+                channelDeliveryResponseBlock?.push(part.text);
+                messageDisplay?.addChunk(part.text);
+              }
             }
           }
 
@@ -3445,6 +3573,14 @@ export class Session implements SessionContext {
             response.type === StreamEventType.RETRY ||
             response.type === StreamEventType.MODEL_FALLBACK
           ) {
+            if (
+              response.type === StreamEventType.MODEL_FALLBACK ||
+              !response.isContinuation
+            ) {
+              if (channelDeliveryResponseBlock) {
+                channelDeliveryResponseBlock.length = channelDeliveryCheckpoint;
+              }
+            }
             await finalizeToolCallPreparations(
               preparationTracker,
               true,
@@ -3490,6 +3626,12 @@ export class Session implements SessionContext {
           await messageDisplay?.finish();
         }
       }
+
+      commitChannelDeliveryResponseBlock(
+        options.channelDeliveryCapture,
+        channelDeliveryResponseBlock,
+        functionCalls.length > 0,
+      );
 
       if (usageMetadata) {
         this.#recordPromptTokenCount(usageMetadata);
@@ -3641,6 +3783,26 @@ export class Session implements SessionContext {
     };
 
     await this.client.sessionUpdate(params);
+  }
+
+  #scheduleChannelDelivery(params: Record<string, unknown>): void {
+    // Best-effort: the unref'd timer means delivery is silently dropped
+    // if the process exits before the next tick — consistent with the
+    // no-retry delivery contract.
+    const timer = setTimeout(() => {
+      void this.client
+        .extMethod(SERVE_CONTROL_EXT_METHODS.channelDelivery, params)
+        .catch((error) => {
+          try {
+            debugLogger.warn(
+              `Channel delivery submission failed: ${error instanceof Error ? error.message : String(error)}`,
+            );
+          } catch {
+            // Delivery diagnostics must not create an unhandled rejection.
+          }
+        });
+    }, 0);
+    timer.unref();
   }
 
   #getCurrentChat(): GeminiChat {
@@ -4290,6 +4452,8 @@ export class Session implements SessionContext {
         prompt: job.prompt,
         source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
         ...(job.id ? { taskId: job.id } : {}),
+        ...(job.lastFiredAt !== undefined ? { firedAt: job.lastFiredAt } : {}),
+        ...(job.delivery ? { delivery: job.delivery } : {}),
       });
       void this.#drainCronQueue();
     });
@@ -4477,6 +4641,10 @@ export class Session implements SessionContext {
         const promptId =
           this.config.getSessionId() + '########cron' + Date.now();
         let cronHadError = false;
+        let cronCompleted = false;
+        const channelDeliveryCapture = item.delivery
+          ? { finalText: '' }
+          : undefined;
         await withInteractionSpan(
           this.config,
           {
@@ -4660,6 +4828,10 @@ export class Session implements SessionContext {
                   return;
                 }
                 const responseStream = sendResult.responseStream;
+                const channelDeliveryResponseBlock =
+                  beginChannelDeliveryResponseBlock(channelDeliveryCapture);
+                const channelDeliveryCheckpoint =
+                  channelDeliveryResponseBlock?.length ?? 0;
                 if (loopTick && turnCount === 1) {
                   // The block reached the model (the send started); commit it so
                   // the next tick can detect "unchanged". Deferring the commit
@@ -4694,6 +4866,7 @@ export class Session implements SessionContext {
                           part.thought,
                         );
                         if (!part.thought) {
+                          channelDeliveryResponseBlock?.push(part.text);
                           messageDisplay?.addChunk(part.text);
                         }
                       }
@@ -4717,6 +4890,15 @@ export class Session implements SessionContext {
                       resp.type === StreamEventType.RETRY ||
                       resp.type === StreamEventType.MODEL_FALLBACK
                     ) {
+                      if (
+                        resp.type === StreamEventType.MODEL_FALLBACK ||
+                        !resp.isContinuation
+                      ) {
+                        if (channelDeliveryResponseBlock) {
+                          channelDeliveryResponseBlock.length =
+                            channelDeliveryCheckpoint;
+                        }
+                      }
                       await finalizeToolCallPreparations(
                         preparationTracker,
                         true,
@@ -4741,6 +4923,12 @@ export class Session implements SessionContext {
                     await messageDisplay?.finish();
                   }
                 }
+
+                commitChannelDeliveryResponseBlock(
+                  channelDeliveryCapture,
+                  channelDeliveryResponseBlock,
+                  functionCalls.length > 0,
+                );
 
                 if (usageMetadata) {
                   this.#recordPromptTokenCount(usageMetadata);
@@ -4780,6 +4968,7 @@ export class Session implements SessionContext {
                   }
                 }
               }
+              let stopReason: PromptResponse['stopReason'] = 'end_turn';
               if (this.todoStopGuard.needsStopInspection) {
                 const guardStop = await this.#handleStopHookLoop(
                   ac,
@@ -4787,11 +4976,15 @@ export class Session implements SessionContext {
                   false,
                   undefined,
                   false,
+                  undefined,
+                  channelDeliveryCapture,
                 );
+                stopReason = guardStop.stopReason;
                 if (guardStop.stopReason === 'max_tokens') {
                   this.#stopCronAfterTokenLimit();
                 }
               }
+              cronCompleted = stopReason === 'end_turn' && !ac.signal.aborted;
             } catch (error) {
               if (ac.signal.aborted) {
                 this.todoStopGuard.suspend();
@@ -4824,6 +5017,24 @@ export class Session implements SessionContext {
           () =>
             ac.signal.aborted ? 'cancelled' : cronHadError ? 'error' : 'ok',
         );
+        if (
+          cronCompleted &&
+          item.delivery &&
+          item.taskId &&
+          item.firedAt !== undefined
+        ) {
+          this.#scheduleChannelDelivery({
+            sessionId: this.sessionId,
+            deliveryId: `${item.taskId}:${item.firedAt}`,
+            source: 'scheduled',
+            target: item.delivery.target,
+            text: normalizeChannelDeliveryText(
+              channelDeliveryCapture?.finalText ?? '',
+            ),
+            taskId: item.taskId,
+            firedAt: item.firedAt,
+          });
+        }
       },
     );
   }

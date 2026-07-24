@@ -7,7 +7,10 @@
 import express from 'express';
 import type { Application } from 'express';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
-import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core';
+import {
+  hashDaemonWorkspace,
+  type DurableCronTask,
+} from '@qwen-code/qwen-code-core';
 import type { DaemonLogger } from './daemon-logger.js';
 import type {
   DaemonMetricsBucket,
@@ -100,6 +103,7 @@ import {
   registerScheduledTasksRoutes,
   registerWorkspaceQualifiedScheduledTasksRoutes,
 } from './routes/scheduled-tasks.js';
+import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
 import { registerGoalsRoutes } from './routes/goals.js';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
@@ -222,6 +226,11 @@ import {
   registerWorkspaceSkillsRoutes,
 } from './routes/workspace-skills.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
+import type {
+  ChannelDeliveryAccepted,
+  ChannelDeliveryRequest,
+} from './channel-delivery-ipc.js';
+import type { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 import {
   parseChannelWebhookConfigLenient,
   type parseChannelWebhookConfig,
@@ -428,6 +437,11 @@ export interface ServeAppDeps {
   ) => Promise<ChannelWorkerSetResult>;
   stopChannelWorker?: () => Promise<ChannelWorkerStopResult>;
   enqueueChannelWebhookTask?: ChannelWorkerSupervisor['enqueueWebhookTask'];
+  deliverChannelMessage?: (
+    workspaceCwd: string,
+    request: ChannelDeliveryRequest,
+  ) => Promise<ChannelDeliveryAccepted>;
+  channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
   channelWebhookConfigSources?: readonly ChannelWebhookConfigSource[];
   getChannelWebhookConfigSources?: () => readonly ChannelWebhookConfigSource[];
   getChannelWebhookConfigVersion?: () => number;
@@ -1173,6 +1187,14 @@ export function createServeApp(
     languageCodes,
   });
 
+  registerChannelNotifyRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    deliverChannelMessage: deps.deliverChannelMessage,
+  });
+
   registerWorkspaceStatusRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
@@ -1469,6 +1491,7 @@ export function createServeApp(
     mutate,
     sendBridgeError,
     daemonLog,
+    channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
     promptDeadlineMs: opts.promptDeadlineMs,
     sessionShellCommandEnabled,
     languageCodes,
@@ -1604,6 +1627,7 @@ export function createServeApp(
     mutate,
     safeBody,
     bridge: deps.manageScheduledTaskSessions ? bridge : undefined,
+    channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
   });
 
   // Workspace-wide active-goal listing (the Web Shell "Goals" page). Read-only
@@ -1623,6 +1647,7 @@ export function createServeApp(
     mutate,
     safeBody,
     manageScheduledTaskSessions: deps.manageScheduledTaskSessions === true,
+    channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
   });
 
   // Read-only token-usage dashboard (Daemon Status "统计" tab). Aggregate local
@@ -1633,6 +1658,25 @@ export function createServeApp(
   // embeds that call createServeApp neither spawn sessions on boot nor hold a
   // heartbeat timer (both would read the bound workspace's real tasks file).
   if (deps.manageScheduledTaskSessions) {
+    const registerScheduledTaskAuthorizations = (
+      workspaceCwd: string,
+      tasks: readonly DurableCronTask[],
+    ) => {
+      const authorizations = deps.channelDeliveryAuthorizations;
+      if (!authorizations) return;
+      for (const task of tasks) {
+        if (!task.delivery || !task.sessionId) continue;
+        authorizations.registerScheduledTask(workspaceCwd, {
+          sessionId: task.sessionId,
+          taskId: task.id,
+          target: task.delivery.target,
+          recurring: task.recurring,
+          ...(typeof task.lastFiredAt === 'number'
+            ? { lastFiredAt: task.lastFiredAt }
+            : {}),
+        });
+      }
+    };
     // Keepalive: keep task sessions resident so their in-child schedulers keep
     // ticking rather than being idle-reaped, AND revive a re-enabled bound
     // session the reaper already let go. The revive loop is needed even when the
@@ -1654,6 +1698,8 @@ export function createServeApp(
       void rehydrateScheduledTaskSessions({
         bridge: taskBridge,
         boundWorkspace: workspaceCwd,
+        onTasksRead: (tasks) =>
+          registerScheduledTaskAuthorizations(workspaceCwd, tasks),
         onError: (sessionId, err) => {
           process.stderr.write(
             `qwen serve: failed to rehydrate scheduled-task session ${sessionId}: ${
@@ -1687,6 +1733,8 @@ export function createServeApp(
         bridge: runtime.bridge,
         boundWorkspace: runtime.workspaceCwd,
         intervalMs: keepaliveIntervalMs,
+        onTasksRead: (tasks) =>
+          registerScheduledTaskAuthorizations(runtime.workspaceCwd, tasks),
       });
       rehydrateWorkspace(runtime.bridge, runtime.workspaceCwd);
       keepaliveStops.set(runtime.workspaceCwd, keepalive.stop);

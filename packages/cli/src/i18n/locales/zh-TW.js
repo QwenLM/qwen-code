@@ -272,6 +272,7 @@ export default {
     '正在連接到 MCP servers... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': '輸入您的消息或 @ 檔案路徑',
   '? for shortcuts': '按 ? 查看快捷鍵',
+  'Pasting…': '正在貼上…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "按 'i' 進入插入模式，按 'Esc' 進入普通模式",
   'Cancel operation / Clear input (double press)':

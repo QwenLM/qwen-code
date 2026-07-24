@@ -74,6 +74,7 @@ export default {
   'Type your message or @path/to/file':
     'Escriviu el vostre missatge o @camí/al/fitxer',
   '? for shortcuts': '? per a dreceres',
+  'Pasting…': 'Enganxant…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Premeu 'i' per al mode INSERCIÓ i 'Esc' per al mode NORMAL.",
   'Cancel operation / Clear input (double press)':
