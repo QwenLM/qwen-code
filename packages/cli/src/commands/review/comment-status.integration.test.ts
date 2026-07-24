@@ -116,10 +116,17 @@ describe('makeGitProbe (real git)', () => {
   it('takes the comment path literally, not as pathspec magic', () => {
     const base = commitFile('pkg/src/a.ts', 'v1\n', 'base');
     commitFile('pkg/src/a.ts', 'v2\n', 'fix');
-    // `:(exclude)…` would flip the meaning if magic were honored; literal
-    // means "a file actually named this", which does not exist → unchanged.
-    const got = makeGitProbe(repo)(':(exclude)pkg/src/a.ts', base);
-    expect(got.changed).toBe(false);
+    // A DISCRIMINATING pathspec: `:(glob)pkg/**` under magic matches the
+    // changed a.ts → changed:true; taken literally it is a file named
+    // `:(glob)pkg/**`, which does not exist → changed:false. Asserting false
+    // therefore fails if the literal prefix is ever dropped (magic would
+    // return true) — unlike `:(exclude)…`, which reads false either way.
+    const magic = makeGitProbe(repo)(':(glob)pkg/**', base);
+    expect(magic.changed).toBe(false);
+    // Control: the same file under its plain path IS seen as changed, proving
+    // the false above is the literal-vs-magic distinction, not a dead probe.
+    const plain = makeGitProbe(repo)('pkg/src/a.ts', base);
+    expect(plain.changed).toBe(true);
   });
 
   it('reports unchanged for a file the range never touched', () => {

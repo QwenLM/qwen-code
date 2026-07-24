@@ -350,17 +350,26 @@ async function runCommentStatus(args: CommentStatusArgs): Promise<void> {
 
   const worktree = worktreePath(prNumber);
   const worktreeHeadSha = gitOpt('-C', worktree, 'rev-parse', 'HEAD');
+  // A null HEAD means the worktree is absent (comment-status run before
+  // fetch-pr, or after cleanup) — every thread's code facts then degrade to
+  // 'unknown', which must not pass silently as if the files were unchanged.
+  const worktreeMissing = worktreeHeadSha === null;
   // Anchor facts (`line`, outdated) describe the LIVE head — GitHub maps
   // comments against the latest diff it serves. Code facts (`touchedBy`,
   // changedSinceComment) describe the WORKTREE head — the code this review
-  // rules on. Drift when the worktree lags the live head, OR when the head
-  // moved between the two samples (a push raced the fetch).
+  // rules on. Two distinct conditions:
+  //  - worktreeStale: the checked-out code lags the live head, so the code
+  //    facts describe a SUPERSEDED checkout (this is what staleWorktree means
+  //    per-thread — NOT the union below).
+  //  - headMovedDuringFetch: the head moved between the two samples, so the
+  //    anchor facts may be mixed across commits even if the worktree happens
+  //    to match the final head; that is a separate warning, not staleness.
   const headMovedDuringFetch =
     liveHeadBefore !== '' &&
     liveHeadAfter !== '' &&
     liveHeadBefore !== liveHeadAfter;
   const worktreeStale =
-    worktreeHeadSha !== null &&
+    !worktreeMissing &&
     liveHeadAfter !== '' &&
     worktreeHeadSha !== liveHeadAfter;
   const headDrift = headMovedDuringFetch || worktreeStale;
@@ -370,10 +379,12 @@ async function runCommentStatus(args: CommentStatusArgs): Promise<void> {
     prAuthor,
     makeGitProbe(worktree),
   );
-  if (headDrift) {
-    // Denormalize the drift onto every thread: the code facts describe a
-    // superseded checkout, and a jq consumer of threads[] must not need to
-    // remember a top-level flag to see that.
+  if (worktreeStale) {
+    // Denormalize onto every thread: the code facts describe a superseded
+    // checkout, and a jq consumer of threads[] must not need to remember a
+    // top-level flag to see that. Keyed on worktreeStale specifically — a
+    // head that merely moved mid-fetch while the worktree matches the final
+    // head is NOT a superseded checkout.
     for (const t of threads) t.code.staleWorktree = true;
   }
   const summary = summarizeThreads(threads);
@@ -385,6 +396,7 @@ async function runCommentStatus(args: CommentStatusArgs): Promise<void> {
     liveHeadSha: liveHeadAfter,
     liveHeadBefore,
     worktreeHeadSha,
+    worktreeMissing,
     headDrift,
     headMovedDuringFetch,
     inlineComments: comments.length,
@@ -401,6 +413,13 @@ async function runCommentStatus(args: CommentStatusArgs): Promise<void> {
       `${summary.changedSinceComment} on files changed since their comment, ` +
       `${summary.withReplies} with replies, ${summary.authorReplied} answered by the PR author)`,
   );
+  if (worktreeMissing) {
+    writeStdoutLine(
+      `warning: no worktree at ${worktree} — run \`qwen review fetch-pr\` first. ` +
+        `Every thread's code facts (changedSinceComment, touchedBy) are \`unknown\`; ` +
+        `only the anchor and reply facts are usable.`,
+    );
+  }
   if (headMovedDuringFetch) {
     writeStdoutLine(
       `warning: PR head moved during the comments fetch (${liveHeadBefore.slice(0, 8)} → ${liveHeadAfter.slice(0, 8)}) — ` +

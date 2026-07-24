@@ -142,4 +142,49 @@ describe('comment-status handler', () => {
     expect(report.liveHeadSha).toBe('headB');
     expect(warnings().join('\n')).toContain('moved during the comments fetch');
   });
+
+  it('does not mark threads staleWorktree when the head raced but the worktree matches the final head', async () => {
+    // Worktree is at headB (the final live head); the head merely moved
+    // mid-fetch. The checkout is NOT superseded, so staleWorktree must stay
+    // false even though headDrift/headMovedDuringFetch are true.
+    mocks.gitOpt.mockImplementation((...args: string[]) =>
+      args.includes('rev-parse') ? 'headB' : null,
+    );
+    // One thread so we can inspect its code facts.
+    mocks.ghApiAll.mockReturnValue([
+      {
+        id: 1,
+        user: { login: 'r' },
+        path: 'a.ts',
+        line: 1,
+        original_commit_id: 's',
+      },
+    ]);
+    queueHeads('headA', 'headB');
+    await run();
+    const report = reportWritten();
+    expect(report.headMovedDuringFetch).toBe(true);
+    expect(report.threads[0].code.staleWorktree).toBe(false);
+  });
+
+  it('warns and flags worktreeMissing when the worktree is absent', async () => {
+    // gitOpt returns null for everything (no worktree): every thread's code
+    // facts are unknown, which must not pass silently.
+    mocks.gitOpt.mockReturnValue(null);
+    mocks.ghApiAll.mockReturnValue([
+      {
+        id: 1,
+        user: { login: 'r' },
+        path: 'a.ts',
+        line: 1,
+        original_commit_id: 's',
+      },
+    ]);
+    queueHeads('headA', 'headA');
+    await run();
+    const report = reportWritten();
+    expect(report.worktreeMissing).toBe(true);
+    expect(report.threads[0].code.changedSinceComment).toBe('unknown');
+    expect(warnings().join('\n')).toContain('no worktree at');
+  });
 });
