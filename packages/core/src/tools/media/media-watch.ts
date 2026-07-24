@@ -15,11 +15,13 @@ import { getMediaReadPermission } from '../../utils/media/media-security.js';
 import { resolveMediaConfig } from '../../utils/media/media-config.js';
 import { isModelOwned } from '../../utils/media/decision-policy.js';
 import type { MediaReadParams } from '../../utils/media/reader-registry.js';
+import type { MediaEffort } from '../../utils/media/types.js';
 
 export interface MediaWatchParams {
   file_path: string;
   range?: [number, number];
   fps?: number;
+  effort?: MediaEffort;
 }
 
 class MediaWatchInvocation extends BaseToolInvocation<
@@ -53,6 +55,9 @@ class MediaWatchInvocation extends BaseToolInvocation<
     }
     if (isModelOwned('fps', policy) && this.params.fps !== undefined) {
       params.fps = this.params.fps;
+    }
+    if (isModelOwned('effort', policy) && this.params.effort !== undefined) {
+      params.effort = this.params.effort;
     }
     return readMedia({
       filePath: this.params.file_path,
@@ -96,6 +101,14 @@ export class MediaWatchTool extends BaseDeclarativeTool<
       properties['fps'] = {
         type: 'number',
         description: 'Optional frames-per-second to sample (video only).',
+      };
+    }
+    if (isModelOwned('effort', policy)) {
+      properties['effort'] = {
+        type: 'string',
+        enum: ['low', 'medium', 'high', 'xhigh', 'max'],
+        description:
+          'Optional detail/cost tradeoff. Higher effort samples more frames at higher resolution.',
       };
     }
     super(

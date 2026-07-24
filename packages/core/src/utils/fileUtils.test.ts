@@ -1918,11 +1918,15 @@ describe('fileUtils', () => {
         expect(result.error).toBeUndefined();
         expect(Array.isArray(result.llmContent)).toBe(true);
         const parts = result.llmContent as MediaPart[];
-        expect(parts).toHaveLength(2);
+        // 2 page images + the mandatory downscale-disclosure note (零静默降质).
+        expect(parts).toHaveLength(3);
         expect(parts[0]!.inlineData).toMatchObject({
           data: 'AAA',
           mimeType: 'image/jpeg',
         });
+        expect(
+          parts.some((p) => /downscaled to \d+px/.test(p.text ?? '')),
+        ).toBe(true);
         expect(result.returnDisplay).toContain('image');
         expect(mockRender).toHaveBeenCalledWith(testPdfFilePath, {
           firstPage: 1,
@@ -1948,7 +1952,7 @@ describe('fileUtils', () => {
         );
 
         expect(Array.isArray(result.llmContent)).toBe(true);
-        expect(result.llmContent).toHaveLength(3);
+        expect(result.llmContent).toHaveLength(4);
         expect(mockRender).toHaveBeenCalledWith(testPdfFilePath, {
           firstPage: 1,
           lastPage: PDF_MAX_PAGES_PER_READ,
@@ -1973,7 +1977,7 @@ describe('fileUtils', () => {
         );
 
         expect(Array.isArray(result.llmContent)).toBe(true);
-        expect(result.llmContent).toHaveLength(2);
+        expect(result.llmContent).toHaveLength(3);
       });
 
       it('still returns page guidance (no render) beyond the page ceiling', async () => {
@@ -3055,7 +3059,10 @@ describe('fileUtils', () => {
       expect(result.isTruncated).toBe(false);
     });
 
-    it('should still return an error if an inline media file exceeds 10MB', async () => {
+    it('routes an oversized inline image to media-memory guidance (no hard error)', async () => {
+      // Large media is no longer a bare "too large" error: the shared read path
+      // is memory-first (keyed by path) and, absent prior understanding, names
+      // the media tool to use. See largeMediaMemoryResult / commit d3b6cfef9.
       mockMimeGetType.mockReturnValue('image/png');
       actualNodeFs.writeFileSync(
         testImageFilePath,
@@ -3067,11 +3074,9 @@ describe('fileUtils', () => {
         mockConfig,
       );
 
-      expect(result.error).toContain('File size exceeds the 10MB limit');
-      expect(result.returnDisplay).toContain(
-        'File size exceeds the 10MB limit',
-      );
-      expect(result.llmContent).toContain('File size exceeds the 10MB limit');
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('too large to read inline');
+      expect(result.llmContent).toContain('image_view');
     });
 
     it('should allow explicit page ranges above the full-PDF text-extraction size cap', async () => {

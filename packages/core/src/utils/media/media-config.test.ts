@@ -23,11 +23,12 @@ describe('media-config', () => {
 
   it('merges the user decision policy over defaults', () => {
     const resolved = resolveMediaConfig(
-      fakeConfig({ decisionPolicy: { fps: 'model' } }),
+      fakeConfig({ decisionPolicy: { reader: 'model' } }),
     );
+    expect(resolved.decisionPolicy['reader']).toBe('model');
+    // Unspecified knobs keep their default (refinement knobs are model-owned).
+    expect(resolved.decisionPolicy['range']).toBe('model');
     expect(resolved.decisionPolicy['fps']).toBe('model');
-    // Unspecified knobs keep their scaffold default.
-    expect(resolved.decisionPolicy['range']).toBe('scaffold');
   });
 
   it('keeps default readers when the user list is empty', () => {

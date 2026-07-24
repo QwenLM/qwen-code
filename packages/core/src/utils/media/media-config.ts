@@ -28,9 +28,23 @@ export interface MediaInjectionConfig {
 }
 
 export interface MediaUploadConfig {
-  /** Upload backend KIND selector (deployment params come from env). */
-  backend?: string;
+  /**
+   * Upload backend KIND selector. `command` runs an upload CLI that prints the
+   * public URL; `http` PUTs the bytes to an endpoint. Deployment secrets come
+   * from env (see `headersEnv`), never inlined here.
+   */
+  backend?: 'command' | 'http' | string;
   bucket?: string;
+  /** `command` backend: template with {path}/{name}/{bucket}; prints URL on stdout. */
+  command?: string;
+  /** `http` backend: upload target URL (may template {name}); defaults to publicUrlBase/{name}. */
+  endpoint?: string;
+  /** `http` backend: base of the fetchable public URL the provider will read. */
+  publicUrlBase?: string;
+  /** `http` backend: HTTP method for the upload (default PUT). */
+  method?: string;
+  /** `http` backend: map of header name → env var holding its value (e.g. auth token). */
+  headersEnv?: Record<string, string>;
 }
 
 export interface MediaConfig {

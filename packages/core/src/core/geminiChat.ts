@@ -76,7 +76,9 @@ import {
   InMemoryImagePayloadStore,
   buildReattachParts,
   countAllInlineImages,
+  countAllInlineAudioVideo,
   replaceImagePayloadsInPlace,
+  replaceAudioVideoPayloadsInPlace,
 } from '../services/image-payload-references.js';
 import {
   estimateContentTokens,
@@ -1619,15 +1621,29 @@ export class GeminiChat {
     const { maxRecentImages, imagePayloadThreshold } = resolveCompactionTuning(
       this.config.getChatCompression(),
     );
+    const skipEntry = currentUserContent
+      ? curatedHistory.find(
+          (c) =>
+            c === currentUserContent ||
+            (c.role === 'user' &&
+              currentUserContent.parts?.some((p) => c.parts?.includes(p))),
+        )
+      : undefined;
+
+    // Seam B — audio/video history governance. A/V payloads are far larger than
+    // images; re-sending them every turn is duplicate injection and token bloat.
+    // Evict them from prior turns to a text reference (understanding stays in
+    // media memory); the current user turn is kept so freshly-provided media is
+    // still seen this turn. No reattach — bytes are too large to re-send.
+    if (countAllInlineAudioVideo(curatedHistory) > 0) {
+      replaceAudioVideoPayloadsInPlace(
+        curatedHistory,
+        this.imagePayloadStore,
+        skipEntry,
+      );
+    }
+
     if (countAllInlineImages(curatedHistory) >= imagePayloadThreshold) {
-      const skipEntry = currentUserContent
-        ? curatedHistory.find(
-            (c) =>
-              c === currentUserContent ||
-              (c.role === 'user' &&
-                currentUserContent.parts?.some((p) => c.parts?.includes(p))),
-          )
-        : undefined;
       const replaced = replaceImagePayloadsInPlace(
         curatedHistory,
         this.imagePayloadStore,

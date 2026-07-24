@@ -39,8 +39,12 @@ export interface MediaProbe {
   /** Pixel dimensions for image/video, when known. */
   width?: number;
   height?: number;
+  /** Video frame rate (frames per second), when known. */
+  fps?: number;
   /** Whether a video carries an audio track, when known. */
   hasAudio?: boolean;
+  /** Number of audio channels for audio/video, when known. */
+  audioChannels?: number;
 }
 
 /** Rough cost estimate for a read, used by capability gating and effort. */

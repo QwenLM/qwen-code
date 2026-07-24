@@ -31,6 +31,7 @@ import {
   isPdftotextAvailable,
   parsePDFPageRange,
   PDF_MAX_PAGES_PER_READ,
+  PDF_RENDER_SCALE_TO_PX,
   PDF_TEXT_EXTRACTION_UNAVAILABLE_MESSAGE,
   PDF_TEXT_RESULT_MAX_TOKENS,
   renderPDFPagesToImages,
@@ -1555,6 +1556,12 @@ export async function processSingleFileContent(
           );
           if (render.success && render.images.length > 0) {
             const parts = toImageParts(render.images, startPage);
+            // No silent quality loss: each page is rasterized and downscaled to
+            // PDF_RENDER_SCALE_TO_PX on its longest edge, so fine print may be
+            // unreadable. Disclose it and how to read a page more closely.
+            parts.push({
+              text: `[Pages rendered as images downscaled to ${PDF_RENDER_SCALE_TO_PX}px on the longest edge; small text may be lost. To read a page at more detail, request that single page via the 'pages' parameter.]`,
+            });
             // Never drop pages silently. Two ways a no-page-range read can be
             // partial: the byte cap kicked in, or the render filled the page
             // ceiling (the page count was unknown/underestimated upstream, so

@@ -1,25 +1,71 @@
 # Unified Multimodal Layer (media)
 
-Status: initial skeleton (P0–P5 additive slice) landed on `feat/unified-multimodal-layer`.
+Status: P0–P5 implemented (everything except the generation track PG) on
+`feat/unified-multimodal-layer`.
 
-This implements the skeleton + minimal working defaults of the unified
-multimodal understanding layer described in the omni_harness design docs
-(`需求与设计-统一多模态理解.md`, `方案-统一多模态层与媒体记忆.md`,
-`实施计划.md`). It follows the three beliefs: cross-session media memory,
-"assumptions expire → pluggable", and "one interface + config selects the
-implementation + an effort knob". Everything here is **additive** — no
-core hotspot (`geminiChat`, `coreToolScheduler` media pass-through,
-`converter.ts`) changed behavior; media reaches the model over the existing
-tool-result media path.
+This implements the unified multimodal understanding layer described in the
+omni_harness design docs (`需求与设计-统一多模态理解.md`,
+`方案-统一多模态层与媒体记忆.md`, `实施计划.md`). It follows the three beliefs:
+cross-session media memory, "assumptions expire → pluggable", and "one interface
+
+- config selects the implementation + an effort knob". Reads reach the model over
+  the existing tool-result media path; the one core-hotspot change is Seam B
+  audio/video history governance in `geminiChat` (additive, mirrors the existing
+  image-payload eviction).
+
+## What is real (not scaffold)
+
+- **Probe** fills duration / resolution / **fps** / audio-track / audio-channels
+  via `ffprobe` (best-effort; images are probed for dimensions too).
+- **Refinement knobs actually apply** (ffmpeg): image `region` (crop) / `scale`
+  / provider long-edge cap; audio/video `range` (clip) and `fps` (sampling).
+  Every reduction is declared in the C10 `precision` note. The default decision
+  policy makes range/fps/region/scale/effort **model-owned** (they now do
+  something), so `image_view` / `media_watch` expose them.
+- **Effort ladder** (`media-effort.ts`) maps low→max to concrete choices
+  (keyframe count, frame long-edge, segment count, image-cap scale) across the
+  native reader, keyframe extractor and `media_dispatch`.
+- **Upload backends** (`core/media/uploader.ts`): `command` (run any upload CLI
+  that prints the public URL — aliyun/aws/rclone, dependency-free) and `http`
+  (PUT bytes to an endpoint, reference by public URL). Default stays fail-closed
+  with a remedy. Selected by `media.upload.backend`.
+- **Per-provider media profiles** (`provider-media-profiles.ts`): qwen-vl /
+  gemini / anthropic / openai, selected by auth type (with a DashScope base-URL
+  sniff), carrying image long-edge caps, per-modality token estimates, and
+  whether the provider can fetch a `fileData.fileUri`.
+- **Delegated backends** (`delegated-reader.ts`): `command` (local ASR/OCR CLI),
+  `subagent` (one-shot multimodal understanding call — image/keyframes/audio →
+  a vision model), and `mcp` (route to a discovered MCP tool). All fail closed
+  with a remedy.
+- **`media_extract`** (`media-derive.ts`): `keyframes` / `audio_track` / `clip`
+  run locally via ffmpeg and are written to a **content-addressed derived store**
+  (`media-memory/derived/<hash>.<ext>`) — each artifact is a first-class media
+  file with its own hash + memory record linked back to the source
+  (`derivedFrom`), searchable via `media_grep`. `transcript` routes to the
+  delegated understanding/ASR backend.
+- **P0 anti-pattern fixed**: computer-use screenshots now disclose their
+  downscale cap (and how to get full resolution) on every screenshot part, not
+  only on failure; rendered PDF pages disclose the per-page 1600px downscale.
+- **Seam B (a/v)**: `image-payload-references.ts` now evicts inline audio/video
+  payloads from prior turns to a memory-pointing text reference (no reattach —
+  bytes too large; the current turn is preserved). This bounds token cost,
+  prevents duplicate injection, and survives model switches. Wired into
+  `geminiChat.getRequestHistory`.
+- **P5 skill media** (`media-references.ts`): media files referenced in a skill
+  body are surfaced through the unified read interface on skill load
+  (summary-first with prior understanding + how-to-pull, or inline bytes per
+  `media.injection.mode`), confined to the skill directory.
 
 ## Large files & oversized video
 
-Probe fills duration/resolution/audio-track best-effort via `ffprobe`. Files
-past the inline limit try the upload backend first; when none is configured, a
-video falls back to **local `ffmpeg` keyframe extraction** — a handful of
-downsampled frames delivered inline, with an explicit LOSSY precision note. This
-makes large videos (e.g. 170MB+) usable without an upload backend. Audio/other
-modalities still fail closed with the upload remedy.
+Probe fills duration/resolution/audio-track/fps via `ffprobe`. Files past the
+inline limit try the configured upload backend first (when the provider can
+fetch a URL); when none is configured, a video falls back to **local `ffmpeg`
+keyframe extraction** — a handful of downsampled frames delivered inline with an
+explicit LOSSY precision note. Reading an oversized media file through the shared
+read path (`@`-mention / `read_file`) is **memory-first**: it recalls any prior
+cross-session understanding (by absolute path) or names the media tool to use,
+instead of a bare "too large" error.
 
 ## media_dispatch (parallel time-segment understanding)
 
@@ -131,16 +177,18 @@ All fields optional; unset runs native-reader-only. Swapping a reader model is a
 `readers[].model` edit; flipping who owns a decision is a `decisionPolicy` edit;
 neither touches core.
 
-## Deferred (Seam B — maintainer-led, touches core hotspots)
+## Deferred (still maintainer-led / out of this slice)
 
-1. **Push injection**: scaffold actively injecting pasted/dragged media into
-   turn assembly (`geminiChat`), generalizing the existing image push code.
-2. **History/compression governance for audio/video**: eviction alignment,
-   duplicate-injection guards, model-switch rebuild (`chatCompressionService`,
-   `image-payload-references`).
-3. **skill/memory media auto-injection**: pull-style additive loading is
-   enabled today (the model can `image_view`/`media_watch` any referenced path);
-   automatic injection at load time is the Seam B side and is deferred.
+1. **Active push injection at paste/drag time**: pasted/dragged media already
+   enters the turn via the `@`-path (inlineData) and is governed once in history;
+   a scaffold that _actively_ injects pasted media into turn assembly
+   (generalizing the image push in `image-payload-references`) beyond the a/v
+   eviction wired here is left to a maintainer PR.
+2. **Memory (QWEN.md) media auto-injection**: memory is flattened into the
+   system prompt (text), which cannot carry media parts; media paths in memory
+   are pull-readable (the model can `image_view`/`media_watch` them) but are not
+   auto-injected as bytes. Skill media _is_ integrated (skill results carry
+   parts). Full memory auto-injection needs the text→parts pipeline change.
 
 ## Not in scope (per Q9)
 

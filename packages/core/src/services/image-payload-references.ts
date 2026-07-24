@@ -62,6 +62,77 @@ export function countAllInlineImages(contents: Content[]): number {
   return count;
 }
 
+/** True for an inline audio or video payload (not image). */
+function isAudioVideoMime(mimeType: string | undefined): boolean {
+  return (
+    !!mimeType &&
+    (mimeType.startsWith('audio/') || mimeType.startsWith('video/'))
+  );
+}
+
+/**
+ * Count inline audio/video payloads across history (incl. nested tool
+ * responses). Audio and video bytes are far larger than images, so leaving them
+ * in durable history re-sends them every turn — this is the signal to evict.
+ */
+export function countAllInlineAudioVideo(contents: Content[]): number {
+  let count = 0;
+  for (const content of contents) {
+    for (const part of content.parts ?? []) {
+      if (isAudioVideoMime(part.inlineData?.mimeType)) count++;
+      const nested = getFunctionResponseParts(part);
+      if (!nested) continue;
+      for (const inner of nested) {
+        if (isAudioVideoMime(inner.inlineData?.mimeType)) count++;
+      }
+    }
+  }
+  return count;
+}
+
+/**
+ * Seam B history governance for audio/video: evict inline a/v payloads in-place,
+ * replacing them with a text reference that points the model to media memory.
+ * Unlike images there is NO reattach — a/v bytes are too large to re-send, and
+ * their understanding is preserved cross-session in media memory (media_grep).
+ * The current user turn is preserved via `skipContent` so freshly-provided media
+ * is still seen this turn. This bounds token cost, prevents duplicate injection,
+ * and survives model switches (the reference is plain text).
+ */
+export function replaceAudioVideoPayloadsInPlace(
+  contents: Content[],
+  store: ImagePayloadStore,
+  skipContent?: Content,
+): StoredImagePayload[] {
+  const replaced: StoredImagePayload[] = [];
+  const evict = (part: Part): Part | undefined => {
+    if (isAudioVideoMime(part.inlineData?.mimeType) && part.inlineData?.data) {
+      const stored = store.put(part);
+      replaced.push(stored);
+      return { text: mediaReferenceText(stored) };
+    }
+    return undefined;
+  };
+  for (const content of contents) {
+    if (content === skipContent) continue;
+    if (!content.parts) continue;
+    for (let i = 0; i < content.parts.length; i++) {
+      const evicted = evict(content.parts[i]!);
+      if (evicted) {
+        content.parts[i] = evicted;
+        continue;
+      }
+      const nested = getFunctionResponseParts(content.parts[i]!);
+      if (!nested) continue;
+      for (let j = 0; j < nested.length; j++) {
+        const nestedEvicted = evict(nested[j]!);
+        if (nestedEvicted) nested[j] = nestedEvicted;
+      }
+    }
+  }
+  return replaced;
+}
+
 /**
  * Replace image payloads in-place with text references, storing the
  * originals in the provided store. This mutates the history so that
@@ -296,10 +367,22 @@ function imageReferenceText(stored: StoredImagePayload): string {
   return `[Image #${stored.id}: ${safeImageMimeType(stored.mimeType)}, ${stored.bytes} bytes]`;
 }
 
+/** Reference text for an evicted audio/video payload, pointing to media memory. */
+function mediaReferenceText(stored: StoredImagePayload): string {
+  const kind = stored.mimeType.startsWith('audio/') ? 'Audio' : 'Video';
+  return `[${kind} #${stored.id}: ${safeMediaMimeType(stored.mimeType)}, ${stored.bytes} bytes — evicted from history to bound token cost; recall its understanding from media memory (media_grep), or re-read the source with media_watch.]`;
+}
+
 function safeImageMimeType(mimeType: string): string {
   return /^image\/[a-z0-9.+-]{1,64}$/i.test(mimeType)
     ? mimeType.toLowerCase()
     : 'image/unknown';
+}
+
+function safeMediaMimeType(mimeType: string): string {
+  return /^(audio|video)\/[a-z0-9.+-]{1,64}$/i.test(mimeType)
+    ? mimeType.toLowerCase()
+    : 'application/octet-stream';
 }
 
 function storedImageToPart(stored: StoredImagePayload): Part {

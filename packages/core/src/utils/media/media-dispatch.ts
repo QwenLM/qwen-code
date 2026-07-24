@@ -10,9 +10,10 @@ import { getResponseText } from '../partUtils.js';
 import { getMediaMemory } from '../../memory/media/media-memory-store.js';
 import { computeAutoLinks } from '../../memory/media/media-links.js';
 import { extractKeyframes } from './keyframe-extractor.js';
+import { effortBudget } from './media-effort.js';
 import { probeMedia } from './probe.js';
 import { MediaReadError } from './reader-registry.js';
-import type { MediaProbe } from './types.js';
+import type { MediaEffort, MediaProbe } from './types.js';
 
 /**
  * media_dispatch — parallel time-segment understanding.
@@ -47,6 +48,8 @@ export interface DispatchOptions {
   prompt?: string;
   /** Re-analyze even if a prior understanding for this prompt exists. */
   force?: boolean;
+  /** Detail/cost tradeoff: scales segment count and frames per segment. */
+  effort?: MediaEffort;
   signal: AbortSignal;
 }
 
@@ -69,7 +72,6 @@ export interface DispatchResult {
   memoryBody?: string;
 }
 
-const DEFAULT_FRAMES_PER_SEGMENT = 6;
 const DEFAULT_CONCURRENCY = 3;
 const MAX_SEGMENTS = 12;
 const DEFAULT_FOCUS_KEY = 'overview';
@@ -142,6 +144,7 @@ async function understandSegment(
   index: number,
   model: string,
   framesPerSegment: number,
+  frameLongEdge: number,
   focus: string,
   config: Config,
   signal: AbortSignal,
@@ -150,6 +153,7 @@ async function understandSegment(
     const frames = await extractKeyframes(probe, {
       range,
       maxFrames: framesPerSegment,
+      longEdge: frameLongEdge,
       signal,
     });
     const parts: Part[] = [
@@ -196,6 +200,7 @@ export async function dispatchMediaSegments(
 
   const focus = (opts.prompt ?? '').trim();
   const focusKey = focusKeyOf(opts.prompt);
+  const budget = effortBudget(opts.effort);
 
   // Cache-first, keyed by (content hash, prompt): a prior understanding for THIS
   // question is returned instantly so a new session does not redo it. A new/
@@ -237,9 +242,13 @@ export async function dispatchMediaSegments(
 
   const count = Math.max(
     1,
-    Math.min(opts.segments ?? Math.ceil(durationSec / 30), MAX_SEGMENTS),
+    Math.min(
+      opts.segments ?? Math.ceil((durationSec / 30) * budget.segmentsPer30s),
+      MAX_SEGMENTS,
+    ),
   );
-  const framesPerSegment = opts.framesPerSegment ?? DEFAULT_FRAMES_PER_SEGMENT;
+  const framesPerSegment =
+    opts.framesPerSegment ?? Math.max(2, Math.round(budget.maxFrames / 2));
   const ranges = segmentRanges(durationSec, count);
 
   const segments = await mapWithConcurrency(
@@ -252,6 +261,7 @@ export async function dispatchMediaSegments(
         index,
         model,
         framesPerSegment,
+        budget.frameLongEdge,
         focus,
         config,
         opts.signal,

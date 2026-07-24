@@ -18,10 +18,20 @@ import { Storage } from '../../config/storage.js';
 
 export const MEDIA_MEMORY_DIRNAME = 'media-memory';
 export const MEDIA_INDEX_FILENAME = 'MEDIA_INDEX.md';
+export const MEDIA_DERIVED_DIRNAME = 'derived';
 
 /** Root dir for all media understandings. */
 export function getMediaMemoryRoot(): string {
   return path.join(Storage.getRuntimeBaseDir(), MEDIA_MEMORY_DIRNAME);
+}
+
+/**
+ * Directory holding derived artifacts (keyframes/clips/audio tracks extracted by
+ * `media_extract`), content-addressed so identical derivations dedupe. These are
+ * first-class media files with their own hash + memory record.
+ */
+export function getMediaDerivedDir(): string {
+  return path.join(getMediaMemoryRoot(), MEDIA_DERIVED_DIRNAME);
 }
 
 /** Per-file understanding record path, keyed by content hash. */

@@ -53,15 +53,17 @@ export function isModelOwned(
 }
 
 /**
- * The default policy: start with everything on scaffold except whether to call
- * a tool at all (that is inherently the model's — it decides to invoke). This is
- * the "start simple" baseline; config can flip any knob to `model`.
+ * The default policy. The refinement knobs (range/fps/region/scale/effort) are
+ * model-owned: they have no meaningful scaffold auto-value (there is no "right"
+ * crop or time window without the question), and now that the readers actually
+ * honor them, exposing them lets the model zoom / seek / trade cost for detail.
+ * `reader` stays on scaffold (the registry picks). Config can flip any knob.
  */
 export const DEFAULT_MEDIA_DECISION_POLICY: MediaDecisionPolicy = {
   reader: 'scaffold',
-  range: 'scaffold',
-  fps: 'scaffold',
-  region: 'scaffold',
-  scale: 'scaffold',
-  effort: 'scaffold',
+  range: 'model',
+  fps: 'model',
+  region: 'model',
+  scale: 'model',
+  effort: 'model',
 };

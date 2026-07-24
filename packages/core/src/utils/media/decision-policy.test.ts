@@ -39,9 +39,12 @@ describe('decision policy', () => {
     expect(isModelOwned('missing', {})).toBe(false);
   });
 
-  it('default policy starts everything on scaffold', () => {
-    for (const owner of Object.values(DEFAULT_MEDIA_DECISION_POLICY)) {
-      expect(owner).toBe('scaffold');
+  it('default policy owns the refinement knobs by the model, reader by scaffold', () => {
+    // The refinement knobs (range/fps/region/scale/effort) are model-owned so
+    // the model can zoom/seek/trade cost for detail; reader stays on scaffold.
+    expect(DEFAULT_MEDIA_DECISION_POLICY['reader']).toBe('scaffold');
+    for (const knob of ['range', 'fps', 'region', 'scale', 'effort']) {
+      expect(DEFAULT_MEDIA_DECISION_POLICY[knob]).toBe('model');
     }
   });
 });

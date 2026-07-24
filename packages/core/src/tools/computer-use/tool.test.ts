@@ -563,6 +563,28 @@ describe('buildLlmContent', () => {
     expect(result).toBe('');
   });
 
+  it('discloses the screenshot downscale cap on image parts (零静默降质)', () => {
+    const content = [
+      { type: 'image' as const, mimeType: 'image/png', data: 'x==' },
+    ];
+    // default cap
+    const def = buildLlmContent(content, 'screenshot') as Part[];
+    expect(
+      def.some((p) => p.text?.includes('downscaled to a longest edge of 1568')),
+    ).toBe(true);
+    // explicit cap
+    const capped = buildLlmContent(
+      content,
+      'screenshot',
+      undefined,
+      900,
+    ) as Part[];
+    expect(capped.some((p) => p.text?.includes('900px'))).toBe(true);
+    // full resolution
+    const full = buildLlmContent(content, 'screenshot', undefined, 0) as Part[];
+    expect(full.some((p) => p.text?.includes('full resolution'))).toBe(true);
+  });
+
   it('forwards structuredContent (real window_ids) the terse text omits', () => {
     // Regression: list_windows content is just "Found N window(s)"; the real
     // window_id / bounds / is_on_screen live ONLY in structuredContent.

@@ -173,6 +173,13 @@ export function resolveChecksumUrls(
 export const MAX_IMAGE_DIMENSION_ENV = 'QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION';
 
 /**
+ * cua-driver's built-in screenshot longest-edge cap (px) when no override is
+ * pushed. Screenshots are downscaled to this by default; the delivery discloses
+ * it so the model knows the resolution boundary (零静默降质).
+ */
+export const CUA_DRIVER_DEFAULT_IMAGE_DIMENSION = 1568;
+
+/**
  * Coerce a raw value into a valid `max_image_dimension` override, or
  * `undefined` if it isn't one. A valid override is a non-negative integer
  * (`0` = no resizing / full resolution). Anything else — negative (incl. the

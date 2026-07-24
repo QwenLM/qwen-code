@@ -33,11 +33,28 @@ describe('delegated reader', () => {
     expect(result.precision).toContain('derived note');
   });
 
-  it('fails closed with a remedy for unwired dispatch kinds', async () => {
+  it('mcp backend fails closed with a remedy when the tool is not registered', async () => {
+    const mcpCtx = {
+      signal: new AbortController().signal,
+      config: {
+        getToolRegistry: () => ({ getTool: () => undefined }),
+      },
+    } as unknown as MediaReadContext;
     const reader = createDelegatedReader({
       id: 'ocr',
-      via: 'subagent',
-      ref: 'media-ocr',
+      via: 'mcp',
+      ref: 'nonexistent-mcp-tool',
+    });
+    await expect(reader.read(probe, {}, mcpCtx)).rejects.toBeInstanceOf(
+      MediaReadError,
+    );
+  });
+
+  it('rejects an unknown dispatch kind', async () => {
+    const reader = createDelegatedReader({
+      id: 'weird',
+      via: 'telepathy' as unknown as 'command',
+      ref: 'x',
     });
     await expect(reader.read(probe, {}, ctx)).rejects.toBeInstanceOf(
       MediaReadError,

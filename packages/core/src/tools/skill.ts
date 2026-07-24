@@ -7,6 +7,8 @@
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { ToolResult, ToolResultDisplay } from './tools.js';
+import type { Part } from '@google/genai';
+import { buildReferencedMediaParts } from '../utils/media/media-references.js';
 import type {
   Config,
   ModelInvocableCommandExecutorResult,
@@ -553,8 +555,27 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         success: true,
       });
 
+      // P5 · pull-style additive media loading: if the skill body references
+      // media files in its directory, surface them through the unified read
+      // interface (prior understanding + how to pull, or inline bytes per the
+      // media.injection mode). Best-effort — never fail the skill on this.
+      const contentParts: Array<{ text: string } | Part> = [
+        { text: llmContent },
+      ];
+      try {
+        const mediaParts = await buildReferencedMediaParts(
+          skill.body,
+          baseDir,
+          this.config,
+          _signal ?? new AbortController().signal,
+        );
+        contentParts.push(...mediaParts);
+      } catch (mediaErr) {
+        debugLogger.debug('Skill media reference load failed:', mediaErr);
+      }
+
       return {
-        llmContent: [{ text: llmContent }],
+        llmContent: contentParts,
         returnDisplay: skill.description,
         modelOverride: skill.model,
       };

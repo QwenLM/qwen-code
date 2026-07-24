@@ -24,6 +24,10 @@ import { safeJsonStringify } from '../../utils/safeJsonStringify.js';
 import { runBootstrap } from './bootstrap.js';
 import { isPackageSpecApproved, saveInstallState } from './install-state.js';
 import { approvalKey, resolveMaxImageDimension } from './constants.js';
+import {
+  CUA_DRIVER_DEFAULT_IMAGE_DIMENSION,
+  MAX_IMAGE_DIMENSION_ENV,
+} from './constants.js';
 import { type Config } from '../../config/config.js';
 import { homedir } from 'node:os';
 
@@ -218,9 +222,10 @@ class ComputerUseInvocation extends BaseToolInvocation<
     // onto the shared client BEFORE start: it is applied via set_config once the
     // driver connects (and re-applied on reconnect). undefined → leave the
     // driver default. Cheap + idempotent to set on every call.
-    client.setMaxImageDimension(
-      resolveMaxImageDimension(this.config?.getComputerUseMaxImageDimension()),
+    const maxImageDimension = resolveMaxImageDimension(
+      this.config?.getComputerUseMaxImageDimension(),
     );
+    client.setMaxImageDimension(maxImageDimension);
     client.setIdleTimeoutMs(this.config?.getComputerUseIdleTimeoutMs());
 
     // If the user confirmed through the pre-execution dialog, the install state
@@ -272,6 +277,7 @@ class ComputerUseInvocation extends BaseToolInvocation<
       mcpResult.content,
       this.upstreamName,
       mcpResult.structuredContent,
+      maxImageDimension,
     );
     const returnDisplay = buildDisplayText(mcpResult.content);
 
@@ -412,13 +418,25 @@ type RawContentBlock = CallToolResult['content'][number];
  * Converts MCP content blocks to a GenAI PartListUnion.
  * - Text-only results → plain string (preserves existing caller expectations).
  * - Mixed or image/audio results → Part[] so the model can see screenshots.
+ *
+ * `maxImageDimension` is the resolved screenshot longest-edge cap in effect
+ * (undefined → the cua-driver default). Screenshots are downscaled to it, so —
+ * per the "no silent quality loss" contract — every screenshot part is delivered
+ * with a note stating the cap and how to get full resolution. `0` means the
+ * driver was told not to resize, which is disclosed as full resolution.
  */
 export function buildLlmContent(
   content: RawContentBlock[],
   toolName: string,
   structuredContent?: unknown,
+  maxImageDimension?: number,
 ): PartListUnion {
   const parts: Part[] = [];
+  const effectiveCap = maxImageDimension ?? CUA_DRIVER_DEFAULT_IMAGE_DIMENSION;
+  const imagePrecisionNote =
+    effectiveCap === 0
+      ? ' (full resolution, no downscaling)'
+      : ` (downscaled to a longest edge of ${effectiveCap}px to save tokens; for full resolution set tools.computerUse.maxImageDimension=0 or ${MAX_IMAGE_DIMENSION_ENV}=0)`;
 
   for (const block of content) {
     if (block.type === 'text' && block.text) {
@@ -428,8 +446,9 @@ export function buildLlmContent(
       block.mimeType &&
       block.data
     ) {
+      const note = block.type === 'image' ? imagePrecisionNote : '';
       parts.push({
-        text: `[Tool '${toolName}' provided the following ${block.type} data with mime-type: ${block.mimeType}]`,
+        text: `[Tool '${toolName}' provided the following ${block.type} data with mime-type: ${block.mimeType}${note}]`,
       });
       parts.push({
         inlineData: {

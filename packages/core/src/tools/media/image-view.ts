@@ -15,11 +15,13 @@ import { getMediaReadPermission } from '../../utils/media/media-security.js';
 import { resolveMediaConfig } from '../../utils/media/media-config.js';
 import { isModelOwned } from '../../utils/media/decision-policy.js';
 import type { MediaReadParams } from '../../utils/media/reader-registry.js';
+import type { MediaEffort } from '../../utils/media/types.js';
 
 export interface ImageViewParams {
   file_path: string;
   region?: [number, number, number, number];
   scale?: number;
+  effort?: MediaEffort;
 }
 
 class ImageViewInvocation extends BaseToolInvocation<
@@ -49,6 +51,9 @@ class ImageViewInvocation extends BaseToolInvocation<
     }
     if (isModelOwned('scale', policy) && this.params.scale !== undefined) {
       params.scale = this.params.scale;
+    }
+    if (isModelOwned('effort', policy) && this.params.effort !== undefined) {
+      params.effort = this.params.effort;
     }
     return readMedia({
       filePath: this.params.file_path,
@@ -92,6 +97,14 @@ export class ImageViewTool extends BaseDeclarativeTool<
       properties['scale'] = {
         type: 'number',
         description: 'Optional downscale factor in (0, 1].',
+      };
+    }
+    if (isModelOwned('effort', policy)) {
+      properties['effort'] = {
+        type: 'string',
+        enum: ['low', 'medium', 'high', 'xhigh', 'max'],
+        description:
+          'Optional detail/cost tradeoff. Higher effort keeps more resolution.',
       };
     }
     super(

@@ -45,11 +45,29 @@ export async function hashFile(filePath: string): Promise<string> {
   return hash.digest('hex');
 }
 
+/** sha256 of an in-memory buffer (used for content-addressing derived artifacts). */
+export function hashBuffer(buffer: Buffer): string {
+  return createHash('sha256').update(buffer).digest('hex');
+}
+
 interface FfprobeFacts {
   durationSec?: number;
   width?: number;
   height?: number;
+  fps?: number;
   hasAudio?: boolean;
+  audioChannels?: number;
+}
+
+/** Parse an ffprobe `r_frame_rate` like "30000/1001" into fps. */
+function parseFrameRate(raw: string | undefined): number | undefined {
+  if (!raw) return undefined;
+  const [num, den] = raw.split('/');
+  const n = Number(num);
+  const d = den === undefined ? 1 : Number(den);
+  if (!Number.isFinite(n) || !Number.isFinite(d) || d === 0) return undefined;
+  const fps = n / d;
+  return fps > 0 ? +fps.toFixed(3) : undefined;
 }
 
 /**
@@ -81,21 +99,32 @@ export async function ffprobeFacts(filePath: string): Promise<FfprobeFacts> {
         codec_type?: string;
         width?: number;
         height?: number;
+        channels?: number;
+        r_frame_rate?: string;
+        avg_frame_rate?: string;
+        duration?: string;
       }>;
     };
     const streams = parsed.streams ?? [];
     const video = streams.find((s) => s.codec_type === 'video');
-    const hasAudio = streams.some((s) => s.codec_type === 'audio');
-    const durationRaw = parsed.format?.duration;
+    const audio = streams.find((s) => s.codec_type === 'audio');
+    const hasAudio = audio !== undefined;
+    const durationRaw =
+      parsed.format?.duration ?? video?.duration ?? audio?.duration;
     const durationSec =
       durationRaw !== undefined && Number.isFinite(Number(durationRaw))
         ? Number(durationRaw)
         : undefined;
+    const fps =
+      parseFrameRate(video?.avg_frame_rate) ??
+      parseFrameRate(video?.r_frame_rate);
     return {
       durationSec,
       width: video?.width,
       height: video?.height,
+      fps,
       hasAudio,
+      audioChannels: audio?.channels,
     };
   } catch {
     return {};
@@ -121,9 +150,9 @@ export async function probeMedia(filePath: string): Promise<MediaProbe> {
     );
   }
   const hash = await hashFile(resolved);
-  // Duration/resolution/audio-track matter for audio+video decisions; ffprobe
-  // is cheap and best-effort. Skip it for images (size is enough there).
-  const facts = modality === 'image' ? {} : await ffprobeFacts(resolved);
+  // Duration/resolution/audio-track/fps matter for a/v decisions, and image
+  // dimensions drive the downscale cap; ffprobe is cheap and best-effort.
+  const facts = await ffprobeFacts(resolved);
   return {
     path: resolved,
     hash,
@@ -133,6 +162,10 @@ export async function probeMedia(filePath: string): Promise<MediaProbe> {
     ...(facts.durationSec !== undefined && { durationSec: facts.durationSec }),
     ...(facts.width !== undefined && { width: facts.width }),
     ...(facts.height !== undefined && { height: facts.height }),
+    ...(facts.fps !== undefined && { fps: facts.fps }),
     ...(facts.hasAudio !== undefined && { hasAudio: facts.hasAudio }),
+    ...(facts.audioChannels !== undefined && {
+      audioChannels: facts.audioChannels,
+    }),
   };
 }

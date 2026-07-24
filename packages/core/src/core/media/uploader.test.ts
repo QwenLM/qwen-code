@@ -18,6 +18,12 @@ const probe: MediaProbe = {
   sizeBytes: 100_000_000,
 };
 
+function configWithUpload(upload: unknown): Config {
+  return {
+    getMediaConfig: () => ({ upload }),
+  } as unknown as Config;
+}
+
 describe('uploader', () => {
   it('always resolves to a terminal uploader (never undefined)', () => {
     const uploader = determineUploader(config);
@@ -37,5 +43,34 @@ describe('uploader', () => {
         'upload backend',
       );
     }
+  });
+
+  it('selects the command backend when configured', () => {
+    const uploader = determineUploader(
+      configWithUpload({
+        backend: 'command',
+        command: 'oss cp {path} && echo url',
+      }),
+    );
+    expect(uploader.id).toBe('command');
+  });
+
+  it('selects the http backend when an endpoint/publicUrlBase is configured', () => {
+    const uploader = determineUploader(
+      configWithUpload({
+        backend: 'http',
+        publicUrlBase: 'https://cdn.example.com',
+      }),
+    );
+    expect(uploader.id).toBe('http');
+  });
+
+  it('falls back to default when the backend is misconfigured', () => {
+    expect(determineUploader(configWithUpload({ backend: 'command' })).id).toBe(
+      'default',
+    );
+    expect(determineUploader(configWithUpload({ backend: 'http' })).id).toBe(
+      'default',
+    );
   });
 });

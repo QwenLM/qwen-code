@@ -27,6 +27,8 @@ export interface KeyframeOptions {
   longEdge?: number;
   /** Optional [startSeconds, endSeconds] window. */
   range?: [number, number];
+  /** Explicit sampling rate (frames per second); overrides the auto rate. */
+  fps?: number;
   signal?: AbortSignal;
 }
 
@@ -79,7 +81,11 @@ export async function extractKeyframes(
       ? Math.max(end - start, 0.001)
       : probe.durationSec;
   const fps =
-    windowSec && windowSec > 0 ? Math.min(maxFrames / windowSec, 30) : 0.1;
+    opts.fps !== undefined && opts.fps > 0
+      ? opts.fps
+      : windowSec && windowSec > 0
+        ? Math.min(maxFrames / windowSec, 30)
+        : 0.1;
   const intervalSec = fps > 0 ? 1 / fps : undefined;
 
   const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'media-kf-'));

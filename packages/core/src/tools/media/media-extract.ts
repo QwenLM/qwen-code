@@ -11,8 +11,10 @@ import { ToolNames, ToolDisplayNames } from '../tool-names.js';
 import type { Config } from '../../config/config.js';
 import type { PermissionDecision } from '../../permissions/types.js';
 import { readMedia } from '../../utils/media/media-orchestrator.js';
+import { deriveMediaArtifact } from '../../utils/media/media-derive.js';
 import { getMediaReadPermission } from '../../utils/media/media-security.js';
 import type { MediaReadParams } from '../../utils/media/reader-registry.js';
+import type { MediaEffort } from '../../utils/media/types.js';
 
 export type ExtractMode = 'transcript' | 'keyframes' | 'audio_track' | 'clip';
 
@@ -20,14 +22,16 @@ export interface MediaExtractParams {
   file_path: string;
   mode: ExtractMode;
   range?: [number, number];
+  effort?: MediaEffort;
 }
 
 /**
  * P4 · `media_extract` — explicit derivation (transcript / keyframes / audio
- * track / clip) via a delegated backend. Conditional-trigger: it only does
- * something when a delegated reader is configured, and fails closed with a
- * remedy otherwise (信念二: build the entry, wire the heavy machinery on proof).
- * Derived understandings land in media memory and are recalled by media_grep.
+ * track / clip). Keyframes/audio_track/clip run locally via ffmpeg and are
+ * written to the content-addressed derived store (each artifact becomes a
+ * first-class media file linked back to the source, searchable via media_grep).
+ * `transcript` needs understanding (ASR), so it routes to the delegated read
+ * backend and fails closed with a remedy when none is configured.
  */
 class MediaExtractInvocation extends BaseToolInvocation<
   MediaExtractParams,
@@ -49,14 +53,25 @@ class MediaExtractInvocation extends BaseToolInvocation<
   }
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
-    const params: MediaReadParams = { intent: this.params.mode };
-    if (this.params.range) params.range = this.params.range;
-    return readMedia({
+    if (this.params.mode === 'transcript') {
+      const params: MediaReadParams = { intent: 'transcript' };
+      if (this.params.range) params.range = this.params.range;
+      if (this.params.effort) params.effort = this.params.effort;
+      return readMedia({
+        filePath: this.params.file_path,
+        params,
+        config: this.config,
+        signal,
+        requireDelegated: true,
+      });
+    }
+    return deriveMediaArtifact({
       filePath: this.params.file_path,
-      params,
+      mode: this.params.mode,
+      ...(this.params.range ? { range: this.params.range } : {}),
+      ...(this.params.effort ? { effort: this.params.effort } : {}),
       config: this.config,
       signal,
-      requireDelegated: true,
     });
   }
 }
@@ -71,7 +86,7 @@ export class MediaExtractTool extends BaseDeclarativeTool<
     super(
       MediaExtractTool.Name,
       ToolDisplayNames.MEDIA_EXTRACT,
-      'Extract a derived artifact from a media file (transcript, keyframes, audio track, or clip) via a configured delegated backend. Results are cached in media memory and searchable via media_grep.',
+      'Extract a derived artifact from a media file. keyframes/audio_track/clip run locally via ffmpeg and cache the artifact as a first-class media file (searchable via media_grep); transcript uses a configured understanding/ASR backend. Every result states scope and precision.',
       Kind.Read,
       {
         type: 'object',
@@ -83,7 +98,8 @@ export class MediaExtractTool extends BaseDeclarativeTool<
           mode: {
             type: 'string',
             enum: ['transcript', 'keyframes', 'audio_track', 'clip'],
-            description: 'What to extract.',
+            description:
+              'What to extract. clip requires a range; keyframes needs a video.',
           },
           range: {
             type: 'array',
@@ -91,6 +107,12 @@ export class MediaExtractTool extends BaseDeclarativeTool<
             minItems: 2,
             maxItems: 2,
             description: 'Optional time range [startSeconds, endSeconds].',
+          },
+          effort: {
+            type: 'string',
+            enum: ['low', 'medium', 'high', 'xhigh', 'max'],
+            description:
+              'Optional detail/cost tradeoff (more keyframes / higher resolution).',
           },
         },
         required: ['file_path', 'mode'],
