@@ -270,7 +270,7 @@ describe('<CompactToolGroupDisplay /> — summary label', () => {
 
     // Summary line wraps + hint line → at least 2 rows at 80 columns.
     expect(frame.split('\n').length).toBeGreaterThanOrEqual(2);
-    expect(frame).toContain('...and 28 more');
+    expect(frame).toContain('... and 28 more');
     expect(frame).toContain('⎿ packages/cli/src/ui/components/example-30.tsx');
     expect(frame).not.toContain('example-03.tsx');
   });
@@ -350,7 +350,7 @@ describe('buildToolSummary', () => {
       make({ callId: 'c4', description: 'd.ts' }),
     ];
     expect(buildToolSummary(tools, false)).toBe(
-      'Read a.ts, b.ts, ...and 2 more',
+      'Read a.ts, b.ts, ... and 2 more',
     );
   });
 

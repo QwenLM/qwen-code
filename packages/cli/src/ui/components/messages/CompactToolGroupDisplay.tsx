@@ -360,7 +360,7 @@ const DESCRIPTION_PREVIEW_COUNT = 2;
  * Single tool (no description)   → "Read 1 file" / "Ran 1 command"
  * Multi ≤ 3 (with descriptions)  → "Read a.ts, b.ts, c.ts"
  * Multi ≤ 3 (no descriptions)    → "Read 3 files"
- * Multi > 3                      → "Read a.ts, b.ts, ...and 3 more"
+ * Multi > 3                      → "Read a.ts, b.ts, ... and 3 more"
  * Multi mixed                    → "Read 2 files, ran npm test"
  *
  * Uses past tense when all tools are done, present progressive when active.
@@ -424,7 +424,10 @@ export function buildToolSummary(
         .filter((d): d is string => d !== undefined);
       if (previewDescs.length === DESCRIPTION_PREVIEW_COUNT) {
         const remaining = tools.length - DESCRIPTION_PREVIEW_COUNT;
-        part = `${verb} ${previewDescs.join(', ')}, ...and ${remaining} more`;
+        const morePhrase = t('... and {{count}} more', {
+          count: String(remaining),
+        });
+        part = `${verb} ${previewDescs.join(', ')}, ${morePhrase}`;
       } else {
         // Not enough preview descriptions → count phrase.
         const forms = isActive ? template.active : template.past;
