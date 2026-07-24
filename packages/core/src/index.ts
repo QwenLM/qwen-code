@@ -530,6 +530,7 @@ export {
   openaiLogger,
   resolveOpenAILogDir,
 } from './utils/openaiLogger.js';
+export * from './utils/osc8.js';
 export * from './utils/partUtils.js';
 export * from './utils/sessionStorageUtils.js';
 export * from './utils/pathReader.js';
