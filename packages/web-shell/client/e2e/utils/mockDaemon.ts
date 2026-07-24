@@ -11,6 +11,7 @@ import {
   type DaemonSessionState,
   type DaemonSessionSummary,
   type DaemonWorkspaceExtensionsStatus,
+  type DaemonGitHubPullRequestList,
   type DaemonWorkspaceGitStatus,
   type DaemonWorkspaceMcpResourcesStatus,
   type DaemonWorkspaceMcpStatus,
@@ -58,6 +59,11 @@ export interface WebShellDaemonScenario {
    * (non-git workspace), matching the real daemon's graceful degradation.
    */
   gitStatus?: DaemonWorkspaceGitStatus;
+  /**
+   * Response for `GET /workspaces/:cwd/github/prs`. Defaults to an available,
+   * empty pull-request list.
+   */
+  gitHubPrs?: DaemonGitHubPullRequestList;
 }
 
 export interface MockDaemonController {
@@ -311,6 +317,7 @@ export function createWebShellDaemonScenario(
     events: overrides.events ?? [],
     state,
     gitStatus: overrides.gitStatus,
+    gitHubPrs: overrides.gitHubPrs,
   };
 }
 
@@ -508,6 +515,7 @@ function isDaemonPath(path: string): boolean {
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
     /^\/workspaces\/.+\/git\/?$/.test(path) ||
+    /^\/workspaces\/.+\/github\/prs\/?$/.test(path) ||
     path === '/session' ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
@@ -566,6 +574,9 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   if (method === 'GET' && /^\/workspaces\/.+\/git\/?$/.test(path)) {
+    return true;
+  }
+  if (method === 'GET' && /^\/workspaces\/.+\/github\/prs\/?$/.test(path)) {
     return true;
   }
   if (
@@ -692,6 +703,18 @@ async function handleDaemonRoute(
         v: 2,
         workspaceCwd: scenario.workspaceCwd,
         branch: null,
+      },
+    );
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/.+\/github\/prs\/?$/.test(path)) {
+    await json(
+      route,
+      scenario.gitHubPrs ?? {
+        v: 1,
+        workspaceCwd: scenario.workspaceCwd,
+        available: true,
+        pullRequests: [],
       },
     );
     return;

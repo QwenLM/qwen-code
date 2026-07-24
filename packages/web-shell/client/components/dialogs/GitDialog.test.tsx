@@ -16,28 +16,44 @@ if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
 
-const { workspaceGitDiff, workspaceGitLog, workspaceClient } = vi.hoisted(
-  () => {
-    const workspaceGitDiff = vi.fn();
-    const workspaceGitLog = vi.fn();
-    const workspaceClient = {
-      workspaceByCwd: () => ({
-        workspaceGitDiff,
-        workspaceGitDiffFile: vi.fn(),
-        workspaceGitLog,
-        workspaceGitCommitDetail: vi.fn(),
-      }),
-    };
-    return { workspaceGitDiff, workspaceGitLog, workspaceClient };
-  },
-);
+const {
+  workspaceGitDiff,
+  workspaceGitLog,
+  workspaceGitHubPullRequests,
+  workspaceClient,
+  mockState,
+} = vi.hoisted(() => {
+  const workspaceGitDiff = vi.fn();
+  const workspaceGitLog = vi.fn();
+  const workspaceGitHubPullRequests = vi.fn();
+  const workspaceClient = {
+    workspaceByCwd: () => ({
+      workspaceGitDiff,
+      workspaceGitDiffFile: vi.fn(),
+      workspaceGitLog,
+      workspaceGitCommitDetail: vi.fn(),
+      workspaceGitHubPullRequests,
+    }),
+  };
+  const mockState = { capabilities: undefined as unknown };
+  return {
+    workspaceGitDiff,
+    workspaceGitLog,
+    workspaceGitHubPullRequests,
+    workspaceClient,
+    mockState,
+  };
+});
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('@qwen-code/webui/daemon-react-sdk')>();
   return {
     ...actual,
-    useWorkspace: () => ({ client: workspaceClient }),
+    useWorkspace: () => ({
+      client: workspaceClient,
+      capabilities: mockState.capabilities,
+    }),
   };
 });
 
@@ -52,7 +68,7 @@ async function flush() {
   });
 }
 
-function mount(initialView: 'diff' | 'log' = 'diff') {
+function mount(initialView: 'diff' | 'log' | 'prs' = 'diff') {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -73,6 +89,7 @@ afterEach(() => {
   act(() => root.unmount());
   container.remove();
   vi.clearAllMocks();
+  mockState.capabilities = undefined;
 });
 
 describe('GitDialog', () => {
@@ -150,6 +167,78 @@ describe('GitDialog', () => {
     expect(
       document
         .getElementById('git-dialog-tab-log')
+        ?.getAttribute('aria-selected'),
+    ).toBe('true');
+  });
+
+  it('shows the pull requests tab only when the daemon advertises the capability', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+      files: [],
+      hiddenCount: 0,
+    });
+
+    // Without the capability: two tabs, no PR fetch.
+    mount();
+    await flush();
+    expect(document.getElementById('git-dialog-tab-prs')).toBeNull();
+    expect(workspaceGitHubPullRequests).not.toHaveBeenCalled();
+
+    act(() => root.unmount());
+    container.remove();
+
+    // With the capability: third tab fetches and renders PRs.
+    mockState.capabilities = { features: ['workspace_github_prs'] };
+    workspaceGitHubPullRequests.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      pullRequests: [
+        {
+          number: 42,
+          title: 'Fix the flaky test',
+          url: 'https://github.com/o/r/pull/42',
+          author: 'octocat',
+          headRefName: 'fix/flaky-test',
+          state: 'open',
+          reviewDecision: 'approved',
+          checks: 'passing',
+          updatedAt: Math.floor(Date.now() / 1000) - 120,
+        },
+      ],
+    });
+    mount('prs');
+    await flush();
+
+    const prsTab = document.getElementById('git-dialog-tab-prs');
+    expect(prsTab?.getAttribute('aria-selected')).toBe('true');
+    expect(workspaceGitHubPullRequests).toHaveBeenCalledTimes(1);
+    expect(document.body.textContent).toContain('Fix the flaky test');
+  });
+
+  it('falls back to the diff view when PRs are requested without the capability', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+      files: [],
+      hiddenCount: 0,
+    });
+    mount('prs');
+    await flush();
+
+    expect(document.getElementById('git-dialog-tab-prs')).toBeNull();
+    expect(
+      document
+        .getElementById('git-dialog-tab-diff')
         ?.getAttribute('aria-selected'),
     ).toBe('true');
   });

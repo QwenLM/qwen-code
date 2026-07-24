@@ -401,6 +401,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_trust',
   'workspace_init',
   'workspace_github_setup',
+  'workspace_github_prs',
   'workspace_mcp_restart',
   // #4175 follow-up. Daemon hosts `POST /session/:id/recap` (wraps
   // core's `generateSessionRecap` for one-sentence session summaries).
@@ -463,6 +464,7 @@ const EXPECTED_REGISTERED_FEATURES = [
     (f) =>
       f !== 'workspace_init' &&
       f !== 'workspace_github_setup' &&
+      f !== 'workspace_github_prs' &&
       f !== 'workspace_permissions' &&
       f !== 'workspace_trust' &&
       f !== 'workspace_mcp_restart' &&
@@ -496,6 +498,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_trust',
   'workspace_init',
   'workspace_github_setup',
+  'workspace_github_prs',
   'workspace_mcp_restart',
   'session_recap',
   'session_generation',

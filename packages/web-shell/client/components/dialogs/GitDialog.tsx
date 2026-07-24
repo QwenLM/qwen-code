@@ -5,13 +5,17 @@
  */
 
 import { useCallback, useState, type KeyboardEvent } from 'react';
+import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { DialogShell } from './DialogShell';
 import { GitDiffContent } from './GitDiffDialog';
 import { GitLogContent } from './GitLogDialog';
+import { GitHubPrsContent } from './GitHubPrsDialog';
 import styles from './GitDialog.module.css';
 
-export type GitDialogView = 'diff' | 'log';
+export type GitDialogView = 'diff' | 'log' | 'prs';
+
+const GITHUB_PRS_FEATURE = 'workspace_github_prs';
 
 export function GitDialog({
   workspaceCwd,
@@ -23,7 +27,15 @@ export function GitDialog({
   onClose: () => void;
 }) {
   const { t } = useI18n();
-  const [view, setView] = useState(initialView);
+  const { capabilities } = useWorkspace();
+  const prsSupported =
+    capabilities?.features?.includes(GITHUB_PRS_FEATURE) === true;
+  const views: GitDialogView[] = prsSupported
+    ? ['diff', 'log', 'prs']
+    : ['diff', 'log'];
+  const [view, setView] = useState(
+    initialView === 'prs' && !prsSupported ? 'diff' : initialView,
+  );
   const [subtitle, setSubtitle] = useState<string>();
 
   const selectView = useCallback((next: GitDialogView) => {
@@ -37,27 +49,34 @@ export function GitDialog({
   };
 
   const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    const index = views.indexOf(view);
     if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
       event.preventDefault();
-      selectAndFocus(view === 'diff' ? 'log' : 'diff');
+      const delta = event.key === 'ArrowRight' ? 1 : -1;
+      selectAndFocus(views[(index + delta + views.length) % views.length]);
       return;
     }
     if (event.key === 'Home') {
       event.preventDefault();
-      selectAndFocus('diff');
+      selectAndFocus(views[0]);
       return;
     }
     if (event.key === 'End') {
       event.preventDefault();
-      selectAndFocus('log');
+      selectAndFocus(views[views.length - 1]);
     }
   };
 
-  const title = view === 'diff' ? t('gitDiff.title') : t('gitLog.title');
+  const titleKey =
+    view === 'diff'
+      ? 'gitDiff.title'
+      : view === 'log'
+        ? 'gitLog.title'
+        : 'githubPrs.title';
 
   return (
     <DialogShell
-      title={title}
+      title={t(titleKey)}
       subtitle={subtitle}
       size="xl"
       allowFullscreen
@@ -65,32 +84,28 @@ export function GitDialog({
     >
       <div className={styles.content}>
         <div className={styles.tabBar} role="tablist">
-          <button
-            id="git-dialog-tab-diff"
-            type="button"
-            role="tab"
-            aria-selected={view === 'diff'}
-            aria-controls="git-dialog-panel"
-            tabIndex={view === 'diff' ? 0 : -1}
-            className={`${styles.tab}${view === 'diff' ? ` ${styles.tabActive}` : ''}`}
-            onClick={() => selectView('diff')}
-            onKeyDown={onTabKeyDown}
-          >
-            {t('gitDiff.title')}
-          </button>
-          <button
-            id="git-dialog-tab-log"
-            type="button"
-            role="tab"
-            aria-selected={view === 'log'}
-            aria-controls="git-dialog-panel"
-            tabIndex={view === 'log' ? 0 : -1}
-            className={`${styles.tab}${view === 'log' ? ` ${styles.tabActive}` : ''}`}
-            onClick={() => selectView('log')}
-            onKeyDown={onTabKeyDown}
-          >
-            {t('gitLog.title')}
-          </button>
+          {views.map((name) => (
+            <button
+              key={name}
+              id={`git-dialog-tab-${name}`}
+              type="button"
+              role="tab"
+              aria-selected={view === name}
+              aria-controls="git-dialog-panel"
+              tabIndex={view === name ? 0 : -1}
+              className={`${styles.tab}${view === name ? ` ${styles.tabActive}` : ''}`}
+              onClick={() => selectView(name)}
+              onKeyDown={onTabKeyDown}
+            >
+              {t(
+                name === 'diff'
+                  ? 'gitDiff.title'
+                  : name === 'log'
+                    ? 'gitLog.title'
+                    : 'githubPrs.title',
+              )}
+            </button>
+          ))}
         </div>
         <div
           id="git-dialog-panel"
@@ -103,8 +118,13 @@ export function GitDialog({
               workspaceCwd={workspaceCwd}
               onSubtitleChange={setSubtitle}
             />
-          ) : (
+          ) : view === 'log' ? (
             <GitLogContent
+              workspaceCwd={workspaceCwd}
+              onSubtitleChange={setSubtitle}
+            />
+          ) : (
+            <GitHubPrsContent
               workspaceCwd={workspaceCwd}
               onSubtitleChange={setSubtitle}
             />
