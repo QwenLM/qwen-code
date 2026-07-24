@@ -9,7 +9,11 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { SubagentManager } from './subagent-manager.js';
-import { type SubagentConfig, SubagentError } from './types.js';
+import {
+  type SubagentConfig,
+  SubagentError,
+  SubagentErrorCode,
+} from './types.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import type { Config } from '../config/config.js';
 import { makeFakeConfig } from '../test-utils/config.js';
@@ -1466,6 +1470,47 @@ You are a helpful assistant.`;
         /not found/,
       );
     });
+
+    it.each([undefined, 'extension'] as const)(
+      'should reject updates to extension-provided subagents when level is %s',
+      async (level) => {
+        vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([
+          {
+            id: 'test-extension',
+            name: 'test-extension',
+            version: '1.0.0',
+            isActive: true,
+            path: '/extension',
+            config: { name: 'test-extension', version: '1.0.0' },
+            contextFiles: [],
+            agents: [
+              {
+                name: 'extension-agent',
+                description: 'Provided by an extension',
+                systemPrompt: 'Review the code.',
+                level: 'extension',
+                filePath: '/extension/agents/extension-agent.md',
+              },
+            ],
+          },
+        ]);
+
+        await expect(
+          manager.updateSubagent(
+            'extension-agent',
+            { description: 'Updated description' },
+            level,
+          ),
+        ).rejects.toMatchObject({
+          code: SubagentErrorCode.INVALID_CONFIG,
+          subagentName: 'extension-agent',
+          message:
+            'Cannot update extension-provided subagent "extension-agent"',
+        });
+        expect(mockValidateOrThrow).not.toHaveBeenCalled();
+        expect(fs.writeFile).not.toHaveBeenCalled();
+      },
+    );
 
     it('should throw error on write failure', async () => {
       vi.mocked(fs.writeFile).mockRejectedValue(new Error('Write failed'));
