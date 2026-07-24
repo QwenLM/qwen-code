@@ -2950,7 +2950,7 @@ export const useGeminiStream = (
             // expired and the retry succeeded. Clear it so it does not
             // stay on screen. Terminal errors (handleErrorEvent) set
             // lastPromptErroredRef and are intentionally left visible.
-            setPendingRetryErrorItem(null);
+            clearRetryCountdown();
           }
           const loopDetected = loopDetectedRef.current;
           if (loopDetected) {

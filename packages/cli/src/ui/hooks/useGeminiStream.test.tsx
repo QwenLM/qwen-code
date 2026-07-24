@@ -9176,6 +9176,10 @@ describe('useGeminiStream', () => {
           );
         }
         expect(errorItem).toBeDefined();
+        const countdownItem = result.current.pendingHistoryItems.find(
+          (item) => item.type === 'retry_countdown',
+        );
+        expect(countdownItem).toBeDefined();
 
         await act(async () => {
           await vi.advanceTimersByTimeAsync(1000);
@@ -9191,6 +9195,10 @@ describe('useGeminiStream', () => {
           (item) => item.type === MessageType.ERROR,
         );
         expect(remainingError).toBeUndefined();
+        const remainingCountdown = result.current.pendingHistoryItems.find(
+          (item) => item.type === 'retry_countdown',
+        );
+        expect(remainingCountdown).toBeUndefined();
       } finally {
         vi.useRealTimers();
       }
