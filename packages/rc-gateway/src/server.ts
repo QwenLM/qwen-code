@@ -89,6 +89,7 @@ import type { AggregateQuery } from './cost/usageStore.js';
 import type { UsageTickBroadcaster } from './cost/usageTickBroadcaster.js';
 import { createForkRoute } from './routes/fork.js';
 import { createRewindRoute } from './routes/rewind.js';
+import { createApprovalModeRoute } from './routes/approvalMode.js';
 import {
   createIdleToggleRoute,
   createIdleStatusRoute,
@@ -1076,6 +1077,21 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
         queue: promptQueue,
       },
     ),
+  );
+
+  // POST /session/:id/approval-mode — MINIMAL mount for Task 3 (the route
+  // itself; tiered scope + daemon trust-gate passthrough). WRITE is the
+  // floor (plan/default); the in-handler OWNER gate escalates for power
+  // modes (auto-edit/auto/yolo) and a durable `persist: true`. A later task
+  // (add-remote-approval-mode's approval-mode pump) is expected to widen
+  // this mount with `recordActivity(workingDevice)` + `enforceSessionLock(audit)`
+  // to match the fork/rewind mounts above, and to reposition it alongside
+  // those — this minimal form exists only so the route is reachable through
+  // the real `createGatewayApp` for its own tests.
+  app.post(
+    '/session/:id/approval-mode',
+    requireScope(WRITE, audit),
+    createApprovalModeRoute(deps.daemon, { audit }),
   );
 
   if (deps.snooze) {
