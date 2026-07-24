@@ -287,6 +287,7 @@ export default {
     'Connecting to MCP servers... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': 'Type your message or @path/to/file',
   '? for shortcuts': '? for shortcuts',
+  'Pasting…': 'Pasting…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.",
   'Cancel operation / Clear input (double press)':
@@ -482,6 +483,12 @@ export default {
     'Create a new subagent with guided setup.',
   'Create a reusable skill from a knowledge source (file, URL, conversation, or text).':
     'Create a reusable skill from a knowledge source (file, URL, conversation, or text).',
+  'The current model or provider does not support native video input for /learn. Switch to a video-capable model on an OpenAI-compatible provider and try again.':
+    'The current model or provider does not support native video input for /learn. Switch to a video-capable model on an OpenAI-compatible provider and try again.',
+  'YouTube page URLs cannot be sent as native video input. Download the video into your workspace and pass the local video file path to /learn.':
+    'YouTube page URLs cannot be sent as native video input. Download the video into your workspace and pass the local video file path to /learn.',
+  'The local video could not be attached for /learn.':
+    'The local video could not be attached for /learn.',
 
   // ============================================================================
   // Agents - Management Dialog

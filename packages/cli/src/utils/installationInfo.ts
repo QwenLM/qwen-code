@@ -41,19 +41,26 @@ export function getNpmCliPath(
   // instead of throwing synchronously — getNpmCliPath is called from a
   // non-async site (handleAutoUpdate), and a returned best-effort path lets the
   // downstream spawn surface any failure through its 'error' handler.
+  //
+  // Node version managers (mise, asdf, proto) may replace bin/npm with a shell
+  // wrapper instead of a symlink to npm-cli.js. Validate the resolved path is a
+  // .js file before returning it; otherwise use the conventional fallback.
+  const npmCliJs = path.join(
+    path.dirname(nodePath),
+    '..',
+    'lib',
+    'node_modules',
+    'npm',
+    'bin',
+    'npm-cli.js',
+  );
   const adjacentNpm = path.join(path.dirname(nodePath), 'npm');
   try {
-    return fs.realpathSync(adjacentNpm);
+    const resolved = fs.realpathSync(adjacentNpm);
+    if (resolved.endsWith('.js')) return resolved;
+    return npmCliJs;
   } catch {
-    return path.join(
-      path.dirname(nodePath),
-      '..',
-      'lib',
-      'node_modules',
-      'npm',
-      'bin',
-      'npm-cli.js',
-    );
+    return npmCliJs;
   }
 }
 

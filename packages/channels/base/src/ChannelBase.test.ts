@@ -26,6 +26,10 @@ import type {
   ChannelWebhookTask,
 } from './ChannelWebhookTask.js';
 import { SessionRouter } from './SessionRouter.js';
+import {
+  ChannelProactiveDeliveryError,
+  isChannelProactiveDeliveryError,
+} from './ChannelProactiveDeliveryError.js';
 
 // Concrete test implementation
 class TestChannel extends ChannelBase {
@@ -352,6 +356,139 @@ describe('ChannelBase', () => {
       options,
     );
   }
+
+  describe('proactive delivery boundary', () => {
+    it('recognizes typed delivery errors across module instances', () => {
+      expect(
+        isChannelProactiveDeliveryError({
+          code: 'channel_proactive_delivery_error',
+          disposition: 'permanent',
+          message: 'invalid recipient',
+        }),
+      ).toBe(true);
+      expect(
+        isChannelProactiveDeliveryError({
+          code: 'channel_proactive_delivery_error',
+          disposition: 'unknown',
+          message: 'invalid recipient',
+        }),
+      ).toBe(false);
+    });
+
+    it('derives chat and user session targets', async () => {
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+      ch.proactiveTargetSupported = true;
+
+      await ch.deliverProactive(
+        { channelName: 'test-chan', type: 'chat', id: 'group-1' },
+        'group result',
+      );
+      await ch.deliverProactive(
+        { channelName: 'test-chan', type: 'user', id: 'user-1' },
+        'user result',
+      );
+
+      expect(ch.proactiveTargets).toEqual([
+        {
+          channelName: 'test-chan',
+          senderId: 'group-1',
+          chatId: 'group-1',
+          isGroup: true,
+        },
+        {
+          channelName: 'test-chan',
+          senderId: 'user-1',
+          chatId: 'user-1',
+          isGroup: false,
+        },
+      ]);
+    });
+
+    it('rejects invalid and unsupported proactive targets', async () => {
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'test-chan', type: 'user', id: '  ' },
+          'result',
+        ),
+      ).rejects.toThrow('invalid proactive target');
+
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'test-chan', type: 'user', id: 'user-1' },
+          '  ',
+        ),
+      ).rejects.toThrow('empty proactive text');
+
+      ch.proactiveTargetSupported = false;
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'test-chan', type: 'chat', id: 'group-1' },
+          'result',
+        ),
+      ).rejects.toThrow('does not support this proactive target');
+    });
+
+    it('rejects delivery owned by another channel or without send support', async () => {
+      const ch = createChannel();
+      ch.proactiveTargetSupported = true;
+
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'other', type: 'user', id: 'user-1' },
+          'result',
+        ),
+      ).rejects.toThrow('does not own delivery target');
+
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'test-chan', type: 'user', id: 'user-1' },
+          'result',
+        ),
+      ).rejects.toThrow('does not support proactive delivery');
+    });
+
+    it('normalizes untyped adapter failures as transient delivery errors', async () => {
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+      ch.proactiveTargetSupported = true;
+      const cause = new Error('provider request failed');
+      ch.proactiveError = cause;
+
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'test-chan', type: 'user', id: 'user-1' },
+          'result',
+        ),
+      ).rejects.toMatchObject({
+        code: 'channel_proactive_delivery_error',
+        disposition: 'transient',
+        message: 'provider request failed',
+        cause,
+      });
+    });
+
+    it('preserves typed adapter delivery errors', async () => {
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+      ch.proactiveTargetSupported = true;
+      const error = new ChannelProactiveDeliveryError(
+        'permanent',
+        'recipient rejected',
+      );
+      ch.proactiveError = error;
+
+      await expect(
+        ch.deliverProactive(
+          { channelName: 'test-chan', type: 'user', id: 'user-1' },
+          'result',
+        ),
+      ).rejects.toBe(error);
+    });
+  });
 
   describe('gate integration', () => {
     it('silently drops group messages when groupPolicy=disabled', async () => {
@@ -2128,10 +2265,88 @@ describe('ChannelBase', () => {
         ['回复前必须说 1122'],
         'alice',
       );
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
+      expect(bridge.prompt).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.stringContaining('你记一下以后回复前要说 1122'),
+        expect.anything(),
+      );
+    });
+
+    it('classifier remember in a multi-task message saves memory and still runs the other tasks', async () => {
+      const channelMemory = createChannelMemory();
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'remember',
+          memory: 'Code reviews should use inline comments',
+          confidence: 0.93,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+      const text =
+        'Review PR #123. Remember that code reviews should use inline ' +
+        'comments. Also check PR #456.';
+
+      await ch.handleInbound(envelope({ text, senderId: 'alice' }));
+
+      expect(channelMemory.addChannelMemoryEntries).toHaveBeenCalledWith(
+        {
+          channelName: 'test-chan',
+          chatId: 'chat1',
+          threadId: undefined,
+        },
+        ['Code reviews should use inline comments'],
+        'alice',
+      );
+      // The full message reaches the agent so the non-memory tasks run, and
+      // no bot-injected confirmation precedes the agent's reply.
+      expect(bridge.prompt).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.stringContaining('Review PR #123'),
+        expect.anything(),
+      );
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
+    });
+
+    it('classifier remember save failures report the error and still forward the message', async () => {
+      const channelMemory = createChannelMemory();
+      channelMemory.addChannelMemoryEntries.mockRejectedValue(
+        new Error('disk full'),
+      );
+      const memoryIntentClassifier = {
+        classifyChannelMemoryIntent: vi.fn().mockResolvedValue({
+          intent: 'remember',
+          memory: 'Use staging.',
+          confidence: 0.91,
+        }),
+      };
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, memoryIntentClassifier },
+      );
+      const stderrSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+
+      await ch.handleInbound(
+        envelope({
+          text: 'Deploy the fix and remember to use staging',
+          senderId: 'alice',
+        }),
+      );
+
       expect(ch.sent).toEqual([
-        { chatId: 'chat1', text: 'Channel memory m-000000000001 saved.' },
+        {
+          chatId: 'chat1',
+          text: 'Failed to save channel memory: An error occurred while accessing channel memory.',
+        },
+        { chatId: 'chat1', text: 'agent response' },
       ]);
-      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
+      stderrSpy.mockRestore();
     });
 
     it('dispatches all validated classifier facts in one memory write', async () => {
@@ -2166,7 +2381,7 @@ describe('ChannelBase', () => {
         ['Use staging.', 'Run tests first.', 'Deploy after approval.'],
         'alice',
       );
-      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
     });
 
     it('dispatches the validated snapshot when classifier memories getter mutates', async () => {
@@ -2204,7 +2419,7 @@ describe('ChannelBase', () => {
         'alice',
       );
       expect(memoriesReads).toBe(1);
-      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
     });
 
     it('dispatches the first indexed value when a classifier memory changes on a second read', async () => {
@@ -2245,7 +2460,7 @@ describe('ChannelBase', () => {
         'alice',
       );
       expect(secondFactReads).toBe(1);
-      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
     });
 
     it('dispatches the first indexed value when a classifier memory becomes non-string on a second read', async () => {
@@ -2286,7 +2501,7 @@ describe('ChannelBase', () => {
         'alice',
       );
       expect(secondFactReads).toBe(1);
-      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
     });
 
     it.each(['confidence', 'intent'] as const)(
@@ -2478,10 +2693,10 @@ describe('ChannelBase', () => {
         ['Use staging.'],
         'alice',
       );
-      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
     });
 
-    it('reports saved and skipped IDs once for mixed batch results', async () => {
+    it('suppresses save confirmations for mixed batch results and forwards the message', async () => {
       const channelMemory = createChannelMemory();
       channelMemory.addChannelMemoryEntries.mockResolvedValue({
         changed: true,
@@ -2518,13 +2733,8 @@ describe('ChannelBase', () => {
       );
 
       expect(invalidateUnattendedMemory).toHaveBeenCalledTimes(1);
-      expect(ch.sent).toEqual([
-        {
-          chatId: 'chat1',
-          text: 'Channel memory saved: m-a31f0d82c7e4, m-b82c4e190a6f. Skipped duplicates: m-c93d5f20b7a8.',
-        },
-      ]);
-      expect(bridge.prompt).not.toHaveBeenCalled();
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
+      expect(bridge.prompt).toHaveBeenCalledTimes(1);
     });
 
     it('regex memory intent skips the llm classifier', async () => {

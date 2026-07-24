@@ -60,3 +60,32 @@ export function parseLastEventId(
   }
   return n;
 }
+
+/**
+ * Parse an `X-Qwen-Event-Epoch` request header into an epoch token for the
+ * EventBus stale-cursor detection (DAEMON-001). Shared by the REST
+ * `GET /session/:id/events` surface and the ACP `GET /acp` surface — a
+ * single implementation on purpose, to avoid re-growing the
+ * `parseLastEventId` dual-copy problem noted above.
+ *
+ * Accepts only non-empty `[A-Za-z0-9_-]` strings of length ≤ 64 (the daemon
+ * emits `randomUUID()` tokens; the bound guards against log/header abuse).
+ * Invalid values are treated as "not provided" (the bus falls back to the
+ * numeric heuristic) and logged for operators; a missing header is silent.
+ *
+ * @param logPrefix distinguishes the surface in logs, e.g. `'/acp '` vs `''`.
+ */
+export function parseEventEpochHeader(
+  raw: unknown,
+  logPrefix = '',
+): string | undefined {
+  if (typeof raw !== 'string' || raw.length === 0) return undefined;
+  if (raw.length > 64 || !/^[\w-]+$/.test(raw)) {
+    writeStderrLine(
+      `qwen serve: ${logPrefix}rejected X-Qwen-Event-Epoch ` +
+        `${safeLogValue(raw)} (expected [A-Za-z0-9_-]{1,64})`,
+    );
+    return undefined;
+  }
+  return raw;
+}

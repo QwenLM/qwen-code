@@ -250,6 +250,7 @@ export class GeminiClient {
   private cachedGitStatus: string | null | undefined;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
   private shutdownRequested = false;
+  private readonly settledSteerInputs = new WeakSet<SteerInput>();
 
   private readonly loopDetector: LoopDetectionService;
   private lastPromptId: string | undefined = undefined;
@@ -1929,7 +1930,8 @@ export class GeminiClient {
       steerInput: SteerInput | undefined,
       pushCountBefore: number,
     ) => {
-      if (!steerInput) return;
+      if (!steerInput || this.settledSteerInputs.has(steerInput)) return;
+      this.settledSteerInputs.add(steerInput);
       try {
         if (currentPushCount() > pushCountBefore) {
           steerInput.accept();
@@ -2557,9 +2559,20 @@ export class GeminiClient {
 
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
+      let steerInputSettled = false;
       let hasToolCalls = false;
       try {
         for await (const event of resultStream) {
+          if (!steerInputSettled) {
+            // Settle the attached steer input as soon as the first stream
+            // event arrives — the user-content push has landed by now.
+            // Settling here (before model-response events are committed to
+            // UI history) ensures the queued user message renders above the
+            // model's reply.  The outer finally re-runs settleSteerInput
+            // as a no-op thanks to the settledSteerInputs guard.
+            settleSteerInput(attachedSteerInput, attachedSteerPushCount);
+            steerInputSettled = true;
+          }
           if (event.type === GeminiEventType.ToolCallRequest) {
             hasToolCalls = true;
           } else if (
@@ -2729,7 +2742,7 @@ export class GeminiClient {
               {
                 ...options,
                 type: SendMessageType.Steer,
-                steerInput: undefined,
+                steerInput,
               },
               steerTurnBudget,
             );
@@ -2952,6 +2965,7 @@ export class GeminiClient {
                 type: SendMessageType.Hook,
                 modelOverride: options?.modelOverride,
                 getSteerInput: options?.getSteerInput,
+                steerInput: pendingSteer,
                 stopHookState: discardGoalContinuation
                   ? undefined
                   : {
@@ -3053,7 +3067,7 @@ export class GeminiClient {
                 type: pendingSteer
                   ? SendMessageType.Steer
                   : SendMessageType.Hook,
-                steerInput: undefined,
+                steerInput: pendingSteer,
               },
               continueTurnBudget,
             );

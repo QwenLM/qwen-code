@@ -65,12 +65,14 @@ vi.mock('undici', () => {
 import {
   buildRuntimeFetchOptions,
   extractHostnameFromProxyUrl,
+  getOrCreateMcpDispatcher,
   getOrCreateSharedDispatcher,
   isTlsVerificationDisabled,
   preloadRuntimeFetchModule,
   redactProxyCredentials,
   redactProxyError,
   resetDispatcherCache,
+  setResolvedProxyUrlForRuntimeFetch,
 } from './runtimeFetchOptions.js';
 
 type UndiciOptions = Record<string, unknown>;
@@ -304,6 +306,37 @@ describe('getOrCreateSharedDispatcher', () => {
       result as { fetchOptions?: { dispatcher?: unknown } }
     ).fetchOptions?.dispatcher;
     expect(sdkDispatcher).toBe(shared);
+  });
+});
+
+describe('getOrCreateMcpDispatcher', () => {
+  beforeEach(() => {
+    resetDispatcherCache();
+  });
+
+  it('routes MCP traffic through the explicitly configured proxy dispatcher', () => {
+    setResolvedProxyUrlForRuntimeFetch('http://proxy.example.com:8080');
+    const dispatcher = getOrCreateMcpDispatcher(false);
+    expect(dispatcher).toBe(
+      getOrCreateSharedDispatcher('http://proxy.example.com:8080', false),
+    );
+  });
+
+  it('falls back to a cached env-aware dispatcher when no explicit proxy is registered', () => {
+    const d1 = getOrCreateMcpDispatcher(false);
+    expect(d1).toBe(getOrCreateMcpDispatcher(false));
+    expect(d1).not.toBe(
+      getOrCreateSharedDispatcher('http://proxy.local', false),
+    );
+  });
+
+  it('drops the registered explicit proxy when the dispatcher cache is reset', () => {
+    setResolvedProxyUrlForRuntimeFetch('http://proxy.example.com:8080');
+    resetDispatcherCache();
+    const dispatcher = getOrCreateMcpDispatcher(false);
+    expect(dispatcher).not.toBe(
+      getOrCreateSharedDispatcher('http://proxy.example.com:8080', false),
+    );
   });
 });
 
