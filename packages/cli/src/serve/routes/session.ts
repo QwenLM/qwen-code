@@ -2220,9 +2220,14 @@ export function registerSessionRoutes(
           runtime.generationGuard?.assertOpen();
         } catch (error) {
           if (!result.attached) {
-            await runtime.bridge
+            const killed = await runtime.bridge
               .killSession(result.sessionId, { requireZeroAttaches: true })
-              .catch(() => {});
+              .catch(() => false);
+            if (killed) {
+              await new SessionService(runtime.workspaceCwd)
+                .removeSession(result.sessionId)
+                .catch(() => {});
+            }
           } else {
             await runtime.bridge
               .detachClient(result.sessionId, result.clientId)

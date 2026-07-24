@@ -14131,6 +14131,69 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('POST /session/:id/branch', () => {
+    it.each([
+      ['removes', true, 1],
+      ['preserves', false, 0],
+    ])(
+      '%s the persisted branch when generation cleanup kills=%s',
+      async (_label, killed, expectedRemovals) => {
+        const generationGuard = createWorkspaceGenerationGuard();
+        const bridge = fakeBridge();
+        bridge.branchSession = vi.fn(async (sessionId) => {
+          generationGuard.close();
+          return {
+            sessionId: 'stale-branch',
+            workspaceCwd: WS_BOUND,
+            attached: false,
+            clientId: 'stale-client',
+            state: {},
+            displayName: 'Stale branch',
+            forkedFrom: { sessionId, displayName: 'Source' },
+          };
+        });
+        const killSpy = vi
+          .spyOn(bridge, 'killSession')
+          .mockResolvedValue(killed);
+        const removeSpy = vi
+          .spyOn(SessionService.prototype, 'removeSession')
+          .mockResolvedValue();
+        const runtime = makeWorkspaceRuntimeForTest({
+          workspaceId: 'branch-primary',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge,
+          generationGuard,
+        });
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { workspaceRegistry: createWorkspaceRegistry([runtime]) },
+        );
+
+        try {
+          const res = await request(app)
+            .post('/session/source-session/branch')
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .send({});
+
+          expect(res.status).toBe(503);
+          expect(res.body.code).toBe('workspace_runtime_unavailable');
+          expect(killSpy).toHaveBeenCalledWith('stale-branch', {
+            requireZeroAttaches: true,
+          });
+          expect(removeSpy).toHaveBeenCalledTimes(expectedRemovals);
+          if (killed) {
+            expect(removeSpy).toHaveBeenCalledWith('stale-branch');
+          }
+        } finally {
+          killSpy.mockRestore();
+          removeSpy.mockRestore();
+        }
+      },
+    );
+  });
+
   describe('POST /session/:id/fork', () => {
     it('does not launch through a closed runtime generation', async () => {
       const generationGuard = createWorkspaceGenerationGuard();

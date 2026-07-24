@@ -312,6 +312,9 @@ const TRUSTED_WORKSPACE_METHODS = new Set<string>([
   `${QWEN_METHOD_NS}workspace/agents/create`,
   `${QWEN_METHOD_NS}workspace/agents/update`,
   `${QWEN_METHOD_NS}workspace/agents/delete`,
+  `${QWEN_METHOD_NS}workspace/session_groups/create`,
+  `${QWEN_METHOD_NS}workspace/session_groups/update`,
+  `${QWEN_METHOD_NS}workspace/session_groups/delete`,
 ]);
 
 const WORKSPACE_GENERATION_MUTATION_METHODS = new Set<string>([
@@ -333,6 +336,9 @@ const WORKSPACE_GENERATION_MUTATION_METHODS = new Set<string>([
   `${QWEN_METHOD_NS}workspace/agents/create`,
   `${QWEN_METHOD_NS}workspace/agents/update`,
   `${QWEN_METHOD_NS}workspace/agents/delete`,
+  `${QWEN_METHOD_NS}workspace/session_groups/create`,
+  `${QWEN_METHOD_NS}workspace/session_groups/update`,
+  `${QWEN_METHOD_NS}workspace/session_groups/delete`,
 ]);
 
 function advertisedQwenVendorMethods(
@@ -2266,6 +2272,7 @@ export class AcpDispatcher {
             name: params['name'] as string,
             color: params['color'] as SessionGroupColor,
           });
+          assertGenerationOpen?.();
           this.replyConn(conn, id, { group });
           return;
         }
@@ -2285,6 +2292,7 @@ export class AcpDispatcher {
               : {}),
             ...('order' in params ? { order: params['order'] as number } : {}),
           });
+          assertGenerationOpen?.();
           this.replyConn(conn, id, { group });
           return;
         }
@@ -2299,6 +2307,7 @@ export class AcpDispatcher {
             await createSessionOrganizationService(workspaceCwd).deleteGroup(
               groupId,
             );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, { deleted });
           return;
         }

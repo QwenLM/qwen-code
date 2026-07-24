@@ -713,6 +713,31 @@ describe('scheduled-tasks routes', () => {
     expect(res.body.code).toBe('task_not_found');
   });
 
+  it('preserves a missing PATCH response when no mutation committed', async () => {
+    await teardown(h);
+    let checks = 0;
+    h = await makeHarness(true, {
+      closed: false,
+      assertOpen() {
+        checks += 1;
+        if (checks > 1) {
+          throw Object.assign(new Error('generation closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+      },
+      close() {},
+    });
+
+    const res = await request(h.app)
+      .patch('/scheduled-tasks/missing1')
+      .send({ enabled: false });
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('task_not_found');
+    expect(checks).toBe(1);
+  });
+
   it('deletes a task, then 404s on repeat', async () => {
     const created = await create({ cron: '0 9 * * *', prompt: 'x' });
     const id = created.body.id as string;
@@ -727,6 +752,29 @@ describe('scheduled-tasks routes', () => {
     expect(again.status).toBe(404);
     // A no-op delete (already gone) closes nothing further.
     expect(h.bridge.closed).toEqual([created.body.sessionId]);
+  });
+
+  it('preserves a missing DELETE response when no mutation committed', async () => {
+    await teardown(h);
+    let checks = 0;
+    h = await makeHarness(true, {
+      closed: false,
+      assertOpen() {
+        checks += 1;
+        if (checks > 1) {
+          throw Object.assign(new Error('generation closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+      },
+      close() {},
+    });
+
+    const res = await request(h.app).delete('/scheduled-tasks/missing1');
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('task_not_found');
+    expect(checks).toBe(1);
   });
 
   it('records a manual run: advances lastFiredAt and appends a manual run', async () => {
@@ -913,6 +961,42 @@ describe('scheduled-tasks routes', () => {
       (x: { id: string }) => x.id === 'legacy-enable',
     );
     expect(t.enabled).toBe(false);
+  });
+
+  it('preserves a legacy PATCH rejection when no mutation committed', async () => {
+    await teardown(h);
+    let checks = 0;
+    h = await makeHarness(true, {
+      closed: false,
+      assertOpen() {
+        checks += 1;
+        if (checks > 1) {
+          throw Object.assign(new Error('generation closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+      },
+      close() {},
+    });
+    await seedTask({
+      id: 'legacy-enable',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: null,
+      enabled: false,
+      sessionId: 'sess-legacy-enable',
+      condition: 'only when files changed',
+    });
+
+    const res = await request(h.app)
+      .patch('/scheduled-tasks/legacy-enable')
+      .send({ enabled: true });
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('task_legacy_unsupported');
+    expect(checks).toBe(1);
   });
 
   it('removes a ONE-SHOT task on manual run (so the scheduler cannot fire it again)', async () => {

@@ -36,7 +36,11 @@ import {
   SessionShellDisabledError,
   TotalSessionLimitExceededError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
-import { SessionService, Storage } from '@qwen-code/qwen-code-core';
+import {
+  SessionOrganizationService,
+  SessionService,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import {
   resetHomeEnvBootstrapForTesting,
   SettingScope,
@@ -6817,6 +6821,46 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
+    it.each([
+      [
+        '_qwen/workspace/session_groups/create',
+        { workspaceCwd: '/ws', name: 'Blocked', color: 'blue' },
+      ],
+      [
+        '_qwen/workspace/session_groups/update',
+        { workspaceCwd: '/ws', groupId: 'blocked', name: 'Blocked' },
+      ],
+      [
+        '_qwen/workspace/session_groups/delete',
+        { workspaceCwd: '/ws', groupId: 'blocked' },
+      ],
+    ])(
+      'rejects untrusted session group mutation %s',
+      async (method, params) => {
+        await restartServer({ primaryTrusted: false });
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 590,
+          method,
+          params,
+        });
+
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({
+          id: 590,
+          error: {
+            data: {
+              errorKind: 'untrusted_workspace',
+              httpStatus: 403,
+            },
+          },
+        });
+      },
+    );
+
     it('rejects a sensitive response when its runtime generation closes in flight', async () => {
       const generationGuard = createWorkspaceGenerationGuard();
       let markStarted!: () => void;
@@ -6866,6 +6910,53 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
       reader.close();
       statusSpy.mockRestore();
+    });
+
+    it('rejects a session group mutation when its generation closes in flight', async () => {
+      const generationGuard = createWorkspaceGenerationGuard();
+      const createSpy = vi
+        .spyOn(SessionOrganizationService.prototype, 'createGroup')
+        .mockImplementationOnce(async ({ name, color }) => {
+          generationGuard.close();
+          return {
+            id: 'stale-group',
+            name,
+            color,
+            order: 0,
+            createdAt: '2026-07-24T00:00:00.000Z',
+            updatedAt: '2026-07-24T00:00:00.000Z',
+          };
+        });
+      try {
+        await restartServer({ generationGuard });
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 593,
+          method: '_qwen/workspace/session_groups/create',
+          params: {
+            workspaceCwd: '/ws',
+            name: 'Stale',
+            color: 'blue',
+          },
+        });
+
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({
+          id: 593,
+          error: {
+            data: {
+              errorKind: 'workspace_runtime_unavailable',
+              httpStatus: 503,
+              retryable: true,
+            },
+          },
+        });
+      } finally {
+        createSpy.mockRestore();
+      }
     });
 
     it('_qwen/workspace/tools returns tools', async () => {
