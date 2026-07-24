@@ -4444,9 +4444,8 @@ export class WorkspaceDaemonClient {
   }
 
   workspaceGitDiff(cwd?: string): Promise<DaemonWorkspaceGitDiff> {
-    const suffix = cwd
-      ? `/git/diff?cwd=${encodeURIComponent(cwd)}`
-      : '/git/diff';
+    const suffix =
+      cwd != null ? `/git/diff?cwd=${urlEncode(cwd)}` : '/git/diff';
     return this.client.workspaceJsonRequest<DaemonWorkspaceGitDiff>(
       this.workspaceSelector,
       suffix,
@@ -4463,7 +4462,7 @@ export class WorkspaceDaemonClient {
     const query =
       `/git/diff/file?path=${urlEncode(path)}` +
       (oldPath != null ? `&oldPath=${urlEncode(oldPath)}` : '') +
-      (cwd != null ? `&cwd=${encodeURIComponent(cwd)}` : '');
+      (cwd != null ? `&cwd=${urlEncode(cwd)}` : '');
     return this.client.workspaceJsonRequest<DaemonWorkspaceGitDiffHunks>(
       this.workspaceSelector,
       query,
@@ -4496,7 +4495,7 @@ export class WorkspaceDaemonClient {
   ): Promise<DaemonGitCommitDetail> {
     const query =
       `/git/log/commit?sha=${urlEncode(sha)}` +
-      (cwd != null ? `&cwd=${encodeURIComponent(cwd)}` : '');
+      (cwd != null ? `&cwd=${urlEncode(cwd)}` : '');
     return this.client.workspaceJsonRequest<DaemonGitCommitDetail>(
       this.workspaceSelector,
       query,

@@ -425,7 +425,7 @@ export function GitDiffContent({
             // Key by workspace + path so switching workspace remounts the row
             // instead of reusing another workspace's hunks/open state for a
             // path both workspaces share.
-            key={`${workspaceCwd}:${file.path}`}
+            key={`${workspaceCwd}:${gitCwd ?? ''}:${file.path}`}
             workspaceCwd={workspaceCwd}
             gitCwd={gitCwd}
             file={file}

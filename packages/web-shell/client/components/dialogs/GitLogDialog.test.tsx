@@ -32,7 +32,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useWorkspace: () => ({ client: workspaceClient }),
 }));
 
-const { GitLogDialog } = await import('./GitLogDialog');
+const { GitLogDialog, GitLogContent } = await import('./GitLogDialog');
 
 let container: HTMLDivElement;
 let root: Root;
@@ -306,6 +306,48 @@ describe('GitLogDialog', () => {
 
     expect(document.body.textContent).toContain(
       'Failed to load commit details',
+    );
+  });
+
+  it('forwards gitCwd to the log list and commit-detail SDK calls', async () => {
+    const e = entry();
+    workspaceGitLog.mockResolvedValue(logPayload([e]));
+    workspaceGitCommitDetail.mockResolvedValue({
+      ...e,
+      body: 'body',
+      files: [],
+      filesCount: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+      hiddenCount: 0,
+    });
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitLogContent workspaceCwd="/repo" gitCwd="/worktrees/wt" />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    expect(workspaceGitLog).toHaveBeenCalledWith(50, 0, '/worktrees/wt');
+
+    const row = document.body.querySelector(
+      'button[aria-expanded="false"]',
+    ) as HTMLButtonElement;
+    expect(row).not.toBeNull();
+    await act(async () => {
+      row.click();
+    });
+    await flush();
+
+    expect(workspaceGitCommitDetail).toHaveBeenCalledWith(
+      e.sha,
+      '/worktrees/wt',
     );
   });
 });

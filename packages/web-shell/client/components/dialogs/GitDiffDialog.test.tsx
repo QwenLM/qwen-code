@@ -67,7 +67,7 @@ vi.mock('../messages/ToolGroup', () => ({
   languageForPath: () => 'text',
 }));
 
-const { GitDiffDialog } = await import('./GitDiffDialog');
+const { GitDiffDialog, GitDiffContent } = await import('./GitDiffDialog');
 
 let container: HTMLDivElement;
 let root: Root;
@@ -471,5 +471,67 @@ describe('GitDiffDialog', () => {
     // the new side — not the plain-text fallback.
     expect(texts).toContain('const a = 1');
     expect(texts).toContain('const a = 2');
+  });
+
+  it('forwards gitCwd to the diff list and file SDK calls', async () => {
+    workspaceGitDiff.mockResolvedValue(
+      diffPayload({
+        files: [
+          {
+            path: 'src/a.ts',
+            added: 1,
+            removed: 0,
+            isBinary: false,
+            isUntracked: false,
+            isDeleted: false,
+            truncated: false,
+          },
+        ],
+      }),
+    );
+    workspaceGitDiffFile.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      path: 'src/a.ts',
+      available: true,
+      hunks: [
+        {
+          oldStart: 1,
+          oldLines: 1,
+          newStart: 1,
+          newLines: 1,
+          lines: ['-old', '+new'],
+        },
+      ],
+    });
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDiffContent workspaceCwd="/repo" gitCwd="/worktrees/wt" />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    expect(workspaceGitDiff).toHaveBeenCalledWith('/worktrees/wt');
+
+    const header = document.body.querySelector(
+      'button[aria-expanded="false"]',
+    ) as HTMLButtonElement;
+    expect(header).not.toBeNull();
+    await act(async () => {
+      header.click();
+    });
+    await flush();
+
+    expect(workspaceGitDiffFile).toHaveBeenCalledWith(
+      'src/a.ts',
+      undefined,
+      '/worktrees/wt',
+    );
   });
 });
