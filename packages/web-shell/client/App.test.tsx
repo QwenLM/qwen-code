@@ -2,7 +2,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, createRef, type CSSProperties } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonInputAnnotation,
+  DaemonWorkspaceGitStatus,
+} from '@qwen-code/sdk/daemon';
 import type { WebShellApi } from './App';
 import type { Message } from './adapters/types';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
@@ -26,6 +29,8 @@ type MockConnection = {
   error?: string;
   errorStatus?: number;
   missingSession?: boolean;
+  gitBranch?: string;
+  gitStatus?: DaemonWorkspaceGitStatus;
 };
 
 type ChatEditorTestProps = {
@@ -57,6 +62,8 @@ type ChatEditorTestProps = {
     name?: string;
     slug?: string;
   }) => void;
+  gitBranch?: string;
+  gitStatus?: DaemonWorkspaceGitStatus;
 };
 
 type AddWorkspaceDialogTestProps = {
@@ -1011,6 +1018,8 @@ beforeEach(() => {
   mockConnection.skills = [];
   mockConnection.loadingTranscript = false;
   mockConnection.catchingUp = false;
+  mockConnection.gitBranch = undefined;
+  mockConnection.gitStatus = undefined;
   mockWorkspace.capabilities = {
     workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
   };
@@ -1948,6 +1957,78 @@ describe('App session callbacks', () => {
     expect(
       testState.latestChatEditorProps?.onGitModeIntentChange,
     ).toBeUndefined();
+  });
+
+  it('fetches the composer git status on both the fast and the wait:true fresh path', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    const workspaceGit = vi.fn().mockResolvedValue({ branch: 'main' });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit,
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    // Fast path paints the chip from the daemon's last-known cache; the
+    // wait:true fresh path fills in the enriched counters once the daemon's
+    // background recomputation lands (no SSE exists before the first
+    // prompt). Both share one daemon-side `git status` computation.
+    await vi.waitFor(() => {
+      expect(workspaceGit).toHaveBeenCalledWith({ cwd: undefined });
+      expect(workspaceGit).toHaveBeenCalledWith({ wait: true });
+    });
+  });
+
+  it('mirrors connection.gitStatus into the composer git chip', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    renderApp();
+    await flush();
+    await flush();
+
+    // Fast GET applied the branch-only last-known status.
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitStatus).toEqual({
+        branch: 'main',
+      });
+    });
+
+    // The daemon's `git_status_changed` push lands as connection.gitStatus
+    // (a provider state update in production; simulated here by mutating the
+    // connection object and forcing a re-render).
+    act(() => {
+      mockConnection.gitStatus = {
+        v: 2,
+        workspaceCwd: '/workspace',
+        branch: 'main',
+        staged: 2,
+        computedAt: 1_700_000_000_000,
+      };
+      testState.latestChatEditorProps?.onInputTextChange?.('x');
+    });
+    await flush();
+
+    await vi.waitFor(() => {
+      expect(testState.latestChatEditorProps?.gitStatus).toMatchObject({
+        workspaceCwd: '/workspace',
+        branch: 'main',
+        staged: 2,
+      });
+    });
   });
 
   it('forwards the branch intent to createSession when submitting a prompt', async () => {

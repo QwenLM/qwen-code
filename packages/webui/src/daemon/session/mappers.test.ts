@@ -285,6 +285,49 @@ describe('updateConnectionFromDaemonEvent', () => {
     expect(next).toBe(current);
   });
 
+  it('stores the enriched git status pushed for the current workspace', () => {
+    const next = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        v: 1,
+        type: 'git_status_changed',
+        data: {
+          v: 2,
+          workspaceCwd: '/workspace',
+          branch: 'main',
+          staged: 2,
+          computedAt: 1_700_000_000_000,
+        },
+      },
+    );
+
+    expect(next.gitStatus).toMatchObject({
+      workspaceCwd: '/workspace',
+      branch: 'main',
+      staged: 2,
+    });
+  });
+
+  it('ignores git status pushes from a previous workspace', () => {
+    const current = {
+      status: 'connected' as const,
+      workspaceCwd: '/workspace/current',
+    };
+
+    const next = applyEvent(current, {
+      v: 1,
+      type: 'git_status_changed',
+      data: {
+        v: 2,
+        workspaceCwd: '/workspace/previous',
+        branch: 'stale-branch',
+        staged: 9,
+      },
+    });
+
+    expect(next).toBe(current);
+  });
+
   it('replaces commands and skills from an available_commands_update', () => {
     const next = applyEvent(
       { status: 'connected', workspaceCwd: '/workspace' },

@@ -9,6 +9,7 @@ import {
   getGitWorkingTreeStatus,
   resolveBranchName,
   watchRepoBranch,
+  type GitWorkingTreeStatus,
 } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
@@ -22,6 +23,31 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
 const getGitWorkingTreeStatusMock = vi.mocked(getGitWorkingTreeStatus);
 const resolveBranchNameMock = vi.mocked(resolveBranchName);
 const watchRepoBranchMock = vi.mocked(watchRepoBranch);
+
+function summary(
+  overrides: Partial<GitWorkingTreeStatus> = {},
+): GitWorkingTreeStatus {
+  return {
+    branch: 'main',
+    detached: false,
+    hasUpstream: true,
+    ahead: 0,
+    behind: 0,
+    staged: 0,
+    unstaged: 0,
+    untracked: 0,
+    conflicted: 0,
+    stashCount: 0,
+    ...overrides,
+  };
+}
+
+function bridgeWith(publishWorkspaceEvent = vi.fn()) {
+  return {
+    bridge: { publishWorkspaceEvent } as unknown as AcpSessionBridge,
+    publishWorkspaceEvent,
+  };
+}
 
 describe('WorkspaceGitState', () => {
   beforeEach(() => {
@@ -86,9 +112,13 @@ describe('WorkspaceGitState', () => {
     const state = new WorkspaceGitState();
 
     await expect(
-      state.getStatus('/workspace', {
-        publishWorkspaceEvent: vi.fn(),
-      } as unknown as AcpSessionBridge),
+      state.getStatus(
+        '/workspace',
+        {
+          publishWorkspaceEvent: vi.fn(),
+        } as unknown as AcpSessionBridge,
+        { wait: true },
+      ),
     ).resolves.toEqual({
       v: 2,
       workspaceCwd: '/workspace',
@@ -158,7 +188,7 @@ describe('WorkspaceGitState', () => {
       publishWorkspaceEvent: vi.fn(),
     } as unknown as AcpSessionBridge;
 
-    const status = await state.getStatus('/workspace', bridge);
+    const status = await state.getStatus('/workspace', bridge, { wait: true });
     expect(status).toMatchObject({
       v: 2,
       workspaceCwd: '/workspace',
@@ -197,7 +227,7 @@ describe('WorkspaceGitState', () => {
       publishWorkspaceEvent: vi.fn(),
     } as unknown as AcpSessionBridge;
 
-    const status = await state.getStatus('/workspace', bridge);
+    const status = await state.getStatus('/workspace', bridge, { wait: true });
     expect(status).not.toHaveProperty('operation');
   });
 
@@ -223,7 +253,9 @@ describe('WorkspaceGitState', () => {
       publishWorkspaceEvent: vi.fn(),
     } as unknown as AcpSessionBridge;
 
-    await expect(state.getStatus('/workspace', bridge)).resolves.toMatchObject({
+    await expect(
+      state.getStatus('/workspace', bridge, { wait: true }),
+    ).resolves.toMatchObject({
       branch: 'a1b2c3d',
       detached: true,
     });
@@ -278,5 +310,181 @@ describe('WorkspaceGitState', () => {
     });
     expect(resolveBranchNameMock).toHaveBeenCalledTimes(2);
     state.dispose();
+  });
+
+  it('serves branch-only on a cold cache, then publishes the computed summary', async () => {
+    resolveBranchNameMock.mockResolvedValue('main');
+    watchRepoBranchMock.mockResolvedValue(() => {});
+    getGitWorkingTreeStatusMock.mockResolvedValue(summary({ staged: 2 }));
+    const state = new WorkspaceGitState();
+    const { bridge, publishWorkspaceEvent } = bridgeWith();
+
+    // Fast path: last-known (nothing yet) without waiting for `git status`.
+    await expect(state.getStatus('/workspace', bridge)).resolves.toEqual({
+      v: 2,
+      workspaceCwd: '/workspace',
+      branch: 'main',
+    });
+
+    await vi.waitFor(() =>
+      expect(publishWorkspaceEvent).toHaveBeenCalledWith({
+        type: 'git_status_changed',
+        data: expect.objectContaining({
+          workspaceCwd: '/workspace',
+          branch: 'main',
+          staged: 2,
+        }),
+      }),
+    );
+
+    // Warm cache: the fast path now returns the enriched last-known status.
+    const warm = await state.getStatus('/workspace', bridge);
+    expect(warm).toMatchObject({ staged: 2 });
+    expect(typeof warm.computedAt).toBe('number');
+    state.dispose();
+  });
+
+  it('publishes a follow-up event only when the summary changes', async () => {
+    resolveBranchNameMock.mockResolvedValue('main');
+    watchRepoBranchMock.mockResolvedValue(() => {});
+    getGitWorkingTreeStatusMock.mockResolvedValue(summary({ staged: 1 }));
+    const state = new WorkspaceGitState();
+    const { bridge, publishWorkspaceEvent } = bridgeWith();
+
+    await state.getStatus('/workspace', bridge);
+    await vi.waitFor(() =>
+      expect(publishWorkspaceEvent).toHaveBeenCalledTimes(1),
+    );
+
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      // Past the throttle window: a refresh runs but an unchanged summary
+      // must not re-publish (clients poll on a 30s cadence; a per-poll event
+      // would needlessly re-render).
+      vi.setSystemTime(Date.now() + 2_000);
+      await state.getStatus('/workspace', bridge);
+      await vi.waitFor(() =>
+        expect(getGitWorkingTreeStatusMock).toHaveBeenCalledTimes(2),
+      );
+      expect(publishWorkspaceEvent).toHaveBeenCalledTimes(1);
+
+      getGitWorkingTreeStatusMock.mockResolvedValue(summary({ staged: 3 }));
+      vi.setSystemTime(Date.now() + 2_000);
+      await state.getStatus('/workspace', bridge);
+      await vi.waitFor(() =>
+        expect(publishWorkspaceEvent).toHaveBeenCalledTimes(2),
+      );
+      expect(publishWorkspaceEvent).toHaveBeenLastCalledWith({
+        type: 'git_status_changed',
+        data: expect.objectContaining({ staged: 3 }),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+    state.dispose();
+  });
+
+  it('shares one in-flight computation across concurrent fast callers', async () => {
+    resolveBranchNameMock.mockResolvedValue('main');
+    watchRepoBranchMock.mockResolvedValue(() => {});
+    getGitWorkingTreeStatusMock.mockResolvedValue(summary());
+    const state = new WorkspaceGitState();
+    const { bridge } = bridgeWith();
+
+    await Promise.all([
+      state.getStatus('/workspace', bridge),
+      state.getStatus('/workspace', bridge),
+      state.getStatus('/workspace', bridge),
+    ]);
+    await vi.waitFor(() =>
+      expect(getGitWorkingTreeStatusMock).toHaveBeenCalledTimes(1),
+    );
+
+    // Within the throttle window another fast call does not refresh again.
+    await state.getStatus('/workspace', bridge);
+    expect(getGitWorkingTreeStatusMock).toHaveBeenCalledTimes(1);
+    state.dispose();
+  });
+
+  it('wait:true awaits a fresh computation and bypasses the throttle', async () => {
+    let resolveGit!: (value: GitWorkingTreeStatus | null) => void;
+    getGitWorkingTreeStatusMock.mockImplementation(
+      () =>
+        new Promise<GitWorkingTreeStatus | null>((resolve) => {
+          resolveGit = resolve;
+        }),
+    );
+    resolveBranchNameMock.mockResolvedValue('main');
+    watchRepoBranchMock.mockResolvedValue(() => {});
+    const state = new WorkspaceGitState();
+    const { bridge } = bridgeWith();
+
+    let settled = false;
+    const pending = state
+      .getStatus('/workspace', bridge, { wait: true })
+      .then((status) => {
+        settled = true;
+        return status;
+      });
+    await vi.waitFor(() =>
+      expect(getGitWorkingTreeStatusMock).toHaveBeenCalled(),
+    );
+    expect(settled).toBe(false);
+
+    resolveGit(summary({ ahead: 4 }));
+    await expect(pending).resolves.toMatchObject({ ahead: 4 });
+
+    // A second wait:true right after still forces a fresh computation.
+    getGitWorkingTreeStatusMock.mockResolvedValue(summary({ ahead: 5 }));
+    await expect(
+      state.getStatus('/workspace', bridge, { wait: true }),
+    ).resolves.toMatchObject({ ahead: 5 });
+    expect(getGitWorkingTreeStatusMock).toHaveBeenCalledTimes(2);
+    state.dispose();
+  });
+
+  it('keeps the cached summary and stays silent when a refresh fails', async () => {
+    resolveBranchNameMock.mockResolvedValue('main');
+    watchRepoBranchMock.mockResolvedValue(() => {});
+    getGitWorkingTreeStatusMock.mockResolvedValueOnce(summary({ staged: 1 }));
+    const state = new WorkspaceGitState();
+    const { bridge, publishWorkspaceEvent } = bridgeWith();
+
+    await expect(
+      state.getStatus('/workspace', bridge, { wait: true }),
+    ).resolves.toMatchObject({ staged: 1 });
+    expect(publishWorkspaceEvent).toHaveBeenCalledTimes(1);
+
+    getGitWorkingTreeStatusMock.mockRejectedValueOnce(
+      new Error('git exploded'),
+    );
+    await expect(
+      state.getStatus('/workspace', bridge, { wait: true }),
+    ).resolves.toMatchObject({ staged: 1 });
+    expect(publishWorkspaceEvent).toHaveBeenCalledTimes(1);
+    state.dispose();
+  });
+
+  it('does not publish when a refresh finishes after dispose', async () => {
+    let resolveGit!: (value: GitWorkingTreeStatus | null) => void;
+    getGitWorkingTreeStatusMock.mockImplementation(
+      () =>
+        new Promise<GitWorkingTreeStatus | null>((resolve) => {
+          resolveGit = resolve;
+        }),
+    );
+    resolveBranchNameMock.mockResolvedValue('main');
+    watchRepoBranchMock.mockResolvedValue(() => {});
+    const state = new WorkspaceGitState();
+    const { bridge, publishWorkspaceEvent } = bridgeWith();
+
+    const pending = state.getStatus('/workspace', bridge, { wait: true });
+    await vi.waitFor(() =>
+      expect(getGitWorkingTreeStatusMock).toHaveBeenCalled(),
+    );
+    state.dispose();
+    resolveGit(summary({ staged: 5 }));
+    await pending;
+    expect(publishWorkspaceEvent).not.toHaveBeenCalled();
   });
 });
