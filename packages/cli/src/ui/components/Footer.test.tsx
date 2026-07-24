@@ -223,7 +223,7 @@ describe('<Footer />', () => {
       isCronEnabled: vi.fn(() => true),
       getCronScheduler: vi.fn(() => ({ size: 2 })),
     });
-    expect(lastFrame()).toContain('◎ 2 scheduled tasks');
+    expect(lastFrame()).toContain('◎\uFE0E 2 scheduled tasks');
   });
 
   it('refreshes the scheduled task count after mount', async () => {
@@ -248,7 +248,7 @@ describe('<Footer />', () => {
       await act(async () => {
         await vi.advanceTimersByTimeAsync(1000);
       });
-      expect(lastFrame()).toContain('◎ 1 scheduled task');
+      expect(lastFrame()).toContain('◎\uFE0E 1 scheduled task');
 
       schedulerSize = 0;
       await act(async () => {

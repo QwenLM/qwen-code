@@ -345,8 +345,8 @@ describe('ProviderSetupSteps', () => {
     expect(inputLine).toContain('custom-model');
     expect(inputLine).not.toContain('MiniMax-M3');
     expect(inputLine).not.toContain('MiniMax-M2.7');
-    expect(frame).toMatch(/◉\s+MiniMax-M3/);
-    expect(frame).toMatch(/◉\s+MiniMax-M2\.7/);
+    expect(frame).toMatch(/◉\uFE0E\s+MiniMax-M3/);
+    expect(frame).toMatch(/◉\uFE0E\s+MiniMax-M2\.7/);
     unmount();
   });
 

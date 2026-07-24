@@ -1048,7 +1048,7 @@ describe('BackgroundTasksDialog', () => {
       h.call(() => h.probe.current!.actions.enterDetail());
       const frame = h.lastFrame() ?? '';
       expect(frame).toContain('Sub-agents');
-      expect(frame).toContain('○ explore — child work');
+      expect(frame).toContain('○\uFE0E explore — child work');
       // The parent itself is top-level: no Parent section, no badge.
       expect(frame).not.toContain('level 1 of');
     });

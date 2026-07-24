@@ -719,7 +719,7 @@ describe('<LiveAgentPanel />', () => {
       });
       const { lastFrame } = renderPanel({ entries: [child, parent] });
       const frame = lastFrame() ?? '';
-      expect(frame).toContain('↳ ○ child work');
+      expect(frame).toContain('↳ ○\uFE0E child work');
       expect(frame.indexOf('parent work')).toBeLessThan(
         frame.indexOf('child work'),
       );
@@ -755,7 +755,7 @@ describe('<LiveAgentPanel />', () => {
       });
       const { lastFrame } = renderPanel({ entries: [orphan] });
       const frame = lastFrame() ?? '';
-      expect(frame).toContain('↳ ○ orphan work');
+      expect(frame).toContain('↳ ○\uFE0E orphan work');
       expect(frame).toContain('· from researcher');
       // Root gutter only (paddingX 2 + prefix 2 = 4 cols) — no tree indent
       // despite the launch depth of 2, which would add 4+ more columns.
