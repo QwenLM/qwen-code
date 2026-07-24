@@ -155,6 +155,7 @@ export function addToolSchemaAttributes(
 
 /**
  * @deprecated Provider responses are captured by the GenAI exchange.
+ * This compatibility helper writes nothing without an explicit finish reason.
  */
 export function addModelOutputAttributes(
   config: Config,
@@ -181,6 +182,7 @@ export function addModelOutputAttributes(
 
 /**
  * @deprecated Use addToolArgumentsAttributes with the final invocation params.
+ * Only JSON object strings produce a standard arguments attribute.
  */
 export function addToolInputAttributes(
   config: Config,
@@ -199,6 +201,7 @@ export function addToolInputAttributes(
 
 /**
  * @deprecated Use addToolCallResultAttributes with the final FunctionResponse.
+ * Only JSON object strings produce a standard result attribute.
  */
 export function addToolResultAttributes(
   config: Config,

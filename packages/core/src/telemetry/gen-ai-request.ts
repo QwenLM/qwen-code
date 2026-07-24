@@ -350,6 +350,9 @@ export class GenAiExchangeController {
 }
 
 function disabledFallbackContext(parent: Context): Context {
+  // Preserve every other Context behavior through the parent prototype while
+  // shadowing key operations so a failed setValue cannot expose an ancestor
+  // observer to this exchange.
   const fallback = Object.create(parent) as Context;
   fallback.getValue = (key) => {
     if (key === requestObserverKey) return DISABLED_OBSERVER;
