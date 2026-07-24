@@ -259,6 +259,43 @@ jobs:
             echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
           fi
 
+      # The agent runs as one long step, but its output streams live to the
+      # Actions log. Post a status comment up front carrying that run link so a
+      # maintainer can watch progress instead of waiting silently until the
+      # first stage comment lands; "Finalize triage status comment" flips it to
+      # a terminal state at the end. Upsert by marker so a re-run reuses the one
+      # comment (no clutter). Best-effort: never fail the job over a status post.
+      - name: 'Post triage status comment'
+        if: "steps.resolve.outputs.number != ''"
+        shell: 'bash'
+        env:
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          NUMBER: '${{ steps.resolve.outputs.number }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |-
+          set -uo pipefail
+          MARKER='<!-- qwen-triage stage=status -->'
+          printf -v BODY '%s\n\n%s\n\n%s' \
+            "$MARKER" \
+            "🔄 **Qwen Triage is running** — [watch live progress]($RUN_URL). Stage results will post in this thread as they complete." \
+            "🔄 **Qwen Triage 正在运行** —— [查看实时进度]($RUN_URL)。各阶段结果完成后会更新在本线程。"
+          EXISTING_ID="$(
+            gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+              --method GET --paginate -F per_page=100 |
+              jq -rs --arg m "$MARKER" \
+                '[.[][] | select(.body | contains($m))] | last | .id // empty'
+          )" || EXISTING_ID=''
+          if [ -n "$EXISTING_ID" ]; then
+            gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
+              -f body="$BODY" >/dev/null ||
+              echo "::warning::Failed to update triage status comment; continuing." >&2
+          else
+            gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+              -f body="$BODY" >/dev/null ||
+              echo "::warning::Failed to post triage status comment; continuing." >&2
+          fi
+
       - name: 'Inject model name into triage signature'
         shell: 'bash'
         env:
@@ -373,6 +410,47 @@ jobs:
             "The stage comments above were updated with the latest result. [View workflow run]($RUN_URL)."
           gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
             -f body="$BODY" >/dev/null
+
+      # Flip the early status comment to a terminal state so a lingering
+      # "running" line doesn't outlive the run. Neutral wording — the verdict
+      # lives in the stage comments above; this only records that the run ended
+      # and keeps the run link. Same marker → edits the one comment, no second
+      # post. Best-effort, on both success and failure.
+      - name: 'Finalize triage status comment'
+        if: "(success() || failure()) && steps.resolve.outputs.number != ''"
+        shell: 'bash'
+        env:
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          NUMBER: '${{ steps.resolve.outputs.number }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          TRIAGE_OUTCOME: '${{ steps.triage.outcome }}'
+        run: |-
+          set -uo pipefail
+          MARKER='<!-- qwen-triage stage=status -->'
+          if [ "${TRIAGE_OUTCOME:-}" = 'success' ]; then
+            EN="✅ **Qwen Triage finished** — [view run]($RUN_URL). See the stage comments above for the result."
+            ZH="✅ **Qwen Triage 已完成** —— [查看运行]($RUN_URL)。结果见上方各阶段评论。"
+          else
+            EN="⚠️ **Qwen Triage ended early** — [view run]($RUN_URL). It stopped before finishing; check the run log."
+            ZH="⚠️ **Qwen Triage 提前结束** —— [查看运行]($RUN_URL)。未跑完,请查看运行日志。"
+          fi
+          printf -v BODY '%s\n\n%s\n\n%s' "$MARKER" "$EN" "$ZH"
+          EXISTING_ID="$(
+            gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+              --method GET --paginate -F per_page=100 |
+              jq -rs --arg m "$MARKER" \
+                '[.[][] | select(.body | contains($m))] | last | .id // empty'
+          )" || EXISTING_ID=''
+          if [ -n "$EXISTING_ID" ]; then
+            gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
+              -f body="$BODY" >/dev/null ||
+              echo "::warning::Failed to finalize triage status comment; continuing." >&2
+          else
+            gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+              -f body="$BODY" >/dev/null ||
+              echo "::warning::Failed to post final triage status comment; continuing." >&2
+          fi
 
   # On-demand real-user testing: a write-permission user comments
   # `@qwen-code /tmux` on a PR to launch the changed app in a tmux TUI and

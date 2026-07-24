@@ -644,6 +644,7 @@ jobs:
       - name: 'Stage trusted schema gate'
         run: |-
           cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
+          cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
 
       - name: 'Check bot credentials'
@@ -1151,6 +1152,8 @@ jobs:
           # and kill the gate with no outcome), and the gate logic must come
           # from the trusted base, not the branch under verification.
           bash "${RUNNER_TEMP}/check-settings-schema.sh"
+          git diff --name-only "origin/main...${BRANCH}" \
+            | bash "${RUNNER_TEMP}/check-autofix-contracts.sh"
 
           # Run changed/related tests for the packages this fix touches.
           # --changed follows the import graph so transitive breakage is caught.
@@ -2480,6 +2483,7 @@ jobs:
       - name: 'Stage trusted schema gate and agent runner'
         run: |-
           cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
+          cp .github/scripts/check-autofix-contracts.sh "${RUNNER_TEMP}/check-autofix-contracts.sh"
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
           cp .github/scripts/run-autofix-review-verification.sh "${RUNNER_TEMP}/run-autofix-review-verification.sh"
           # The agent step runs AFTER prepare checks out the PR branch, so

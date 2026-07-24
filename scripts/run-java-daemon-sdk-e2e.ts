@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -32,6 +32,7 @@ const cancelPrompt = 'java daemon e2e cancel sentinel';
 const teardownPrompt = 'java daemon e2e teardown sentinel';
 const directPrompt = 'java daemon e2e direct response';
 const token = 'java-daemon-e2e-token';
+const javaTestTimeoutMs = 5 * 60_000;
 mkdirSync(workspace, { recursive: true });
 mkdirSync(path.join(testHome, '.qwen'), { recursive: true });
 writeFileSync(
@@ -110,6 +111,7 @@ const daemon = spawn(
   ],
   {
     cwd: root,
+    detached: process.platform !== 'win32',
     env: {
       ...cleanEnvironment,
       HOME: testHome,
@@ -125,54 +127,106 @@ const daemon = spawn(
     stdio: ['ignore', 'pipe', 'pipe'],
   },
 );
-const daemonClosed = new Promise<void>((resolve) => {
-  daemon.once('close', () => resolve());
-});
 
 let stderr = '';
+let javaTest: ChildProcess | undefined;
+let receivedSignal: NodeJS.Signals | undefined;
 let succeeded = false;
 daemon.stderr?.on('data', (chunk) => {
   stderr += chunk.toString();
 });
 
-async function stopDaemon(): Promise<void> {
-  if (daemon.exitCode === null && daemon.signalCode === null) {
-    daemon.kill('SIGTERM');
+let rejectSignal: (error: Error) => void = () => {};
+const signalFailure = new Promise<never>((_resolve, reject) => {
+  rejectSignal = reject;
+});
+const handleSignal = (signal: NodeJS.Signals) => {
+  if (receivedSignal === undefined) {
+    receivedSignal = signal;
+    rejectSignal(new Error(`Java daemon E2E interrupted by ${signal}`));
   }
-  const forceTimer = setTimeout(() => daemon.kill('SIGKILL'), 5_000);
-  try {
-    await daemonClosed;
-  } finally {
-    clearTimeout(forceTimer);
+};
+const handleSigint = () => handleSignal('SIGINT');
+const handleSigterm = () => handleSignal('SIGTERM');
+process.once('SIGINT', handleSigint);
+process.once('SIGTERM', handleSigterm);
+
+async function stopChild(child: ChildProcess, name: string): Promise<void> {
+  if (!processTreeExists(child)) return;
+  signalProcessTree(child, 'SIGTERM');
+  if (await waitForProcessTreeExit(child, 5_000)) return;
+  signalProcessTree(child, 'SIGKILL');
+  if (!(await waitForProcessTreeExit(child, 5_000))) {
+    throw new Error(`${name} process tree did not exit after SIGKILL`);
   }
 }
 
+function processTreeExists(child: ChildProcess): boolean {
+  if (child.pid === undefined) return false;
+  if (process.platform === 'win32') {
+    return child.exitCode === null && child.signalCode === null;
+  }
+  try {
+    process.kill(-child.pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== 'ESRCH';
+  }
+}
+
+async function waitForProcessTreeExit(
+  child: ChildProcess,
+  timeoutMs: number,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (processTreeExists(child)) {
+    if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return true;
+}
+
+function signalProcessTree(child: ChildProcess, signal: NodeJS.Signals): void {
+  if (process.platform !== 'win32' && child.pid !== undefined) {
+    try {
+      process.kill(-child.pid, signal);
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ESRCH') return;
+    }
+  }
+  child.kill(signal);
+}
+
+let runFailure: unknown;
 try {
-  const port = await new Promise<number>((resolve, reject) => {
-    const timer = setTimeout(
-      () => reject(new Error(`daemon startup timed out\n${stderr}`)),
-      15_000,
-    );
-    let output = '';
-    daemon.stdout?.on('data', (chunk) => {
-      output += chunk.toString();
-      const match = output.match(/listening on http:\/\/127\.0\.0\.1:(\d+)/);
-      if (match) {
+  const port = await Promise.race([
+    new Promise<number>((resolve, reject) => {
+      const timer = setTimeout(
+        () => reject(new Error(`daemon startup timed out\n${stderr}`)),
+        15_000,
+      );
+      let output = '';
+      daemon.stdout?.on('data', (chunk) => {
+        output += chunk.toString();
+        const match = output.match(/listening on http:\/\/127\.0\.0\.1:(\d+)/);
+        if (!match) return;
         clearTimeout(timer);
         resolve(Number(match[1]));
-      }
-    });
-    daemon.once('error', (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    daemon.once('exit', (code) => {
-      clearTimeout(timer);
-      reject(new Error(`daemon exited with ${code}\n${stderr}`));
-    });
-  });
+      });
+      daemon.once('error', (error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+      daemon.once('exit', (code) => {
+        clearTimeout(timer);
+        reject(new Error(`daemon exited with ${code}\n${stderr}`));
+      });
+    }),
+    signalFailure,
+  ]);
 
-  const javaTest = spawn(
+  javaTest = spawn(
     'mvn',
     [
       '--batch-mode',
@@ -184,6 +238,7 @@ try {
     ],
     {
       cwd: path.join(root, 'packages', 'sdk-java', 'qwencode'),
+      detached: process.platform !== 'win32',
       env: {
         ...cleanEnvironment,
         QWEN_DAEMON_E2E_BASE_URL: `http://127.0.0.1:${port}`,
@@ -198,9 +253,26 @@ try {
       stdio: 'inherit',
     },
   );
-  const result = await new Promise<number | null>((resolve, reject) => {
-    javaTest.once('error', reject);
-    javaTest.once('exit', resolve);
+  let timeout: NodeJS.Timeout | undefined;
+  const result = await Promise.race([
+    new Promise<number | null>((resolve, reject) => {
+      javaTest?.once('error', reject);
+      javaTest?.once('exit', resolve);
+    }),
+    new Promise<never>((_resolve, reject) => {
+      timeout = setTimeout(
+        () =>
+          reject(
+            new Error(
+              `Java daemon E2E Maven test timed out after ${javaTestTimeoutMs}ms`,
+            ),
+          ),
+        javaTestTimeoutMs,
+      );
+    }),
+    signalFailure,
+  ]).finally(() => {
+    if (timeout !== undefined) clearTimeout(timeout);
   });
   if (result !== 0) {
     const logPath = path.join(
@@ -226,12 +298,47 @@ try {
     );
   }
   succeeded = true;
-} finally {
-  await stopDaemon();
-  await fake.close();
-  if (succeeded) {
-    rmSync(temporary, { recursive: true, force: true });
-  } else {
-    console.error(`Retained Java daemon E2E state at ${temporary}`);
+} catch (error) {
+  runFailure = error;
+}
+
+const cleanupFailures: unknown[] = [];
+if (javaTest !== undefined) {
+  try {
+    await stopChild(javaTest, 'Maven test');
+  } catch (error) {
+    cleanupFailures.push(error);
   }
+}
+try {
+  await stopChild(daemon, 'daemon');
+} catch (error) {
+  cleanupFailures.push(error);
+}
+try {
+  await fake.close();
+} catch (error) {
+  cleanupFailures.push(error);
+}
+process.off('SIGINT', handleSigint);
+process.off('SIGTERM', handleSigterm);
+if (succeeded && cleanupFailures.length === 0) {
+  rmSync(temporary, { recursive: true, force: true });
+} else {
+  console.error(`Retained Java daemon E2E state at ${temporary}`);
+}
+if (receivedSignal !== undefined) {
+  process.kill(process.pid, receivedSignal);
+}
+if (runFailure !== undefined && cleanupFailures.length > 0) {
+  throw new AggregateError(
+    [runFailure, ...cleanupFailures],
+    'Java daemon E2E and cleanup both failed',
+  );
+}
+if (runFailure !== undefined) {
+  throw runFailure;
+}
+if (cleanupFailures.length > 0) {
+  throw new AggregateError(cleanupFailures, 'Java daemon E2E cleanup failed');
 }

@@ -41,6 +41,7 @@ import {
   ArchiveRestoreIcon,
   DownloadIcon,
   FolderInputIcon,
+  GitBranchIcon,
   GitForkIcon,
   PencilIcon,
   PinIcon,
@@ -255,6 +256,13 @@ interface GroupMenuState {
   top: number;
   left: number;
 }
+
+type SessionWorkspaceScope =
+  | { kind: 'primary'; cwd: string }
+  | { kind: 'locked'; cwd: string; workspace: DaemonWorkspaceCapability }
+  | { kind: 'restricted'; cwd: string; workspace: DaemonWorkspaceCapability }
+  | { kind: 'untrusted'; cwd: string; workspace: DaemonWorkspaceCapability }
+  | { kind: 'unknown'; cwd: string };
 
 interface WebShellSidebarProps {
   collapsed: boolean;
@@ -549,6 +557,10 @@ export function WebShellSidebar({
     () => providedWorkspaces ?? workspace.capabilities?.workspaces ?? [],
     [providedWorkspaces, workspace.capabilities?.workspaces],
   );
+  const workspaceCatalogAdvertised =
+    workspaces.length > 0 ||
+    workspace.capabilities?.workspaces !== undefined ||
+    connection.capabilities?.workspaces !== undefined;
   const primaryWorkspaceCwd =
     workspaces.find((entry) => entry.primary)?.cwd ??
     workspace.capabilities?.workspaceCwd ??
@@ -633,7 +645,9 @@ export function WebShellSidebar({
     DaemonSessionGroupPresetColor[]
   >([]);
   const [groupBusy, setGroupBusy] = useState(false);
-  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [editingSessionIdentity, setEditingSessionIdentity] = useState<
+    string | null
+  >(null);
   const [editingName, setEditingName] = useState('');
   const [busySessionIds, setBusySessionIds] = useState<Set<string>>(
     () => new Set(),
@@ -740,12 +754,18 @@ export function WebShellSidebar({
   );
   const canExportSessions =
     connection.capabilities?.features?.includes('session_export') ?? false;
+  const canExportWorkspaceSessions =
+    connection.capabilities?.features?.includes('workspace_session_export') ??
+    false;
   const canExportArchivedSessions =
     connection.capabilities?.features?.includes(
       'workspace_archived_session_export',
     ) ?? false;
   const currentSessionIdentity = currentSessionId
-    ? getSessionIdentity(currentSessionId, connection.workspaceCwd)
+    ? getSessionIdentity(
+        currentSessionId,
+        connection.workspaceCwd || primaryWorkspaceCwd,
+      )
     : null;
   const projectName =
     getWorkspaceName(connection.workspaceCwd) || t('sidebar.projectFallback');
@@ -786,66 +806,205 @@ export function WebShellSidebar({
     primaryPinnedSessions,
     secondaryPinnedSessions,
   ]);
+  const resolveSessionWorkspaceScope = useCallback(
+    (session: DaemonSessionSummary): SessionWorkspaceScope => {
+      const explicitCwd = session.workspaceCwd;
+      const cwd = explicitCwd || primaryWorkspaceCwd || '';
+      const workspaceEntry = workspaces.find((entry) => entry.cwd === cwd);
+
+      if (explicitCwd && !workspaceEntry) {
+        if (!workspaceCatalogAdvertised && cwd === primaryWorkspaceCwd) {
+          return { kind: 'primary', cwd };
+        }
+        return { kind: 'unknown', cwd };
+      }
+      if (workspaceEntry && !workspaceEntry.trusted) {
+        return { kind: 'untrusted', cwd, workspace: workspaceEntry };
+      }
+      if (
+        workspaceEntry?.primary ||
+        (!explicitCwd && cwd === primaryWorkspaceCwd)
+      ) {
+        return { kind: 'primary', cwd };
+      }
+      if (!workspaceEntry) return { kind: 'unknown', cwd };
+      if (lockedWorkspaceCwd === cwd) {
+        return { kind: 'locked', cwd, workspace: workspaceEntry };
+      }
+      return { kind: 'restricted', cwd, workspace: workspaceEntry };
+    },
+    [
+      lockedWorkspaceCwd,
+      primaryWorkspaceCwd,
+      workspaceCatalogAdvertised,
+      workspaces,
+    ],
+  );
+  const getSessionWorkspaceCwd = useCallback(
+    (session: DaemonSessionSummary) =>
+      resolveSessionWorkspaceScope(session).cwd,
+    [resolveSessionWorkspaceScope],
+  );
+  const isMutableSessionScope = useCallback(
+    (scope: SessionWorkspaceScope) =>
+      scope.kind === 'primary' || scope.kind === 'locked',
+    [],
+  );
+  const canUseWorkspaceQualifiedActions = useCallback(
+    (scope: SessionWorkspaceScope) =>
+      scope.kind === 'primary' ||
+      (scope.kind === 'locked' && workspaceQualifiedRestCoreEnabled),
+    [workspaceQualifiedRestCoreEnabled],
+  );
+  const isActiveSessionReadOnly = useCallback(
+    (session: DaemonSessionSummary) =>
+      !isMutableSessionScope(resolveSessionWorkspaceScope(session)),
+    [isMutableSessionScope, resolveSessionWorkspaceScope],
+  );
   const getSessionWorkspaceActions = useCallback(
     (session: DaemonSessionSummary) => {
-      const sessionWorkspace = displayedWorkspaces.find(
-        (entry) => entry.cwd === session.workspaceCwd,
-      );
-      return !sessionWorkspace || sessionWorkspace.primary
-        ? workspaceActions
-        : workspace.client.workspaceByCwd(sessionWorkspace.cwd);
+      const scope = resolveSessionWorkspaceScope(session);
+      if (scope.kind === 'primary') return workspaceActions;
+      if (scope.kind === 'locked') {
+        return workspace.client.workspaceByCwd(scope.cwd);
+      }
+      return undefined;
     },
-    [displayedWorkspaces, workspace.client, workspaceActions],
-  );
-  const isPrimaryWorkspaceCwd = useCallback(
-    (workspaceCwd: string | undefined) =>
-      !workspaceCwd ||
-      displayedWorkspaces.find((entry) => entry.cwd === workspaceCwd)
-        ?.primary !== false,
-    [displayedWorkspaces],
+    [resolveSessionWorkspaceScope, workspace.client, workspaceActions],
   );
   const getIdentityForSession = useCallback(
     (session: DaemonSessionSummary) =>
-      getSessionIdentity(
-        session.sessionId,
-        session.workspaceCwd || primaryWorkspaceCwd,
-      ),
-    [primaryWorkspaceCwd],
+      getSessionIdentity(session.sessionId, getSessionWorkspaceCwd(session)),
+    [getSessionWorkspaceCwd],
   );
   const isCurrentSession = useCallback(
     (session: DaemonSessionSummary) =>
       currentSessionIdentity === getIdentityForSession(session),
     [currentSessionIdentity, getIdentityForSession],
   );
+  const canRenameSession = useCallback(
+    (session: DaemonSessionSummary) =>
+      sessionActionItems.has('rename') &&
+      isCurrentSession(session) &&
+      isMutableSessionScope(resolveSessionWorkspaceScope(session)),
+    [
+      isCurrentSession,
+      isMutableSessionScope,
+      resolveSessionWorkspaceScope,
+      sessionActionItems,
+    ],
+  );
+  const canShowDeleteSession = useCallback(
+    (session: DaemonSessionSummary) =>
+      sessionActionItems.has('delete') &&
+      canUseWorkspaceQualifiedActions(resolveSessionWorkspaceScope(session)),
+    [
+      canUseWorkspaceQualifiedActions,
+      resolveSessionWorkspaceScope,
+      sessionActionItems,
+    ],
+  );
+  const canDeleteSession = useCallback(
+    (session: DaemonSessionSummary) =>
+      !isCurrentSession(session) && canShowDeleteSession(session),
+    [canShowDeleteSession, isCurrentSession],
+  );
+  const canOrganizeSession = useCallback(
+    (session: DaemonSessionSummary, item: 'pin' | 'group') =>
+      organizationEnabled &&
+      sessionActionItems.has(item) &&
+      canUseWorkspaceQualifiedActions(resolveSessionWorkspaceScope(session)),
+    [
+      canUseWorkspaceQualifiedActions,
+      organizationEnabled,
+      resolveSessionWorkspaceScope,
+      sessionActionItems,
+    ],
+  );
+  const resolveWorkspaceScope = useCallback(
+    (workspaceCwd?: string) =>
+      resolveSessionWorkspaceScope({
+        sessionId: '',
+        workspaceCwd,
+      } as DaemonSessionSummary),
+    [resolveSessionWorkspaceScope],
+  );
+  const canOrganizeWorkspace = useCallback(
+    (workspaceCwd?: string) =>
+      organizationEnabled &&
+      sessionActionItems.has('group') &&
+      canUseWorkspaceQualifiedActions(resolveWorkspaceScope(workspaceCwd)),
+    [
+      canUseWorkspaceQualifiedActions,
+      organizationEnabled,
+      resolveWorkspaceScope,
+      sessionActionItems,
+    ],
+  );
+  const groupAssignmentPolicyRef = useRef<{
+    canOrganizeSession: typeof canOrganizeSession;
+    getSessionWorkspaceActions: typeof getSessionWorkspaceActions;
+    resolveWorkspaceScope: typeof resolveWorkspaceScope;
+  } | null>(null);
+  groupAssignmentPolicyRef.current = {
+    canOrganizeSession,
+    getSessionWorkspaceActions,
+    resolveWorkspaceScope,
+  };
   const canMutateSessionArchive = useCallback(
     (session: DaemonSessionSummary) => {
-      const sessionWorkspace = displayedWorkspaces.find(
-        (entry) => entry.cwd === session.workspaceCwd,
-      );
-      if (sessionWorkspace?.trusted === false) return false;
+      const scope = resolveSessionWorkspaceScope(session);
+      if (scope.kind === 'unknown' || scope.kind === 'untrusted') return false;
       return (
         sessionArchiveEnabled &&
-        (sessionWorkspace?.primary !== false ||
-          workspaceQualifiedRestCoreEnabled)
+        (scope.kind === 'primary' || workspaceQualifiedRestCoreEnabled)
       );
     },
     [
-      displayedWorkspaces,
+      resolveSessionWorkspaceScope,
       sessionArchiveEnabled,
       workspaceQualifiedRestCoreEnabled,
     ],
   );
+  const getActiveExportScope = useCallback(
+    (session: DaemonSessionSummary) => {
+      const scope = resolveSessionWorkspaceScope(session);
+      if (scope.kind === 'primary' && canExportSessions) {
+        return scope;
+      }
+      if (scope.kind === 'locked' && canExportWorkspaceSessions) {
+        return scope;
+      }
+      return undefined;
+    },
+    [
+      canExportSessions,
+      canExportWorkspaceSessions,
+      resolveSessionWorkspaceScope,
+    ],
+  );
   const getArchivedExportWorkspaceCwd = useCallback(
     (session: DaemonSessionSummary) => {
-      const workspaceCwd = session.workspaceCwd || primaryWorkspaceCwd;
-      const sessionWorkspace = displayedWorkspaces.find(
-        (entry) => entry.cwd === workspaceCwd,
-      );
-      return canExportArchivedSessions && sessionWorkspace?.trusted === true
-        ? sessionWorkspace.cwd
+      const scope = resolveSessionWorkspaceScope(session);
+      return canExportArchivedSessions &&
+        scope.kind !== 'unknown' &&
+        scope.kind !== 'untrusted'
+        ? scope.cwd
         : undefined;
     },
-    [canExportArchivedSessions, displayedWorkspaces, primaryWorkspaceCwd],
+    [canExportArchivedSessions, resolveSessionWorkspaceScope],
+  );
+  const canArchiveSession = useCallback(
+    (session: DaemonSessionSummary) =>
+      sessionActionItems.has('archive') &&
+      !isCurrentSession(session) &&
+      canMutateSessionArchive(session),
+    [canMutateSessionArchive, isCurrentSession, sessionActionItems],
+  );
+  const canUnarchiveSession = useCallback(
+    (session: DaemonSessionSummary) =>
+      sessionActionItems.has('archive') && canMutateSessionArchive(session),
+    [canMutateSessionArchive, sessionActionItems],
   );
 
   useEffect(() => {
@@ -1504,28 +1663,61 @@ export function WebShellSidebar({
     ],
   );
 
-  const startRename = useCallback((session: DaemonSessionSummary) => {
-    setEditingSessionId(session.sessionId);
-    setEditingName(getSessionLabel(session));
-  }, []);
+  const startRename = useCallback(
+    (session: DaemonSessionSummary) => {
+      if (!canRenameSession(session)) return;
+      setEditingSessionIdentity(getIdentityForSession(session));
+      setEditingName(getSessionLabel(session));
+    },
+    [canRenameSession, getIdentityForSession],
+  );
 
   const cancelRename = useCallback(() => {
-    setEditingSessionId(null);
+    setEditingSessionIdentity(null);
     setEditingName('');
   }, []);
 
+  useEffect(() => {
+    const currentSession = currentSessionId
+      ? ({
+          sessionId: currentSessionId,
+          workspaceCwd: connection.workspaceCwd,
+        } as DaemonSessionSummary)
+      : undefined;
+    if (
+      editingSessionIdentity !== null &&
+      (!currentSession ||
+        editingSessionIdentity !== currentSessionIdentity ||
+        !canRenameSession(currentSession))
+    ) {
+      cancelRename();
+    }
+  }, [
+    canRenameSession,
+    cancelRename,
+    connection.workspaceCwd,
+    currentSessionId,
+    currentSessionIdentity,
+    editingSessionIdentity,
+  ]);
+
   const saveRename = useCallback(() => {
     const nextName = editingName.trim();
-    if (!nextName || editingSessionId !== currentSessionId) {
+    if (
+      !nextName ||
+      !currentSessionId ||
+      editingSessionIdentity !== currentSessionIdentity ||
+      !canRenameSession({
+        sessionId: currentSessionId,
+        workspaceCwd: connection.workspaceCwd,
+      } as DaemonSessionSummary)
+    ) {
       cancelRename();
       return;
     }
-    const sessionId = editingSessionId;
-    if (
-      busySessionIdsRef.current.has(
-        getSessionIdentity(sessionId, connection.workspaceCwd),
-      )
-    ) {
+    const sessionId = currentSessionId;
+    const sessionIdentity = currentSessionIdentity;
+    if (!sessionIdentity || busySessionIdsRef.current.has(sessionIdentity)) {
       return;
     }
     setSessionBusy(sessionId, true, connection.workspaceCwd);
@@ -1546,11 +1738,13 @@ export function WebShellSidebar({
   }, [
     actions,
     bumpWorkspaceReload,
+    canRenameSession,
     cancelRename,
     connection.workspaceCwd,
+    currentSessionIdentity,
     currentSessionId,
     editingName,
-    editingSessionId,
+    editingSessionIdentity,
     onError,
     reload,
     setSessionBusy,
@@ -1559,10 +1753,10 @@ export function WebShellSidebar({
 
   const handleDeleteSession = useCallback(
     (session: DaemonSessionSummary) => {
-      if (isCurrentSession(session)) return;
+      if (!canDeleteSession(session)) return;
       setDeleteCandidate(session);
     },
-    [isCurrentSession],
+    [canDeleteSession],
   );
 
   const setSessionExporting = useCallback(
@@ -1588,10 +1782,12 @@ export function WebShellSidebar({
       const sessionId = session.sessionId;
       const sessionIdentity = getIdentityForSession(session);
       const archived = session.isArchived === true;
+      const activeExportScope = getActiveExportScope(session);
       if (
+        !sessionActionItems.has('export') ||
         (archived
           ? !getArchivedExportWorkspaceCwd(session)
-          : !canExportSessions) ||
+          : !activeExportScope) ||
         exportingSessionIdsRef.current.has(sessionIdentity)
       ) {
         return;
@@ -1606,8 +1802,14 @@ export function WebShellSidebar({
             result = await workspace.client
               .workspaceByCwd(workspaceCwd)
               .exportArchivedSession(sessionId, { format: 'html' });
-          } else {
+          } else if (activeExportScope?.kind === 'primary') {
             result = await exportSession(sessionId, 'html');
+          } else if (activeExportScope?.kind === 'locked') {
+            result = await workspace.client
+              .workspaceByCwd(activeExportScope.cwd)
+              .exportSession(sessionId, { format: 'html' });
+          } else {
+            return;
           }
           const blob = new Blob([result.content], {
             type: result.mimeType || 'text/html',
@@ -1631,12 +1833,13 @@ export function WebShellSidebar({
       })();
     },
     [
-      canExportSessions,
       exportSession,
+      getActiveExportScope,
       getArchivedExportWorkspaceCwd,
       getIdentityForSession,
       onError,
       setSessionExporting,
+      sessionActionItems,
       t,
       workspace.client,
     ],
@@ -1646,22 +1849,32 @@ export function WebShellSidebar({
     if (!deleteCandidate) return;
     const sessionId = deleteCandidate.sessionId;
     const sessionIdentity = getIdentityForSession(deleteCandidate);
-    if (isCurrentSession(deleteCandidate)) {
+    if (!canDeleteSession(deleteCandidate)) {
       setDeleteCandidate(null);
       return;
     }
+    const scope = resolveSessionWorkspaceScope(deleteCandidate);
     const isArchived = Boolean(deleteCandidate.isArchived);
+    const removeSession =
+      scope.kind === 'locked'
+        ? async (id: string) => {
+            const result = await workspace.client
+              .workspaceByCwd(scope.cwd)
+              .deleteSessionsData([id]);
+            const itemError = result.errors.find(
+              (entry) => entry.sessionId === id,
+            );
+            if (itemError) throw new Error(itemError.error);
+          }
+        : scope.kind === 'primary'
+          ? isArchived
+            ? deleteArchivedSession
+            : deleteSession
+          : undefined;
     setDeleteCandidate(null);
+    if (!removeSession) return;
     if (busySessionIdsRef.current.has(sessionIdentity)) return;
     setSessionBusy(sessionId, true, deleteCandidate.workspaceCwd);
-    const removeSession = !isPrimaryWorkspaceCwd(deleteCandidate.workspaceCwd)
-      ? (id: string) =>
-          workspace.client
-            .workspaceByCwd(deleteCandidate.workspaceCwd!)
-            .deleteSessionsData([id])
-      : isArchived
-        ? deleteArchivedSession
-        : deleteSession;
     removeSession(sessionId)
       .then(() => {
         // A hard delete unlinks the transcript from BOTH the active and
@@ -1676,15 +1889,15 @@ export function WebShellSidebar({
       });
   }, [
     bumpWorkspaceReload,
+    canDeleteSession,
     deleteArchivedSession,
     deleteCandidate,
     deleteSession,
     getIdentityForSession,
-    isCurrentSession,
-    isPrimaryWorkspaceCwd,
     onError,
     reload,
     reloadArchived,
+    resolveSessionWorkspaceScope,
     setSessionBusy,
     t,
     workspace.client,
@@ -1699,15 +1912,17 @@ export function WebShellSidebar({
   );
 
   const handleCreateGroup = useCallback(() => {
+    if (!canOrganizeWorkspace()) return;
     setGroupMenu(null);
     setGroupName('');
     setGroupColor(getDefaultGroupColor(colorOptions));
     setLastValidCustomGroupColor(DEFAULT_CUSTOM_GROUP_COLOR);
     setGroupEditor({ mode: 'create' });
-  }, [colorOptions]);
+  }, [canOrganizeWorkspace, colorOptions]);
 
   const handleCreateWorkspaceGroup = useCallback(
     (workspaceCwd: string) => {
+      if (!canOrganizeWorkspace(workspaceCwd)) return;
       void (async () => {
         try {
           const catalog = await workspace.client
@@ -1723,11 +1938,12 @@ export function WebShellSidebar({
         }
       })();
     },
-    [onError, t, workspace.client],
+    [canOrganizeWorkspace, onError, t, workspace.client],
   );
 
   const handleCreateGroupForSession = useCallback(
     (session: DaemonSessionSummary) => {
+      if (!canOrganizeSession(session, 'group')) return;
       setGroupMenu(null);
       setGroupName('');
       setGroupColor(getDefaultGroupColor(colorOptions));
@@ -1738,11 +1954,12 @@ export function WebShellSidebar({
         workspaceCwd: session.workspaceCwd,
       });
     },
-    [colorOptions],
+    [canOrganizeSession, colorOptions],
   );
 
   const handleRenameGroup = useCallback(
     (group: DaemonSessionGroup, workspaceCwd?: string) => {
+      if (!canOrganizeWorkspace(workspaceCwd)) return;
       setGroupName(group.name);
       setGroupColor(group.color);
       setLastValidCustomGroupColor(
@@ -1750,7 +1967,7 @@ export function WebShellSidebar({
       );
       setGroupEditor({ mode: 'edit', group, workspaceCwd });
     },
-    [],
+    [canOrganizeWorkspace],
   );
 
   const closeGroupEditor = useCallback(() => {
@@ -1763,6 +1980,14 @@ export function WebShellSidebar({
 
   const saveGroupEditor = useCallback(() => {
     if (!groupEditor) return;
+    if (
+      !canOrganizeWorkspace(groupEditor.workspaceCwd) ||
+      (groupEditor.targetSession &&
+        !canOrganizeSession(groupEditor.targetSession, 'group'))
+    ) {
+      closeGroupEditor();
+      return;
+    }
     const name = groupName.trim();
     const color = normalizeGroupColorInput(
       groupColor,
@@ -1771,10 +1996,25 @@ export function WebShellSidebar({
     if (!name || !color) return;
     void (async () => {
       setGroupBusy(true);
+      const reportCreatedGroupAssignmentFailure = (error: unknown) => {
+        setGroupEditor(null);
+        setGroupName('');
+        if (groupEditor.workspaceCwd) {
+          bumpWorkspaceReload();
+        } else {
+          void reloadGroups().catch(() => undefined);
+        }
+        onError(error, t('sidebar.groupAssignFailedAfterCreate'));
+      };
       try {
-        const groupActions = !isPrimaryWorkspaceCwd(groupEditor.workspaceCwd)
-          ? workspace.client.workspaceByCwd(groupEditor.workspaceCwd!)
-          : workspaceActions;
+        const scope = resolveWorkspaceScope(groupEditor.workspaceCwd);
+        const groupActions =
+          scope.kind === 'primary'
+            ? workspaceActions
+            : scope.kind === 'locked'
+              ? workspace.client.workspaceByCwd(scope.cwd)
+              : undefined;
+        if (!groupActions) return;
         const group =
           groupEditor.mode === 'create'
             ? await groupActions.createSessionGroup({
@@ -1788,7 +2028,35 @@ export function WebShellSidebar({
         if (groupEditor.mode === 'create') {
           if (groupEditor.targetSession) {
             try {
-              await groupActions.updateSessionOrganization(
+              const livePolicy = groupAssignmentPolicyRef.current;
+              const targetScope = livePolicy?.resolveWorkspaceScope(
+                groupEditor.targetSession.workspaceCwd,
+              );
+              if (
+                !livePolicy ||
+                !targetScope ||
+                !livePolicy.canOrganizeSession(
+                  groupEditor.targetSession,
+                  'group',
+                ) ||
+                targetScope.kind !== scope.kind ||
+                targetScope.cwd !== scope.cwd
+              ) {
+                reportCreatedGroupAssignmentFailure(
+                  new Error(t('sidebar.groupAssignFailedAfterCreate')),
+                );
+                return;
+              }
+              const targetActions = livePolicy.getSessionWorkspaceActions(
+                groupEditor.targetSession,
+              );
+              if (!targetActions) {
+                reportCreatedGroupAssignmentFailure(
+                  new Error(t('sidebar.groupAssignFailedAfterCreate')),
+                );
+                return;
+              }
+              await targetActions.updateSessionOrganization(
                 groupEditor.targetSession.sessionId,
                 // Assigning a named group clears any color tag (single choice
                 // in the UI), matching assignSessionGroup.
@@ -1799,12 +2067,7 @@ export function WebShellSidebar({
               }
               bumpWorkspaceReload();
             } catch (err) {
-              setGroupEditor(null);
-              setGroupName('');
-              if (!groupEditor.workspaceCwd) {
-                void reloadGroups().catch(() => undefined);
-              }
-              onError(err, t('sidebar.groupAssignFailedAfterCreate'));
+              reportCreatedGroupAssignmentFailure(err);
               return;
             }
           }
@@ -1833,10 +2096,13 @@ export function WebShellSidebar({
     groupColor,
     groupEditor,
     groupName,
-    isPrimaryWorkspaceCwd,
+    canOrganizeSession,
+    canOrganizeWorkspace,
+    closeGroupEditor,
     onError,
     reload,
     reloadGroups,
+    resolveWorkspaceScope,
     t,
     workspaceActions,
     workspace.client,
@@ -1844,19 +2110,30 @@ export function WebShellSidebar({
 
   const handleDeleteGroup = useCallback(
     (group: DaemonSessionGroup, workspaceCwd?: string) => {
+      if (!canOrganizeWorkspace(workspaceCwd)) return;
       setDeleteGroupCandidate({ group, workspaceCwd });
     },
-    [],
+    [canOrganizeWorkspace],
   );
 
   const confirmDeleteGroup = useCallback(() => {
     if (!deleteGroupCandidate) return;
+    if (!canOrganizeWorkspace(deleteGroupCandidate.workspaceCwd)) {
+      setDeleteGroupCandidate(null);
+      return;
+    }
     setGroupBusy(true);
-    const groupActions = !isPrimaryWorkspaceCwd(
-      deleteGroupCandidate.workspaceCwd,
-    )
-      ? workspace.client.workspaceByCwd(deleteGroupCandidate.workspaceCwd!)
-      : workspaceActions;
+    const scope = resolveWorkspaceScope(deleteGroupCandidate.workspaceCwd);
+    const groupActions =
+      scope.kind === 'primary'
+        ? workspaceActions
+        : scope.kind === 'locked'
+          ? workspace.client.workspaceByCwd(scope.cwd)
+          : undefined;
+    if (!groupActions) {
+      setGroupBusy(false);
+      return;
+    }
     groupActions
       .deleteSessionGroup(deleteGroupCandidate.group.id)
       .then(() => {
@@ -1873,28 +2150,66 @@ export function WebShellSidebar({
       .finally(() => setGroupBusy(false));
   }, [
     deleteGroupCandidate,
-    isPrimaryWorkspaceCwd,
+    canOrganizeWorkspace,
     onError,
     reload,
     reloadGroups,
     t,
     bumpWorkspaceReload,
+    resolveWorkspaceScope,
     workspace.client,
     workspaceActions,
   ]);
+
+  useEffect(() => {
+    if (deleteCandidate && !canDeleteSession(deleteCandidate)) {
+      setDeleteCandidate(null);
+    }
+  }, [canDeleteSession, deleteCandidate]);
+
+  useEffect(() => {
+    if (groupMenu && !canOrganizeSession(groupMenu.session, 'group')) {
+      setGroupMenu(null);
+    }
+  }, [canOrganizeSession, groupMenu]);
+
+  useEffect(() => {
+    if (
+      groupEditor &&
+      (!canOrganizeWorkspace(groupEditor.workspaceCwd) ||
+        (groupEditor.targetSession &&
+          !canOrganizeSession(groupEditor.targetSession, 'group')))
+    ) {
+      setGroupEditor(null);
+      setGroupName('');
+    }
+  }, [canOrganizeSession, canOrganizeWorkspace, groupEditor]);
+
+  useEffect(() => {
+    if (
+      deleteGroupCandidate &&
+      !canOrganizeWorkspace(deleteGroupCandidate.workspaceCwd)
+    ) {
+      setDeleteGroupCandidate(null);
+    }
+  }, [canOrganizeWorkspace, deleteGroupCandidate]);
 
   const handleTogglePin = useCallback(
     (session: DaemonSessionSummary) => {
       const sessionId = session.sessionId;
       const sessionIdentity = getIdentityForSession(session);
       if (
-        !organizationEnabled ||
+        !canOrganizeSession(session, 'pin') ||
         busySessionIdsRef.current.has(sessionIdentity)
       ) {
         return;
       }
       setSessionBusy(sessionId, true, session.workspaceCwd);
       const sessionActions = getSessionWorkspaceActions(session);
+      if (!sessionActions) {
+        setSessionBusy(sessionId, false, session.workspaceCwd);
+        return;
+      }
       sessionActions
         .updateSessionOrganization(sessionId, {
           isPinned: !session.isPinned,
@@ -1914,7 +2229,7 @@ export function WebShellSidebar({
       getIdentityForSession,
       getSessionWorkspaceActions,
       onError,
-      organizationEnabled,
+      canOrganizeSession,
       reload,
       reloadPinnedSessions,
       setSessionBusy,
@@ -1928,15 +2243,15 @@ export function WebShellSidebar({
       const sessionIdentity = getIdentityForSession(session);
       // The daemon force-ends a live turn on archive; keep the current
       // session off-limits, mirroring the delete guard.
-      if (!canMutateSessionArchive(session) || isCurrentSession(session))
-        return;
+      if (!canArchiveSession(session)) return;
       if (busySessionIdsRef.current.has(sessionIdentity)) return;
       setSessionBusy(sessionId, true, session.workspaceCwd);
       void (async () => {
         try {
-          if (!isPrimaryWorkspaceCwd(session.workspaceCwd)) {
+          const scope = resolveSessionWorkspaceScope(session);
+          if (scope.kind === 'locked' || scope.kind === 'restricted') {
             const result = await workspace.client
-              .workspaceByCwd(session.workspaceCwd)
+              .workspaceByCwd(scope.cwd)
               .archiveSessionsData([sessionId]);
             const itemError = result.errors.find(
               (entry) => entry.sessionId === sessionId,
@@ -1944,8 +2259,10 @@ export function WebShellSidebar({
             if (itemError) {
               onError(new Error(itemError.error), t('sidebar.archiveFailed'));
             }
-          } else {
+          } else if (scope.kind === 'primary') {
             await archiveSession(sessionId);
+          } else {
+            return;
           }
         } catch (err) {
           onError(err, t('sidebar.archiveFailed'));
@@ -1960,15 +2277,14 @@ export function WebShellSidebar({
     [
       archiveSession,
       bumpWorkspaceReload,
-      canMutateSessionArchive,
+      canArchiveSession,
       getIdentityForSession,
-      isPrimaryWorkspaceCwd,
-      isCurrentSession,
       onError,
       reload,
       reloadArchived,
       setSessionBusy,
       t,
+      resolveSessionWorkspaceScope,
       workspace.client,
     ],
   );
@@ -1977,14 +2293,15 @@ export function WebShellSidebar({
     (session: DaemonSessionSummary) => {
       const sessionId = session.sessionId;
       const sessionIdentity = getIdentityForSession(session);
-      if (!canMutateSessionArchive(session)) return;
+      if (!canUnarchiveSession(session)) return;
       if (busySessionIdsRef.current.has(sessionIdentity)) return;
       setSessionBusy(sessionId, true, session.workspaceCwd);
       void (async () => {
         try {
-          if (!isPrimaryWorkspaceCwd(session.workspaceCwd)) {
+          const scope = resolveSessionWorkspaceScope(session);
+          if (scope.kind === 'locked' || scope.kind === 'restricted') {
             const result = await workspace.client
-              .workspaceByCwd(session.workspaceCwd)
+              .workspaceByCwd(scope.cwd)
               .unarchiveSessionsData([sessionId]);
             const itemError = result.errors.find(
               (entry) => entry.sessionId === sessionId,
@@ -1992,8 +2309,10 @@ export function WebShellSidebar({
             if (itemError) {
               onError(new Error(itemError.error), t('sidebar.unarchiveFailed'));
             }
-          } else {
+          } else if (scope.kind === 'primary') {
             await unarchiveSession(sessionId);
+          } else {
+            return;
           }
         } catch (err) {
           onError(err, t('sidebar.unarchiveFailed'));
@@ -2007,25 +2326,28 @@ export function WebShellSidebar({
     },
     [
       bumpWorkspaceReload,
-      canMutateSessionArchive,
+      canUnarchiveSession,
       getIdentityForSession,
-      isPrimaryWorkspaceCwd,
       onError,
       reload,
       reloadArchived,
       setSessionBusy,
       t,
       unarchiveSession,
+      resolveSessionWorkspaceScope,
       workspace.client,
     ],
   );
 
   const openGroupMenuFromAnchor = useCallback(
     async (anchorEl: HTMLElement, session: DaemonSessionSummary) => {
+      if (!canOrganizeSession(session, 'group')) return;
       let groupCount = 0;
       try {
-        const catalog =
-          await getSessionWorkspaceActions(session).listSessionGroups();
+        const sessionActions = getSessionWorkspaceActions(session);
+        if (!sessionActions) return;
+        const catalog = await sessionActions.listSessionGroups();
+        if (!canOrganizeSession(session, 'group')) return;
         setMenuGroups(catalog.groups);
         setColorOptions(catalog.colorOptions);
         groupCount = catalog.groups.length;
@@ -2065,7 +2387,7 @@ export function WebShellSidebar({
         left,
       });
     },
-    [getSessionWorkspaceActions, onError, t],
+    [canOrganizeSession, getSessionWorkspaceActions, onError, t],
   );
 
   const assignSessionGroup = useCallback(
@@ -2073,7 +2395,7 @@ export function WebShellSidebar({
       const sessionId = session.sessionId;
       const sessionIdentity = getIdentityForSession(session);
       if (
-        !organizationEnabled ||
+        !canOrganizeSession(session, 'group') ||
         busySessionIdsRef.current.has(sessionIdentity)
       ) {
         return;
@@ -2081,6 +2403,10 @@ export function WebShellSidebar({
       setGroupMenu(null);
       setSessionBusy(sessionId, true, session.workspaceCwd);
       const sessionActions = getSessionWorkspaceActions(session);
+      if (!sessionActions) {
+        setSessionBusy(sessionId, false, session.workspaceCwd);
+        return;
+      }
       sessionActions
         // Group and color are a single choice in the UI: assigning a named
         // group (or "Ungrouped", groupId=null) clears any color tag.
@@ -2099,7 +2425,7 @@ export function WebShellSidebar({
       getIdentityForSession,
       getSessionWorkspaceActions,
       onError,
-      organizationEnabled,
+      canOrganizeSession,
       reload,
       setSessionBusy,
       t,
@@ -2114,7 +2440,7 @@ export function WebShellSidebar({
       const sessionId = session.sessionId;
       const sessionIdentity = getIdentityForSession(session);
       if (
-        !organizationEnabled ||
+        !canOrganizeSession(session, 'group') ||
         busySessionIdsRef.current.has(sessionIdentity)
       ) {
         return;
@@ -2122,6 +2448,10 @@ export function WebShellSidebar({
       setGroupMenu(null);
       setSessionBusy(sessionId, true, session.workspaceCwd);
       const sessionActions = getSessionWorkspaceActions(session);
+      if (!sessionActions) {
+        setSessionBusy(sessionId, false, session.workspaceCwd);
+        return;
+      }
       sessionActions
         // Picking a color clears any named-group assignment (single choice).
         .updateSessionOrganization(sessionId, { color, groupId: null })
@@ -2139,7 +2469,7 @@ export function WebShellSidebar({
       getIdentityForSession,
       getSessionWorkspaceActions,
       onError,
-      organizationEnabled,
+      canOrganizeSession,
       reload,
       setSessionBusy,
       t,
@@ -2419,12 +2749,13 @@ export function WebShellSidebar({
       session: DaemonSessionSummary,
       options: {
         isArchived?: boolean;
-        // Suppress per-session mutations other than an explicitly supported
-        // archive action. Secondary workspace rows remain otherwise load-only.
+        // Keep unlocked secondary rows conservative while allowing a trusted
+        // locked workspace to use normal session controls.
         readOnly?: boolean;
       } = {},
     ) => {
-      const { isArchived = false, readOnly = false } = options;
+      const { isArchived = false } = options;
+      const readOnly = options.readOnly ?? isActiveSessionReadOnly(session);
       const sessionIdentity = getIdentityForSession(session);
       const label = getSessionLabel(session);
       const stamp = session.updatedAt || session.createdAt;
@@ -2455,6 +2786,19 @@ export function WebShellSidebar({
         </div>
       );
       if (isArchived) {
+        const archivedExportWorkspaceCwd =
+          getArchivedExportWorkspaceCwd(session);
+        const showArchivedDetails = sessionActionItems.has('details');
+        const showArchivedExport =
+          sessionActionItems.has('export') &&
+          Boolean(archivedExportWorkspaceCwd);
+        const showArchivedUnarchive = canUnarchiveSession(session);
+        const showArchivedDelete = canDeleteSession(session);
+        const hasArchivedActions =
+          showArchivedDetails ||
+          showArchivedExport ||
+          showArchivedUnarchive ||
+          showArchivedDelete;
         return (
           <div
             key={sessionIdentity}
@@ -2467,79 +2811,85 @@ export function WebShellSidebar({
             <span className={styles.sessionText}>{label}</span>
             <div className={styles.sessionMetaSlot}>
               <span className={styles.sessionTime}>{time}</span>
-              <div
-                className={styles.sessionActions}
-                onClick={(event) => event.stopPropagation()}
-                onKeyDown={(event) => event.stopPropagation()}
-              >
-                <DropdownMenu>
-                  <DropdownMenuTrigger asChild>
-                    <button
-                      className={styles.sessionActionButton}
-                      type="button"
-                      aria-label={t('sidebar.moreActions')}
-                      title={t('sidebar.moreActions')}
-                    >
-                      <EllipsisVerticalIcon />
-                    </button>
-                  </DropdownMenuTrigger>
-                  <DropdownMenuContent
-                    align="end"
-                    className="w-auto min-w-40"
-                    onPointerDownOutside={() => {
-                      sessionMenuPointerDismissRef.current = true;
-                    }}
-                    onCloseAutoFocus={(event) => {
-                      if (!sessionMenuPointerDismissRef.current) return;
-                      sessionMenuPointerDismissRef.current = false;
-                      event.preventDefault();
-                    }}
-                  >
-                    <DropdownMenuGroup>
-                      <DropdownMenuSub>
-                        <DropdownMenuSubTrigger>
-                          <InfoIcon />
-                          {t('sidebar.details')}
-                        </DropdownMenuSubTrigger>
-                        <DropdownMenuSubContent className="min-w-64 p-3">
-                          {details}
-                        </DropdownMenuSubContent>
-                      </DropdownMenuSub>
-                      {getArchivedExportWorkspaceCwd(session) && (
-                        <DropdownMenuItem
-                          disabled={exporting}
-                          onSelect={() => handleExportSession(session)}
-                        >
-                          <DownloadIcon />
-                          {t('sidebar.export')}
-                        </DropdownMenuItem>
-                      )}
-                      {canMutateSessionArchive(session) && (
-                        <DropdownMenuItem
-                          onSelect={() => handleUnarchive(session)}
-                        >
-                          <ArchiveRestoreIcon />
-                          {t('sidebar.unarchive')}
-                        </DropdownMenuItem>
-                      )}
-                      <DropdownMenuItem
-                        variant="destructive"
-                        onSelect={() => handleDeleteSession(session)}
+              {hasArchivedActions && (
+                <div
+                  className={styles.sessionActions}
+                  onClick={(event) => event.stopPropagation()}
+                  onKeyDown={(event) => event.stopPropagation()}
+                >
+                  <DropdownMenu>
+                    <DropdownMenuTrigger asChild>
+                      <button
+                        className={styles.sessionActionButton}
+                        type="button"
+                        aria-label={t('sidebar.moreActions')}
+                        title={t('sidebar.moreActions')}
                       >
-                        <Trash2Icon />
-                        {t('sidebar.delete')}
-                      </DropdownMenuItem>
-                    </DropdownMenuGroup>
-                  </DropdownMenuContent>
-                </DropdownMenu>
-              </div>
+                        <EllipsisVerticalIcon />
+                      </button>
+                    </DropdownMenuTrigger>
+                    <DropdownMenuContent
+                      align="end"
+                      className="w-auto min-w-40"
+                      onPointerDownOutside={() => {
+                        sessionMenuPointerDismissRef.current = true;
+                      }}
+                      onCloseAutoFocus={(event) => {
+                        if (!sessionMenuPointerDismissRef.current) return;
+                        sessionMenuPointerDismissRef.current = false;
+                        event.preventDefault();
+                      }}
+                    >
+                      <DropdownMenuGroup>
+                        {showArchivedDetails && (
+                          <DropdownMenuSub>
+                            <DropdownMenuSubTrigger>
+                              <InfoIcon />
+                              {t('sidebar.details')}
+                            </DropdownMenuSubTrigger>
+                            <DropdownMenuSubContent className="min-w-64 p-3">
+                              {details}
+                            </DropdownMenuSubContent>
+                          </DropdownMenuSub>
+                        )}
+                        {showArchivedExport && (
+                          <DropdownMenuItem
+                            disabled={exporting}
+                            onSelect={() => handleExportSession(session)}
+                          >
+                            <DownloadIcon />
+                            {t('sidebar.export')}
+                          </DropdownMenuItem>
+                        )}
+                        {showArchivedUnarchive && (
+                          <DropdownMenuItem
+                            onSelect={() => handleUnarchive(session)}
+                          >
+                            <ArchiveRestoreIcon />
+                            {t('sidebar.unarchive')}
+                          </DropdownMenuItem>
+                        )}
+                        {showArchivedDelete && (
+                          <DropdownMenuItem
+                            variant="destructive"
+                            onSelect={() => handleDeleteSession(session)}
+                          >
+                            <Trash2Icon />
+                            {t('sidebar.delete')}
+                          </DropdownMenuItem>
+                        )}
+                      </DropdownMenuGroup>
+                    </DropdownMenuContent>
+                  </DropdownMenu>
+                </div>
+              )}
             </div>
           </div>
         );
       }
 
       const isCurrent = isCurrentSession(session);
-      const isEditing = isCurrent && editingSessionId === session.sessionId;
+      const isEditing = isCurrent && editingSessionIdentity === sessionIdentity;
       const needsUserInput =
         !session.isWaitingForPermission && session.isWaitingForUserQuestion;
       const attentionLabel = session.isWaitingForPermission
@@ -2547,6 +2897,15 @@ export function WebShellSidebar({
         : needsUserInput
           ? t('sidebar.userInputNeeded')
           : null;
+      const mutableScope = !isActiveSessionReadOnly(session);
+      const showPin = canOrganizeSession(session, 'pin');
+      const showArchive =
+        sessionActionItems.has('archive') && canMutateSessionArchive(session);
+      const showRename = sessionActionItems.has('rename') && mutableScope;
+      const activeExportScope = getActiveExportScope(session);
+      const showExport =
+        sessionActionItems.has('export') && Boolean(activeExportScope);
+      const showDelete = canShowDeleteSession(session);
       return (
         <div
           key={sessionIdentity}
@@ -2564,7 +2923,7 @@ export function WebShellSidebar({
             handleLoadSession(session.sessionId, session.workspaceCwd)
           }
           onDoubleClick={() => {
-            if (!readOnly && isCurrent && !collapsed) startRename(session);
+            if (!collapsed && canRenameSession(session)) startRename(session);
           }}
           onKeyDown={(event) => {
             if (event.key === 'Enter') {
@@ -2582,7 +2941,7 @@ export function WebShellSidebar({
                   />
                 ) : null}
               </span>
-              {isEditing && !readOnly ? (
+              {isEditing && canRenameSession(session) ? (
                 <form
                   className={styles.renameForm}
                   onClick={(event) => event.stopPropagation()}
@@ -2616,6 +2975,14 @@ export function WebShellSidebar({
                         aria-label={t('sidebar.newWorktreeTask')}
                       />
                     )}
+                    {session.branch && (
+                      <GitBranchIcon
+                        size={11}
+                        strokeWidth={1.5}
+                        className={styles.sessionBadgeIcon}
+                        aria-label={session.branch.name}
+                      />
+                    )}
                     {label}
                   </span>
                   <div className={styles.sessionMetaSlot}>
@@ -2638,14 +3005,13 @@ export function WebShellSidebar({
                     ) : !attentionLabel ? (
                       <span className={styles.sessionTime}>{time}</span>
                     ) : null}
-                    {readOnly &&
-                      canMutateSessionArchive(session) &&
-                      sessionActionItems.has('archive') && (
-                        <div
-                          className={styles.sessionActions}
-                          onClick={(event) => event.stopPropagation()}
-                          onKeyDown={(event) => event.stopPropagation()}
-                        >
+                    {readOnly && showArchive && (
+                      <div
+                        className={styles.sessionActions}
+                        onClick={(event) => event.stopPropagation()}
+                        onKeyDown={(event) => event.stopPropagation()}
+                      >
+                        {inlineActionItems.has('archive') ? (
                           <button
                             className={styles.sessionActionButton}
                             type="button"
@@ -2660,8 +3026,50 @@ export function WebShellSidebar({
                           >
                             <ArchiveIcon />
                           </button>
-                        </div>
-                      )}
+                        ) : (
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <button
+                                className={styles.sessionActionButton}
+                                type="button"
+                                aria-label={t('sidebar.moreActions')}
+                                title={t('sidebar.moreActions')}
+                              >
+                                <EllipsisVerticalIcon />
+                              </button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent
+                              align="end"
+                              className="w-auto min-w-40"
+                              onPointerDownOutside={() => {
+                                sessionMenuPointerDismissRef.current = true;
+                              }}
+                              onCloseAutoFocus={(event) => {
+                                if (!sessionMenuPointerDismissRef.current)
+                                  return;
+                                sessionMenuPointerDismissRef.current = false;
+                                event.preventDefault();
+                              }}
+                            >
+                              <DropdownMenuGroup>
+                                <DropdownMenuItem
+                                  disabled={busy || isCurrent}
+                                  title={
+                                    isCurrent
+                                      ? t('sidebar.archiveCurrentDisabled')
+                                      : undefined
+                                  }
+                                  onSelect={() => handleArchive(session)}
+                                >
+                                  <ArchiveIcon />
+                                  {t('sidebar.archive')}
+                                </DropdownMenuItem>
+                              </DropdownMenuGroup>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        )}
+                      </div>
+                    )}
                     {!readOnly && (
                       <div
                         className={styles.sessionActions}
@@ -2688,10 +3096,7 @@ export function WebShellSidebar({
                                 : t('sidebar.pin'),
                               disabled: busy,
                               active: session.isPinned,
-                              visible:
-                                organizationEnabled &&
-                                sessionActionItems.has('pin') &&
-                                inlineActionItems.has('pin'),
+                              visible: showPin && inlineActionItems.has('pin'),
                               onClick: () => handleTogglePin(session),
                             },
                             {
@@ -2703,9 +3108,7 @@ export function WebShellSidebar({
                                 ? t('sidebar.archiveCurrentDisabled')
                                 : t('sidebar.archive'),
                               visible:
-                                canMutateSessionArchive(session) &&
-                                sessionActionItems.has('archive') &&
-                                inlineActionItems.has('archive'),
+                                showArchive && inlineActionItems.has('archive'),
                               onClick: () => handleArchive(session),
                             },
                             {
@@ -2717,8 +3120,7 @@ export function WebShellSidebar({
                                 ? t('sidebar.renameCurrentOnly')
                                 : undefined,
                               visible:
-                                sessionActionItems.has('rename') &&
-                                inlineActionItems.has('rename'),
+                                showRename && inlineActionItems.has('rename'),
                               onClick: () => handleRenameFromMenu(session),
                             },
                             {
@@ -2729,9 +3131,7 @@ export function WebShellSidebar({
                               label: t('sidebar.export'),
                               disabled: exporting,
                               visible:
-                                canExportSessions &&
-                                sessionActionItems.has('export') &&
-                                inlineActionItems.has('export'),
+                                showExport && inlineActionItems.has('export'),
                               onClick: () => handleExportSession(session),
                             },
                             {
@@ -2744,8 +3144,7 @@ export function WebShellSidebar({
                                 ? t('sidebar.currentDeleteDisabled')
                                 : undefined,
                               visible:
-                                sessionActionItems.has('delete') &&
-                                inlineActionItems.has('delete'),
+                                showDelete && inlineActionItems.has('delete'),
                               onClick: () => handleDeleteSession(session),
                             },
                           ];
@@ -2780,22 +3179,13 @@ export function WebShellSidebar({
                               </button>
                             ));
                         })()}
-                        {(organizationEnabled &&
-                          sessionActionItems.has('pin') &&
-                          !inlineActionItems.has('pin')) ||
-                        (canMutateSessionArchive(session) &&
-                          sessionActionItems.has('archive') &&
-                          !inlineActionItems.has('archive')) ||
+                        {(showPin && !inlineActionItems.has('pin')) ||
+                        (showArchive && !inlineActionItems.has('archive')) ||
                         sessionActionItems.has('details') ||
-                        (sessionActionItems.has('rename') &&
-                          !inlineActionItems.has('rename')) ||
-                        (organizationEnabled &&
-                          sessionActionItems.has('group')) ||
-                        (canExportSessions &&
-                          sessionActionItems.has('export') &&
-                          !inlineActionItems.has('export')) ||
-                        (sessionActionItems.has('delete') &&
-                          !inlineActionItems.has('delete')) ? (
+                        (showRename && !inlineActionItems.has('rename')) ||
+                        canOrganizeSession(session, 'group') ||
+                        (showExport && !inlineActionItems.has('export')) ||
+                        (showDelete && !inlineActionItems.has('delete')) ? (
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                               <button
@@ -2821,21 +3211,18 @@ export function WebShellSidebar({
                               }}
                             >
                               <DropdownMenuGroup>
-                                {organizationEnabled &&
-                                  sessionActionItems.has('pin') &&
-                                  !inlineActionItems.has('pin') && (
-                                    <DropdownMenuItem
-                                      disabled={busy}
-                                      onSelect={() => handleTogglePin(session)}
-                                    >
-                                      <PinIcon />
-                                      {session.isPinned
-                                        ? t('sidebar.unpin')
-                                        : t('sidebar.pin')}
-                                    </DropdownMenuItem>
-                                  )}
-                                {canMutateSessionArchive(session) &&
-                                  sessionActionItems.has('archive') &&
+                                {showPin && !inlineActionItems.has('pin') && (
+                                  <DropdownMenuItem
+                                    disabled={busy}
+                                    onSelect={() => handleTogglePin(session)}
+                                  >
+                                    <PinIcon />
+                                    {session.isPinned
+                                      ? t('sidebar.unpin')
+                                      : t('sidebar.pin')}
+                                  </DropdownMenuItem>
+                                )}
+                                {showArchive &&
                                   !inlineActionItems.has('archive') && (
                                     <DropdownMenuItem
                                       disabled={busy || isCurrent}
@@ -2861,7 +3248,7 @@ export function WebShellSidebar({
                                     </DropdownMenuSubContent>
                                   </DropdownMenuSub>
                                 )}
-                                {sessionActionItems.has('rename') &&
+                                {showRename &&
                                   !inlineActionItems.has('rename') && (
                                     <DropdownMenuItem
                                       disabled={!isCurrent}
@@ -2878,23 +3265,21 @@ export function WebShellSidebar({
                                       {t('sidebar.rename')}
                                     </DropdownMenuItem>
                                   )}
-                                {organizationEnabled &&
-                                  sessionActionItems.has('group') && (
-                                    <DropdownMenuItem
-                                      disabled={busy}
-                                      onSelect={(event) =>
-                                        openGroupMenuFromAnchor(
-                                          event.currentTarget as HTMLElement,
-                                          session,
-                                        )
-                                      }
-                                    >
-                                      <FolderInputIcon />
-                                      {t('sidebar.sessionGroup')}
-                                    </DropdownMenuItem>
-                                  )}
-                                {canExportSessions &&
-                                  sessionActionItems.has('export') &&
+                                {canOrganizeSession(session, 'group') && (
+                                  <DropdownMenuItem
+                                    disabled={busy}
+                                    onSelect={(event) =>
+                                      openGroupMenuFromAnchor(
+                                        event.currentTarget as HTMLElement,
+                                        session,
+                                      )
+                                    }
+                                  >
+                                    <FolderInputIcon />
+                                    {t('sidebar.sessionGroup')}
+                                  </DropdownMenuItem>
+                                )}
+                                {showExport &&
                                   !inlineActionItems.has('export') && (
                                     <DropdownMenuItem
                                       disabled={exporting}
@@ -2906,7 +3291,7 @@ export function WebShellSidebar({
                                       {t('sidebar.export')}
                                     </DropdownMenuItem>
                                   )}
-                                {sessionActionItems.has('delete') &&
+                                {showDelete &&
                                   !inlineActionItems.has('delete') && (
                                     <DropdownMenuItem
                                       variant="destructive"
@@ -2940,15 +3325,20 @@ export function WebShellSidebar({
     },
     [
       busySessionIds,
+      canDeleteSession,
+      canShowDeleteSession,
+      canOrganizeSession,
+      canRenameSession,
+      canUnarchiveSession,
       canMutateSessionArchive,
-      canExportSessions,
       cancelRename,
       collapsed,
       completedUnreadIds,
       editingName,
-      editingSessionId,
+      editingSessionIdentity,
       exportingSessionIds,
       getArchivedExportWorkspaceCwd,
+      getActiveExportScope,
       getIdentityForSession,
       handleArchive,
       handleDeleteSession,
@@ -2959,10 +3349,10 @@ export function WebShellSidebar({
       handleUnarchive,
       isCurrentSession,
       openGroupMenuFromAnchor,
-      organizationEnabled,
       saveRename,
       sessionActionItems,
       inlineActionItems,
+      isActiveSessionReadOnly,
       startRename,
       t,
     ],
@@ -3009,12 +3399,12 @@ export function WebShellSidebar({
           expanded={expanded}
           onToggle={() => toggleSessionSection(section.id)}
           onRename={
-            section.kind === 'group' && group
+            section.kind === 'group' && group && canOrganizeWorkspace()
               ? () => handleRenameGroup(group)
               : undefined
           }
           onDelete={
-            section.kind === 'group' && group
+            section.kind === 'group' && group && canOrganizeWorkspace()
               ? () => handleDeleteGroup(group)
               : undefined
           }
@@ -3028,6 +3418,7 @@ export function WebShellSidebar({
     });
   }, [
     collapsedSessionSectionIds,
+    canOrganizeWorkspace,
     error,
     filteredSessions,
     groupBusy,
@@ -3634,7 +4025,11 @@ export function WebShellSidebar({
                 </div>
                 {pinnedExpanded && (
                   <div className={styles.pinnedSessionList}>
-                    {pinnedSessions.map((session) => renderSessionRow(session))}
+                    {pinnedSessions.map((session) =>
+                      renderSessionRow(session, {
+                        readOnly: isActiveSessionReadOnly(session),
+                      }),
+                    )}
                   </div>
                 )}
               </>
@@ -3725,8 +4120,16 @@ export function WebShellSidebar({
                             loadErrorLabel={t('sidebar.loadFailed')}
                             organizationEnabled={organizationEnabled}
                             ungroupedLabel={t('sidebar.groupUngrouped')}
-                            onRenameGroup={handleRenameGroup}
-                            onDeleteGroup={handleDeleteGroup}
+                            onRenameGroup={
+                              canOrganizeWorkspace(ws.cwd)
+                                ? handleRenameGroup
+                                : undefined
+                            }
+                            onDeleteGroup={
+                              canOrganizeWorkspace(ws.cwd)
+                                ? handleDeleteGroup
+                                : undefined
+                            }
                             renameGroupLabel={t('sidebar.groupRename')}
                             deleteGroupLabel={t('sidebar.groupDelete')}
                             groupActionsDisabled={groupBusy}
@@ -3750,7 +4153,12 @@ export function WebShellSidebar({
                                   ...session,
                                   workspaceCwd: ws.cwd,
                                 },
-                                { readOnly: !ws.primary },
+                                {
+                                  readOnly: isActiveSessionReadOnly({
+                                    ...session,
+                                    workspaceCwd: ws.cwd,
+                                  }),
+                                },
                               )
                             }
                             headerActions={(visible) => {
@@ -3776,22 +4184,31 @@ export function WebShellSidebar({
                                 >
                                   {ws.trusted && (
                                     <>
-                                      <button
-                                        className={styles.workspaceHeaderAction}
-                                        type="button"
-                                        aria-label={t('sidebar.groupCreate')}
-                                        onClick={(event) => {
-                                          event.preventDefault();
-                                          event.stopPropagation();
-                                          if (ws.primary) {
-                                            handleCreateGroup();
-                                          } else {
-                                            handleCreateWorkspaceGroup(ws.cwd);
+                                      {canOrganizeWorkspace(ws.cwd) && (
+                                        <button
+                                          className={
+                                            styles.workspaceHeaderAction
                                           }
-                                        }}
-                                      >
-                                        <PlusIcon size={16} strokeWidth={1.2} />
-                                      </button>
+                                          type="button"
+                                          aria-label={t('sidebar.groupCreate')}
+                                          onClick={(event) => {
+                                            event.preventDefault();
+                                            event.stopPropagation();
+                                            if (ws.primary) {
+                                              handleCreateGroup();
+                                            } else {
+                                              handleCreateWorkspaceGroup(
+                                                ws.cwd,
+                                              );
+                                            }
+                                          }}
+                                        >
+                                          <PlusIcon
+                                            size={16}
+                                            strokeWidth={1.2}
+                                          />
+                                        </button>
+                                      )}
                                       <button
                                         className={styles.workspaceHeaderAction}
                                         type="button"

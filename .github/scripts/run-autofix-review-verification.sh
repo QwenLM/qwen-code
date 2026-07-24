@@ -50,6 +50,8 @@ git checkout "${BRANCH}"
 # and kill the gate with no outcome), and the gate logic must come
 # from the trusted base, not the branch under verification.
 bash "${RUNNER_TEMP}/check-settings-schema.sh"
+git diff --name-only "origin/main...${BRANCH}" \
+  | bash "${RUNNER_TEMP}/check-autofix-contracts.sh"
 
 if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
   # No new commit. That is only legitimate as a deliberate no-action.
