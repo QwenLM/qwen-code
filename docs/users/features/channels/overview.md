@@ -2,6 +2,8 @@
 
 Channels let you interact with a Qwen Code agent from messaging platforms like Telegram, WeChat, QQ, DingTalk, WeCom, or Feishu, instead of the terminal. You send messages from your phone or desktop chat app, and the agent responds just like it would in the CLI.
 
+Code-hosting platforms (starting with [GitHub](./github)) are also supported via polling adapters — the agent monitors notifications and responds to @mentions on issues and pull requests.
+
 ## How It Works
 
 When you run `qwen channel start`, Qwen Code:

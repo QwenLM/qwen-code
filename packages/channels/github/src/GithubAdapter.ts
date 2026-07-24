@@ -1,0 +1,426 @@
+import process from 'node:process';
+import { Octokit } from '@octokit/rest';
+import { HttpsProxyAgent } from 'https-proxy-agent';
+import type {
+  ChannelAgentBridge,
+  ChannelBaseOptions,
+  ChannelConfig,
+  Envelope,
+} from '@qwen-code/channel-base';
+import { PollingChannelBase } from '@qwen-code/channel-base';
+import { testBotMention, stripBotMention } from './mention.js';
+
+interface GithubConfig extends ChannelConfig {
+  baseUrl?: string;
+}
+
+interface GithubCursor {
+  lastProcessedAt: string;
+  /**
+   * Thread keys (`chatId|threadId`) whose issue/PR body has already been fed as
+   * a first-contact trigger. Dedupes body dispatch when a thread is re-fetched
+   * with `last_read_at` still null — which happens if `markNotificationsAsRead`
+   * failed to mark it read (its `updated_at` was bumped past the cutoff between
+   * fetch and mark). Bounded to the most recent entries so the cursor stays small.
+   */
+  dispatchedBodies?: string[];
+}
+
+const MAX_DISPATCHED_BODIES = 500;
+
+export class GithubChannel extends PollingChannelBase<GithubCursor> {
+  private octokit!: Octokit;
+  private botUserId: number | null = null;
+  private botUsername: string | null = null;
+  private webOrigin = 'https://github.com';
+
+  constructor(
+    name: string,
+    config: GithubConfig & Record<string, unknown>,
+    bridge: ChannelAgentBridge,
+    options?: ChannelBaseOptions,
+  ) {
+    super(name, config, bridge, options);
+  }
+
+  protected createInitialCursor(): GithubCursor {
+    return { lastProcessedAt: new Date().toISOString() };
+  }
+
+  protected override validateCursor(parsed: unknown): GithubCursor | null {
+    const base = super.validateCursor(parsed);
+    if (!base || typeof base.lastProcessedAt !== 'string') return null;
+    if (base.dispatchedBodies && !Array.isArray(base.dispatchedBodies)) {
+      base.dispatchedBodies = [];
+    }
+    return base;
+  }
+
+  async connect(): Promise<void> {
+    const cfg = this.config as GithubConfig;
+    const baseUrl = cfg.baseUrl || 'https://api.github.com';
+    this.webOrigin = baseUrl
+      .replace(/\/api\/v3\/?$/, '')
+      .replace(/^https:\/\/api\.github\.com/, 'https://github.com');
+    this.octokit = new Octokit({
+      auth: cfg.token,
+      baseUrl,
+      ...(this.proxy
+        ? { request: { agent: new HttpsProxyAgent(this.proxy) } }
+        : {}),
+    });
+    try {
+      const { data } = await this.octokit.rest.users.getAuthenticated();
+      this.botUserId = data.id;
+      this.botUsername = data.login;
+    } catch (err) {
+      throw new Error(
+        `[Channel:${this.name}] failed to resolve bot identity: ${err}`,
+      );
+    }
+    // Resolve allowedUsers logins to immutable numeric IDs
+    const resolved: string[] = [];
+    for (const login of this.config.allowedUsers ?? []) {
+      try {
+        const { data: u } = await this.octokit.rest.users.getByUsername({
+          username: login,
+        });
+        resolved.push(String(u.id));
+      } catch (err) {
+        process.stderr.write(
+          `[Channel:${this.name}] could not resolve allowedUser "${login}" to a numeric ID, keeping login (will not match numeric senderId): ${err}\n`,
+        );
+        resolved.push(login);
+      }
+    }
+    this.config.allowedUsers = resolved;
+    this.gate.replaceAllowedUsers(resolved);
+    this.startPollLoop();
+  }
+
+  disconnect(): void {
+    this.stopPollLoop();
+  }
+
+  async sendMessage(_chatId: string, _text: string): Promise<void> {
+    throw new Error(
+      `[Channel:${this.name}] sendMessage requires a threadId; use sendThreadMessage`,
+    );
+  }
+
+  protected override async sendThreadMessage(
+    chatId: string,
+    threadId: string | undefined,
+    text: string,
+  ): Promise<void> {
+    if (!threadId) {
+      return super.sendThreadMessage(chatId, threadId, text);
+    }
+    const match = threadId.match(/^(?:issue|pr):(\d+)$/);
+    if (!match) {
+      throw new Error(
+        `[Channel:${this.name}] invalid threadId format: ${threadId}`,
+      );
+    }
+    const issueNumber = Number(match[1]);
+    await this.githubApi(
+      () =>
+        this.octokit.rest.issues.createComment({
+          owner: chatId.split('/')[0],
+          repo: chatId.split('/')[1],
+          issue_number: issueNumber,
+          body: text,
+        }),
+      `createComment(${threadId})`,
+    );
+  }
+
+  protected async pollOnce(): Promise<void> {
+    const since = new Date(
+      new Date(this.cursor.lastProcessedAt).getTime() - 1000,
+    ).toISOString();
+
+    const notifications = await this.githubApi(
+      () =>
+        this.octokit.paginate(
+          this.octokit.rest.activity.listNotificationsForAuthenticatedUser,
+          { since, per_page: 100 },
+        ),
+      'listNotifications',
+    );
+
+    notifications.sort((a, b) => a.updated_at.localeCompare(b.updated_at));
+
+    const maxUpdatedAt =
+      notifications.length > 0
+        ? notifications[notifications.length - 1].updated_at
+        : this.cursor.lastProcessedAt;
+
+    // Mark as read BEFORE processing (best-effort delivery). Bot's own
+    // replies won't flip notifications back to unread, so this is safe.
+    // If we crash mid-processing, the user re-mentions to retry.
+    if (maxUpdatedAt > this.cursor.lastProcessedAt) {
+      await this.markNotificationsAsRead(maxUpdatedAt);
+      this.cursor.lastProcessedAt = maxUpdatedAt;
+    }
+
+    for (const notification of notifications) {
+      const extracted = this.extractFromSubjectUrl(notification.subject.url);
+      if (!extracted) {
+        continue;
+      }
+
+      const { chatId, threadId, issueNumber } = extracted;
+      const lastReadAt = notification.last_read_at;
+      const windowSince = lastReadAt || since;
+
+      try {
+        const comments = await this.githubApi(
+          () =>
+            this.octokit.paginate(this.octokit.rest.issues.listComments, {
+              owner: chatId.split('/')[0],
+              repo: chatId.split('/')[1],
+              issue_number: issueNumber,
+              since: windowSince,
+              per_page: 100,
+            }),
+          `listComments(${threadId})`,
+        );
+
+        comments.sort((a, b) =>
+          (a.created_at || '').localeCompare(b.created_at || ''),
+        );
+
+        const newComments = comments.filter((c) => {
+          if (c.user?.id != null && c.user.id === this.botUserId) {
+            return false;
+          }
+          if (c.updated_at && c.updated_at > maxUpdatedAt) {
+            return false;
+          }
+          return true;
+        });
+
+        let dispatchedMention = false;
+
+        for (const comment of newComments) {
+          const body = comment.body || '';
+          const isMentioned = this.botUsername
+            ? testBotMention(body, this.botUsername)
+            : false;
+
+          const text = this.botUsername
+            ? stripBotMention(body, this.botUsername)
+            : body;
+
+          const envelope: Envelope = {
+            channelName: this.name,
+            senderId: String(comment.user?.id ?? 'unknown'),
+            senderName: comment.user?.login || 'unknown',
+            chatId,
+            threadId,
+            messageId: String(comment.id),
+            text,
+            isGroup: true,
+            isMentioned,
+            isReplyToBot: false,
+            metadata: this.buildMetadata(chatId, threadId, notification),
+          };
+
+          try {
+            await this.handleInbound(envelope);
+            if (isMentioned) dispatchedMention = true;
+          } catch (err) {
+            process.stderr.write(
+              `[Channel:${this.name}] handleInbound failed for comment ${comment.id}: ${err}\n`,
+            );
+            await this.postErrorComment(chatId, issueNumber);
+          }
+        }
+
+        if (!dispatchedMention && !lastReadAt) {
+          await this.tryFirstContactBody(
+            chatId,
+            threadId,
+            issueNumber,
+            notification,
+          );
+        }
+      } catch (err) {
+        process.stderr.write(
+          `[Channel:${this.name}] API error processing ${threadId}, skipping: ${err}\n`,
+        );
+        continue;
+      }
+    }
+  }
+
+  private async tryFirstContactBody(
+    chatId: string,
+    threadId: string,
+    issueNumber: number,
+    notification: { subject: { title?: string } },
+  ): Promise<void> {
+    // First contact is gated by `last_read_at` in the caller, but a thread can
+    // be re-fetched with `last_read_at` still null if marking it read failed
+    // (its updated_at was bumped past the cutoff). Dedup on an explicit record
+    // of which bodies we have already fed, so that re-fetch never feeds the body
+    // twice. Unlike a `created_at <= cursor` guard, this also feeds bodies whose
+    // notification arrived late — after the cursor had advanced past created_at.
+    const bodyKey = `${chatId}|${threadId}`;
+    if (this.cursor.dispatchedBodies?.includes(bodyKey)) return;
+    try {
+      const { data: issue } = await this.octokit.rest.issues.get({
+        owner: chatId.split('/')[0],
+        repo: chatId.split('/')[1],
+        issue_number: issueNumber,
+      });
+
+      const body = issue.body || '';
+
+      const isMentioned = this.botUsername
+        ? testBotMention(body, this.botUsername)
+        : false;
+
+      const text = this.botUsername
+        ? stripBotMention(body, this.botUsername)
+        : body;
+
+      const envelope: Envelope = {
+        channelName: this.name,
+        senderId: String(issue.user?.id ?? 'unknown'),
+        senderName: issue.user?.login || 'unknown',
+        chatId,
+        threadId,
+        messageId: `issue-body-${issueNumber}`,
+        text,
+        isGroup: true,
+        isMentioned,
+        isReplyToBot: false,
+        metadata: this.buildMetadata(chatId, threadId, {
+          subject: { title: notification.subject.title },
+        }),
+      };
+
+      try {
+        await this.handleInbound(envelope);
+        this.recordDispatchedBody(bodyKey);
+      } catch (err) {
+        process.stderr.write(
+          `[Channel:${this.name}] handleInbound failed for issue body ${issueNumber}: ${err}\n`,
+        );
+        await this.postErrorComment(chatId, issueNumber);
+      }
+    } catch (err) {
+      process.stderr.write(
+        `[Channel:${this.name}] failed to fetch issue for first contact: ${err}\n`,
+      );
+    }
+  }
+
+  private recordDispatchedBody(key: string): void {
+    const list = this.cursor.dispatchedBodies ?? [];
+    list.push(key);
+    this.cursor.dispatchedBodies = list.slice(-MAX_DISPATCHED_BODIES);
+  }
+
+  private extractFromSubjectUrl(
+    url: string,
+  ): { chatId: string; threadId: string; issueNumber: number } | null {
+    const match = url.match(/\/repos\/([^/]+\/[^/]+)\/(issues|pulls)\/(\d+)/);
+    if (!match) return null;
+    const chatId = match[1];
+    const kind = match[2] === 'pulls' ? 'pr' : 'issue';
+    const issueNumber = Number(match[3]);
+    const threadId = `${kind}:${issueNumber}`;
+    return { chatId, threadId, issueNumber };
+  }
+
+  private buildMetadata(
+    chatId: string,
+    threadId: string,
+    notification: { subject: { title?: string } },
+  ): string {
+    const type = threadId.startsWith('pr:') ? 'Pull Request' : 'Issue';
+    const title = notification.subject.title || '';
+    const url = `${this.webOrigin}/${chatId}/${threadId.startsWith('pr:') ? 'pull' : 'issues'}/${threadId.split(':')[1]}`;
+    return `Type: ${type} | Title: ${title} | URL: ${url}`;
+  }
+
+  private async githubApi<T>(
+    fn: () => Promise<T>,
+    label: string,
+    retries = 3,
+  ): Promise<T> {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        return await fn();
+      } catch (err: unknown) {
+        if (attempt === retries) throw err;
+        // Octokit RequestError: { status, response?: { headers } }
+        const e = err as {
+          status?: number;
+          response?: { headers?: Record<string, string | number> };
+          message?: string;
+        };
+        const headers = e.response?.headers ?? {};
+
+        let cooldown: number;
+        if (headers['retry-after']) {
+          cooldown = Number(headers['retry-after']) * 1000;
+        } else if (
+          (e.status === 403 || e.status === 429) &&
+          Number(headers['x-ratelimit-remaining']) === 0 &&
+          Number(headers['x-ratelimit-reset']) > 0
+        ) {
+          cooldown =
+            Math.max(
+              0,
+              Number(headers['x-ratelimit-reset']) * 1000 - Date.now(),
+            ) + 1000;
+        } else {
+          cooldown = 1000 * 2 ** (attempt - 1);
+        }
+
+        process.stderr.write(
+          `[Channel:${this.name}] ${label} failed (attempt ${attempt}/${retries}, status=${e.status}), retrying in ${cooldown}ms: ${e.message}\n`,
+        );
+        await new Promise((r) => setTimeout(r, cooldown));
+      }
+    }
+    throw new Error('unreachable');
+  }
+
+  private async markNotificationsAsRead(lastReadAt: string): Promise<void> {
+    await this.githubApi(
+      () =>
+        this.octokit.rest.activity.markNotificationsAsRead({
+          last_read_at: lastReadAt,
+          read: true,
+        }),
+      'markNotificationsAsRead',
+    );
+  }
+
+  private async postErrorComment(
+    chatId: string,
+    issueNumber: number,
+  ): Promise<void> {
+    try {
+      await this.githubApi(
+        () =>
+          this.octokit.rest.issues.createComment({
+            owner: chatId.split('/')[0],
+            repo: chatId.split('/')[1],
+            issue_number: issueNumber,
+            body: '⚠️ Failed to process this request. Please re-mention the bot to retry.',
+          }),
+        `postErrorComment(${chatId}#${issueNumber})`,
+      );
+    } catch (err) {
+      process.stderr.write(
+        `[Channel:${this.name}] postErrorComment also failed for ${chatId}#${issueNumber}, user must re-mention manually: ${err}\n`,
+      );
+    }
+  }
+}

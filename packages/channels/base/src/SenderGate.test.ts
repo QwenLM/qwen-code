@@ -49,6 +49,13 @@ describe('SenderGate', () => {
       expect(gate.isAllowed('alice')).toBe(true);
       expect(gate.isAllowed('eve')).toBe(false);
     });
+
+    it('replaceAllowedUsers swaps the snapshotted allowlist', () => {
+      const gate = new SenderGate('allowlist', ['alice']);
+      gate.replaceAllowedUsers(['10001']);
+      expect(gate.check('10001').allowed).toBe(true);
+      expect(gate.check('alice').allowed).toBe(false);
+    });
   });
 
   describe('pairing policy', () => {

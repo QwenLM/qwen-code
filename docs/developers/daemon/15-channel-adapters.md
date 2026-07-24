@@ -67,6 +67,8 @@ abstract class ChannelBase {
 }
 ```
 
+All internal message delivery routes through `sendThreadMessage(chatId, threadId, text)`. The default implementation falls through to `sendMessage(chatId, text)`, ignoring `threadId` — IM adapters are unaffected. Polling adapters (e.g. GitHub) override `sendThreadMessage` to post comments on a specific issue/PR using the `threadId`.
+
 Handles common cross-cutting concerns: sender gating (allowlist / denylist), group gating, message block streaming (chunk size, throttling), inbound debounce.
 
 ### Per-channel adapters
@@ -180,22 +182,22 @@ Adapter `connect()` failures are reported separately from worker lifecycle error
 
 ## Dependencies
 
-- `packages/channels/base/` — `ChannelBase`, `DaemonChannelBridge`, `types.ts` (`ChannelConfig`, `Envelope`, `SessionScope`, `ChannelPlugin`).
+- `packages/channels/base/` — `ChannelBase`, `PollingChannelBase`, `DaemonChannelBridge`, `types.ts` (`ChannelConfig`, `Envelope`, `SessionScope`, `ChannelPlugin`).
 - `packages/sdk-typescript/src/daemon/` — `DaemonSessionClient` and friends.
-- Per-channel SDKs: `@dingtalk/stream` (DingTalk), proprietary iLink Bot HTTP (Weixin), `grammy` (Telegram).
+- Per-channel SDKs: `@dingtalk/stream` (DingTalk), proprietary iLink Bot HTTP (Weixin), `grammy` (Telegram), `@octokit/rest` (GitHub polling).
 
 ## Configuration
 
 `ChannelConfig` (from `packages/channels/base/src/types.ts`):
 
-| Knob                                     | Effect                                                                                                    |
-| ---------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `sessionScope`                           | `'user'` (sender + chat), `'thread'` (thread id or chat), or `'single'` (one shared session per channel). |
-| `approvalMode`                           | `'auto'` (auto-respond) / `'prompt'` (render UI).                                                         |
-| `allowlist?: string[]`                   | Sender ids allowed; missing = open.                                                                       |
-| `denylist?: string[]`                    | Sender ids denied.                                                                                        |
-| `chunkSize`, `chunkIntervalMs`           | Outbound block streaming settings.                                                                        |
-| `daemon: { baseUrl, token?, clientId? }` | Forwarded to `DaemonChannelSessionFactory`.                                                               |
+| Knob                                     | Effect                                                                                                                                                                         |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `sessionScope`                           | `'user'` (sender + chat), `'thread'` (thread id or chat), `'chat_thread'` (channel + chatId + threadId, for polling adapters), or `'single'` (one shared session per channel). |
+| `approvalMode`                           | `'auto'` (auto-respond) / `'prompt'` (render UI).                                                                                                                              |
+| `allowlist?: string[]`                   | Sender ids allowed; missing = open.                                                                                                                                            |
+| `denylist?: string[]`                    | Sender ids denied.                                                                                                                                                             |
+| `chunkSize`, `chunkIntervalMs`           | Outbound block streaming settings.                                                                                                                                             |
+| `daemon: { baseUrl, token?, clientId? }` | Forwarded to `DaemonChannelSessionFactory`.                                                                                                                                    |
 
 Channel-specific keys layer on top (DingTalk: `streamCredentials`; WeChat: `ilinkUrl`, `botId`; Telegram: `botToken`; Feishu: `clientId` (appId), `clientSecret` (appSecret), `verificationToken`, `encryptKey` (webhook mode)).
 
