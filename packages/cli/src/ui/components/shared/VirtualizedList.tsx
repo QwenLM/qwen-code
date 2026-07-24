@@ -495,19 +495,10 @@ function VirtualizedList<T>(
       return startIndex;
     }
 
-    let heightFromEnd = 0;
-    for (let i = endIndex; i >= 0; i--) {
-      const item = data[i];
-      const key = item ? keyExtractor(item, i) : '';
-      const raw = heights[key] ?? estimatedItemHeight(i);
-      const height = Number.isFinite(raw) && raw > 0 ? raw : 0;
-      heightFromEnd += height;
-      if (heightFromEnd >= viewHeightForEndIndex) {
-        return Math.min(startIndex, Math.max(0, i - 1));
-      }
-    }
-
-    return 0;
+    const targetOffset =
+      (offsets[endIndex + 1] ?? totalHeight) - viewHeightForEndIndex;
+    const backStart = findLastLE(offsets, targetOffset);
+    return Math.min(startIndex, Math.max(0, backStart));
   })();
 
   const topSpacerHeight =
