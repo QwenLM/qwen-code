@@ -358,6 +358,39 @@ describe('GithubChannel', () => {
       await pollOnce();
       expect(channel.inboundEnvelopes).toHaveLength(0);
     });
+
+    it('feeds PR body when no comments and PR is new', async () => {
+      const prNotification = makeNotification({
+        last_read_at: null,
+        subject: {
+          title: 'feat: add divide',
+          url: 'https://api.github.com/repos/owner/repo/pulls/99',
+          type: 'PullRequest',
+        },
+      });
+      mockOctokit.paginate
+        .mockResolvedValueOnce([prNotification])
+        .mockResolvedValueOnce([]); // no comments
+
+      mockOctokit.rest.issues.get.mockResolvedValue({
+        data: {
+          body: '@test-bot review this PR',
+          created_at: '2026-07-02T08:00:00.000Z',
+          user: { login: 'carol' },
+        },
+      });
+
+      await initWithoutLoop();
+      channel.cursor = { lastProcessedAt: '2026-07-01T00:00:00.000Z' };
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      const env = channel.inboundEnvelopes[0]!;
+      expect(env.text).toBe('review this PR');
+      expect(env.senderId).toBe('carol');
+      expect(env.threadId).toBe('pr:99');
+      expect(env.metadata).toContain('Pull Request');
+    });
   });
 
   describe('error handling', () => {
