@@ -69,6 +69,7 @@ import { MatrixRestApi } from './bridges/matrix/restApi.js';
 import { IdleSessionToggles } from './idle/sessionToggles.js';
 import type { IdleStatusResolver } from './routes/idleToggle.js';
 import { SessionEventPump } from './webpush/pump.js';
+import { forwardApprovalModeChange } from './webpush/approvalModeForward.js';
 import { AgentRegistry } from './agents/agentRegistry.js';
 import { ReviewRegistry, type ReviewRecord } from './reviews/reviewRegistry.js';
 import { loadOrCreateHookIngestToken } from './agents/hookIngestToken.js';
@@ -1122,28 +1123,34 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       // NOT newly activate idle suggestions — enabling cost tracking must not change
       // idle behavior. So gate the idle hook on `notifier`, not just `onSessionIdle`.
       ...(onSessionIdle && notifier ? { onSessionIdle } : {}),
-      ...(usageIngester || agentLifecycle || reviewLifecycle
-        ? {
-            onEvent: (sid: string, ev: { type: string; data: unknown }) => {
-              usageIngester?.ingest(sid, ev.data, sessionAttribution.get(sid));
-              // Fire-and-forget: lifecycle transitions must never block or
-              // break the pump's subscribe loop.
-              agentLifecycle
-                ?.handleSessionEvent(sid, {
-                  type: ev.type,
-                  data: ev.data,
-                })
-                .catch(() => {});
-              // Review lifecycle (add-remote-review): a mid-review daemon
-              // session_died drives the review to `failed` and emits
-              // review_failed — the wire-protocol registry promise. Same
-              // fire-and-forget contract as agents above.
-              void reviewLifecycle
-                ?.handleSessionEvent(sid, { type: ev.type, data: ev.data })
-                .catch(() => {});
-            },
-          }
-        : {}),
+      onEvent: (sid: string, ev: { type: string; data: unknown }) => {
+        usageIngester?.ingest(sid, ev.data, sessionAttribution.get(sid));
+        // Fire-and-forget: lifecycle transitions must never block or
+        // break the pump's subscribe loop.
+        agentLifecycle
+          ?.handleSessionEvent(sid, {
+            type: ev.type,
+            data: ev.data,
+          })
+          .catch(() => {});
+        // Review lifecycle (add-remote-review): a mid-review daemon
+        // session_died drives the review to `failed` and emits
+        // review_failed — the wire-protocol registry promise. Same
+        // fire-and-forget contract as agents above.
+        void reviewLifecycle
+          ?.handleSessionEvent(sid, { type: ev.type, data: ev.data })
+          .catch(() => {});
+        // Approval-mode forward (add-remote-approval-mode): the daemon's own
+        // approval_mode_changed event is the single source of truth for
+        // fan-out — the route (routes/approvalMode.ts) deliberately does not
+        // publish/notify itself, so this is the ONLY broadcast per change.
+        // Bounded by the pump running at all (notifier || usageIngester ||
+        // agentLifecycle || reviewLifecycle), per the design's documented
+        // "pump must be subscribed" residual.
+        if (ev.type === 'approval_mode_changed') {
+          forwardApprovalModeChange(sid, ev.data, ownerEvents, notifier);
+        }
+      },
     });
     await pump.start();
     const consumers: string[] = [];
