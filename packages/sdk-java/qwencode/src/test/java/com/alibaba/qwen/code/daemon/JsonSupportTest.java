@@ -31,6 +31,15 @@ class JsonSupportTest {
     }
 
     @Test
+    void identifiesTruncatedObjectAsIncomplete() {
+        DaemonProtocolException failure = assertThrows(
+                DaemonProtocolException.class,
+                () -> JsonSupport.parseObject("{\"value\":1", "test response"));
+        assertEquals("test response contains an incomplete JSON object",
+                failure.getMessage());
+    }
+
+    @Test
     void rejectsNonFiniteJsonNumbersRecursively() {
         for (Number value : new Number[] {
                 Double.NaN,
