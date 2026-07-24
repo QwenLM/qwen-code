@@ -127,6 +127,69 @@ describe('isDestructiveCommand — git patterns', () => {
     expect(result!.blocked).toBe(true);
   });
 
+  it('blocks the force flag wherever it appears in git clean', () => {
+    for (const cmd of [
+      // Long spelling of -f.
+      'git clean --force',
+      'git clean --force -d',
+      // Force flag after another flag, rather than as the first token.
+      'git clean -d --force',
+      'git clean -d -f',
+      'git clean -n -f',
+      'git clean --quiet -fd',
+    ]) {
+      const result = isDestructiveCommand(cmd, 'remove files');
+      expect(result).not.toBeNull();
+      expect(result!.blocked).toBe(true);
+    }
+  });
+
+  it('does not pull a -f from a later command segment into git clean', () => {
+    // `git clean` alone is harmless; the -f belongs to the second command.
+    for (const cmd of [
+      'git clean; grep -f patterns.txt file',
+      'git clean && tail -f log.txt',
+      'git clean | xargs -f',
+    ]) {
+      const result = isDestructiveCommand(cmd, 'look at logs');
+      expect(result).toBeNull();
+    }
+  });
+
+  it('blocks git checkout . (same discard as the -- . form)', () => {
+    for (const cmd of [
+      'git checkout .',
+      'git checkout . && npm test',
+      // No space before the separator — the `.` is followed by `;`/`&`/`|`
+      // rather than whitespace, which an over-tight lookahead would miss.
+      'git checkout .;rm -rf /tmp/x',
+      'git checkout .&&npm test',
+      'git checkout .|tee out.txt',
+      // A directory pathspec discards everything under it; the `-- ./src`
+      // spelling is already blocked by the sibling pattern.
+      'git checkout ./src',
+      'git checkout ./packages/core',
+      // The parent forms discard a whole tree from a subdirectory — strictly
+      // more than `.` does — and the `--` spelling of both is already blocked
+      // by the sibling pattern, so the bare spelling cannot be the lenient one.
+      'git checkout ..',
+      'git checkout ../',
+      'git checkout ../src',
+      // Redirects bind to the command, not the pathspec: bash tokenizes `.>`
+      // as the word `.` plus a redirect, so the checkout still runs.
+      'git checkout .>/dev/null',
+      'git checkout .>out.txt 2>&1',
+      'git checkout .<in.txt',
+      // Command substitution puts the closing delimiter right after the dot.
+      'echo $(git checkout .)',
+      'echo `git checkout .`',
+    ]) {
+      const result = isDestructiveCommand(cmd, 'fix the bug');
+      expect(result).not.toBeNull();
+      expect(result!.blocked).toBe(true);
+    }
+  });
+
   it('blocks git stash drop', () => {
     const result = isDestructiveCommand('git stash drop', 'remove stash');
     expect(result).not.toBeNull();
@@ -171,6 +234,14 @@ describe('isDestructiveCommand — git patterns', () => {
       'git stash',
       'git stash pop',
       'git stash list',
+      // A leading-dot pathspec is a single file, not the whole worktree, so
+      // it must not be caught by the `git checkout .` pattern.
+      'git checkout .gitignore',
+      'git checkout .github/workflows/ci.yml',
+      'git checkout .env.local',
+      // `--force` only counts on `git clean`; these are unrelated commands.
+      'git push --force-with-lease',
+      'git fetch --force',
     ];
     for (const cmd of safeCommands) {
       const result = isDestructiveCommand(cmd, 'do stuff');
