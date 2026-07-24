@@ -121,8 +121,8 @@ export interface Envelope {
   attachments?: Attachment[];
   /**
    * Contextual metadata (e.g. issue type, title, URL) kept separate from `text`
-   * so slash-command parsing operates on the comment body alone. Appended to the
-   * prompt after command parsing, sanitized via sanitizePromptText.
+   * so slash-command parsing operates on the comment body alone. Prepended to
+   * the prompt after command parsing, sanitized via sanitizePromptText.
    */
   metadata?: string;
   /**
