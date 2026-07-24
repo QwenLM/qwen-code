@@ -339,7 +339,7 @@ Two more escaping notes: `<code>` shows HTML entities literally but GFM **still 
 
 **Runs in the main working tree, not the worktree** — tmux needs the local build environment.
 
-**Mandatory.** Unit tests don't substitute. Unrelated build failure ≠ excuse to skip.
+**Mandatory** for PRs with user-visible behavioral changes. Unit tests don't substitute. Unrelated build failure ≠ excuse to skip.
 
 **⛔ The tmux output IS the review.** The maintainer reads your Stage 2 comment and decides approve/reject from it. You **must** paste the actual `capture-pane` terminal output inline in the comment — inside a fenced code block. Not a file path, not "see attached log", not a text summary. If you didn't inline the output, the review is worthless.
 
@@ -398,7 +398,7 @@ so the maintainer can trust and reproduce it.
 
 Post a single Stage 2 comment (must include `<!-- qwen-triage stage=2 -->` at the top), in this order: code review findings → optional sequence diagram (2a-bis) → optional changed-files overview (2a-bis) → real-scenario testing result (below) → the bilingual `<details>` Chinese summary → signature + footer last (the same tail order as the Stage 1 template). Include the two enrichments only when 2a-bis says they earn their place; a small, focused PR is just findings + testing.
 
-**⛔ BEFORE POSTING: verify your comment contains the tmux output.** Read back through your draft — does it have a fenced code block with the actual terminal capture? If not, add it now. The maintainer cannot approve without seeing what actually happened.
+**⛔ BEFORE POSTING: verify your comment contains the tmux output** (or the `N/A` substitution for docs/types/refactor PRs with nothing user-visible). Read back through your draft — does it have a fenced code block with the actual terminal capture? If not, add it now. The maintainer cannot approve without seeing what actually happened.
 
 ````markdown
 ## Before (installed build)
