@@ -4464,7 +4464,7 @@ export abstract class ChannelBase {
     }
 
     if (envelope.metadata) {
-      promptText = promptText + '\n\n' + sanitizePromptText(envelope.metadata);
+      promptText = sanitizePromptText(envelope.metadata) + '\n\n' + promptText;
     }
 
     // Resolve dispatch mode: per-group override → channel config → default
