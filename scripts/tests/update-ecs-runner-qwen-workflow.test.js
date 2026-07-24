@@ -19,5 +19,8 @@ describe('ECS runner qwen update workflow', () => {
     expect(workflow).toContain(
       'sudo env "NPM_CONFIG_PREFIX=${global_prefix}" npm install -g',
     );
+    expect(workflow).toMatch(
+      /if \[\[ -w "\$\{global_prefix\}" \]\][\s\S]*?then\s*\n\s*npm install -g/,
+    );
   });
 });
