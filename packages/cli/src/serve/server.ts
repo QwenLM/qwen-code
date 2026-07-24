@@ -983,10 +983,10 @@ export function createServeApp(
       statusProvider,
       workspaceProvidersStatusProvider: createWorkspaceProvidersStatusProvider({
         ...(primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {}),
-        workspaceTrusted: deps.primaryWorkspaceTrusted ?? true,
+        workspaceTrusted: isPrimaryWorkspaceTrusted(),
       }),
       workspaceSkillsStatusProvider: createWorkspaceSkillsStatusProvider({
-        workspaceTrusted: deps.primaryWorkspaceTrusted ?? true,
+        workspaceTrusted: isPrimaryWorkspaceTrusted(),
       }),
       ...(primaryEffectiveEnv ? { skillInstallEnv: primaryEffectiveEnv } : {}),
       ...(primaryEffectiveEnv ? { voiceEnv: primaryEffectiveEnv } : {}),
