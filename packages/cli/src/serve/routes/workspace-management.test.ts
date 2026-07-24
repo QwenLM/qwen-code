@@ -1708,6 +1708,41 @@ describe('DELETE /workspaces/:workspace', () => {
     ).toBeUndefined();
   });
 
+  it('continues cleanup when registry drain commit fails after persistence commits', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    const registry = createMockRegistry([runtime]);
+    vi.mocked(registry.commitDrain).mockImplementationOnce(() => {
+      throw new Error('registry commit failed');
+    });
+    const runtimeRemoval = createRemovalController();
+    const { app } = createApp({
+      workspaceRegistry: registry,
+      runtimeRemoval,
+      workspaceRegistrationStore: {
+        removeByIds: vi.fn().mockResolvedValue(1),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app)
+      .delete(`/workspaces/${encodeURIComponent(runtime.workspaceId)}`)
+      .send({ force: true });
+
+    expect(res.status).toBe(200);
+    expect(runtimeRemoval.disposeRuntime).toHaveBeenCalledWith(
+      runtime,
+      'workspace_removed',
+    );
+    expect(runtimeRemoval.completeDrain).toHaveBeenCalledWith(runtime);
+    expect(registry.completeDrain).toHaveBeenCalledWith(runtime);
+    expect(registry.cancelDrain).not.toHaveBeenCalled();
+    expect(
+      registry.getManagedByWorkspaceId(runtime.workspaceId),
+    ).toBeUndefined();
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: failed to commit workspace registry drain: registry commit failed',
+    );
+  });
+
   it('accepts a URL-encoded absolute cwd selector', async () => {
     const runtime = makeRuntime(REAL_DIR);
     const { app, deps } = createApp({

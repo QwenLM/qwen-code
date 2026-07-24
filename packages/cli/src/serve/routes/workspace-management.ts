@@ -1204,14 +1204,14 @@ export function registerWorkspaceManagementRoutes(
           });
         }
       };
+      const logCleanupFailure = (message: string): void => {
+        try {
+          writeStderrLine(message);
+        } catch {
+          // Cleanup must continue after the persistence commit point.
+        }
+      };
       const convergeCommittedRemoval = async (): Promise<void> => {
-        const logCleanupFailure = (message: string): void => {
-          try {
-            writeStderrLine(message);
-          } catch {
-            // Cleanup must continue after the persistence commit point.
-          }
-        };
         try {
           getAcpHandle?.()?.commitWorkspaceRemoval(runtime.workspaceId);
         } catch (err) {
@@ -1333,7 +1333,15 @@ export function registerWorkspaceManagementRoutes(
         // Persistence is the commit point. Every cleanup step after it is
         // best-effort and logical removal must never roll back to active.
         removalCommitted = true;
-        workspaceRegistry.commitDrain(runtime);
+        try {
+          workspaceRegistry.commitDrain(runtime);
+        } catch (err) {
+          logCleanupFailure(
+            `qwen serve: failed to commit workspace registry drain: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
         await convergeCommittedRemoval();
 
         res.status(200).json({
