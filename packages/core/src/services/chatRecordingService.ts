@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import {
   type PartListUnion,
+  type Part,
   type Content,
   type FunctionDeclaration,
   type GenerateContentResponseUsageMetadata,
@@ -368,6 +369,8 @@ export interface AgentBootstrapRecordPayload {
    * reuse this exact value rather than reading the current parent config.
    */
   systemInstruction?: string | Content;
+  /** Startup-context snapshot used to restore fork context after compaction. */
+  startupParts?: Part[];
   /**
    * Immutable launch-time tool declarations / allowlist for the fork runtime.
    * Resume must reuse this exact capability set or stay blocked.

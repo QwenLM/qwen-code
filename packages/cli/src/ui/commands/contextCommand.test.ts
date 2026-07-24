@@ -47,6 +47,7 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
     }),
     getVisibleTools: vi.fn().mockReturnValue(new Set()),
     getUserMemory: vi.fn().mockReturnValue(''),
+    getManagedMemoryPrompt: vi.fn().mockReturnValue(''),
     getSkillManager: vi.fn().mockReturnValue({
       listSkills: vi.fn().mockResolvedValue([]),
     }),
@@ -77,6 +78,7 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getVisibleTools: vi.fn().mockReturnValue(new Set()),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getManagedMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
       }),
@@ -121,6 +123,138 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.totalTokens).toBe(50_000);
     // 50K < warn(150K); if the 999K global had leaked through it would be `hard`.
     expect(data.breakdown.currentTier).toBe('safe');
+  });
+
+  it('counts pending startup user content before the first API request', async () => {
+    const config = {
+      ...makeMockConfig(200_000),
+      getGeminiClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        getChat: vi.fn().mockReturnValue({
+          getLastPromptTokenCount: vi.fn().mockReturnValue(0),
+          getPendingStartupParts: vi
+            .fn()
+            .mockReturnValue([{ text: 'x'.repeat(400) }]),
+        }),
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, false);
+
+    expect(data.isEstimated).toBe(true);
+    expect(data.breakdown.messages).toBe(100);
+  });
+
+  it('counts managed memory when no active chat can expose pending parts', async () => {
+    const config = {
+      ...makeMockConfig(200_000),
+      getManagedMemoryPrompt: vi.fn().mockReturnValue('m'.repeat(400)),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, false);
+
+    expect(data.breakdown.memoryFiles).toBe(100);
+    expect(data.breakdown.messages).toBe(0);
+  });
+
+  it('projects pending startup content after an API request', async () => {
+    const getLastPromptTokenCount = vi.fn().mockReturnValue(10_000);
+    const config = {
+      ...makeMockConfig(200_000),
+      getGeminiClient: vi.fn().mockReturnValue({
+        isInitialized: vi.fn().mockReturnValue(true),
+        getChat: vi.fn().mockReturnValue({
+          getLastPromptTokenCount,
+          getPendingStartupParts: vi
+            .fn()
+            .mockReturnValue([{ text: 'x'.repeat(400) }]),
+        }),
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, false);
+
+    expect(data.totalTokens).toBe(10_100);
+    expect(data.breakdown.messages).toBeGreaterThanOrEqual(100);
+    expect(data.breakdown.freeSpace).toBeLessThan(
+      200_000 - 10_000 - data.breakdown.autocompactBuffer,
+    );
+  });
+
+  it('does not count categorized startup context again as messages', async () => {
+    mockGetLastPromptTokenCount.mockReturnValue(10_000);
+    const config = {
+      ...makeMockConfig(200_000),
+      getUserMemory: vi.fn().mockReturnValue('m'.repeat(400)),
+      getSkillManager: vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([
+          {
+            name: 'review',
+            description: 'd'.repeat(400),
+            level: 'project',
+          },
+        ]),
+      }),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, false);
+
+    const categorizedRemainder =
+      data.totalTokens -
+      data.breakdown.systemPrompt -
+      data.breakdown.memoryFiles -
+      data.breakdown.skills;
+    expect(
+      Math.abs(data.breakdown.messages - categorizedRemainder),
+    ).toBeLessThanOrEqual(1);
+  });
+
+  it('reports only the skills and commands listed in startup context', async () => {
+    const skillManager = {
+      listSkills: vi.fn().mockResolvedValue([
+        {
+          name: 'visible',
+          description: 'Visible skill',
+          level: 'project',
+        },
+        {
+          name: 'hidden',
+          description: 'Hidden skill',
+          level: 'project',
+          disableModelInvocation: true,
+        },
+        {
+          name: 'disabled',
+          description: 'Disabled skill',
+          level: 'project',
+        },
+        {
+          name: 'gated',
+          description: 'Path-gated skill',
+          level: 'project',
+          paths: ['src/**'],
+        },
+      ]),
+      isSkillActive: vi.fn((skill: { name: string }) => skill.name !== 'gated'),
+    };
+    const config = {
+      ...makeMockConfig(200_000),
+      getSkillManager: vi.fn().mockReturnValue(skillManager),
+      getDisabledSkillNames: vi.fn().mockReturnValue(new Set(['disabled'])),
+      getModelInvocableCommandsProvider: vi.fn().mockReturnValue(() => [
+        {
+          name: 'command',
+          description: 'Model-invocable command',
+        },
+      ]),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.skills.map((skill) => skill.name).sort()).toEqual([
+      'command',
+      'visible',
+    ]);
   });
 
   it('falls back to the global singleton when the session chat is not initialized', async () => {
@@ -172,6 +306,7 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getVisibleTools: vi.fn().mockReturnValue(new Set()),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getManagedMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
       }),
@@ -216,6 +351,7 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getVisibleTools: vi.fn().mockReturnValue(new Set(['web_fetch'])),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getManagedMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
       }),

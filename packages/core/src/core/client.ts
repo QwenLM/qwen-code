@@ -47,13 +47,11 @@ const debugLogger = createDebugLogger('CLIENT');
 
 // Core modules
 import { GeminiChat } from './geminiChat.js';
-import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   getArenaSystemReminder,
   getCoreSystemPrompt,
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
-  resolveInteractionMode,
 } from './prompts.js';
 import {
   CompressionStatus,
@@ -98,11 +96,11 @@ import {
   buildChangedAgentsReminder,
   buildChangedMcpToolsReminder,
   buildChangedSkillsReminder,
-  getDirectoryContextString,
+  buildStartupContextReminder,
   getInitialChatHistory,
-  getStartupContextLength,
   type AgentAvailabilityEntry,
 } from '../utils/environmentContext.js';
+import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
   collectAvailableSkillEntries,
   type AvailableSkillEntry,
@@ -235,7 +233,6 @@ export class GeminiClient {
   private sessionTurnCount = 0;
   private toolCallCount = 0;
   private skillsModifiedInSession = false;
-  private cachedGitStatus: string | null | undefined;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
   private shutdownRequested = false;
 
@@ -247,6 +244,7 @@ export class GeminiClient {
   private pendingMemoryPrefetch: MemoryPrefetchHandle | undefined;
   private lastSessionStartContext: string | undefined;
   private lastSessionStartSource: SessionStartSource | undefined;
+  private cachedGitStatus: string | null | undefined;
   private announcedDeferredToolNames = new Set<string>();
   // MCP-only subset the model has actually seen via startup or delta reminders.
   // `announcedDeferredToolNames` is broader and exists for deferred tool-search
@@ -257,10 +255,9 @@ export class GeminiClient {
   // Dedup state for the per-turn skill/command "now available" delta reminders
   // (drainSkillAndCommandReminders). Keys are "skill:<name>" / "cmd:<name>". The
   // set is seeded on the first drain from the current skills (the startup
-  // snapshot already listed them) and reset whenever the startup prelude is
+  // snapshot already listed them) and reset whenever startup parts are
   // rebuilt (startChat), so a resumed/compacted session re-seeds from its fresh
-  // snapshot instead of re-announcing — mirrors Claude Code's
-  // suppressNextSkillListing / "don't re-inject on compact".
+  // snapshot instead of re-announcing unchanged entries after compaction.
   private announcedSkillReminderKeys = new Set<string>();
   private skillRemindersInitialized = false;
   private announcedAgentReminderNames = new Set<string>();
@@ -764,11 +761,7 @@ export class GeminiClient {
     if (!this.chat) {
       return;
     }
-
-    this.getChat().addHistory({
-      role: 'user',
-      parts: [{ text: await getDirectoryContextString(this.config) }],
-    });
+    await this.queueCurrentStartupContext();
   }
 
   async addWorkingDirectoryChangedContext(
@@ -780,123 +773,96 @@ export class GeminiClient {
     }
 
     this.cachedGitStatus = undefined;
-    await this.refreshSystemInstruction();
-    this.getChat().addHistory({
-      role: 'user',
-      parts: [
-        {
-          text:
-            `The session's working directory has changed from ${oldDir} to ${newDir} via /cd. ` +
-            `The startup directory context above is stale. All tool calls and relative paths now resolve from ${newDir}.`,
-        },
-      ],
-    });
-    await this.addDirectoryContext();
+    await this.queueCurrentStartupContext({ oldDir, newDir });
   }
 
   private getCachedGitStatus(): string | null {
     if (this.cachedGitStatus === undefined) {
-      // Mirror claude-code: append git status (branch + recent commits) to the
-      // system prompt so the main agent treats version history as authoritative
-      // context, not background noise. Only injected when cwd is a git repo.
       this.cachedGitStatus = getRecentGitStatus(this.config.getCwd());
     }
     return this.cachedGitStatus;
   }
 
-  private getMainSessionSystemInstruction(): string {
-    const userMemory = this.config.getUserMemory();
-    const overrideSystemPrompt = this.config.getSystemPrompt();
-    const appendSystemPrompt = this.config.getAppendSystemPrompt();
-    const gitStatus = this.getCachedGitStatus();
-
-    if (overrideSystemPrompt) {
-      const base = getCustomSystemPrompt(
-        overrideSystemPrompt,
-        userMemory,
-        appendSystemPrompt,
-      );
-      return gitStatus ? base + '\n\n' + gitStatus : base;
+  private async buildCurrentStartupContextPart(workingDirectoryChange?: {
+    oldDir: string;
+    newDir: string;
+  }): Promise<Part | null> {
+    if (this.config.getSkipStartupContext()) {
+      return null;
     }
-
-    const base = getCoreSystemPrompt(
-      userMemory,
-      this.config.getModel(),
-      appendSystemPrompt,
-      resolveInteractionMode(this.config),
-    );
-    return gitStatus ? base + '\n\n' + gitStatus : base;
+    const reminder = await buildStartupContextReminder(this.config, {
+      gitStatus: this.getCachedGitStatus(),
+      sessionStartContext: this.lastSessionStartContext,
+      workingDirectoryChange,
+    });
+    return reminder ? { text: reminder } : null;
   }
 
-  async refreshStartupContextReminder(): Promise<void> {
+  private async queueCurrentStartupContext(workingDirectoryChange?: {
+    oldDir: string;
+    newDir: string;
+  }): Promise<void> {
     if (!this.chat) {
       return;
     }
-
-    const currentHistory = this.getChat().getHistory();
-    const startupLength = getStartupContextLength(currentHistory);
-    if (startupLength === 0) {
-      return;
-    }
-
-    // Slice by the detected prelude length, not a hardcoded 1: a restored
-    // legacy session stores startup context as a [user(env), model("Got
-    // it…")] pair (getStartupContextLength === 2), so slice(1) would leave
-    // the orphaned model-ack entry behind when re-prepending the prelude.
-    const remaining = currentHistory.slice(startupLength);
-    const [[startupContext], snapshotEntries] = await getInitialChatHistory(
-      this.config,
-    );
-    this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
-    await this.seedAgentReminderDedupFromCurrent();
-    this.getChat().setHistory(
-      startupContext ? [startupContext, ...remaining] : remaining,
+    this.chat.setPendingStartupContextPart(
+      await this.buildCurrentStartupContextPart(workingDirectoryChange),
     );
   }
 
+  private getMainSessionSystemInstruction(): string {
+    const overrideSystemPrompt = this.config.getSystemPrompt();
+    const appendSystemPrompt = this.config.getAppendSystemPrompt();
+
+    if (overrideSystemPrompt) {
+      return getCustomSystemPrompt(
+        overrideSystemPrompt,
+        undefined,
+        appendSystemPrompt,
+      );
+    }
+
+    return getCoreSystemPrompt(undefined, undefined, appendSystemPrompt);
+  }
+
+  async refreshStartupContextReminder(): Promise<void> {
+    await this.queueCurrentStartupContext();
+  }
+
   /**
-   * Re-prepend a fresh startup-context prelude after auto-compaction.
+   * Queue fresh startup parts after auto-compaction.
    *
    * Auto-compaction runs in-place inside `GeminiChat.sendMessageStream`
    * (`setHistory([summary, ack, ...kept])`) and does NOT route through
    * `tryCompressChat` → `startChat`, so — unlike manual `/compress` — the
-   * startup prelude at history[0] is consumed into the summary and never
-   * rebuilt. Without this, workspace/env context, deferred-tool metadata,
-   * and MCP server instructions are lost for the rest of the session (before
-   * this PR they lived in the system instruction and survived compaction).
-   *
-   * Unlike `refreshStartupContextReminder` (which replaces an existing
-   * prelude and no-ops when absent), this prepends when absent. No-ops if a
-   * prelude is already present so it can't double-prepend.
+   * The first user turn carrying startup metadata may be summarized during
+   * compaction. Rebuilding the pending parts keeps workspace, tool, skill,
+   * and MCP context available on the next real turn.
    */
   async restoreStartupContextAfterCompaction(): Promise<void> {
     if (!this.chat) {
       return;
     }
 
-    const currentHistory = this.getChat().getHistory();
-    if (getStartupContextLength(currentHistory) !== 0) {
-      return;
-    }
-
-    const [[startupContext], snapshotEntries] = await getInitialChatHistory(
+    const [, snapshotEntries, startupParts] = await getInitialChatHistory(
       this.config,
+      undefined,
+      {
+        gitStatus: this.getCachedGitStatus(),
+        sessionStartContext: this.lastSessionStartContext,
+      },
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
     await this.seedAgentReminderDedupFromCurrent();
-    if (startupContext) {
-      this.getChat().setHistory([startupContext, ...currentHistory]);
-    }
+    this.getChat().setPendingStartupParts(startupParts);
   }
 
   /**
-   * Rebuilds the main-session system instruction from the current
-   * `userMemory` / model / prompt overrides and re-binds it to the live chat.
+   * Rebuilds the main-session system instruction from the current prompt
+   * override and re-binds it to the live chat.
    *
-   * Use this after mutating inputs that feed into the system instruction
-   * (e.g. user memory refreshed from `output-language.md`) so the change
-   * takes effect on the next turn without restarting the session. No-op if
-   * no chat has been started yet.
+   * Runtime context is separately refreshed into pending startup parts. No-op
+   * if no chat has been started yet.
    */
   async refreshSystemInstruction(): Promise<void> {
     if (!this.chat) {
@@ -904,12 +870,7 @@ export class GeminiClient {
     }
     await this.config.getToolRegistry().warmAll();
     this.chat.setSystemInstruction(this.getMainSessionSystemInstruction());
-    if (this.lastSessionStartContext && this.lastSessionStartSource) {
-      this.chat.applySessionStartContext(
-        this.lastSessionStartContext,
-        this.lastSessionStartSource,
-      );
-    }
+    await this.queueCurrentStartupContext();
   }
 
   /**
@@ -1048,10 +1009,10 @@ export class GeminiClient {
    * startup. Emitted as a tail `<system-reminder>` only, so it never mutates the
    * cached tools/system/messages prefix. Deduped via `announcedSkillReminderKeys`.
    *
-   * The first call after a (re)built startup prelude seeds the announced set from
+   * The first call after rebuilt startup parts seeds the announced set from
    * the current skills and emits nothing — the startup snapshot already listed
-   * them (mirrors Claude Code's `suppressNextSkillListing` and its decision not
-   * to re-inject the listing after compaction). Conditional path-activations are
+   * them; rebuilt startup listings are not re-announced after compaction.
+   * Conditional path-activations are
    * announced inline on the tool result by `coreToolScheduler`, so they are
    * recorded here as announced (not re-queued) to avoid a double announcement.
    */
@@ -1258,6 +1219,7 @@ export class GeminiClient {
     });
     let history: Content[] = [];
     let snapshotEntries: AvailableSkillEntry[] = [];
+    let startupParts: Part[] = [];
     let deferredReminderCount = 0;
     const finishProfile = (ok: boolean) => {
       profiler.finish({
@@ -1307,10 +1269,24 @@ export class GeminiClient {
         return resolved;
       });
       deferredReminderCount = deferredTools?.length ?? 0;
-      [history, snapshotEntries] = await profiler.time(
-        'initial_chat_history',
-        () => getInitialChatHistory(this.config, extraHistory),
+      const sessionStartAdditionalContext = await profiler.time(
+        'session_start_hook',
+        () => this.fireSessionStartHook(sessionStartSource),
       );
+      this.lastSessionStartContext = sessionStartAdditionalContext;
+      this.lastSessionStartSource = sessionStartAdditionalContext
+        ? sessionStartSource
+        : undefined;
+
+      [history, snapshotEntries, startupParts] = await profiler.time(
+        'initial_chat_history',
+        () =>
+          getInitialChatHistory(this.config, extraHistory, {
+            gitStatus: this.getCachedGitStatus(),
+            sessionStartContext: sessionStartAdditionalContext,
+          }),
+      );
+      this.lastInjectedDate = formatDateForContext();
       profiler.timeSync('skill_reminder_seed', () => {
         this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
       });
@@ -1334,6 +1310,7 @@ export class GeminiClient {
             uiTelemetryService,
           ),
       );
+      chat.setPendingStartupParts(startupParts);
       this.chat = chat;
 
       // Repair any dangling `model[functionCall]` whose `functionResponse`
@@ -1352,24 +1329,6 @@ export class GeminiClient {
       profiler.timeSync('orphan_tool_use_repair', () => {
         this.repairOrphanedToolUseTurnsInHistory();
       });
-
-      const sessionStartAdditionalContext = await profiler.time(
-        'session_start_hook',
-        () => this.fireSessionStartHook(sessionStartSource),
-      );
-      this.lastSessionStartContext = sessionStartAdditionalContext;
-      this.lastSessionStartSource = sessionStartAdditionalContext
-        ? sessionStartSource
-        : undefined;
-
-      if (sessionStartAdditionalContext) {
-        profiler.timeSync('session_start_context_apply', () => {
-          chat.applySessionStartContext(
-            sessionStartAdditionalContext,
-            sessionStartSource,
-          );
-        });
-      }
 
       // setTools() intentionally keeps its own warmAll() guard, so this stage
       // overlaps with tool_registry_warm while preserving the startup path.
@@ -2477,7 +2436,21 @@ export class GeminiClient {
             )
           : null;
 
-      const resultStream = turn.run(model, requestToSend, signal);
+      const applyPendingStartupParts =
+        messageType === SendMessageType.UserQuery ||
+        messageType === SendMessageType.Cron ||
+        messageType === SendMessageType.Notification ||
+        messageType === SendMessageType.Teammate ||
+        messageType === SendMessageType.Steer ||
+        (messageType === SendMessageType.Retry &&
+          (this.getChat().getPendingStartupParts?.().length ?? 0) > 0 &&
+          !requestToSend.some(
+            (part) =>
+              typeof part !== 'string' && part.functionResponse !== undefined,
+          ));
+      const resultStream = applyPendingStartupParts
+        ? turn.run(model, requestToSend, signal)
+        : turn.run(model, requestToSend, signal, false);
       let didUpdateIdeContextState = false;
       try {
         for await (const event of resultStream) {
@@ -2559,7 +2532,7 @@ export class GeminiClient {
           // the previous merged IDE context.
           if (event.type === GeminiEventType.ChatCompressed) {
             this.forceFullIdeContext = true;
-            // Auto-compaction summarized away the startup prelude. Rebuild it
+            // Auto-compaction summarized away the startup metadata. Rebuild it
             // before the next turn so env/tool/MCP context isn't lost for the
             // rest of the session (manual /compress gets this via startChat).
             try {
@@ -2578,10 +2551,7 @@ export class GeminiClient {
                 }
                 this.lastSessionStartContext = compactAdditionalContext;
                 this.lastSessionStartSource = SessionStartSource.Compact;
-                this.chat.applySessionStartContext(
-                  compactAdditionalContext,
-                  SessionStartSource.Compact,
-                );
+                return this.queueCurrentStartupContext();
               })
               .catch((error) => {
                 this.config
@@ -3040,9 +3010,8 @@ export class GeminiClient {
     let currentAttemptModel: string = model;
 
     try {
-      const userMemory = this.config.getUserMemory();
       const finalSystemInstruction = generationConfig.systemInstruction
-        ? getCustomSystemPrompt(generationConfig.systemInstruction, userMemory)
+        ? getCustomSystemPrompt(generationConfig.systemInstruction, undefined)
         : this.getMainSessionSystemInstruction();
 
       const requestConfig: GenerateContentConfig = {
@@ -3163,10 +3132,7 @@ export class GeminiClient {
       ) {
         this.lastSessionStartContext = previousSessionStartContext;
         this.lastSessionStartSource = previousSessionStartSource;
-        this.getChat().applySessionStartContext(
-          previousSessionStartContext,
-          previousSessionStartSource,
-        );
+        await this.queueCurrentStartupContext();
       }
       // startChat() creates a new GeminiChat without touching FileReadCache,
       // so prior read_file results that were summarised away would still

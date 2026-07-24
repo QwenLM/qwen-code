@@ -441,7 +441,7 @@ export interface ContextMemoryDetail {
 
 export interface ContextSkillDetail {
   name: string;
-  /** Token cost of the skill listing (name+description) in the tool definition */
+  /** Token cost of the skill's model-visible startup listing entry */
   tokens: number;
   /** Whether this skill has been invoked and its full body loaded into context */
   loaded?: boolean;

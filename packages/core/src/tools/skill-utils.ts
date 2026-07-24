@@ -22,9 +22,8 @@ export function buildSkillLlmContent(baseDir: string, body: string): string {
 /**
  * One model-facing skill/command entry, normalized so file-based skills and
  * model-invocable commands (MCP prompts / file commands) render through a single
- * code path. `level` is present only for file-based skills — when set, the
- * rendered entry carries a `(level)` suffix and a <location> tag (matching the
- * legacy `SkillTool.updateDescriptionAndSchema` output); commands omit both.
+ * code path. `level` is retained for filtering and UI consumers but is not
+ * included in the model-facing startup listing.
  */
 export interface AvailableSkillEntry {
   name: string;
@@ -215,42 +214,23 @@ function compareSkillEntries(
 }
 
 /**
- * Renders normalized skill entries into the `<available_skills>` body. Pure: no
- * I/O, no config — XML-escapes every untrusted field (extension/command names
- * bypass `validateSkillName`, so a crafted name could otherwise inject raw tags)
- * and emits a stable order. Returns '' when there are no entries; callers decide
- * the empty-state messaging.
+ * Renders normalized skill entries as deterministic `- name: description`
+ * lines. Pure: no I/O, no config. Every field is flattened to one line and
+ * escaped because extension/command names bypass `validateSkillName`.
  */
 export function renderAvailableSkillsBlock(
   entries: AvailableSkillEntry[],
 ): string {
+  const oneLine = (value: string): string =>
+    escapeXml(value.replace(/\s+/g, ' ').trim());
+
   return [...entries]
     .sort(compareSkillEntries)
     .map((entry) => {
-      if (entry.level !== undefined) {
-        const descText = `${escapeXml(entry.description)}${
-          entry.whenToUse ? ` — ${escapeXml(entry.whenToUse)}` : ''
-        } (${entry.level})`;
-        return `<skill>
-<name>
-${escapeXml(entry.name)}
-</name>
-<description>
-${descText}
-</description>
-<location>
-${entry.level}
-</location>
-</skill>`;
-      }
-      return `<skill>
-<name>
-${escapeXml(entry.name)}
-</name>
-<description>
-${escapeXml(entry.description)}
-</description>
-</skill>`;
+      const description = `${oneLine(entry.description)}${
+        entry.whenToUse ? ` — ${oneLine(entry.whenToUse)}` : ''
+      }`;
+      return `- ${oneLine(entry.name)}: ${description}`;
     })
     .join('\n');
 }

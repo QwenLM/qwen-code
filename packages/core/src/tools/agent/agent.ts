@@ -34,7 +34,7 @@ import {
   ContextState,
 } from '../../agents/runtime/agent-headless.js';
 import type { AgentExternalInput } from '../../agents/runtime/agent-types.js';
-import type { Content, FunctionDeclaration } from '@google/genai';
+import type { Content, FunctionDeclaration, Part } from '@google/genai';
 import {
   FORK_AGENT,
   FORK_DEFAULT_MAX_TURNS,
@@ -56,7 +56,10 @@ import {
 } from '../../services/gitWorktreeService.js';
 import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
 import { WorkspaceContext } from '../../utils/workspaceContext.js';
-import { getStartupContextLength } from '../../utils/environmentContext.js';
+import {
+  getStartupContextLength,
+  stripStartupContext,
+} from '../../utils/environmentContext.js';
 import {
   childLaunchDepth,
   getCurrentAgentId,
@@ -1532,16 +1535,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   }> {
     const geminiClient = this.config.getGeminiClient();
     const forkTurns = normalizeForkTurns(this.params.fork_turns);
+    const inheritedStartupParts: Part[] =
+      geminiClient?.getChat().getStartupPartsSnapshot?.() ?? [];
     let rawHistory: Content[] = [];
     if (geminiClient) {
-      // The `all` and numeric paths curate history differently on purpose.
-      // `all` takes curated history directly. The numeric path reads
-      // *uncurated* history so the startup context can be sliced off on its own
-      // (getStartupContextLength) before curation coalesces it with the first
-      // real user turn; the startup prefix is then reattached to the bounded
-      // window from getHistoryForForkWindow (which curates *after* stripping
-      // startup). Sharing the curated `all` source here would drop the startup
-      // reminder into the first turn and break bounded selection.
+      // `all` inherits the parent's merged history verbatim. Numeric windows
+      // select real turns without startup metadata, then merge the chat's latest
+      // startup snapshot into the first selected user turn.
       if (forkTurns === 'all') {
         rawHistory = selectForkHistory(
           geminiClient.getHistoryShallow?.(true) ??
@@ -1551,25 +1551,36 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       } else {
         const comprehensiveHistory =
           geminiClient.getHistoryShallow?.() ?? geminiClient.getHistory();
-        const startupContext = comprehensiveHistory.slice(
-          0,
-          getStartupContextLength(comprehensiveHistory),
+        const legacyStartupContext =
+          inheritedStartupParts.length === 0
+            ? comprehensiveHistory.slice(
+                0,
+                getStartupContextLength(comprehensiveHistory),
+              )
+            : [];
+        let boundedHistory = selectForkHistory(
+          geminiClient.getHistoryForForkWindow?.() ?? geminiClient.getHistory(),
+          forkTurns,
         );
+        if (inheritedStartupParts.length > 0) {
+          boundedHistory = stripStartupContext(boundedHistory);
+          const firstUserIndex = boundedHistory.findIndex(
+            (content) => content.role === 'user',
+          );
+          if (firstUserIndex >= 0) {
+            const firstUser = boundedHistory[firstUserIndex]!;
+            boundedHistory[firstUserIndex] = {
+              ...firstUser,
+              parts: [
+                ...structuredClone(inheritedStartupParts),
+                ...(firstUser.parts ?? []),
+              ],
+            };
+          }
+        }
         rawHistory = [
-          ...structuredClone(startupContext),
-          ...selectForkHistory(
-            // Fallback uses *uncurated* history, not getHistory(true). Curation
-            // (extractCuratedHistory) coalesces the leading startup reminder
-            // into the first real user turn, so getStartupContextLength can no
-            // longer detect it as a pure prefix — selectForkHistory would then
-            // leave the startup text embedded in the first turn while the
-            // startupContext above prepends it again, duplicating startup.
-            // Uncurated history keeps the startup reminder as its own pure
-            // entry, which selectForkHistory strips cleanly.
-            geminiClient.getHistoryForForkWindow?.() ??
-              geminiClient.getHistory(),
-            forkTurns,
-          ),
+          ...structuredClone(legacyStartupContext),
+          ...boundedHistory,
         ];
       }
     }
@@ -1651,6 +1662,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         renderedSystemPrompt: generationConfig.systemInstruction as
           | string
           | Content,
+        startupParts: structuredClone(inheritedStartupParts),
         initialMessages,
       };
       toolConfig = {
@@ -3023,6 +3035,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             bootstrapSystemInstruction: isFork
               ? (bgPromptConfig?.renderedSystemPrompt ??
                 bgPromptConfig?.systemPrompt)
+              : undefined,
+            bootstrapStartupParts: isFork
+              ? bgPromptConfig?.startupParts
               : undefined,
             bootstrapTools: isFork ? bgToolConfig?.tools : undefined,
             launchTaskPrompt: isFork ? bgTaskPrompt : undefined,

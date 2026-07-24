@@ -37,7 +37,7 @@ import { MAX_SUBAGENT_DEPTH_LIMIT } from '../config/config.js';
 import type { SandboxConfig } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { _recoverObjectsFromLine } from '../utils/jsonl-utils.js';
-import type { FunctionDeclaration, Content } from '@google/genai';
+import type { FunctionDeclaration, Content, Part } from '@google/genai';
 
 const debugLogger = createDebugLogger('AGENT_TRANSCRIPT');
 
@@ -279,6 +279,8 @@ export interface AttachJsonlOptions {
    * Immutable launch-time system instruction for fork resume.
    */
   bootstrapSystemInstruction?: string | Content;
+  /** Startup-context snapshot inherited by a fork. */
+  bootstrapStartupParts?: Part[];
   /**
    * Immutable launch-time tool declarations / allowlist for fork resume.
    */
@@ -444,6 +446,7 @@ export function attachJsonlTranscriptWriter(
   const hasBootstrapPayload =
     options.bootstrapHistory !== undefined ||
     options.bootstrapSystemInstruction !== undefined ||
+    options.bootstrapStartupParts !== undefined ||
     options.bootstrapTools !== undefined;
 
   if (hasBootstrapPayload) {
@@ -456,6 +459,9 @@ export function attachJsonlTranscriptWriter(
               options.bootstrapSystemInstruction,
             ),
           }
+        : {}),
+      ...(options.bootstrapStartupParts !== undefined
+        ? { startupParts: structuredClone(options.bootstrapStartupParts) }
         : {}),
       ...(options.bootstrapTools !== undefined
         ? { tools: structuredClone(options.bootstrapTools) }

@@ -1075,12 +1075,7 @@ export class ArenaManager {
         approvalMode: toApprovalMode(this.arenaConfig?.approvalMode),
         runtimeConfig: {
           promptConfig: {
-            systemPrompt: getCoreSystemPrompt(
-              this.config.getUserMemory(),
-              model.modelId,
-              undefined,
-              'headless',
-            ),
+            systemPrompt: getCoreSystemPrompt(),
           },
           modelConfig: { model: model.modelId },
           runConfig: {

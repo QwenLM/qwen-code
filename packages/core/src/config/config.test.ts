@@ -3872,6 +3872,7 @@ describe('Server Config (config.ts)', () => {
     const config = new Config(paramsWithoutMemory);
 
     expect(config.getUserMemory()).toBe('');
+    expect(config.getManagedMemoryPrompt()).toBe('');
   });
 
   it('Config constructor should enable runtime sleep prevention by default', () => {
@@ -3889,7 +3890,7 @@ describe('Server Config (config.ts)', () => {
     expect(config.getPreventSystemSleepEnabled()).toBe(false);
   });
 
-  it('refreshHierarchicalMemory should append managed auto-memory index when present', async () => {
+  it('refreshHierarchicalMemory should keep managed memory separate from project instructions', async () => {
     const config = new Config(baseParams);
 
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
@@ -3906,8 +3907,11 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     expect(config.getUserMemory()).toContain('Project rules');
-    expect(config.getUserMemory()).toContain('# auto memory');
-    expect(config.getUserMemory()).toContain('[Project Memory](project.md)');
+    expect(config.getUserMemory()).not.toContain('# Memory');
+    expect(config.getManagedMemoryPrompt()).toContain('# Memory');
+    expect(config.getManagedMemoryPrompt()).toContain(
+      '[Project Memory](project.md)',
+    );
   });
 
   it('refreshHierarchicalMemory should not load team memory from untrusted workspaces', async () => {
@@ -3927,7 +3931,7 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     expect(rebuildTeamAutoMemoryIndex).not.toHaveBeenCalled();
-    expect(config.getUserMemory()).not.toContain('Team Memory');
+    expect(config.getManagedMemoryPrompt()).not.toContain('Team Memory');
     // The shareability check is gated on the active tier, so an inactive
     // (untrusted) tier must never probe git.
     expect(getTeamMemoryShareabilityWarning).not.toHaveBeenCalled();
@@ -4599,7 +4603,7 @@ describe('Server Config (config.ts)', () => {
     cwdSpy.mockRestore();
   });
 
-  it('refreshHierarchicalMemory should include empty memory prompt when no managed auto-memory index exists', async () => {
+  it('refreshHierarchicalMemory should include active directories when indexes are empty', async () => {
     const config = new Config(baseParams);
 
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
@@ -4614,8 +4618,13 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     expect(config.getUserMemory()).toContain('Project rules');
-    expect(config.getUserMemory()).toContain('# auto memory');
-    expect(config.getUserMemory()).toContain('MEMORY.md is currently empty');
+    expect(config.getUserMemory()).not.toContain('# Memory');
+    expect(config.getManagedMemoryPrompt()).toContain('# Memory context');
+    expect(config.getManagedMemoryPrompt()).toContain('USER memory');
+    expect(config.getManagedMemoryPrompt()).toContain('PROJECT memory');
+    expect(config.getManagedMemoryPrompt()).not.toContain(
+      'Each memory is one file',
+    );
   });
 
   it('refreshHierarchicalMemory should omit managed auto-memory prompt when disabled', async () => {
@@ -4636,8 +4645,20 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     expect(config.getUserMemory()).toContain('Project rules');
-    expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(config.getManagedMemoryPrompt()).toBe('');
     expect(readAutoMemoryIndex).not.toHaveBeenCalled();
+  });
+
+  it('refreshHierarchicalMemory should clear managed memory in safe mode', async () => {
+    const config = new Config({ ...baseParams, safeMode: true });
+    config.setUserMemory('stale project instructions');
+    config.setManagedMemoryPrompt('stale managed memory');
+
+    await config.refreshHierarchicalMemory();
+
+    expect(config.getUserMemory()).toBe('');
+    expect(config.getManagedMemoryPrompt()).toBe('');
+    expect(loadServerHierarchicalMemory).not.toHaveBeenCalled();
   });
 
   it('refreshHierarchicalMemory should only use explicit inputs in bare mode', async () => {
@@ -4661,7 +4682,7 @@ describe('Server Config (config.ts)', () => {
     expect(lastCall?.[1]).toEqual([]);
     expect(readAutoMemoryIndex).not.toHaveBeenCalled();
     expect(config.getUserMemory()).toContain('Project rules');
-    expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(config.getManagedMemoryPrompt()).toBe('');
   });
 
   describe('isManagedMemoryAvailable', () => {

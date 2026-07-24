@@ -39,7 +39,6 @@ import {
   estimatePromptTokens,
 } from '../services/tokenEstimation.js';
 import { SYSTEM_REMINDER_OPEN } from '../utils/environmentContext.js';
-import { SessionStartSource } from '../hooks/types.js';
 import {
   getToolCallPreparations,
   setToolCallPreparations,
@@ -271,68 +270,31 @@ describe('GeminiChat', async () => {
     } as unknown as GenerateContentResponse;
   }
 
-  describe('system instruction helpers', () => {
-    it('replaces prior session-start context instead of appending indefinitely', () => {
+  describe('startup parts helpers', () => {
+    it('keeps only startup parts missing from the current history pending', () => {
+      const startupParts = [
+        { text: 'MCP capability metadata' },
+        { text: '<system-reminder>Session context</system-reminder>' },
+      ];
       const isolatedChat = new GeminiChat(
         mockConfig,
         {},
-        [],
-        undefined,
-        uiTelemetryService,
-      );
-      isolatedChat.setSystemInstruction('Base instruction');
-
-      isolatedChat.setSessionStartContext('Ctx1');
-      isolatedChat.setSessionStartContext('Ctx2');
-
-      expect(isolatedChat['generationConfig'].systemInstruction).toBe(
-        'Base instruction\n\n<qwen:session-start-context hidden="true">\nSessionStart additional context:\nCtx2\n</qwen:session-start-context>',
-      );
-    });
-
-    it('preserves existing system prompt suffixes when replacing session-start context', () => {
-      const isolatedChat = new GeminiChat(
-        mockConfig,
-        {},
-        [],
-        undefined,
-        uiTelemetryService,
-      );
-      isolatedChat.setSystemInstruction(
-        'Base instruction\n\n---\n\nUser memory\n\n---\n\nAppended rule',
-      );
-
-      isolatedChat.setSessionStartContext('Ctx1');
-      isolatedChat.setSessionStartContext('Ctx2');
-
-      expect(isolatedChat['generationConfig'].systemInstruction).toBe(
-        'Base instruction\n\n---\n\nUser memory\n\n---\n\nAppended rule\n\n<qwen:session-start-context hidden="true">\nSessionStart additional context:\nCtx2\n</qwen:session-start-context>',
-      );
-    });
-
-    it('preserves non-string systemInstruction content when applying session-start context', () => {
-      const isolatedChat = new GeminiChat(
-        mockConfig,
-        {
-          systemInstruction: {
-            role: 'system',
-            parts: [{ text: 'Base content instruction' }],
+        [
+          {
+            role: 'user',
+            parts: [startupParts[0]!, { text: 'real user prompt' }],
           },
-        },
-        [],
+        ],
         undefined,
         uiTelemetryService,
       );
 
-      isolatedChat.setSessionStartContext('Ctx1');
-      isolatedChat.setSessionStartContext('Ctx2');
+      isolatedChat.setPendingStartupParts(startupParts);
 
-      expect(isolatedChat['generationConfig'].systemInstruction).toBe(
-        'Base content instruction\n\n<qwen:session-start-context hidden="true">\nSessionStart additional context:\nCtx2\n</qwen:session-start-context>',
-      );
+      expect(isolatedChat.getPendingStartupParts()).toEqual([startupParts[1]]);
     });
 
-    it('applies session-start context synchronously via applySessionStartContext', () => {
+    it('replaces the pending session context without changing capability parts', () => {
       const isolatedChat = new GeminiChat(
         mockConfig,
         {},
@@ -340,42 +302,135 @@ describe('GeminiChat', async () => {
         undefined,
         uiTelemetryService,
       );
-      isolatedChat.setSystemInstruction('Base instruction');
+      isolatedChat.setPendingStartupParts([
+        { text: 'MCP capability metadata' },
+        { text: '<system-reminder>\nold context\n</system-reminder>' },
+      ]);
 
-      isolatedChat.applySessionStartContext(
-        '  Sync ctx  ',
-        SessionStartSource.Startup,
-      );
+      isolatedChat.setPendingStartupContextPart({
+        text: '<system-reminder>\nnew context\n</system-reminder>',
+      });
 
-      expect(isolatedChat['generationConfig'].systemInstruction).toBe(
-        'Base instruction\n\n<qwen:session-start-context hidden="true">\nSessionStart additional context:\nSync ctx\n</qwen:session-start-context>',
-      );
-    });
-
-    it('does not strip legitimate content that only resembles the old plain-text marker', () => {
-      const isolatedChat = new GeminiChat(
-        mockConfig,
-        {},
-        [],
-        undefined,
-        uiTelemetryService,
-      );
-      isolatedChat.setSystemInstruction(
-        'Base instruction\n\n---\n\nSessionStart additional context:\nLegitimate content',
-      );
-
-      isolatedChat.setSessionStartContext('Ctx1');
-
-      expect(isolatedChat['generationConfig'].systemInstruction).toContain(
-        'Legitimate content',
-      );
-      expect(isolatedChat['generationConfig'].systemInstruction).toContain(
-        '<qwen:session-start-context hidden="true">\nSessionStart additional context:\nCtx1\n</qwen:session-start-context>',
-      );
+      expect(isolatedChat.getPendingStartupParts()).toEqual([
+        { text: 'MCP capability metadata' },
+        { text: '<system-reminder>\nnew context\n</system-reminder>' },
+      ]);
     });
   });
 
   describe('sendMessageStream', () => {
+    it('prepends startup parts to the first real user turn in order', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamResponse(stopResponse([{ text: 'done' }])),
+      );
+      chat.setPendingStartupParts([
+        { text: 'MCP capability metadata' },
+        { text: 'Available skills metadata' },
+        { text: '<system-reminder>\nSession context\n</system-reminder>' },
+      ]);
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: [{ text: 'real user prompt' }] },
+        'prompt-id-startup-parts',
+      );
+      for await (const _ of stream) {
+        /* consume stream */
+      }
+
+      expect(chat.getHistory()[0]).toEqual({
+        role: 'user',
+        parts: [
+          { text: 'MCP capability metadata' },
+          { text: 'Available skills metadata' },
+          { text: '<system-reminder>\nSession context\n</system-reminder>' },
+          { text: 'real user prompt' },
+        ],
+      });
+      expect(chat.getPendingStartupParts()).toEqual([]);
+    });
+
+    it('re-queues startup parts when the carrying user turn is removed', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamResponse(stopResponse([{ text: 'done' }])),
+      );
+      const startupParts = [
+        { text: 'MCP capability metadata' },
+        { text: '<system-reminder>\nSession context\n</system-reminder>' },
+      ];
+      chat.setPendingStartupParts(startupParts);
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: [{ text: 'failed prompt' }] },
+        'prompt-id-requeue-startup',
+      );
+      for await (const _ of stream) {
+        /* consume stream */
+      }
+
+      chat.truncateHistory(1);
+      const stripped = chat.stripOrphanedUserEntriesFromHistory();
+
+      expect(stripped).toHaveLength(1);
+      expect(chat.getPendingStartupParts()).toEqual(startupParts);
+
+      chat.addHistory(stripped[0]!);
+
+      expect(chat.getPendingStartupParts()).toEqual([]);
+    });
+
+    it('re-queues startup parts when rewind truncates their user turn', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamResponse(stopResponse([{ text: 'done' }])),
+      );
+      const startupParts = [
+        { text: 'Available skills metadata' },
+        { text: '<system-reminder>\nSession context\n</system-reminder>' },
+      ];
+      chat.setPendingStartupParts(startupParts);
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: [{ text: 'first prompt' }] },
+        'prompt-id-rewind-startup',
+      );
+      for await (const _ of stream) {
+        /* consume stream */
+      }
+
+      chat.truncateHistory(0);
+
+      expect(chat.getPendingStartupParts()).toEqual(startupParts);
+    });
+
+    it('keeps startup parts pending for non-user continuation messages', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        streamResponse(stopResponse([{ text: 'done' }])),
+      );
+      chat.setPendingStartupParts([
+        { text: '<system-reminder>Session context</system-reminder>' },
+      ]);
+
+      const continuation = await chat.sendMessageStream(
+        'test-model',
+        { message: [{ text: 'tool or hook continuation' }] },
+        'prompt-id-continuation',
+        false,
+      );
+      for await (const _ of continuation) {
+        /* consume stream */
+      }
+
+      expect(chat.getHistory()[0]).toEqual({
+        role: 'user',
+        parts: [{ text: 'tool or hook continuation' }],
+      });
+      expect(chat.getPendingStartupParts()).toEqual([
+        { text: '<system-reminder>Session context</system-reminder>' },
+      ]);
+    });
+
     it('releases the sleep inhibitor after the stream is consumed', async () => {
       vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
         (async function* () {
@@ -5120,6 +5175,26 @@ describe('GeminiChat', async () => {
       chat.setHistory([startup, firstTurn, answer]);
 
       expect(chat.getHistoryForForkWindow()).toEqual([firstTurn, answer]);
+    });
+
+    it('removes startup parts from a merged real user turn', () => {
+      chat.setHistory([
+        {
+          role: 'user',
+          parts: [
+            {
+              text: '<system-reminder>\n# Session context\nctx\n</system-reminder>',
+            },
+            { text: 'first question' },
+          ],
+        },
+        { role: 'model', parts: [{ text: 'first answer' }] },
+      ]);
+
+      expect(chat.getHistoryForForkWindow()).toEqual([
+        { role: 'user', parts: [{ text: 'first question' }] },
+        { role: 'model', parts: [{ text: 'first answer' }] },
+      ]);
     });
   });
 

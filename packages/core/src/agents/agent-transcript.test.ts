@@ -21,7 +21,7 @@ import {
 } from './agent-transcript.js';
 import { AgentEventEmitter, AgentEventType } from './runtime/agent-events.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
-import type { Content, FunctionDeclaration } from '@google/genai';
+import type { Content, FunctionDeclaration, Part } from '@google/genai';
 
 describe('agent-transcript', () => {
   describe('path helpers', () => {
@@ -173,6 +173,7 @@ describe('agent-transcript', () => {
         initialUserPrompt?: string;
         bootstrapHistory?: Content[];
         bootstrapSystemInstruction?: string | Content;
+        bootstrapStartupParts?: Part[];
         bootstrapTools?: Array<string | FunctionDeclaration>;
         launchTaskPrompt?: string;
       } = {},
@@ -225,6 +226,9 @@ describe('agent-transcript', () => {
           { role: 'user', parts: [{ text: 'bootstrap env' }] },
           { role: 'model', parts: [{ text: 'bootstrap ack' }] },
         ],
+        bootstrapStartupParts: [
+          { text: '<system-reminder>startup context</system-reminder>' },
+        ],
         initialUserPrompt: 'visible launch prompt',
         launchTaskPrompt: 'Begin.',
       });
@@ -250,6 +254,9 @@ describe('agent-transcript', () => {
         history: [
           { role: 'user', parts: [{ text: 'bootstrap env' }] },
           { role: 'model', parts: [{ text: 'bootstrap ack' }] },
+        ],
+        startupParts: [
+          { text: '<system-reminder>startup context</system-reminder>' },
         ],
       });
       expect(records[2]?.systemPayload).toMatchObject({

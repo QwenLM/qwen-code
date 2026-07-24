@@ -4435,8 +4435,8 @@ export class CoreToolScheduler {
               // entries from the shared collector — which applies the same
               // disabled / disable-model-invocation filtering — and keep only the
               // file-based ones that were just activated.
-              // renderAvailableSkillsBlock XML-escapes every untrusted field, so
-              // a crafted extension name cannot break out of the reminder.
+              // renderAvailableSkillsBlock flattens and escapes every untrusted
+              // field, so a crafted extension name cannot break the reminder.
               let activatedEntries: AvailableSkillEntry[] = [];
               try {
                 const collected = await collectAvailableSkillEntries(
@@ -4460,9 +4460,9 @@ export class CoreToolScheduler {
               }
               if (activatedEntries.length > 0) {
                 reminderBlocks.push(
-                  `The following skill(s) became available via the Skill tool based on the file you just accessed; invoke a skill by passing its name to the Skill tool:\n<available_skills>\n${renderAvailableSkillsBlock(
+                  `The following skill(s) became available via the Skill tool based on the file you just accessed; invoke a skill by passing its name to the Skill tool:\n${renderAvailableSkillsBlock(
                     activatedEntries,
-                  )}\n</available_skills>`,
+                  )}`,
                 );
                 // Record the announced keys so the client's per-turn drain
                 // (drainSkillAndCommandReminders) marks them as announced and

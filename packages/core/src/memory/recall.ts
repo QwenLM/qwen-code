@@ -15,6 +15,7 @@ import {
 import { memoryAge, memoryFreshnessText } from './memoryAge.js';
 import { selectRelevantAutoMemoryDocumentsByModel } from './relevanceSelector.js';
 import { logMemoryRecall, MemoryRecallEvent } from '../telemetry/index.js';
+import { escapeSystemReminderTags } from '../utils/xml.js';
 
 const MAX_RELEVANT_DOCS = 5;
 const MAX_DOC_BODY_CHARS = 1_200;
@@ -193,7 +194,7 @@ export function buildRelevantAutoMemoryPrompt(
     return '';
   }
 
-  return [
+  const body = [
     '## Relevant memory',
     '',
     'Use the following memories only when they are directly relevant to the current request. Verify file/function claims before relying on them.',
@@ -212,6 +213,8 @@ export function buildRelevantAutoMemoryPrompt(
       ];
     }),
   ].join('\n');
+
+  return `<system-reminder>\n${escapeSystemReminderTags(body)}\n</system-reminder>`;
 }
 
 export interface ResolveRelevantAutoMemoryPromptOptions {

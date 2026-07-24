@@ -1148,6 +1148,8 @@ TTL 滑动窗口意味着 agent loop 内 summary 轮**几乎 100% 命中** prima
 
 ### 7.8 `prompts.ts` 动态内容审计（2026-05-27）
 
+> **已被取代（2026-07-22）**：本节记录的是 2026-05-27 时的历史实现，不再描述当前默认 prompt。当前设计与动态/静态内容边界见 [`../default-system-prompt.md`](../default-system-prompt.md)。以下内容保留为当时 RT 决策的审计记录。
+
 §7.1 给出 "system prompt 已稳态" 的结论时只做了粗略 grep。本节是对 `packages/core/src/core/prompts.ts`（1169 行）的系统性审计，列清单作为后续 cache 命中率分析与浮油决策的依据。
 
 **审计方法**：枚举所有 `${...}` 插值表达式、IIFE、`process.*` / `new Date` / `Date.now` / `Math.random` / `fs.*` 调用，对每一处判断"在同一 session 内是否会变化"。

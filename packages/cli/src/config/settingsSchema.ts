@@ -1946,9 +1946,10 @@ const SETTINGS_SCHEMA = {
         default: undefined as string[] | undefined,
         description:
           'Skill names to hide. Matched case-insensitively against the skill ' +
-          'name. Hidden skills do not appear in <available_skills> or as ' +
-          '/<name> slash commands. UNION-merged across systemDefaults/user/' +
-          'workspace/system scopes — workspace cannot remove entries defined ' +
+          'name. Hidden skills do not appear in the model-facing skills ' +
+          'listing or as /<name> slash commands. UNION-merged across ' +
+          'systemDefaults/user/workspace/system scopes — workspace cannot ' +
+          'remove entries defined ' +
           'in higher scopes.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,

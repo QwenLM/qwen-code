@@ -10,6 +10,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   getStartupContextLength,
   stripSystemReminderBlocks,
+  stripStartupParts,
 } from '../utils/environmentContext.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { stripTerminalControlSequences } from '../utils/terminalSafe.js';
@@ -212,7 +213,7 @@ function filterToDialog(history: Content[]): Content[] {
   for (const msg of history.slice(getStartupContextLength(history))) {
     if (msg.role !== 'user' && msg.role !== 'model') continue;
     const textParts: Part[] = [];
-    for (const part of msg.parts ?? []) {
+    for (const part of stripStartupParts(msg.parts ?? [])) {
       if (
         typeof part?.text !== 'string' ||
         part.text.trim() === '' ||

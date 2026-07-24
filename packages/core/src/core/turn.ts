@@ -448,20 +448,25 @@ export class Turn {
     model: string,
     req: PartListUnion,
     signal: AbortSignal,
+    applyPendingStartupParts = true,
   ): AsyncGenerator<ServerGeminiStreamEvent> {
     try {
       // Note: This assumes `sendMessageStream` yields events like
       // { type: StreamEventType.RETRY } or { type: StreamEventType.CHUNK, value: GenerateContentResponse }
-      const responseStream = await this.chat.sendMessageStream(
-        model,
-        {
-          message: req,
-          config: {
-            abortSignal: signal,
-          },
+      const sendParams = {
+        message: req,
+        config: {
+          abortSignal: signal,
         },
-        this.prompt_id,
-      );
+      };
+      const responseStream = await (applyPendingStartupParts
+        ? this.chat.sendMessageStream(model, sendParams, this.prompt_id)
+        : this.chat.sendMessageStream(
+            model,
+            sendParams,
+            this.prompt_id,
+            false,
+          ));
 
       for await (const streamEvent of responseStream) {
         if (signal?.aborted) {

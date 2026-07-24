@@ -598,9 +598,9 @@ describe('languageCommand', () => {
       expect(refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
       expect(getGeminiClient).toHaveBeenCalledTimes(1);
       expect(refreshSystemInstruction).toHaveBeenCalledTimes(1);
-      // Memory MUST be refreshed before the system instruction is rebuilt;
-      // otherwise the new instruction would be built from stale userMemory
-      // and the language switch would silently fail to take effect.
+      // Memory MUST be refreshed before session context is re-queued;
+      // otherwise the next request would use stale userMemory and the language
+      // switch would silently fail to take effect.
       const memoryOrder = refreshHierarchicalMemory.mock.invocationCallOrder[0];
       const instructionOrder =
         refreshSystemInstruction.mock.invocationCallOrder[0];

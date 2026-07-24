@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   appendManagedAutoMemoryToUserMemory,
+  buildDefaultMemoryPrompt,
   buildManagedAutoMemoryPrompt,
   CONDENSED_DO_NOT_SAVE_SECTION,
   CONDENSED_TEAM_GUIDANCE,
@@ -14,6 +15,57 @@ import {
   CONDENSED_WHEN_TO_ACCESS_SECTION,
   MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
 } from './prompt.js';
+
+describe('default memory prompt', () => {
+  it('renders only active directories and populated indexes for session context', () => {
+    const prompt = buildDefaultMemoryPrompt(
+      '/tmp/qwen/projects/example/memory',
+      '- [Preference](feedback/terse.md) — Prefer terse answers.',
+    );
+
+    expect(prompt).toContain('# Memory context');
+    expect(prompt).toContain(
+      'PROJECT memory (this project, private): `/tmp/qwen/projects/example/memory`',
+    );
+    expect(prompt).toContain('[Preference](feedback/terse.md)');
+    expect(prompt).not.toContain('type: user | feedback | project | reference');
+    expect(prompt).not.toContain('## How to save memories');
+  });
+
+  it('includes only populated indexes in user, project, team order', () => {
+    const prompt = buildDefaultMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      '- [Project](project/release.md) — Release notes.',
+      {
+        memoryDir: '/tmp/user/.qwen/memories',
+        indexContent: '- [User](user/role.md) — User role.',
+      },
+      {
+        memoryDir: '/tmp/project/.qwen/team-memory',
+        indexContent: '- [Team](feedback/tests.md) — Test convention.',
+      },
+    );
+
+    expect(
+      prompt.indexOf('## /tmp/user/.qwen/memories/MEMORY.md'),
+    ).toBeLessThan(prompt.indexOf('## /tmp/project/.qwen/memory/MEMORY.md'));
+    expect(
+      prompt.indexOf('## /tmp/project/.qwen/memory/MEMORY.md'),
+    ).toBeLessThan(
+      prompt.indexOf('## /tmp/project/.qwen/team-memory/MEMORY.md'),
+    );
+  });
+
+  it('omits empty index placeholders', () => {
+    const prompt = buildDefaultMemoryPrompt('/tmp/project/.qwen/memory', null, {
+      memoryDir: '/tmp/user/.qwen/memories',
+      indexContent: null,
+    });
+
+    expect(prompt).not.toContain('## /tmp/project/.qwen/memory/MEMORY.md');
+    expect(prompt).not.toContain('## /tmp/user/.qwen/memories/MEMORY.md');
+  });
+});
 
 describe('managed auto-memory prompt helpers', () => {
   it('builds a condensed memory prompt when MEMORY.md is empty', () => {

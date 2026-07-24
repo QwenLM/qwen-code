@@ -22,10 +22,11 @@ import {
   DiscoveredMCPTool,
   uiTelemetryService,
   getCoreSystemPrompt,
-  resolveInteractionMode,
   DEFAULT_TOKEN_LIMIT,
   ToolNames,
+  buildAvailableSkillsReminder,
   buildSkillLlmContent,
+  renderAvailableSkillsBlock,
   computeThresholds,
   type CompactionThresholds,
 } from '@qwen-code/qwen-code-core';
@@ -116,20 +117,22 @@ export async function collectContextData(
   // to the global singleton only when no chat exists yet (first /context,
   // --continue resume before any send).
   const geminiClient = config.getGeminiClient?.();
-  const apiTotalTokens = geminiClient?.isInitialized?.()
-    ? geminiClient.getChat().getLastPromptTokenCount()
+  const activeChat = geminiClient?.isInitialized?.()
+    ? geminiClient.getChat()
+    : undefined;
+  const apiTotalTokens = activeChat
+    ? activeChat.getLastPromptTokenCount()
     : uiTelemetryService.getLastPromptTokenCount();
+  const pendingStartupParts = activeChat?.getPendingStartupParts?.() ?? [];
+  const pendingStartupTokens = estimateTokens(
+    pendingStartupParts.map((part) => part.text ?? '').join('\n'),
+  );
   // Cached-content tokens have no per-chat mirror today (only the global
   // singleton is written, geminiChat.ts), so this read stays global. It only
   // refines the messages-vs-cache split, not the headline total or tier.
   const apiCachedTokens = uiTelemetryService.getLastCachedContentTokenCount();
 
-  const systemPromptText = getCoreSystemPrompt(
-    undefined,
-    modelName,
-    undefined,
-    resolveInteractionMode(config),
-  );
+  const systemPromptText = getCoreSystemPrompt();
   const systemPromptTokens = estimateTokens(systemPromptText);
 
   const toolRegistry = config.getToolRegistry();
@@ -167,8 +170,10 @@ export async function collectContextData(
     }
   }
 
-  const memoryContent = config.getUserMemory();
-  const memoryFiles = parseMemoryFiles(memoryContent);
+  const memoryFiles = [
+    ...parseMemoryFiles(config.getUserMemory()),
+    ...parseMemoryFiles(config.getManagedMemoryPrompt()),
+  ];
   const memoryFilesTokens = memoryFiles.reduce((sum, f) => sum + f.tokens, 0);
 
   const skillTool = allTools.find((tool) => tool.name === ToolNames.SKILL);
@@ -184,30 +189,54 @@ export async function collectContextData(
       : new Set();
 
   const skillManager = config.getSkillManager();
-  const skillConfigs = skillManager ? await skillManager.listSkills() : [];
+  const skillsResult = skillManager
+    ? await buildAvailableSkillsReminder(config)
+    : null;
+  const renderedSkillEntries = skillsResult?.renderedEntries ?? [];
+  const skillConfigs =
+    skillManager && loadedSkillNames.size > 0
+      ? await skillManager.listSkills()
+      : [];
   let loadedBodiesTokens = 0;
-  const skills: ContextSkillDetail[] = skillConfigs.map((skill) => {
-    const listingTokens = estimateTokens(
-      `<skill>\n<name>\n${skill.name}\n</name>\n<description>\n${skill.description} (${skill.level})\n</description>\n<location>\n${skill.level}\n</location>\n</skill>`,
-    );
-    const isLoaded = loadedSkillNames.has(skill.name);
-    let bodyTokens: number | undefined;
-    if (isLoaded && skill.body) {
-      const baseDir = skill.filePath
-        ? skill.filePath.replace(/\/[^/]+$/, '')
-        : '';
-      bodyTokens = estimateTokens(buildSkillLlmContent(baseDir, skill.body));
-      loadedBodiesTokens += bodyTokens;
+  const loadedBodyTokensByName = new Map<string, number>();
+  for (const skill of skillConfigs) {
+    if (!loadedSkillNames.has(skill.name) || !skill.body) {
+      continue;
     }
-    return {
-      name: skill.name,
-      tokens: listingTokens,
-      loaded: isLoaded,
-      bodyTokens,
-    };
-  });
+    const baseDir = skill.filePath
+      ? skill.filePath.replace(/\/[^/]+$/, '')
+      : '';
+    const bodyTokens = estimateTokens(
+      buildSkillLlmContent(baseDir, skill.body),
+    );
+    loadedBodyTokensByName.set(skill.name, bodyTokens);
+    loadedBodiesTokens += bodyTokens;
+  }
 
-  const skillsTokens = skillToolDefinitionTokens + loadedBodiesTokens;
+  const listedSkillNames = new Set(
+    renderedSkillEntries.map((entry) => entry.name),
+  );
+  const skills: ContextSkillDetail[] = renderedSkillEntries.map((entry) => ({
+    name: entry.name,
+    tokens: estimateTokens(renderAvailableSkillsBlock([entry])),
+    loaded: loadedSkillNames.has(entry.name),
+    bodyTokens: loadedBodyTokensByName.get(entry.name),
+  }));
+
+  for (const skill of skillConfigs) {
+    if (loadedSkillNames.has(skill.name) && !listedSkillNames.has(skill.name)) {
+      skills.push({
+        name: skill.name,
+        tokens: 0,
+        loaded: true,
+        bodyTokens: loadedBodyTokensByName.get(skill.name),
+      });
+    }
+  }
+
+  const skillListingTokens = estimateTokens(skillsResult?.reminder ?? '');
+  const skillsTokens =
+    skillToolDefinitionTokens + loadedBodiesTokens + skillListingTokens;
 
   const thresholds = computeThresholds(
     contextWindowSize,
@@ -223,11 +252,25 @@ export async function collectContextData(
     Math.round(contextWindowSize - thresholds.auto),
   );
 
-  const rawOverhead =
+  const fallbackStartupTokens = memoryFilesTokens + skillListingTokens;
+  const estimatedStartupTokens = Math.max(
+    pendingStartupTokens,
+    fallbackStartupTokens,
+  );
+  const uncategorizedStartupTokens = Math.max(
+    0,
+    estimatedStartupTokens - fallbackStartupTokens,
+  );
+  const categorizedOverhead =
     systemPromptTokens +
     allToolsTokens +
-    memoryFilesTokens +
-    loadedBodiesTokens;
+    loadedBodiesTokens +
+    fallbackStartupTokens;
+  const estimatedOverhead =
+    systemPromptTokens +
+    allToolsTokens +
+    loadedBodiesTokens +
+    estimatedStartupTokens;
 
   const isEstimated = apiTotalTokens === 0;
 
@@ -259,23 +302,28 @@ export async function collectContextData(
     );
     displayMcpTools = mcpToolsTotalTokens;
     displayMemoryFiles = memoryFilesTokens;
-    messagesTokens = 0;
+    messagesTokens = uncategorizedStartupTokens;
     freeSpace = Math.max(
       0,
-      contextWindowSize - rawOverhead - autocompactBuffer,
+      contextWindowSize - estimatedOverhead - autocompactBuffer,
     );
     detailBuiltinTools = builtinTools;
     detailMcpTools = mcpTools;
     detailMemoryFiles = memoryFiles;
     detailSkills = skills;
   } else {
-    totalTokens = apiTotalTokens;
+    totalTokens = apiTotalTokens + pendingStartupTokens;
 
     const overheadScale =
-      rawOverhead > totalTokens ? totalTokens / rawOverhead : 1;
+      categorizedOverhead > apiTotalTokens
+        ? apiTotalTokens / categorizedOverhead
+        : 1;
 
     displaySystemPrompt = Math.round(systemPromptTokens * overheadScale);
     const scaledAllTools = Math.round(allToolsTokens * overheadScale);
+    const scaledStartupTokens = Math.round(
+      fallbackStartupTokens * overheadScale,
+    );
     displayMemoryFiles = Math.round(memoryFilesTokens * overheadScale);
     displaySkills = Math.round(skillsTokens * overheadScale);
     const scaledMcpTotal = Math.round(mcpToolsTotalTokens * overheadScale);
@@ -291,13 +339,14 @@ export async function collectContextData(
     const scaledOverhead =
       displaySystemPrompt +
       scaledAllTools +
-      displayMemoryFiles +
+      scaledStartupTokens +
       Math.round(loadedBodiesTokens * overheadScale);
 
     if (apiCachedTokens > 0) {
       messagesTokens = Math.max(0, totalTokens - apiCachedTokens);
     } else {
-      messagesTokens = Math.max(0, totalTokens - scaledOverhead);
+      messagesTokens =
+        pendingStartupTokens + Math.max(0, apiTotalTokens - scaledOverhead);
     }
 
     freeSpace = Math.max(
@@ -328,13 +377,14 @@ export async function collectContextData(
         : skills;
   }
 
-  // Tier classification: prefer the API-reported total when available.
+  // Tier classification: prefer the API-reported total plus pending startup
+  // content when available.
   // When no API call has happened yet (first /context, --continue resume,
-  // sub-agent inheritance), classify against `rawOverhead` so a session
+  // sub-agent inheritance), classify against `estimatedOverhead` so a session
   // dominated by system prompt / skills / MCP tools doesn't silently show
   // "safe". (R2.2)
   //
-  // SCOPE GAP (R5.1): `rawOverhead` excludes `messagesTokens` — the actual
+  // SCOPE GAP (R5.1): `estimatedOverhead` excludes `messagesTokens` — the actual
   // chat history. A `--continue` restore with 100K of historical messages
   // (but small overhead) will still display "safe" here, even though the
   // cheap-gate inside chatCompressionService will trigger compression on
@@ -346,7 +396,7 @@ export async function collectContextData(
   // estimatePromptTokens(history, undefined, 0, 0, imageTokenEstimate) here
   // for same-source-of-truth as the cheap-gate. Defer because Config
   // doesn't expose the active chat instance today.
-  const tierTokens = isEstimated ? rawOverhead : apiTotalTokens;
+  const tierTokens = isEstimated ? estimatedOverhead : totalTokens;
 
   const breakdown: ContextCategoryBreakdown = {
     systemPrompt: displaySystemPrompt,

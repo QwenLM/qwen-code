@@ -1808,6 +1808,11 @@ describe('BackgroundAgentResumeService', () => {
               role: 'system',
               parts: [{ text: 'persisted system instruction' }],
             },
+            startupParts: [
+              {
+                text: '<system-reminder>persisted startup context</system-reminder>',
+              },
+            ],
             tools: [{ name: 'Bash' }, { name: 'Read' }],
           },
         }),
@@ -1885,6 +1890,11 @@ describe('BackgroundAgentResumeService', () => {
         role: 'system',
         parts: [{ text: 'persisted system instruction' }],
       },
+      startupParts: [
+        {
+          text: '<system-reminder>persisted startup context</system-reminder>',
+        },
+      ],
       initialMessages: [
         { role: 'user', parts: [{ text: 'bootstrap env' }] },
         { role: 'model', parts: [{ text: 'bootstrap ack' }] },

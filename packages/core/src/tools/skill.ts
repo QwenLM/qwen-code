@@ -41,13 +41,11 @@ import {
 
 /**
  * Static description for the Skill tool. The live list of available skills is
- * deliberately NOT embedded here — it is injected as an `<available_skills>`
- * `<system-reminder>` in the startup prelude (see `environmentContext`) and
- * refreshed via per-turn deltas. Keeping this description constant for the whole
- * session means skill changes never mutate the tools block, which sits at the
- * front of the tools → system → messages prompt-cache prefix. Mirrors Claude
- * Code's static SkillTool prompt ("Available skills are listed in
- * system-reminder messages in the conversation").
+ * deliberately NOT embedded here — it is injected as a plain startup listing
+ * (see `environmentContext`) and refreshed via per-turn reminders. Keeping this
+ * description constant for the whole session means skill changes never mutate
+ * the tools block, which sits at the front of the tools → system → messages
+ * prompt-cache prefix.
  */
 const SKILL_TOOL_DESCRIPTION = `Execute a skill within the main conversation
 
@@ -63,7 +61,7 @@ How to invoke:
   - \`skill: "mcp-prompt", args: "topic"\` - invoke a model-invocable command with arguments
 
 Important:
-- Available skills are listed in <system-reminder> messages in the conversation; only use skills listed there.
+- Available skills are listed in startup user content and may be updated by <system-reminder> messages; only use skills listed there.
 - When a skill is relevant, you must invoke this tool IMMEDIATELY as your first action
 - NEVER just announce or mention a skill in your text response without actually calling this tool
 - This is a BLOCKING REQUIREMENT: invoke the relevant Skill tool BEFORE generating any other response about the task
@@ -79,7 +77,7 @@ Important:
  * Skill tool that enables the model to access skill definitions. The tool keeps
  * an in-memory set of the currently available skills (for validation) but exposes
  * a static description to the model — the live listing reaches the model via the
- * startup-prelude snapshot and per-turn `<system-reminder>` deltas.
+ * startup listing and per-turn `<system-reminder>` deltas.
  */
 export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
   static readonly Name: string = ToolNames.SKILL;
@@ -166,8 +164,8 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
    * prompt-cache prefix, where any byte change invalidates the whole cached
    * prefix. These runtime sets are in-memory only and never serialized into a
    * request, so refreshing them is prompt-cache-neutral. The model's view of the
-   * available skills comes from the `<available_skills>` snapshot in the startup
-   * prelude plus per-turn `<system-reminder>` deltas.
+   * available skills comes from the startup listing plus per-turn
+   * `<system-reminder>` deltas.
    */
   async refreshSkills(): Promise<void> {
     try {
@@ -210,7 +208,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
     );
     if (skillExists) return null;
 
-    // Check model-invocable commands (e.g. MCP prompts) listed in <available_skills>
+    // Check model-invocable commands (e.g. MCP prompts) listed at startup.
     const commandExists = this.modelInvocableCommands.some(
       (cmd) => cmd.name === params.skill,
     );

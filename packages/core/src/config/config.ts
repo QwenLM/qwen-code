@@ -896,7 +896,7 @@ export interface ConfigParameters {
   disabledSlashCommands?: string[];
   /**
    * Live-read provider for the set of skill names that should be hidden
-   * from `<available_skills>` and the `/<skill-name>` slash-command
+   * from the model-facing skills listing and the `/<skill-name>` slash-command
    * surface. Unlike `disabledSlashCommands` (which is a frozen snapshot),
    * this is a function so the CLI layer can close over `LoadedSettings`
    * and have post-`setValue` toggles take effect without restart.
@@ -904,8 +904,7 @@ export interface ConfigParameters {
    * Must be attached at construction time — `Config.initialize()` calls
    * `toolRegistry.warmAll()` which instantiates `SkillTool`, and that
    * tool's constructor immediately calls `refreshSkills()`. A late-attach
-   * provider would let persisted disabled skills leak into the first
-   * `<available_skills>` build.
+   * provider would let persisted disabled skills leak into the first listing.
    *
    * Names returned must be lower-cased; consumers compare case-insensitively.
    */
@@ -1730,6 +1729,7 @@ export class Config {
   private mcpReconcilePromise: Promise<void> | undefined;
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
+  private managedMemoryPrompt = '';
   private sdkMode: boolean;
   private geminiMdFileCount: number;
   private conditionalRulesRegistry: ConditionalRulesRegistry | undefined;
@@ -3034,6 +3034,7 @@ export class Config {
     // Safe mode: skip all context file loading (QWEN.md, AGENTS.md, rules)
     if (this.isSafeMode()) {
       this.setUserMemory('');
+      this.setManagedMemoryPrompt('');
       this.setGeminiMdFileCount(0);
       this.conditionalRulesRegistry = new ConditionalRulesRegistry(
         [],
@@ -3149,14 +3150,11 @@ export class Config {
         readAutoMemoryIndex(this.getProjectRoot()),
         readUserAutoMemoryIndex().catch(() => null),
       ]);
-      // Always surface the user-level section so the main assistant knows the
-      // dir exists and can route ad-hoc "remember this cross-project" saves
-      // there. When empty the prompt builder emits a "MEMORY.md is currently
-      // empty" placeholder — the same shape the per-project layer has used
-      // since day one — so the cost is one extra index header.
-      this.setUserMemory(
-        this.memoryManager.appendToUserMemory(
-          memoryContent,
+      // Keep project instructions separate from runtime memory directories
+      // and indexes so startup context can order them explicitly.
+      this.setUserMemory(memoryContent);
+      this.setManagedMemoryPrompt(
+        this.memoryManager.buildPrompt(
           getAutoMemoryRoot(this.getProjectRoot()),
           managedAutoMemoryIndex,
           {
@@ -3173,6 +3171,7 @@ export class Config {
       );
     } else {
       this.setUserMemory(memoryContent);
+      this.setManagedMemoryPrompt('');
     }
     this.setGeminiMdFileCount(fileCount);
     this.conditionalRulesRegistry = new ConditionalRulesRegistry(
@@ -3389,7 +3388,9 @@ export class Config {
    */
   getWarnings(): string[] {
     const memoryContextWarning = this.buildMemoryContextWarning(
-      this.getUserMemory(),
+      [this.getUserMemory(), this.getManagedMemoryPrompt()]
+        .filter((content) => content.trim().length > 0)
+        .join('\n\n'),
     );
     return memoryContextWarning
       ? [...this.warnings, memoryContextWarning]
@@ -5145,6 +5146,10 @@ export class Config {
     return this.userMemory;
   }
 
+  getManagedMemoryPrompt(): string {
+    return this.managedMemoryPrompt;
+  }
+
   getOutputLanguageFilePath(): string | undefined {
     return this.outputLanguageFilePath;
   }
@@ -5155,6 +5160,10 @@ export class Config {
 
   setUserMemory(newUserMemory: string): void {
     this.userMemory = newUserMemory;
+  }
+
+  setManagedMemoryPrompt(prompt: string): void {
+    this.managedMemoryPrompt = prompt;
   }
 
   getGeminiMdFileCount(): number {
@@ -6601,8 +6610,8 @@ export class Config {
   /**
    * Registers a provider that returns model-invocable commands (e.g., bundled
    * skills, user/project file commands, MCP prompts). Called by the CLI's
-   * CommandService after initialisation so that the startup snapshot and
-   * per-turn drain can include these in the `<available_skills>` listing.
+   * CommandService after initialisation so that the startup listing and
+   * per-turn drain can include these commands.
    */
   setModelInvocableCommandsProvider(
     provider: () => ReadonlyArray<{ name: string; description: string }>,

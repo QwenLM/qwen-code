@@ -183,7 +183,7 @@ describe('SkillTool', () => {
       expect(skillTool.description).not.toContain('<available_skills>');
     });
 
-    it('renders available skills in the <available_skills> snapshot block', async () => {
+    it('renders available skills in the plain startup listing', async () => {
       const listing = await renderListing();
       expect(listing).toContain('code-review');
       expect(listing).toContain('Specialized skill for reviewing code quality');
@@ -193,7 +193,7 @@ describe('SkillTool', () => {
 
     it('should XML-escape description and whenToUse fields', async () => {
       // A crafted description containing XML-special characters must not
-      // inject raw tags into the <available_skills> block.
+      // inject raw tags into the startup listing.
       vi.mocked(mockSkillManager.listSkills).mockResolvedValue([
         {
           name: 'xss-skill',
@@ -219,7 +219,7 @@ describe('SkillTool', () => {
       // Regression: file-based skill names go through validateSkillName,
       // but extension skills come in via extension.skills (skill-manager
       // line 827) and bypass that validator. A crafted extension name
-      // would otherwise inject raw tags into <available_skills>.
+      // would otherwise inject raw tags into the startup listing.
       vi.mocked(mockSkillManager.listSkills).mockResolvedValue([
         {
           name: 'evil<inject>',
@@ -258,7 +258,7 @@ describe('SkillTool', () => {
     it('should XML-escape modelInvocableCommands description', async () => {
       // Same XML-injection vector via the cmd.description field — an
       // MCP prompt can ship a crafted description and the SkillTool's
-      // <available_skills> block must escape it the same way as
+      // Startup listing must escape it the same way as
       // file-based skills.
       vi.mocked(mockSkillManager.listSkills).mockResolvedValue([]);
       vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
@@ -277,7 +277,7 @@ describe('SkillTool', () => {
       expect(listing).toContain(
         'MCP &lt;description&gt;fake&lt;/description&gt; &amp; &lt;/available_skills&gt;&lt;tag&gt;',
       );
-      // The crafted closing tag must NOT escape the <available_skills>
+      // The crafted closing tag must NOT escape the startup-listing
       // block as a literal raw tag.
       expect(listing).not.toContain('</available_skills><tag>');
     });
@@ -1040,7 +1040,7 @@ describe('SkillTool', () => {
       { name: 'mcp-prompt-a', description: 'An MCP prompt' },
     ];
 
-    it('should show non-skill commands in <available_skills> section', async () => {
+    it('should show non-skill commands in the startup listing', async () => {
       // 'review' and 'mcp-prompt-a' don't overlap with file skills
       vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
         () => mockCommands,
@@ -1050,7 +1050,7 @@ describe('SkillTool', () => {
       await vi.runAllTimersAsync();
 
       const listing = await renderListing();
-      // Commands share the single <available_skills> listing — no separate
+      // Commands share the single startup listing — no separate
       // <available_commands> block.
       expect(listing).not.toContain('<available_commands>');
       expect(listing).toContain('review');
@@ -1123,7 +1123,7 @@ describe('SkillTool', () => {
       await vi.runAllTimersAsync();
 
       const listing = await renderListing();
-      // 'code-review' is already in <available_skills> as a file skill, must NOT appear twice
+      // 'code-review' is already in the startup listing as a file skill, must NOT appear twice
       const codeReviewMatches = (listing.match(/code-review/g) || []).length;
       expect(codeReviewMatches).toBe(1);
       // 'mcp-prompt-a' is not a file-based skill, must appear in the unified list
@@ -1513,7 +1513,7 @@ describe('SkillTool', () => {
   });
 
   describe('disabled-skill refreshSkills filter', () => {
-    it('drops disabled skills from <available_skills>', async () => {
+    it('drops disabled skills from the startup listing', async () => {
       vi.mocked(config.getDisabledSkillNames).mockReturnValue(
         new Set(['testing']),
       );
@@ -1526,7 +1526,7 @@ describe('SkillTool', () => {
       expect(listing).not.toMatch(/<name>\s*testing\s*<\/name>/);
     });
 
-    it('lets a same-named MCP prompt surface in <available_skills> when its skill is disabled', async () => {
+    it('lets a same-named MCP prompt surface in the startup listing when its skill is disabled', async () => {
       // Regression for §3c: `fileBasedSkillNames` must EXCLUDE disabled
       // skills, otherwise a same-named MCP prompt is silently shadowed
       // and never surfaces to the model.

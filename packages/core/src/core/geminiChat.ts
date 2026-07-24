@@ -97,11 +97,9 @@ import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
 import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
 import {
-  getStartupContextLength,
   isSystemReminderContent,
+  stripStartupContext,
 } from '../utils/environmentContext.js';
-import type { SessionStartSource } from '../hooks/types.js';
-import { getCustomSystemPrompt } from './prompts.js';
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
 import {
   collectToolCallIdsFromHistory,
@@ -1440,36 +1438,6 @@ export function repairOrphanedToolUseTurns(
  * @remarks
  * The session maintains all the turns between user and model.
  */
-const SESSION_START_CONTEXT_SENTINEL_START =
-  '<qwen:session-start-context hidden="true">';
-const SESSION_START_CONTEXT_SENTINEL_END = '</qwen:session-start-context>';
-const SESSION_START_CONTEXT_HEADER = 'SessionStart additional context';
-
-function buildSessionStartContextBlock(extraInstruction: string): string {
-  return `\n\n${SESSION_START_CONTEXT_SENTINEL_START}\n${SESSION_START_CONTEXT_HEADER}:\n${extraInstruction}\n${SESSION_START_CONTEXT_SENTINEL_END}`;
-}
-
-function stripTrailingSessionStartContextBlock(
-  systemInstruction: string,
-): string {
-  const startIndex = systemInstruction.lastIndexOf(
-    `\n\n${SESSION_START_CONTEXT_SENTINEL_START}\n${SESSION_START_CONTEXT_HEADER}:\n`,
-  );
-  if (startIndex === -1) {
-    return systemInstruction;
-  }
-
-  const endIndex = systemInstruction.indexOf(
-    `\n${SESSION_START_CONTEXT_SENTINEL_END}`,
-    startIndex,
-  );
-  if (endIndex === -1) {
-    return systemInstruction;
-  }
-
-  return systemInstruction.slice(0, startIndex);
-}
-
 export class GeminiChat {
   // A promise to represent the current state of the message being sent to the
   // model.
@@ -1547,6 +1515,18 @@ export class GeminiChat {
    * can't, since compression shrinks history independently of the push.
    */
   private userContentPushCount = 0;
+
+  /**
+   * Startup capability and context parts waiting to be merged into the next
+   * real user message. Keeping them out of history until send time avoids an
+   * adjacent synthetic user turn on providers that require role alternation.
+   * Snapshot text is also the identity used to reconcile these parts against
+   * history, so they must remain discrete and text-identical there. Coalescing
+   * or rewriting one would make a sent part look missing and requeue it.
+   */
+  private pendingStartupParts: Part[] = [];
+
+  private startupPartsSnapshot: Part[] = [];
 
   /**
    * Reset both partial-push markers in lockstep. Every history-mutation
@@ -1844,34 +1824,73 @@ export class GeminiChat {
     this.generationConfig.systemInstruction = sysInstr;
   }
 
-  setSessionStartContext(extraInstruction: string) {
-    const trimmed = extraInstruction.trim();
-    if (!trimmed) {
-      return;
-    }
-
-    const current = this.generationConfig.systemInstruction;
-    let baseInstruction = '';
-    if (typeof current === 'string') {
-      baseInstruction = stripTrailingSessionStartContextBlock(current);
-    } else if (current) {
-      baseInstruction = getCustomSystemPrompt(current);
-      baseInstruction = stripTrailingSessionStartContextBlock(baseInstruction);
-    }
-    const contextBlock = buildSessionStartContextBlock(trimmed);
-    this.generationConfig.systemInstruction = `${baseInstruction}${contextBlock}`;
+  setPendingStartupParts(parts: Part[]): void {
+    const snapshot = structuredClone(parts);
+    this.startupPartsSnapshot = snapshot;
+    this.syncPendingStartupPartsWithHistory();
   }
 
-  applySessionStartContext(
-    extraInstruction: string,
-    _source: SessionStartSource,
-  ): void {
-    const trimmed = extraInstruction.trim();
-    if (!trimmed) {
-      return;
+  setPendingStartupContextPart(part: Part | null): void {
+    const withoutContextPart = (parts: Part[]): Part[] =>
+      parts.filter((candidate) => {
+        const text = candidate.text;
+        return !(
+          typeof text === 'string' &&
+          text.startsWith('<system-reminder>') &&
+          text.trimEnd().endsWith('</system-reminder>')
+        );
+      });
+    this.startupPartsSnapshot = withoutContextPart(this.startupPartsSnapshot);
+    this.pendingStartupParts = withoutContextPart(this.pendingStartupParts);
+    if (part) {
+      const cloned = structuredClone(part);
+      this.startupPartsSnapshot.push(cloned);
+      this.pendingStartupParts.push(structuredClone(cloned));
     }
+  }
 
-    this.setSessionStartContext(trimmed);
+  getPendingStartupParts(): Part[] {
+    return structuredClone(this.pendingStartupParts);
+  }
+
+  getStartupPartsSnapshot(): Part[] {
+    return structuredClone(this.startupPartsSnapshot);
+  }
+
+  private syncPendingStartupPartsWithHistory(): void {
+    this.pendingStartupParts = this.startupPartsSnapshot.filter(
+      (snapshotPart) =>
+        !this.history.some((content) =>
+          content.parts?.some(
+            (part) =>
+              typeof snapshotPart.text === 'string' &&
+              part.text === snapshotPart.text,
+          ),
+        ),
+    );
+  }
+
+  private getMissingPendingStartupParts(parts: Part[]): Part[] {
+    const presentTexts = new Set(
+      parts
+        .map((part) => part.text)
+        .filter((text): text is string => typeof text === 'string'),
+    );
+    return this.pendingStartupParts.filter(
+      (part) => typeof part.text !== 'string' || !presentTexts.has(part.text),
+    );
+  }
+
+  private insertStartupParts(parts: Part[], startupParts: Part[]): Part[] {
+    let insertionIndex = 0;
+    while (parts[insertionIndex]?.functionResponse) {
+      insertionIndex += 1;
+    }
+    return [
+      ...parts.slice(0, insertionIndex),
+      ...startupParts,
+      ...parts.slice(insertionIndex),
+    ];
   }
 
   /**
@@ -1900,6 +1919,7 @@ export class GeminiChat {
     model: string,
     params: SendMessageParameters,
     prompt_id: string,
+    applyPendingStartupParts = true,
   ): Promise<AsyncGenerator<StreamEvent>> {
     const fullTurnRoute = model.endsWith('\0');
     const exactRoute = fullTurnRoute
@@ -1935,6 +1955,7 @@ export class GeminiChat {
     let compressionInfo: ChatCompressionInfo;
     let requestContents: Content[];
     let userContentAdded = false;
+    let startupPartsApplied: Part[] = [];
 
     // Determine the ceiling for this turn's output request. The clamp below
     // (see clampOutputTokensToWindow) sizes the actual max_tokens to the room
@@ -2000,6 +2021,14 @@ export class GeminiChat {
           );
           userContent = { ...userContent, parts: guarded.responseParts };
         }
+      }
+      if (applyPendingStartupParts && this.pendingStartupParts.length > 0) {
+        startupPartsApplied = structuredClone(this.pendingStartupParts);
+        const parts = userContent.parts ?? [];
+        userContent.parts = this.insertStartupParts(
+          parts,
+          this.getMissingPendingStartupParts(parts),
+        );
       }
 
       // Hard-tier rescue: when the estimated prompt size is at or above the
@@ -2163,6 +2192,9 @@ export class GeminiChat {
       this.history.push(userContent);
       currentUserContent = userContent;
       userContentAdded = true;
+      if (startupPartsApplied.length > 0) {
+        this.pendingStartupParts = [];
+      }
       // Record that the user content landed (see `userContentPushCount`). The
       // setup-error path below decrements this if it rolls the push back.
       this.userContentPushCount++;
@@ -2246,6 +2278,9 @@ export class GeminiChat {
         this.history.pop();
         // The push above was rolled back, so undo its count too.
         this.userContentPushCount--;
+        if (startupPartsApplied.length > 0) {
+          this.pendingStartupParts = startupPartsApplied;
+        }
       }
       streamDoneResolver!();
       throw error;
@@ -3423,7 +3458,7 @@ export class GeminiChat {
   }
 
   getHistoryForForkWindow(): Content[] {
-    const history = this.history.slice(getStartupContextLength(this.history));
+    const history = stripStartupContext(this.history);
     return extractCuratedHistory(history).map(copyContentContainer);
   }
 
@@ -3519,6 +3554,7 @@ export class GeminiChat {
    */
   clearHistory(): void {
     this.history = [];
+    this.syncPendingStartupPartsWithHistory();
     // Any pending partial-push state points into the now-empty history;
     // resetting prevents `popPartialIfPushed` from splicing whatever
     // shows up at that index in a future send (defense-in-depth — the
@@ -3535,6 +3571,7 @@ export class GeminiChat {
    */
   addHistory(content: Content): void {
     this.history.push(content);
+    this.syncPendingStartupPartsWithHistory();
     // addHistory only runs between sends, so the partial-push marker
     // should already be cleared. If it is not, a new caller is
     // violating that invariant — surface it at error level so the
@@ -3554,6 +3591,7 @@ export class GeminiChat {
 
   setHistory(history: Content[]): void {
     this.history = history;
+    this.syncPendingStartupPartsWithHistory();
     // History replacement (compression, /clear, --resume reload) wipes
     // the index basis the partial-push marker was captured against. The
     // marker MUST be cleared — otherwise `popPartialIfPushed` could find
@@ -3566,6 +3604,7 @@ export class GeminiChat {
 
   truncateHistory(keepCount: number): void {
     this.history = this.history.slice(0, keepCount);
+    this.syncPendingStartupPartsWithHistory();
     // Truncation can drop the entry the partial-push marker points at,
     // or leave it valid but shift the meaning of nearby indices. Reset
     // both fields rather than try to fix them up — they're per-send and
@@ -3629,6 +3668,7 @@ export class GeminiChat {
     // happens to line up with whatever model entry is at that index
     // in the meanwhile.
     this.clearPendingPartialState();
+    this.syncPendingStartupPartsWithHistory();
     return strippedEntries;
   }
 

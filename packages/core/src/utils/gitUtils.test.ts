@@ -38,7 +38,7 @@ describe('getRecentGitStatus', () => {
 
     expect(result).toBeNull();
     expect(mockWarn).toHaveBeenCalledWith(
-      'Failed to get recent git status for system prompt:',
+      'Failed to get recent git status for startup context:',
       expect.objectContaining({ message: 'git missing from PATH' }),
     );
   });
@@ -186,7 +186,7 @@ describe('getRecentGitStatus', () => {
     expect(result).toBeNull();
     expect(execSyncSpy).toHaveBeenCalledTimes(1);
     expect(mockWarn).toHaveBeenCalledWith(
-      'Failed to get recent git status for system prompt:',
+      'Failed to get recent git status for startup context:',
       expect.objectContaining({
         message: 'Unexpected git status --branch output',
       }),

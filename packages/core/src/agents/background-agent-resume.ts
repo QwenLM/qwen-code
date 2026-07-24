@@ -26,7 +26,6 @@ import {
 } from './agent-transcript.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { buildOrderedUuidChain } from '../utils/conversation-chain.js';
-import { getInitialChatHistory } from '../utils/environmentContext.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 import {
@@ -50,8 +49,6 @@ import type {
 } from './background-tasks.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../subagents/types.js';
-import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from './runtime/agent-core.js';
-import { ToolNames } from '../tools/tool-names.js';
 import type { PromptConfig, ToolConfig } from './runtime/agent-types.js';
 import type {
   AgentBootstrapRecordPayload,
@@ -72,21 +69,6 @@ const LEGACY_FORK_CAPABILITIES_BLOCKED_REASON =
 
 type ApprovalModeValue = 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
 
-/**
- * Returns true when the subagent's effective tool surface will include the
- * Skill tool. Mirrors `AgentCore.willHaveSkillTool()` for the resume path
- * where no AgentCore instance exists yet.
- */
-function subagentWillHaveSkillTool(
-  subagentConfig: SubagentConfig | undefined,
-): boolean {
-  const tools = subagentConfig?.tools;
-  if (!tools || tools.length === 0 || tools.includes('*')) {
-    return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
-  }
-  return tools.includes(ToolNames.SKILL);
-}
-
 interface TranscriptRecovery {
   history: Content[];
   initialPrompt?: string;
@@ -96,6 +78,7 @@ interface TranscriptRecovery {
     taskPrompt: string;
     runtimeHistory: Content[];
     systemInstruction?: string | Content;
+    startupParts?: Part[];
     tools?: Array<string | FunctionDeclaration>;
   };
 }
@@ -332,6 +315,10 @@ function recoverTranscript(records: ChatRecord[]): TranscriptRecovery {
             systemInstruction: structuredClone(
               (bootstrapRecord.systemPayload as AgentBootstrapRecordPayload)
                 .systemInstruction,
+            ),
+            startupParts: structuredClone(
+              (bootstrapRecord.systemPayload as AgentBootstrapRecordPayload)
+                .startupParts,
             ),
             tools: structuredClone(
               (bootstrapRecord.systemPayload as AgentBootstrapRecordPayload)
@@ -720,17 +707,7 @@ export class BackgroundAgentResumeService {
             },
             ...(recovery.forkBootstrap?.runtimeHistory ?? []),
           ]
-        : [
-            ...(
-              await getInitialChatHistory(bgConfig as Config, undefined, {
-                includeDeferredToolsReminder: false,
-                includeAvailableSkillsReminder: subagentWillHaveSkillTool(
-                  target.subagentConfig,
-                ),
-              })
-            )[0],
-            ...recovery.history,
-          ];
+        : [...recovery.history];
       const promptMessages = [...operation.continuationMessages];
       const continuationPrompt =
         promptMessages.join('\n\n').trim() ||
@@ -1175,6 +1152,7 @@ export class BackgroundAgentResumeService {
   ): Promise<AgentHeadless> {
     const promptConfig: PromptConfig = {
       renderedSystemPrompt: structuredClone(bootstrap.systemInstruction!),
+      startupParts: structuredClone(bootstrap.startupParts ?? []),
       initialMessages,
     };
     const toolConfig: ToolConfig = {

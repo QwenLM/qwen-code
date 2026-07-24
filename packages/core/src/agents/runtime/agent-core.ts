@@ -421,13 +421,14 @@ export class AgentCore {
       );
     }
 
-    // When initialMessages is set, the caller owns the full prior history
-    // (including any env bootstrap it wants). Fork relies on this to inherit
-    // the parent conversation verbatim without duplicating env messages.
-    const hasInitialMessages = this.promptConfig.initialMessages !== undefined;
+    // Forks inherit the parent's complete rendered prompt and history. Other
+    // agents, including resumed background agents with initialMessages, still
+    // need a fresh startup context merged into their next real user request.
+    const inheritsRenderedPrompt =
+      this.promptConfig.renderedSystemPrompt !== undefined;
     const hasSkillTool = this.willHaveSkillTool();
-    const [envHistory] = hasInitialMessages
-      ? [[]]
+    const [envHistory, , startupParts] = inheritsRenderedPrompt
+      ? [[], [], this.promptConfig.startupParts ?? []]
       : await getInitialChatHistory(this.runtimeContext, undefined, {
           includeDeferredToolsReminder: false,
           includeAvailableSkillsReminder: hasSkillTool,
@@ -463,6 +464,7 @@ export class AgentCore {
         generationConfig,
         startHistory,
       );
+      chat.setPendingStartupParts(startupParts);
       // Seed the per-chat token count so the auto-compaction threshold
       // gate sees the inherited history's true size on the first send.
       // Without this, fork subagents start at 0 and the gate NOOPs even
@@ -484,8 +486,8 @@ export class AgentCore {
 
   /**
    * Returns true if this agent's effective tool surface will include the Skill
-   * tool. Used before `prepareTools()` to decide whether to inject the
-   * `<available_skills>` snapshot.
+   * tool. Used before `prepareTools()` to decide whether to include the
+   * startup skills listing.
    */
   private willHaveSkillTool(): boolean {
     if (!this.toolConfig) {
@@ -2116,12 +2118,6 @@ Important Rules:
  - You operate in non-interactive mode: do not ask the user questions; proceed with available context.
  - Use tools only when necessary to obtain facts or make changes.
  - When the task is complete, return the final result as a normal model response (not a tool call) and stop.`;
-    }
-
-    // Append user memory (QWEN.md + output-language.md) to ensure subagent respects project conventions
-    const userMemory = this.runtimeContext.getUserMemory();
-    if (userMemory && userMemory.trim().length > 0) {
-      finalPrompt += `\n\n---\n\n${userMemory.trim()}`;
     }
 
     return finalPrompt;

@@ -14,11 +14,11 @@ import {
   resolveInteractionMode,
 } from './prompts.js';
 import { InputFormat } from '../output/types.js';
-import { isGitRepository } from '../utils/gitUtils.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { QWEN_DIR } from '../config/storage.js';
+import { DEFAULT_SYSTEM_PROMPT } from './default-system-prompt.js';
 
 // Mock tool names if they are dynamically generated or complex
 vi.mock('../tools/ls', () => ({ LSTool: { Name: 'list_directory' } }));
@@ -35,9 +35,6 @@ vi.mock('../tools/shell', () => ({
 vi.mock('../tools/write-file', () => ({
   WriteFileTool: { Name: 'write_file' },
 }));
-vi.mock('../utils/gitUtils', () => ({
-  isGitRepository: vi.fn(),
-}));
 vi.mock('node:fs');
 
 describe('Core System Prompt (prompts.ts)', () => {
@@ -47,245 +44,153 @@ describe('Core System Prompt (prompts.ts)', () => {
     vi.stubEnv('QWEN_WRITE_SYSTEM_MD', undefined);
   });
 
-  it('should return the base prompt when no userMemory is provided', () => {
-    vi.stubEnv('SANDBOX', undefined);
-    const prompt = getCoreSystemPrompt();
-    expect(prompt).not.toContain('---\n\n'); // Separator should not be present
-    expect(prompt).toContain('You are Qwen Code, an interactive CLI agent'); // Check for core content
-    expect(prompt).toContain('# Executing actions with care');
-    expect(prompt).toMatchSnapshot(); // Use snapshot for base prompt structure
-  });
-
-  it('instructs the model not to bypass denied tool calls through equivalent paths', () => {
-    vi.stubEnv('SANDBOX', undefined);
+  it('uses the JobBench-validated prompt as the default base prompt', () => {
     const prompt = getCoreSystemPrompt();
 
-    // Forbid equivalent paths for the denied action while allowing unrelated
-    // safer alternatives.
-    expect(prompt).toContain('denied action through another tool');
-    expect(prompt).toContain(
-      'genuinely safer alternative that does not accomplish the denied action',
+    expect(prompt).toBe(DEFAULT_SYSTEM_PROMPT);
+    expect(prompt).not.toContain(
+      'You are Qwen Code, an interactive CLI agent developed by Alibaba Group',
     );
-    expect(prompt).toContain(
-      'request explicit approval only when the current interaction mode can receive it',
-    );
+    expect(prompt).toMatchSnapshot();
   });
 
-  it.each([
-    [
-      'interactive',
-      'an interactive CLI agent',
-      "Use 'ask_user_question' when you need clarification",
-    ],
-    [
-      'headless',
-      'a non-interactive CLI agent',
-      'Never ask the user a question',
-    ],
-    [
-      'acp',
-      'a CLI agent operating through an ACP host',
-      'The ACP host can relay the question and response',
-    ],
-  ] as const)(
-    'aligns the system prompt with %s mode',
-    (mode, role, questionGuidance) => {
-      vi.stubEnv('SANDBOX', undefined);
-      const prompt = getCoreSystemPrompt(undefined, undefined, undefined, mode);
+  it('uses Qwen tool function names in the adapted prompt', () => {
+    const prompt = getCoreSystemPrompt();
 
-      expect(prompt).toContain(`You are Qwen Code, ${role}`);
-      expect(prompt).toContain(questionGuidance);
-    },
-  );
+    for (const toolName of [
+      'read_file',
+      'write_file',
+      'edit',
+      'glob',
+      'grep_search',
+      'run_shell_command',
+      'skill',
+    ]) {
+      expect(prompt).toContain(`\`${toolName}\``);
+    }
 
-  it('does not tell headless runs to wait for user input', () => {
-    vi.stubEnv('SANDBOX', undefined);
-    vi.mocked(isGitRepository).mockReturnValue(true);
+    expect(prompt).not.toContain('the Write tool');
+    expect(prompt).not.toContain('via Skill');
+    expect(prompt).not.toContain('Bash');
+  });
+
+  it('does not vary by legacy interaction mode argument', () => {
     const prompt = getCoreSystemPrompt(
       undefined,
       undefined,
       undefined,
       'headless',
     );
-
-    expect(prompt).not.toContain('stop and ask the user for explicit approval');
-    expect(prompt).not.toContain('ask clarifying questions');
-    expect(prompt).not.toContain('If unsure, ask the user');
-    expect(prompt).not.toContain(
-      'ask for clarification or confirmation where needed',
-    );
-    expect(prompt).not.toMatch(/Use 'ask_user_question' when you need/);
-    expect(
-      prompt.lastIndexOf('This is a non-interactive, single-turn run'),
-    ).toBeGreaterThan(prompt.lastIndexOf('# Examples'));
+    expect(prompt).toBe(DEFAULT_SYSTEM_PROMPT);
   });
 
   it('instructs the model to preserve unrelated existing work', () => {
-    vi.stubEnv('SANDBOX', undefined);
-    vi.mocked(isGitRepository).mockReturnValue(true);
     const prompt = getCoreSystemPrompt();
 
+    expect(prompt).toContain("preserve the user's existing or unexpected work");
     expect(prompt).toContain(
-      'Treat existing or unexpected changes as user-owned',
-    );
-    expect(prompt).toContain(
-      'Do not modify, stage, commit, or revert unrelated changes',
-    );
-    expect(prompt).toContain(
-      'Stage only paths that belong to the requested change',
-    );
-    expect(prompt).toContain(
-      'Do not use broad staging commands such as `git add -A` when unrelated changes are present',
+      'Do not overwrite, revert, stage, or otherwise mix unrelated changes',
     );
   });
 
-  it('does not tell the model to enter plan mode without user opt-in', () => {
-    vi.stubEnv('SANDBOX', undefined);
+  it('excludes collector and unsupported runtime-specific content', () => {
     const prompt = getCoreSystemPrompt();
 
-    expect(prompt).toContain(
-      'Do not enter plan mode or call enter_plan_mode on your own',
-    );
-    expect(prompt).toContain(
-      'Use plan mode only when the user explicitly asks you to switch to plan mode',
-    );
-    expect(prompt).not.toContain(
-      'When the work requires a shared plan before execution, enter plan mode',
-    );
-  });
-
-  it('uses todos selectively and keeps plans outcome-oriented', () => {
-    vi.stubEnv('SANDBOX', undefined);
-    const prompt = getCoreSystemPrompt();
-
-    expect(prompt).toContain('complex, ambiguous, or multi-phase tasks');
-    expect(prompt).toContain('Do not use it for simple or single-step queries');
-    expect(prompt).toContain('unless the user explicitly asks for a plan');
-    expect(prompt).toContain('Keep it short and outcome-oriented');
-    expect(prompt).toContain(
-      'rather than one item per error, file, command, or minor edit',
-    );
-    expect(prompt).not.toContain('VERY frequently');
-    expect(prompt).not.toContain('EXTREMELY helpful');
-    expect(prompt).not.toContain('write 10 items to the todo list');
-  });
-
-  it('adapts final response detail to the request', () => {
-    vi.stubEnv('SANDBOX', undefined);
-    const prompt = getCoreSystemPrompt();
-
-    expect(prompt).toContain(
-      'Final responses should be concise by default, but their shape and depth must match the request',
-    );
-    expect(prompt).toContain(
-      'For code reviews, explanations, investigations, or substantial changes',
-    );
-    expect(prompt).toContain(
-      'complex findings may require several paragraphs or sections',
-    );
-    expect(prompt).not.toContain('End-of-turn summary: one or two sentences');
-    expect(prompt).not.toContain('Nothing else.');
-    expect(prompt).not.toContain('fewer than 3 lines');
+    for (const excludedContent of [
+      '===== SYSTEM MESSAGE INDEX',
+      '/logs/agent/sessions/projects/-workspace/memory/',
+      'Fast mode',
+      'Available agent types for the Agent tool',
+      'The following skills are available',
+      '# Outside of Sandbox',
+      '# Sandbox',
+      '# macOS Seatbelt',
+      '# Executing actions with care',
+      '# Git Repository',
+      '# Examples (Illustrating Tone and Workflow)',
+      '# Final Reminder',
+    ]) {
+      expect(prompt).not.toContain(excludedContent);
+    }
   });
 
   it('should return the base prompt when userMemory is empty string', () => {
     vi.stubEnv('SANDBOX', undefined);
     const prompt = getCoreSystemPrompt('');
-    expect(prompt).not.toContain('---\n\n');
-    expect(prompt).toContain('You are Qwen Code, an interactive CLI agent');
-    expect(prompt).toMatchSnapshot();
+    expect(prompt).toBe(DEFAULT_SYSTEM_PROMPT);
   });
 
   it('should return the base prompt when userMemory is whitespace only', () => {
     vi.stubEnv('SANDBOX', undefined);
     const prompt = getCoreSystemPrompt('   \n  \t ');
-    expect(prompt).not.toContain('---\n\n');
-    expect(prompt).toContain('You are Qwen Code, an interactive CLI agent');
-    expect(prompt).toMatchSnapshot();
+    expect(prompt).toBe(DEFAULT_SYSTEM_PROMPT);
   });
 
-  it('should append userMemory with separator when provided', () => {
-    vi.stubEnv('SANDBOX', undefined);
+  it('keeps runtime user context out of the fixed system prompt', () => {
     const memory = 'This is custom user memory.\nBe extra polite.';
-    const expectedSuffix = `\n\n---\n\n${memory}`;
     const prompt = getCoreSystemPrompt(memory);
 
-    expect(prompt.endsWith(expectedSuffix)).toBe(true);
-    expect(prompt).toContain('You are Qwen Code, an interactive CLI agent'); // Ensure base prompt follows
-    expect(prompt).toMatchSnapshot(); // Snapshot the combined prompt
+    expect(prompt).toBe(DEFAULT_SYSTEM_PROMPT);
+    expect(prompt).not.toContain(memory);
   });
 
-  it('should append extra system prompt instructions after user memory when provided', () => {
-    vi.stubEnv('SANDBOX', undefined);
-    const memory = 'Remember the project conventions.';
-    const appendInstruction = 'Always answer in exactly one sentence.';
-    const prompt = getCoreSystemPrompt(memory, undefined, appendInstruction);
+  it('keeps the general Memory protocol in the fixed base', () => {
+    const prompt = getCoreSystemPrompt();
 
-    expect(prompt).toContain(`\n\n---\n\n${memory}`);
-    expect(prompt).toContain(`\n\n---\n\n${appendInstruction}`);
-    expect(prompt.indexOf(memory)).toBeLessThan(
-      prompt.indexOf(appendInstruction),
+    expect(prompt.indexOf('# Session-specific guidance')).toBeLessThan(
+      prompt.indexOf('# Memory'),
+    );
+    expect(prompt.indexOf('# Memory')).toBeLessThan(
+      prompt.indexOf('# Context management'),
+    );
+    expect(prompt).toContain('persistent file-based memory');
+    expect(prompt).toContain('USER memory');
+    expect(prompt).toContain('PROJECT memory');
+    expect(prompt).toContain('TEAM memory');
+    expect(prompt).not.toContain('/tmp/project/.qwen/memory');
+    expect(prompt).not.toContain('[Preference]');
+    expect(prompt).not.toContain(
+      '/logs/agent/sessions/projects/-workspace/memory/',
     );
   });
 
-  it('should append extra instructions after a custom system prompt and user memory', () => {
+  it('does not append hierarchical memory inputs', () => {
+    const agentsMemory = '--- Context from: AGENTS.md ---\nProject rules';
+    const prompt = getCoreSystemPrompt(agentsMemory);
+
+    expect(prompt).not.toContain(agentsMemory);
+    expect(prompt.match(/^# Memory$/gm)).toHaveLength(1);
+  });
+
+  it('appends explicit extra system instructions after the fixed base', () => {
+    const appendInstruction = 'Always answer in exactly one sentence.';
+    const prompt = getCoreSystemPrompt(undefined, undefined, appendInstruction);
+
+    expect(prompt).toContain(`\n\n---\n\n${appendInstruction}`);
+  });
+
+  it('appends extra instructions after a custom base without runtime context', () => {
     const customInstruction = 'You are a release manager.';
-    const userMemory = 'The repo uses pnpm.';
     const appendInstruction = 'Only report blocking issues.';
 
     const result = getCustomSystemPrompt(
       customInstruction,
-      userMemory,
+      undefined,
       appendInstruction,
     );
 
     expect(result).toBe(
-      [customInstruction, userMemory, appendInstruction].join('\n\n---\n\n'),
+      [customInstruction, appendInstruction].join('\n\n---\n\n'),
     );
   });
 
-  it('should include sandbox-specific instructions when SANDBOX env var is set', () => {
-    vi.stubEnv('SANDBOX', 'true'); // Generic sandbox value
-    const prompt = getCoreSystemPrompt();
-    expect(prompt).toContain('# Sandbox');
-    expect(prompt).not.toContain('# macOS Seatbelt');
-    expect(prompt).not.toContain('# Outside of Sandbox');
-    expect(prompt).toMatchSnapshot();
-  });
-
-  it('should include seatbelt-specific instructions when SANDBOX env var is "sandbox-exec"', () => {
-    vi.stubEnv('SANDBOX', 'sandbox-exec');
-    const prompt = getCoreSystemPrompt();
-    expect(prompt).toContain('# macOS Seatbelt');
-    expect(prompt).not.toContain('# Sandbox');
-    expect(prompt).not.toContain('# Outside of Sandbox');
-    expect(prompt).toMatchSnapshot();
-  });
-
-  it('should include non-sandbox instructions when SANDBOX env var is not set', () => {
-    vi.stubEnv('SANDBOX', undefined); // Ensure it's not set
-    const prompt = getCoreSystemPrompt();
-    expect(prompt).toContain('# Outside of Sandbox');
-    expect(prompt).not.toContain('# Sandbox');
-    expect(prompt).not.toContain('# macOS Seatbelt');
-    expect(prompt).toMatchSnapshot();
-  });
-
-  it('should include git instructions when in a git repo', () => {
-    vi.stubEnv('SANDBOX', undefined);
-    vi.mocked(isGitRepository).mockReturnValue(true);
-    const prompt = getCoreSystemPrompt();
-    expect(prompt).toContain('# Git Repository');
-    expect(prompt).toMatchSnapshot();
-  });
-
-  it('should not include git instructions when not in a git repo', () => {
-    vi.stubEnv('SANDBOX', undefined);
-    vi.mocked(isGitRepository).mockReturnValue(false);
-    const prompt = getCoreSystemPrompt();
-    expect(prompt).not.toContain('# Git Repository');
-    expect(prompt).toMatchSnapshot();
-  });
+  it.each([undefined, 'true', 'sandbox-exec'])(
+    'does not inject sandbox guidance when SANDBOX=%s',
+    (sandbox) => {
+      vi.stubEnv('SANDBOX', sandbox);
+      expect(getCoreSystemPrompt()).toBe(DEFAULT_SYSTEM_PROMPT);
+    },
+  );
 
   describe('QWEN_SYSTEM_MD environment variable', () => {
     it('should use default prompt when QWEN_SYSTEM_MD is "false"', () => {
@@ -434,148 +339,8 @@ describe('Core System Prompt (prompts.ts)', () => {
 });
 
 describe('Model-specific tool call formats', () => {
-  beforeEach(() => {
-    vi.resetAllMocks();
-    vi.stubEnv('SANDBOX', undefined);
-  });
-
-  it('should use XML format for qwen3-coder model', () => {
-    vi.mocked(isGitRepository).mockReturnValue(false);
-    const prompt = getCoreSystemPrompt(undefined, 'qwen3-coder-7b');
-
-    // Should contain XML-style tool calls
-    expect(prompt).toContain('<tool_call>');
-    expect(prompt).toContain('<function=run_shell_command>');
-    expect(prompt).toContain('<parameter=command>');
-    expect(prompt).toContain('</function>');
-    expect(prompt).toContain('</tool_call>');
-
-    // Should NOT contain bracket-style tool calls
-    expect(prompt).not.toContain('[tool_call: run_shell_command for');
-
-    // Should NOT contain JSON-style tool calls
-    expect(prompt).not.toContain('{"name": "run_shell_command"');
-
-    expect(prompt).toMatchSnapshot();
-  });
-
-  it('should use JSON format for qwen-vl model', () => {
-    vi.mocked(isGitRepository).mockReturnValue(false);
-    const prompt = getCoreSystemPrompt(undefined, 'qwen-vl-max');
-
-    // Should contain JSON-style tool calls
-    expect(prompt).toContain('<tool_call>');
-    expect(prompt).toContain('{"name": "run_shell_command"');
-    expect(prompt).toContain(
-      '"arguments": {"command": "node server.js", "is_background": true}',
-    );
-    expect(prompt).toContain('</tool_call>');
-
-    // Should NOT contain bracket-style tool calls
-    expect(prompt).not.toContain('[tool_call: run_shell_command for');
-
-    // Should NOT contain XML-style tool calls with parameters
-    expect(prompt).not.toContain('<function=run_shell_command>');
-    expect(prompt).not.toContain('<parameter=command>');
-
-    expect(prompt).toMatchSnapshot();
-  });
-
-  it('should use bracket format for generic models', () => {
-    vi.mocked(isGitRepository).mockReturnValue(false);
-    const prompt = getCoreSystemPrompt(undefined, 'gpt-4');
-
-    // Should contain bracket-style tool calls
-    expect(prompt).toContain('[tool_call: run_shell_command for');
-    expect(prompt).toContain('because it must run in the background]');
-
-    // Should NOT contain XML-style tool calls
-    expect(prompt).not.toContain('<function=run_shell_command>');
-    expect(prompt).not.toContain('<parameter=command>');
-
-    // Should NOT contain JSON-style tool calls
-    expect(prompt).not.toContain('{"name": "run_shell_command"');
-
-    expect(prompt).toMatchSnapshot();
-  });
-
-  it('should use bracket format when no model is specified', () => {
-    vi.mocked(isGitRepository).mockReturnValue(false);
-    const prompt = getCoreSystemPrompt();
-
-    // Should contain bracket-style tool calls (default behavior)
-    expect(prompt).toContain('[tool_call: run_shell_command for');
-    expect(prompt).toContain('because it must run in the background]');
-
-    // Should NOT contain XML or JSON formats
-    expect(prompt).not.toContain('<function=run_shell_command>');
-    expect(prompt).not.toContain('{"name": "run_shell_command"');
-
-    expect(prompt).toMatchSnapshot();
-  });
-
-  it('should preserve model-specific formats with user memory', () => {
-    vi.mocked(isGitRepository).mockReturnValue(false);
-    const userMemory = 'User prefers concise responses.';
-    const prompt = getCoreSystemPrompt(userMemory, 'qwen3-coder-14b');
-
-    // Should contain XML-style tool calls
-    expect(prompt).toContain('<tool_call>');
-    expect(prompt).toContain('<function=run_shell_command>');
-
-    // Should contain user memory with separator
-    expect(prompt).toContain('---');
-    expect(prompt).toContain('User prefers concise responses.');
-
-    expect(prompt).toMatchSnapshot();
-  });
-
-  it('should preserve model-specific formats with sandbox environment', () => {
-    vi.stubEnv('SANDBOX', 'true');
-    vi.mocked(isGitRepository).mockReturnValue(false);
-    const prompt = getCoreSystemPrompt(undefined, 'qwen-vl-plus');
-
-    // Should contain JSON-style tool calls
-    expect(prompt).toContain('{"name": "run_shell_command"');
-
-    // Should contain sandbox instructions
-    expect(prompt).toContain('# Sandbox');
-
-    expect(prompt).toMatchSnapshot();
-  });
-
-  it('should use native Gemma 4 format for gemma4 models', () => {
-    vi.mocked(isGitRepository).mockReturnValue(false);
-
-    // Test detection via regex
-    const prompt = getCoreSystemPrompt(
-      undefined,
-      'unsloth/gemma-4-26B-A4B-it-qat',
-    );
-
-    // Should contain Gemma native token boundaries and quotes
-    expect(prompt).toContain('<|tool_call>call:run_shell_command');
-    expect(prompt).toContain(
-      '{command:<|"|>node server.js<|"|>,is_background:true}<tool_call|>',
-    );
-
-    // Should NOT contain legacy/generic formats
-    expect(prompt).not.toContain('[tool_call: run_shell_command for');
-    expect(prompt).not.toContain('<function=run_shell_command>');
-    expect(prompt).not.toContain('{"name": "run_shell_command"');
-
-    expect(prompt).toMatchSnapshot();
-  });
-
-  it('should override tool call format via QWEN_CODE_TOOL_CALL_STYLE env variable for gemma4', () => {
-    vi.stubEnv('QWEN_CODE_TOOL_CALL_STYLE', 'gemma4');
-    vi.mocked(isGitRepository).mockReturnValue(false);
-
-    // Pass a non-gemma model string to verify env var takes precedence
-    const prompt = getCoreSystemPrompt(undefined, 'gpt-4');
-
-    expect(prompt).toContain('<|tool_call>call:run_shell_command');
-    expect(prompt).not.toContain('[tool_call: run_shell_command for');
+  it('does not inject model-specific tool examples', () => {
+    expect(getCoreSystemPrompt()).toBe(DEFAULT_SYSTEM_PROMPT);
   });
 });
 
@@ -591,33 +356,35 @@ describe('getCustomSystemPrompt', () => {
     expect(result).not.toContain('---');
   });
 
-  it('should handle string custom instruction with user memory', () => {
+  it('does not append user memory to a custom instruction', () => {
     const customInstruction =
       'You are a helpful assistant specialized in code review.';
-    const userMemory =
-      'Remember to be extra thorough.\nFocus on security issues.';
+    const userMemory = 'Always use the repository conventions.';
     const result = getCustomSystemPrompt(customInstruction, userMemory);
 
-    expect(result).toBe(
-      'You are a helpful assistant specialized in code review.\n\n---\n\nRemember to be extra thorough.\nFocus on security issues.',
-    );
-    expect(result).toContain('---');
+    expect(result).toBe(customInstruction);
   });
 
-  it('should handle Content object with parts array and user memory', () => {
+  it('flattens a Content object without appending user memory', () => {
     const customInstruction = {
       parts: [
         { text: 'You are a code assistant. ' },
         { text: 'Always provide examples.' },
       ],
     };
-    const userMemory = 'User prefers TypeScript examples.';
-    const result = getCustomSystemPrompt(customInstruction, userMemory);
+    const result = getCustomSystemPrompt(customInstruction, 'Runtime memory');
 
-    expect(result).toBe(
-      'You are a code assistant. Always provide examples.\n\n---\n\nUser prefers TypeScript examples.',
+    expect(result).toBe('You are a code assistant. Always provide examples.');
+  });
+
+  it('appends explicit content after a custom base', () => {
+    const result = getCustomSystemPrompt(
+      'Custom base',
+      undefined,
+      'Append content',
     );
-    expect(result).toContain('---');
+
+    expect(result).toBe(['Custom base', 'Append content'].join('\n\n---\n\n'));
   });
 });
 
@@ -809,7 +576,6 @@ describe('New Applications workflow deferred to skill', () => {
   });
 
   it('system prompt does not contain the full New Applications workflow', () => {
-    vi.mocked(isGitRepository).mockReturnValue(false);
     const prompt = getCoreSystemPrompt();
     expect(prompt).not.toContain(
       'Autonomously implement and deliver a visually appealing',
@@ -818,11 +584,10 @@ describe('New Applications workflow deferred to skill', () => {
     expect(prompt).not.toContain('npx create-react-app');
   });
 
-  it('system prompt references the new-app skill', () => {
-    vi.mocked(isGitRepository).mockReturnValue(false);
+  it('system prompt does not hard-code the new-app skill', () => {
     const prompt = getCoreSystemPrompt();
-    expect(prompt).toContain('new-app');
-    expect(prompt).toContain('## New Applications');
+    expect(prompt).not.toContain('new-app');
+    expect(prompt).not.toContain('## New Applications');
   });
 });
 

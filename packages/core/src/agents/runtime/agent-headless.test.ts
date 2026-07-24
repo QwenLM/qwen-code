@@ -88,14 +88,9 @@ vi.mock('../../utils/environmentContext.js', () => ({
   SYSTEM_REMINDER_OPEN: '<system-reminder>',
   getEnvironmentContext: vi.fn().mockResolvedValue([{ text: 'Env Context' }]),
   getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
-    [
-      {
-        role: 'user',
-        parts: [{ text: '<system-reminder>\nEnv Context\n</system-reminder>' }],
-      },
-      ...(extraHistory ?? []),
-    ],
+    [...(extraHistory ?? [])],
     [],
+    [{ text: '<system-reminder>\nEnv Context\n</system-reminder>' }],
   ]),
 }));
 vi.mock('../../core/nonInteractiveToolExecutor.js');
@@ -344,6 +339,7 @@ describe('subagent.ts', () => {
         () =>
           ({
             sendMessageStream: mockSendMessageStream,
+            setPendingStartupParts: vi.fn(),
             setLastPromptTokenCount: vi.fn(),
             getHistoryFunctionResponseIds: mockGetHistoryFunctionResponseIds,
           }) as unknown as GeminiChat,
@@ -527,23 +523,21 @@ describe('subagent.ts', () => {
           'Important Rules:',
         );
 
-        // Check History (should include environment context)
+        // Startup context remains pending until the first real user message.
         const history = callArgs[2];
         expect(getInitialChatHistory).toHaveBeenCalledWith(config, undefined, {
           includeDeferredToolsReminder: false,
           includeAvailableSkillsReminder: true,
         });
-        expect(history).toEqual([
-          {
-            role: 'user',
-            parts: [
-              { text: '<system-reminder>\nEnv Context\n</system-reminder>' },
-            ],
-          },
+        expect(history).toEqual([]);
+        expect(
+          vi.mocked(GeminiChat).mock.results[0]?.value.setPendingStartupParts,
+        ).toHaveBeenCalledWith([
+          { text: '<system-reminder>\nEnv Context\n</system-reminder>' },
         ]);
       });
 
-      it('should append userMemory to the system prompt when available', async () => {
+      it('should keep userMemory out of the subagent system prompt', async () => {
         const { config } = await createMockConfig();
         const userMemoryContent =
           '# Output language preference: English\nRespond in English.';
@@ -575,10 +569,10 @@ describe('subagent.ts', () => {
         expect(generationConfig.systemInstruction).toContain(
           'Important Rules:',
         );
-        expect(generationConfig.systemInstruction).toContain(
+        expect(generationConfig.systemInstruction).not.toContain(
           '# Output language preference: English',
         );
-        expect(generationConfig.systemInstruction).toContain(
+        expect(generationConfig.systemInstruction).not.toContain(
           'Respond in English.',
         );
       });
@@ -640,7 +634,7 @@ describe('subagent.ts', () => {
         expect(sysPrompt).not.toContain('---');
       });
 
-      it('should replace env history with initialMessages when both initialMessages and systemPrompt are set', async () => {
+      it('should keep startup context pending when initialMessages are present', async () => {
         const { config } = await createMockConfig();
         vi.mocked(GeminiChat).mockClear();
 
@@ -677,11 +671,11 @@ describe('subagent.ts', () => {
         expect(generationConfig.systemInstruction).toContain(
           'Important Rules:',
         );
-        // Env bootstrap is skipped; history is exactly initialMessages.
+        // Restored history stays unchanged; startup context is pending.
         expect(history).toEqual(initialMessages);
       });
 
-      it('should skip env history when initialMessages is an empty array', async () => {
+      it('should queue startup context when initialMessages is an empty array', async () => {
         const { config } = await createMockConfig();
         vi.mocked(GeminiChat).mockClear();
         vi.mocked(getInitialChatHistory).mockClear();
@@ -710,7 +704,10 @@ describe('subagent.ts', () => {
 
         expect(generationConfig.systemInstruction).toContain('System Agent.');
         expect(callArgs[2]).toEqual([]);
-        expect(getInitialChatHistory).not.toHaveBeenCalled();
+        expect(getInitialChatHistory).toHaveBeenCalledWith(config, undefined, {
+          includeDeferredToolsReminder: false,
+          includeAvailableSkillsReminder: true,
+        });
       });
 
       it('should use renderedSystemPrompt verbatim and bypass templating', async () => {
@@ -718,10 +715,14 @@ describe('subagent.ts', () => {
         vi.mocked(GeminiChat).mockClear();
 
         const rendered = 'Verbatim parent system prompt ${name}';
+        const startupParts = [
+          { text: '<system-reminder>inherited context</system-reminder>' },
+        ];
         const promptConfig: PromptConfig = {
           renderedSystemPrompt: rendered,
+          startupParts,
           initialMessages: [
-            { role: 'user', parts: [{ text: 'hi' }] },
+            { role: 'user', parts: [...startupParts, { text: 'hi' }] },
             { role: 'model', parts: [{ text: 'ok' }] },
           ],
         };
@@ -742,6 +743,9 @@ describe('subagent.ts', () => {
         const generationConfig = getGenerationConfigFromMock();
         // No ${name} substitution and no non-interactive rules appended.
         expect(generationConfig.systemInstruction).toBe(rendered);
+        expect(
+          vi.mocked(GeminiChat).mock.results[0]?.value.setPendingStartupParts,
+        ).toHaveBeenCalledWith(startupParts);
       });
 
       it('should throw an error if template variables are missing', async () => {
@@ -1833,6 +1837,7 @@ describe('subagent.ts', () => {
           () =>
             ({
               sendMessageStream: mockSendMessageStream,
+              setPendingStartupParts: vi.fn(),
               setLastPromptTokenCount: vi.fn(),
               getHistoryFunctionResponseIds: vi.fn(() => new Set<string>()),
             }) as unknown as GeminiChat,
@@ -1874,6 +1879,7 @@ describe('subagent.ts', () => {
           () =>
             ({
               sendMessageStream: mockSendMessageStream,
+              setPendingStartupParts: vi.fn(),
               setLastPromptTokenCount: vi.fn(),
               getHistoryFunctionResponseIds: vi.fn(() => new Set<string>()),
             }) as unknown as GeminiChat,
@@ -1940,6 +1946,7 @@ describe('subagent.ts', () => {
           () =>
             ({
               sendMessageStream: mockSendMessageStream,
+              setPendingStartupParts: vi.fn(),
               setLastPromptTokenCount: vi.fn(),
               getHistoryFunctionResponseIds: vi.fn(() => new Set<string>()),
             }) as unknown as GeminiChat,

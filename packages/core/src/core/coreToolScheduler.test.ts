@@ -14970,7 +14970,8 @@ describe('CoreToolScheduler activation wiring', () => {
     // Even when collectAvailableSkillEntries throws, the fallback
     // should still announce the activated skill by name.
     expect(responseText).toContain('tsx-helper');
-    expect(responseText).toContain('available_skills');
+    expect(responseText).toContain('- tsx-helper:');
+    expect(responseText).not.toContain('<available_skills>');
   });
 
   // Build a scheduler that runs a single ReadFile call against a

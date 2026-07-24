@@ -2836,6 +2836,68 @@ describe('AgentTool', () => {
       );
     });
 
+    it('reattaches merged startup parts to a bounded fork window', async () => {
+      const startupParts = [
+        {
+          text: '<system-reminder>\n# Session context\nproject context\n</system-reminder>',
+        },
+      ];
+      const firstUser = {
+        role: 'user' as const,
+        parts: [...startupParts, { text: 'first question' }],
+      };
+      const firstModel = {
+        role: 'model' as const,
+        parts: [{ text: 'first answer' }],
+      };
+      const secondUser = {
+        role: 'user' as const,
+        parts: [{ text: 'second question' }],
+      };
+      const secondModel = {
+        role: 'model' as const,
+        parts: [{ text: 'second answer' }],
+      };
+      vi.mocked(config.getGeminiClient).mockReturnValue({
+        getHistoryShallow: vi
+          .fn()
+          .mockReturnValue([firstUser, firstModel, secondUser, secondModel]),
+        getHistoryForForkWindow: vi
+          .fn()
+          .mockReturnValue([firstModel, secondUser, secondModel]),
+        getChat: vi.fn().mockReturnValue({
+          getStartupPartsSnapshot: vi.fn().mockReturnValue(startupParts),
+          getGenerationConfig: vi.fn().mockReturnValue({
+            systemInstruction: 'parent system prompt',
+          }),
+        }),
+      } as unknown as ReturnType<Config['getGeminiClient']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'some task',
+        prompt: 'do the thing',
+        subagent_type: 'fork',
+        fork_turns: '1',
+      });
+
+      await invocation.execute();
+
+      expect(vi.mocked(AgentHeadless.create).mock.calls[0]?.[2]).toEqual(
+        expect.objectContaining({
+          startupParts,
+          initialMessages: [
+            {
+              role: 'user',
+              parts: [...startupParts, { text: 'second question' }],
+            },
+            secondModel,
+          ],
+        }),
+      );
+    });
+
     it('preserves full curated history when fork_turns is "all"', async () => {
       // The `all` branch takes a different source path than the numeric
       // branch: it reads curated history from getHistoryShallow(true) and
@@ -2874,7 +2936,10 @@ describe('AgentTool', () => {
       vi.mocked(config.getGeminiClient).mockReturnValue({
         getHistoryShallow,
         getChat: vi.fn().mockReturnValue({
-          getGenerationConfig: vi.fn().mockReturnValue({}),
+          getStartupPartsSnapshot: vi.fn().mockReturnValue(startup.parts),
+          getGenerationConfig: vi.fn().mockReturnValue({
+            systemInstruction: 'parent system prompt',
+          }),
         }),
       } as unknown as ReturnType<Config['getGeminiClient']>);
 
@@ -2895,6 +2960,7 @@ describe('AgentTool', () => {
       // text message, so no synthetic tool-response/ack is appended).
       expect(vi.mocked(AgentHeadless.create).mock.calls[0]?.[2]).toEqual(
         expect.objectContaining({
+          startupParts: startup.parts,
           initialMessages: [
             startup,
             firstUser,
@@ -5460,11 +5526,15 @@ describe('AgentTool', () => {
         },
         tools: [{ functionDeclarations: [{ name: 'Bash' }, { name: 'Read' }] }],
       };
+      const startupParts = [
+        { text: '<system-reminder>parent context</system-reminder>' },
+      ];
       const geminiClient = {
         getHistory: vi
           .fn()
           .mockReturnValue([{ role: 'model', parts: [{ text: 'Ready' }] }]),
         getChat: vi.fn().mockReturnValue({
+          getStartupPartsSnapshot: () => startupParts,
           getGenerationConfig: () => generationConfig,
         }),
       };
@@ -5487,6 +5557,7 @@ describe('AgentTool', () => {
         expect.any(String),
         expect.objectContaining({
           bootstrapSystemInstruction: generationConfig.systemInstruction,
+          bootstrapStartupParts: startupParts,
           bootstrapTools: generationConfig.tools[0].functionDeclarations,
         }),
       );

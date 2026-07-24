@@ -566,4 +566,75 @@ export function appendManagedAutoMemoryToUserMemory(
   return `${trimmedUserMemory}\n\n---\n\n${managedPrompt}`;
 }
 
+export function buildDefaultMemoryPrompt(
+  memoryDir: string,
+  indexContent?: string | null,
+  userSection?: UserAutoMemorySection,
+  teamSection?: TeamAutoMemorySection,
+): string {
+  const directories: string[] = [];
+  if (userSection) {
+    directories.push(
+      `- USER memory (cross-project, private): \`${userSection.memoryDir}\``,
+    );
+  }
+  directories.push(
+    `- PROJECT memory (this project, private): \`${memoryDir}\``,
+  );
+  if (teamSection) {
+    directories.push(
+      `- TEAM memory (this project, shared through the repository): \`${teamSection.memoryDir}\``,
+    );
+  }
+
+  const populatedIndexSections = buildPopulatedIndexSections(
+    memoryDir,
+    indexContent,
+    userSection,
+    teamSection,
+  );
+
+  return [
+    '# Memory context',
+    '',
+    'The following persistent memory directories are active for this session:',
+    ...directories,
+    ...(populatedIndexSections.length > 0
+      ? ['', ...populatedIndexSections]
+      : []),
+  ].join('\n');
+}
+
+function buildPopulatedIndexSections(
+  memoryDir: string,
+  indexContent: string | null | undefined,
+  userSection: UserAutoMemorySection | undefined,
+  teamSection: TeamAutoMemorySection | undefined,
+): string[] {
+  const sections: string[] = [];
+  const append = (dir: string, content: string | null | undefined): void => {
+    const trimmed = content?.trim();
+    if (!trimmed) {
+      return;
+    }
+    if (sections.length > 0) {
+      sections.push('');
+    }
+    sections.push(
+      `## ${dir}/MEMORY.md`,
+      '',
+      truncateManagedAutoMemoryIndex(trimmed),
+    );
+  };
+
+  if (userSection) {
+    append(userSection.memoryDir, userSection.indexContent);
+  }
+  append(memoryDir, indexContent);
+  if (teamSection) {
+    append(teamSection.memoryDir, teamSection.indexContent);
+  }
+  return sections;
+}
+
 export { MAX_MANAGED_AUTO_MEMORY_INDEX_LINES };

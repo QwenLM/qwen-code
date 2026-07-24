@@ -161,21 +161,13 @@ function formatGitPromptValue(value: string): string {
 }
 
 /**
- * Gets the recent git status including the last 5 commits.
- * Mirrors claude-code's getGitStatus() in context.ts.
- *
- * Injected as context at conversation start so the main agent can reason about
- * version history (e.g. "regressed in 2.1" + "Recent commits: 2.1.8" triggers
- * Explore with git log). Critical for SWE-bench regression tasks.
- *
- * NOTE: Do NOT pass this to Explore/read-only subagents - they run their own
- * git log. The snapshot here is dead weight (and potentially stale) for them.
+ * Gets a bounded snapshot of the current branch, worktree status, and recent
+ * commits. The output is model-facing repository data, so every line is
+ * prefixed and the framing explicitly marks it as untrusted and staleable.
  */
 export function getRecentGitStatus(cwd: string): string | null {
   if (!isGitRepository(cwd)) return null;
   try {
-    // The branch header lets one Git process provide both values while the
-    // short status remainder keeps the existing path and color configuration.
     const statusWithBranch = execSync(
       'git --no-optional-locks status --short --branch',
       {
@@ -208,11 +200,10 @@ export function getRecentGitStatus(cwd: string): string | null {
       timeout: GIT_STATUS_TIMEOUT_MS,
     }).trim();
 
-    // Truncate status if too long (>2k chars)
-    const MAX_STATUS_CHARS = 2000;
+    const maxStatusChars = 2000;
     const truncatedStatus =
-      status.length > MAX_STATUS_CHARS
-        ? status.substring(0, MAX_STATUS_CHARS) +
+      status.length > maxStatusChars
+        ? status.substring(0, maxStatusChars) +
           '\n... (truncated, run `git status` for full output)'
         : status;
 
@@ -226,7 +217,7 @@ export function getRecentGitStatus(cwd: string): string | null {
     ].join('\n');
   } catch (error) {
     debugLogger.warn(
-      'Failed to get recent git status for system prompt:',
+      'Failed to get recent git status for startup context:',
       error,
     );
     return null;

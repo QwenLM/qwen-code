@@ -11,7 +11,7 @@
  * run, tool), termination modes, and interactive agent types.
  */
 
-import type { Content, FunctionDeclaration } from '@google/genai';
+import type { Content, FunctionDeclaration, Part } from '@google/genai';
 
 // ─── Agent Configuration ─────────────────────────────────────
 
@@ -21,8 +21,8 @@ import type { Content, FunctionDeclaration } from '@google/genai';
 export interface PromptConfig {
   /**
    * A single system prompt string that defines the agent's persona and instructions.
-   * Templated via ${var} substitution, optionally suffixed with non-interactive
-   * rules and user memory. Mutually exclusive with `renderedSystemPrompt`.
+   * Templated via ${var} substitution and optionally suffixed with
+   * non-interactive rules. Mutually exclusive with `renderedSystemPrompt`.
    */
   systemPrompt?: string;
 
@@ -35,9 +35,16 @@ export interface PromptConfig {
   renderedSystemPrompt?: string | Content;
 
   /**
-   * Seed chat history. When set, fully replaces the default env bootstrap
-   * (the caller owns the full prior context, e.g. fork inheriting parent
-   * history). Can coexist with `systemPrompt` / `renderedSystemPrompt`.
+   * Complete startup-context snapshot inherited by a fork. Parts already in
+   * `initialMessages` stay non-pending and are re-queued if compaction removes
+   * them from history.
+   */
+  startupParts?: Part[];
+
+  /**
+   * Seed chat history. Agents with a regular `systemPrompt` also queue fresh
+   * startup context for their next real request. Forks with a
+   * `renderedSystemPrompt` inherit the parent's complete context instead.
    */
   initialMessages?: Content[];
 }

@@ -140,10 +140,10 @@ async function setUiLanguage(
  * Handles the /language output command, updating both the setting and the rule file.
  * 'auto' is preserved in settings and written as a dynamic same-language rule.
  *
- * After persisting the change, hierarchical memory is reloaded so `output-language.md`
- * flows back into `userMemory`, and the live chat's system instruction is rebuilt
- * in place. The new language therefore takes effect on the next turn without
- * restarting the session and without losing conversation history.
+ * After persisting the change, hierarchical memory is reloaded so
+ * `output-language.md` flows back into `userMemory`, then the live chat queues
+ * refreshed session context. The new language therefore takes effect on the
+ * next turn without restarting the session or losing conversation history.
  */
 async function setOutputLanguage(
   context: CommandContext,
@@ -170,8 +170,8 @@ async function setOutputLanguage(
     }
 
     // Apply the new rule to the running session: refresh hierarchical memory
-    // so output-language.md is re-read into userMemory, then rebuild and
-    // re-bind the system instruction on the live chat.
+    // so output-language.md is re-read into userMemory, then queue refreshed
+    // session context on the live chat.
     const config = context.services.config;
     if (config) {
       try {
