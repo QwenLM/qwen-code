@@ -48,6 +48,12 @@ export interface EndInteractionOptions {
 
 export type InteractionSpanResultStatus = 'ok' | 'error' | 'cancelled';
 
+export interface StartLLMRequestSpanOptions {
+  operationName?: 'chat' | 'generate_content';
+  providerName?: string;
+  outputType?: 'text' | 'json' | 'image' | 'speech';
+}
+
 export interface LLMRequestMetadata {
   inputTokens?: number;
   outputTokens?: number;
@@ -58,6 +64,8 @@ export interface LLMRequestMetadata {
    * by each provider generator before reaching LoggingContentGenerator.
    */
   cachedInputTokens?: number;
+  cacheCreationInputTokens?: number;
+  cachedInputTokensReported?: boolean;
   success: boolean;
   durationMs?: number;
   error?: string;
@@ -100,8 +108,12 @@ export interface LLMRequestMetadata {
   retryTotalDelayMs?: number;
   /** Provider response ID (e.g. DashScope request_id / OpenAI completion id). */
   responseId?: string;
+  /** Model identifier returned by the provider, without request-model fallback. */
+  responseModel?: string;
   /** Model finish/stop reason (e.g. "STOP", "MAX_TOKENS"). */
   finishReason?: string;
+  /** Finish reasons for all candidates, ordered by candidate index. */
+  finishReasons?: string[];
   /**
    * Reasoning/thinking token count. For OpenAI-compatible providers,
    * this value is already INCLUDED in outputTokens (candidatesTokenCount).
@@ -275,7 +287,8 @@ function sweepStaleSpans(now: number): void {
       // garbage-collected by the TTL safety net" from "deliberately
       // ended without setting status / attrs" (#4321 review).
       const ageMs = now - ctx.startTime;
-      const toolName = ctx.attributes['tool.name'];
+      const toolName =
+        ctx.attributes['gen_ai.tool.name'] ?? ctx.attributes['tool.name'];
       const callId = ctx.attributes['tool.call_id'];
       // setAttributes and span.end() are wrapped separately so a
       // setAttributes throw can't prevent the span from being ended
@@ -352,7 +365,7 @@ function getSpanId(span: Span): string {
   return span.spanContext().spanId || '';
 }
 
-const SPAN_ERROR_MAX_CHARS = 1024;
+const SPAN_TEXT_MAX_CHARS = 1024;
 
 /**
  * Bound the size of error strings written to span attributes / status
@@ -368,16 +381,20 @@ const SPAN_ERROR_MAX_CHARS = 1024;
  * ~32KB), so we keep the simpler char-count bound rather than paying
  * the encoder cost on every endXSpan.
  */
-export function truncateSpanError(s: string): string {
-  if (s.length <= SPAN_ERROR_MAX_CHARS) return s;
+function truncateSpanText(s: string): string {
+  if (s.length <= SPAN_TEXT_MAX_CHARS) return s;
   // Back up one code unit if the cut lands on a high surrogate so we
   // don't emit a lone surrogate followed by the sentinel — strict
   // OTLP/gRPC collectors reject span batches with invalid UTF-8
   // (a lone high surrogate encodes to an invalid byte sequence).
-  let end = SPAN_ERROR_MAX_CHARS;
+  let end = SPAN_TEXT_MAX_CHARS;
   const code = s.charCodeAt(end - 1);
   if (code >= 0xd800 && code <= 0xdbff) end--;
   return s.slice(0, end) + '…[truncated]';
+}
+
+export function truncateSpanError(s: string): string {
+  return truncateSpanText(s);
 }
 
 function getTracer() {
@@ -553,7 +570,11 @@ export async function withInteractionSpan<T>(
 
 // --- LLM Request Spans ---
 
-export function startLLMRequestSpan(model: string, promptId: string): Span {
+export function startLLMRequestSpan(
+  model: string,
+  promptId: string,
+  options?: StartLLMRequestSpanOptions,
+): Span {
   if (!isTelemetrySdkInitialized()) {
     return NOOP_SPAN;
   }
@@ -570,17 +591,24 @@ export function startLLMRequestSpan(model: string, promptId: string): Span {
   const sessionId = resolveSessionId(parentCtx);
   const attributes: Attributes = {
     ...(sessionId ? { 'session.id': sessionId } : {}),
-    'qwen-code.model': model,
+    ...(sessionId ? { 'gen_ai.conversation.id': sessionId } : {}),
     'qwen-code.prompt_id': promptId,
     'llm_request.context': subagentContext.getStore()
       ? 'subagent'
       : interactionContext.getStore()
         ? 'interaction'
         : 'standalone',
-    // Dual-emit OTel GenAI semantic convention (Stable). Private name
-    // (qwen-code.model) remains authoritative; gen_ai.* is a compat layer
-    // for spec-aware backends. See docs/design/telemetry-llm-request-timing-design.md (D8).
+    // Emit the version-pinned OTel GenAI semantic convention.
     'gen_ai.request.model': model,
+    ...(options?.operationName
+      ? { 'gen_ai.operation.name': options.operationName }
+      : {}),
+    ...(options?.providerName
+      ? { 'gen_ai.provider.name': options.providerName }
+      : {}),
+    ...(options?.outputType
+      ? { 'gen_ai.output.type': options.outputType }
+      : {}),
   };
 
   const span = getTracer().startSpan(
@@ -628,26 +656,39 @@ export function endLLMRequestSpan(
     const endAttributes: Attributes = { duration_ms: duration };
 
     if (metadata) {
-      if (metadata.inputTokens !== undefined) {
-        endAttributes['input_tokens'] = metadata.inputTokens;
-        // Dual-emit OTel GenAI semconv (Stable). Private name stays authoritative.
+      if (
+        metadata.inputTokens !== undefined &&
+        Number.isSafeInteger(metadata.inputTokens) &&
+        metadata.inputTokens >= 0
+      ) {
         endAttributes['gen_ai.usage.input_tokens'] = metadata.inputTokens;
       }
-      if (metadata.outputTokens !== undefined) {
-        endAttributes['output_tokens'] = metadata.outputTokens;
+      if (
+        metadata.outputTokens !== undefined &&
+        Number.isSafeInteger(metadata.outputTokens) &&
+        metadata.outputTokens >= 0
+      ) {
         endAttributes['gen_ai.usage.output_tokens'] = metadata.outputTokens;
       }
-      if (metadata.cachedInputTokens !== undefined) {
-        endAttributes['cached_input_tokens'] = metadata.cachedInputTokens;
-        // Dual-emit OTel GenAI semconv (Experimental — may rename before Stable).
-        endAttributes['gen_ai.usage.cached_tokens'] =
+      if (
+        metadata.cachedInputTokensReported &&
+        metadata.cachedInputTokens !== undefined &&
+        Number.isSafeInteger(metadata.cachedInputTokens) &&
+        metadata.cachedInputTokens >= 0
+      ) {
+        endAttributes['gen_ai.usage.cache_read.input_tokens'] =
           metadata.cachedInputTokens;
+      }
+      if (
+        metadata.cacheCreationInputTokens !== undefined &&
+        Number.isSafeInteger(metadata.cacheCreationInputTokens) &&
+        metadata.cacheCreationInputTokens >= 0
+      ) {
+        endAttributes['gen_ai.usage.cache_creation.input_tokens'] =
+          metadata.cacheCreationInputTokens;
       }
       if (metadata.ttftMs !== undefined) {
         endAttributes['ttft_ms'] = metadata.ttftMs;
-        // Dual-emit OTel GenAI semconv (Experimental). Spec unit is seconds-as-double.
-        endAttributes['gen_ai.server.time_to_first_token'] =
-          metadata.ttftMs / 1000;
       }
       if (metadata.requestSetupMs !== undefined) {
         endAttributes['request_setup_ms'] = metadata.requestSetupMs;
@@ -687,19 +728,22 @@ export function endLLMRequestSpan(
       if (metadata.error !== undefined)
         endAttributes['error'] = truncateSpanError(metadata.error);
       if (metadata.responseId !== undefined) {
-        endAttributes['response_id'] = metadata.responseId;
         endAttributes['gen_ai.response.id'] = metadata.responseId;
       }
-      if (metadata.finishReason !== undefined) {
-        endAttributes['finish_reason'] = metadata.finishReason;
-        endAttributes['gen_ai.response.finish_reasons'] = [
-          metadata.finishReason,
-        ];
+      if (metadata.responseModel !== undefined) {
+        endAttributes['gen_ai.response.model'] = metadata.responseModel;
+      }
+      const finishReasons = metadata.finishReasons?.length
+        ? metadata.finishReasons
+        : metadata.finishReason !== undefined
+          ? [metadata.finishReason]
+          : undefined;
+      if (finishReasons) {
+        endAttributes['finish_reason'] = finishReasons[0];
+        endAttributes['gen_ai.response.finish_reasons'] = finishReasons;
       }
       if (metadata.thoughtsTokenCount !== undefined) {
         endAttributes['thoughts_token_count'] = metadata.thoughtsTokenCount;
-        endAttributes['gen_ai.usage.reasoning_tokens'] =
-          metadata.thoughtsTokenCount;
       }
       if (metadata.subagentName !== undefined) {
         endAttributes['subagent_name'] = metadata.subagentName;
@@ -719,7 +763,7 @@ export function endLLMRequestSpan(
     // Isolated in its own try/catch so metric failures cannot affect span status.
     try {
       if (metadata?.config && metadata.success) {
-        const model = String(spanCtx.attributes['qwen-code.model'] ?? '');
+        const model = String(spanCtx.attributes['gen_ai.request.model'] ?? '');
         if (metadata.requestSetupMs !== undefined) {
           recordApiRequestBreakdown(metadata.config, metadata.requestSetupMs, {
             model,
@@ -797,8 +841,10 @@ export function startToolSpan(
   const sessionId = resolveSessionId(parentCtx);
   const attributes: Attributes = {
     ...(sessionId ? { 'session.id': sessionId } : {}),
-    'tool.name': toolName,
     ...attrs,
+    'gen_ai.operation.name': 'execute_tool',
+    'gen_ai.tool.name': toolName,
+    'gen_ai.tool.type': 'function',
   };
 
   const span = getTracer().startSpan(
@@ -1312,6 +1358,8 @@ export interface StartSubagentSpanOptions {
   agentId: string;
   /** Human-readable subagent type (e.g. `Explore`, `code-reviewer`, `fork`). */
   subagentName: string;
+  /** Human-readable description from the resolved subagent definition. */
+  agentDescription?: string;
   invocationKind: SubagentInvocationKind;
   isBuiltIn: boolean;
   /** Parent agent's id, when this subagent is nested inside another. */
@@ -1320,7 +1368,7 @@ export interface StartSubagentSpanOptions {
   depth: number;
   /** Parent's request id (for cross-trace correlation with parent prompt). */
   invokingRequestId?: string;
-  /** Session id — set as both `gen_ai.conversation.id` and vendor key. */
+  /** Session id used as `gen_ai.conversation.id`. */
   sessionId: string;
   /** Model override, if this subagent runs on a different model than parent. */
   modelOverride?: string;
@@ -1359,10 +1407,10 @@ export interface SubagentSpanMetadata {
  *   inflate the parent trace's duration / span count beyond several
  *   backends' caps (e.g. LangSmith's 25k-run cap per trace).
  *
- * Dual-emits the OTel GenAI spec attrs (`gen_ai.agent.id`, `gen_ai.agent.name`,
- * `gen_ai.conversation.id`) alongside vendor `qwen-code.subagent.*` keys.
- * Spec is in Development status — dual-emit lets dashboards transition once
- * the spec stabilises; drop the vendor key in a follow-up.
+ * Emits OTel GenAI agent name, description, and conversation attributes
+ * alongside vendor `qwen-code.subagent.*` keys.
+ * The GenAI spec is in Development status; vendor lifecycle and invocation
+ * identity attributes remain available for existing Qwen Code queries.
  */
 export function startSubagentSpan(opts: StartSubagentSpanOptions): Span {
   if (!isTelemetrySdkInitialized()) return NOOP_SPAN;
@@ -1372,19 +1420,23 @@ export function startSubagentSpan(opts: StartSubagentSpanOptions): Span {
   const attributes: Attributes = {
     // Spec-aligned (OTel GenAI Agent Spans, Development status).
     'gen_ai.operation.name': 'invoke_agent',
-    'gen_ai.provider.name': SERVICE_NAME,
-    'gen_ai.agent.id': opts.agentId,
     'gen_ai.agent.name': opts.subagentName,
     'gen_ai.conversation.id': opts.sessionId,
 
-    // Vendor (qwen-code-specific). Dual-emit id/name so dashboards already
-    // querying spec keys still work.
+    // Vendor identity and lifecycle. The per-invocation ID stays private;
+    // gen_ai.agent.id is reserved for a stable agent definition identity.
     'qwen-code.subagent.id': opts.agentId,
     'qwen-code.subagent.name': opts.subagentName,
     'qwen-code.subagent.invocation_kind': opts.invocationKind,
     'qwen-code.subagent.is_built_in': opts.isBuiltIn,
     'qwen-code.subagent.depth': opts.depth,
   };
+
+  if (opts.agentDescription !== undefined) {
+    attributes['gen_ai.agent.description'] = truncateSpanText(
+      opts.agentDescription,
+    );
+  }
 
   if (opts.modelOverride !== undefined) {
     attributes['gen_ai.request.model'] = opts.modelOverride;

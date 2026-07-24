@@ -144,6 +144,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   // consumers silently drop this event via `asKnownDaemonEvent`
   // returning undefined (no protocol bump required).
   'followup_suggestion',
+  'channel_delivery_result',
   'user_shell_command',
   'user_shell_result',
   'turn_complete',
@@ -389,12 +390,22 @@ export interface DaemonStateResyncRequiredData {
    * Machine-readable resync reason. One of:
    * - `'ring_evicted'`: consumer's `Last-Event-ID` fell behind the ring's
    *   earliest surviving id (same-epoch gap).
-   * - `'epoch_reset'`: consumer's `Last-Event-ID` is past the bus
-   *   high-water — its cursor is from a previous bus epoch (daemon
-   *   restart rebuilt the EventBus). The whole fresh ring is replayed.
+   * - `'epoch_reset'`: consumer's cursor is from a previous bus epoch
+   *   (daemon restart rebuilt the EventBus). Triggered either by the
+   *   numeric heuristic (`Last-Event-ID` past the bus high-water) or by
+   *   an epoch token comparison (`X-Qwen-Event-Epoch` header does not
+   *   match the bus's current epoch — see `detail`). The whole fresh
+   *   ring is replayed.
    * Reserved for future causes (e.g. `'schema_version_bump'`).
    */
   reason: string;
+  /**
+   * Optional trigger discriminator on the wire. `'epoch_mismatch'` marks an
+   * `'epoch_reset'` produced by the epoch token comparison rather than the
+   * numeric heuristic. Operational/wire-level field — UI consumers key on
+   * `reason` alone.
+   */
+  detail?: string;
   /** Consumer's `Last-Event-ID` at reconnect time. */
   lastDeliveredId: number;
   /**
@@ -769,6 +780,34 @@ export interface DaemonFollowupSuggestionData {
   [key: string]: unknown;
 }
 
+// Independent copy — see CHANNEL_DELIVERY_ERROR_CODES below and the
+// daemonEvents test suite for the cross-check.
+export type DaemonChannelDeliveryErrorCode =
+  | 'channel_worker_unavailable'
+  | 'channel_delivery_timeout'
+  | 'channel_delivery_invalid'
+  | 'channel_delivery_rejected'
+  | 'channel_delivery_queue_full'
+  | 'channel_delivery_failed';
+
+type DeliveryResultSource =
+  | { source: 'prompt'; promptId: string }
+  | { source: 'scheduled'; taskId: string; firedAt: number };
+
+export type DaemonChannelDeliveryResultData =
+  | ({
+      sessionId: string;
+      deliveryId: string;
+      status: 'delivered' | 'skipped';
+    } & DeliveryResultSource)
+  | ({
+      sessionId: string;
+      deliveryId: string;
+      status: 'failed';
+      code: DaemonChannelDeliveryErrorCode;
+      error: string;
+    } & DeliveryResultSource);
+
 export interface DaemonTurnCompleteData {
   sessionId: string;
   stopReason: string;
@@ -1092,6 +1131,11 @@ export type DaemonFollowupSuggestionEvent = DaemonEventEnvelope<
   DaemonFollowupSuggestionData
 >;
 
+export type DaemonChannelDeliveryResultEvent = DaemonEventEnvelope<
+  'channel_delivery_result',
+  DaemonChannelDeliveryResultData
+>;
+
 export type DaemonTurnCompleteEvent = DaemonEventEnvelope<
   'turn_complete',
   DaemonTurnCompleteData
@@ -1135,6 +1179,7 @@ export type DaemonSessionEvent =
   | DaemonArtifactChangedEvent
   | DaemonMidTurnMessageInjectedEvent
   | DaemonPendingPromptEvent
+  | DaemonChannelDeliveryResultEvent
   | DaemonSessionBranchedEvent;
 
 export type DaemonControlEvent =
@@ -1726,6 +1771,10 @@ export function asKnownDaemonEvent(
       return isFollowupSuggestionData(event.data)
         ? (event as DaemonFollowupSuggestionEvent)
         : undefined;
+    case 'channel_delivery_result':
+      return isChannelDeliveryResultData(event.data)
+        ? (event as DaemonChannelDeliveryResultEvent)
+        : undefined;
     case 'mcp_server_added':
       return isMcpServerAddedData(event.data)
         ? (event as DaemonMcpServerAddedEvent)
@@ -2146,6 +2195,7 @@ export function reduceDaemonSessionEvent(
     case PENDING_PROMPT_ADDED_EVENT:
     case PENDING_PROMPT_STARTED_EVENT:
     case PENDING_PROMPT_COMPLETED_EVENT:
+    case 'channel_delivery_result':
       return base;
     case 'session_rewound':
       return {
@@ -3023,6 +3073,63 @@ function isFollowupSuggestionData(
     isNonEmptyString(value['suggestion']) &&
     isNonEmptyString(value['promptId'])
   );
+}
+
+// Independent copy of the canonical set in acp-bridge bridgeOptions.ts;
+// cross-checked by the daemonEvents test suite.
+const CHANNEL_DELIVERY_ERROR_CODES: ReadonlySet<string> = new Set([
+  'channel_worker_unavailable',
+  'channel_delivery_timeout',
+  'channel_delivery_invalid',
+  'channel_delivery_rejected',
+  'channel_delivery_queue_full',
+  'channel_delivery_failed',
+]);
+
+function isChannelDeliveryResultData(
+  value: unknown,
+): value is DaemonChannelDeliveryResultData {
+  if (
+    !isRecord(value) ||
+    !isNonEmptyString(value['sessionId']) ||
+    !isNonEmptyString(value['deliveryId']) ||
+    (value['status'] !== 'delivered' &&
+      value['status'] !== 'failed' &&
+      value['status'] !== 'skipped') ||
+    !Object.keys(value).every((key) =>
+      [
+        'sessionId',
+        'deliveryId',
+        'source',
+        'status',
+        'promptId',
+        'taskId',
+        'firedAt',
+        'code',
+        'error',
+      ].includes(key),
+    )
+  ) {
+    return false;
+  }
+  const correlationValid =
+    (value['source'] === 'prompt' &&
+      isNonEmptyString(value['promptId']) &&
+      value['taskId'] === undefined &&
+      value['firedAt'] === undefined) ||
+    (value['source'] === 'scheduled' &&
+      isNonEmptyString(value['taskId']) &&
+      isFiniteNumber(value['firedAt']) &&
+      value['promptId'] === undefined);
+  if (!correlationValid) return false;
+  if (value['status'] === 'failed') {
+    return (
+      typeof value['code'] === 'string' &&
+      CHANNEL_DELIVERY_ERROR_CODES.has(value['code']) &&
+      isNonEmptyString(value['error'])
+    );
+  }
+  return value['code'] === undefined && value['error'] === undefined;
 }
 
 function isMcpServerAddedData(

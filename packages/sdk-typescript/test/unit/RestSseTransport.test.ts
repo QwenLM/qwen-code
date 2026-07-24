@@ -258,6 +258,72 @@ describe('RestSseTransport', () => {
       expect(calls[0].headers['last-event-id']).toBe('99');
     });
 
+    it('sends X-Qwen-Event-Epoch alongside the resume cursor', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        sseResponse('data: {"type":"a","data":{},"id":2,"v":1}\n\n'),
+      );
+      const transport = new RestSseTransport('http://d', undefined, fetch);
+      const gen = transport.subscribeEvents('s1', {
+        lastEventId: 99,
+        epoch: 'epoch-abc',
+      });
+      await gen.next();
+      expect(calls[0].headers['last-event-id']).toBe('99');
+      expect(calls[0].headers['x-qwen-event-epoch']).toBe('epoch-abc');
+    });
+
+    it('does NOT send the epoch header without a resume cursor (meaningless alone)', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        sseResponse('data: {"type":"a","data":{},"id":1,"v":1}\n\n'),
+      );
+      const transport = new RestSseTransport('http://d', undefined, fetch);
+      const gen = transport.subscribeEvents('s1', { epoch: 'epoch-abc' });
+      await gen.next();
+      expect(calls[0].headers['x-qwen-event-epoch']).toBeUndefined();
+    });
+
+    it('reports the response X-Qwen-Event-Epoch header via onEpoch', async () => {
+      const { fetch } = recordingFetch(
+        () =>
+          new Response(
+            new ReadableStream<Uint8Array>({
+              start(controller) {
+                controller.enqueue(
+                  new TextEncoder().encode(
+                    'data: {"type":"a","data":{},"id":1,"v":1}\n\n',
+                  ),
+                );
+                controller.close();
+              },
+            }),
+            {
+              status: 200,
+              headers: {
+                'content-type': 'text/event-stream',
+                'x-qwen-event-epoch': 'epoch-from-server',
+              },
+            },
+          ),
+      );
+      const transport = new RestSseTransport('http://d', undefined, fetch);
+      const onEpoch = vi.fn();
+      const gen = transport.subscribeEvents('s1', { onEpoch });
+      await gen.next();
+      expect(onEpoch).toHaveBeenCalledTimes(1);
+      expect(onEpoch).toHaveBeenCalledWith('epoch-from-server');
+    });
+
+    it('does not invoke onEpoch when the response carries no epoch header', async () => {
+      const { fetch } = recordingFetch(() =>
+        sseResponse('data: {"type":"a","data":{},"id":1,"v":1}\n\n'),
+      );
+      const transport = new RestSseTransport('http://d', undefined, fetch);
+      const onEpoch = vi.fn();
+      const gen = transport.subscribeEvents('s1', { onEpoch });
+      await gen.next();
+      expect(onEpoch).not.toHaveBeenCalled();
+    });
+
     it('applies maxQueued query parameter', async () => {
       const { fetch, calls } = recordingFetch(() =>
         sseResponse('data: {"type":"a","data":{},"id":1,"v":1}\n\n'),

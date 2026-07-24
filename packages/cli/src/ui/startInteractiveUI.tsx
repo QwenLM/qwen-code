@@ -33,7 +33,8 @@ import {
 } from './utils/kittyProtocolDetector.js';
 import { installTerminalRedrawOptimizer } from './utils/terminalRedrawOptimizer.js';
 import { installSynchronizedOutput } from './utils/synchronizedOutput.js';
-import { registerCleanup } from '../utils/cleanup.js';
+import { ErrorBoundary } from './components/shared/ErrorBoundary.js';
+import { registerCleanup, runExitCleanup } from '../utils/cleanup.js';
 import { stopAndGetCapturedInput } from '../utils/earlyInputCapture.js';
 import { profileCheckpoint } from '../utils/startupProfiler.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
@@ -195,13 +196,29 @@ export async function startInteractiveUI(
     // coordinates even though these listeners are owned and cleaned up.
     process.stdout.setMaxListeners(0);
   }
+  const appTree = (
+    <ErrorBoundary
+      onError={(error, info) => {
+        debugLogger.error(
+          `[FATAL_RENDER_ERROR] ${error.message}\n${info.componentStack ?? ''}\n${error.stack ?? ''}`,
+        );
+        // The fallback replaces AppWrapper, unmounting KeypressProvider and
+        // Ctrl+C handling. Schedule a graceful exit so the session does not
+        // hang (e.g. under the Kitty keyboard protocol where Ctrl+C is a
+        // keypress, not SIGINT).
+        setTimeout(() => {
+          void runExitCleanup().then(() => process.exit(1));
+        }, 5000);
+      }}
+    >
+      <AppWrapper />
+    </ErrorBoundary>
+  );
   const instance = render(
     process.env['DEBUG'] ? (
-      <React.StrictMode>
-        <AppWrapper />
-      </React.StrictMode>
+      <React.StrictMode>{appTree}</React.StrictMode>
     ) : (
-      <AppWrapper />
+      appTree
     ),
     {
       exitOnCtrlC: false,

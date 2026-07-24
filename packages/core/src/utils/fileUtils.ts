@@ -769,6 +769,17 @@ function isTextMime(lookedUpMimeType: string): boolean {
 }
 
 /**
+ * Video containers whose MIME type `mime/lite` does not carry in its default
+ * "standard" database. `.m4v`'s `video/x-m4v` mapping lives only in the
+ * non-default "other" set, so `mime.getType('clip.m4v')` returns null and —
+ * without this override — {@link detectFileType} falls through to the content
+ * sampler and misclassifies a real video as binary.
+ */
+const MIME_LITE_MISSING_VIDEO_TYPES: ReadonlyMap<string, string> = new Map([
+  ['.m4v', 'video/x-m4v'],
+]);
+
+/**
  * Detects the type of file based on extension and content.
  * @param filePath Path to the file.
  * @returns Promise that resolves to a FileType string.
@@ -794,7 +805,12 @@ export async function detectFileType(filePath: string): Promise<FileType> {
     return 'notebook';
   }
 
-  const lookedUpMimeType = mime.getType(filePath); // Returns null if not found, or the mime type string
+  // Returns null if not found, or the mime type string. `mime/lite` omits a
+  // few video containers (see MIME_LITE_MISSING_VIDEO_TYPES), so fall back to
+  // that override before giving up — otherwise a real video falls through to
+  // the content sampler and is misclassified as binary.
+  const lookedUpMimeType =
+    mime.getType(filePath) ?? MIME_LITE_MISSING_VIDEO_TYPES.get(ext) ?? null;
   if (lookedUpMimeType) {
     if (lookedUpMimeType.startsWith('image/')) {
       return 'image';
@@ -1414,7 +1430,12 @@ export async function processSingleFileContent(
           llmContent: {
             inlineData: {
               data: base64Data,
-              mimeType: mime.getType(filePath) || 'application/octet-stream',
+              mimeType:
+                mime.getType(filePath) ??
+                MIME_LITE_MISSING_VIDEO_TYPES.get(
+                  path.extname(filePath).toLowerCase(),
+                ) ??
+                'application/octet-stream',
               displayName,
             },
           },

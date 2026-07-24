@@ -1105,6 +1105,234 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
   });
 });
 
+describe('BridgeClient — channel-delivery extMethod dispatch', () => {
+  const METHOD = 'qwen/control/channel-delivery';
+
+  function makeClient(
+    onChannelDelivery: (info: Record<string, unknown>) => Promise<unknown>,
+  ) {
+    const publish = vi.fn().mockReturnValue(true);
+    const entry = { sessionId: 'session-1', events: { publish } };
+    const noFlow = () => {
+      throw new Error('test: should not run');
+    };
+    const client = new BridgeClient(
+      ((id: string) => (id === 'session-1' ? entry : undefined)) as never,
+      noFlow as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (id) => id === 'session-1',
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      onChannelDelivery as never,
+    );
+    return { client, publish };
+  }
+
+  const validParams = {
+    sessionId: 'session-1',
+    deliveryId: 'prompt-1',
+    source: 'prompt',
+    target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+    text: 'final answer',
+    promptId: 'prompt-1',
+  };
+
+  it('dispatches a validated request and publishes a sanitized delivered result', async () => {
+    const deliver = vi.fn(async () => ({ status: 'delivered' }));
+    const { client, publish } = makeClient(deliver);
+
+    await expect(client.extMethod(METHOD, validParams)).resolves.toEqual({
+      status: 'delivered',
+    });
+    expect(deliver).toHaveBeenCalledWith(validParams);
+    expect(publish).toHaveBeenCalledWith({
+      type: 'channel_delivery_result',
+      promptId: 'prompt-1',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'prompt-1',
+        source: 'prompt',
+        status: 'delivered',
+        promptId: 'prompt-1',
+      },
+    });
+    expect(JSON.stringify(publish.mock.calls)).not.toContain('final answer');
+    expect(JSON.stringify(publish.mock.calls)).not.toContain('user-1');
+  });
+
+  it('publishes only a sanitized code and error for a failed delivery', async () => {
+    const { client, publish } = makeClient(async () => ({
+      status: 'failed',
+      code: 'channel_delivery_rejected',
+      error: 'Recipient rejected.',
+    }));
+
+    await client.extMethod(METHOD, validParams);
+
+    expect(publish.mock.calls[0]?.[0]).toMatchObject({
+      type: 'channel_delivery_result',
+      data: {
+        status: 'failed',
+        code: 'channel_delivery_rejected',
+        error: 'Recipient rejected.',
+      },
+    });
+    expect(JSON.stringify(publish.mock.calls)).not.toContain('dingtalk');
+  });
+
+  it('lets the host authorize an empty final before publishing skipped', async () => {
+    const deliver = vi.fn(async () => ({ status: 'skipped' }));
+    const { client, publish } = makeClient(deliver);
+
+    await expect(
+      client.extMethod(METHOD, { ...validParams, text: '' }),
+    ).resolves.toEqual({ status: 'skipped' });
+
+    expect(deliver).toHaveBeenCalledWith({ ...validParams, text: '' });
+    expect(publish.mock.calls[0]?.[0]).toMatchObject({
+      type: 'channel_delivery_result',
+      data: { status: 'skipped' },
+    });
+  });
+
+  it('rejects a session that this connection does not own', async () => {
+    const deliver = vi.fn();
+    const { client, publish } = makeClient(deliver);
+
+    await expect(
+      client.extMethod(METHOD, { ...validParams, sessionId: 'victim' }),
+    ).rejects.toThrow(/sessionId/i);
+    expect(deliver).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed or child-expanded payloads before dispatch', async () => {
+    const deliver = vi.fn();
+    const { client } = makeClient(deliver);
+
+    await expect(
+      client.extMethod(METHOD, {
+        ...validParams,
+        workspaceCwd: '/other',
+      }),
+    ).rejects.toThrow();
+    await expect(
+      client.extMethod(METHOD, {
+        ...validParams,
+        target: { ...validParams.target, type: 'topic' },
+      }),
+    ).rejects.toThrow();
+    expect(deliver).not.toHaveBeenCalled();
+  });
+
+  const scheduledParams = {
+    sessionId: 'session-1',
+    deliveryId: 'task-1:1750000000000',
+    source: 'scheduled',
+    target: { channelName: 'dingtalk', type: 'chat', id: 'chat-1' },
+    text: 'scheduled answer',
+    taskId: 'task-1',
+    firedAt: 1_750_000_000_000,
+  };
+
+  it('dispatches a validated scheduled request and publishes its fire correlation', async () => {
+    const deliver = vi.fn(async () => ({ status: 'delivered' }));
+    const { client, publish } = makeClient(deliver);
+
+    await expect(client.extMethod(METHOD, scheduledParams)).resolves.toEqual({
+      status: 'delivered',
+    });
+    expect(deliver).toHaveBeenCalledWith(scheduledParams);
+    expect(publish).toHaveBeenCalledWith({
+      type: 'channel_delivery_result',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'task-1:1750000000000',
+        source: 'scheduled',
+        status: 'delivered',
+        taskId: 'task-1',
+        firedAt: 1_750_000_000_000,
+      },
+    });
+    expect(JSON.stringify(publish.mock.calls)).not.toContain(
+      'scheduled answer',
+    );
+    expect(JSON.stringify(publish.mock.calls)).not.toContain('chat-1');
+  });
+
+  it('publishes a correlated scheduled skipped result from the host', async () => {
+    const deliver = vi.fn(async () => ({ status: 'skipped' }));
+    const { client, publish } = makeClient(deliver);
+
+    await expect(
+      client.extMethod(METHOD, { ...scheduledParams, text: '  \n' }),
+    ).resolves.toEqual({ status: 'skipped' });
+    expect(deliver).toHaveBeenCalledWith({
+      ...scheduledParams,
+      text: '  \n',
+    });
+    expect(publish).toHaveBeenCalledWith({
+      type: 'channel_delivery_result',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'task-1:1750000000000',
+        source: 'scheduled',
+        status: 'skipped',
+        taskId: 'task-1',
+        firedAt: 1_750_000_000_000,
+      },
+    });
+  });
+
+  it('rejects a scheduled request with an inconsistent fire correlation', async () => {
+    const deliver = vi.fn();
+    const { client, publish } = makeClient(deliver);
+
+    await expect(
+      client.extMethod(METHOD, {
+        ...scheduledParams,
+        deliveryId: 'task-1:999',
+      }),
+    ).rejects.toThrow(/correlation/i);
+    await expect(
+      client.extMethod(METHOD, {
+        ...scheduledParams,
+        firedAt: 0,
+      }),
+    ).rejects.toThrow(/correlation/i);
+    await expect(
+      client.extMethod(METHOD, {
+        ...scheduledParams,
+        promptId: 'task-1:1750000000000',
+      }),
+    ).rejects.toThrow(/correlation/i);
+
+    expect(deliver).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it('still resolves when the result-event publish throws', async () => {
+    const deliver = vi.fn(async () => ({ status: 'delivered' }));
+    const { client, publish } = makeClient(deliver);
+    publish.mockImplementation(() => {
+      throw new Error('bus closed');
+    });
+
+    await expect(client.extMethod(METHOD, validParams)).resolves.toEqual({
+      status: 'delivered',
+    });
+    expect(deliver).toHaveBeenCalledOnce();
+  });
+});
+
 describe('BridgeClient — artifact ingress', () => {
   const noPermissionFlow = () => {
     throw new Error('test: permission flow should not run');
