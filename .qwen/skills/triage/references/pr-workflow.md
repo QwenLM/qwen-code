@@ -422,14 +422,14 @@ tmux kill-session -t "$S"
   never attempt this; see 2b/2c scoping above.)
 - Fork code: sandbox (strip write tokens/secrets).
 
-**Scale the evidence to the change** — the tmux before/after above is the floor,
+**Scale the evidence to the change** (local runs only — never in unattended CI) — the tmux before/after above is the floor,
 not the ceiling. Match the depth to what is actually under review:
 
 - **UI / styling / interaction changes** (color, highlight, cursor position, or
   layout is the thing being reviewed): `capture-pane` text cannot show which
   item is highlighted or where the caret block sits. Use the `terminal-capture`
   skill (node-pty → xterm.js → pixel-accurate PNG; it needs
-  `npx playwright install chromium` — install on demand if absent). Whatever the
+  `npx playwright install chromium` — install on demand if absent; on fork PRs, sandbox per the fork-code bullet above). Whatever the
   medium, name the **oracle**: the exact on-screen element that proves the
   behavior ("the highlighted pill is the active tab; the filtered list is the
   oracle for which tab is active"), and show the state before AND after the
