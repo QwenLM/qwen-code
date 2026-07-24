@@ -430,23 +430,15 @@ for (const theme of THEMES) {
       ).toBeVisible();
       await captureScreenshot(page, `git-mode-popover-${theme}`);
 
-      // New-branch mode: reveals the branch-name input (validated ✓) and the
-      // Create-branch affordance. Selecting an option once dismissed the popover
-      // — the click bubbled through the React tree (portaled content) to the
-      // composer surface's onClick → core.focus() → Radix focus-outside close —
-      // until #7668 stopped that propagation on PopoverContent. So this capture
-      // both shows the sub-state the previous revision couldn't and stands as a
-      // visual regression guard: if that dismissal ever returns, the input goes
-      // missing and this assertion fails here, not just in the screenshot.
-      // Match the option by role — its label is split across a name + a
-      // description span, so getByText('New branch') is ambiguous (#7668).
+      // #7668 keeps this sub-state open; its input is the visual regression guard.
+      // Match by role — the label spans multiple elements, so getByText is ambiguous.
       await page.getByRole('radio', { name: /New branch/ }).click();
       const branchInput = page.locator('[data-testid="git-mode-branch-input"]');
       await expect(branchInput).toBeVisible();
       await branchInput.fill('feat/my-feature');
       await expect(
         page.locator('[data-testid="git-mode-confirm-branch"]'),
-      ).toBeVisible();
+      ).toBeEnabled();
       await captureScreenshot(page, `git-mode-branch-${theme}`);
     });
 
