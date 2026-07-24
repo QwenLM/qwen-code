@@ -57,7 +57,9 @@ export function createLoadedSettingsAdapter(
           );
         }
       }
-      settings.setValue(persistScope, key, value);
+      // Enable throwOnWriteFailure to catch silent write failures that would
+      // cause /auth changes to appear to work in-session but not persist to disk.
+      settings.setValue(persistScope, key, value, { throwOnWriteFailure: true });
     },
 
     getModelProviders(): ModelProvidersConfig {

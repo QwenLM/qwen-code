@@ -366,6 +366,22 @@ const SETTINGS_SCHEMA = {
     mergeStrategy: MergeStrategy.SHALLOW_MERGE,
   },
 
+  // Auth-modified environment variables (written by /auth command)
+  // Loaded with higher priority than env to ensure /auth changes take effect
+  // even when system env vars exist. Only /auth writes to this field — workspace
+  // settings.json cannot inject arbitrary keys here.
+  authEnv: {
+    type: 'object',
+    label: 'Auth Environment Variables',
+    category: 'Advanced',
+    requiresRestart: true,
+    default: {} as Record<string, string>,
+    description:
+      'Environment variables saved by /auth command. These are loaded with higher priority than env field, ensuring auth changes take effect even when system env vars exist.',
+    showInDialog: false,
+    mergeStrategy: MergeStrategy.SHALLOW_MERGE,
+  },
+
   proxy: {
     type: 'string',
     label: 'Proxy',
