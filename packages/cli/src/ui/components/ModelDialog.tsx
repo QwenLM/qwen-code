@@ -116,6 +116,7 @@ interface ModelDialogProps {
   isFastModelMode?: boolean;
   isVoiceModelMode?: boolean;
   isVisionModelMode?: boolean;
+  isCompactionModelMode?: boolean;
   /** Override which settings scope to persist the selection to. */
   persistScope?: 'workspace' | 'user';
   availableTerminalHeight?: number;
@@ -285,6 +286,7 @@ export function ModelDialog({
   isFastModelMode,
   isVoiceModelMode,
   isVisionModelMode,
+  isCompactionModelMode,
   persistScope,
   availableTerminalHeight,
 }: ModelDialogProps): React.JSX.Element {
@@ -309,7 +311,9 @@ export function ModelDialog({
         (m.authType !== AuthType.QWEN_OAUTH ||
           authType === AuthType.QWEN_OAUTH) &&
         (isFastModelMode || !m.fastOnly) &&
-        (isVoiceModelMode || !m.voiceOnly),
+        (isVoiceModelMode || !m.voiceOnly) &&
+        (isVisionModelMode || !m.visionOnly) &&
+        (isCompactionModelMode || !m.visionOnly),
     );
 
     // Group registry models by authType
@@ -363,7 +367,14 @@ export function ModelDialog({
     }
 
     return result;
-  }, [authType, config, isFastModelMode, isVoiceModelMode]);
+  }, [
+    authType,
+    config,
+    isFastModelMode,
+    isVoiceModelMode,
+    isVisionModelMode,
+    isCompactionModelMode,
+  ]);
 
   const MODEL_OPTIONS = useMemo(
     () =>
@@ -488,8 +499,11 @@ export function ModelDialog({
   // Check if current model is a runtime model
   // Runtime snapshot ID is already in $runtime|${authType}|${modelId} format
   const activeRuntimeSnapshot =
-    isFastModelMode || isVoiceModelMode || isVisionModelMode
-      ? undefined // fast/voice/vision models are never runtime model selections
+    isFastModelMode ||
+    isVoiceModelMode ||
+    isVisionModelMode ||
+    isCompactionModelMode
+      ? undefined // fast/voice/vision/compaction models are never runtime model selections
       : config?.getActiveRuntimeModelSnapshot?.();
   const currentBaseUrl = config
     ?.getModelsConfig()

@@ -13,11 +13,13 @@ interface UseModelCommandReturn {
   isFastModelMode: boolean;
   isVoiceModelMode: boolean;
   isVisionModelMode: boolean;
+  isCompactionModelMode: boolean;
   modelDialogPersistScope: ModelDialogPersistScope | undefined;
   openModelDialog: (options?: {
     fastModelMode?: boolean;
     voiceModelMode?: boolean;
     visionModelMode?: boolean;
+    compactionModelMode?: boolean;
     persistScope?: ModelDialogPersistScope;
   }) => void;
   closeModelDialog: () => void;
@@ -28,6 +30,7 @@ export const useModelCommand = (): UseModelCommandReturn => {
   const [isFastModelMode, setIsFastModelMode] = useState(false);
   const [isVoiceModelMode, setIsVoiceModelMode] = useState(false);
   const [isVisionModelMode, setIsVisionModelMode] = useState(false);
+  const [isCompactionModelMode, setIsCompactionModelMode] = useState(false);
   const [modelDialogPersistScope, setModelDialogPersistScope] = useState<
     ModelDialogPersistScope | undefined
   >(undefined);
@@ -37,20 +40,25 @@ export const useModelCommand = (): UseModelCommandReturn => {
       fastModelMode?: boolean;
       voiceModelMode?: boolean;
       visionModelMode?: boolean;
+      compactionModelMode?: boolean;
       persistScope?: ModelDialogPersistScope;
     }) => {
       const voiceModelMode = options?.voiceModelMode ?? false;
       const visionModelMode = options?.visionModelMode ?? false;
+      const compactionModelMode = options?.compactionModelMode ?? false;
       // Modes are mutually exclusive; a specialized mode suppresses fast mode.
       setIsFastModelMode(
-        voiceModelMode || visionModelMode
+        voiceModelMode || visionModelMode || compactionModelMode
           ? false
           : (options?.fastModelMode ?? false),
       );
       // Vision wins over voice when both are passed, so the dialog can't end up
       // in two specialized modes at once (mismatched title vs. highlighted row).
-      setIsVoiceModelMode(visionModelMode ? false : voiceModelMode);
-      setIsVisionModelMode(visionModelMode);
+      setIsVoiceModelMode(
+        visionModelMode || compactionModelMode ? false : voiceModelMode,
+      );
+      setIsVisionModelMode(compactionModelMode ? false : visionModelMode);
+      setIsCompactionModelMode(compactionModelMode);
       setModelDialogPersistScope(options?.persistScope);
       setIsModelDialogOpen(true);
     },
@@ -62,6 +70,7 @@ export const useModelCommand = (): UseModelCommandReturn => {
     setIsFastModelMode(false);
     setIsVoiceModelMode(false);
     setIsVisionModelMode(false);
+    setIsCompactionModelMode(false);
     setModelDialogPersistScope(undefined);
   }, []);
 
@@ -70,6 +79,7 @@ export const useModelCommand = (): UseModelCommandReturn => {
     isFastModelMode,
     isVoiceModelMode,
     isVisionModelMode,
+    isCompactionModelMode,
     modelDialogPersistScope,
     openModelDialog,
     closeModelDialog,
