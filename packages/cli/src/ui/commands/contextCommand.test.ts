@@ -47,6 +47,7 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
     }),
     getVisibleTools: vi.fn().mockReturnValue(new Set()),
     getUserMemory: vi.fn().mockReturnValue(''),
+    getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
     getSkillManager: vi.fn().mockReturnValue({
       listSkills: vi.fn().mockResolvedValue([]),
     }),
@@ -77,6 +78,7 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getVisibleTools: vi.fn().mockReturnValue(new Set()),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
       }),
@@ -172,6 +174,7 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getVisibleTools: vi.fn().mockReturnValue(new Set()),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
       }),
@@ -216,6 +219,7 @@ describe('collectContextData (contextCommand)', () => {
       }),
       getVisibleTools: vi.fn().mockReturnValue(new Set(['web_fetch'])),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
       }),

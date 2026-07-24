@@ -26,10 +26,7 @@ import {
 } from './store.js';
 import { scanUserAutoMemoryTopicDocuments } from './scan.js';
 import { rebuildUserAutoMemoryIndex } from './indexer.js';
-import {
-  appendManagedAutoMemoryToUserMemory,
-  buildManagedAutoMemoryPrompt,
-} from './prompt.js';
+import { buildManagedAutoMemoryPrompt } from './prompt.js';
 
 describe('user-level auto-memory', () => {
   let tempDir: string;
@@ -299,9 +296,8 @@ describe('user-level auto-memory', () => {
       expect(prompt).toContain('## /tmp/project/.qwen/memory/MEMORY.md');
     });
 
-    it('appendManagedAutoMemoryToUserMemory passes the user section through', () => {
-      const result = appendManagedAutoMemoryToUserMemory(
-        'Project rules from QWEN.md',
+    it('buildManagedAutoMemoryPrompt passes the user section through', () => {
+      const result = buildManagedAutoMemoryPrompt(
         '/tmp/project/.qwen/memory',
         '- [Release](project/release.md) — Release Friday.',
         {
@@ -310,7 +306,6 @@ describe('user-level auto-memory', () => {
         },
       );
 
-      expect(result).toContain('Project rules from QWEN.md');
       expect(result).toContain('USER memory');
       expect(result).toContain('/tmp/global/memories');
     });

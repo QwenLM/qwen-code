@@ -1738,6 +1738,14 @@ export class Config {
   private mcpReconcilePromise: Promise<void> | undefined;
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
+  /**
+   * Volatile system-prompt layer: the managed auto-memory section
+   * (instructions + MEMORY.md indexes). Kept separate from `userMemory`
+   * (context files, stable in-session) because it is rewritten on every
+   * memory save — prompt assembly appends it last so a save invalidates
+   * the shortest possible cached prompt prefix.
+   */
+  private autoMemoryPrompt = '';
   private sdkMode: boolean;
   private geminiMdFileCount: number;
   private conditionalRulesRegistry: ConditionalRulesRegistry | undefined;
@@ -3043,6 +3051,7 @@ export class Config {
     // Safe mode: skip all context file loading (QWEN.md, AGENTS.md, rules)
     if (this.isSafeMode()) {
       this.setUserMemory('');
+      this.autoMemoryPrompt = '';
       this.setGeminiMdFileCount(0);
       this.conditionalRulesRegistry = new ConditionalRulesRegistry(
         [],
@@ -3163,25 +3172,24 @@ export class Config {
       // there. When empty the prompt builder emits a "MEMORY.md is currently
       // empty" placeholder — the same shape the per-project layer has used
       // since day one — so the cost is one extra index header.
-      this.setUserMemory(
-        this.memoryManager.appendToUserMemory(
-          memoryContent,
-          getAutoMemoryRoot(this.getProjectRoot()),
-          managedAutoMemoryIndex,
-          {
-            memoryDir: getUserAutoMemoryRoot(),
-            indexContent: userAutoMemoryIndex,
-          },
-          teamMemoryEnabled
-            ? {
-                memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
-                indexContent: teamAutoMemoryIndex,
-              }
-            : undefined,
-        ),
+      this.setUserMemory(memoryContent);
+      this.autoMemoryPrompt = this.memoryManager.buildAutoMemoryPrompt(
+        getAutoMemoryRoot(this.getProjectRoot()),
+        managedAutoMemoryIndex,
+        {
+          memoryDir: getUserAutoMemoryRoot(),
+          indexContent: userAutoMemoryIndex,
+        },
+        teamMemoryEnabled
+          ? {
+              memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
+              indexContent: teamAutoMemoryIndex,
+            }
+          : undefined,
       );
     } else {
       this.setUserMemory(memoryContent);
+      this.autoMemoryPrompt = '';
     }
     this.setGeminiMdFileCount(fileCount);
     this.conditionalRulesRegistry = new ConditionalRulesRegistry(
@@ -3397,8 +3405,12 @@ export class Config {
    * and should be displayed to the user during startup.
    */
   getWarnings(): string[] {
+    // Both layers are always loaded into the system prompt, so the size
+    // estimate must cover context files and the auto-memory section alike.
     const memoryContextWarning = this.buildMemoryContextWarning(
-      this.getUserMemory(),
+      [this.getUserMemory(), this.autoMemoryPrompt]
+        .filter(Boolean)
+        .join('\n\n'),
     );
     return memoryContextWarning
       ? [...this.warnings, memoryContextWarning]
@@ -5163,6 +5175,15 @@ export class Config {
 
   getUserMemory(): string {
     return this.userMemory;
+  }
+
+  /**
+   * The managed auto-memory section of the system prompt (volatile layer).
+   * Empty when managed memory is unavailable. Callers assembling a system
+   * prompt must append this after all stable/context content.
+   */
+  getAutoMemoryPrompt(): string {
+    return this.autoMemoryPrompt;
   }
 
   getOutputLanguageFilePath(): string | undefined {

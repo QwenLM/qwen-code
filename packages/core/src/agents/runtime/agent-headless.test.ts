@@ -813,6 +813,7 @@ describe('subagent.ts', () => {
       it('should not append userMemory separator when userMemory is empty', async () => {
         const { config } = await createMockConfig();
         vi.spyOn(config, 'getUserMemory').mockReturnValue('');
+        vi.spyOn(config, 'getAutoMemoryPrompt').mockReturnValue('');
 
         vi.mocked(GeminiChat).mockClear();
 
@@ -842,6 +843,7 @@ describe('subagent.ts', () => {
       it('should not append userMemory separator when userMemory is whitespace-only', async () => {
         const { config } = await createMockConfig();
         vi.spyOn(config, 'getUserMemory').mockReturnValue('   \n\n  ');
+        vi.spyOn(config, 'getAutoMemoryPrompt').mockReturnValue('');
 
         vi.mocked(GeminiChat).mockClear();
 

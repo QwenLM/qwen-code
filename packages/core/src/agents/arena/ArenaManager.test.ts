@@ -72,6 +72,7 @@ const createMockConfig = (
   getModel: () => 'test-model',
   getSessionId: () => 'test-session',
   getUserMemory: () => '',
+  getAutoMemoryPrompt: () => '',
   getToolRegistry: () => ({
     getFunctionDeclarations: () => [],
     getFunctionDeclarationsFiltered: () => [],

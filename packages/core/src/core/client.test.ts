@@ -456,6 +456,10 @@ describe('Gemini Client (client.ts)', () => {
   };
   beforeEach(async () => {
     vi.resetAllMocks();
+    // The client concatenates these with the auto-memory suffix, so the
+    // default mock must return a string, not undefined.
+    vi.mocked(getCoreSystemPrompt).mockReturnValue('');
+    vi.mocked(getCustomSystemPrompt).mockReturnValue('');
     sessionStartProfilerMocks.profilers.length = 0;
     sessionStartProfilerMocks.createSessionStartProfiler.mockImplementation(
       () => {
@@ -550,6 +554,7 @@ describe('Gemini Client (client.ts)', () => {
       getVertexAI: vi.fn().mockReturnValue(false),
       getUserAgent: vi.fn().mockReturnValue('test-agent'),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getAppendSystemPrompt: vi.fn().mockReturnValue(undefined),
       getFullContext: vi.fn().mockReturnValue(false),

@@ -2151,6 +2151,13 @@ Important Rules:
       finalPrompt += `\n\n---\n\n${userMemory.trim()}`;
     }
 
+    // Volatile layer last: the auto-memory section is rewritten on every
+    // memory save, so it must follow the stable context content above.
+    const autoMemoryPrompt = this.runtimeContext.getAutoMemoryPrompt();
+    if (autoMemoryPrompt) {
+      finalPrompt += `\n\n---\n\n${autoMemoryPrompt}`;
+    }
+
     return finalPrompt;
   }
 

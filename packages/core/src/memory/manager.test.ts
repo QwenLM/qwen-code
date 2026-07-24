@@ -1635,20 +1635,18 @@ describe('MemoryManager', () => {
     });
   });
 
-  describe('appendToUserMemory', () => {
+  describe('buildAutoMemoryPrompt', () => {
     it('forwards options to buildManagedAutoMemoryPrompt', () => {
       const mgr = new MemoryManager();
 
       // Without forceFullProtocol (all indexes empty → condensed path)
-      const condensed = mgr.appendToUserMemory(
-        '',
+      const condensed = mgr.buildAutoMemoryPrompt(
         '/project/.qwen/memory',
         null,
       );
 
       // With forceFullProtocol → full verbose path
-      const full = mgr.appendToUserMemory(
-        '',
+      const full = mgr.buildAutoMemoryPrompt(
         '/project/.qwen/memory',
         null,
         undefined,

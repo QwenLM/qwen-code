@@ -3889,7 +3889,7 @@ describe('Server Config (config.ts)', () => {
     expect(config.getPreventSystemSleepEnabled()).toBe(false);
   });
 
-  it('refreshHierarchicalMemory should append managed auto-memory index when present', async () => {
+  it('refreshHierarchicalMemory should build the managed auto-memory prompt when present', async () => {
     const config = new Config(baseParams);
 
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
@@ -3905,9 +3905,14 @@ describe('Server Config (config.ts)', () => {
 
     await config.refreshHierarchicalMemory();
 
+    // Context files stay in userMemory; the volatile auto-memory section is
+    // kept separate so prompt assembly can order stable → context → volatile.
     expect(config.getUserMemory()).toContain('Project rules');
-    expect(config.getUserMemory()).toContain('# auto memory');
-    expect(config.getUserMemory()).toContain('[Project Memory](project.md)');
+    expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toContain(
+      '[Project Memory](project.md)',
+    );
   });
 
   it('refreshHierarchicalMemory should not load team memory from untrusted workspaces', async () => {
@@ -4624,8 +4629,11 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     expect(config.getUserMemory()).toContain('Project rules');
-    expect(config.getUserMemory()).toContain('# auto memory');
-    expect(config.getUserMemory()).toContain('MEMORY.md is currently empty');
+    expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toContain(
+      'MEMORY.md is currently empty',
+    );
   });
 
   it('refreshHierarchicalMemory should omit managed auto-memory prompt when disabled', async () => {
@@ -4646,7 +4654,7 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     expect(config.getUserMemory()).toContain('Project rules');
-    expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toBe('');
     expect(readAutoMemoryIndex).not.toHaveBeenCalled();
   });
 
@@ -4671,7 +4679,7 @@ describe('Server Config (config.ts)', () => {
     expect(lastCall?.[1]).toEqual([]);
     expect(readAutoMemoryIndex).not.toHaveBeenCalled();
     expect(config.getUserMemory()).toContain('Project rules');
-    expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toBe('');
   });
 
   describe('isManagedMemoryAvailable', () => {

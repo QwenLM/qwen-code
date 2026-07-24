@@ -13,7 +13,10 @@ import {
   type ApprovalMode,
   type Config,
 } from '../../config/config.js';
-import { getCoreSystemPrompt } from '../../core/prompts.js';
+import {
+  buildSystemPromptSuffix,
+  getCoreSystemPrompt,
+} from '../../core/prompts.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { isNodeError } from '../../utils/errors.js';
 import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
@@ -1075,12 +1078,13 @@ export class ArenaManager {
         approvalMode: toApprovalMode(this.arenaConfig?.approvalMode),
         runtimeConfig: {
           promptConfig: {
-            systemPrompt: getCoreSystemPrompt(
-              this.config.getUserMemory(),
-              model.modelId,
-              undefined,
-              'headless',
-            ),
+            systemPrompt:
+              getCoreSystemPrompt(
+                this.config.getUserMemory(),
+                model.modelId,
+                undefined,
+                'headless',
+              ) + buildSystemPromptSuffix(this.config.getAutoMemoryPrompt()),
           },
           modelConfig: { model: model.modelId },
           runConfig: {
