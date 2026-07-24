@@ -388,8 +388,15 @@ function quoteBlock(s: string): string {
 /**
  * Walk a comment's `in_reply_to_id` chain up to the root. Defends against
  * cycles (which shouldn't happen on GitHub but cheap to handle).
+ *
+ * Exported and generic: `comment-status` groups the same flat comment list
+ * into the same threads, and a shared walk is what keeps the two surfaces
+ * agreeing by construction — a cycle-guard fix applied to one private copy
+ * and not the other would silently diverge their thread classification.
  */
-function findRootId(startId: number, byId: Map<number, RawComment>): number {
+export function findRootId<
+  T extends { id: number; in_reply_to_id?: number | null },
+>(startId: number, byId: Map<number, T>): number {
   const seen = new Set<number>();
   let cur = startId;
   while (true) {

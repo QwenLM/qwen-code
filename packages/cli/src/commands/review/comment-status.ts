@@ -27,7 +27,7 @@ import { DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD } from '@qwen-code/qwen-code-cor
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh, ghApiAll, setGhHost } from './lib/gh.js';
 import { gitOpt } from './lib/git.js';
-import { carriesBlockerSignal } from './pr-context.js';
+import { carriesBlockerSignal, findRootId } from './pr-context.js';
 
 /** Inline review comment, as listed by `GET /pulls/{n}/comments`. */
 export interface RawStatusComment {
@@ -100,6 +100,11 @@ export interface ThreadStatus {
     /** Real count before the cap — when it exceeds `touchedBy.length`, the
      * list was cut and a fix commit may be among the ones not shown. */
     touchedByTotal: number;
+    /** True when the worktree HEAD no longer matches the live PR head: the
+     * code facts above describe a superseded checkout. Denormalized onto
+     * every thread so a `jq` filter over `threads[]` cannot skip the
+     * top-level drift flag by construction. */
+    staleWorktree: boolean;
   };
   replies: Array<{ id: number; author: string; createdAt: string }>;
   /** The PR author replied somewhere in this thread — the strongest cheap
@@ -109,24 +114,6 @@ export interface ThreadStatus {
 }
 
 const TOUCHED_BY_CAP = 10;
-
-/** Cycle-safe walk to a reply chain's root (mirrors pr-context's walk). */
-function findRootId(
-  startId: number,
-  byId: Map<number, RawStatusComment>,
-): number {
-  const seen = new Set<number>();
-  let cur = startId;
-  while (true) {
-    if (seen.has(cur)) return cur;
-    seen.add(cur);
-    const c = byId.get(cur);
-    if (!c || c.in_reply_to_id === undefined || c.in_reply_to_id === null) {
-      return cur;
-    }
-    cur = c.in_reply_to_id;
-  }
-}
 
 /**
  * Pure classification core: group the flat comment list into threads and
@@ -185,6 +172,7 @@ export function buildThreadStatuses(
         changedSinceComment: probed.changed,
         touchedBy: probed.touchedBy,
         touchedByTotal: probed.touchedByTotal,
+        staleWorktree: false,
       },
       replies: replies.map((r) => ({
         id: r.id,
@@ -210,7 +198,17 @@ export function buildThreadStatuses(
   return threads;
 }
 
-export function summarizeThreads(threads: ThreadStatus[]) {
+export interface ThreadSummary {
+  threads: number;
+  outdated: number;
+  blockers: number;
+  changedSinceComment: number;
+  changeUnknown: number;
+  withReplies: number;
+  authorReplied: number;
+}
+
+export function summarizeThreads(threads: ThreadStatus[]): ThreadSummary {
   return {
     threads: threads.length,
     outdated: threads.filter((t) => t.anchor.outdated).length,
@@ -231,9 +229,13 @@ export function summarizeThreads(threads: ThreadStatus[]) {
  * this inside the PR worktree). Memoized per (path, sinceSha): several
  * threads routinely anchor to the same file at the same commit.
  */
-function makeGitProbe(): CodeChangeProbe {
+export function makeGitProbe(): CodeChangeProbe {
   const inRepo = gitOpt('rev-parse', '--is-inside-work-tree') === 'true';
   const memo = new Map<string, ReturnType<CodeChangeProbe>>();
+  // Commit existence depends on the SHA alone; memoizing it separately from
+  // the (path, sha) results roughly halves the git spawns on a thread-heavy
+  // PR where many threads share one anchor commit.
+  const commitExists = new Map<string, boolean>();
   return (path, sinceSha) => {
     if (!inRepo || !sinceSha || !path) {
       return { changed: 'unknown', touchedBy: [], touchedByTotal: 0 };
@@ -246,10 +248,27 @@ function makeGitProbe(): CodeChangeProbe {
     // range is unanswerable. (When a force-pushed-away commit is still
     // present via the shared object database, the range widens instead;
     // see the CodeChangeProbe doc for why that direction is accepted.)
-    if (gitOpt('cat-file', '-e', `${sinceSha}^{commit}`) === null) {
+    let exists = commitExists.get(sinceSha);
+    if (exists === undefined) {
+      exists = gitOpt('cat-file', '-e', `${sinceSha}^{commit}`) !== null;
+      commitExists.set(sinceSha, exists);
+    }
+    if (!exists) {
       result = { changed: 'unknown', touchedBy: [], touchedByTotal: 0 };
     } else {
-      const log = gitOpt('log', '--format=%h', `${sinceSha}..HEAD`, '--', path);
+      // `:(top)` anchors the pathspec at the repository root regardless of
+      // the CWD inside the worktree. Without it, running from a subdirectory
+      // silently resolves the repo-relative comment path against the
+      // subdirectory — empty output, exit 0, and every thread reads as
+      // "untouched since the comment": the one direction this index must
+      // not fail in.
+      const log = gitOpt(
+        'log',
+        '--format=%h',
+        `${sinceSha}..HEAD`,
+        '--',
+        `:(top)${path}`,
+      );
       if (log === null) {
         result = { changed: 'unknown', touchedBy: [], touchedByTotal: 0 };
       } else {
@@ -311,6 +330,12 @@ async function runCommentStatus(args: CommentStatusArgs): Promise<void> {
     worktreeHeadSha !== liveHeadSha;
 
   const threads = buildThreadStatuses(comments, prAuthor, makeGitProbe());
+  if (headDrift) {
+    // Denormalize the drift onto every thread: the code facts describe a
+    // superseded checkout, and a jq consumer of threads[] must not need to
+    // remember a top-level flag to see that.
+    for (const t of threads) t.code.staleWorktree = true;
+  }
   const summary = summarizeThreads(threads);
 
   const report = {

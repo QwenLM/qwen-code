@@ -150,6 +150,7 @@ describe('buildThreadStatuses — signals', () => {
       changedSinceComment: true,
       touchedBy: ['abc1234', 'def5678'],
       touchedByTotal: 12,
+      staleWorktree: false,
     });
   });
 
