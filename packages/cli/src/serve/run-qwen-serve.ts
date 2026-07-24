@@ -110,6 +110,7 @@ import type {
 import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
 import type { AcpHttpHandle } from './acp-http/index.js';
+import type { ChannelManagementService } from './channel-management-service.js';
 import type { WorkspaceRuntimeRemovalController } from './routes/workspace-management.js';
 import {
   allowOriginMode,
@@ -1126,6 +1127,7 @@ function currentServeFeaturesForRunQwenServe(
     reloadAvailable: true,
     channelReloadAvailable: opts.channelSelection !== undefined,
     channelControlAvailable: true,
+    channelManagementAvailable: true,
     persistentWorkspaceRegistrationAvailable: true,
     workspaceRuntimeRemovalAvailable: true,
     // Advertise the same WS feature flags as the runtime path (serve-features.ts)
@@ -4539,6 +4541,44 @@ async function runQwenServeImpl(
       },
     };
 
+    const channelManagementServices = new WeakMap<
+      WorkspaceRuntime,
+      Promise<ChannelManagementService>
+    >();
+    const channelManagementService = (
+      targetRuntime: WorkspaceRuntime,
+    ): Promise<ChannelManagementService> => {
+      const existing = channelManagementServices.get(targetRuntime);
+      if (existing) return existing;
+      const pending = (async () => {
+        if (!ensureChannelWorkerManager) {
+          throw Object.assign(
+            new Error('Channel worker manager is unavailable.'),
+            { code: 'channel_worker_unavailable' },
+          );
+        }
+        const [
+          { createChannelManagementService },
+          { WorkspaceChannelSettingsStore },
+        ] = await Promise.all([
+          import('./channel-management-service.js'),
+          import('./channel-settings-store.js'),
+        ]);
+        return createChannelManagementService({
+          workspaceCwd: targetRuntime.workspaceCwd,
+          store: new WorkspaceChannelSettingsStore(targetRuntime.workspaceCwd),
+          manager: await ensureChannelWorkerManager(),
+        });
+      })();
+      channelManagementServices.set(targetRuntime, pending);
+      void pending.catch(() => {
+        if (channelManagementServices.get(targetRuntime) === pending) {
+          channelManagementServices.delete(targetRuntime);
+        }
+      });
+      return pending;
+    };
+
     const app = runtime.createServeApp(opts, () => actualPort, {
       workspaceRegistry,
       createWorkspaceRuntime: createDynamicWorkspaceRuntime,
@@ -4596,6 +4636,7 @@ async function runQwenServeImpl(
       },
       channelDeliveryAuthorizations,
       reloadChannelWorker,
+      channelManagementService,
       getPerfSnapshot: () => ({
         eventLoop: currentDaemonEventLoopMonitor.snapshot(),
         promptQueueWait: {

@@ -5,7 +5,13 @@
  */
 
 import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
-import { sanitizeLogText } from '@qwen-code/channel-base';
+import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
+import {
+  PairingStore,
+  sanitizeLogText,
+  type PairingRequest,
+} from '@qwen-code/channel-base';
+import { resolveChannelCwd } from '../commands/channel/channel-cwd.js';
 import { getPlugin } from '../commands/channel/channel-registry.js';
 import type {
   ChannelSecretUpdate,
@@ -63,6 +69,15 @@ export interface ChannelMutationResult {
   instance: ChannelInstanceSnapshot;
 }
 
+export interface ChannelPairingRequestsSnapshot {
+  requests: PairingRequest[];
+}
+
+export interface ChannelPairingApprovalResult
+  extends ChannelPairingRequestsSnapshot {
+  approved: PairingRequest;
+}
+
 export interface ChannelManagementService {
   list(): Promise<DaemonChannelsSnapshot>;
   upsert(
@@ -80,6 +95,11 @@ export interface ChannelManagementService {
   start(name: string): Promise<ChannelMutationResult>;
   stop(name: string): Promise<ChannelMutationResult>;
   restart(name: string): Promise<ChannelMutationResult>;
+  pairingRequests(name: string): Promise<ChannelPairingRequestsSnapshot>;
+  approvePairing(
+    name: string,
+    code: string,
+  ): Promise<ChannelPairingApprovalResult>;
 }
 
 interface ChannelManagementSettingsStore {
@@ -178,13 +198,26 @@ export function createChannelManagementService(
     return matches;
   };
 
+  const workspaceCommittedNames = (): string[] => {
+    const globalNames = opts.manager.committedChannelNames();
+    const workers = opts.manager.state().workers;
+    return globalNames.filter((name) =>
+      workers.some(
+        (worker) =>
+          worker.workspaceCwd === opts.workspaceCwd &&
+          (worker.adapters?.some((adapter) => adapter.name === name) ||
+            worker.requestedChannels?.includes(name) ||
+            worker.channels.includes(name)),
+      ),
+    );
+  };
+
   const assertOwnedRuntime = (name: string): void => {
-    if (!opts.manager.committedChannelNames().includes(name)) return;
-    const workers = workerFor(name);
-    if (
-      workers.length !== 1 ||
-      workers[0]!.workspaceCwd !== opts.workspaceCwd
-    ) {
+    if (!workspaceCommittedNames().includes(name)) return;
+    const workers = workerFor(name).filter(
+      (worker) => worker.workspaceCwd === opts.workspaceCwd,
+    );
+    if (workers.length !== 1) {
       throw new ChannelManagementError(
         'channel_runtime_owner_mismatch',
         `Channel "${name}" does not have one confirmed runtime owner in this workspace.`,
@@ -195,14 +228,14 @@ export function createChannelManagementService(
   const runtimeFor = (name: string): ChannelRuntimeState => {
     const retainedError = diagnostics.get(name);
     if (retainedError) return { state: 'error', lastError: retainedError };
-    const committed = opts.manager.committedChannelNames();
-    if (!committed.includes(name)) return { state: 'stopped' };
+    if (!workspaceCommittedNames().includes(name)) {
+      return { state: 'stopped' };
+    }
     const state = opts.manager.state();
-    const workers = workerFor(name);
-    if (
-      workers.length !== 1 ||
-      workers[0]!.workspaceCwd !== opts.workspaceCwd
-    ) {
+    const workers = workerFor(name).filter(
+      (worker) => worker.workspaceCwd === opts.workspaceCwd,
+    );
+    if (workers.length !== 1) {
       return {
         state: 'error',
         lastError: 'Channel runtime owner is unknown or ambiguous.',
@@ -332,14 +365,49 @@ export function createChannelManagementService(
     }
   };
 
+  const assertWorkspaceConfig = (config: Record<string, unknown>): void => {
+    const rawCwd = config['cwd'];
+    if (typeof rawCwd !== 'string') return;
+    const workspaceCwd = canonicalizeWorkspace(opts.workspaceCwd);
+    const channelCwd = canonicalizeWorkspace(
+      resolveChannelCwd(rawCwd, workspaceCwd),
+    );
+    if (channelCwd !== workspaceCwd) {
+      throw new ChannelManagementError(
+        'channel_workspace_mismatch',
+        'Channel workspace must match the selected workspace.',
+      );
+    }
+  };
+
+  const pairingStoreFor = (name: string): PairingStore => {
+    assertManageableInstanceName(name);
+    const channels = opts.store.snapshot().channels;
+    if (!Object.hasOwn(channels, name)) {
+      throw new ChannelManagementError(
+        'channel_instance_not_found',
+        `Channel "${name}" is not configured in this workspace.`,
+      );
+    }
+    const config = channels[name]!;
+    assertWorkspaceConfig(config);
+    if (config['senderPolicy'] !== 'pairing') {
+      throw new ChannelManagementError(
+        'channel_pairing_not_enabled',
+        `Channel "${name}" does not use pairing mode.`,
+      );
+    }
+    return new PairingStore(name, opts.workspaceCwd);
+  };
+
   const service: ChannelManagementService = {
     async list() {
       return listFrom(opts.store.snapshot());
     },
     async upsert(name, request) {
       assertManageableInstanceName(name);
-      const committedNames = opts.manager.committedChannelNames();
-      const active = committedNames.includes(name);
+      assertWorkspaceConfig(request.config);
+      const active = workspaceCommittedNames().includes(name);
       if (active) assertOwnedRuntime(name);
       const persisted = await opts.store.upsert(name, request);
       diagnostics.delete(name);
@@ -360,13 +428,17 @@ export function createChannelManagementService(
     async remove(name, request) {
       assertManageableInstanceName(name);
       const current = opts.store.snapshot();
+      if (!Object.hasOwn(current.channels, name)) {
+        throw new ChannelManagementError(
+          'channel_instance_not_found',
+          `Channel "${name}" is not configured in this workspace.`,
+        );
+      }
+      assertWorkspaceConfig(current.channels[name]!);
       assertExpectedRevision(current, request.expectedRevision);
-      if (!isAllChannelSelectionName(name)) {
-        const committedNames = opts.manager.committedChannelNames();
-        if (committedNames.includes(name)) {
-          assertOwnedRuntime(name);
-          await stopChannel(name);
-        }
+      if (workspaceCommittedNames().includes(name)) {
+        assertOwnedRuntime(name);
+        await stopChannel(name);
       }
       const persisted = await opts.store.remove(name, request);
       diagnostics.delete(name);
@@ -381,6 +453,7 @@ export function createChannelManagementService(
           `Channel "${name}" is not configured in this workspace.`,
         );
       }
+      assertWorkspaceConfig(current.channels[name]!);
       const startsAll = current.startupNames.some(isAllChannelSelectionName);
       if (startsAll && request.enabled) {
         assertExpectedRevision(current, request.expectedRevision);
@@ -409,6 +482,7 @@ export function createChannelManagementService(
           `Channel "${name}" is not configured in this workspace.`,
         );
       }
+      assertWorkspaceConfig(persisted.channels[name]!);
       await opts.manager.setChannelEnabled(
         { name, workspaceCwd: opts.workspaceCwd },
         true,
@@ -425,6 +499,7 @@ export function createChannelManagementService(
           `Channel "${name}" is not configured in this workspace.`,
         );
       }
+      assertWorkspaceConfig(persisted.channels[name]!);
       await opts.manager.setChannelEnabled(
         { name, workspaceCwd: opts.workspaceCwd },
         false,
@@ -435,7 +510,14 @@ export function createChannelManagementService(
     async restart(name) {
       assertManageableInstanceName(name);
       const persisted = opts.store.snapshot();
-      if (!opts.manager.committedChannelNames().includes(name)) {
+      if (!Object.hasOwn(persisted.channels, name)) {
+        throw new ChannelManagementError(
+          'channel_instance_not_found',
+          `Channel "${name}" is not configured in this workspace.`,
+        );
+      }
+      assertWorkspaceConfig(persisted.channels[name]!);
+      if (!workspaceCommittedNames().includes(name)) {
         throw new ChannelManagementError(
           'channel_worker_not_enabled',
           `Channel "${name}" is not running.`,
@@ -451,6 +533,20 @@ export function createChannelManagementService(
       }
       return resultFor(name, persisted);
     },
+    async pairingRequests(name) {
+      return { requests: pairingStoreFor(name).listPending() };
+    },
+    async approvePairing(name, code) {
+      const store = pairingStoreFor(name);
+      const approved = store.approve(code);
+      if (!approved) {
+        throw new ChannelManagementError(
+          'channel_pairing_request_not_found',
+          'Pairing request was not found or has expired.',
+        );
+      }
+      return { approved, requests: store.listPending() };
+    },
   };
   return {
     list: () => service.list(),
@@ -463,5 +559,8 @@ export function createChannelManagementService(
     start: (name) => inMutationLane(() => service.start(name)),
     stop: (name) => inMutationLane(() => service.stop(name)),
     restart: (name) => inMutationLane(() => service.restart(name)),
+    pairingRequests: (name) => service.pairingRequests(name),
+    approvePairing: (name, code) =>
+      inMutationLane(() => service.approvePairing(name, code)),
   };
 }

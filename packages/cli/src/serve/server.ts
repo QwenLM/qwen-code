@@ -216,7 +216,9 @@ import {
   registerWorkspaceQualifiedMcpControlRoutes,
 } from './routes/workspace-mcp-control.js';
 import { registerWorkspaceChannelControlRoutes } from './routes/workspace-channel-control.js';
+import { registerWorkspaceChannelManagementRoutes } from './routes/workspace-channel-management.js';
 import { registerWorkspaceChannelObservedContactRoutes } from './routes/workspace-channel-observed-contacts.js';
+import type { ChannelManagementService } from './channel-management-service.js';
 import {
   registerWorkspaceQualifiedToolsRoutes,
   registerWorkspaceToolsRoutes,
@@ -452,6 +454,12 @@ export interface ServeAppDeps {
    * `channel_reload` is advertised only while the control state is enabled.
    */
   reloadChannelWorker?: () => Promise<ChannelWorkerSnapshot>;
+  channelManagementService?: (
+    runtime: WorkspaceRuntime,
+  ) =>
+    | ChannelManagementService
+    | undefined
+    | Promise<ChannelManagementService | undefined>;
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   /** Rolling metrics series for the Daemon Status charts (oldest→newest). */
   getMetricsSeries?: () => DaemonMetricsBucket[];
@@ -732,6 +740,7 @@ export function createServeApp(
         deps.getChannelWorkerControl !== undefined &&
         deps.setChannelWorkerSelection !== undefined &&
         deps.stopChannelWorker !== undefined,
+      channelManagementAvailable: deps.channelManagementService !== undefined,
       channelReloadAvailable: () => {
         if (deps.reloadChannelWorker === undefined) return false;
         const control = deps.getChannelWorkerControl?.();
@@ -1558,6 +1567,17 @@ export function createServeApp(
       sendBridgeError,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+    });
+  }
+  if (deps.channelManagementService) {
+    registerWorkspaceChannelManagementRoutes(app, {
+      primaryRuntime,
+      workspaceRegistry,
+      resolveService: deps.channelManagementService,
+      mutate,
+      safeBody,
+      parseAndValidateClientId: (req, res, runtime) =>
+        parseAndValidateWorkspaceClientId(req, res, runtime.bridge),
     });
   }
   registerWorkspaceChannelObservedContactRoutes(app, {

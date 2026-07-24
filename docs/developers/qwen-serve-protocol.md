@@ -437,6 +437,7 @@ operator diagnostic snapshot documented below.
 | `workspace_reload`                  | workspace reload support is available in the embedded route configuration.                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `channel_reload`                    | a daemon-managed channel worker manager is enabled and can reload its current selection.                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `channel_control`                   | daemon-managed channel worker runtime control is wired.                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `channel_management`                | workspace-scoped Channel settings, lifecycle, and pairing management are wired.                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `multi_workspace_sessions`          | more than one workspace runtime is registered, so session creation can select a trusted runtime by cwd.                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `multi_workspace_session_rewind`    | more than one workspace runtime is registered; singular live-session rewind routes resolve the owning runtime.                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `multi_workspace_session_shell`     | more than one workspace runtime is registered and session shell execution is explicitly enabled; singular REST shell resolves the owning runtime.                                                                                                                                                                                                                                                                                                                                                               |
@@ -747,6 +748,51 @@ top-level `channels` (union) and `workerPid` (primary) stay populated for older
 readers; single-workspace daemons keep the original single-worker shape. Worker
 stdout/stderr are forwarded into the daemon log with bearer tokens, sensitive
 worker environment values, and proxy URL credentials redacted.
+
+### Workspace Channel management
+
+The `channel_management` capability advertises workspace-scoped Channel
+configuration and runtime management. The singular `/workspace` routes target
+the primary runtime. `/workspaces/:workspace` resolves the exact registered,
+trusted runtime and never falls back to the primary runtime.
+
+Read-only discovery uses:
+
+- `GET /workspace/channel-types`
+- `GET /workspace/channels`
+- `GET /workspaces/:workspace/channel-types`
+- `GET /workspaces/:workspace/channels`
+
+The catalog marks the types supported by this management API with
+`manageable: true`. Instance snapshots include a revision, redacted secret
+presence metadata, startup state, and runtime state; literal secrets are never
+returned. Channel snapshots use `Cache-Control: no-store`.
+
+Configuration writes use optimistic concurrency and the strict bearer-token
+gate:
+
+- `PUT /workspace/channels/:name`
+- `DELETE /workspace/channels/:name`
+- `PUT /workspace/channels/:name/startup`
+- the equivalent `/workspaces/:workspace/...` routes
+
+Each settings mutation includes `expectedRevision`. Upsert requests contain a
+`config` object and may contain explicit secret operations: `preserve`,
+`replace`, or `clear`. A Channel config cannot select a working directory
+outside the resolved workspace.
+
+Runtime actions are strict-gated `POST` requests to
+`.../channels/:name/start`, `stop`, or `restart`. They operate only on the
+worker owned by the resolved workspace.
+
+Pairing management is available only for instances configured with the
+`pairing` sender policy:
+
+- `GET .../channels/:name/pairing-requests`
+- `POST .../channels/:name/pairing-requests/approve` with `{ "code": "..." }`
+
+Both pairing routes require a bearer token and use `Cache-Control: no-store`.
+Approval is scoped to the selected Channel instance and workspace.
 
 ### Channel delivery and Notify
 
