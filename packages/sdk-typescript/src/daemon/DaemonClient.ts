@@ -41,6 +41,7 @@ import type {
   DaemonSessionExportResult,
   DaemonSessionTranscriptPage,
   DaemonSessionTranscriptPageOptions,
+  DaemonSubagentSessionResolveOptions,
   DaemonSubagentSessionResolution,
   DaemonSessionGroup,
   DaemonSessionGroupCatalog,
@@ -2315,9 +2316,12 @@ export class DaemonClient {
     sessionId: string,
     toolCallId: string,
     clientId?: string,
+    opts: DaemonSubagentSessionResolveOptions = {},
   ): Promise<DaemonSubagentSessionResolution> {
     return await this.jsonRequest<DaemonSubagentSessionResolution>(
-      `/session/${urlEncode(sessionId)}/subagents/${urlEncode(toolCallId)}`,
+      `/session/${urlEncode(sessionId)}/subagents/${urlEncode(toolCallId)}${
+        opts.includeTree ? '?includeTree=1' : ''
+      }`,
       'GET /session/:id/subagents/:toolCallId',
       { clientId, mode: 'rest' },
     );

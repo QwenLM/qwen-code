@@ -22,6 +22,9 @@ vi.mock('../App', async () => {
 vi.mock('./MessageItem', async () => {
   const React = await import('react');
   const { useWebShellCustomization } = await import('../customization');
+  const { usePlanExecutionHistory } = await import(
+    '../planExecutionHistoryContext'
+  );
   return {
     MessageItem: ({
       message,
@@ -35,6 +38,8 @@ vi.mock('./MessageItem', async () => {
       assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
     }) => {
       const { renderAssistantTurnFooter } = useWebShellCustomization();
+      const { resolveLoaded: resolvePlanExecutions } =
+        usePlanExecutionHistory();
       const assistantTurnFooter = assistantTurnFooterInfo
         ? renderAssistantTurnFooter?.(assistantTurnFooterInfo)
         : undefined;
@@ -44,6 +49,10 @@ vi.mock('./MessageItem', async () => {
           'data-testid': `msg-${message.id}`,
           'data-assistant-actions': String(Boolean(showAssistantActions)),
           'data-locate-flashing': isLocateFlashing ? 'true' : undefined,
+          'data-plan-executions':
+            message.role === 'plan'
+              ? String(resolvePlanExecutions({ messageId: message.id }).length)
+              : undefined,
         },
         message.role === 'thinking'
           ? React.createElement('button', {
@@ -337,6 +346,16 @@ const simpleTurns = (count: number): Message[] =>
   }).flat();
 
 describe('MessageList — turn collapse (DOM)', () => {
+  it('provides later Agent executions to a historical plan row', () => {
+    const container = mount([planMsg('plan'), agentMsg('agent')]);
+
+    expect(
+      container
+        .querySelector('[data-testid="msg-plan"]')
+        ?.getAttribute('data-plan-executions'),
+    ).toBe('1');
+  });
+
   it('reloads an oversized transcript after 120 quiet seconds at the tail', async () => {
     vi.useFakeTimers();
     const onReloadTranscript = vi.fn().mockResolvedValue(undefined);

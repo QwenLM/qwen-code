@@ -196,6 +196,9 @@ vi.mock('./messages/ToolApproval', () => ({
     <button
       data-testid="tool-approval"
       data-keyboard-active={String(props.keyboardActive)}
+      data-plan-todos={JSON.stringify(
+        props.planTodos?.map((todo: any) => todo.id) ?? [],
+      )}
       onClick={() => props.onConfirm(props.request.id, 'proceed')}
     >
       approve
@@ -642,6 +645,37 @@ describe('ChatPane', () => {
     render();
     expect(testid('tool-approval')?.getAttribute('data-keyboard-active')).toBe(
       'false',
+    );
+  });
+
+  it('passes this pane workflow to its exit-plan approval', () => {
+    messagesState = [
+      {
+        id: 'plan',
+        role: 'plan',
+        todos: [
+          { id: 'prepare', content: 'Prepare', status: 'completed' },
+          {
+            id: 'ship',
+            content: 'Ship',
+            status: 'pending',
+            blockedBy: ['prepare'],
+          },
+        ],
+      },
+      { id: 'revision', role: 'user', content: 'Revise the wording' },
+    ];
+    pendingPermission = {
+      id: 'perm-plan',
+      toolKind: 'switch_mode',
+      toolName: 'exit_plan_mode',
+      rawInput: {},
+    };
+
+    render();
+
+    expect(testid('tool-approval')?.getAttribute('data-plan-todos')).toBe(
+      '["prepare","ship"]',
     );
   });
 

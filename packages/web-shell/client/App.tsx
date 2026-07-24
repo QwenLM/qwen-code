@@ -44,7 +44,10 @@ import { type SessionGitIntent } from './components/GitModePopover';
 import { SESSION_TRANSCRIPT_PAGINATION_FEATURE } from './constants/sessions';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
-import { SubagentDetailsProvider } from './subagentDetailsContext';
+import {
+  SubagentDetailsProvider,
+  useSubagentTreeResolver,
+} from './subagentDetailsContext';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
 import {
   ChatEditor,
@@ -226,7 +229,9 @@ import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
 import {
   computeTodoDetails,
   computeTodoTimeline,
+  getAgentToolsForPlan,
   getFloatingTodos,
+  getLatestActiveTodos,
   todoDetailSignature,
   todoTimelineSignature,
   type TodoDetail,
@@ -1326,6 +1331,7 @@ export function App({
   const connection = useConnection();
   const transcriptHistory = useTranscriptHistory();
   const workspace = useWorkspace();
+  const resolveSubagentTree = useSubagentTreeResolver();
   const workspaces = useMemo(() => {
     const capabilityWorkspaces = workspace.capabilities?.workspaces ?? [];
     if (
@@ -2216,6 +2222,10 @@ export function App({
     () => getFloatingTodos(messages),
     [messages],
   );
+  const approvalPlanTodos = useMemo(
+    () => getLatestActiveTodos(messages),
+    [messages],
+  );
   // Keep the timeline Map referentially stable across streaming ticks that
   // don't touch any todo snapshot. The Map is a context value, so a fresh
   // reference would re-render every todo/plan row regardless of memoization;
@@ -2251,9 +2261,8 @@ export function App({
     todoDetailRef.current = { signature, details };
     return details;
   }, [messages]);
-  const floatingTodos = useStableArray(
-    floatingTodosState.todos,
-    (t) => `${t.id}:${t.status}:${t.content}`,
+  const floatingTodos = useStableArray(floatingTodosState.todos, (todo) =>
+    JSON.stringify([todo.id, todo.status, todo.content, todo.blockedBy ?? []]),
   );
   const floatingTodosAllCompleted = floatingTodosState.allCompleted;
   const [todoPanelMode, setTodoPanelMode] = useState<'hidden' | 'active'>(
@@ -2951,6 +2960,13 @@ export function App({
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [tasksDialogMessage, setTasksDialogMessage] =
     useState<SerializedTasksMessage | null>(null);
+  const planAgentTools = useMemo(
+    () =>
+      tasksDialogMessage
+        ? getAgentToolsForPlan(messages, floatingTodosState)
+        : [],
+    [floatingTodosState, messages, tasksDialogMessage],
+  );
   const [selectedTheme, setSelectedTheme] = useState<WebShellTheme>(
     providedTheme ?? WebShellThemeId.Dark,
   );
@@ -6699,7 +6715,11 @@ export function App({
           )}
           {tasksDialogMessage && (
             <DialogShell
-              title={t('tasks.title')}
+              title={
+                floatingTodos.length > 0
+                  ? t('planExecution.dialogTitle')
+                  : t('tasks.title')
+              }
               size="lg"
               onClose={() => setTasksDialogMessage(null)}
             >
@@ -6708,6 +6728,12 @@ export function App({
                 embedded
                 manageActiveEvent={false}
                 onClose={() => setTasksDialogMessage(null)}
+                planTodos={floatingTodos}
+                agentTools={planAgentTools}
+                onOpenSubagent={(tool) => {
+                  setTasksDialogMessage(null);
+                  openSubagentPanel(tool);
+                }}
               />
             </DialogShell>
           )}
@@ -7634,6 +7660,7 @@ export function App({
                             const messageList = (
                               <SubagentDetailsProvider
                                 onOpen={openSubagentPanel}
+                                resolveTree={resolveSubagentTree}
                               >
                                 {messageListContent}
                               </SubagentDetailsProvider>
@@ -7743,6 +7770,9 @@ export function App({
                           <TodoPanel
                             todos={showFloatingTodos ? floatingTodos : []}
                             statusItems={floatingBottomStatusItems}
+                            onOpen={
+                              showFloatingTodos ? openTasksPanel : undefined
+                            }
                           />
                         </div>
                       )}
@@ -7761,6 +7791,7 @@ export function App({
                             onConfirm={handleConfirm}
                             variant="floating"
                             keyboardActive={toolApprovalOverlayVisible}
+                            planTodos={approvalPlanTodos}
                           />
                         </div>
                       )}

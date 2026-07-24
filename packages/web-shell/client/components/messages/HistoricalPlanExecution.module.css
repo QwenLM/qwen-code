@@ -1,0 +1,29 @@
+.details {
+  margin-top: 8px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.summary {
+  width: fit-content;
+  color: var(--agent-blue-500);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.summary:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 2px;
+}
+
+.content {
+  margin-top: 8px;
+}
+
+.historyNotice {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.4;
+  margin-bottom: 8px;
+}

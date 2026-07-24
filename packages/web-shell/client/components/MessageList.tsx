@@ -48,6 +48,7 @@ import turnCollapseStyles from './TurnCollapseRow.module.css';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
 import { WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS } from '../constants/sessions';
+import { PlanExecutionHistoryProvider } from '../planExecutionHistoryContext';
 
 const noopTurnOutputAction = () => undefined;
 const RELOAD_TRANSCRIPT_DELAY_MS = 120_000;
@@ -2331,7 +2332,10 @@ export const MessageList = memo(
     const followPausedByUserRef = useRef(false);
     const userScrollIntentUntil = useRef(0);
     const lastScrollTop = useRef(0);
-    const olderHistoryLoadInFlight = useRef(false);
+    const olderHistoryLoadInFlight = useRef<{
+      promise: Promise<boolean>;
+      resolve: (loaded: boolean) => void;
+    } | null>(null);
     const scrollCooldown = useRef(false);
     const scrollCooldownCount = useRef(0);
     const sessionTimelineFrame = useRef<number | null>(null);
@@ -2393,9 +2397,20 @@ export const MessageList = memo(
           olderHistoryAnchor.scrollTop +
           Math.max(0, current.scrollHeight - olderHistoryAnchor.scrollHeight);
       }
-      olderHistoryLoadInFlight.current = false;
+      const inFlight = olderHistoryLoadInFlight.current;
+      olderHistoryLoadInFlight.current = null;
+      inFlight?.resolve(true);
       setOlderHistoryAnchor(null);
     }, [olderHistoryAnchor]);
+
+    useEffect(
+      () => () => {
+        const inFlight = olderHistoryLoadInFlight.current;
+        olderHistoryLoadInFlight.current = null;
+        inFlight?.resolve(false);
+      },
+      [],
+    );
 
     useEffect(() => {
       if (!hasOlderHistory) {
@@ -3164,37 +3179,48 @@ export const MessageList = memo(
     }, [visibleItems, headerOffset, performScrollToRow]);
 
     const loadOlderHistory = useCallback(
-      async (allowRetry = false) => {
+      (allowRetry = false): Promise<boolean> => {
+        const existing = olderHistoryLoadInFlight.current;
+        if (existing) return existing.promise;
         const el = containerRef.current;
         if (
           !el ||
           !onLoadOlderHistory ||
-          loadingOlderHistory ||
-          olderHistoryLoadInFlight.current ||
           (olderHistoryRetryBlocked.current && !allowRetry)
         ) {
-          return;
+          return Promise.resolve(false);
         }
+        let resolveLoad!: (loaded: boolean) => void;
+        const promise = new Promise<boolean>((resolve) => {
+          resolveLoad = resolve;
+        });
+        const inFlight = { promise, resolve: resolveLoad };
+        olderHistoryLoadInFlight.current = inFlight;
         olderHistoryRetryBlocked.current = false;
-        olderHistoryLoadInFlight.current = true;
         setSuppressOlderHistoryLoadingStatus(!allowRetry);
         const previousHeight = el.scrollHeight;
         const previousTop = el.scrollTop;
         followPausedByUserRef.current = true;
-        try {
-          await onLoadOlderHistory();
-          setOlderHistoryAnchor({
-            scrollHeight: previousHeight,
-            scrollTop: previousTop,
+        void onLoadOlderHistory()
+          .then(() => {
+            setOlderHistoryAnchor({
+              scrollHeight: previousHeight,
+              scrollTop: previousTop,
+            });
+          })
+          .catch(() => {
+            olderHistoryRetryBlocked.current = true;
+            if (olderHistoryLoadInFlight.current === inFlight) {
+              olderHistoryLoadInFlight.current = null;
+            }
+            resolveLoad(false);
+          })
+          .finally(() => {
+            setSuppressOlderHistoryLoadingStatus(false);
           });
-        } catch {
-          olderHistoryRetryBlocked.current = true;
-          olderHistoryLoadInFlight.current = false;
-        } finally {
-          setSuppressOlderHistoryLoadingStatus(false);
-        }
+        return promise;
       },
-      [loadingOlderHistory, onLoadOlderHistory],
+      [onLoadOlderHistory],
     );
 
     // Rules 2 & 3: detect scroll direction to toggle follow mode.
@@ -3785,89 +3811,97 @@ export const MessageList = memo(
     }, [messages, scheduleScrollOverflowReport, totalCount, totalVirtualSize]);
 
     return (
-      <div
-        ref={containerRef}
-        className={joinClassNames(
-          styles.list,
-          hasHeader && centerWelcomeHeader
-            ? styles.listWithWelcomeHeader
-            : undefined,
-        )}
-        data-web-shell-message-list
-        onClickCapture={handleDisclosureClickCapture}
+      <PlanExecutionHistoryProvider
+        messages={messages}
+        hasOlderHistory={hasOlderHistory}
+        onLoadOlderHistory={() => loadOlderHistory(true)}
       >
-        {showLoadingSkeleton && (
-          <LoadingTranscriptSkeleton label={t('editor.sessionLoading')} />
-        )}
-        {loadingOlderHistory &&
-          !showLoadingSkeleton &&
-          !suppressOlderHistoryLoadingStatus && (
+        <div
+          ref={containerRef}
+          className={joinClassNames(
+            styles.list,
+            hasHeader && centerWelcomeHeader
+              ? styles.listWithWelcomeHeader
+              : undefined,
+          )}
+          data-web-shell-message-list
+          onClickCapture={handleDisclosureClickCapture}
+        >
+          {showLoadingSkeleton && (
+            <LoadingTranscriptSkeleton label={t('editor.sessionLoading')} />
+          )}
+          {loadingOlderHistory &&
+            !showLoadingSkeleton &&
+            !suppressOlderHistoryLoadingStatus && (
+              <div className={styles.historyStatus} role="status">
+                {t('history.loadingEarlier')}
+              </div>
+            )}
+          {historyCapacityReached && !showLoadingSkeleton && (
             <div className={styles.historyStatus} role="status">
-              {t('history.loadingEarlier')}
+              {t('history.capacityReached')}
             </div>
           )}
-        {historyCapacityReached && !showLoadingSkeleton && (
-          <div className={styles.historyStatus} role="status">
-            {t('history.capacityReached')}
-          </div>
-        )}
-        <SessionTimeline
-          entries={sessionTimelineEntries}
-          currentTurnId={currentTimelineTurnId}
-          currentRange={sessionTimelineRange}
-          hidden={!isSessionTimelineVisible || !hasEnoughSessionTimelineEntries}
-          onSelect={scrollToMessage}
-        />
-        {useVirtualScroll ? (
-          <div
-            className={styles.virtualSizer}
-            style={{
-              height: totalVirtualSize,
-            }}
-          >
-            {virtualItems.map((virtualRow) => (
-              <div
-                key={virtualRow.key}
-                data-index={virtualRow.index}
-                ref={virtualizer.measureElement}
-                className={joinClassNames(
-                  styles.virtualRow,
-                  getRowClassName(
-                    visibleItems[virtualRow.index - headerOffset],
-                  ),
-                )}
-                data-message-row-key={String(getItemKey(virtualRow.index))}
-                data-web-shell-message-row
-                style={{
-                  position: 'absolute',
-                  top: 0,
-                  left: 0,
-                  right: 0,
-                  transform: `translateY(${virtualRow.start}px)`,
-                }}
-              >
-                {renderVirtualItem(virtualRow.index)}
-              </div>
-            ))}
-          </div>
-        ) : (
-          Array.from({ length: totalCount }, (_, index) => {
-            const key = getItemKey(index);
-            const item = visibleItems[index - headerOffset];
-            return (
-              <div
-                key={key}
-                data-index={index}
-                className={getRowClassName(item)}
-                data-message-row-key={String(key)}
-                data-web-shell-message-row
-              >
-                {renderVirtualItem(index)}
-              </div>
-            );
-          })
-        )}
-      </div>
+          <SessionTimeline
+            entries={sessionTimelineEntries}
+            currentTurnId={currentTimelineTurnId}
+            currentRange={sessionTimelineRange}
+            hidden={
+              !isSessionTimelineVisible || !hasEnoughSessionTimelineEntries
+            }
+            onSelect={scrollToMessage}
+          />
+          {useVirtualScroll ? (
+            <div
+              className={styles.virtualSizer}
+              style={{
+                height: totalVirtualSize,
+              }}
+            >
+              {virtualItems.map((virtualRow) => (
+                <div
+                  key={virtualRow.key}
+                  data-index={virtualRow.index}
+                  ref={virtualizer.measureElement}
+                  className={joinClassNames(
+                    styles.virtualRow,
+                    getRowClassName(
+                      visibleItems[virtualRow.index - headerOffset],
+                    ),
+                  )}
+                  data-message-row-key={String(getItemKey(virtualRow.index))}
+                  data-web-shell-message-row
+                  style={{
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    right: 0,
+                    transform: `translateY(${virtualRow.start}px)`,
+                  }}
+                >
+                  {renderVirtualItem(virtualRow.index)}
+                </div>
+              ))}
+            </div>
+          ) : (
+            Array.from({ length: totalCount }, (_, index) => {
+              const key = getItemKey(index);
+              const item = visibleItems[index - headerOffset];
+              return (
+                <div
+                  key={key}
+                  data-index={index}
+                  className={getRowClassName(item)}
+                  data-message-row-key={String(key)}
+                  data-web-shell-message-row
+                >
+                  {renderVirtualItem(index)}
+                </div>
+              );
+            })
+          )}
+        </div>
+      </PlanExecutionHistoryProvider>
     );
   }),
 );

@@ -50,8 +50,12 @@ describe('daemon selectors', () => {
             content: 'first',
             status: 'completed',
             priority: 'high',
+            _meta: {
+              qwenTodo: { id: 'todo-1', blockedBy: ['prepare'] },
+            },
           },
         ],
+        plan: { id: 'plan-1' },
       },
     });
     const active = block({
@@ -82,6 +86,10 @@ describe('daemon selectors', () => {
       },
     ]);
     expect(selectDaemonTodoLists([completed, active])).toHaveLength(2);
+    expect(selectDaemonTodoLists([completed])[0]).toMatchObject({
+      planId: 'plan-1',
+      items: [{ id: 'todo-1', blockedBy: ['prepare'] }],
+    });
     expect(selectDaemonLatestTodoList([completed, active])).toMatchObject({
       toolCallId: 'tool-2',
       items: [{ content: 'second' }],
@@ -89,6 +97,54 @@ describe('daemon selectors', () => {
     expect(selectDaemonActiveTodoList([completed, active])).toMatchObject({
       toolCallId: 'tool-2',
     });
+  });
+
+  it('keeps an empty latest plan so it clears the active list', () => {
+    const active = block({
+      kind: 'tool',
+      id: 'active',
+      toolCallId: 'active-call',
+      title: 'TodoWrite',
+      status: 'completed',
+      toolName: 'TodoWrite',
+      rawInput: {
+        todos: [{ id: 'one', content: 'one', status: 'in_progress' }],
+      },
+    });
+    const cleared = block({
+      kind: 'tool',
+      id: 'cleared',
+      toolCallId: 'clear-call',
+      title: 'Updated Plan',
+      status: 'completed',
+      toolName: 'TodoWrite',
+      rawOutput: {
+        entries: [],
+        plan: { id: 'plan-1' },
+      },
+    });
+
+    expect(selectDaemonLatestTodoList([active, cleared])).toMatchObject({
+      planId: 'plan-1',
+      items: [],
+    });
+    expect(selectDaemonActiveTodoList([active, cleared])).toBeUndefined();
+  });
+
+  it('ignores an empty output from a non-todo tool', () => {
+    const other = block({
+      kind: 'tool',
+      id: 'other',
+      toolCallId: 'other-call',
+      title: 'List records',
+      status: 'completed',
+      toolName: 'mcp__example__list',
+      toolKind: 'other',
+      rawOutput: { entries: [], plan: {} },
+    });
+
+    expect(extractDaemonTodosFromToolBlock(asToolBlock(other))).toBeUndefined();
+    expect(selectDaemonTodoLists([other])).toEqual([]);
   });
 
   it('does not resurrect stale active todos after the latest list completes', () => {

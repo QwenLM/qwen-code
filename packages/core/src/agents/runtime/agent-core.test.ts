@@ -595,6 +595,10 @@ describe('AgentCore.prepareTools', () => {
         description: 'task update',
       } as FunctionDeclaration,
       {
+        name: ToolNames.TODO_WRITE,
+        description: 'TodoWrite',
+      } as FunctionDeclaration,
+      {
         name: ToolNames.ENTER_PLAN_MODE,
         description: 'enter plan mode',
       } as FunctionDeclaration,

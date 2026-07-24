@@ -6,6 +6,7 @@ import type {
   DaemonSessionAgentTaskStatus,
   DaemonSessionTasksStatus,
 } from '@qwen-code/sdk/daemon';
+import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { I18nProvider } from '../../i18n';
 
 // The panel only needs getTasks/cancelTask from the daemon SDK; mock the
@@ -58,7 +59,14 @@ function agentTask(
   };
 }
 
-function renderPanel(tasks: DaemonSessionAgentTaskStatus[]): HTMLElement {
+function renderPanel(
+  tasks: DaemonSessionAgentTaskStatus[],
+  options: {
+    planTodos?: readonly TodoItem[];
+    agentTools?: readonly ACPToolCall[];
+    onOpenSubagent?: (tool: ACPToolCall) => void;
+  } = {},
+): HTMLElement {
   const snapshot: DaemonSessionTasksStatus = {
     v: 1,
     sessionId: 'session-1',
@@ -72,7 +80,13 @@ function renderPanel(tasks: DaemonSessionAgentTaskStatus[]): HTMLElement {
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <TasksStatusMessage message={{ snapshot }} manageActiveEvent={false} />
+        <TasksStatusMessage
+          message={{ snapshot }}
+          manageActiveEvent={false}
+          planTodos={options.planTodos}
+          agentTools={options.agentTools}
+          onOpenSubagent={options.onOpenSubagent}
+        />
       </I18nProvider>,
     );
   });
@@ -80,6 +94,57 @@ function renderPanel(tasks: DaemonSessionAgentTaskStatus[]): HTMLElement {
 }
 
 describe('TasksStatusMessage nested-agent tree', () => {
+  it('leaves workflow and subagent buttons in control of their keyboard input', async () => {
+    const onOpenSubagent = vi.fn();
+    const tool: ACPToolCall = {
+      callId: 'call-build',
+      toolName: 'Agent',
+      title: 'Build agent',
+      status: 'in_progress',
+      args: { todo_id: 'build' },
+    };
+    const container = renderPanel(
+      [agentTask('build', { toolUseId: tool.callId })],
+      {
+        planTodos: [
+          { id: 'build', content: 'Build the feature', status: 'in_progress' },
+        ],
+        agentTools: [tool],
+        onOpenSubagent,
+      },
+    );
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    });
+
+    const node = container.querySelector<HTMLButtonElement>(
+      '[data-plan-node-id="build"]',
+    )!;
+    const enter = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => node.dispatchEvent(enter));
+    expect(enter.defaultPrevented).toBe(false);
+    act(() => node.click());
+
+    const details = container.querySelector('[data-plan-step-details]')!;
+    const execution = Array.from(
+      details.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('Build agent'))!;
+    const executionEnter = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => execution.dispatchEvent(executionEnter));
+    expect(executionEnter.defaultPrevented).toBe(false);
+    act(() => execution.click());
+    expect(onOpenSubagent).toHaveBeenCalledWith(tool);
+    expect(cancelTaskMock).not.toHaveBeenCalled();
+  });
+
   it('groups a child directly beneath its parent across the sort order', () => {
     // Active sort alone renders newest-first: child(3000), other(2000),
     // parent(1000). The tree post-pass must pull the child up under its

@@ -7523,12 +7523,15 @@ describe('createServeApp', () => {
       });
       const resolveSpy = vi
         .spyOn(VirtualSubagentSessions.prototype, 'resolve')
-        .mockResolvedValue({
-          sessionId: createVirtualSubagentSessionId('s-1', 'agent-1'),
-          taskId: 'agent-1',
-          title: 'Investigate',
-          status: 'running',
-        });
+        .mockImplementation(
+          async (_runtime, _sessionId, _toolCallId, opts) => ({
+            sessionId: createVirtualSubagentSessionId('s-1', 'agent-1'),
+            taskId: 'agent-1',
+            title: 'Investigate',
+            status: 'running',
+            ...(opts?.includeTree ? { nestedAgents: [] } : {}),
+          }),
+        );
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
       const app = createServeApp(
         { ...tokenOpts, workspace: WS_BOUND },
@@ -7539,6 +7542,14 @@ describe('createServeApp', () => {
       try {
         const resolveRes = await request(app)
           .get('/session/s-1/subagents/tool-1')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        const resolveTreeRes = await request(app)
+          .get('/session/s-1/subagents/tool-1?includeTree=1')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        const resolveNonLiteralTreeRes = await request(app)
+          .get('/session/s-1/subagents/tool-1?includeTree=true')
           .set('Host', `127.0.0.1:${tokenOpts.port}`)
           .set('Authorization', 'Bearer secret');
         const cancelRes = await request(app)
@@ -7552,11 +7563,32 @@ describe('createServeApp', () => {
           taskId: 'agent-1',
           status: 'running',
         });
+        expect(resolveRes.body).not.toHaveProperty('nestedAgents');
+        expect(resolveTreeRes.status).toBe(200);
+        expect(resolveTreeRes.body.nestedAgents).toEqual([]);
+        expect(resolveNonLiteralTreeRes.status).toBe(200);
+        expect(resolveNonLiteralTreeRes.body).not.toHaveProperty(
+          'nestedAgents',
+        );
         expect(cancelRes.status).toBe(200);
         expect(cancelRes.body).toEqual({ cancelled: true });
-        expect(resolveSpy).toHaveBeenCalledTimes(2);
-        expect(resolveSpy.mock.calls[0]?.slice(1)).toEqual(['s-1', 'tool-1']);
-        expect(resolveSpy.mock.calls[1]?.slice(1)).toEqual(['s-1', 'tool-1']);
+        expect(resolveSpy).toHaveBeenCalledTimes(4);
+        expect(resolveSpy.mock.calls[0]?.slice(1)).toEqual([
+          's-1',
+          'tool-1',
+          { includeTree: false },
+        ]);
+        expect(resolveSpy.mock.calls[1]?.slice(1)).toEqual([
+          's-1',
+          'tool-1',
+          { includeTree: true },
+        ]);
+        expect(resolveSpy.mock.calls[2]?.slice(1)).toEqual([
+          's-1',
+          'tool-1',
+          { includeTree: false },
+        ]);
+        expect(resolveSpy.mock.calls[3]?.slice(1)).toEqual(['s-1', 'tool-1']);
         expect(bridge.cancelSessionTaskCalls).toEqual([
           { sessionId: 's-1', taskId: 'agent-1', taskKind: 'agent' },
         ]);

@@ -484,6 +484,23 @@ describe('AgentTool', () => {
       );
     });
 
+    it('declares the optional todo association', () => {
+      const properties = agentTool.schema.parametersJsonSchema as {
+        properties: {
+          todo_id: {
+            type?: string;
+            description?: string;
+          };
+        };
+      };
+
+      expect(properties.properties.todo_id.type).toBe('string');
+      expect(properties.properties.todo_id.description).toContain(
+        'current todo list',
+      );
+      expect(agentTool.description).toContain('set `todo_id`');
+    });
+
     it('declares fork_turns for fork agents without a none option', () => {
       const properties = agentTool.schema.parametersJsonSchema as {
         properties: {
@@ -628,6 +645,26 @@ describe('AgentTool', () => {
         prompt: '',
       });
       expect(result).toBe('Parameter "prompt" must be a non-empty string.');
+    });
+
+    it('should reject an empty todo_id', () => {
+      const result = agentTool.validateToolParams({
+        ...validParams,
+        todo_id: ' ',
+      });
+      expect(result).toBe(
+        'Parameter "todo_id" must be a non-empty string of at most 500 characters.',
+      );
+    });
+
+    it('should reject an oversized todo_id', () => {
+      const result = agentTool.validateToolParams({
+        ...validParams,
+        todo_id: 'x'.repeat(501),
+      });
+      expect(result).toBe(
+        'Parameter "todo_id" must be a non-empty string of at most 500 characters.',
+      );
     });
 
     it('should reject empty subagent_type', async () => {
@@ -5741,6 +5778,7 @@ describe('AgentTool', () => {
 
         const meta = readSidecar('monitor-top-1');
         expect(meta.parentAgentId).toBeNull();
+        expect(meta.toolUseId).toBe('top-1');
       });
 
       it('records the launching agent id when launched from a subagent frame', async () => {
@@ -5763,6 +5801,8 @@ describe('AgentTool', () => {
 
         const meta = readSidecar('monitor-nested-1');
         expect(meta.parentAgentId).toBe('explore-parent-42');
+        expect(meta.parentSessionId).toBe('test-session-id');
+        expect(meta.toolUseId).toBe('nested-1');
       });
     });
 

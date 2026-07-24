@@ -862,6 +862,20 @@ export interface DaemonSubagentSessionResolution {
   inputTokens?: number;
   outputTokens?: number;
   cachedTokens?: number;
+  nestedAgents?: DaemonSubagentTreeNode[];
+  nestedAgentsTruncated?: boolean;
+}
+
+export interface DaemonSubagentSessionResolveOptions {
+  includeTree?: boolean;
+}
+
+export interface DaemonSubagentTreeNode {
+  taskId: string;
+  toolCallId: string;
+  parentTaskId: string;
+  title: string;
+  status: string;
 }
 
 export type DaemonSessionArchiveState = 'active' | 'archived';

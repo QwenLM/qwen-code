@@ -53,6 +53,7 @@ export interface DaemonMessageToolCall {
   endTime?: number;
   subContent?: string;
   subTools?: DaemonMessageToolCall[];
+  subToolsTruncated?: boolean;
 }
 
 export interface DaemonMessageTodoItem {
@@ -60,6 +61,7 @@ export interface DaemonMessageTodoItem {
   content: string;
   status: 'pending' | 'in_progress' | 'completed';
   priority?: 'high' | 'medium' | 'low';
+  blockedBy?: string[];
 }
 
 /**

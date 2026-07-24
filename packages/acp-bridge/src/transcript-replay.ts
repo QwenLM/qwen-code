@@ -81,6 +81,7 @@ interface UpdateMetaOptions {
   readonly timestamp?: string | number;
   readonly sourceRecordIds?: readonly string[];
   readonly planToolCallId?: string;
+  readonly todoPlanId?: string;
   readonly extra?: Readonly<Record<string, unknown>>;
 }
 
@@ -114,6 +115,12 @@ export interface TranscriptTodoItem {
   readonly id?: string;
   readonly content: string;
   readonly status: 'pending' | 'in_progress' | 'completed';
+  readonly blockedBy?: readonly string[];
+}
+
+export interface TranscriptTodoPlan {
+  readonly planId?: string;
+  readonly todos: TranscriptTodoItem[];
 }
 
 export interface TranscriptUsageUpdateOptions extends UpdateMetaOptions {
@@ -304,6 +311,9 @@ export function createTranscriptPlanUpdate(
     ...options,
     extra: {
       ...(cumulativeUsage ? { stats: { ...cumulativeUsage } } : {}),
+      ...(options.todoPlanId
+        ? { qwenTodoPlan: { id: options.todoPlanId } }
+        : {}),
       ...(options.extra ?? {}),
     },
   });
@@ -313,6 +323,16 @@ export function createTranscriptPlanUpdate(
       content: todo.content,
       priority: 'medium' as const,
       status: todo.status,
+      ...(todo.id || todo.blockedBy
+        ? {
+            _meta: {
+              qwenTodo: {
+                ...(todo.id ? { id: todo.id } : {}),
+                ...(todo.blockedBy ? { blockedBy: [...todo.blockedBy] } : {}),
+              },
+            },
+          }
+        : {}),
     })),
     ...(meta ? { _meta: meta } : {}),
   } as SessionUpdate;
@@ -322,10 +342,18 @@ export function extractTranscriptTodos(
   resultDisplay: unknown,
   args?: Readonly<Record<string, unknown>>,
 ): TranscriptTodoItem[] | null {
-  const fromDisplay = extractTodosFromDisplay(resultDisplay);
+  return extractTranscriptTodoPlan(resultDisplay, args)?.todos ?? null;
+}
+
+export function extractTranscriptTodoPlan(
+  resultDisplay: unknown,
+  args?: Readonly<Record<string, unknown>>,
+): TranscriptTodoPlan | null {
+  const fromDisplay = extractTodoPlanFromDisplay(resultDisplay);
   if (fromDisplay) return fromDisplay;
+  if (resultDisplay !== null && resultDisplay !== undefined) return null;
   return args && Array.isArray(args['todos'])
-    ? normalizeTodos(args['todos'])
+    ? { todos: normalizeTodos(args['todos']) }
     : null;
 }
 
@@ -656,12 +684,13 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
 
     const resultDisplay = result?.['resultDisplay'];
     if (toolName === 'todo_write') {
-      const todos = extractTranscriptTodos(resultDisplay);
-      if (todos) {
+      const plan = extractTranscriptTodoPlan(resultDisplay);
+      if (plan) {
         yield emit(
-          createTranscriptPlanUpdate(todos, this.usage, {
+          createTranscriptPlanUpdate(plan.todos, this.usage, {
             ...meta,
             planToolCallId: callId,
+            todoPlanId: plan.planId,
           }),
         );
       }
@@ -1167,10 +1196,15 @@ function extractToolResultCallId(
   return undefined;
 }
 
-function extractTodosFromDisplay(value: unknown): TranscriptTodoItem[] | null {
+function extractTodoPlanFromDisplay(value: unknown): TranscriptTodoPlan | null {
   if (isObjectRecord(value) && value['type'] === 'todo_list') {
     return Array.isArray(value['todos'])
-      ? normalizeTodos(value['todos'])
+      ? {
+          ...(typeof value['planId'] === 'string'
+            ? { planId: value['planId'] }
+            : {}),
+          todos: normalizeTodos(value['todos']),
+        }
       : null;
   }
   if (typeof value !== 'string') return null;
@@ -1179,7 +1213,12 @@ function extractTodosFromDisplay(value: unknown): TranscriptTodoItem[] | null {
     return isObjectRecord(parsed) &&
       parsed['type'] === 'todo_list' &&
       Array.isArray(parsed['todos'])
-      ? normalizeTodos(parsed['todos'])
+      ? {
+          ...(typeof parsed['planId'] === 'string'
+            ? { planId: parsed['planId'] }
+            : {}),
+          todos: normalizeTodos(parsed['todos']),
+        }
       : null;
   } catch {
     return null;
@@ -1203,6 +1242,10 @@ function normalizeTodos(values: readonly unknown[]): TranscriptTodoItem[] {
         ...(typeof value['id'] === 'string' ? { id: value['id'] } : {}),
         content: value['content'],
         status,
+        ...(Array.isArray(value['blockedBy']) &&
+        value['blockedBy'].every((dependency) => typeof dependency === 'string')
+          ? { blockedBy: value['blockedBy'] as string[] }
+          : {}),
       },
     ];
   });

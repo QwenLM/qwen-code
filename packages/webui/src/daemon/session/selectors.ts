@@ -36,13 +36,17 @@ export function selectDaemonTodoLists(
   return blocks.flatMap((block): DaemonTodoList[] => {
     if (block.kind !== 'tool') return [];
     const items = extractDaemonTodosFromToolBlock(block);
-    if (!items || items.length === 0) return [];
+    if (!items) return [];
+    const rawOutput = getRecord(block.rawOutput);
+    const plan = getRecord(rawOutput?.['plan']);
+    const planId = getString(plan, 'id');
     return [
       {
         blockId: block.id,
         toolCallId: block.toolCallId,
         title: block.title,
         status: block.status,
+        ...(planId ? { planId } : {}),
         items,
         raw: block,
       },
@@ -70,43 +74,59 @@ export function extractDaemonTodosFromToolBlock(
 ): DaemonTodoItem[] | undefined {
   const toolName = (block.toolName ?? '').toLowerCase();
   const toolKind = (block.toolKind ?? '').toLowerCase();
-  if (
-    toolName !== 'todowrite' &&
-    toolName !== 'todo_write' &&
-    toolKind !== 'updated_plan' &&
-    toolKind !== 'todo' &&
-    toolKind !== 'other'
-  ) {
+  const isTodoTool =
+    toolName === 'todowrite' ||
+    toolName === 'todo_write' ||
+    toolKind === 'updated_plan' ||
+    toolKind === 'todo';
+  if (!isTodoTool && toolKind !== 'other') {
     return undefined;
   }
 
+  const rawOutput = getRecord(block.rawOutput);
+  const hasPlanMetadata =
+    getString(getRecord(rawOutput?.['plan']), 'id') !== undefined;
   const rawInput = getRecord(block.rawInput);
   const inputTodos = getTodoArray(rawInput);
-  if (inputTodos) return parseDaemonTodoItemsFromEntries(inputTodos);
+  if (inputTodos) {
+    const todos = parseDaemonTodoItemsFromEntries(inputTodos);
+    return todos.length > 0 || isTodoTool ? todos : undefined;
+  }
 
-  const rawOutput = getRecord(block.rawOutput);
   const outputTodos = getTodoArray(rawOutput);
-  if (outputTodos) return parseDaemonTodoItemsFromEntries(outputTodos);
+  if (outputTodos) {
+    const todos = parseDaemonTodoItemsFromEntries(outputTodos);
+    return todos.length > 0 || isTodoTool || hasPlanMetadata
+      ? todos
+      : undefined;
+  }
 
   const entries = Array.isArray(rawOutput?.['entries'])
     ? rawOutput['entries']
     : undefined;
-  return entries ? parseDaemonTodoItemsFromEntries(entries) : undefined;
+  if (!entries) return undefined;
+  const todos = parseDaemonTodoItemsFromEntries(entries);
+  return todos.length > 0 || isTodoTool || hasPlanMetadata ? todos : undefined;
 }
 
 export function parseDaemonTodoItemsFromEntries(
   entries: readonly unknown[],
-): DaemonTodoItem[] | undefined {
+): DaemonTodoItem[] {
   const todos = entries.flatMap((entry, index): DaemonTodoItem[] => {
     const item = getRecord(entry);
     const content = getString(item, 'content');
     if (!content) return [];
-    const id = getString(item, 'id') ?? `plan-${index}`;
+    const meta = getRecord(item?.['_meta']);
+    const qwenTodo = getRecord(meta?.['qwenTodo']);
+    const id =
+      getString(qwenTodo, 'id') ?? getString(item, 'id') ?? `plan-${index}`;
+    const blockedBy = getStringArray(qwenTodo, 'blockedBy');
     return [
       {
         id,
         content,
         status: getTodoStatus(getString(item, 'status')),
+        ...(blockedBy ? { blockedBy } : {}),
         ...(() => {
           const priority = getTodoPriority(getString(item, 'priority'));
           return priority ? { priority } : {};
@@ -114,7 +134,7 @@ export function parseDaemonTodoItemsFromEntries(
       },
     ];
   });
-  return todos.length > 0 ? todos : undefined;
+  return todos;
 }
 
 export function hasDaemonActiveTodos(
@@ -241,4 +261,14 @@ function getString(
 ): string | undefined {
   const value = record?.[key];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function getStringArray(
+  record: Record<string, unknown> | undefined,
+  key: string,
+): string[] | undefined {
+  const value = record?.[key];
+  return Array.isArray(value) && value.every((item) => typeof item === 'string')
+    ? value
+    : undefined;
 }

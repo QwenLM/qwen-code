@@ -125,6 +125,7 @@ const {
       forkSession: vi.fn().mockResolvedValue({ launched: false }),
       sendShellCommand: vi.fn().mockResolvedValue(undefined),
       getStats: vi.fn().mockResolvedValue({}),
+      getTasks: vi.fn().mockResolvedValue({ tasks: [] }),
       loadArtifacts: vi.fn().mockResolvedValue({ artifacts: [] }),
       loadSession: vi.fn().mockResolvedValue(undefined),
       reloadSession: vi.fn().mockResolvedValue(undefined),
@@ -184,7 +185,17 @@ const {
       latestChatEditorProps: null as ChatEditorTestProps | null,
       latestAddWorkspaceDialogProps: null as AddWorkspaceDialogTestProps | null,
       latestToolApprovalKeyboardActive: null as boolean | null,
+      latestToolApprovalPlanTodos: [] as Array<{ id: string }>,
       latestAskUserQuestionKeyboardActive: null as boolean | null,
+      latestTodoPanelTodos: [] as Array<{
+        id: string;
+        blockedBy?: string[];
+      }>,
+      latestTodoPanelOnOpen: null as (() => void) | null,
+      latestTasksStatusProps: null as {
+        planTodos?: Array<{ id: string }>;
+        agentTools?: Array<{ callId: string }>;
+      } | null,
       latestScheduledTasksProps: null as {
         onRunPrompt?: (
           prompt: string,
@@ -632,7 +643,19 @@ function mockComponent(path: string, exportName: string): void {
 mockComponent('./components/StatusBar', 'StatusBar');
 mockComponent('./components/StreamingStatus', 'StreamingStatus');
 mockComponent('./components/ToastHost', 'ToastHost');
-mockComponent('./components/panels/TodoPanel', 'TodoPanel');
+vi.doMock('./components/panels/TodoPanel', async () => {
+  const React = await import('react');
+  return {
+    TodoPanel: (props: {
+      todos: Array<{ id: string; blockedBy?: string[] }>;
+      onOpen?: () => void;
+    }) => {
+      testState.latestTodoPanelTodos = props.todos;
+      testState.latestTodoPanelOnOpen = props.onOpen ?? null;
+      return React.createElement('div');
+    },
+  };
+});
 mockComponent('./components/WelcomeHeader', 'WelcomeHeader');
 mockComponent('./components/dialogs/ApprovalModeDialog', 'ApprovalModeDialog');
 mockComponent('./components/dialogs/ResumeDialog', 'ResumeDialog');
@@ -839,8 +862,12 @@ mockComponent('./components/messages/AuthMessage', 'AuthMessage');
 vi.doMock('./components/messages/ToolApproval', async () => {
   const React = await import('react');
   return {
-    ToolApproval: (props: { keyboardActive?: boolean }) => {
+    ToolApproval: (props: {
+      keyboardActive?: boolean;
+      planTodos?: Array<{ id: string }>;
+    }) => {
       testState.latestToolApprovalKeyboardActive = props.keyboardActive ?? null;
+      testState.latestToolApprovalPlanTodos = props.planTodos ?? [];
       return React.createElement('div', {
         'data-web-shell-permission-panel': '',
       });
@@ -857,7 +884,18 @@ vi.doMock('./components/messages/AskUserQuestion', async () => {
     },
   };
 });
-mockComponent('./components/messages/TasksStatusMessage', 'TasksStatusMessage');
+vi.doMock('./components/messages/TasksStatusMessage', async () => {
+  const React = await import('react');
+  return {
+    TasksStatusMessage: (props: {
+      planTodos?: Array<{ id: string }>;
+      agentTools?: Array<{ callId: string }>;
+    }) => {
+      testState.latestTasksStatusProps = props;
+      return React.createElement('div');
+    },
+  };
+});
 mockComponent('./components/messages/BtwMessage', 'BtwMessage');
 mockComponent('./components/QueuedPromptDisplay', 'QueuedPromptDisplay');
 
@@ -959,7 +997,7 @@ function deferred<T>(): {
 // array, so the ask-user variant carries a toolCall.input.questions payload
 // (getPermissionRawInput reads toolCall.input) — a bare toolName isn't enough.
 function makePendingPermissionBlock(
-  overrides: { resolved?: boolean; toolName?: string } = {},
+  overrides: { resolved?: boolean; toolName?: string; kind?: string } = {},
 ): unknown {
   const toolName = overrides.toolName ?? 'run_shell_command';
   const isAskUser = toolName === 'ask_user_question';
@@ -971,7 +1009,7 @@ function makePendingPermissionBlock(
     title: 'Run ls',
     toolCall: {
       toolCallId: 'tc-1',
-      kind: isAskUser ? 'other' : 'execute',
+      kind: overrides.kind ?? (isAskUser ? 'other' : 'execute'),
       _meta: { toolName },
       ...(isAskUser
         ? { input: { questions: [{ question: 'Pick one', options: [] }] } }
@@ -1028,7 +1066,11 @@ beforeEach(() => {
   testState.latestChatEditorProps = null;
   testState.latestAddWorkspaceDialogProps = null;
   testState.latestToolApprovalKeyboardActive = null;
+  testState.latestToolApprovalPlanTodos = [];
   testState.latestAskUserQuestionKeyboardActive = null;
+  testState.latestTodoPanelTodos = [];
+  testState.latestTodoPanelOnOpen = null;
+  testState.latestTasksStatusProps = null;
   testState.latestScheduledTasksProps = null;
   testState.latestGoalsProps = null;
   sidebarTokens.length = 0;
@@ -1062,6 +1104,7 @@ beforeEach(() => {
   mockSessionActions.forkSession.mockResolvedValue({ launched: false });
   mockSessionActions.sendShellCommand.mockResolvedValue(undefined);
   mockSessionActions.getStats.mockResolvedValue({});
+  mockSessionActions.getTasks.mockResolvedValue({ tasks: [] });
   mockSessionActions.loadSession.mockResolvedValue(undefined);
   mockStore.reset.mockClear();
   mockStore.dispatch.mockClear();
@@ -1099,6 +1142,118 @@ afterEach(() => {
   }
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe('App plan todos', () => {
+  it('passes the active workflow to an exit-plan approval', async () => {
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'plan',
+        todos: [
+          { id: 'prepare', content: 'Prepare', status: 'completed' },
+          {
+            id: 'ship',
+            content: 'Ship',
+            status: 'pending',
+            blockedBy: ['prepare'],
+          },
+        ],
+      },
+      { id: 'revision', role: 'user', content: 'Revise the wording' },
+    ];
+    testState.blocks = [
+      makePendingPermissionBlock({
+        toolName: 'exit_plan_mode',
+        kind: 'switch_mode',
+      }),
+    ];
+
+    renderApp();
+    await flush();
+
+    expect(
+      testState.latestToolApprovalPlanTodos.map((todo) => todo.id),
+    ).toEqual(['prepare', 'ship']);
+  });
+
+  it('refreshes dependencies when only blockedBy changes', async () => {
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'plan',
+        todos: [
+          { id: 'prepare', content: 'Prepare', status: 'completed' },
+          {
+            id: 'ship',
+            content: 'Ship',
+            status: 'pending',
+            blockedBy: ['prepare'],
+          },
+        ],
+      },
+    ];
+    const { rerender } = renderApp();
+    await flush();
+
+    expect(testState.latestTodoPanelTodos[1]?.blockedBy).toEqual(['prepare']);
+
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'plan',
+        todos: [
+          { id: 'prepare', content: 'Prepare', status: 'completed' },
+          {
+            id: 'ship',
+            content: 'Ship',
+            status: 'pending',
+            blockedBy: [],
+          },
+        ],
+      },
+    ];
+    rerender();
+    await flush();
+
+    expect(testState.latestTodoPanelTodos[1]?.blockedBy).toEqual([]);
+  });
+
+  it('opens the workflow dialog with plan todos and linked agents', async () => {
+    testState.messages = [
+      {
+        id: 'plan',
+        role: 'plan',
+        todos: [{ id: 'work', content: 'Work', status: 'in_progress' }],
+      },
+      {
+        id: 'agents',
+        role: 'tool_group',
+        tools: [
+          {
+            callId: 'agent-call',
+            toolName: 'Agent',
+            status: 'in_progress',
+            args: { todo_id: 'work' },
+          },
+        ],
+      },
+    ];
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestTodoPanelOnOpen?.();
+      await Promise.resolve();
+    });
+
+    expect(
+      testState.latestTasksStatusProps?.planTodos?.map((todo) => todo.id),
+    ).toEqual(['work']);
+    expect(
+      testState.latestTasksStatusProps?.agentTools?.map((tool) => tool.callId),
+    ).toEqual(['agent-call']);
+  });
 });
 
 describe('App session callbacks', () => {

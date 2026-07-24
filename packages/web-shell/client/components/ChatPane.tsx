@@ -20,7 +20,10 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../adapters/types';
-import { SubagentDetailsProvider } from '../subagentDetailsContext';
+import {
+  SubagentDetailsProvider,
+  useSubagentTreeResolver,
+} from '../subagentDetailsContext';
 import { useI18n } from '../i18n';
 import { SESSION_TRANSCRIPT_PAGINATION_FEATURE } from '../constants/sessions';
 import { useMessages } from '../hooks/useMessages';
@@ -37,6 +40,7 @@ import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
 import { shouldBlockComposerSubmit } from '../utils/composerInputState';
+import { getLatestActiveTodos } from '../utils/todos';
 import { invokeSlashCommandHandler } from '../utils/slash-command-action';
 import type { WebShellSlashCommandHandler } from '../App';
 import { getModelDisplayName } from '../utils/modelDisplay';
@@ -137,6 +141,7 @@ export function ChatPane({
   const actions = useActions();
   const workspaceActions = useWorkspaceActions();
   const workspace = useWorkspace();
+  const resolveSubagentTree = useSubagentTreeResolver();
   const messages = useMessages(t);
   const blocks = useTranscriptBlocks();
   const transcriptHistory = useTranscriptHistory();
@@ -236,6 +241,13 @@ export function ChatPane({
     pendingApproval && !isAskUser ? pendingApproval : null;
   const pendingAskUserApproval =
     pendingApproval && isAskUser ? pendingApproval : null;
+  const isExitPlanApproval =
+    pendingToolApproval?.toolKind === 'switch_mode' &&
+    pendingToolApproval?.toolName?.toLowerCase() === 'exit_plan_mode';
+  const planTodos = useMemo(
+    () => (isExitPlanApproval ? getLatestActiveTodos(messages) : []),
+    [isExitPlanApproval, messages],
+  );
   // Tracked in a ref so an async approval-mode switch (handleSelectMode) reads
   // the approval current when setApprovalMode *resolves*, not a stale one
   // captured at click time — mirrors App's pendingApprovalRef.
@@ -581,7 +593,10 @@ export function ChatPane({
       )}
 
       <div className={styles.body}>
-        <SubagentDetailsProvider onOpen={openSubagentDetails}>
+        <SubagentDetailsProvider
+          onOpen={openSubagentDetails}
+          resolveTree={resolveSubagentTree}
+        >
           <MessageList
             messages={messages}
             pendingApproval={pendingToolApproval}
@@ -629,6 +644,7 @@ export function ChatPane({
               request={pendingToolApproval}
               onConfirm={handleConfirm}
               variant="floating"
+              planTodos={planTodos}
               // Several panes can show approvals at once; don't auto-focus one
               // pane's approval (it would steal focus from the pane the user is
               // in). Keyboard handling is focus-scoped, so each pane's approval
