@@ -596,6 +596,8 @@ interface SessionEntry {
   retryAllowed: boolean;
   /** Prompt id whose `prompt_cancelled` event has already been broadcast. */
   cancelBroadcastPromptId?: string;
+  /** Whether an id-less idle cancellation has already been broadcast. */
+  cancelBroadcastWithoutPrompt?: boolean;
   /**
    * Count of times `spawnOrAttach` has returned `attached: true` for
    * this entry — i.e. a second-or-subsequent client claimed this
@@ -989,13 +991,18 @@ function broadcastPromptCancelledOnce(
   originatorClientId: string | undefined,
   reason?: 'forward_failed',
 ): void {
-  if (promptId !== undefined && entry.cancelBroadcastPromptId === promptId) {
+  if (
+    (promptId !== undefined && entry.cancelBroadcastPromptId === promptId) ||
+    (promptId === undefined && entry.cancelBroadcastWithoutPrompt === true)
+  ) {
     writeStderrLine(
-      `broadcastPromptCancelledOnce: suppressed duplicate cancel for session ${sessionId} prompt=${promptId}`,
+      `broadcastPromptCancelledOnce: suppressed duplicate cancel for session ${sessionId} prompt=${promptId ?? 'none'}`,
     );
     return;
   }
-  if (promptId !== undefined) {
+  if (promptId === undefined) {
+    entry.cancelBroadcastWithoutPrompt = true;
+  } else {
     entry.cancelBroadcastPromptId = promptId;
   }
   broadcastPromptCancelled(
@@ -3582,7 +3589,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         if (published === undefined) {
           failureCount += 1;
           teeServeDebugLine(
-            `broadcastWorkspaceEvent: publish on session ${entry.sessionId} no-op (bus closed)`,
+            `broadcastWorkspaceEvent: publish on session ${entry.sessionId} no-op (bus closed or unserializable)`,
           );
         } else {
           successCount += 1;
@@ -5447,6 +5454,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 })();
                 entry.promptActive = true;
                 entry.activePromptId = pendingEntry.promptId;
+                delete entry.cancelBroadcastWithoutPrompt;
                 delete entry.turnError;
                 activePromptCounter++;
                 entry.sessionLastSeenAt = Date.now();
@@ -6467,7 +6475,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           if (published === undefined) {
             failureCount += 1;
             teeServeDebugLine(
-              `publishWorkspaceEvent: publish on session ${entry.sessionId} no-op (bus closed)`,
+              `publishWorkspaceEvent: publish on session ${entry.sessionId} no-op (bus closed or unserializable)`,
             );
           } else {
             successCount += 1;

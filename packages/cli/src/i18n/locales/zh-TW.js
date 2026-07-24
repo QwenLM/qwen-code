@@ -445,6 +445,12 @@ export default {
   'Create a new subagent with guided setup.': '通過引導式設置創建新的子智能體',
   'Create a reusable skill from a knowledge source (file, URL, conversation, or text).':
     '從知識源（檔案、URL、對話或文字）建立可重複使用的技能。',
+  'The current model or provider does not support native video input for /learn. Switch to a video-capable model on an OpenAI-compatible provider and try again.':
+    '目前模型或供應商不支援 /learn 的原生影片輸入。請切換到 OpenAI 相容供應商上的影片模型後再試一次。',
+  'YouTube page URLs cannot be sent as native video input. Download the video into your workspace and pass the local video file path to /learn.':
+    'YouTube 頁面連結不能作為原生影片輸入傳送。請將影片下載到工作區內，再將本機影片檔案路徑傳給 /learn。',
+  'The local video could not be attached for /learn.':
+    '無法為 /learn 附加本機影片。',
   Agents: '智能體',
   'Choose Action': '選擇操作',
   'Edit {{name}}': '編輯 {{name}}',
