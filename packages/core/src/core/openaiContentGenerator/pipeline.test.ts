@@ -3464,7 +3464,7 @@ describe('ContentGenerationPipeline', () => {
     it('should ignore empty choices while merging finishReason and usageMetadata', async () => {
       // Arrange
       const request: GenerateContentParameters = {
-        model: 'GLM-5.2-FP8',
+        model: 'test-model',
         contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
       };
       const userPromptId = 'test-prompt-id';
@@ -3481,25 +3481,20 @@ describe('ContentGenerationPipeline', () => {
       const mockChunk2 = {
         id: 'chunk-2',
         choices: [{ delta: { content: '' }, finish_reason: 'stop' }],
-        usage: null,
       } as OpenAI.Chat.ChatCompletionChunk;
 
       // Empty choices chunk between finish and usage
       const mockChunk3 = {
         id: 'chunk-3',
-        object: 'chat.completion.chunk',
-        created: 0,
-        model: 'GLM-5.2-FP8',
         choices: [],
-        usage: null,
-      } as OpenAI.Chat.ChatCompletionChunk;
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
 
       // Usage metadata chunk (empty candidates, has usage)
       const mockChunk4 = {
         id: 'chunk-4',
         object: 'chat.completion.chunk',
-        created: 0,
-        model: 'GLM-5.2-FP8',
+        created: Date.now(),
+        model: 'test-model',
         choices: [],
         usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
       } as OpenAI.Chat.ChatCompletionChunk;
@@ -3552,38 +3547,47 @@ describe('ContentGenerationPipeline', () => {
         mockStream,
       );
 
+      // Act
       const resultGenerator = await pipeline.executeStream(
         request,
         userPromptId,
       );
       const iterator = resultGenerator[Symbol.asyncIterator]();
 
-      const contentResult = await iterator.next();
-      if (contentResult.done) throw new Error('Expected a content response.');
-      expect(contentResult.value).toBe(mockContentResponse);
+      // Assert
+      try {
+        const contentResult = await iterator.next();
+        if (contentResult.done) throw new Error('Expected a content response.');
+        expect(contentResult.value).toBe(mockContentResponse);
 
-      const finishResult = await iterator.next();
-      if (finishResult.done) throw new Error('Expected a finish response.');
-      // Check before resuming: a later chunk can mutate the yielded object.
-      expect(finishResult.value.candidates?.[0]?.finishReason).toBe(
-        FinishReason.STOP,
-      );
-      expect(finishResult.value.usageMetadata).toEqual({
-        promptTokenCount: 10,
-        candidatesTokenCount: 20,
-        totalTokenCount: 30,
-      });
-      expect(finishResult.value.modelVersion).toBe('actual-provider-model');
-      expect(getGenAiUsageProvenance(finishResult.value.usageMetadata)).toEqual(
-        {
+        const finishResult = await iterator.next();
+        if (finishResult.done) throw new Error('Expected a finish response.');
+        // Check before resuming: a later chunk can mutate the yielded object.
+        expect(finishResult.value.candidates?.[0]?.finishReason).toBe(
+          FinishReason.STOP,
+        );
+        expect(finishResult.value.usageMetadata).toEqual({
+          promptTokenCount: 10,
+          candidatesTokenCount: 20,
+          totalTokenCount: 30,
+        });
+        expect(finishResult.value.modelVersion).toBe('actual-provider-model');
+        expect(
+          getGenAiUsageProvenance(finishResult.value.usageMetadata),
+        ).toEqual({
           cachedInputTokensReported: false,
-        },
-      );
+        });
 
-      await expect(iterator.next()).resolves.toEqual({
-        value: undefined,
-        done: true,
-      });
+        await expect(iterator.next()).resolves.toEqual({
+          value: undefined,
+          done: true,
+        });
+      } finally {
+        let result = await iterator.next();
+        while (!result.done) {
+          result = await iterator.next();
+        }
+      }
     });
 
     it('should handle ideal case where last chunk has both finishReason and usageMetadata', async () => {
