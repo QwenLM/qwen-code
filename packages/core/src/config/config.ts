@@ -1761,6 +1761,7 @@ export class Config {
   private approvalMode: ApprovalMode;
   private prePlanMode?: ApprovalMode;
   private approvalModeRevision = 0;
+  private pendingManualPlanExitNotice = false;
   private autoModeDenialState: AutoModeDenialState = createDenialState();
   private readonly accessibility: AccessibilitySettings;
   private readonly showResponseTokensPerSecond: boolean;
@@ -5403,10 +5404,18 @@ export class Config {
 
   setApprovalMode(
     mode: ApprovalMode,
-    /** @deprecated Model origin no longer changes plan-exit approval. */
-    options?: { enteredByModel?: boolean },
+    options?: {
+      /** @deprecated Model origin no longer changes plan-exit approval. */
+      enteredByModel?: boolean;
+      /**
+       * Set by ExitPlanModeTool for user/leader-approved plan exits. Every
+       * other PLAN → non-PLAN transition (Shift+Tab, /approval-mode, /plan,
+       * ACP setSessionMode, confirm-and-switch) is a manual exit the model
+       * was never told about, and queues a one-shot system reminder.
+       */
+      fromApprovedPlanExit?: boolean;
+    },
   ): void {
-    void options;
     if (
       !this.isTrustedFolder() &&
       mode !== ApprovalMode.DEFAULT &&
@@ -5435,8 +5444,18 @@ export class Config {
     // succeeded, so callers never observe a partially applied mode change.
     if (mode === ApprovalMode.PLAN && fromMode !== ApprovalMode.PLAN) {
       this.prePlanMode = fromMode;
+      // A stale exit notice must not survive a re-entry: the plan-mode
+      // reminder takes over again on the next turn.
+      this.pendingManualPlanExitNotice = false;
     } else if (mode !== ApprovalMode.PLAN && fromMode === ApprovalMode.PLAN) {
       this.prePlanMode = undefined;
+      if (!options?.fromApprovedPlanExit) {
+        // While in plan mode the model is told "plan mode is active" on
+        // every turn; on a manual exit that reminder just stops appearing,
+        // which models do not reliably notice (#7671). Queue an explicit
+        // one-shot exit notice for the next turn's reminder assembly.
+        this.pendingManualPlanExitNotice = true;
+      }
     }
     // Any deliberate mode change invalidates the AUTO denialTracking signal.
     if (fromMode !== mode) {
@@ -5446,6 +5465,17 @@ export class Config {
     if (fromMode !== mode) {
       this.approvalModeRevision++;
     }
+  }
+
+  /**
+   * One-shot: returns whether a manual (non-approved) plan-mode exit is
+   * pending model notification, and clears the flag. Consumed by the
+   * system-reminder assembly in `GeminiClient` on the next model-bound turn.
+   */
+  consumePendingManualPlanExitNotice(): boolean {
+    const pending = this.pendingManualPlanExitNotice;
+    this.pendingManualPlanExitNotice = false;
+    return pending;
   }
 
   /**

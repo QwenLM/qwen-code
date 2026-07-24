@@ -234,7 +234,9 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
 
     this.savePlanBestEffort(snapshot.plan);
     try {
-      this.config.setApprovalMode(targetMode);
+      this.config.setApprovalMode(targetMode, {
+        fromApprovedPlanExit: true,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       debugLogger.error(
@@ -331,7 +333,9 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
 
     this.savePlanBestEffort(plan);
     try {
-      this.config.setApprovalMode(decision.targetMode);
+      this.config.setApprovalMode(decision.targetMode, {
+        fromApprovedPlanExit: true,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return this.errorResult(

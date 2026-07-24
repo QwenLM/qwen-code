@@ -1099,6 +1099,22 @@ Your plan is ready when you have addressed all ambiguities and it covers: what t
 }
 
 /**
+ * One-shot reminder injected on the first model-bound turn after the user
+ * manually exits plan mode (Shift+Tab, `/approval-mode`, `/plan`, ACP mode
+ * switch). While plan mode is active {@link getPlanModeSystemReminder} is
+ * re-injected every turn, so on a manual exit the model's most recent
+ * context still says "plan mode is active" — the reminder silently
+ * disappearing is not a signal models reliably notice (#7671).
+ *
+ * @param currentMode - The approval mode the user switched to
+ */
+export function getManualPlanExitSystemReminder(currentMode: string): string {
+  return `<system-reminder>
+The user has manually switched out of plan mode (current approval mode: ${currentMode}). You are no longer in plan mode. Do NOT call ${ToolNames.EXIT_PLAN_MODE} — there is no plan approval pending. Continue working in the current mode; previous plan-mode restrictions on edits and state-modifying tools no longer apply.
+</system-reminder>`;
+}
+
+/**
  * Generates a system reminder about an active Arena session.
  *
  * @param configFilePath - Absolute path to the arena session's `config.json`
