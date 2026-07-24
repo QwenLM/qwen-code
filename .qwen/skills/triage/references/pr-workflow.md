@@ -545,7 +545,16 @@ PENDING=$(gh api "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=100" --pa
 case "$PENDING" in '' | *[!0-9]*) PENDING=1 ;; esac   # unreadable → treat as pending (defer, fail closed)
 ```
 
-If the verdict is approve and `PENDING` is greater than 0, state it plainly in the comment — "approval deferred until CI lands green on `<HEAD_SHA>`" — and include this machine marker on its own line (full OID, the same one the footer attests):
+**Compute the approval guardrail HERE, before the marker.** The marker is an approval with a CI precondition attached, so everything that would block an immediate approval must block the marker too — evaluating the guardrail only in Step 2, after the comment is posted, would leave a standing approval instruction that Step 2 cannot cleanly withdraw:
+
+```bash
+GUARD=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json isCrossRepository,title \
+  --jq 'if (.isCrossRepository and (.title | test("^\\s*refactor"; "i"))) then "block" else "ok" end')
+```
+
+Emit the marker only when ALL of these hold: the verdict is approve, `PENDING` is greater than 0, `GUARD` is `ok`, and Stage 0 raised no maintainer escalation. A fork `refactor` or an escalated PR never carries the marker — those cap at 3/5 and take the defer path, with or without CI. (The finalize workflow independently re-asserts the fork-refactor guardrail before approving, but that is a backstop, not the mechanism.)
+
+When the marker is warranted, state it plainly in the comment — "approval deferred until CI lands green on `<HEAD_SHA>`" — and include it on its own line (full OID, the same one the footer attests):
 
 ```
 <!-- qwen-triage approve-on-green sha=<HEAD_SHA> -->
@@ -555,12 +564,7 @@ The finalize workflow honors the marker only in comments authored by the bot its
 
 **Step 2: Act on the verdict.**
 
-**⛔ Approval guardrail — check this BEFORE approving.** A cross-repository (fork) `refactor` PR must never be auto-approved: refactors touch structure broadly and a fork author is not a trusted committer, so these always need a human maintainer's eye (this rule exists because such a PR was wrongly auto-approved and merged). Decide it deterministically — do not eyeball it:
-
-```bash
-GUARD=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json isCrossRepository,title \
-  --jq 'if (.isCrossRepository and (.title | test("^\\s*refactor"; "i"))) then "block" else "ok" end')
-```
+**⛔ Approval guardrail — check this BEFORE approving.** A cross-repository (fork) `refactor` PR must never be auto-approved: refactors touch structure broadly and a fork author is not a trusted committer, so these always need a human maintainer's eye (this rule exists because such a PR was wrongly auto-approved and merged). Decide it deterministically — do not eyeball it. `GUARD` was already computed in Step 1 (where it also gates the `approve-on-green` marker, for the same reason); reuse that value here.
 
 If `GUARD` is `block`: do **not** run `gh pr review --approve` no matter how clean every stage looked. Escalate to the maintainer instead (the "Genuinely unsure" path below, using `$QWEN_MAINTAINER_HANDLE` if set), and only `--request-changes` if you actually found blocking issues. This overrides the "approve" path.
 

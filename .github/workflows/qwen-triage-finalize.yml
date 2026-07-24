@@ -61,7 +61,11 @@ jobs:
     name: 'finalize-triage-ci'
     # Only PR-caused CI runs can have triage comments to finalize; push and
     # merge-queue runs are filtered here rather than discovered-empty later.
-    if: "github.event.workflow_run.event == 'pull_request'"
+    # The repository guard is the house convention for bot workflows: a fork
+    # that configured its own CI_BOT_PAT should opt in by editing this line.
+    if: >-
+      github.event.workflow_run.event == 'pull_request' &&
+      github.repository == 'QwenLM/qwen-code'
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     steps:
@@ -113,6 +117,12 @@ jobs:
           # reviewed-commit footer. Fixed-string matching via index(), never
           # regex.
           replace_region() { # $1 body-in  $2 region-file  $3 body-out
+            # An empty or unreadable region file would delete the region AND
+            # its markers (getline just returns 0), leaving nothing for a
+            # later run to repair — refuse it up front.
+            if [ ! -s "$2" ]; then
+              return 1
+            fi
             if ! grep -qF "$CI_BEGIN" "$1" || ! grep -qF "$CI_END" "$1"; then
               return 1
             fi
@@ -153,15 +163,25 @@ jobs:
                 | @tsv' "$1"
           }
 
-          # Table rows from check-runs: one row per check NAME (latest run
-          # wins — the API default filter=latest only dedups within one check
-          # suite, and every bot event mints a new suite with the same job
-          # names), skipped rows dropped (noise in a table, though still green
-          # for the gate), and still-running + non-green rows sorted FIRST so
-          # the row cap can never truncate a failure into invisibility.
-          table_rows() { # $1 checks-file → TSV: name status conclusion
-            jq -r --arg self "$SELF_CHECK_NAME" '
-              map(select(.name != $self))
+          # Table rows from check-runs, restricted to the SAME universe the
+          # approval gate trusts: only checks whose suite belongs to a deduped
+          # event == "pull_request" workflow run. Without that filter the
+          # table renders bot-orchestration plumbing (route, label, precheck)
+          # as CI evidence and disagrees with the gate about what "CI" means.
+          # Then: one row per check NAME (latest run wins — filter=latest only
+          # dedups within one check suite), skipped rows dropped (noise in a
+          # table, though still green for the gate), and still-running +
+          # non-green rows sorted FIRST so the row cap can never truncate a
+          # failure into invisibility. A check with no readable suite id is
+          # excluded (fail closed toward showing less, never toward blanking —
+          # the caller skips the rewrite entirely when zero rows survive).
+          table_rows() { # $1 checks-file  $2 runs-file → TSV: name status conclusion
+            jq -r --arg self "$SELF_CHECK_NAME" --slurpfile runs "$2" '
+              ([$runs[0][] | select(.event == "pull_request")]
+                 | group_by(.workflow_id) | map(max_by(.id))
+                 | map(.check_suite_id)) as $ok
+                | map(select(.name != $self))
+                | map(select((.check_suite.id // null) as $s | $ok | index($s)))
                 | group_by(.name) | map(max_by(.id))
                 | map(select(.conclusion != "skipped"))
                 | sort_by([ (.status == "completed"),
@@ -220,9 +240,17 @@ jobs:
           # comment limit alongside the rest of the Stage 2 comment; because
           # table_rows sorts running/non-green first, the cap can only ever
           # cut green rows.
-          table_rows /tmp/checks.json > /tmp/rows.tsv
+          table_rows /tmp/checks.json /tmp/runs.json > /tmp/rows.tsv
           ROWS=$(grep -c '' /tmp/rows.tsv || true)
           MAX_ROWS=60
+          REGION_OK=true
+          if [ "${ROWS:-0}" -eq 0 ]; then
+            # Zero surviving rows means "could not read the PR's CI" (failed
+            # runs fetch, missing suite ids), not "there is no CI" — leave the
+            # agent's hand-written table untouched rather than blanking it.
+            echo "::warning::No PR CI table rows for $SHORT_SHA; leaving existing tables untouched."
+            REGION_OK=false
+          fi
           {
             printf '%s\n\n' "$CI_BEGIN"
             if [ "$GATE_OK" = true ] && [ "$PENDING" -eq 0 ]; then
@@ -230,7 +258,7 @@ jobs:
             else
               printf 'CI results for `%s` — this table auto-updates as CI workflows complete:\n\n' "$SHORT_SHA"
             fi
-            printf '| Check | Result |\n| ----- | ------ |\n'
+            printf '| Check | Conclusion |\n| ----- | ---------- |\n'
             head -n "$MAX_ROWS" /tmp/rows.tsv |
               while IFS=$'\t' read -r name status conclusion; do
                 safe_name="$(printf '%s' "$name" | tr -d '\r\n\000' | cut -c1-120 | html_escape)"
@@ -257,9 +285,13 @@ jobs:
 
           # Flip the triage status comment when the deferred approval resolves,
           # so its outcome is visible without opening the Stage 2 table.
-          update_status() { # $1 pr-number  $2 approved|red|stale|deferred
+          update_status() { # $1 pr-number  $2 approved|red|stale|deferred|guarded
             local pr="$1" kind="$2" en zh sid
             case "$kind" in
+              guarded)
+                en="🛡️ **Deferred approval blocked by the fork-refactor guardrail** — a cross-repository refactor PR needs a human maintainer's approval regardless of CI. CI results are in the Stage 2 table. [finalize run](${RUN_URL})"
+                zh="🛡️ **延迟审批被 fork-refactor 护栏拦截** —— 跨仓库的 refactor PR 无论 CI 结果如何都需要人类维护者审批。CI 结果见 Stage 2 表格。[查看 finalize 运行](${RUN_URL})"
+                ;;
               approved)
                 en="✅ **Qwen Triage finished** — CI landed green on \`${SHORT_SHA}\` and the deferred approval was posted. [finalize run](${RUN_URL})"
                 zh="✅ **Qwen Triage 已完成** —— \`${SHORT_SHA}\` 的 CI 全绿，延迟审批已提交。[查看 finalize 运行](${RUN_URL})"
@@ -302,7 +334,9 @@ jobs:
             CID="$(jq -r --arg bot "$BOT_LOGIN" --arg m "$CI_BEGIN" \
               '[.[] | select(.user.login == $bot) | select(.body | contains($m))] | last | .id // empty' \
               "/tmp/comments-$PR.json")"
-            if [ -n "$CID" ]; then
+            if [ -n "$CID" ] && [ "$REGION_OK" != true ]; then
+              echo "PR #$PR: table rewrite skipped (no readable CI rows)."
+            elif [ -n "$CID" ]; then
               jq -r --argjson id "$CID" '.[] | select(.id == $id) | .body' \
                 "/tmp/comments-$PR.json" > /tmp/body-in.md
               if replace_region /tmp/body-in.md /tmp/region.md /tmp/body-out.md; then
@@ -364,6 +398,19 @@ jobs:
               echo "PR #$PR: closed or draft; approval stays withheld."
               continue
             fi
+            # Structural re-assertion of the skill's fork-refactor approval
+            # guardrail. The marker's emission is a prompt-ordering property;
+            # this is not — even a marker that slipped out on a
+            # cross-repository refactor PR never becomes an approval. A
+            # deleted fork repo yields a null head.repo → treated as fork →
+            # blocked (fail closed).
+            IS_FORK="$(jq -r '(.head.repo.full_name // "") != .base.repo.full_name' <<<"$PR_STATE_JSON")"
+            PR_TITLE="$(jq -r '.title // ""' <<<"$PR_STATE_JSON")"
+            if [ "$IS_FORK" != false ] && printf '%s' "$PR_TITLE" | grep -qiE '^[[:space:]]*refactor'; then
+              echo "PR #$PR: fork refactor — approval guardrail blocks the deferred approval."
+              update_status "$PR" guarded
+              continue
+            fi
             # An unavailable gate or an empty run list is "cannot attest", not
             # "nothing failed" — skip without approving.
             if [ "$GATE_OK" != true ] || [ "$TOTAL" -eq 0 ]; then
@@ -386,7 +433,12 @@ jobs:
                 'any(.[][]; .user.login == $bot and .state == "APPROVED" and .commit_id == $sha)')" ||
               ALREADY='false'
             if [ "$ALREADY" = 'true' ]; then
+              # Repair the status comment too: a later firing that saw
+              # PENDING > 0 (a job re-run, a labeled-triggered workflow) may
+              # have flipped it back to "deferred" after the approval landed,
+              # and nothing else would ever set it right again.
               echo "PR #$PR: already approved at $SHORT_SHA."
+              update_status "$PR" approved
               continue
             fi
             gh api "repos/$GITHUB_REPOSITORY/pulls/$PR/reviews" \

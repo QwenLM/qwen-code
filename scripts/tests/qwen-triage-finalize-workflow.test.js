@@ -34,8 +34,12 @@ describe('qwen-triage-finalize workflow', () => {
     ]);
     expect(workflow.on.workflow_run.workflows).not.toContain('E2E Tests');
     expect(workflow.on.workflow_run.types).toEqual(['completed']);
-    expect(workflow.jobs.finalize.if).toBe(
+    expect(workflow.jobs.finalize.if).toContain(
       "github.event.workflow_run.event == 'pull_request'",
+    );
+    // House convention for bot workflows: forks opt in by editing the guard.
+    expect(workflow.jobs.finalize.if).toContain(
+      "github.repository == 'QwenLM/qwen-code'",
     );
   });
 
@@ -106,8 +110,23 @@ describe('qwen-triage-finalize workflow', () => {
     );
     // Still-pending is visible, not silent.
     expect(script).toContain('update_status "$PR" deferred');
-    // Re-running finalize must not stack approvals.
+    // Re-running finalize must not stack approvals — and the already-approved
+    // branch repairs a status comment that a later PENDING>0 firing flipped
+    // back to "deferred" after the approval landed.
     expect(script).toContain('.state == "APPROVED" and .commit_id == $sha');
+    expect(script).toMatch(
+      /already approved at \$SHORT_SHA\."\n\s*update_status "\$PR" approved/,
+    );
+    // The fork-refactor guardrail is re-asserted structurally: even a marker
+    // that slipped out on a cross-repository refactor PR never becomes an
+    // approval, and a deleted fork (null head.repo) is treated as a fork.
+    expect(script).toContain(
+      `(.head.repo.full_name // "") != .base.repo.full_name`,
+    );
+    expect(script).toContain("grep -qiE '^[[:space:]]*refactor'");
+    expect(script.indexOf('update_status "$PR" guarded')).toBeLessThan(
+      script.indexOf('update_status "$PR" deferred'),
+    );
   });
 
   it('binds every marker to the full head SHA of the triggering run', () => {
@@ -138,12 +157,22 @@ describe('qwen-triage-finalize workflow', () => {
   it('keeps the region deterministic so no-op PATCHes are skipped', () => {
     // RUN_URL carries the run id and would differ on every firing; inside the
     // region it would make the cmp always miss and every trigger PATCH.
-    const region = script.slice(
-      script.indexOf('table_rows /tmp/checks.json > /tmp/rows.tsv'),
-      script.indexOf('} > /tmp/region.md'),
+    const start = script.indexOf(
+      'table_rows /tmp/checks.json /tmp/runs.json > /tmp/rows.tsv',
     );
+    expect(start).toBeGreaterThan(-1);
+    const region = script.slice(start, script.indexOf('} > /tmp/region.md'));
     expect(region).not.toContain('RUN_URL');
     expect(script).toContain('cmp -s /tmp/body-in.md /tmp/body-out.md');
+  });
+
+  it('never blanks a table it cannot rebuild', () => {
+    // Zero surviving rows (failed runs fetch, missing suite ids) skips the
+    // rewrite instead of overwriting the agent's table with an empty one,
+    // and replace_region refuses an empty region file outright.
+    expect(script).toContain('REGION_OK=false');
+    expect(script).toContain('[ -n "$CID" ] && [ "$REGION_OK" != true ]');
+    expect(script).toContain('if [ ! -s "$2" ]; then');
   });
 
   it('exits quietly when no bot token or no matching PR exists', () => {
@@ -298,43 +327,103 @@ describe('qwen-triage-finalize helpers', () => {
     }
   });
 
-  it('table_rows: dedups by name, drops skipped, sorts failures first', () => {
+  it('table_rows: suite-filtered, deduped by name, skipped dropped, failures first', () => {
+    // Suite 1000 belongs to the latest pull_request run; suite 900 to a
+    // superseded run of the same workflow; suite 2000 to a bot
+    // (pull_request_target) run. Only suite-1000 checks may render.
+    const runs = [
+      {
+        event: 'pull_request',
+        workflow_id: 1,
+        id: 100,
+        check_suite_id: 1000,
+      },
+      { event: 'pull_request', workflow_id: 1, id: 90, check_suite_id: 900 },
+      {
+        event: 'pull_request_target',
+        workflow_id: 2,
+        id: 101,
+        check_suite_id: 2000,
+      },
+    ];
     const checks = [
       {
         name: 'Test (ubuntu-latest)',
         id: 2,
         status: 'completed',
         conclusion: 'success',
+        check_suite: { id: 1000 },
       },
       {
         name: 'Test (ubuntu-latest)',
         id: 1,
         status: 'completed',
         conclusion: 'failure',
+        check_suite: { id: 1000 },
       },
-      { name: 'authorize', id: 3, status: 'completed', conclusion: 'skipped' },
-      { name: 'Serve A/B', id: 4, status: 'completed', conclusion: 'failure' },
-      { name: 'visuals', id: 5, status: 'in_progress', conclusion: null },
       {
-        name: 'finalize-triage-ci',
+        name: 'old-run-check',
+        id: 3,
+        status: 'completed',
+        conclusion: 'failure',
+        check_suite: { id: 900 },
+      },
+      {
+        name: 'triage',
+        id: 4,
+        status: 'completed',
+        conclusion: 'failure',
+        check_suite: { id: 2000 },
+      },
+      {
+        name: 'skippy',
+        id: 5,
+        status: 'completed',
+        conclusion: 'skipped',
+        check_suite: { id: 1000 },
+      },
+      {
+        name: 'running',
         id: 6,
         status: 'in_progress',
         conclusion: null,
+        check_suite: { id: 1000 },
       },
-      { name: 'alpha', id: 7, status: 'completed', conclusion: 'success' },
+      {
+        name: 'finalize-triage-ci',
+        id: 7,
+        status: 'in_progress',
+        conclusion: null,
+        check_suite: { id: 1000 },
+      },
+      {
+        name: 'redcheck',
+        id: 8,
+        status: 'completed',
+        conclusion: 'cancelled',
+        check_suite: { id: 1000 },
+      },
+      {
+        name: 'beta',
+        id: 9,
+        status: 'completed',
+        conclusion: 'success',
+        check_suite: { id: 1000 },
+      },
     ];
     const dir = mkdtempSync(join(tmpdir(), 'triage-finalize-table-'));
     try {
       writeFileSync(join(dir, 'checks.json'), JSON.stringify(checks));
+      writeFileSync(join(dir, 'runs.json'), JSON.stringify(runs));
       const { status, stdout, stderr } = runHelpers(
-        `table_rows '${join(dir, 'checks.json')}'`,
+        `table_rows '${join(dir, 'checks.json')}' '${join(dir, 'runs.json')}'`,
       );
       expect(stderr).toBe('');
       expect(status).toBe(0);
       expect(stdout.trimEnd().split('\n')).toEqual([
-        'visuals\tin_progress\t',
-        'Serve A/B\tcompleted\tfailure',
-        'alpha\tcompleted\tsuccess',
+        'running\tin_progress\t',
+        'redcheck\tcompleted\tcancelled',
+        'beta\tcompleted\tsuccess',
         'Test (ubuntu-latest)\tcompleted\tsuccess',
       ]);
     } finally {
