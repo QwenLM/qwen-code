@@ -56,7 +56,7 @@ function categoryLabel(cat: SuggestionCategory | 'all'): string {
     case 'session':
       return t('Sessions');
     case 'mcp':
-      return 'MCP';
+      return t('MCP');
     case 'extension':
       return t('Extensions');
     default:

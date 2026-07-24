@@ -2581,6 +2581,34 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('should NOT switch category on Ctrl+left/right when availableCategories is exactly 2', async () => {
+    const switchCategory = vi.fn();
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      suggestions: [{ label: 'file.ts', value: 'file.ts', category: 'file' }],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      availableCategories: ['all', 'file'],
+      switchCategory,
+    });
+    props.buffer.setText('@file');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\x1b[1;5C'); // Ctrl+right arrow
+    await wait();
+    stdin.write('\x1b[1;5D'); // Ctrl+left arrow
+    await wait();
+
+    // With only 2 entries (all + one real category) the tab bar is hidden,
+    // so Ctrl+arrows must not trigger category switching.
+    expect(switchCategory).not.toHaveBeenCalled();
+    unmount();
+  });
+
   it('should switch category on Ctrl+left/right when availableCategories > 2', async () => {
     const switchCategory = vi.fn();
     mockedUseCommandCompletion.mockReturnValue({

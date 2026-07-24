@@ -76,14 +76,14 @@ export class SessionReferenceService {
 
     const title = opts.title ?? this.deriveTitle(records) ?? sessionId;
     const header = `--- Referenced session "${title}" (slimmed, read-only) ---`;
-    const overhead = this.estimate([header, '[earlier turns omitted]']);
+    const headerCost = this.estimate([header]);
 
     // Single-pass tail-retention: estimate each line once, then accumulate
     // from the newest line backward until the budget is reached. Avoids the
     // O(N²) cost of re-joining and re-scanning all remaining lines per
     // dropped line (which dominated resolve() time for long sessions).
     const perLine = lines.map((l) => this.estimate([l]));
-    let total = overhead;
+    let total = headerCost;
     let start = lines.length;
     while (start > 0 && total + perLine[start - 1] <= budget) {
       total += perLine[start - 1];
@@ -96,6 +96,9 @@ export class SessionReferenceService {
     }
     const kept = lines.slice(start);
     const truncated = start > 0;
+    const overhead = truncated
+      ? headerCost + this.estimate(['[earlier turns omitted]'])
+      : headerCost;
 
     const body =
       (truncated ? '[earlier turns omitted]\n' : '') + kept.join('\n');
@@ -110,9 +113,7 @@ export class SessionReferenceService {
         sessionId,
         title,
         messageCount: records.length,
-        approxTokens:
-          this.estimate(kept) +
-          (truncated ? overhead : this.estimate([header])),
+        approxTokens: this.estimate(kept) + overhead,
       },
       truncated,
     };
