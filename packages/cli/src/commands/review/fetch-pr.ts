@@ -297,28 +297,52 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   // bypass write made during the abandoned attempt from cleanup's audit.
   const fetchedAt = new Date().toISOString();
   let auditSince = fetchedAt;
+  let prevRaw: string | null = null;
   try {
-    const prev = JSON.parse(readFileSync(out, 'utf8')) as {
-      prNumber?: unknown;
-      fetchedAt?: unknown;
-      auditSince?: unknown;
-    };
-    const prevSince =
-      typeof prev.auditSince === 'string'
-        ? prev.auditSince
-        : typeof prev.fetchedAt === 'string'
-          ? prev.fetchedAt
-          : null;
-    if (
-      prev.prNumber === prNumber &&
-      prevSince !== null &&
-      !Number.isNaN(Date.parse(prevSince)) &&
-      prevSince < auditSince
-    ) {
-      auditSince = prevSince;
+    prevRaw = readFileSync(out, 'utf8');
+  } catch (err) {
+    // ENOENT is the normal first attempt for this target — silent. Any other
+    // read failure (EACCES, EISDIR, I/O) is NOT "no previous report"; name it
+    // so an operator is not sent toward the wrong cause.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') {
+      writeStderrLine(
+        `WARNING: could not read the previous fetch report at ${out} (${code ?? (err as Error).message}); ` +
+          `the audit window starts at this fetch and may not reach an earlier abandoned attempt.`,
+      );
     }
-  } catch {
-    /* no previous report — first attempt for this target */
+  }
+  if (prevRaw !== null) {
+    try {
+      const prev = JSON.parse(prevRaw) as {
+        prNumber?: unknown;
+        fetchedAt?: unknown;
+        auditSince?: unknown;
+      };
+      const prevSince =
+        typeof prev.auditSince === 'string'
+          ? prev.auditSince
+          : typeof prev.fetchedAt === 'string'
+            ? prev.fetchedAt
+            : null;
+      if (
+        prev.prNumber === prNumber &&
+        prevSince !== null &&
+        !Number.isNaN(Date.parse(prevSince)) &&
+        prevSince < auditSince
+      ) {
+        auditSince = prevSince;
+      }
+    } catch {
+      // The file exists but is unparseable — a crash mid-write leaves
+      // truncated JSON. Silently resetting the window to this fetch would let
+      // a bypass write from the abandoned attempt escape the audit, so warn:
+      // the window may not reach it.
+      writeStderrLine(
+        `WARNING: the previous fetch report at ${out} is not valid JSON (a crash mid-write?); ` +
+          `the audit window starts at this fetch and may not reach an earlier abandoned attempt.`,
+      );
+    }
   }
   const result: FetchPrResult = {
     prNumber,

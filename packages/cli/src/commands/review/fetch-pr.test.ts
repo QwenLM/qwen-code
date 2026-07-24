@@ -211,6 +211,7 @@ const producerMocks = vi.hoisted(() => ({
   }),
   gh: vi.fn(),
   git: vi.fn(),
+  writeStderrLine: vi.fn(),
 }));
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -240,7 +241,7 @@ vi.mock('node:child_process', async (importOriginal) => {
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStdoutLine: vi.fn(),
-  writeStderrLine: vi.fn(),
+  writeStderrLine: producerMocks.writeStderrLine,
 }));
 
 vi.mock('../../services/review-worktree-lease.js', () => ({
@@ -342,5 +343,39 @@ describe('fetch-pr report — audit-window contract', () => {
     );
     const report = await reportFor({});
     expect(report.auditSince).toBe(report.fetchedAt);
+  });
+
+  it('warns (not silently resets) when a prior report exists but is corrupt', async () => {
+    // A crash mid-write leaves truncated JSON. Silently resetting auditSince
+    // would let a bypass write from the abandoned attempt escape the window.
+    producerMocks.readFileSync.mockReturnValue('{"prNumber":"42","audit');
+    const report = await reportFor({});
+    expect(report.auditSince).toBe(report.fetchedAt); // best available
+    const warned = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .some((l) => l.includes('not valid JSON'));
+    expect(warned).toBe(true);
+  });
+
+  it('stays silent on ENOENT (a genuine first attempt)', async () => {
+    producerMocks.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    await reportFor({});
+    const warnedAboutReport = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .some((l) => l.includes('previous fetch report'));
+    expect(warnedAboutReport).toBe(false);
+  });
+
+  it('names a non-ENOENT read failure of the prior report', async () => {
+    producerMocks.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+    });
+    await reportFor({});
+    const warned = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .some((l) => l.includes('could not read the previous fetch report'));
+    expect(warned).toBe(true);
   });
 });
