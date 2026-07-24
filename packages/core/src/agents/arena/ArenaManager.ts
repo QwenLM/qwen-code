@@ -13,10 +13,7 @@ import {
   type ApprovalMode,
   type Config,
 } from '../../config/config.js';
-import {
-  buildSystemPromptSuffix,
-  getCoreSystemPrompt,
-} from '../../core/prompts.js';
+import { getCoreSystemPrompt } from '../../core/prompts.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { isNodeError } from '../../utils/errors.js';
 import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
@@ -1078,13 +1075,17 @@ export class ArenaManager {
         approvalMode: toApprovalMode(this.arenaConfig?.approvalMode),
         runtimeConfig: {
           promptConfig: {
-            systemPrompt:
-              getCoreSystemPrompt(
-                this.config.getUserMemory(),
-                model.modelId,
-                undefined,
-                'headless',
-              ) + buildSystemPromptSuffix(this.config.getAutoMemoryPrompt()),
+            // Stable base + context only. The volatile auto-memory section is
+            // appended once by AgentCore.buildChatSystemPrompt when the
+            // in-process worker builds its system instruction; appending it
+            // here too would duplicate the section (the per-agent Config
+            // inherits a non-empty getAutoMemoryPrompt() from this base).
+            systemPrompt: getCoreSystemPrompt(
+              this.config.getUserMemory(),
+              model.modelId,
+              undefined,
+              'headless',
+            ),
           },
           modelConfig: { model: model.modelId },
           runConfig: {
