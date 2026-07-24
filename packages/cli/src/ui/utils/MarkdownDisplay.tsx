@@ -6,6 +6,7 @@
 
 import React from 'react';
 import { Text, Box } from 'ink';
+import stringWidth from 'string-width';
 import { theme } from '../semantic-colors.js';
 import { ICON } from '../constants.js';
 import { colorizeCode } from './CodeColorizer.js';
@@ -1092,7 +1093,7 @@ const RenderListItemInternal: React.FC<RenderListItemProps> = ({
     : type === 'ol'
       ? `${marker}. `
       : `${marker} `;
-  const prefixWidth = prefix.length;
+  const prefixWidth = stringWidth(prefix);
   const indentation = leadingWhitespace.length;
 
   return (
