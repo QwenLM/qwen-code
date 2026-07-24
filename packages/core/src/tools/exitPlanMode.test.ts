@@ -115,7 +115,9 @@ describe('ExitPlanModeTool', () => {
 
       expect(result.error).toBeUndefined();
       expect(approvalMode).toBe(targetMode);
-      expect(config.setApprovalMode).toHaveBeenCalledWith(targetMode);
+      expect(config.setApprovalMode).toHaveBeenCalledWith(targetMode, {
+        fromApprovedPlanExit: true,
+      });
       expect(config.savePlan).toHaveBeenCalledWith('Approved plan');
     },
   );
