@@ -13,11 +13,11 @@ capture its ID:
 COMMENT_ID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@/tmp/stage-N.md --jq '.id')
 ```
 
-| Stage   | Comment                                                        |
-| ------- | -------------------------------------------------------------- |
-| Stage 1 | Gate findings                                                  |
-| Stage 2 | Code review + CI test evidence (+ tmux capture on local runs)  |
-| Stage 3 | Reflection + verdict                                           |
+| Stage   | Comment                                                                         |
+| ------- | ------------------------------------------------------------------------------- |
+| Stage 1 | Gate findings                                                                   |
+| Stage 2 | Code review + CI test evidence (+ tmux capture on local runs when user-visible) |
+| Stage 3 | Reflection + verdict                                                            |
 
 **Terminal gate exception:** if any terminal exit triggers (Stage 0 core
 module hard block, Stage 1a template failure, Stage 1b problem-does-not-exist,
@@ -390,9 +390,9 @@ maintainer can trigger it. Everything below applies to local invocation (no
 
 **Runs in the main working tree, not the worktree** — tmux needs the local build environment.
 
-**Mandatory on local runs.** Unit tests don't substitute. Unrelated build failure ≠ excuse to skip.
+**Mandatory on local runs, for PRs with user-visible behavioral changes.** Unit tests don't substitute. Unrelated build failure ≠ excuse to skip.
 
-**⛔ The tmux output IS the review.** The maintainer reads your Stage 2 comment and decides approve/reject from it. You **must** paste the actual `capture-pane` terminal output inline in the comment — inside a fenced code block. Not a file path, not "see attached log", not a text summary. If you didn't inline the output, the review is worthless.
+**⛔ The tmux output IS the review** (for PRs with user-visible behavioral changes). The maintainer reads your Stage 2 comment and decides approve/reject from it. You **must** paste the actual `capture-pane` terminal output inline in the comment — inside a fenced code block — **or state `N/A` for docs/types/refactor PRs with nothing user-visible**. Not a file path, not "see attached log", not a text summary. If you didn't inline the output (or the N/A substitution), the review is worthless.
 
 Drive the real product in tmux, using the `tmux-real-user-testing` skill. Capture the terminal at key moments with `capture-pane` — these are the evidence that makes the review actionable.
 
@@ -422,9 +422,37 @@ tmux kill-session -t "$S"
   never attempt this; see 2b/2c scoping above.)
 - Fork code: sandbox (strip write tokens/secrets).
 
+**Scale the evidence to the change** (local runs only — never in unattended CI) — the tmux before/after above is the floor,
+not the ceiling. Match the depth to what is actually under review:
+
+- **UI / styling / interaction changes** (color, highlight, cursor position, or
+  layout is the thing being reviewed): `capture-pane` text cannot show which
+  item is highlighted or where the caret block sits. Use the `terminal-capture`
+  skill (node-pty → xterm.js → pixel-accurate PNG; it needs
+  `npx playwright install chromium` — install on demand if absent; on fork PRs, sandbox per the fork-code bullet above). Whatever the
+  medium, name the **oracle**: the exact on-screen element that proves the
+  behavior ("the highlighted pill is the active tab; the filtered list is the
+  oracle for which tab is active"), and show the state before AND after the
+  action so the change is _visible_, not asserted.
+- **Build / typecheck / test numbers you cite as evidence**: get them from a
+  clean state, not a shared or symlinked `node_modules` — a contaminated tree
+  surfaces spurious cross-package `TS2307`/`TS2353` errors that are
+  environmental, not the PR's. Report such errors as environmental and never as
+  a PR defect; a clean install is what makes the counts trustworthy.
+- **Performance changes**: behavioral before/after is not enough — measure it.
+  Instrument the REAL built code (wrap the hot path, e.g. `node:fs`), run the
+  old path vs the new, and report concrete numbers (calls, disk walks, ms).
+  "Faster" must be a measurement, not a claim.
+
+A docs / types / refactor PR needs none of this — say `N/A` when nothing is
+user-visible. When the verification was non-trivial, separate merge-BLOCKERS
+from standing, non-blocking follow-ups (a pre-existing gap, a platform caveat, a
+nit), and add a one-paragraph methodology note (environment, how you drove it)
+so the maintainer can trust and reproduce it.
+
 Post a single Stage 2 comment (must include `<!-- qwen-triage stage=2 -->` at the top), in this order: code review findings → optional sequence diagram (2a-bis) → optional changed-files overview (2a-bis) → CI test evidence (2b) → real-scenario testing result when one was driven locally (2c) → the bilingual `<details>` Chinese summary → signature + footer last (the same tail order as the Stage 1 template). Include the two enrichments only when 2a-bis says they earn their place; a small, focused PR is just findings + testing.
 
-**⛔ BEFORE POSTING: verify the testing section carries real evidence.** Read back through your draft. In CI: does it quote actual check names and conclusions (and the failing job's log excerpt when red)? On a local run: does it have a fenced code block with the actual terminal capture? If not, fix that now — and never paper over a gap with the author's self-reported results. The maintainer cannot approve without seeing what actually happened.
+**⛔ BEFORE POSTING: verify the testing section carries real evidence.** Read back through your draft. In CI: does it quote actual check names and conclusions (and the failing job's log excerpt when red)? On a local run: does it have a fenced code block with the actual terminal capture (or the `N/A` substitution for docs/types/refactor PRs with nothing user-visible)? Does the evidence depth match the PR type per “Scale the evidence” above — screenshots for UI changes, measurements for performance claims, clean-state numbers for build/test claims? If not, fix that now — and never paper over a gap with the author's self-reported results. The maintainer cannot approve without seeing what actually happened.
 
 ````markdown
 ## Before (installed build)
