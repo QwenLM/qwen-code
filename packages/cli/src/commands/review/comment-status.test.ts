@@ -12,7 +12,11 @@ import {
   type RawStatusComment,
 } from './comment-status.js';
 
-const noChange: CodeChangeProbe = () => ({ changed: false, touchedBy: [] });
+const noChange: CodeChangeProbe = () => ({
+  changed: false,
+  touchedBy: [],
+  touchedByTotal: 0,
+});
 
 const comment = (over: Partial<RawStatusComment> & { id: number }) =>
   ({
@@ -114,7 +118,7 @@ describe('buildThreadStatuses — anchor status', () => {
     const seen: Array<string | undefined> = [];
     const probe: CodeChangeProbe = (_path, since) => {
       seen.push(since);
-      return { changed: 'unknown', touchedBy: [] };
+      return { changed: 'unknown', touchedBy: [], touchedByTotal: 0 };
     };
     buildThreadStatuses(
       [
@@ -134,6 +138,7 @@ describe('buildThreadStatuses — signals', () => {
     const probe: CodeChangeProbe = () => ({
       changed: true,
       touchedBy: ['abc1234', 'def5678'],
+      touchedByTotal: 12,
     });
     const [t] = buildThreadStatuses(
       [comment({ id: 1, body: '🔴 Finding 1 — poll loop wedges (blocker)' })],
@@ -144,6 +149,7 @@ describe('buildThreadStatuses — signals', () => {
     expect(t.code).toEqual({
       changedSinceComment: true,
       touchedBy: ['abc1234', 'def5678'],
+      touchedByTotal: 12,
     });
   });
 
@@ -154,6 +160,17 @@ describe('buildThreadStatuses — signals', () => {
       noChange,
     );
     expect(t.isBlocker).toBe(false);
+  });
+
+  it('never reports authorReplied for a ghost author matching a ghost replier', () => {
+    // A deleted PR-author account and a deleted reply account both fall back
+    // to '' — without the guard they match each other.
+    const [t] = buildThreadStatuses(
+      [comment({ id: 1 }), comment({ id: 2, in_reply_to_id: 1, user: null })],
+      '',
+      noChange,
+    );
+    expect(t.authorReplied).toBe(false);
   });
 
   it('detects a PR-author reply case-insensitively', () => {
@@ -176,8 +193,8 @@ describe('summarizeThreads', () => {
   it('counts each status dimension once per thread', () => {
     const probe: CodeChangeProbe = (path) =>
       path === 'src/changed.ts'
-        ? { changed: true, touchedBy: ['abc1234'] }
-        : { changed: 'unknown', touchedBy: [] };
+        ? { changed: true, touchedBy: ['abc1234'], touchedByTotal: 1 }
+        : { changed: 'unknown', touchedBy: [], touchedByTotal: 0 };
     const threads = buildThreadStatuses(
       [
         comment({ id: 1, path: 'src/changed.ts', body: 'this is a blocker' }),

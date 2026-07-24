@@ -23,6 +23,7 @@
 import type { CommandModule } from 'yargs';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD } from '@qwen-code/qwen-code-core';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh, ghApiAll, setGhHost } from './lib/gh.js';
 import { gitOpt } from './lib/git.js';
@@ -38,7 +39,6 @@ export interface RawStatusComment {
    * to it (the anchor is outdated). File-level comments are always null. */
   line?: number | null;
   original_line?: number | null;
-  side?: string | null;
   /** SHA GitHub currently anchors the comment to. */
   commit_id?: string;
   /** SHA the comment was filed against. */
@@ -53,12 +53,22 @@ export interface RawStatusComment {
  * Answers "did `path` change between `sinceSha` and the worktree HEAD, and
  * which commits touched it?" — injected so the classification core stays
  * pure. `'unknown'` when the question cannot be answered (no worktree, the
- * comment's commit was force-pushed away, path outside the repo).
+ * comment's commit absent from the object store, path outside the repo).
+ *
+ * Force-push caveat: the worktree shares the main clone's object database,
+ * so a force-pushed-away commit is often still PRESENT — the range then
+ * spans the whole re-pushed branch rather than the intended window. That
+ * errs fail-safe (it can over-report `changed: true`, never hide a change),
+ * so it is accepted rather than special-cased.
  */
 export type CodeChangeProbe = (
   path: string,
   sinceSha: string | undefined,
-) => { changed: boolean | 'unknown'; touchedBy: string[] };
+) => {
+  changed: boolean | 'unknown';
+  touchedBy: string[];
+  touchedByTotal: number;
+};
 
 export interface ThreadStatus {
   rootId: number;
@@ -87,6 +97,9 @@ export interface ThreadStatus {
     /** Short SHAs of commits in that range touching the file, newest first,
      * capped — the candidate "fixed by" commits for the re-check. */
     touchedBy: string[];
+    /** Real count before the cap — when it exceeds `touchedBy.length`, the
+     * list was cut and a fix commit may be among the ones not shown. */
+    touchedByTotal: number;
   };
   replies: Array<{ id: number; author: string; createdAt: string }>;
   /** The PR author replied somewhere in this thread — the strongest cheap
@@ -171,15 +184,18 @@ export function buildThreadStatuses(
       code: {
         changedSinceComment: probed.changed,
         touchedBy: probed.touchedBy,
+        touchedByTotal: probed.touchedByTotal,
       },
       replies: replies.map((r) => ({
         id: r.id,
         author: r.user?.login ?? 'unknown',
         createdAt: r.created_at ?? '',
       })),
-      authorReplied: replies.some(
-        (r) => (r.user?.login ?? '').toLowerCase() === authorLc,
-      ),
+      // Guard the empty-author case: a deleted PR-author account and a
+      // deleted reply account would otherwise match as '' === ''.
+      authorReplied:
+        authorLc !== '' &&
+        replies.some((r) => (r.user?.login ?? '').toLowerCase() === authorLc),
       participants,
     });
   }
@@ -220,28 +236,30 @@ function makeGitProbe(): CodeChangeProbe {
   const memo = new Map<string, ReturnType<CodeChangeProbe>>();
   return (path, sinceSha) => {
     if (!inRepo || !sinceSha || !path) {
-      return { changed: 'unknown', touchedBy: [] };
+      return { changed: 'unknown', touchedBy: [], touchedByTotal: 0 };
     }
     const key = `${sinceSha}\0${path}`;
     const hit = memo.get(key);
     if (hit) return hit;
     let result: ReturnType<CodeChangeProbe>;
-    // The comment's commit can be absent locally (force-pushed away and gone
-    // from the fetched history) — then the range is unanswerable.
+    // The comment's commit can be absent from the object store — then the
+    // range is unanswerable. (When a force-pushed-away commit is still
+    // present via the shared object database, the range widens instead;
+    // see the CodeChangeProbe doc for why that direction is accepted.)
     if (gitOpt('cat-file', '-e', `${sinceSha}^{commit}`) === null) {
-      result = { changed: 'unknown', touchedBy: [] };
+      result = { changed: 'unknown', touchedBy: [], touchedByTotal: 0 };
     } else {
       const log = gitOpt('log', '--format=%h', `${sinceSha}..HEAD`, '--', path);
-      result =
-        log === null
-          ? { changed: 'unknown', touchedBy: [] }
-          : {
-              changed: log.length > 0,
-              touchedBy: log
-                .split('\n')
-                .filter(Boolean)
-                .slice(0, TOUCHED_BY_CAP),
-            };
+      if (log === null) {
+        result = { changed: 'unknown', touchedBy: [], touchedByTotal: 0 };
+      } else {
+        const shas = log.split('\n').filter(Boolean);
+        result = {
+          changed: shas.length > 0,
+          touchedBy: shas.slice(0, TOUCHED_BY_CAP),
+          touchedByTotal: shas.length,
+        };
+      }
     }
     memo.set(key, result);
     return result;
@@ -308,7 +326,8 @@ async function runCommentStatus(args: CommentStatusArgs): Promise<void> {
   };
 
   mkdirSync(dirname(out), { recursive: true });
-  writeFileSync(out, JSON.stringify(report, null, 2) + '\n', 'utf8');
+  const json = JSON.stringify(report, null, 2) + '\n';
+  writeFileSync(out, json, 'utf8');
   writeStdoutLine(
     `Wrote comment-status report to ${out} (${comments.length} inline comments in ${summary.threads} threads: ` +
       `${summary.outdated} outdated, ${summary.blockers} blocker(s), ` +
@@ -320,6 +339,18 @@ async function runCommentStatus(args: CommentStatusArgs): Promise<void> {
       `warning: worktree HEAD ${worktreeHeadSha!.slice(0, 8)} != live PR head ${liveHeadSha.slice(0, 8)} — ` +
         `the PR advanced since fetch-pr. Anchor facts describe the live head; ` +
         `code facts describe the worktree.`,
+    );
+  }
+  // Same silent-tail hazard pr-context already warns about, with sharper
+  // teeth here: `threads` is sorted by path, so a truncated read drops the
+  // alphabetically-later files WHOLESALE (measured on a 71-thread PR: one
+  // read showed 35 threads and lost 24 blocker-flagged ones), and cut JSON
+  // is not merely incomplete but unparseable.
+  if (json.length > DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD) {
+    writeStdoutLine(
+      `warning: ${out} is ${json.length} chars; read_file returns the first ` +
+        `${DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD} and sets isTruncated — cut JSON does not parse. ` +
+        `Query it with jq (it is machine-shaped), or page with offset/limit until isTruncated is false.`,
     );
   }
 }
