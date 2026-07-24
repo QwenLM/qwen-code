@@ -93,6 +93,8 @@ export type {
   ChannelMemoryIntentClassifierResult,
   ChannelMemoryScopeConfig,
   ChannelMemoryScopeMode,
+  ChannelOutputSegmentContext,
+  ChannelOutputSegmentEndReason,
   ChannelPlugin,
   ChannelPromptOwner,
   ChannelProactiveTarget,

@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type {
+  ChannelOutputSegmentContext,
   ChannelTaskCancellationReason,
-  ChannelTaskLifecycleEvent,
 } from '@qwen-code/channel-base';
 import {
   STATUS_CARD_TEMPLATE_ID,
@@ -12,9 +12,8 @@ const FLUSH_INTERVAL_MS = 500;
 const CONTENT_LIMIT = 20_000;
 const TRUNCATION_MARKER = '[Earlier output truncated]\n';
 
-type StartedEvent = Extract<ChannelTaskLifecycleEvent, { type: 'started' }>;
-
 interface StatusRecord {
+  segmentId: string;
   runId: string;
   sessionId: string;
   ownerId: string;
@@ -24,7 +23,6 @@ interface StatusRecord {
   terminal: boolean;
   streamFailed: boolean;
   stopClaimed: boolean;
-  waiting: boolean;
   lastWriteAt: number;
   pendingSnapshot?: string;
   flushTimer?: ReturnType<typeof setTimeout>;
@@ -46,95 +44,78 @@ function boundContent(content: string): string {
 }
 
 export class StatusCardController {
-  private readonly recordsByRun = new Map<string, StatusRecord>();
+  private readonly recordsBySegment = new Map<string, StatusRecord>();
   private readonly recordsByOutTrack = new Map<string, StatusRecord>();
+  private readonly segmentIdsByRun = new Map<string, Set<string>>();
+  private readonly terminalSegmentIds = new Set<string>();
 
   constructor(private readonly options: StatusCardControllerOptions) {}
 
-  start(
-    event: StartedEvent,
+  append(
+    segment: ChannelOutputSegmentContext,
     target: { chatId: string; isGroup: boolean },
-  ): string {
-    const outTrackId = `qwen-status-${randomUUID()}`;
-    const record: StatusRecord = {
-      runId: event.runId!,
-      sessionId: event.sessionId,
-      ownerId: event.owner!.id,
-      outTrackId,
-      content: '',
-      ready: Promise.resolve(false),
-      terminal: false,
-      streamFailed: false,
-      stopClaimed: false,
-      waiting: false,
-      lastWriteAt: Date.now(),
-      writeChain: Promise.resolve(),
-    };
-    this.recordsByRun.set(record.runId, record);
-    this.recordsByOutTrack.set(outTrackId, record);
-    record.ready = this.create(record, target);
-    return outTrackId;
-  }
-
-  append(runId: string, chunk: string): void {
-    const record = this.recordsByRun.get(runId);
-    if (!record || record.terminal || !chunk) return;
+    chunk: string,
+  ): void {
+    if (!chunk || this.terminalSegmentIds.has(segment.segmentId)) return;
+    let record = this.recordsBySegment.get(segment.segmentId);
+    if (!record) {
+      record = this.createRecord(segment, target);
+    }
+    if (record.terminal) return;
     record.content = boundContent(record.content + chunk);
     if (record.streamFailed) return;
     record.pendingSnapshot = record.content;
     this.scheduleFlush(record);
   }
 
-  setWaitingInput(runId: string, waiting: boolean): void {
-    const record = this.recordsByRun.get(runId);
-    if (!record || record.terminal || record.waiting === waiting) return;
-    record.waiting = waiting;
-    record.writeChain = record.writeChain
-      .then(async () => {
-        const ready = await record.ready;
-        if (!ready || record.terminal) return;
-        await this.options.client.updateInstance({
-          outTrackId: record.outTrackId,
-          cardParamMap: {
-            flowStatus: 2,
-            statusLine: waiting ? 'Waiting for input' : 'Running',
-          },
-        });
-      })
-      .catch((error) => {
-        this.options.onError?.('status card state update', error);
-      });
+  private createRecord(
+    segment: ChannelOutputSegmentContext,
+    target: { chatId: string; isGroup: boolean },
+  ): StatusRecord {
+    const outTrackId = `qwen-status-${randomUUID()}`;
+    const record: StatusRecord = {
+      segmentId: segment.segmentId,
+      runId: segment.runId,
+      sessionId: segment.sessionId,
+      ownerId: segment.owner.id,
+      outTrackId,
+      content: '',
+      ready: Promise.resolve(false),
+      terminal: false,
+      streamFailed: false,
+      stopClaimed: false,
+      lastWriteAt: Date.now(),
+      writeChain: Promise.resolve(),
+    };
+    this.recordsBySegment.set(record.segmentId, record);
+    this.recordsByOutTrack.set(outTrackId, record);
+    const segmentIds =
+      this.segmentIdsByRun.get(record.runId) ?? new Set<string>();
+    segmentIds.add(record.segmentId);
+    this.segmentIdsByRun.set(record.runId, segmentIds);
+    record.ready = this.create(record, target);
+    return record;
   }
 
-  responseBoundary(runId: string): void {
-    const record = this.recordsByRun.get(runId);
-    if (!record || record.terminal) return;
-    record.content = '';
-    if (record.flushTimer) clearTimeout(record.flushTimer);
-    record.flushTimer = undefined;
-    if (record.streamFailed) {
-      record.pendingSnapshot = undefined;
-      return;
+  complete(segmentId: string, text: string): Promise<boolean> {
+    return this.finalize(segmentId, boundContent(text), 'Completed', false);
+  }
+
+  fail(segmentId: string, error: string): void {
+    void this.finalize(segmentId, boundContent(error), 'Failed', true);
+  }
+
+  cancelRun(runId: string, reason: ChannelTaskCancellationReason): void {
+    for (const segmentId of [...(this.segmentIdsByRun.get(runId) ?? [])]) {
+      const record = this.recordsBySegment.get(segmentId);
+      if (!record) continue;
+      void this.finalize(
+        segmentId,
+        record.content,
+        reason === 'cancel_command' ? 'Stopped' : 'Cancelled',
+        false,
+      );
     }
-    record.pendingSnapshot = '';
-    this.scheduleFlush(record);
-  }
-
-  complete(runId: string, text: string): Promise<boolean> {
-    return this.finalize(runId, boundContent(text), 'Completed', false);
-  }
-
-  fail(runId: string, error: string): void {
-    void this.finalize(runId, boundContent(error), 'Failed', true);
-  }
-
-  cancel(runId: string, reason: ChannelTaskCancellationReason): void {
-    void this.finalize(
-      runId,
-      this.recordsByRun.get(runId)?.content ?? '',
-      reason === 'cancel_command' ? 'Stopped' : 'Cancelled',
-      false,
-    );
   }
 
   claimStop(
@@ -166,7 +147,7 @@ export class StatusCardController {
         record.stopClaimed = false;
         return;
       }
-      this.cancel(record.runId, 'cancel_command');
+      this.cancelRun(record.runId, 'cancel_command');
     };
   }
 
@@ -183,8 +164,8 @@ export class StatusCardController {
           content: '',
           flowStatus: 2,
           statusLine: 'Running',
-          hasAction: '1',
-          stop_action: '1',
+          hasAction: 'true',
+          stop_action: 'true',
         },
       });
       await this.options.client.openOrUpdateStream({
@@ -202,8 +183,8 @@ export class StatusCardController {
           cardParamMap: {
             flowStatus: 3,
             statusLine: 'Unavailable',
-            hasAction: '0',
-            stop_action: '0',
+            hasAction: 'false',
+            stop_action: 'false',
           },
         })
         .catch(() => {});
@@ -260,14 +241,20 @@ export class StatusCardController {
   }
 
   private async finalize(
-    runId: string,
+    segmentId: string,
     content: string,
     statusLine: string,
     isError: boolean,
   ): Promise<boolean> {
-    const record = this.recordsByRun.get(runId);
+    const record = this.recordsBySegment.get(segmentId);
     if (!record || record.terminal) return false;
     record.terminal = true;
+    this.terminalSegmentIds.add(segmentId);
+    while (this.terminalSegmentIds.size > 1000) {
+      const oldest = this.terminalSegmentIds.values().next().value;
+      if (oldest === undefined) break;
+      this.terminalSegmentIds.delete(oldest);
+    }
     if (record.flushTimer) clearTimeout(record.flushTimer);
     record.flushTimer = undefined;
     record.pendingSnapshot = undefined;
@@ -295,8 +282,8 @@ export class StatusCardController {
           copy_content: finalContent,
           flowStatus: 3,
           statusLine,
-          hasAction: '0',
-          stop_action: '0',
+          hasAction: 'false',
+          stop_action: 'false',
         },
       });
       record.content = '';
@@ -305,11 +292,16 @@ export class StatusCardController {
       this.options.onError?.('status card finalization', error);
       return false;
     } finally {
-      if (this.recordsByRun.get(runId) === record) {
-        this.recordsByRun.delete(runId);
+      if (this.recordsBySegment.get(segmentId) === record) {
+        this.recordsBySegment.delete(segmentId);
       }
       if (this.recordsByOutTrack.get(record.outTrackId) === record) {
         this.recordsByOutTrack.delete(record.outTrackId);
+      }
+      const segmentIds = this.segmentIdsByRun.get(record.runId);
+      segmentIds?.delete(segmentId);
+      if (segmentIds?.size === 0) {
+        this.segmentIdsByRun.delete(record.runId);
       }
     }
   }

@@ -38,11 +38,14 @@ import {
 } from './interactive-card-types.js';
 import { StatusCardController } from './status-card-controller.js';
 import { QuestionCardController } from './question-card-controller.js';
+import { DingtalkInteractionPresenter } from './interaction-presenter.js';
 import type {
   ChannelConfig,
   ChannelBaseOptions,
   Envelope,
   ChannelAgentBridge,
+  ChannelOutputSegmentContext,
+  ChannelOutputSegmentEndReason,
   ChannelTaskLifecycleEvent,
   ChannelUserInputRequestContext,
   SessionTarget,
@@ -240,6 +243,7 @@ export class DingtalkChannel extends ChannelBase {
   protected readonly interactiveCardClient?: DingtalkInteractiveCardClient;
   private statusCardController?: StatusCardController;
   private questionCardController?: QuestionCardController;
+  private interactionPresenter?: DingtalkInteractionPresenter;
   private readonly inboundCardOwners = new Map<
     string,
     {
@@ -247,7 +251,6 @@ export class DingtalkChannel extends ChannelBase {
       target: { chatId: string; isGroup: boolean };
     }
   >();
-  private readonly statusRunBySession = new Map<string, string>();
   private readonly cardRunBySession = new Map<string, string>();
   private readonly cardRuns = new Map<
     string,
@@ -324,14 +327,29 @@ export class DingtalkChannel extends ChannelBase {
         this.questionCardController = new QuestionCardController({
           client: this.interactiveCardClient,
           timeoutMs: this.interactiveCardConfig.questionCard.timeoutMs,
-          setWaitingInput: (runId, waiting) =>
-            this.statusCardController?.setWaitingInput(runId, waiting),
           sendFallback: (chatId, text) => this.sendMessage(chatId, text),
+          reserveRunProjection: (runId) =>
+            this.interactionPresenter?.reserveProjection(runId),
           onError: (operation, error) => {
             process.stderr.write(
               `[DingTalk:${this.name}] ${operation} failed: ${sanitizeLogText(String(error), 300)}\n`,
             );
           },
+        });
+      }
+      if (this.statusCardController || this.questionCardController) {
+        this.interactionPresenter = new DingtalkInteractionPresenter({
+          statusCards: this.statusCardController,
+          questionCards: this.questionCardController,
+          ...(config.blockStreaming !== 'on'
+            ? {
+                sendFallback: (
+                  chatId: string,
+                  text: string,
+                  sessionId: string,
+                ) => this.sendResponseMessage(chatId, text, sessionId),
+              }
+            : {}),
         });
       }
     }
@@ -1091,9 +1109,7 @@ export class DingtalkChannel extends ChannelBase {
     const cardRunId = this.cardRunBySession.get(sessionId);
     if (cardRunId) {
       this.cardRunBySession.delete(sessionId);
-      this.statusRunBySession.delete(sessionId);
-      this.statusCardController?.cancel(cardRunId, 'dropped');
-      this.questionCardController?.cancelRun(cardRunId);
+      this.interactionPresenter?.terminalizeRun(cardRunId, 'cancelled');
       this.cardRuns.delete(cardRunId);
     }
     const keys = this.sessionReactionKeys.get(sessionId);
@@ -1124,15 +1140,12 @@ export class DingtalkChannel extends ChannelBase {
       ) {
         this.cardRuns.set(event.runId, inboundOwner);
         this.cardRunBySession.set(event.sessionId, event.runId);
-        if (this.statusCardController) {
-          this.statusRunBySession.set(event.sessionId, event.runId);
-          this.statusCardController.start(event, inboundOwner.target);
-        }
+        this.interactionPresenter?.registerRun(
+          event.runId,
+          event.owner.id,
+          inboundOwner.target,
+        );
       }
-      return;
-    }
-    if (event.type === 'text_chunk' && event.runId) {
-      this.statusCardController?.append(event.runId, event.chunk);
       return;
     }
     if (isTerminalTaskLifecycleType(event.type)) {
@@ -1140,19 +1153,21 @@ export class DingtalkChannel extends ChannelBase {
       this.stopReaction(event.chatId, event.messageId, event.sessionId);
       if (event.runId) {
         if (event.type === 'failed') {
-          this.statusCardController?.fail(event.runId, event.error);
+          this.interactionPresenter?.terminalizeRun(
+            event.runId,
+            'failed',
+            event.error,
+          );
         } else if (event.type === 'cancelled') {
-          this.statusCardController?.cancel(event.runId, event.reason);
-        } else if (
-          this.statusRunBySession.get(event.sessionId) === event.runId
-        ) {
-          void this.statusCardController?.complete(event.runId, '');
+          this.interactionPresenter?.terminalizeRun(
+            event.runId,
+            'cancelled',
+            event.reason,
+          );
+        } else {
+          this.interactionPresenter?.terminalizeRun(event.runId, 'completed');
         }
-        this.questionCardController?.cancelRun(event.runId);
         this.cardRuns.delete(event.runId);
-        if (this.statusRunBySession.get(event.sessionId) === event.runId) {
-          this.statusRunBySession.delete(event.sessionId);
-        }
         if (this.cardRunBySession.get(event.sessionId) === event.runId) {
           this.cardRunBySession.delete(event.sessionId);
         }
@@ -1229,7 +1244,7 @@ export class DingtalkChannel extends ChannelBase {
       this.inboundCardOwners.set(messageId, {
         ownerId: envelope.senderId,
         target: {
-          chatId: envelope.isGroup ? envelope.chatId : envelope.senderId,
+          chatId: envelope.chatId,
           isGroup: envelope.isGroup,
         },
       });
@@ -1302,12 +1317,17 @@ export class DingtalkChannel extends ChannelBase {
     chatId: string,
     text: string,
     sessionId: string,
+    segment?: ChannelOutputSegmentContext,
   ): Promise<void> {
-    const runId = this.statusRunBySession.get(sessionId);
     if (
-      runId &&
-      this.statusCardController &&
-      (await this.statusCardController.complete(runId, text))
+      segment &&
+      this.interactionPresenter &&
+      (await this.interactionPresenter.closeOutput(
+        segment.segmentId,
+        text,
+        'completed',
+        segment,
+      ))
     ) {
       return;
     }
@@ -1316,10 +1336,23 @@ export class DingtalkChannel extends ChannelBase {
 
   protected override onResponseBoundary(
     _chatId: string,
-    sessionId: string,
+    _sessionId: string,
+    segment?: ChannelOutputSegmentContext,
+    reason: ChannelOutputSegmentEndReason = 'response_boundary',
+  ): void | Promise<void> {
+    if (!segment || !this.interactionPresenter) return;
+    return this.interactionPresenter
+      .closeOutput(segment.segmentId, '', reason, segment)
+      .then(() => undefined);
+  }
+
+  protected override onResponseChunk(
+    _chatId: string,
+    chunk: string,
+    _sessionId: string,
+    segment?: ChannelOutputSegmentContext,
   ): void {
-    const runId = this.statusRunBySession.get(sessionId);
-    if (runId) this.statusCardController?.responseBoundary(runId);
+    if (segment) this.interactionPresenter?.appendOutput(segment, chunk);
   }
 
   protected override async presentUserInputRequest(
@@ -1329,8 +1362,15 @@ export class DingtalkChannel extends ChannelBase {
     if (!run || run.ownerId !== context.owner.id) {
       return { kind: 'unsupported' };
     }
-    if (this.questionCardController) {
-      return this.questionCardController.present(context, run.target);
+    if (this.questionCardController && this.interactionPresenter) {
+      if (context.precedingSegmentId) {
+        await this.interactionPresenter.closeOutput(
+          context.precedingSegmentId,
+          '',
+          'input_requested',
+        );
+      }
+      return this.interactionPresenter.presentInput(context);
     }
     try {
       await this.sendMessage(

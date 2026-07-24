@@ -5,6 +5,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import type {
+  ChannelOutputSegmentContext,
+  ChannelOutputSegmentEndReason,
   ChannelTaskLifecycleEvent,
   ChannelUserInputRequestContext,
   Envelope,
@@ -110,6 +112,8 @@ vi.mock('@qwen-code/channel-base', async () => {
       protected config: Record<string, unknown>;
       protected name: string;
       handleInbound = vi.fn().mockResolvedValue(undefined);
+      protected preflightInbound = vi.fn().mockResolvedValue(true);
+      protected processInbound = vi.fn().mockResolvedValue(undefined);
       onSessionDied(_sessionId: string): void {}
       protected logDebugPayload(platform: string, payload: unknown): void {
         (
@@ -452,19 +456,58 @@ function getLifecycleHook(
 
 function getCompleteHook(
   channel: DingtalkChannelInstance,
-): (chatId: string, text: string, sessionId: string) => Promise<void> {
+): (
+  chatId: string,
+  text: string,
+  sessionId: string,
+  segment?: ChannelOutputSegmentContext,
+) => Promise<void> {
   const fn = (channel as unknown as Record<string, unknown>)[
     'onResponseComplete'
-  ] as (chatId: string, text: string, sessionId: string) => Promise<void>;
+  ] as (
+    chatId: string,
+    text: string,
+    sessionId: string,
+    segment?: ChannelOutputSegmentContext,
+  ) => Promise<void>;
   return fn.bind(channel);
 }
 
 function getBoundaryHook(
   channel: DingtalkChannelInstance,
-): (chatId: string, sessionId: string) => void {
+): (
+  chatId: string,
+  sessionId: string,
+  segment?: ChannelOutputSegmentContext,
+  reason?: ChannelOutputSegmentEndReason,
+) => void | Promise<void> {
   const fn = (channel as unknown as Record<string, unknown>)[
     'onResponseBoundary'
-  ] as (chatId: string, sessionId: string) => void;
+  ] as (
+    chatId: string,
+    sessionId: string,
+    segment?: ChannelOutputSegmentContext,
+    reason?: ChannelOutputSegmentEndReason,
+  ) => void | Promise<void>;
+  return fn.bind(channel);
+}
+
+function getChunkHook(
+  channel: DingtalkChannelInstance,
+): (
+  chatId: string,
+  chunk: string,
+  sessionId: string,
+  segment?: ChannelOutputSegmentContext,
+) => void {
+  const fn = (channel as unknown as Record<string, unknown>)[
+    'onResponseChunk'
+  ] as (
+    chatId: string,
+    chunk: string,
+    sessionId: string,
+    segment?: ChannelOutputSegmentContext,
+  ) => void;
   return fn.bind(channel);
 }
 
@@ -1171,15 +1214,19 @@ describe('DingtalkChannel status cards', () => {
     ).toBeDefined();
   });
 
-  it('binds status cards only to the matching real inbound owner', () => {
+  it('registers only the matching real inbound owner without creating output', () => {
     const channel = createChannel();
-    const start = vi.fn();
+    const registerRun = vi.fn();
+    const appendOutput = vi.fn();
     (
       channel as unknown as {
-        statusCardController: { start: typeof start };
+        interactionPresenter: {
+          registerRun: typeof registerRun;
+          appendOutput: typeof appendOutput;
+        };
         inboundCardOwners: Map<string, unknown>;
       }
-    ).statusCardController = { start };
+    ).interactionPresenter = { registerRun, appendOutput };
     (
       channel as unknown as {
         inboundCardOwners: Map<string, unknown>;
@@ -1198,7 +1245,8 @@ describe('DingtalkChannel status cards', () => {
       runId: 'run-1',
       owner: { kind: 'channel_user', id: 'other-owner' },
     });
-    expect(start).not.toHaveBeenCalled();
+    expect(registerRun).not.toHaveBeenCalled();
+    expect(appendOutput).not.toHaveBeenCalled();
 
     (
       channel as unknown as {
@@ -1218,58 +1266,117 @@ describe('DingtalkChannel status cards', () => {
       owner: { kind: 'channel_user', id: 'owner-1' },
     });
 
-    expect(start).toHaveBeenCalledOnce();
-    expect(start).toHaveBeenCalledWith(
-      expect.objectContaining({ runId: 'run-2' }),
-      { chatId: 'cid-1', isGroup: true },
-    );
+    expect(registerRun).toHaveBeenCalledOnce();
+    expect(registerRun).toHaveBeenCalledWith('run-2', 'owner-1', {
+      chatId: 'cid-1',
+      isGroup: true,
+    });
+    expect(appendOutput).not.toHaveBeenCalled();
+  });
+
+  it('captures direct-card correlation by conversation instead of delivery user', async () => {
+    const channel = createChannel();
+    const envelope: Envelope = {
+      channelName: 'dingtalk',
+      senderId: 'owner-1',
+      senderName: 'Owner',
+      chatId: 'conversation-1',
+      messageId: 'message-1',
+      text: 'hello',
+      isGroup: false,
+      isMentioned: false,
+      isReplyToBot: false,
+    };
+
+    await DingtalkChannel.prototype.handleInbound.call(channel, envelope);
+
+    expect(
+      (
+        channel as unknown as {
+          inboundCardOwners: Map<string, unknown>;
+        }
+      ).inboundCardOwners.get('message-1'),
+    ).toEqual({
+      ownerId: 'owner-1',
+      target: { chatId: 'conversation-1', isGroup: false },
+    });
+  });
+
+  it('routes the first visible chunk with its exact segment context', () => {
+    const channel = createChannel();
+    const appendOutput = vi.fn();
+    (
+      channel as unknown as {
+        interactionPresenter: { appendOutput: typeof appendOutput };
+      }
+    ).interactionPresenter = { appendOutput };
+    const segment = {
+      channelName: 'dingtalk',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      segmentId: 'segment-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid-1',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+    } as ChannelOutputSegmentContext;
+
+    getChunkHook(channel)('cid-1', 'first', 'session-1', segment);
+
+    expect(appendOutput).toHaveBeenCalledWith(segment, 'first');
   });
 
   it('uses the awaited status finalization or falls back to Markdown', async () => {
     const channel = createChannel();
     seedWebhook(channel, 'cid-1');
-    const complete = vi
+    const closeOutput = vi
       .fn()
       .mockResolvedValueOnce(true)
       .mockResolvedValueOnce(false);
     (
       channel as unknown as {
-        statusCardController: { complete: typeof complete };
-        statusRunBySession: Map<string, string>;
+        interactionPresenter: { closeOutput: typeof closeOutput };
       }
-    ).statusCardController = { complete };
-    (
-      channel as unknown as {
-        statusRunBySession: Map<string, string>;
-      }
-    ).statusRunBySession.set('session-1', 'run-1');
+    ).interactionPresenter = { closeOutput };
+    const segment = {
+      channelName: 'dingtalk',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      segmentId: 'segment-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid-1',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+    } as ChannelOutputSegmentContext;
     const fetchSpy = vi
       .spyOn(globalThis, 'fetch')
       .mockResolvedValue(new Response('{}'));
 
-    await getCompleteHook(channel)('cid-1', 'first', 'session-1');
+    await getCompleteHook(channel)('cid-1', 'first', 'session-1', segment);
     expect(fetchSpy).not.toHaveBeenCalled();
 
-    await getCompleteHook(channel)('cid-1', 'second', 'session-1');
+    await getCompleteHook(channel)('cid-1', 'second', 'session-1', {
+      ...segment,
+      segmentId: 'segment-2',
+    });
     expect(fetchSpy).toHaveBeenCalledOnce();
   });
 
-  it('completes the status card when the agent response is empty', () => {
+  it('terminalizes the presenter when the agent response is empty', () => {
     const channel = createChannel();
-    const complete = vi.fn().mockResolvedValue(true);
+    const terminalizeRun = vi.fn();
     (
       channel as unknown as {
-        statusCardController: { complete: typeof complete };
-        statusRunBySession: Map<string, string>;
+        interactionPresenter: { terminalizeRun: typeof terminalizeRun };
         cardRunBySession: Map<string, string>;
       }
-    ).statusCardController = { complete };
-    (
-      channel as unknown as {
-        statusRunBySession: Map<string, string>;
-        cardRunBySession: Map<string, string>;
-      }
-    ).statusRunBySession.set('session-1', 'run-1');
+    ).interactionPresenter = { terminalizeRun };
     (
       channel as unknown as {
         cardRunBySession: Map<string, string>;
@@ -1285,37 +1392,52 @@ describe('DingtalkChannel status cards', () => {
       owner: { kind: 'channel_user', id: 'owner-1' },
     });
 
-    expect(complete).toHaveBeenCalledWith('run-1', '');
+    expect(terminalizeRun).toHaveBeenCalledWith('run-1', 'completed');
   });
 
-  it('resets the exact status run at a response boundary', () => {
+  it('closes the exact output segment at a response boundary', async () => {
     const channel = createChannel();
-    const responseBoundary = vi.fn();
+    const closeOutput = vi.fn().mockResolvedValue(true);
     (
       channel as unknown as {
-        statusCardController: { responseBoundary: typeof responseBoundary };
-        statusRunBySession: Map<string, string>;
+        interactionPresenter: { closeOutput: typeof closeOutput };
       }
-    ).statusCardController = { responseBoundary };
-    (
-      channel as unknown as {
-        statusRunBySession: Map<string, string>;
-      }
-    ).statusRunBySession.set('session-1', 'run-1');
+    ).interactionPresenter = { closeOutput };
+    const segment = {
+      channelName: 'dingtalk',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      segmentId: 'segment-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid-1',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+    } as ChannelOutputSegmentContext;
 
-    getBoundaryHook(channel)('cid-1', 'session-1');
+    await getBoundaryHook(channel)(
+      'cid-1',
+      'session-1',
+      segment,
+      'input_requested',
+    );
 
-    expect(responseBoundary).toHaveBeenCalledWith('run-1');
+    expect(closeOutput).toHaveBeenCalledWith(
+      'segment-1',
+      '',
+      'input_requested',
+      segment,
+    );
   });
 
   it('does not let a stale terminal event detach a newer session run', () => {
     const channel = createChannel();
     const maps = channel as unknown as {
-      statusRunBySession: Map<string, string>;
       cardRunBySession: Map<string, string>;
       cardRuns: Map<string, unknown>;
     };
-    maps.statusRunBySession.set('session-1', 'run-new');
     maps.cardRunBySession.set('session-1', 'run-new');
     maps.cardRuns.set('run-old', {});
     maps.cardRuns.set('run-new', {});
@@ -1329,7 +1451,6 @@ describe('DingtalkChannel status cards', () => {
       owner: { kind: 'channel_user', id: 'owner-1' },
     });
 
-    expect(maps.statusRunBySession.get('session-1')).toBe('run-new');
     expect(maps.cardRunBySession.get('session-1')).toBe('run-new');
     expect(maps.cardRuns.has('run-old')).toBe(false);
     expect(maps.cardRuns.has('run-new')).toBe(true);
@@ -1351,13 +1472,27 @@ describe('DingtalkChannel question cards', () => {
 
   it('presents through the matching attended run only', async () => {
     const channel = createChannel();
-    const present = vi.fn().mockResolvedValue({ kind: 'presented' });
+    const operations: string[] = [];
+    const closeOutput = vi.fn().mockImplementation(async () => {
+      operations.push('close');
+      return true;
+    });
+    const presentInput = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        operations.push('present');
+        return { kind: 'presented' };
+      })
+      .mockResolvedValueOnce({ kind: 'unsupported' });
     (
       channel as unknown as {
-        questionCardController: { present: typeof present };
+        interactionPresenter: {
+          closeOutput: typeof closeOutput;
+          presentInput: typeof presentInput;
+        };
         cardRuns: Map<string, unknown>;
       }
-    ).questionCardController = { present };
+    ).interactionPresenter = { closeOutput, presentInput };
     (channel as unknown as { cardRuns: Map<string, unknown> }).cardRuns.set(
       'run-1',
       {
@@ -1370,15 +1505,19 @@ describe('DingtalkChannel question cards', () => {
       sessionId: 'session-1',
       runId: 'run-1',
       owner: { kind: 'channel_user', id: 'owner-1' },
+      precedingSegmentId: 'segment-1',
     } as ChannelUserInputRequestContext;
 
     await expect(getUserInputHook(channel)(context)).resolves.toEqual({
       kind: 'presented',
     });
-    expect(present).toHaveBeenCalledWith(context, {
-      chatId: 'cid-1',
-      isGroup: true,
-    });
+    expect(closeOutput).toHaveBeenCalledWith(
+      'segment-1',
+      '',
+      'input_requested',
+    );
+    expect(presentInput).toHaveBeenCalledWith(context);
+    expect(operations).toEqual(['close', 'present']);
 
     await expect(
       getUserInputHook(channel)({ ...context, runId: 'unknown' }),

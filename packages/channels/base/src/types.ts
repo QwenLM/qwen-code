@@ -191,7 +191,7 @@ export type UserInputPresentationResult =
   | { kind: 'unsupported' };
 
 export type UserInputSettlementReason =
-  | 'resolved_outside_card'
+  | 'resolved_outside_presenter'
   | 'cancelled'
   | 'run_cancelled';
 
@@ -216,11 +216,29 @@ export interface ChannelUserInputRequestContext {
   runId: string;
   owner: ChannelPromptOwner;
   target: SessionTarget;
+  precedingSegmentId?: string;
   questions: ChannelUserQuestion[];
   submitOptionId: string;
   onSettled(listener: (reason: UserInputSettlementReason) => void): () => void;
   respond(response: ChannelUserInputResponse): Promise<boolean>;
 }
+
+export interface ChannelOutputSegmentContext {
+  channelName: string;
+  sessionId: string;
+  runId: string;
+  segmentId: string;
+  owner: ChannelPromptOwner;
+  target: SessionTarget;
+  messageId?: string;
+}
+
+export type ChannelOutputSegmentEndReason =
+  | 'response_boundary'
+  | 'input_requested'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
 
 export interface ChannelProactiveTarget {
   channelName: string;

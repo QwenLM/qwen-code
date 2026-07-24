@@ -6,6 +6,8 @@ import type {
   ChannelMemoryEntry,
   ChannelMemoryIntentClassifier,
   ChannelMemoryTarget,
+  ChannelOutputSegmentContext,
+  ChannelOutputSegmentEndReason,
   ChannelPromptOwner,
   ChannelProactiveTarget,
   ChannelRuntimeIdentity,
@@ -267,6 +269,7 @@ type CollectBufferEntry = { text: string; envelope: Envelope };
 type ActivePrompt = {
   runId: string;
   owner?: ChannelPromptOwner;
+  activeSegmentId?: string;
   cancelled: boolean;
   cancelPending?: boolean;
   cancellationEmitted?: boolean;
@@ -561,6 +564,11 @@ export abstract class ChannelBase {
       return undefined;
     }
 
+    const precedingSegment = this.closeOutputSegment(
+      pending.sessionId,
+      active,
+      pending.target,
+    );
     let respondInvoked = false;
     const context: ChannelUserInputRequestContext = {
       requestId: pending.requestId,
@@ -568,6 +576,9 @@ export abstract class ChannelBase {
       runId: active.runId,
       owner: active.owner,
       target: pending.target,
+      ...(precedingSegment
+        ? { precedingSegmentId: precedingSegment.segmentId }
+        : {}),
       questions,
       submitOptionId,
       onSettled: (listener) => {
@@ -894,6 +905,8 @@ export abstract class ChannelBase {
       return;
     }
     active.cancellationEmitted = true;
+    const segment = this.closeOutputSegment(sessionId, active);
+    this.notifyOutputSegmentEnd(active.chatId, sessionId, segment, 'cancelled');
     this.emitTaskLifecycle({
       ...this.lifecycleBase(active.chatId, sessionId, active.messageId),
       type: 'cancelled',
@@ -1018,6 +1031,93 @@ export abstract class ChannelBase {
       identity: this.identity,
       memoryScope: this.memoryScope,
     };
+  }
+
+  private outputSegmentContext(
+    sessionId: string,
+    active: ActivePrompt,
+    segmentId: string,
+    target?: SessionTarget,
+  ): ChannelOutputSegmentContext | undefined {
+    const resolvedTarget =
+      target ??
+      (active.senderId
+        ? {
+            channelName: this.name,
+            chatId: active.chatId,
+            senderId: active.senderId,
+            ...(active.threadId ? { threadId: active.threadId } : {}),
+            ...(active.isGroup !== undefined
+              ? { isGroup: active.isGroup }
+              : {}),
+          }
+        : undefined);
+    if (
+      !active.owner ||
+      !resolvedTarget ||
+      resolvedTarget.channelName !== this.name
+    ) {
+      return undefined;
+    }
+    return {
+      channelName: this.name,
+      sessionId,
+      runId: active.runId,
+      segmentId,
+      owner: active.owner,
+      target: resolvedTarget,
+      ...(active.messageId ? { messageId: active.messageId } : {}),
+    };
+  }
+
+  private ensureOutputSegment(
+    sessionId: string,
+    active: ActivePrompt,
+  ): ChannelOutputSegmentContext | undefined {
+    if (!active.owner) return undefined;
+    const segmentId = active.activeSegmentId ?? randomUUID();
+    const context = this.outputSegmentContext(sessionId, active, segmentId);
+    if (context) active.activeSegmentId = segmentId;
+    return context;
+  }
+
+  private closeOutputSegment(
+    sessionId: string,
+    active: ActivePrompt,
+    target?: SessionTarget,
+  ): ChannelOutputSegmentContext | undefined {
+    const segmentId = active.activeSegmentId;
+    if (!segmentId) return undefined;
+    active.activeSegmentId = undefined;
+    return this.outputSegmentContext(sessionId, active, segmentId, target);
+  }
+
+  private notifyOutputSegmentEnd(
+    chatId: string,
+    sessionId: string,
+    segment: ChannelOutputSegmentContext | undefined,
+    reason: ChannelOutputSegmentEndReason,
+  ): void {
+    if (!segment) return;
+    try {
+      const result = this.onResponseBoundary(
+        chatId,
+        sessionId,
+        segment,
+        reason,
+      );
+      if (result && typeof result.catch === 'function') {
+        result.catch((err: unknown) => {
+          process.stderr.write(
+            `[${this.name}] output segment boundary failed for session ${sanitizeLogText(sessionId, 64)}: ${this.lifecycleError(err)}\n`,
+          );
+        });
+      }
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] output segment boundary failed for session ${sanitizeLogText(sessionId, 64)}: ${this.lifecycleError(err)}\n`,
+      );
+    }
   }
 
   supportsProactiveSend(): boolean {
@@ -2212,13 +2312,19 @@ export abstract class ChannelBase {
     _chatId: string,
     _chunk: string,
     _sessionId: string,
+    _segment?: ChannelOutputSegmentContext,
   ): void {}
 
   /**
    * Called when the agent starts a new response segment for the same prompt.
    * Override to clear adapter-owned streaming buffers.
    */
-  protected onResponseBoundary(_chatId: string, _sessionId: string): void {}
+  protected onResponseBoundary(
+    _chatId: string,
+    _sessionId: string,
+    _segment?: ChannelOutputSegmentContext,
+    _reason?: ChannelOutputSegmentEndReason,
+  ): void | Promise<void> {}
 
   protected async sendResponseMessage(
     chatId: string,
@@ -2240,6 +2346,7 @@ export abstract class ChannelBase {
     chatId: string,
     fullText: string,
     sessionId: string,
+    _segment?: ChannelOutputSegmentContext,
   ): Promise<void> {
     await this.sendResponseMessage(chatId, fullText, sessionId);
   }
@@ -2325,7 +2432,7 @@ export abstract class ChannelBase {
 
   private removePendingPermission(
     requestId: string,
-    reason: UserInputSettlementReason = 'resolved_outside_card',
+    reason: UserInputSettlementReason = 'resolved_outside_presenter',
   ): void {
     const pending = this.pendingPermissions.get(requestId);
     if (!pending) {
@@ -2404,7 +2511,7 @@ export abstract class ChannelBase {
         return 'cancelled';
       }
     }
-    return 'resolved_outside_card';
+    return 'resolved_outside_presenter';
   }
 
   private pendingPermissionForEnvelope(
@@ -5298,6 +5405,7 @@ export abstract class ChannelBase {
       const releaseHeldChunks = () => {
         for (const held of heldChunks.splice(0)) {
           hasStreamedText = true;
+          const segment = this.ensureOutputSegment(sessionId, promptState);
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
               envelope.chatId,
@@ -5307,7 +5415,7 @@ export abstract class ChannelBase {
             type: 'text_chunk',
             chunk: held,
           });
-          this.onResponseChunk(envelope.chatId, held, sessionId);
+          this.onResponseChunk(envelope.chatId, held, sessionId, segment);
           streamer?.push(held);
         }
       };
@@ -5330,7 +5438,13 @@ export abstract class ChannelBase {
         }
         heldChunks.length = 0;
         hasStreamedText = false;
-        this.onResponseBoundary(envelope.chatId, sessionId);
+        const segment = this.closeOutputSegment(sessionId, promptState);
+        this.notifyOutputSegmentEnd(
+          envelope.chatId,
+          sessionId,
+          segment,
+          'response_boundary',
+        );
         streamer?.stop();
       };
       const promptBridge = this.bridge;
@@ -5357,7 +5471,16 @@ export abstract class ChannelBase {
             }
             await streamer.flush();
           } else {
-            await this.onResponseComplete(envelope.chatId, response, sessionId);
+            const segment = this.ensureOutputSegment(sessionId, promptState);
+            await this.onResponseComplete(
+              envelope.chatId,
+              response,
+              sessionId,
+              segment,
+            );
+            if (segment && promptState.activeSegmentId === segment.segmentId) {
+              promptState.activeSegmentId = undefined;
+            }
           }
         }
         // Once delivery started the turn's outcome is fixed — don't let a
@@ -5366,6 +5489,13 @@ export abstract class ChannelBase {
           await this.settleCancelRequested(promptState);
         }
         if (!promptState.cancelled && !promptState.cancellationEmitted) {
+          const segment = this.closeOutputSegment(sessionId, promptState);
+          this.notifyOutputSegmentEnd(
+            envelope.chatId,
+            sessionId,
+            segment,
+            'completed',
+          );
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
               envelope.chatId,
@@ -5384,6 +5514,13 @@ export abstract class ChannelBase {
         }
         if (!promptState.cancelled) {
           releaseHeldChunks();
+          const segment = this.closeOutputSegment(sessionId, promptState);
+          this.notifyOutputSegmentEnd(
+            envelope.chatId,
+            sessionId,
+            segment,
+            'failed',
+          );
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
               envelope.chatId,

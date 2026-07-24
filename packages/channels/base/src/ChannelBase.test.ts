@@ -63,9 +63,24 @@ class TestChannel extends ChannelBase {
     sessionId: string;
     messageIds: string[];
   }> = [];
-  responseChunks: Array<{ chatId: string; chunk: string; sessionId: string }> =
-    [];
-  responseBoundaries: Array<{ chatId: string; sessionId: string }> = [];
+  responseChunks: Array<{
+    chatId: string;
+    chunk: string;
+    sessionId: string;
+    segment?: unknown;
+  }> = [];
+  responseBoundaries: Array<{
+    chatId: string;
+    sessionId: string;
+    segment?: unknown;
+    reason?: unknown;
+  }> = [];
+  responseCompletions: Array<{
+    chatId: string;
+    text: string;
+    sessionId: string;
+    segment?: unknown;
+  }> = [];
   /** When set, onPromptEnd throws AFTER recording — to exercise the finally guard. */
   throwOnPromptEnd = false;
   responseCompleteGate?: Promise<void>;
@@ -214,22 +229,32 @@ class TestChannel extends ChannelBase {
     chatId: string,
     chunk: string,
     sessionId: string,
+    segment?: unknown,
   ): void {
-    this.responseChunks.push({ chatId, chunk, sessionId });
+    this.responseChunks.push({ chatId, chunk, sessionId, segment });
   }
 
   protected override onResponseBoundary(
     chatId: string,
     sessionId: string,
+    segment?: unknown,
+    reason?: unknown,
   ): void {
-    this.responseBoundaries.push({ chatId, sessionId });
+    this.responseBoundaries.push({ chatId, sessionId, segment, reason });
   }
 
   protected override async onResponseComplete(
     chatId: string,
     fullText: string,
     sessionId: string,
+    segment?: unknown,
   ): Promise<void> {
+    this.responseCompletions.push({
+      chatId,
+      text: fullText,
+      sessionId,
+      segment,
+    });
     await this.responseCompleteGate;
     await super.onResponseComplete(chatId, fullText, sessionId);
   }
@@ -1246,6 +1271,57 @@ describe('ChannelBase', () => {
       await active.finish();
     });
 
+    it('presents direct user input without allocating an output segment', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+
+      emitUserQuestion(active.sessionId, 'req-direct-question');
+
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      expect(ch.responseChunks).toEqual([]);
+      expect(ch.responseBoundaries).toEqual([]);
+      expect(
+        (
+          ch.userInputPresentations[0] as ChannelUserInputRequestContext & {
+            precedingSegmentId?: string;
+          }
+        ).precedingSegmentId,
+      ).toBeUndefined();
+
+      await active.finish();
+    });
+
+    it('passes visible output identity without projecting a shared boundary', async () => {
+      const ch = createChannel();
+      ch.userInputPresentationResult = { kind: 'presented' };
+      const active = await startActiveSession(ch);
+
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        active.sessionId,
+        'Need more information.',
+      );
+      await vi.waitFor(() => expect(ch.responseChunks).toHaveLength(1));
+      emitUserQuestion(active.sessionId, 'req-after-output');
+
+      await vi.waitFor(() => expect(ch.userInputPresentations).toHaveLength(1));
+      const segment = ch.responseChunks[0]!.segment as
+        | { segmentId?: string }
+        | undefined;
+      expect(segment?.segmentId).toEqual(expect.any(String));
+      expect(ch.responseBoundaries).toEqual([]);
+      expect(
+        (
+          ch.userInputPresentations[0] as ChannelUserInputRequestContext & {
+            precedingSegmentId?: string;
+          }
+        ).precedingSegmentId,
+      ).toBe(segment?.segmentId);
+
+      await active.finish();
+    });
+
     it('presents identified legacy user input from rawInput questions', async () => {
       const ch = createChannel();
       ch.userInputPresentationResult = { kind: 'presented' };
@@ -1511,7 +1587,7 @@ describe('ChannelBase', () => {
       await expect(second).resolves.toBe(true);
       expect(respondToPermissionMock()).toHaveBeenCalledTimes(1);
       expect(settled).toHaveBeenCalledOnce();
-      expect(settled).toHaveBeenCalledWith('resolved_outside_card');
+      expect(settled).toHaveBeenCalledWith('resolved_outside_presenter');
 
       await active.finish();
     });
@@ -11513,6 +11589,80 @@ describe('ChannelBase', () => {
       ]);
     });
 
+    it('allocates output segments lazily and rotates them at response boundaries', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit('textChunk', sid, 'first ');
+          (bridge as unknown as EventEmitter).emit('textChunk', sid, 'part');
+          (bridge as unknown as EventEmitter).emit('responseBoundary', sid);
+          (bridge as unknown as EventEmitter).emit('textChunk', sid, 'second');
+          return Promise.resolve('second');
+        },
+      );
+      const ch = createChannel();
+
+      await ch.handleInbound(envelope({ messageId: 'segment-message' }));
+
+      expect(ch.taskEvents[0]).toMatchObject({ type: 'started' });
+      expect(ch.taskEvents[0]).not.toHaveProperty('segmentId');
+      expect(ch.responseChunks).toHaveLength(3);
+      const firstSegment = ch.responseChunks[0]!.segment as
+        | { runId?: string; segmentId?: string }
+        | undefined;
+      const repeatedSegment = ch.responseChunks[1]!.segment as
+        | { segmentId?: string }
+        | undefined;
+      const secondSegment = ch.responseChunks[2]!.segment as
+        | { segmentId?: string }
+        | undefined;
+      expect(firstSegment).toMatchObject({
+        runId: expect.any(String),
+        segmentId: expect.any(String),
+      });
+      expect(repeatedSegment?.segmentId).toBe(firstSegment?.segmentId);
+      expect(secondSegment?.segmentId).not.toBe(firstSegment?.segmentId);
+      expect(ch.responseBoundaries).toEqual([
+        expect.objectContaining({
+          segment: expect.objectContaining({
+            segmentId: firstSegment?.segmentId,
+          }),
+          reason: 'response_boundary',
+        }),
+      ]);
+      expect(ch.responseCompletions).toEqual([
+        expect.objectContaining({
+          text: 'second',
+          segment: expect.objectContaining({
+            segmentId: secondSegment?.segmentId,
+          }),
+        }),
+      ]);
+    });
+
+    it('closes streamed output when the provider completes without a response body', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit(
+            'textChunk',
+            sid,
+            'streamed only',
+          );
+          return Promise.resolve('');
+        },
+      );
+      const ch = createChannel();
+
+      await ch.handleInbound(envelope());
+
+      const segmentId = ch.responseChunks[0]!.segment?.segmentId;
+      expect(ch.responseBoundaries).toEqual([
+        expect.objectContaining({
+          segment: expect.objectContaining({ segmentId }),
+          reason: 'completed',
+        }),
+      ]);
+    });
+
     it('does not expose mutable lifecycle metadata references', async () => {
       (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue('done');
       const ch = createChannel({
@@ -11638,19 +11788,31 @@ describe('ChannelBase', () => {
     });
 
     it('emits failed lifecycle event when prompting rejects', async () => {
-      (bridge.prompt as ReturnType<typeof vi.fn>).mockRejectedValue(
-        new Error('agent boom'),
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit('textChunk', sid, 'partial');
+          return Promise.reject(new Error('agent boom'));
+        },
       );
       const ch = createChannel();
 
       await expect(ch.handleInbound(envelope())).rejects.toThrow('agent boom');
 
-      expect(ch.taskEvents).toEqual([
-        expect.objectContaining({ type: 'started' }),
+      expect(ch.taskEvents).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'started' }),
+          expect.objectContaining({
+            type: 'failed',
+            error: 'agent boom',
+            phase: 'agent',
+          }),
+        ]),
+      );
+      const segmentId = ch.responseChunks[0]!.segment?.segmentId;
+      expect(ch.responseBoundaries).toEqual([
         expect.objectContaining({
-          type: 'failed',
-          error: 'agent boom',
-          phase: 'agent',
+          segment: expect.objectContaining({ segmentId }),
+          reason: 'failed',
         }),
       ]);
     });
@@ -11784,6 +11946,13 @@ describe('ChannelBase', () => {
 
       const prompt = ch.handleInbound(envelope({ messageId: 'm-cancel' }));
       await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        sessionId,
+        'partial',
+      );
       await ch.handleInbound(envelope({ text: '/cancel' }));
       resolvePrompt('late');
       await prompt;
@@ -11802,6 +11971,13 @@ describe('ChannelBase', () => {
           expect.objectContaining({ type: 'completed' }),
         ]),
       );
+      const segmentId = ch.responseChunks[0]!.segment?.segmentId;
+      expect(ch.responseBoundaries).toEqual([
+        expect.objectContaining({
+          segment: expect.objectContaining({ segmentId }),
+          reason: 'cancelled',
+        }),
+      ]);
     });
 
     it('suppresses lifecycle activity while cancel command is still awaiting bridge cancellation', async () => {
@@ -12630,11 +12806,13 @@ describe('ChannelBase', () => {
       await prompt;
 
       expect(ch.responseBoundaries).toEqual([]);
-      expect(ch.responseChunks).toContainEqual({
-        chatId: 'chat1',
-        chunk: 'held while cancel pending',
-        sessionId: 's-1',
-      });
+      expect(ch.responseChunks).toContainEqual(
+        expect.objectContaining({
+          chatId: 'chat1',
+          chunk: 'held while cancel pending',
+          sessionId: 's-1',
+        }),
+      );
     });
 
     it('does not emit buffered stream text after cancellation', async () => {

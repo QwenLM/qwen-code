@@ -16,11 +16,11 @@ function deferred<T>() {
   return { promise, reject, resolve };
 }
 
-function createContext() {
+function createContext(requestId = 'request-1') {
   const listeners = new Set<(reason: UserInputSettlementReason) => void>();
   const respond = vi.fn().mockResolvedValue(true);
   const context: ChannelUserInputRequestContext = {
-    requestId: 'request-1',
+    requestId,
     sessionId: 'session-1',
     runId: 'run-1',
     owner: { kind: 'channel_user', id: 'owner-1' },
@@ -74,15 +74,13 @@ function createHarness(timeoutMs = 300_000) {
     openOrUpdateStream: vi.fn().mockResolvedValue(undefined),
     updateInstance: vi.fn().mockResolvedValue(undefined),
   } as unknown as DingtalkInteractiveCardClient;
-  const setWaitingInput = vi.fn();
   const sendFallback = vi.fn().mockResolvedValue(undefined);
   const controller = new QuestionCardController({
     client,
     timeoutMs,
-    setWaitingInput,
     sendFallback,
   });
-  return { client, setWaitingInput, sendFallback, controller };
+  return { client, sendFallback, controller };
 }
 
 describe('QuestionCardController', () => {
@@ -91,7 +89,7 @@ describe('QuestionCardController', () => {
   });
 
   it('renders all normalized questions in one form card', async () => {
-    const { client, controller, setWaitingInput } = createHarness();
+    const { client, controller } = createHarness();
     const { context } = createContext();
 
     await expect(
@@ -126,12 +124,11 @@ describe('QuestionCardController', () => {
         }),
       }),
     );
-    expect(setWaitingInput).toHaveBeenCalledWith('run-1', true);
   });
 
   it('does not reactivate a request settled during delivery', async () => {
     const delivery = deferred<void>();
-    const { client, controller, setWaitingInput } = createHarness();
+    const { client, controller } = createHarness();
     vi.mocked(client.createAndDeliver).mockReturnValue(delivery.promise);
     const { context, settle, respond } = createContext();
 
@@ -139,12 +136,11 @@ describe('QuestionCardController', () => {
       chatId: 'cid-1',
       isGroup: true,
     });
-    settle('resolved_outside_card');
+    settle('resolved_outside_presenter');
     delivery.resolve();
 
     await expect(presenting).resolves.toEqual({ kind: 'presented' });
     expect(respond).not.toHaveBeenCalled();
-    expect(setWaitingInput).not.toHaveBeenCalledWith('run-1', true);
     expect(client.updateInstance).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: expect.objectContaining({
@@ -185,7 +181,7 @@ describe('QuestionCardController', () => {
       chatId: 'cid-1',
       isGroup: true,
     });
-    settle('resolved_outside_card');
+    settle('resolved_outside_presenter');
     delivery.reject(new Error('late delivery failure'));
 
     await expect(presenting).resolves.toEqual({ kind: 'presented' });
@@ -232,6 +228,7 @@ describe('QuestionCardController', () => {
     });
     expect(client.updateInstance).toHaveBeenLastCalledWith(
       expect.objectContaining({
+        outTrackId,
         cardParamMap: expect.objectContaining({
           card_status: 'submitted',
         }),
@@ -276,6 +273,14 @@ describe('QuestionCardController', () => {
     expect(respond).toHaveBeenCalledWith({
       outcome: { outcome: 'cancelled' },
     });
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        outTrackId,
+        cardParamMap: expect.objectContaining({
+          card_status: 'cancelled',
+        }),
+      }),
+    );
   });
 
   it('ignores non-business callbacks and accepts custom answers', async () => {
@@ -352,16 +357,81 @@ describe('QuestionCardController', () => {
     const { client, controller } = createHarness(1_000);
     const { context, respond } = createContext();
     await controller.present(context, { chatId: 'cid-1', isGroup: true });
+    const outTrackId = vi.mocked(client.createAndDeliver).mock.calls[0]![0]
+      .outTrackId;
 
     await vi.advanceTimersByTimeAsync(1_000);
 
     expect(client.updateInstance).toHaveBeenCalledWith(
       expect.objectContaining({
+        outTrackId,
         cardParamMap: expect.objectContaining({ card_status: 'expired' }),
       }),
     );
     expect(respond).toHaveBeenCalledWith({
       outcome: { outcome: 'cancelled' },
+    });
+  });
+
+  it('keeps two pending requests in one run independently claimable', async () => {
+    const { client, controller } = createHarness();
+    const first = createContext('request-1');
+    const second = createContext('request-2');
+    await controller.present(first.context, {
+      chatId: 'cid-1',
+      isGroup: true,
+    });
+    await controller.present(second.context, {
+      chatId: 'cid-1',
+      isGroup: true,
+    });
+    const [firstOutTrackId, secondOutTrackId] = vi
+      .mocked(client.createAndDeliver)
+      .mock.calls.map(([request]) => request.outTrackId);
+
+    await controller.claim({
+      outTrackId: firstOutTrackId,
+      actionId: 'submit',
+      ownerId: 'owner-1',
+      formData: { '0': 'Beijing', '1': ['Logs'] },
+    })?.();
+
+    expect(first.respond).toHaveBeenCalledOnce();
+    expect(second.respond).not.toHaveBeenCalled();
+    const secondAction = controller.claim({
+      outTrackId: secondOutTrackId,
+      actionId: 'submit',
+      ownerId: 'owner-1',
+      formData: { '0': 'Shanghai', '1': ['Metrics'] },
+    });
+    expect(secondAction).toBeDefined();
+    await secondAction?.();
+    expect(second.respond).toHaveBeenCalledOnce();
+  });
+
+  it('does not roll back an accepted answer when terminal projection fails', async () => {
+    const { client, controller } = createHarness();
+    const { context, respond } = createContext();
+    await controller.present(context, { chatId: 'cid-1', isGroup: true });
+    const outTrackId = vi.mocked(client.createAndDeliver).mock.calls[0]![0]
+      .outTrackId;
+    vi.mocked(client.updateInstance).mockRejectedValueOnce(
+      new Error('projection failed'),
+    );
+
+    await expect(
+      controller.claim({
+        outTrackId,
+        actionId: 'submit',
+        ownerId: 'owner-1',
+        formData: { '0': 'Beijing', '1': ['Logs'] },
+      })?.(),
+    ).resolves.toBeUndefined();
+
+    expect(respond).toHaveBeenCalledOnce();
+    expect(respond).toHaveBeenCalledWith({
+      outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      answers: { '0': 'Beijing', '1': 'Logs' },
     });
   });
 });

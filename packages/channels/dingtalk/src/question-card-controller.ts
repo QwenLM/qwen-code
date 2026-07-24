@@ -15,7 +15,7 @@ type QuestionTerminalState =
   | 'submitted'
   | 'cancelled'
   | 'expired'
-  | 'resolved_outside_card';
+  | 'resolved_outside_presenter';
 
 const OTHER_OPTION_VALUE = '__qwen_other__';
 
@@ -26,6 +26,7 @@ interface QuestionRecord {
   delivered: boolean;
   terminalState?: QuestionTerminalState;
   deferredSettlement?: UserInputSettlementReason;
+  finishTerminalProjection?: (operation: () => Promise<void>) => Promise<void>;
   timer?: ReturnType<typeof setTimeout>;
   unsubscribe?: () => void;
 }
@@ -33,8 +34,10 @@ interface QuestionRecord {
 export interface QuestionCardControllerOptions {
   client: DingtalkInteractiveCardClient;
   timeoutMs: number;
-  setWaitingInput(runId: string, waiting: boolean): void;
   sendFallback(chatId: string, text: string): Promise<void>;
+  reserveRunProjection?(
+    runId: string,
+  ): ((operation: () => Promise<void>) => Promise<void>) | undefined;
   onError?(operation: string, error: unknown): void;
 }
 
@@ -66,10 +69,11 @@ export class QuestionCardController {
         record.deferredSettlement = reason;
         return;
       }
+      if (record.state === 'pending') this.reserveTerminalProjection(record);
       void this.finalize(
         record,
-        reason === 'resolved_outside_card'
-          ? 'resolved_outside_card'
+        reason === 'resolved_outside_presenter'
+          ? 'resolved_outside_presenter'
           : 'cancelled',
       );
     });
@@ -110,7 +114,6 @@ export class QuestionCardController {
     const pending = this.pendingByRun.get(context.runId) ?? new Set<string>();
     pending.add(context.requestId);
     this.pendingByRun.set(context.runId, pending);
-    this.options.setWaitingInput(context.runId, true);
     record.timer = setTimeout(() => {
       void this.expire(record);
     }, this.options.timeoutMs);
@@ -129,6 +132,7 @@ export class QuestionCardController {
       return undefined;
     }
     if (callback.isCancel || callback.actionId === 'cancel') {
+      this.reserveTerminalProjection(record);
       record.state = 'responding';
       return () => this.respond(record, 'cancelled');
     }
@@ -140,6 +144,7 @@ export class QuestionCardController {
     }
     const answers = this.parseAnswers(record, callback.formData);
     if (!answers) return undefined;
+    this.reserveTerminalProjection(record);
     record.state = 'responding';
     return () => this.respond(record, 'submitted', answers);
   }
@@ -148,7 +153,10 @@ export class QuestionCardController {
     const requestIds = [...(this.pendingByRun.get(runId) ?? [])];
     for (const requestId of requestIds) {
       const record = this.byRequest.get(requestId);
-      if (record) void this.finalize(record, 'cancelled');
+      if (record) {
+        this.reserveTerminalProjection(record);
+        void this.finalize(record, 'cancelled');
+      }
     }
   }
 
@@ -178,6 +186,7 @@ export class QuestionCardController {
 
   private async expire(record: QuestionRecord): Promise<void> {
     if (record.state !== 'pending') return;
+    this.reserveTerminalProjection(record);
     await this.finalize(record, 'expired');
     try {
       await record.context.respond({ outcome: { outcome: 'cancelled' } });
@@ -202,12 +211,22 @@ export class QuestionCardController {
     const pending = this.pendingByRun.get(record.context.runId);
     pending?.delete(record.context.requestId);
     if (pending?.size === 0) this.pendingByRun.delete(record.context.runId);
-    this.options.setWaitingInput(
-      record.context.runId,
-      (pending?.size ?? 0) > 0,
-    );
     this.addTombstone(record.outTrackId, state);
-    if (record.delivered) await this.projectTerminal(record);
+    if (record.delivered) {
+      const finishTerminalProjection = record.finishTerminalProjection;
+      record.finishTerminalProjection = undefined;
+      if (finishTerminalProjection) {
+        await finishTerminalProjection(() => this.projectTerminal(record));
+      } else {
+        await this.projectTerminal(record);
+      }
+    }
+  }
+
+  private reserveTerminalProjection(record: QuestionRecord): void {
+    record.finishTerminalProjection ??= this.options.reserveRunProjection?.(
+      record.context.runId,
+    );
   }
 
   private async projectTerminal(record: QuestionRecord): Promise<void> {
@@ -226,7 +245,7 @@ export class QuestionCardController {
         question_desc: 'This question expired. Please retry.',
         form_btn_text: 'Expired',
       },
-      resolved_outside_card: {
+      resolved_outside_presenter: {
         card_status: 'cancelled',
         question_desc: 'Resolved outside this card.',
         form_btn_text: 'Resolved',
