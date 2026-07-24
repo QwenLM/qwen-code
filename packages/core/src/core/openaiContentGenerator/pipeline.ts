@@ -946,10 +946,16 @@ export class ContentGenerationPipeline {
           delete typed['chat_template_kwargs'];
         }
       }
-      // DashScope rejects forced tool selection while thinking is enabled.
-      if (isDashScope && typed['tool_choice'] === 'required') {
-        delete typed['tool_choice'];
-      }
+    }
+
+    const typed = providerRequest as unknown as Record<string, unknown>;
+    // DashScope rejects forced tool selection while thinking is enabled.
+    if (
+      isDashScope &&
+      typed['tool_choice'] === 'required' &&
+      (thinkingMandatory || typed['enable_thinking'] === true)
+    ) {
+      delete typed['tool_choice'];
     }
 
     return providerRequest;
