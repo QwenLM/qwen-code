@@ -118,6 +118,8 @@ interface ModelDialogProps {
   isVisionModelMode?: boolean;
   /** Override which settings scope to persist the selection to. */
   persistScope?: 'workspace' | 'user';
+  /** Persist main model selections as the default for future sessions. */
+  persistDefault?: boolean;
   availableTerminalHeight?: number;
 }
 
@@ -209,6 +211,7 @@ interface HandleModelSwitchSuccessParams {
   effectiveModelId: string;
   effectiveBaseUrl: string | undefined;
   isRuntime: boolean;
+  persistDefault: boolean;
   persistScope?: 'workspace' | 'user';
 }
 
@@ -220,26 +223,31 @@ function handleModelSwitchSuccess({
   effectiveModelId,
   effectiveBaseUrl,
   isRuntime,
+  persistDefault,
   persistScope,
 }: HandleModelSwitchSuccessParams): void {
-  persistModelSelection(
-    settings,
-    effectiveModelId,
-    effectiveBaseUrl,
-    persistScope,
-  );
-  if (effectiveAuthType) {
-    persistAuthTypeSelection(settings, effectiveAuthType, persistScope);
+  if (persistDefault) {
+    persistModelSelection(
+      settings,
+      effectiveModelId,
+      effectiveBaseUrl,
+      persistScope,
+    );
+    if (effectiveAuthType) {
+      persistAuthTypeSelection(settings, effectiveAuthType, persistScope);
+    }
   }
 
   const baseUrl = after?.baseUrl ?? t('(default)');
   const maskedKey = maskApiKey(after?.apiKey);
   const scopeSuffix =
-    persistScope === 'workspace'
-      ? t(' (this project)')
-      : persistScope === 'user'
-        ? t(' (global)')
-        : '';
+    persistDefault && persistScope === 'workspace'
+      ? t(' (this project default)')
+      : persistDefault && persistScope === 'user'
+        ? t(' (global default)')
+        : persistDefault
+          ? t(' (default)')
+          : t(' (current session)');
   uiState?.historyManager.addItem(
     {
       type: 'info',
@@ -286,6 +294,7 @@ export function ModelDialog({
   isVoiceModelMode,
   isVisionModelMode,
   persistScope,
+  persistDefault = false,
   availableTerminalHeight,
 }: ModelDialogProps): React.JSX.Element {
   const config = useContext(ConfigContext);
@@ -834,6 +843,7 @@ export function ModelDialog({
           : (after?.baseUrl ?? selectedEntry?.model.baseUrl),
         isRuntime,
         persistScope,
+        persistDefault,
       });
       onClose();
     },
@@ -849,6 +859,7 @@ export function ModelDialog({
       isVisionModelMode,
       availableModelEntries,
       persistScope,
+      persistDefault,
     ],
   );
 
@@ -869,7 +880,9 @@ export function ModelDialog({
             ? t('Select Vision Model')
             : isFastModelMode
               ? t('Select Fast Model')
-              : t('Select Model')) +
+              : persistDefault
+                ? t('Set Default Model')
+                : t('Select Model')) +
           (persistScope === 'workspace'
             ? t(' (this project)')
             : persistScope === 'user'

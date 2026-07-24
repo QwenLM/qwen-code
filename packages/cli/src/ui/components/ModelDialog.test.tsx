@@ -460,13 +460,40 @@ describe('<ModelDialog />', () => {
     expect(switchModel).toHaveBeenCalledWith(AuthType.USE_OPENAI, 'gpt-4', {
       baseUrl: undefined,
     });
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('persists main model selections when opened as default picker', async () => {
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    const getAuthType = vi.fn(() => AuthType.USE_OPENAI);
+
+    const { props, mockSettings } = renderComponent({ persistDefault: true }, {
+      getModel: vi.fn(() => 'gpt-4'),
+      getAuthType,
+      switchModel,
+      getAllConfiguredModels: vi.fn(() => [
+        {
+          id: 'gpt-4',
+          label: 'GPT-4',
+          description: 'GPT-4 model',
+          authType: AuthType.USE_OPENAI,
+        },
+      ]),
+      getContentGeneratorConfig: vi.fn(() => ({
+        authType: AuthType.USE_OPENAI,
+        model: 'gpt-4',
+      })),
+    } as unknown as Partial<Config>);
+
+    const childOnSelect = mockedSelect.mock.calls[0][0].onSelect;
+    await childOnSelect(`${AuthType.USE_OPENAI}::gpt-4`);
+
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'model.name',
       'gpt-4',
     );
-    // The selected provider has no baseUrl, so the disambiguator must be
-    // cleared with an empty-string tombstone (overrides any lower-scope value).
     expect(mockSettings.setValue).toHaveBeenCalledWith(
       SettingScope.User,
       'model.baseUrl',
@@ -480,7 +507,7 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('persists model.baseUrl alongside model.name when the selected provider has a baseUrl', async () => {
+  it('does not persist model.baseUrl for ordinary same-id provider selections', async () => {
     const switchModel = vi.fn().mockResolvedValue(undefined);
     const { props, mockSettings } = renderComponent({}, {
       getModel: vi.fn(() => 'qwen3.7-max'),
@@ -524,27 +551,18 @@ describe('<ModelDialog />', () => {
         baseUrl: 'https://idealab.example.com/v1',
       },
     );
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      SettingScope.User,
-      'model.name',
-      'qwen3.7-max',
-    );
-    expect(mockSettings.setValue).toHaveBeenCalledWith(
-      SettingScope.User,
-      'model.baseUrl',
-      'https://idealab.example.com/v1',
-    );
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
-  it('falls back to the picker entry baseUrl when switchModel does not propagate it', async () => {
+  it('falls back to the picker entry baseUrl when persisting a default and switchModel does not propagate it', async () => {
     // Regression guard for the `after?.baseUrl ?? selectedEntry?.model.baseUrl`
     // fallback: if switchModel succeeds but getContentGeneratorConfig returns a
     // config WITHOUT baseUrl, the disambiguator must still be persisted from the
     // selected picker entry's baseUrl — otherwise an empty-string tombstone would
     // be written and the wrong same-id provider would resolve on next launch.
     const switchModel = vi.fn().mockResolvedValue(undefined);
-    const { props, mockSettings } = renderComponent({}, {
+    const { props, mockSettings } = renderComponent({ persistDefault: true }, {
       getModel: vi.fn(() => 'qwen3.7-max'),
       getAuthType: vi.fn(() => AuthType.USE_OPENAI),
       switchModel,

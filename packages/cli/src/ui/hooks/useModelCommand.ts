@@ -14,11 +14,13 @@ interface UseModelCommandReturn {
   isVoiceModelMode: boolean;
   isVisionModelMode: boolean;
   modelDialogPersistScope: ModelDialogPersistScope | undefined;
+  modelDialogPersistDefault: boolean;
   openModelDialog: (options?: {
     fastModelMode?: boolean;
     voiceModelMode?: boolean;
     visionModelMode?: boolean;
     persistScope?: ModelDialogPersistScope;
+    persistDefault?: boolean;
   }) => void;
   closeModelDialog: () => void;
 }
@@ -31,6 +33,8 @@ export const useModelCommand = (): UseModelCommandReturn => {
   const [modelDialogPersistScope, setModelDialogPersistScope] = useState<
     ModelDialogPersistScope | undefined
   >(undefined);
+  const [modelDialogPersistDefault, setModelDialogPersistDefault] =
+    useState(false);
 
   const openModelDialog = useCallback(
     (options?: {
@@ -38,6 +42,7 @@ export const useModelCommand = (): UseModelCommandReturn => {
       voiceModelMode?: boolean;
       visionModelMode?: boolean;
       persistScope?: ModelDialogPersistScope;
+      persistDefault?: boolean;
     }) => {
       const voiceModelMode = options?.voiceModelMode ?? false;
       const visionModelMode = options?.visionModelMode ?? false;
@@ -52,6 +57,7 @@ export const useModelCommand = (): UseModelCommandReturn => {
       setIsVoiceModelMode(visionModelMode ? false : voiceModelMode);
       setIsVisionModelMode(visionModelMode);
       setModelDialogPersistScope(options?.persistScope);
+      setModelDialogPersistDefault(options?.persistDefault ?? false);
       setIsModelDialogOpen(true);
     },
     [],
@@ -63,6 +69,7 @@ export const useModelCommand = (): UseModelCommandReturn => {
     setIsVoiceModelMode(false);
     setIsVisionModelMode(false);
     setModelDialogPersistScope(undefined);
+    setModelDialogPersistDefault(false);
   }, []);
 
   return {
@@ -71,6 +78,7 @@ export const useModelCommand = (): UseModelCommandReturn => {
     isVoiceModelMode,
     isVisionModelMode,
     modelDialogPersistScope,
+    modelDialogPersistDefault,
     openModelDialog,
     closeModelDialog,
   };
