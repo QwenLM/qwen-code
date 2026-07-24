@@ -2497,6 +2497,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getSessionService: vi.fn(() => new SessionService('/tmp')),
       hasSessionWriteOwnership: vi.fn().mockReturnValue(false),
       getSessionRuntimeBaseDir: vi.fn().mockReturnValue('/runtime-a'),
+      getPlansDir: vi.fn().mockReturnValue('/home/test/.qwen/plans'),
       setFileSystemService: vi.fn(),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -2515,6 +2516,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       '/tmp/user-memory',
       '/home/test/.qwen/skills',
       '/tmp/qwen-extensions',
+      '/home/test/.qwen/plans',
       ...(process.platform === 'win32' ? [] : ['/tmp']),
     ];
   }

@@ -104,6 +104,7 @@ describe('ReadFileTool', () => {
         getProjectDir: () => path.join(tempRootDir, '.project'),
         getUserSkillsDirs: () => [path.join(os.homedir(), '.qwen', 'skills')],
       },
+      getPlansDir: () => path.join(os.homedir(), '.qwen', 'plans'),
       getTruncateToolOutputThreshold: () => 2500,
       getTruncateToolOutputLines: () => 500,
       getContentGeneratorConfig: () => ({
@@ -322,6 +323,24 @@ describe('ReadFileTool', () => {
       const invocation = tool.build(params);
       const permission = await invocation.getDefaultPermission();
       expect(permission).toBe('allow');
+    });
+
+    it('should return allow for saved plan files under the plans directory', async () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(os.homedir(), '.qwen', 'plans', 'session-1.md'),
+      };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
+    it('should still return ask for ~/.qwen files outside the plans directory', async () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(os.homedir(), '.qwen', 'settings.json'),
+      };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
     });
 
     it('should return ask for paths directly under the OS temp directory', async () => {
