@@ -4008,10 +4008,15 @@ export class Config {
     // For other auth types we always refresh to recreate the ContentGenerator.
     //
     // Rationale:
-    // - Non-qwen providers may need to re-validate credentials / baseUrl / envKey.
-    // - ModelsConfig.applyResolvedModelDefaults can clear or change credentials sources.
-    // - Refresh keeps runtime behavior consistent and centralized.
-    if (authType === AuthType.QWEN_OAUTH && !requiresRefresh) {
+    // - Initial auth: contentGeneratorConfig doesn't exist yet, need to create it
+    // - Non-qwen providers: may need to re-validate credentials / baseUrl / envKey
+    // - ModelsConfig.applyResolvedModelDefaults can clear or change credentials sources
+    // - Refresh keeps behavior consistent and centralized
+    if (
+      authType === AuthType.QWEN_OAUTH &&
+      !requiresRefresh &&
+      this.contentGeneratorConfig
+    ) {
       const { config, sources } = resolveContentGeneratorConfigWithSources(
         this,
         authType,

@@ -26,6 +26,7 @@ import { theme } from '../semantic-colors.js';
 import { DescriptiveRadioButtonSelect } from './shared/DescriptiveRadioButtonSelect.js';
 import { ConfigContext } from '../contexts/ConfigContext.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
+import { UIActionsContext } from '../contexts/UIActionsContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import { t } from '../../i18n/index.js';
@@ -292,6 +293,7 @@ export function ModelDialog({
 }: ModelDialogProps): React.JSX.Element {
   const config = useContext(ConfigContext);
   const uiState = useContext(UIStateContext);
+  const uiActions = useContext(UIActionsContext);
   const settings = useSettings();
 
   // Local error state for displaying errors within the dialog
@@ -927,6 +929,10 @@ export function ModelDialog({
         isRuntime,
         persistScope,
       });
+      // Close AuthDialog if model switch was successful and user is now authenticated
+      if (effectiveAuthType && uiActions?.closeAuthDialog) {
+        uiActions.closeAuthDialog();
+      }
       onClose();
     },
     [
@@ -942,6 +948,7 @@ export function ModelDialog({
       isImageModelMode,
       availableModelEntries,
       persistScope,
+      uiActions,
     ],
   );
 
