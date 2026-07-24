@@ -4340,7 +4340,11 @@ export abstract class ChannelBase {
     if (!result.allowed) {
       if (result.pairingCode !== undefined) {
         this.logPreflightRejected('sender_pairing_required');
-        return this.onPairingRequired(envelope.chatId, result.pairingCode)
+        return this.onPairingRequired(
+          envelope.chatId,
+          result.pairingCode,
+          envelope.threadId,
+        )
           .then(() => false)
           .catch((err: unknown) => {
             process.stderr.write(
@@ -5181,17 +5185,18 @@ export abstract class ChannelBase {
   protected async onPairingRequired(
     chatId: string,
     code: string | null,
+    threadId?: string,
   ): Promise<void> {
     if (code) {
       await this.sendThreadMessage(
         chatId,
-        undefined,
+        threadId,
         `Your pairing code is: ${code}\n\nAsk the bot operator to approve you with:\n  qwen channel pairing approve ${this.name} ${code}`,
       );
     } else {
       await this.sendThreadMessage(
         chatId,
-        undefined,
+        threadId,
         'Too many pending pairing requests. Please try again later.',
       );
     }

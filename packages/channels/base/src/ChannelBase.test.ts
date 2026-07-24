@@ -7339,6 +7339,50 @@ describe('ChannelBase', () => {
       expect(ch.proactive).toEqual([]);
     });
 
+    it('sendResponseMessage resolves threadId from router target', async () => {
+      const target: SessionTarget = {
+        channelName: 'test-chan',
+        senderId: 'user1',
+        chatId: 'owner/repo',
+        threadId: 'issue:42',
+        isGroup: true,
+      };
+      const router = {
+        getTarget: vi.fn().mockReturnValue(target),
+        handleSessionDied: vi.fn(),
+        setBridge: vi.fn(),
+      };
+      const ch = createChannel({}, {
+        router,
+        registerBridgeEvents: true,
+      } as unknown as ChannelBaseOptions);
+
+      const threadMessages: Array<{
+        chatId: string;
+        threadId?: string;
+        text: string;
+      }> = [];
+      vi.spyOn(ch as never, 'sendThreadMessage').mockImplementation(
+        async (chatId: string, threadId: string | undefined, text: string) => {
+          threadMessages.push({ chatId, threadId, text });
+        },
+      );
+
+      await (
+        ch as unknown as {
+          sendResponseMessage: (
+            c: string,
+            t: string,
+            s: string,
+          ) => Promise<void>;
+        }
+      ).sendResponseMessage('owner/repo', 'reply text', 's-1');
+
+      expect(threadMessages).toEqual([
+        { chatId: 'owner/repo', threadId: 'issue:42', text: 'reply text' },
+      ]);
+    });
+
     it('leaves supplied router bridge events to the gateway by default', () => {
       const router = {
         getTarget: vi.fn(),
