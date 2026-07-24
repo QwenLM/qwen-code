@@ -3631,7 +3631,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // session, so the sessionId context is injected here.
         onCompactionError: (err) => {
           writeStderrLine(
-            `qwen serve: compaction degraded for session=${sessionId}; replay snapshot may lag behind live events: ${
+            `qwen serve: compaction degraded for session=${JSON.stringify(sessionId)}; replay snapshot may lag behind live events: ${
               err instanceof Error ? err.message : String(err)
             }`,
           );
