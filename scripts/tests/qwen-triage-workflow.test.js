@@ -9,6 +9,14 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/qwen-triage.yml', 'utf8');
+const prWorkflow = readFileSync(
+  '.qwen/skills/triage/references/pr-workflow.md',
+  'utf8',
+);
+const issueWorkflow = readFileSync(
+  '.qwen/skills/triage/references/issue-workflow.md',
+  'utf8',
+);
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -36,6 +44,37 @@ function job(name) {
 }
 
 describe('qwen-triage tmux workflow', () => {
+  it('includes the active model in issue triage signatures', () => {
+    expect(issueWorkflow).toContain(
+      'TRIAGE_MODEL="$(printenv OPENAI_MODEL || true)"',
+    );
+    expect(issueWorkflow).toContain('_— <TRIAGE_MODEL> via Qwen Code /triage_');
+    expect(issueWorkflow).toContain('_— Qwen Code /triage_');
+    expect(issueWorkflow).toContain('When it is empty');
+    expect(issueWorkflow).not.toContain('TRIAGE_MODEL="unknown"');
+    expect(issueWorkflow).not.toContain('--- Qwen Code');
+  });
+
+  it('uses the existing on-hold label for behavior-neutral maintenance PRs', () => {
+    expect(prWorkflow).toContain(
+      'Behavior-neutral maintenance stop (non-maintainer PRs only)',
+    );
+    expect(prWorkflow).toContain('--add-label "status/on-hold"');
+    expect(prWorkflow).toContain(
+      'A maintainer can run @qwen-code /review if needed.',
+    );
+    expect(prWorkflow).toContain('Line count alone is never enough.');
+    expect(prWorkflow).toContain(
+      'continue through 1c–1e instead of requesting changes here',
+    );
+    expect(prWorkflow).toContain(
+      'when in doubt, continue with the full review.',
+    );
+    expect(prWorkflow).toContain(
+      'Do not remove an existing `status/on-hold` label automatically',
+    );
+  });
+
   it('does not require fork PR authors to have write permission for automatic triage', () => {
     const precheckJob = job('precheck-pr');
     const authorizeJob = job('authorize');

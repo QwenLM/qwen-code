@@ -162,7 +162,7 @@ If the author cannot provide a reproduction on re-run, escalate to the maintaine
 
 - **No reproduction = no fix.** A `fix:` PR without reproduction is a hypothesis — belongs in issues, not PRs.
 
-**"direction is correct" ≠ "problem exists."** If the runtime already handles the case correctly, there is no bug — only code hygiene. Code hygiene does not warrant a PR.
+**"direction is correct" ≠ "problem exists."** If the runtime already handles the case correctly, there is no bug — only code hygiene. For non-maintainer PRs that are candidates for the behavior-neutral maintenance path, continue through 1c–1e instead of requesting changes here. Other code-hygiene-only PRs do not warrant a PR.
 
 **1c. Product direction:**
 
@@ -193,6 +193,20 @@ curl -s https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.
 If you spot a materially simpler path, or changes that go beyond the minimal set needed for the stated goal, raise it — not as a blocker, but as a genuine question the contributor should think about before the code review.
 
 Implementation-level concerns (over-abstraction, code duplication, "10 lines vs 10 files") belong in Stage 2a code review — you need to see the code for those.
+
+**1e. Behavior-neutral maintenance stop (non-maintainer PRs only):**
+
+After 1a–1d, stop before Stage 2 only when you are **100% confident** the entire diff is behavior-neutral and addresses no standalone user or maintenance problem. Examples are internal-only renames, formatting-only changes, and source/test comment or internal JSDoc cleanup. Line count alone is never enough.
+
+Do not use this path for user-facing documentation or CLI help, broken links, system prompts or model-visible descriptions, workflow/config/dependency/schema/generated changes, public API changes, or anything with possible behavior, security, correctness, data-loss, or compatibility impact. An unclear rename is not behavior-neutral; when in doubt, continue with the full review.
+
+If the PR qualifies:
+
+1. Add `status/on-hold` with `gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "status/on-hold"`.
+2. Use the normal Stage 1 comment, but replace the closing line with: `This appears behavior-neutral, so automatic deep review is paused. A maintainer can run @qwen-code /review if needed.` Suggest combining related cleanup or including it with a substantive change.
+3. Do not request changes, approve, close, or block merging. Exit the worktree and stop.
+
+Do not remove an existing `status/on-hold` label automatically; it may have been applied by a maintainer for another reason. A maintainer can remove it or request `@qwen-code /review` directly.
 
 Post a single Stage 1 comment. Be direct — say what you actually think, not what's polite:
 
@@ -243,8 +257,9 @@ Save this comment's ID. Terminal exits — stop here if any applies:
 
 - Core module hard block (Stage 0) → rejected, do not proceed.
 - Template failure (Stage 1a) → stopped.
-- Problem does not exist (Stage 1b) → request changes, do not proceed to Stage 2.
+- Problem does not exist (Stage 1b), unless it is a Stage 1e candidate → request changes, do not proceed to Stage 2.
 - Direction escalated (Stage 1c) → stop here.
+- Behavior-neutral maintenance (Stage 1e) → add `status/on-hold`, post the Stage 1 summary, and stop without a review verdict.
 
 ### Stage 2: Review + Test
 
