@@ -16,7 +16,17 @@ interface GithubConfig extends ChannelConfig {
 
 interface GithubCursor {
   lastProcessedAt: string;
+  /**
+   * Thread keys (`chatId|threadId`) whose issue/PR body has already been fed as
+   * a first-contact trigger. Dedupes body dispatch when a thread is re-fetched
+   * with `last_read_at` still null — which happens if `markNotificationsAsRead`
+   * failed to mark it read (its `updated_at` was bumped past the cutoff between
+   * fetch and mark). Bounded to the most recent entries so the cursor stays small.
+   */
+  dispatchedBodies?: string[];
 }
+
+const MAX_DISPATCHED_BODIES = 500;
 
 export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private octokit!: Octokit;
@@ -40,6 +50,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   protected override validateCursor(parsed: unknown): GithubCursor | null {
     const base = super.validateCursor(parsed);
     if (!base || typeof base.lastProcessedAt !== 'string') return null;
+    if (base.dispatchedBodies && !Array.isArray(base.dispatchedBodies)) {
+      base.dispatchedBodies = [];
+    }
     return base;
   }
 
@@ -146,7 +159,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // Mark as read BEFORE processing (best-effort delivery). Bot's own
     // replies won't flip notifications back to unread, so this is safe.
     // If we crash mid-processing, the user re-mentions to retry.
-    const prevCursor = this.cursor.lastProcessedAt;
     if (maxUpdatedAt > this.cursor.lastProcessedAt) {
       await this.markNotificationsAsRead(maxUpdatedAt);
       this.cursor.lastProcessedAt = maxUpdatedAt;
@@ -232,7 +244,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             threadId,
             issueNumber,
             notification,
-            prevCursor,
           );
         }
       } catch (err) {
@@ -249,8 +260,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     threadId: string,
     issueNumber: number,
     notification: { subject: { title?: string } },
-    prevCursor: string,
   ): Promise<void> {
+    // First contact is gated by `last_read_at` in the caller, but a thread can
+    // be re-fetched with `last_read_at` still null if marking it read failed
+    // (its updated_at was bumped past the cutoff). Dedup on an explicit record
+    // of which bodies we have already fed, so that re-fetch never feeds the body
+    // twice. Unlike a `created_at <= cursor` guard, this also feeds bodies whose
+    // notification arrived late — after the cursor had advanced past created_at.
+    const bodyKey = `${chatId}|${threadId}`;
+    if (this.cursor.dispatchedBodies?.includes(bodyKey)) return;
     try {
       const { data: issue } = await this.octokit.rest.issues.get({
         owner: chatId.split('/')[0],
@@ -259,8 +277,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       });
 
       const body = issue.body || '';
-      const createdAt = issue.created_at;
-      if (createdAt <= prevCursor) return;
 
       const isMentioned = this.botUsername
         ? testBotMention(body, this.botUsername)
@@ -288,6 +304,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
       try {
         await this.handleInbound(envelope);
+        this.recordDispatchedBody(bodyKey);
       } catch (err) {
         process.stderr.write(
           `[Channel:${this.name}] handleInbound failed for issue body ${issueNumber}: ${err}\n`,
@@ -299,6 +316,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         `[Channel:${this.name}] failed to fetch issue for first contact: ${err}\n`,
       );
     }
+  }
+
+  private recordDispatchedBody(key: string): void {
+    const list = this.cursor.dispatchedBodies ?? [];
+    list.push(key);
+    this.cursor.dispatchedBodies = list.slice(-MAX_DISPATCHED_BODIES);
   }
 
   private extractFromSubjectUrl(
