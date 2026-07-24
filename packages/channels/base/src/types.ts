@@ -361,6 +361,9 @@ export interface ChannelPlugin {
   /** Serializable metadata for safe configuration management. */
   management?: ChannelManagementDescriptor;
 
+  /** Default session scope for this channel type (applied when config omits sessionScope). */
+  defaultSessionScope?: SessionScope;
+
   /** Create a channel adapter instance. */
   createChannel(
     name: string,

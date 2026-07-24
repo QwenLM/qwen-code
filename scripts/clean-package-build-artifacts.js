@@ -22,6 +22,7 @@ const CLI_BUILD_PACKAGE_PATHS = [
   'packages/channels/wecom',
   'packages/channels/feishu',
   'packages/channels/qqbot',
+  'packages/channels/github',
   'packages/channels/plugin-example',
   'packages/audio-capture',
   'packages/acp-bridge',

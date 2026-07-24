@@ -3989,6 +3989,7 @@ export abstract class ChannelBase {
   private isSharedSessionTarget(target: { isGroup?: boolean }): boolean {
     return (
       this.config.sessionScope === 'single' ||
+      this.config.sessionScope === 'chat_thread' ||
       (target.isGroup === true && this.config.sessionScope === 'thread')
     );
   }
@@ -4668,7 +4669,7 @@ export abstract class ChannelBase {
     }
 
     if (envelope.metadata) {
-      promptText = sanitizePromptText(envelope.metadata) + '\n\n' + promptText;
+      promptText = promptText + '\n\n' + sanitizePromptText(envelope.metadata);
     }
 
     // Resolve dispatch mode: per-group override → channel config → default

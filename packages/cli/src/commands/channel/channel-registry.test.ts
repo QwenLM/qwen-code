@@ -11,6 +11,7 @@ describe('channel registry', () => {
       'wecom',
       'feishu',
       'qq',
+      'github',
     ]);
     expect(
       catalog.filter((entry) => entry.manageable).map((entry) => entry.type),

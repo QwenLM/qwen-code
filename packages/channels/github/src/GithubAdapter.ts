@@ -28,7 +28,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ) {
-    super(name, { ...config, sessionScope: 'chat_thread' }, bridge, options);
+    super(name, config, bridge, options);
   }
 
   protected createInitialCursor(): GithubCursor {
@@ -49,10 +49,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const { data } = await this.octokit.rest.users.getAuthenticated();
       this.botUsername = data.login;
     } catch (err) {
-      process.stderr.write(
-        `[Channel:${this.name}] failed to resolve bot identity: ${err}\n`,
+      throw new Error(
+        `[Channel:${this.name}] failed to resolve bot identity: ${err}`,
       );
-      this.botUsername = null;
     }
     this.startPollLoop();
   }
@@ -103,23 +102,18 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
     notifications.sort((a, b) => a.updated_at.localeCompare(b.updated_at));
 
-    let maxUpdatedAt = this.cursor.lastProcessedAt;
+    let lastSuccessfulUpdatedAt = this.cursor.lastProcessedAt;
 
     for (const notification of notifications) {
-      const updatedAt = notification.updated_at;
-      if (updatedAt > maxUpdatedAt) maxUpdatedAt = updatedAt;
-
       const extracted = this.extractFromSubjectUrl(notification.subject.url);
       if (!extracted) {
-        await this.markThreadAsRead(notification.id);
+        lastSuccessfulUpdatedAt = notification.updated_at;
         continue;
       }
 
       const { chatId, threadId, issueNumber } = extracted;
       const lastReadAt = notification.last_read_at;
       const windowSince = lastReadAt || since;
-
-      let latestCommentAt: string | undefined;
 
       try {
         const comments = await this.octokit.paginate(
@@ -182,9 +176,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             );
             await this.postErrorComment(chatId, issueNumber);
           }
-          if (comment.created_at) {
-            latestCommentAt = comment.created_at;
-          }
         }
 
         if (newComments.length === 0 && !lastReadAt) {
@@ -195,13 +186,19 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             notification,
           );
         }
-      } finally {
-        await this.markThreadAsRead(notification.id, latestCommentAt);
+
+        lastSuccessfulUpdatedAt = notification.updated_at;
+      } catch (err) {
+        process.stderr.write(
+          `[Channel:${this.name}] API error processing ${threadId}, stopping batch: ${err}\n`,
+        );
+        break;
       }
     }
 
-    if (maxUpdatedAt > this.cursor.lastProcessedAt) {
-      this.cursor.lastProcessedAt = maxUpdatedAt;
+    if (lastSuccessfulUpdatedAt > this.cursor.lastProcessedAt) {
+      await this.markNotificationsAsRead(lastSuccessfulUpdatedAt);
+      this.cursor.lastProcessedAt = lastSuccessfulUpdatedAt;
     }
   }
 
@@ -285,18 +282,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     return `Type: ${type} | Title: ${title} | URL: ${url}`;
   }
 
-  private async markThreadAsRead(
-    threadId: string,
-    lastReadAt?: string,
-  ): Promise<void> {
+  private async markNotificationsAsRead(lastReadAt: string): Promise<void> {
     try {
-      await this.octokit.rest.activity.markThreadAsRead({
-        thread_id: Number(threadId),
-        ...(lastReadAt ? { last_read_at: lastReadAt } : {}),
+      await this.octokit.rest.activity.markNotificationsAsRead({
+        last_read_at: lastReadAt,
+        read: true,
       });
     } catch (err) {
       process.stderr.write(
-        `[Channel:${this.name}] markThreadAsRead failed for thread ${threadId}: ${err}\n`,
+        `[Channel:${this.name}] markNotificationsAsRead failed: ${err}\n`,
       );
     }
   }
