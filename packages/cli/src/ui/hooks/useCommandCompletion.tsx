@@ -5,7 +5,10 @@
  */
 
 import { useCallback, useMemo, useEffect } from 'react';
-import type { Suggestion } from '../components/SuggestionsDisplay.js';
+import type {
+  Suggestion,
+  SuggestionCategory,
+} from '../components/SuggestionsDisplay.js';
 import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
 import { logicalPosToOffset } from '../components/shared/text-buffer.js';
@@ -67,6 +70,12 @@ export interface UseCommandCompletionReturn {
     acceptText?: string;
     showCursorBeforeText?: boolean;
   } | null;
+  /** Active category tab for the `@` completion UI ('all' shows everything). */
+  activeCategory: SuggestionCategory | 'all';
+  /** Tabs available for the current suggestion set (always includes 'all'). */
+  availableCategories: Array<SuggestionCategory | 'all'>;
+  /** Cycle the active category tab; resets active/scroll index. */
+  switchCategory: (direction: 1 | -1) => void;
 }
 
 export function useCommandCompletion(
@@ -202,6 +211,9 @@ export function useCommandCompletion(
     dismissCompletion,
     navigateUp,
     navigateDown,
+    activeCategory,
+    availableCategories,
+    switchCategory,
   } = useCompletion({ query });
 
   useAtCompletion({
@@ -394,5 +406,8 @@ export function useCommandCompletion(
     handleAutocomplete,
     completionMode,
     midInputGhostText,
+    activeCategory,
+    availableCategories,
+    switchCategory,
   };
 }
