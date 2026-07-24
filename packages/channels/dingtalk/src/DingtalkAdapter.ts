@@ -3,7 +3,12 @@ import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Buffer } from 'node:buffer';
-import { DWClient, TOPIC_ROBOT, EventAck } from 'dingtalk-stream-sdk-nodejs';
+import {
+  DWClient,
+  TOPIC_CARD,
+  TOPIC_ROBOT,
+  EventAck,
+} from 'dingtalk-stream-sdk-nodejs';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import {
   ChannelBase,
@@ -24,6 +29,13 @@ import {
   DingtalkConnectionManager,
   type DingtalkManagedSocket,
 } from './DingtalkConnectionManager.js';
+import { DingtalkInteractiveCardClient } from './interactive-card-client.js';
+import {
+  parseDingtalkCardCallback,
+  parseDingtalkInteractiveCardConfig,
+  type DingtalkCardCallback,
+  type DingtalkInteractiveCardConfig,
+} from './interactive-card-types.js';
 import type {
   ChannelConfig,
   ChannelBaseOptions,
@@ -187,6 +199,7 @@ type DingTalkClientInternals = DWClient & {
 
 type DingtalkChannelConfig = ChannelConfig & {
   useConnectionManager?: unknown;
+  interactiveCards?: unknown;
 };
 
 export class DingtalkChannel extends ChannelBase {
@@ -219,6 +232,8 @@ export class DingtalkChannel extends ChannelBase {
    * on (re)connect, so a long-lived socket serves a stale one after ~2h.
    */
   private proactiveToken?: { token: string; expiresAt: number };
+  private readonly interactiveCardConfig: DingtalkInteractiveCardConfig;
+  protected readonly interactiveCardClient?: DingtalkInteractiveCardClient;
 
   constructor(
     name: string,
@@ -240,6 +255,9 @@ export class DingtalkChannel extends ChannelBase {
     } else if (!this.config.instructions.includes('[IMAGE:')) {
       this.config.instructions += IMAGE_INSTRUCTIONS;
     }
+    this.interactiveCardConfig = parseDingtalkInteractiveCardConfig(
+      (config as DingtalkChannelConfig).interactiveCards,
+    );
 
     if (!config.clientId || !config.clientSecret) {
       throw new Error(
@@ -260,6 +278,12 @@ export class DingtalkChannel extends ChannelBase {
     const useConnectionManager = rawUseConnectionManager ?? true;
 
     this.client = this.createClient(useConnectionManager);
+    if (this.interactiveCardConfig.enabled) {
+      this.interactiveCardClient = new DingtalkInteractiveCardClient({
+        robotCode: config.clientId,
+        getAccessToken: () => this.getProactiveToken(),
+      });
+    }
     if (useConnectionManager) {
       this.connectionManager = new DingtalkConnectionManager({
         initialClient: this.client,
@@ -308,6 +332,42 @@ export class DingtalkChannel extends ChannelBase {
       });
       this.onMessage(msg);
     });
+    if (this.interactiveCardConfig.enabled) {
+      client.registerCallbackListener(TOPIC_CARD, (msg: DWClientDownStream) => {
+        this.onCardCallback(client, msg);
+      });
+    }
+  }
+
+  private onCardCallback(client: DWClient, msg: DWClientDownStream): void {
+    const payload = parseDingtalkCardCallback(msg.data);
+    let action: (() => Promise<void>) | undefined;
+    if (payload) {
+      try {
+        action = this.routeCardCallback(payload);
+      } catch (err) {
+        process.stderr.write(
+          `[DingTalk:${this.name}] card callback routing failed: ${sanitizeLogText(String(err), 200)}\n`,
+        );
+      }
+    }
+    client.send(msg.headers.messageId, {
+      status: EventAck.SUCCESS,
+      message: 'ok',
+    });
+    if (action) {
+      void action().catch((err) => {
+        process.stderr.write(
+          `[DingTalk:${this.name}] card callback action failed: ${sanitizeLogText(String(err), 200)}\n`,
+        );
+      });
+    }
+  }
+
+  protected routeCardCallback(
+    _callback: DingtalkCardCallback,
+  ): (() => Promise<void>) | undefined {
+    return undefined;
   }
 
   private onDownStream(raw: unknown, client: DingTalkClientInternals): void {

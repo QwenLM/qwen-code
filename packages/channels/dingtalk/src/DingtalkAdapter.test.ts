@@ -60,11 +60,13 @@ vi.mock('dingtalk-stream-sdk-nodejs', () => ({
       }
     })();
     callback?: (msg: DWClientDownStream) => void;
+    callbacks = new Map<string, (msg: DWClientDownStream) => void>();
     disconnect = vi.fn();
     getConfig = vi.fn(() => ({ access_token: 'token' }));
     registerCallbackListener = vi.fn(
-      (_topic: string, callback: (msg: DWClientDownStream) => void) => {
-        this.callback = callback;
+      (topic: string, callback: (msg: DWClientDownStream) => void) => {
+        this.callbacks.set(topic, callback);
+        if (topic === 'robot') this.callback = callback;
       },
     );
     send = vi.fn();
@@ -90,6 +92,7 @@ vi.mock('dingtalk-stream-sdk-nodejs', () => ({
     }
   },
   TOPIC_ROBOT: 'robot',
+  TOPIC_CARD: 'card',
   EventAck: { SUCCESS: 'success' },
 }));
 
@@ -182,6 +185,7 @@ function latestMockClient(): Record<string, unknown> {
 
 interface MockDingtalkClient {
   callback?: (msg: DWClientDownStream) => void;
+  callbacks: Map<string, (msg: DWClientDownStream) => void>;
   disconnect: ReturnType<typeof vi.fn>;
   onDownStream(raw: string): void;
   registerCallbackListener: ReturnType<typeof vi.fn>;
@@ -240,6 +244,65 @@ it('adds outbound image instructions without replacing custom instructions', () 
   expect(instructions).toContain('[IMAGE: /absolute/path/to/file.png]');
 });
 
+it('validates interactive card config in the adapter', () => {
+  expect(() =>
+    createChannel({
+      interactiveCards: { questionCard: { timeoutMs: 0 } },
+    }),
+  ).toThrow('questionCard.timeoutMs');
+});
+
+it('ACKs a parsed card callback before starting asynchronous handling', async () => {
+  const events: string[] = [];
+  class CallbackTestChannel extends DingtalkChannel {
+    protected override routeCardCallback(): (() => Promise<void>) | undefined {
+      return async () => {
+        events.push('action');
+      };
+    }
+  }
+  const channel = new CallbackTestChannel(
+    'test-dingtalk',
+    {
+      type: 'dingtalk',
+      token: '',
+      clientId: 'client-id',
+      clientSecret: 'client-secret',
+      senderPolicy: 'open',
+      allowedUsers: [],
+      sessionScope: 'user',
+      cwd: '/tmp',
+      groupPolicy: 'open',
+      dmPolicy: 'open',
+      groups: {},
+    } as never,
+    {} as never,
+  );
+  expect(channel).toBeDefined();
+  const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
+  client.send.mockImplementation(() => {
+    events.push('ack');
+  });
+
+  client.callbacks.get('card')?.({
+    headers: { messageId: 'card-message' },
+    data: JSON.stringify({
+      userId: 'owner-1',
+      value: JSON.stringify({
+        outTrackId: 'status-1',
+        actionValue: 'stop',
+      }),
+    }),
+  } as DWClientDownStream);
+
+  expect(events[0]).toBe('ack');
+  await vi.waitFor(() => expect(events).toEqual(['ack', 'action']));
+  expect(client.send).toHaveBeenCalledWith('card-message', {
+    status: 'success',
+    message: 'ok',
+  });
+});
+
 it('keeps callbacks and ACKs bound to the client that received them', async () => {
   const firstIndex = dingtalkSdkMock.instances.length;
   const channel = createChannel();
@@ -274,8 +337,14 @@ it('keeps callbacks and ACKs bound to the client that received them', async () =
     data: '{}',
   } as DWClientDownStream);
 
-  expect(firstClient.registerCallbackListener).toHaveBeenCalledOnce();
-  expect(replacement.registerCallbackListener).toHaveBeenCalledOnce();
+  expect(firstClient.registerCallbackListener).toHaveBeenCalledTimes(2);
+  expect(replacement.registerCallbackListener).toHaveBeenCalledTimes(2);
+  expect(
+    firstClient.registerCallbackListener.mock.calls.map(([topic]) => topic),
+  ).toEqual(['robot', 'card']);
+  expect(
+    replacement.registerCallbackListener.mock.calls.map(([topic]) => topic),
+  ).toEqual(['robot', 'card']);
   expect(firstClient.send).toHaveBeenCalledWith('old-message', {
     status: 'success',
     message: 'ok',
