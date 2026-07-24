@@ -198,19 +198,12 @@ export function createChannelManagementService(
     return matches;
   };
 
-  const workspaceCommittedNames = (): string[] => {
-    const globalNames = opts.manager.committedChannelNames();
-    const workers = opts.manager.state().workers;
-    return globalNames.filter((name) =>
-      workers.some(
-        (worker) =>
-          worker.workspaceCwd === opts.workspaceCwd &&
-          (worker.adapters?.some((adapter) => adapter.name === name) ||
-            worker.requestedChannels?.includes(name) ||
-            worker.channels.includes(name)),
-      ),
-    );
-  };
+  const workspaceCommittedNames = (): string[] =>
+    opts.manager
+      .committedChannelNames()
+      .filter((name) =>
+        workerFor(name).some((w) => w.workspaceCwd === opts.workspaceCwd),
+      );
 
   const assertOwnedRuntime = (name: string): void => {
     if (!workspaceCommittedNames().includes(name)) return;
