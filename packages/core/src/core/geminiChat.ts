@@ -47,7 +47,9 @@ import {
   parsePositiveIntegerEnvValue,
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
-import { ToolNames } from '../tools/tool-names.js';
+import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
+import * as fs from 'node:fs';
+import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
 import { isManagedMemoryPath } from '../memory/paths.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { StructuredError } from './turn.js';
@@ -163,6 +165,100 @@ function syncFunctionCallsField(
       enumerable: true,
     });
   }
+}
+
+/**
+ * Local mirror of the scheduler's `canonicalToolName` (kept here to avoid a
+ * geminiChat -> coreToolScheduler import cycle): resolves legacy tool-name
+ * aliases so the load-side plan redaction keeps matching sessions recorded
+ * under a pre-migration name, in lockstep with the write-side scheduler.
+ */
+function canonicalPlanToolName(toolName: string | undefined): string {
+  if (!toolName) return '';
+  return (ToolNamesMigration as Record<string, string>)[toolName] ?? toolName;
+}
+
+/**
+ * Single source of the pointer text that replaces an approved plan's
+ * `functionCall.args.plan` (#6237). Shared by the tool scheduler's
+ * post-approval rewrite and the load-side pass below so the two surfaces
+ * cannot drift.
+ */
+export function approvedPlanRedactionText(planPath: string): string {
+  return (
+    `[Plan approved and saved to ${planPath}. The plan text was ` +
+    `removed from the conversation after approval; read that ` +
+    `file if you need to consult it again.]`
+  );
+}
+
+/**
+ * Pure history-wide variant of the approved-plan redaction: rewrites the
+ * `plan` argument of every `exit_plan_mode` `functionCall` whose paired
+ * `functionResponse` carries an approval `llmContent` AND whose plan text
+ * equals `savedPlanContent` (the current on-disk plan file). Returns a new
+ * array when anything changed, or null when the history is untouched.
+ *
+ * Exported for tests; production callers go through
+ * `GeminiChat.setHistory` / the constructor.
+ */
+export function redactApprovedPlansInHistory(
+  history: Content[],
+  savedPlanContent: string,
+  planPath: string,
+): Content[] | null {
+  const approved = new Set<string>();
+  for (const entry of history) {
+    if (!entry?.parts) continue;
+    for (const part of entry.parts) {
+      const fr = part.functionResponse;
+      if (
+        !fr?.id ||
+        canonicalPlanToolName(fr.name) !== ToolNames.EXIT_PLAN_MODE
+      )
+        continue;
+      const output = (fr.response as { output?: unknown } | undefined)?.[
+        'output'
+      ];
+      if (
+        typeof output === 'string' &&
+        PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES.some((prefix) =>
+          output.startsWith(prefix),
+        )
+      ) {
+        approved.add(fr.id);
+      }
+    }
+  }
+  if (approved.size === 0) return null;
+
+  let changed = false;
+  const out = history.map((entry) => {
+    if (entry?.role !== 'model' || !entry.parts) return entry;
+    let entryChanged = false;
+    const parts = entry.parts.map((part) => {
+      const fc = part.functionCall;
+      if (
+        !fc?.id ||
+        canonicalPlanToolName(fc.name) !== ToolNames.EXIT_PLAN_MODE
+      )
+        return part;
+      if (!approved.has(fc.id)) return part;
+      if ((fc.args ?? {})['plan'] !== savedPlanContent) return part;
+      entryChanged = true;
+      return {
+        ...part,
+        functionCall: {
+          ...fc,
+          args: { ...fc.args, plan: approvedPlanRedactionText(planPath) },
+        },
+      };
+    });
+    if (!entryChanged) return entry;
+    changed = true;
+    return { ...entry, parts };
+  });
+  return changed ? out : null;
 }
 
 /**
@@ -1593,6 +1689,7 @@ export class GeminiChat {
     private readonly telemetryService?: UiTelemetryService,
   ) {
     validateHistory(history);
+    this.redactApprovedPlansFromLoadedHistory();
   }
 
   /**
@@ -3552,6 +3649,124 @@ export class GeminiChat {
     this.clearPendingPartialState();
   }
 
+  /**
+   * Replaces the `plan` argument of an `exit_plan_mode` `functionCall` in
+   * history with a short reference, keeping every other part and argument
+   * intact.
+   *
+   * The full plan text a model submits to `exit_plan_mode` stays in history
+   * as its own tool-call arguments; on long conversations models
+   * occasionally regurgitate chunks of that blob in later responses
+   * (#6237). Once the plan is approved it is persisted to disk by
+   * `Config.savePlan`, so the in-context copy can be swapped for a pointer
+   * without losing information. Rejected plans are left untouched — the
+   * model needs the text to revise them.
+   *
+   * When `expectedPlan` is provided the rewrite additionally requires the
+   * in-history plan to equal it byte-for-byte. Callers pass the on-disk
+   * plan-file content here so the pointer can never claim a save that
+   * failed (`savePlanBestEffort` swallows filesystem errors) or reference
+   * a file that holds a different plan.
+   *
+   * The entry is replaced immutably at the same index; the partial-push
+   * markers compare by index and role, so this cannot desync them.
+   *
+   * @returns true when a matching functionCall was found and rewritten.
+   */
+  redactApprovedPlanFromHistory(
+    callId: string,
+    replacement: string,
+    expectedPlan?: string,
+  ): boolean {
+    for (let i = this.history.length - 1; i >= 0; i--) {
+      const entry = this.history[i];
+      if (entry?.role !== 'model' || !entry.parts) continue;
+      const partIdx = entry.parts.findIndex(
+        (part) =>
+          part.functionCall?.id === callId &&
+          canonicalPlanToolName(part.functionCall.name) ===
+            ToolNames.EXIT_PLAN_MODE,
+      );
+      if (partIdx === -1) continue;
+      const part = entry.parts[partIdx]!;
+      const functionCall = part.functionCall!;
+      const plan = (functionCall.args ?? {})['plan'];
+      if (typeof plan !== 'string') {
+        return false;
+      }
+      if (expectedPlan !== undefined && plan !== expectedPlan) {
+        return false;
+      }
+      const newParts = [...entry.parts];
+      newParts[partIdx] = {
+        ...part,
+        functionCall: {
+          ...functionCall,
+          args: { ...functionCall.args, plan: replacement },
+        },
+      };
+      this.history[i] = { ...entry, parts: newParts };
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Read-side counterpart of {@link redactApprovedPlanFromHistory}: the
+   * chat-recording JSONL captured the assistant turn (with the full plan
+   * argument) before the tool ran, so a `--resume` / `--continue` reload
+   * re-feeds the plan text the in-session redaction already removed
+   * (#6237). Every wholesale history load re-applies the redaction to
+   * approved `exit_plan_mode` calls.
+   *
+   * Only calls whose in-history plan matches the current on-disk plan file
+   * are rewritten — same never-lie rule as the write side. With several
+   * approved plans in one session the file holds only the last one, so
+   * earlier calls rehydrate unredacted; safe, just not minimal.
+   */
+  private redactApprovedPlansFromLoadedHistory(): void {
+    const hasPlanCall = this.history.some((entry) =>
+      entry?.parts?.some(
+        (part) =>
+          canonicalPlanToolName(part.functionCall?.name) ===
+          ToolNames.EXIT_PLAN_MODE,
+      ),
+    );
+    if (!hasPlanCall) return;
+    let planPath: string;
+    let savedPlan: string;
+    try {
+      planPath = this.config.getPlanFilePath();
+      savedPlan = fs.readFileSync(planPath, 'utf-8');
+    } catch (err) {
+      // No plan file (never saved, or save failed): leave history alone —
+      // never swap plan text for a pointer to a file that is not there.
+      // Logged (unlike a bare swallow) so a --resume that silently skips
+      // the redaction is traceable under DEBUG.
+      debugLogger.debug(
+        `Skipping load-side plan redaction, plan file unavailable: ${err}`,
+      );
+      return;
+    }
+    const redacted = redactApprovedPlansInHistory(
+      this.history,
+      savedPlan,
+      planPath,
+    );
+    if (redacted) {
+      this.history = redacted;
+    } else {
+      // hasPlanCall was true, so a null here means every exit_plan_mode
+      // call was skipped (unapproved, id-less, or plan text differing
+      // from the saved file) — trace it for "plan still in history"
+      // triage, mirroring the write side.
+      debugLogger.debug(
+        `Load-side plan redaction left history unchanged: no approved ` +
+          `exit_plan_mode call matches the plan file at ${planPath}.`,
+      );
+    }
+  }
+
   setHistory(history: Content[]): void {
     this.history = history;
     // History replacement (compression, /clear, --resume reload) wipes
@@ -3562,6 +3777,7 @@ export class GeminiChat {
     // push, corrupting the conversation. Drop the paired deferred-record
     // stash too: its referent (the model turn at the old index) is gone.
     this.clearPendingPartialState();
+    this.redactApprovedPlansFromLoadedHistory();
   }
 
   truncateHistory(keepCount: number): void {

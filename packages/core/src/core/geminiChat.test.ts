@@ -17,6 +17,8 @@ import { AuthType, type ContentGenerator } from '../core/contentGenerator.js';
 import {
   GeminiChat,
   InvalidStreamError,
+  approvedPlanRedactionText,
+  redactApprovedPlansInHistory,
   redactStructuredOutputArgsForRecording,
   StreamEventType,
   type StreamEvent,
@@ -11436,6 +11438,324 @@ describe('GeminiChat', async () => {
         );
       });
       expect(recordedHasPartial).toBe(false);
+    });
+  });
+
+  describe('redactApprovedPlanFromHistory', () => {
+    // After an approved exit_plan_mode the full plan text would otherwise
+    // stay in history as the model's own tool-call argument and get
+    // regurgitated into later responses (#6237). These tests pin the
+    // targeted history rewrite the tool scheduler performs post-approval.
+
+    const REPLACEMENT = '[Plan approved and saved to /tmp/p.md]';
+
+    function chatWith(history: Content[]): GeminiChat {
+      return new GeminiChat({} as unknown as Config, {}, history);
+    }
+
+    it('rewrites only the plan arg of the matching exit_plan_mode call', () => {
+      const chat = chatWith([
+        { role: 'user', parts: [{ text: 'plan it' }] },
+        {
+          role: 'model',
+          parts: [
+            { text: 'My plan follows.' },
+            {
+              functionCall: {
+                id: 'call-plan',
+                name: 'exit_plan_mode',
+                args: { plan: 'SECRET BIG PLAN', originalRequest: 'plan it' },
+              },
+            },
+          ],
+        },
+      ]);
+
+      expect(chat.redactApprovedPlanFromHistory('call-plan', REPLACEMENT)).toBe(
+        true,
+      );
+
+      const entry = chat.getHistory()[1]!;
+      const fnCall = entry.parts![1]!.functionCall!;
+      expect(fnCall.args!['plan']).toBe(REPLACEMENT);
+      expect(fnCall.args!['originalRequest']).toBe('plan it');
+      expect(fnCall.id).toBe('call-plan');
+      expect(entry.parts![0]).toEqual({ text: 'My plan follows.' });
+      expect(JSON.stringify(chat.getHistory())).not.toContain(
+        'SECRET BIG PLAN',
+      );
+    });
+
+    it('returns false when no matching call id or tool name exists', () => {
+      const chat = chatWith([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-other',
+                name: 'write_file',
+                args: { plan: 'not a plan tool' },
+              },
+            },
+          ],
+        },
+      ]);
+      expect(chat.redactApprovedPlanFromHistory('call-plan', REPLACEMENT)).toBe(
+        false,
+      );
+      expect(
+        chat.redactApprovedPlanFromHistory('call-other', REPLACEMENT),
+      ).toBe(false);
+      expect(chat.getHistory()[0]!.parts![0]!.functionCall!.args!['plan']).toBe(
+        'not a plan tool',
+      );
+    });
+
+    it('returns false when expectedPlan differs from the in-history plan', () => {
+      const chat = chatWith([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-plan',
+                name: 'exit_plan_mode',
+                args: { plan: 'SECRET BIG PLAN' },
+              },
+            },
+          ],
+        },
+      ]);
+      // Never-lie invariant: a stale/different on-disk plan blocks the
+      // rewrite entirely.
+      expect(
+        chat.redactApprovedPlanFromHistory(
+          'call-plan',
+          REPLACEMENT,
+          'a different plan',
+        ),
+      ).toBe(false);
+      expect(chat.getHistory()[0]!.parts![0]!.functionCall!.args!['plan']).toBe(
+        'SECRET BIG PLAN',
+      );
+      // Matching expectedPlan still rewrites.
+      expect(
+        chat.redactApprovedPlanFromHistory(
+          'call-plan',
+          REPLACEMENT,
+          'SECRET BIG PLAN',
+        ),
+      ).toBe(true);
+    });
+
+    it('returns false when the matching call has no string plan arg', () => {
+      const chat = chatWith([
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-plan',
+                name: 'exit_plan_mode',
+                args: {},
+              },
+            },
+          ],
+        },
+      ]);
+      expect(chat.redactApprovedPlanFromHistory('call-plan', REPLACEMENT)).toBe(
+        false,
+      );
+    });
+  });
+
+  describe('redactApprovedPlansInHistory (load-side, #6237)', () => {
+    // The chat-recording JSONL captures the assistant turn with the full
+    // plan argument before the tool runs, so --resume re-feeds the text the
+    // in-session redaction removed. These tests pin the history-wide pass
+    // applied on every wholesale history load.
+    const PLAN = '## Plan\n\nresume leak fixture';
+    const PLAN_PATH = '/plans/session.md';
+
+    const approvedHistory = (): Content[] => [
+      { role: 'user', parts: [{ text: 'plan it' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'call-a',
+              name: 'exit_plan_mode',
+              args: { plan: PLAN, originalRequest: 'plan it' },
+            },
+          },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-a',
+              name: 'exit_plan_mode',
+              response: {
+                output:
+                  'User approved. You can now start coding. Start with updating your todo list if applicable.',
+              },
+            },
+          },
+        ],
+      },
+    ];
+
+    it('rewrites approved calls whose plan matches the on-disk file', () => {
+      const out = redactApprovedPlansInHistory(
+        approvedHistory(),
+        PLAN,
+        PLAN_PATH,
+      );
+      expect(out).not.toBeNull();
+      const fnCall = out![1]!.parts![0]!.functionCall!;
+      expect(fnCall.args!['plan']).toBe(approvedPlanRedactionText(PLAN_PATH));
+      expect(fnCall.args!['originalRequest']).toBe('plan it');
+      expect(JSON.stringify(out)).not.toContain('resume leak fixture');
+    });
+
+    it('redacts only the approved call when a rejected call shares the plan text', () => {
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'plan it' }] },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-rejected',
+                name: 'exit_plan_mode',
+                args: { plan: PLAN },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-rejected',
+                name: 'exit_plan_mode',
+                response: {
+                  output:
+                    'Plan execution was not approved. Remaining in plan mode.',
+                },
+              },
+            },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                id: 'call-approved',
+                name: 'exit_plan_mode',
+                args: { plan: PLAN },
+              },
+            },
+          ],
+        },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-approved',
+                name: 'exit_plan_mode',
+                response: {
+                  output: 'User approved. You can now start coding.',
+                },
+              },
+            },
+          ],
+        },
+      ];
+
+      const out = redactApprovedPlansInHistory(history, PLAN, PLAN_PATH);
+      expect(out).not.toBeNull();
+      // The rejected call keeps its plan text (the model needs it for
+      // revision); only the approved call is rewritten.
+      expect(out![1]!.parts![0]!.functionCall!.args!['plan']).toBe(PLAN);
+      expect(out![3]!.parts![0]!.functionCall!.args!['plan']).toBe(
+        approvedPlanRedactionText(PLAN_PATH),
+      );
+    });
+
+    it('returns null when the response was not an approval', () => {
+      const history = approvedHistory();
+      (
+        history[2]!.parts![0]!.functionResponse!.response as {
+          output: string;
+        }
+      ).output = 'Plan execution was not approved. Remaining in plan mode.';
+      expect(redactApprovedPlansInHistory(history, PLAN, PLAN_PATH)).toBeNull();
+    });
+
+    it('returns null when the on-disk plan differs (stale file)', () => {
+      expect(
+        redactApprovedPlansInHistory(
+          approvedHistory(),
+          'a different, later plan',
+          PLAN_PATH,
+        ),
+      ).toBeNull();
+    });
+
+    it('is applied by setHistory when the plan file exists', () => {
+      // The module-level node:fs mock backs readFileSync with
+      // mockFileSystem, so "writing" the plan file is a Map insert.
+      const planFile = '/plans/wired-session.md';
+      mockFileSystem.set(planFile, PLAN);
+      try {
+        const chat = new GeminiChat(
+          { getPlanFilePath: () => planFile } as unknown as Config,
+          {},
+          [],
+        );
+        chat.setHistory(approvedHistory());
+        const fnCall = chat.getHistory()[1]!.parts![0]!.functionCall!;
+        expect(fnCall.args!['plan']).toBe(approvedPlanRedactionText(planFile));
+      } finally {
+        mockFileSystem.delete(planFile);
+      }
+    });
+
+    it('is applied by the constructor for rehydrated history', () => {
+      const planFile = '/plans/ctor-session.md';
+      mockFileSystem.set(planFile, PLAN);
+      try {
+        const chat = new GeminiChat(
+          { getPlanFilePath: () => planFile } as unknown as Config,
+          {},
+          approvedHistory(),
+        );
+        const fnCall = chat.getHistory()[1]!.parts![0]!.functionCall!;
+        expect(fnCall.args!['plan']).toBe(approvedPlanRedactionText(planFile));
+      } finally {
+        mockFileSystem.delete(planFile);
+      }
+    });
+
+    it('setHistory leaves history alone when no plan file exists', () => {
+      const chat = new GeminiChat(
+        {
+          getPlanFilePath: () => '/plans/never-written.md',
+        } as unknown as Config,
+        {},
+        [],
+      );
+      chat.setHistory(approvedHistory());
+      const fnCall = chat.getHistory()[1]!.parts![0]!.functionCall!;
+      expect(fnCall.args!['plan']).toBe(PLAN);
     });
   });
 

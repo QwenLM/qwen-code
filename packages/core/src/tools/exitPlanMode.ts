@@ -86,6 +86,18 @@ const exitPlanModeToolSchemaData: FunctionDeclaration = {
   },
 };
 
+/**
+ * `llmContent` prefixes that mark a successful plan-mode exit (user or
+ * leader approval). The tool scheduler keys its post-execution history
+ * sanitization (#6237) off these, so they must stay in lockstep with the
+ * success returns in `ExitPlanModeToolInvocation.execute` /
+ * `executePlanRequiredTeammate` below.
+ */
+export const PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES = [
+  'User approved.',
+  'Leader approved.',
+] as const;
+
 interface ExitApprovalSnapshot {
   plan: string;
   approvalModeRevision: number;
