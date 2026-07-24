@@ -25,6 +25,7 @@ import {
   getPathComparisonVariants,
   isWithinRoot,
 } from '../config/path-comparison.js';
+import { publishPendingCompileCache } from '../config/compile-cache.js';
 import type { Settings } from '../config/settingsSchema.js';
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 
@@ -290,6 +291,7 @@ export function loadServeFastPathEnvironment(
       }
     }
   }
+  publishPendingCompileCache();
 }
 
 function readTrustedFolderRulesFastPath(): readonly CachedTrustRule[] {

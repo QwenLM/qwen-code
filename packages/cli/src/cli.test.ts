@@ -433,7 +433,12 @@ describe('bootstrap import boundaries', () => {
       );
       writeFileSync(
         path.join(tempDir, 'cli.js'),
-        'process.stdout.write(JSON.stringify({ cacheDir: process.env.NODE_COMPILE_CACHE }));\n',
+        [
+          'process.stdout.write(JSON.stringify({',
+          '  cacheDir: process.env.NODE_COMPILE_CACHE,',
+          '  pendingCacheDir: process.env.QWEN_CODE_PENDING_COMPILE_CACHE,',
+          '}));',
+        ].join('\n'),
       );
       const baseEnv = { ...process.env };
       delete baseEnv['NODE_COMPILE_CACHE'];
@@ -457,7 +462,9 @@ describe('bootstrap import boundaries', () => {
         }),
       );
       if (canEnableCompileCache) {
-        expect(runEntry(baseEnv).cacheDir).toBeTruthy();
+        expect(runEntry(baseEnv)).toEqual({
+          pendingCacheDir: expect.any(String),
+        });
       } else {
         expect(runEntry(baseEnv)).toEqual({});
       }
@@ -469,8 +476,8 @@ describe('bootstrap import boundaries', () => {
         runEntry({
           ...baseEnv,
           NODE_COMPILE_CACHE: configuredCacheDir,
-        }).cacheDir,
-      ).toBe(configuredCacheDir);
+        }),
+      ).toEqual({ cacheDir: configuredCacheDir });
 
       expect(
         runEntry({
