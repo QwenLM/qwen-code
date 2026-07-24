@@ -6128,7 +6128,25 @@ describe('runQwenServe channel worker supervisor', () => {
 
       const beforeCaps = await fetch(`${handle.url}/capabilities`, { headers });
       expect(await beforeCaps.json()).toMatchObject({
-        features: expect.arrayContaining(['channel_control']),
+        features: expect.arrayContaining([
+          'channel_control',
+          'channel_management',
+        ]),
+      });
+      const channels = await fetch(`${handle.url}/workspace/channels`, {
+        headers,
+      });
+      expect(channels.status).toBe(200);
+      expect(await channels.json()).toMatchObject({
+        instances: {
+          telegram: {
+            name: 'telegram',
+            config: { type: 'telegram' },
+            secrets: {},
+            startsWithServe: false,
+            runtime: { state: 'stopped' },
+          },
+        },
       });
 
       const enable = await fetch(`${handle.url}/workspace/channel`, {
@@ -6156,7 +6174,11 @@ describe('runQwenServe channel worker supervisor', () => {
 
       const afterCaps = await fetch(`${handle.url}/capabilities`, { headers });
       expect(await afterCaps.json()).toMatchObject({
-        features: expect.arrayContaining(['channel_control', 'channel_reload']),
+        features: expect.arrayContaining([
+          'channel_control',
+          'channel_management',
+          'channel_reload',
+        ]),
       });
 
       worker.start.mockClear();
@@ -6191,6 +6213,7 @@ describe('runQwenServe channel worker supervisor', () => {
         features: string[];
       };
       expect(stoppedFeatures.features).toContain('channel_control');
+      expect(stoppedFeatures.features).toContain('channel_management');
       expect(stoppedFeatures.features).not.toContain('channel_reload');
     } finally {
       await handle.close();

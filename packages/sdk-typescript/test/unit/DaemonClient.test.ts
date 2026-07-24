@@ -7018,4 +7018,96 @@ describe('DaemonClient', () => {
       });
     });
   });
+
+  describe('workspace channel management', () => {
+    const snapshot = {
+      revision: 'r1',
+      instances: {
+        bot: {
+          name: 'bot',
+          config: { type: 'dingtalk', clientId: 'client-id' },
+          secrets: { clientSecret: { present: true, source: 'literal' } },
+          startsWithServe: false,
+          runtime: { state: 'stopped' },
+        },
+      },
+    };
+    const mutation = { snapshot, instance: snapshot.instances.bot };
+
+    it('uses encoded primary routes for CRUD, lifecycle, and pairing', async () => {
+      const { fetch, calls } = recordingFetch((request) =>
+        jsonResponse(
+          200,
+          request.url.endsWith('/pairing-requests')
+            ? { requests: [] }
+            : mutation,
+        ),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.workspaceChannels({ clientId: 'reader' });
+      await client.upsertWorkspaceChannel(
+        'bot/name',
+        {
+          expectedRevision: 'r1',
+          config: { type: 'dingtalk' },
+        },
+        { clientId: 'writer' },
+      );
+      await client.deleteWorkspaceChannel('bot/name', {
+        expectedRevision: 'r1',
+      });
+      await client.setWorkspaceChannelStartup('bot/name', {
+        expectedRevision: 'r1',
+        enabled: true,
+      });
+      await client.startWorkspaceChannel('bot/name');
+      await client.stopWorkspaceChannel('bot/name');
+      await client.restartWorkspaceChannel('bot/name');
+      await client.workspaceChannelPairingRequests('bot/name');
+      await client.approveWorkspaceChannelPairing('bot/name', {
+        code: 'ABCDEFGH',
+      });
+
+      expect(calls.map(({ method, url }) => [method, url])).toEqual([
+        ['GET', 'http://daemon/workspace/channels'],
+        ['PUT', 'http://daemon/workspace/channels/bot%2Fname'],
+        ['DELETE', 'http://daemon/workspace/channels/bot%2Fname'],
+        ['PUT', 'http://daemon/workspace/channels/bot%2Fname/startup'],
+        ['POST', 'http://daemon/workspace/channels/bot%2Fname/start'],
+        ['POST', 'http://daemon/workspace/channels/bot%2Fname/stop'],
+        ['POST', 'http://daemon/workspace/channels/bot%2Fname/restart'],
+        ['GET', 'http://daemon/workspace/channels/bot%2Fname/pairing-requests'],
+        [
+          'POST',
+          'http://daemon/workspace/channels/bot%2Fname/pairing-requests/approve',
+        ],
+      ]);
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('reader');
+      expect(calls[1]?.headers['x-qwen-client-id']).toBe('writer');
+    });
+
+    it('uses the exact qualified workspace routes', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, snapshot),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const workspace = client.workspaceByCwd('/tmp/work space');
+
+      await workspace.workspaceChannelTypes();
+      await workspace.workspaceChannels({ clientId: 'reader' });
+      await workspace.startWorkspaceChannel('bot', { clientId: 'writer' });
+
+      expect(calls.map(({ method, url }) => [method, url])).toEqual([
+        ['GET', 'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channel-types'],
+        ['GET', 'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels'],
+        [
+          'POST',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot/start',
+        ],
+      ]);
+      expect(calls[1]?.headers['x-qwen-client-id']).toBe('reader');
+      expect(calls[2]?.headers['x-qwen-client-id']).toBe('writer');
+    });
+  });
 });

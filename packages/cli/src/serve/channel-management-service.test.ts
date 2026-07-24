@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { promises as fs } from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { PairingStore } from '@qwen-code/channel-base';
 import { describe, expect, it, vi } from 'vitest';
 import type { ChannelSettingsSnapshot } from './channel-settings-store.js';
 import {
@@ -244,6 +248,100 @@ describe('createChannelManagementService', () => {
     });
     expect(manager.reload).not.toHaveBeenCalled();
     expect(manager.reloadWorkspace).toHaveBeenCalledWith(WORKSPACE, 'bot');
+  });
+
+  it('rejects a config whose effective cwd escapes the selected workspace', async () => {
+    const { service, store, manager } = setup({ committedNames: [] });
+
+    await expect(
+      service.upsert('bot', {
+        expectedRevision: 'rev-1',
+        config: {
+          type: 'dingtalk',
+          cwd: '../secondary',
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'channel_workspace_mismatch' });
+
+    expect(store.upsert).not.toHaveBeenCalled();
+    expect(manager.setChannelEnabled).not.toHaveBeenCalled();
+  });
+
+  it('fails closed for lifecycle and pairing on a legacy cross-workspace config', async () => {
+    const { service, store, manager } = setup({
+      committedNames: ['bot'],
+      snapshot: settingsSnapshot({
+        channels: {
+          bot: {
+            type: 'dingtalk',
+            cwd: '../secondary',
+            senderPolicy: 'pairing',
+          },
+        },
+      }),
+    });
+
+    await expect(service.start('bot')).rejects.toMatchObject({
+      code: 'channel_workspace_mismatch',
+    });
+    await expect(
+      service.setStartup('bot', {
+        expectedRevision: 'rev-1',
+        enabled: true,
+      }),
+    ).rejects.toMatchObject({ code: 'channel_workspace_mismatch' });
+    await expect(service.restart('bot')).rejects.toMatchObject({
+      code: 'channel_workspace_mismatch',
+    });
+    await expect(service.pairingRequests('bot')).rejects.toMatchObject({
+      code: 'channel_workspace_mismatch',
+    });
+
+    expect(store.setStartupNames).not.toHaveBeenCalled();
+    expect(manager.setChannelEnabled).not.toHaveBeenCalled();
+    expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('lists and approves pairing requests in the selected workspace scope', async () => {
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const qwenHome = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'channel-management-pairing-'),
+    );
+    process.env['QWEN_HOME'] = qwenHome;
+    try {
+      const { service } = setup({
+        snapshot: settingsSnapshot({
+          channels: {
+            bot: {
+              type: 'dingtalk',
+              senderPolicy: 'pairing',
+            },
+          },
+        }),
+      });
+      const pairing = new PairingStore('bot', WORKSPACE);
+      const code = pairing.createRequest('sender-1', 'Alice');
+      expect(code).toBeTypeOf('string');
+
+      await expect(service.pairingRequests('bot')).resolves.toEqual({
+        requests: [
+          expect.objectContaining({
+            senderId: 'sender-1',
+            senderName: 'Alice',
+            code,
+          }),
+        ],
+      });
+      await expect(service.approvePairing('bot', code!)).resolves.toEqual({
+        approved: expect.objectContaining({ senderId: 'sender-1', code }),
+        requests: [],
+      });
+      expect(pairing.isApproved('sender-1')).toBe(true);
+    } finally {
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+      await fs.rm(qwenHome, { recursive: true, force: true });
+    }
   });
 
   it('retains the reload diagnostic when stopping the failed replacement also fails', async () => {
