@@ -26,7 +26,6 @@ interface CompactToolGroupDisplayProps {
   contentWidth: number;
 }
 
-const COMPACT_GROUP_HORIZONTAL_PADDING = 0;
 const ELAPSED_TIME_MARGIN_LEFT = 1;
 const EXECUTING_ELAPSED_TIME_RESERVED_LABEL = '99h 59m 59s';
 
@@ -398,7 +397,6 @@ export function estimateCompactToolGroupHeight(
   const summaryWidth = Math.max(
     1,
     contentWidth -
-      COMPACT_GROUP_HORIZONTAL_PADDING -
       STATUS_INDICATOR_WIDTH -
       getElapsedTimeReservedWidth(activeTool, overallStatus),
   );
