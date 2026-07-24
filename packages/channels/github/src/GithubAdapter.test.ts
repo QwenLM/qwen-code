@@ -5,7 +5,7 @@ import type {
   Envelope,
 } from '@qwen-code/channel-base';
 
-vi.mock('octokit', () => {
+vi.mock('@octokit/rest', () => {
   const mockOctokit = {
     rest: {
       users: { getAuthenticated: vi.fn() },
@@ -38,7 +38,7 @@ vi.mock('@qwen-code/channel-base', async (importOriginal) => {
 import { GithubChannel } from './GithubAdapter.js';
 
 const mockOctokit = (
-  (await import('octokit')) as unknown as {
+  (await import('@octokit/rest')) as unknown as {
     __mockOctokit: Record<string, unknown>;
   }
 ).__mockOctokit as {
@@ -273,7 +273,7 @@ describe('GithubChannel', () => {
       });
     });
 
-    it('does not advance past failed notification', async () => {
+    it('marks all fetched notifications read even on failure', async () => {
       const good = makeNotification({
         id: '1',
         updated_at: '2026-07-02T08:00:00.000Z',
@@ -294,7 +294,7 @@ describe('GithubChannel', () => {
       expect(
         mockOctokit.rest.activity.markNotificationsAsRead,
       ).toHaveBeenCalledWith({
-        last_read_at: '2026-07-02T08:00:00.000Z',
+        last_read_at: '2026-07-02T10:00:00.000Z',
         read: true,
       });
     });
@@ -412,11 +412,11 @@ describe('GithubChannel', () => {
 
     it('still marks thread as read after handleInbound failure', async () => {
       channel.handleInboundError = new Error('agent down');
+      await initWithoutLoop();
       mockOctokit.paginate
         .mockResolvedValueOnce([makeNotification()])
         .mockResolvedValueOnce([makeComment()]);
 
-      await initWithoutLoop();
       await pollOnce();
 
       expect(

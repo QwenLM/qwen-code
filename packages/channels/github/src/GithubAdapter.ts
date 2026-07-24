@@ -1,5 +1,5 @@
 import process from 'node:process';
-import { Octokit } from 'octokit';
+import { Octokit } from '@octokit/rest';
 import type {
   ChannelAgentBridge,
   ChannelBaseOptions,
@@ -95,19 +95,25 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       new Date(this.cursor.lastProcessedAt).getTime() - 1000,
     ).toISOString();
 
-    const notifications = await this.octokit.paginate(
-      this.octokit.rest.activity.listNotificationsForAuthenticatedUser,
-      { since, per_page: 100 },
+    const notifications = await this.githubApi(
+      () =>
+        this.octokit.paginate(
+          this.octokit.rest.activity.listNotificationsForAuthenticatedUser,
+          { since, per_page: 100 },
+        ),
+      'listNotifications',
     );
 
     notifications.sort((a, b) => a.updated_at.localeCompare(b.updated_at));
 
-    let lastSuccessfulUpdatedAt = this.cursor.lastProcessedAt;
+    const maxUpdatedAt =
+      notifications.length > 0
+        ? notifications[notifications.length - 1].updated_at
+        : this.cursor.lastProcessedAt;
 
     for (const notification of notifications) {
       const extracted = this.extractFromSubjectUrl(notification.subject.url);
       if (!extracted) {
-        lastSuccessfulUpdatedAt = notification.updated_at;
         continue;
       }
 
@@ -116,15 +122,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       const windowSince = lastReadAt || since;
 
       try {
-        const comments = await this.octokit.paginate(
-          this.octokit.rest.issues.listComments,
-          {
-            owner: chatId.split('/')[0],
-            repo: chatId.split('/')[1],
-            issue_number: issueNumber,
-            since: windowSince,
-            per_page: 100,
-          },
+        const comments = await this.githubApi(
+          () =>
+            this.octokit.paginate(this.octokit.rest.issues.listComments, {
+              owner: chatId.split('/')[0],
+              repo: chatId.split('/')[1],
+              issue_number: issueNumber,
+              since: windowSince,
+              per_page: 100,
+            }),
+          `listComments(${threadId})`,
         );
 
         comments.sort((a, b) =>
@@ -186,8 +193,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             notification,
           );
         }
-
-        lastSuccessfulUpdatedAt = notification.updated_at;
       } catch (err) {
         process.stderr.write(
           `[Channel:${this.name}] API error processing ${threadId}, stopping batch: ${err}\n`,
@@ -196,9 +201,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       }
     }
 
-    if (lastSuccessfulUpdatedAt > this.cursor.lastProcessedAt) {
-      await this.markNotificationsAsRead(lastSuccessfulUpdatedAt);
-      this.cursor.lastProcessedAt = lastSuccessfulUpdatedAt;
+    if (maxUpdatedAt > this.cursor.lastProcessedAt) {
+      await this.markNotificationsAsRead(maxUpdatedAt);
+      this.cursor.lastProcessedAt = maxUpdatedAt;
     }
   }
 
@@ -282,17 +287,59 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     return `Type: ${type} | Title: ${title} | URL: ${url}`;
   }
 
-  private async markNotificationsAsRead(lastReadAt: string): Promise<void> {
-    try {
-      await this.octokit.rest.activity.markNotificationsAsRead({
-        last_read_at: lastReadAt,
-        read: true,
-      });
-    } catch (err) {
-      process.stderr.write(
-        `[Channel:${this.name}] markNotificationsAsRead failed: ${err}\n`,
-      );
+  private async githubApi<T>(
+    fn: () => Promise<T>,
+    label: string,
+    retries = 3,
+  ): Promise<T> {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        return await fn();
+      } catch (err: unknown) {
+        if (attempt === retries) throw err;
+        // Octokit RequestError: { status, response?: { headers } }
+        const e = err as {
+          status?: number;
+          response?: { headers?: Record<string, string | number> };
+          message?: string;
+        };
+        const headers = e.response?.headers ?? {};
+
+        let cooldown: number;
+        if (headers['retry-after']) {
+          cooldown = Number(headers['retry-after']) * 1000;
+        } else if (
+          (e.status === 403 || e.status === 429) &&
+          Number(headers['x-ratelimit-remaining']) === 0 &&
+          Number(headers['x-ratelimit-reset']) > 0
+        ) {
+          cooldown =
+            Math.max(
+              0,
+              Number(headers['x-ratelimit-reset']) * 1000 - Date.now(),
+            ) + 1000;
+        } else {
+          cooldown = 1000 * 2 ** (attempt - 1);
+        }
+
+        process.stderr.write(
+          `[Channel:${this.name}] ${label} failed (attempt ${attempt}/${retries}, status=${e.status}), retrying in ${cooldown}ms: ${e.message}\n`,
+        );
+        await new Promise((r) => setTimeout(r, cooldown));
+      }
     }
+    throw new Error('unreachable');
+  }
+
+  private async markNotificationsAsRead(lastReadAt: string): Promise<void> {
+    await this.githubApi(
+      () =>
+        this.octokit.rest.activity.markNotificationsAsRead({
+          last_read_at: lastReadAt,
+          read: true,
+        }),
+      'markNotificationsAsRead',
+    );
   }
 
   private async postErrorComment(
