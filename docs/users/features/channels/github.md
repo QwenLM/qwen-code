@@ -81,9 +81,11 @@ The adapter detects mentions by scanning the **comment body** for `@bot-username
 The adapter uses GitHub's Notifications API as a wake-up signal:
 
 1. **Poll** `GET /notifications` for unread threads
-2. **Enumerate** comments via `listComments` using `last_read_at` as the per-thread watermark
-3. **Process** each new comment (mention detection, envelope building)
-4. **Mark read** via `markNotificationsAsRead` (advances `last_read_at`)
+2. **Mark read** via `markNotificationsAsRead` (advances `last_read_at`)
+3. **Enumerate** comments via `listComments` using `last_read_at` as the per-thread watermark
+4. **Process** each new comment (mention detection, envelope building)
+
+Marking as read happens **before** processing (best-effort delivery). This is safe because the bot's own replies do not flip notifications back to unread. If the process crashes mid-processing, the user can re-mention the bot to retry.
 
 Non-comment activity (push, label changes) bumps the notification's `updated_at` but does not change `last_read_at`, so re-fetched threads with zero new comments are skipped without triggering the agent.
 

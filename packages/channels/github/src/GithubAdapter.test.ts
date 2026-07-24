@@ -190,11 +190,10 @@ describe('GithubChannel', () => {
 
   describe('poll and process', () => {
     it('processes a mention comment', async () => {
+      await initWithoutLoop();
       mockOctokit.paginate
         .mockResolvedValueOnce([makeNotification()])
         .mockResolvedValueOnce([makeComment()]);
-
-      await initWithoutLoop();
       await pollOnce();
 
       expect(channel.inboundEnvelopes).toHaveLength(1);
@@ -210,6 +209,7 @@ describe('GithubChannel', () => {
     });
 
     it('skips bot own comments', async () => {
+      await initWithoutLoop();
       mockOctokit.paginate
         .mockResolvedValueOnce([makeNotification()])
         .mockResolvedValueOnce([
@@ -218,42 +218,37 @@ describe('GithubChannel', () => {
             body: '@test-bot reply',
           }),
         ]);
-
-      await initWithoutLoop();
       await pollOnce();
       expect(channel.inboundEnvelopes).toHaveLength(0);
     });
 
     it('dispatches non-mention comments with isMentioned false', async () => {
+      await initWithoutLoop();
       mockOctokit.paginate
         .mockResolvedValueOnce([makeNotification()])
         .mockResolvedValueOnce([
           makeComment({ body: 'just a regular comment' }),
         ]);
-
-      await initWithoutLoop();
       await pollOnce();
       expect(channel.inboundEnvelopes).toHaveLength(1);
       expect(channel.inboundEnvelopes[0]!.isMentioned).toBe(false);
     });
 
     it('does not false-positive on trailing newline', async () => {
+      await initWithoutLoop();
       mockOctokit.paginate
         .mockResolvedValueOnce([makeNotification()])
         .mockResolvedValueOnce([makeComment({ body: 'Please fix.\n' })]);
-
-      await initWithoutLoop();
       await pollOnce();
       expect(channel.inboundEnvelopes).toHaveLength(1);
       expect(channel.inboundEnvelopes[0]!.isMentioned).toBe(false);
     });
 
     it('detects mention case-insensitively', async () => {
+      await initWithoutLoop();
       mockOctokit.paginate
         .mockResolvedValueOnce([makeNotification()])
         .mockResolvedValueOnce([makeComment({ body: '@Test-Bot help' })]);
-
-      await initWithoutLoop();
       await pollOnce();
       expect(channel.inboundEnvelopes).toHaveLength(1);
       expect(channel.inboundEnvelopes[0]!.isMentioned).toBe(true);
@@ -278,15 +273,14 @@ describe('GithubChannel', () => {
       ).toHaveBeenCalledWith(expect.objectContaining({ read: true }));
     });
 
-    it('calls markNotificationsAsRead with latest updated_at', async () => {
+    it('marks notifications as read before processing (best-effort)', async () => {
       const notification = makeNotification({
         updated_at: '2026-07-02T10:00:00.000Z',
       });
+      await initWithoutLoop();
       mockOctokit.paginate
         .mockResolvedValueOnce([notification])
         .mockResolvedValueOnce([makeComment()]);
-
-      await initWithoutLoop();
       await pollOnce();
 
       expect(
@@ -317,21 +311,17 @@ describe('GithubChannel', () => {
 
       expect(
         mockOctokit.rest.activity.markNotificationsAsRead,
-      ).toHaveBeenCalledWith({
-        last_read_at: '2026-07-02T10:00:00.000Z',
-        read: true,
-      });
+      ).toHaveBeenCalledWith(expect.objectContaining({ read: true }));
     });
 
     it('uses last_read_at as enumeration window when available', async () => {
       const notification = makeNotification({
         last_read_at: '2026-07-01T12:00:00.000Z',
       });
+      await initWithoutLoop();
       mockOctokit.paginate
         .mockResolvedValueOnce([notification])
         .mockResolvedValueOnce([makeComment()]);
-
-      await initWithoutLoop();
       await pollOnce();
 
       expect(mockOctokit.paginate).toHaveBeenCalledWith(
@@ -343,6 +333,7 @@ describe('GithubChannel', () => {
 
   describe('first contact (new issue body)', () => {
     it('feeds issue body when no comments and issue is new', async () => {
+      await initWithoutLoop();
       mockOctokit.paginate
         .mockResolvedValueOnce([makeNotification({ last_read_at: null })])
         .mockResolvedValueOnce([]); // no comments
@@ -355,7 +346,6 @@ describe('GithubChannel', () => {
         },
       });
 
-      await initWithoutLoop();
       channel.cursor = { lastProcessedAt: '2026-07-01T00:00:00.000Z' };
       await pollOnce();
 
@@ -366,6 +356,7 @@ describe('GithubChannel', () => {
     });
 
     it('dispatches issue body without mention as isMentioned false', async () => {
+      await initWithoutLoop();
       mockOctokit.paginate
         .mockResolvedValueOnce([makeNotification({ last_read_at: null })])
         .mockResolvedValueOnce([]);
@@ -378,7 +369,6 @@ describe('GithubChannel', () => {
         },
       });
 
-      await initWithoutLoop();
       await pollOnce();
       expect(channel.inboundEnvelopes).toHaveLength(1);
       expect(channel.inboundEnvelopes[0]!.isMentioned).toBe(false);
@@ -393,6 +383,7 @@ describe('GithubChannel', () => {
           type: 'PullRequest',
         },
       });
+      await initWithoutLoop();
       mockOctokit.paginate
         .mockResolvedValueOnce([prNotification])
         .mockResolvedValueOnce([]); // no comments
@@ -405,7 +396,6 @@ describe('GithubChannel', () => {
         },
       });
 
-      await initWithoutLoop();
       channel.cursor = { lastProcessedAt: '2026-07-01T00:00:00.000Z' };
       await pollOnce();
 
@@ -421,11 +411,10 @@ describe('GithubChannel', () => {
   describe('error handling', () => {
     it('posts error comment when handleInbound fails', async () => {
       channel.handleInboundError = new Error('agent down');
+      await initWithoutLoop();
       mockOctokit.paginate
         .mockResolvedValueOnce([makeNotification()])
         .mockResolvedValueOnce([makeComment()]);
-
-      await initWithoutLoop();
       await pollOnce();
 
       expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(

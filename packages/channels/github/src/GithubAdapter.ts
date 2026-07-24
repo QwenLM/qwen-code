@@ -139,6 +139,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         ? notifications[notifications.length - 1].updated_at
         : this.cursor.lastProcessedAt;
 
+    // Mark as read BEFORE processing (best-effort delivery). Bot's own
+    // replies won't flip notifications back to unread, so this is safe.
+    // If we crash mid-processing, the user re-mentions to retry.
+    const prevCursor = this.cursor.lastProcessedAt;
+    if (maxUpdatedAt > this.cursor.lastProcessedAt) {
+      await this.markNotificationsAsRead(maxUpdatedAt);
+      this.cursor.lastProcessedAt = maxUpdatedAt;
+    }
+
     for (const notification of notifications) {
       const extracted = this.extractFromSubjectUrl(notification.subject.url);
       if (!extracted) {
@@ -219,6 +228,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
             threadId,
             issueNumber,
             notification,
+            prevCursor,
           );
         }
       } catch (err) {
@@ -228,11 +238,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         continue;
       }
     }
-
-    if (maxUpdatedAt > this.cursor.lastProcessedAt) {
-      await this.markNotificationsAsRead(maxUpdatedAt);
-      this.cursor.lastProcessedAt = maxUpdatedAt;
-    }
   }
 
   private async tryFirstContactBody(
@@ -240,6 +245,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     threadId: string,
     issueNumber: number,
     notification: { subject: { title?: string } },
+    prevCursor: string,
   ): Promise<void> {
     try {
       const { data: issue } = await this.octokit.rest.issues.get({
@@ -250,7 +256,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
       const body = issue.body || '';
       const createdAt = issue.created_at;
-      if (createdAt <= this.cursor.lastProcessedAt) return;
+      if (createdAt <= prevCursor) return;
 
       const isMentioned = this.botUsername
         ? testBotMention(body, this.botUsername)
