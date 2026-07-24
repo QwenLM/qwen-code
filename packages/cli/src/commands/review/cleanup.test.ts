@@ -309,6 +309,34 @@ describe('runCleanup — bypass-write audit', () => {
     expect(notes.some((l) => l.includes('for PR 999'))).toBe(true);
   });
 
+  it('clears any prior Enterprise host for a github.com report (host: null)', () => {
+    // setGhHost(undefined) is what un-routes gh after an Enterprise review in
+    // the same process; only the Enterprise fixture was asserted before.
+    mocks.readFileSync.mockReturnValue(
+      JSON.stringify({
+        prNumber: '123',
+        ownerRepo: 'acme/widgets',
+        fetchedAt: '2026-07-24T08:00:00Z',
+        host: null,
+      }),
+    );
+    mocks.ghApiAll.mockReturnValue([
+      {
+        id: 9,
+        user: { login: 'reviewer' },
+        created_at: '2026-07-24T09:00:00Z',
+      },
+    ]);
+
+    runCleanup('pr-123');
+
+    expect(mocks.setGhHost).toHaveBeenCalledWith(undefined);
+    const warnings = mocks.writeStdoutLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('warning:'));
+    expect(warnings.join('\n')).toContain('posted comment 9');
+  });
+
   it('does not resolve the current user when the window has no comments at all', () => {
     mocks.readFileSync.mockReturnValue(fetchReport);
     mocks.ghApiAll.mockReturnValue([]);
