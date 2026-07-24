@@ -118,13 +118,41 @@ describe('comment-status handler', () => {
     expect(warnings()).toEqual([]);
   });
 
-  it('flags drift and warns when the worktree lags the live head', async () => {
+  it('flags drift, warns, and denormalizes staleWorktree onto each thread when the worktree lags', async () => {
+    // A thread must be present so the denormalization loop is actually
+    // exercised: with zero threads it iterates over nothing and would pass
+    // even if the block were removed.
+    mocks.ghApiAll.mockReturnValue([
+      {
+        id: 1,
+        user: { login: 'r' },
+        path: 'a.ts',
+        line: 1,
+        original_commit_id: 's',
+      },
+    ]);
     queueHeads('headB', 'headB'); // live head B, worktree still at headA
     await run();
     const report = reportWritten();
     expect(report.headDrift).toBe(true);
     expect(report.headMovedDuringFetch).toBe(false);
+    expect(report.threads[0].code.staleWorktree).toBe(true);
     expect(warnings().join('\n')).toContain('worktree HEAD');
+  });
+
+  it('threads --host to setGhHost so a GHE review targets the right host', async () => {
+    queueHeads('headA', 'headA');
+    const handler = commentStatusCommand.handler;
+    if (!handler) throw new Error('handler missing');
+    await handler({
+      _: [],
+      $0: 'qwen',
+      pr_number: '7632',
+      owner_repo: 'o/r',
+      out: '/repo/.qwen/tmp/qwen-review-pr-7632-comment-status.json',
+      host: 'github.example.com',
+    } as unknown as Parameters<typeof handler>[0]);
+    expect(mocks.setGhHost).toHaveBeenCalledWith('github.example.com');
   });
 
   it('flags a push that raced the comments fetch, recording both samples', async () => {

@@ -160,9 +160,18 @@ export function ghApi(path: string, jq?: string): unknown {
  *
  * Use this for endpoints that return arrays and may have more than 30
  * (the default `per_page`) entries — PR `/comments`, `/issues/{n}/comments`,
- * `/reviews`, etc. `gh --paginate` walks every `next` link and concatenates
- * each page's array into a single top-level array, so a single
- * `JSON.parse` recovers the full set.
+ * `/reviews`, etc.
+ *
+ * **Why a single `JSON.parse` is correct on multi-page output (a recurring
+ * review question):** for a TOP-LEVEL JSON array `gh --paginate` MERGES the
+ * pages into one array — it does NOT emit one array per page. So the output
+ * is a single well-formed array and `JSON.parse` recovers the full set. The
+ * per-page-concatenation failure mode (`}{` / `][` between pages that would
+ * throw) only happens for endpoints whose array is NESTED under a key (e.g.
+ * `check-runs`), and those go through {@link ghApiAllNested} with
+ * `--jq '.<key>[]'` + NDJSON parsing precisely because `--paginate` can't
+ * merge them. Verified empirically on a 4-page (`per_page=30`, 97-comment)
+ * `pulls/{n}/comments` response: zero `][` markers, one array, clean parse.
  *
  * Returns `[]` for empty responses or non-array payloads (defensive — the
  * endpoint may legitimately return an object on a 4xx-style 200, e.g. an
