@@ -44,9 +44,10 @@
 // caller's.
 
 import type { CommandModule } from 'yargs';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { ghWithInput, setGhHost } from './lib/gh.js';
+import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
 import { parseReviewArgs } from './parse-args.js';
 import { composeReview, type ComposeReviewInput } from './compose-review.js';
 import {
@@ -520,7 +521,32 @@ export function runSubmit(args: SubmitArgs): void {
   // GitHub would receive a payload that never passed the gate. `--input -` posts
   // exactly the object we parsed and checked. (Still `--input`, never `-f body=`,
   // so the body's newlines reach GitHub as newlines.)
-  ghWithInput(JSON.stringify(post), 'api', target, '--input', '-');
+  const response = ghWithInput(
+    JSON.stringify(post),
+    'api',
+    target,
+    '--input',
+    '-',
+  );
+  // Receipt for cleanup's bypass audit: the ONE review this run was
+  // authorised to create, by id. The audit lists reviews by the reviewing
+  // account inside the window and flags any the receipt does not vouch for —
+  // without the id, a bypass posted through `gh pr review` (a review, not an
+  // issue comment) would be indistinguishable from the sanctioned one.
+  // Best-effort: a receipt failure must never fail a review that DID post.
+  try {
+    const reviewId = (JSON.parse(response) as { id?: number }).id;
+    if (typeof reviewId === 'number') {
+      mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+      writeFileSync(
+        tmpFile(`pr-${args.pr}`, 'submit-receipt.json'),
+        `${JSON.stringify({ reviewId, event, postedAt: new Date().toISOString() })}\n`,
+        'utf8',
+      );
+    }
+  } catch {
+    /* audit metadata only — the post itself succeeded */
+  }
   writeStderrLine(
     `Posted ${event} to ${args.repo}#${args.pr} — ${auth.why}` +
       (cappedBy.length ? ` (capped by ${cappedBy.join(', ')})` : '') +

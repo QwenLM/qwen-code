@@ -52,6 +52,26 @@ export interface RawIssueComment {
  */
 const AUTOMATION_MARKER = '<!-- qwen-';
 
+/**
+ * The bot workflows put their marker on the FIRST line of the body; anchoring
+ * the test there keeps a hand-posted summary that merely QUOTES a marked
+ * comment (or deliberately embeds the marker mid-body to hide) visible to
+ * the tripwire.
+ */
+function isAutomationComment(body: string | null | undefined): boolean {
+  return (body ?? '').trimStart().startsWith(AUTOMATION_MARKER);
+}
+
+/**
+ * Clock-skew allowance subtracted from the recorded window opening before it
+ * is used as the audit boundary. `fetchedAt` is a LOCAL timestamp compared
+ * against GitHub's SERVER timestamps: a fast local clock would otherwise
+ * hide bypass writes made in the first moments of the review. Two minutes
+ * errs toward over-flagging (fail-safe — the warning copy already covers
+ * "the user did this themselves").
+ */
+const CLOCK_SKEW_MS = 2 * 60 * 1000;
+
 export interface WindowWrites {
   /** Created inside the window by the reviewing account — the incident shape. */
   posted: RawIssueComment[];
@@ -93,7 +113,7 @@ export function findUnsanctionedIssueComments(
     (c) =>
       (c.user?.login ?? '').toLowerCase() === reviewerLc &&
       typeof c.created_at === 'string' &&
-      !(c.body ?? '').includes(AUTOMATION_MARKER),
+      !isAutomationComment(c.body),
   );
   return {
     posted: relevant.filter((c) => c.created_at! >= sinceIso),
@@ -115,7 +135,45 @@ interface AuditWindow {
   prNumber: string;
   ownerRepo: string;
   fetchedAt: string;
+  /** Earliest window opening across drift restarts (fetch-pr preserves it);
+   * falls back to fetchedAt for reports written before it existed. A restart
+   * must not blind the audit to writes made during the abandoned attempt. */
+  auditSince: string;
   host: string | null;
+}
+
+/** A review, as listed by `GET /pulls/{n}/reviews`. */
+export interface RawReview {
+  id: number;
+  user?: { login: string } | null;
+  state?: string;
+  submitted_at?: string;
+  html_url?: string;
+}
+
+/**
+ * Reviews the reviewing account submitted inside the window that the submit
+ * receipt does not vouch for. Step 7's ban covers this channel too (`gh pr
+ * review`, direct POSTs to `pulls/<n>/reviews`), and unlike issue comments
+ * a review CAN legitimately appear here — the sanctioned submit posts one —
+ * so sanctioned-vs-bypass is decided by id against the receipt submit wrote.
+ * No receipt vouches for nothing: with zero sanctioned writes recorded,
+ * every in-window review by the account is flagged (fail-safe).
+ */
+export function findUnsanctionedReviews(
+  reviews: RawReview[],
+  reviewer: string,
+  sinceIso: string,
+  receiptReviewId: number | null,
+): RawReview[] {
+  const reviewerLc = reviewer.toLowerCase();
+  return reviews.filter(
+    (r) =>
+      (r.user?.login ?? '').toLowerCase() === reviewerLc &&
+      typeof r.submitted_at === 'string' &&
+      r.submitted_at >= sinceIso &&
+      r.id !== receiptReviewId,
+  );
 }
 
 const OWNER_REPO_RE = /^[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
@@ -127,8 +185,16 @@ function readAuditWindow(
   let raw: string;
   try {
     raw = readFileSync(tmpFile(target, 'fetch.json'), 'utf8');
-  } catch {
-    return { skip: 'no fetch report' };
+  } catch (err) {
+    // Only ENOENT means "no report"; any other failure (permissions, EISDIR,
+    // I/O) is a different problem and pointing the operator at "no fetch
+    // report" sends them the wrong way.
+    const code = (err as NodeJS.ErrnoException).code;
+    return code === 'ENOENT'
+      ? { skip: 'no fetch report' }
+      : {
+          skip: `cannot read fetch report (${code ?? (err as Error).message})`,
+        };
   }
   try {
     const report = JSON.parse(raw) as Partial<AuditWindow>;
@@ -155,17 +221,51 @@ function readAuditWindow(
     if (!OWNER_REPO_RE.test(report.ownerRepo)) {
       return { skip: 'fetch report ownerRepo is not owner/repo-shaped' };
     }
+    const auditSince =
+      typeof report.auditSince === 'string' &&
+      !Number.isNaN(Date.parse(report.auditSince))
+        ? report.auditSince
+        : report.fetchedAt;
+    if (Number.isNaN(Date.parse(auditSince))) {
+      return { skip: 'fetch report fetchedAt is not a timestamp' };
+    }
     return {
       window: {
         prNumber: report.prNumber,
         ownerRepo: report.ownerRepo,
         fetchedAt: report.fetchedAt,
+        auditSince,
         host: typeof report.host === 'string' ? report.host : null,
       },
     };
   } catch {
     return { skip: 'fetch report is not valid JSON' };
   }
+}
+
+/** The review id the sanctioned submit recorded, or null when none did. */
+function readSubmitReceipt(target: string): number | null {
+  try {
+    const receipt = JSON.parse(
+      readFileSync(tmpFile(target, 'submit-receipt.json'), 'utf8'),
+    ) as { reviewId?: unknown };
+    return typeof receipt.reviewId === 'number' ? receipt.reviewId : null;
+  } catch {
+    return null;
+  }
+}
+
+/** First line that actually says something: gh puts the HTTP/auth/DNS cause
+ * on stderr while `err.message` is often the generic "Command failed" wrap. */
+function briefErrorLine(err: unknown): string {
+  const stderr = (err as { stderr?: unknown }).stderr;
+  if (typeof stderr === 'string') {
+    const line = stderr.split('\n').find((l) => l.trim().length > 0);
+    if (line) return line.trim();
+  }
+  return err instanceof Error
+    ? (err.message.split('\n')[0] ?? String(err))
+    : String(err);
 }
 
 /**
@@ -187,22 +287,43 @@ function auditPrWrites(target: string, prNumber: string): void {
   const window = read.window;
   try {
     setGhHost(window.host ?? undefined);
+    // The boundary backs off from the recorded opening: fetchedAt is local
+    // time compared against GitHub's server timestamps (see CLOCK_SKEW_MS),
+    // and auditSince already reaches back across drift restarts.
+    const boundary = new Date(
+      Date.parse(window.auditSince) - CLOCK_SKEW_MS,
+    ).toISOString();
     const comments = ghApiAll(
-      `repos/${window.ownerRepo}/issues/${window.prNumber}/comments?since=${encodeURIComponent(window.fetchedAt)}&per_page=100`,
+      `repos/${window.ownerRepo}/issues/${window.prNumber}/comments?since=${encodeURIComponent(boundary)}&per_page=100`,
     ) as RawIssueComment[];
+    const reviews = (
+      ghApiAll(
+        `repos/${window.ownerRepo}/pulls/${window.prNumber}/reviews?per_page=100`,
+      ) as RawReview[]
+    ).filter(
+      (r) => typeof r.submitted_at === 'string' && r.submitted_at >= boundary,
+    );
     // The common case; skipping currentUser() here saves a network round
     // trip on every clean cleanup.
-    if (comments.length === 0) return;
+    if (comments.length === 0 && reviews.length === 0) return;
+    const me = currentUser();
     const { posted, edited } = findUnsanctionedIssueComments(
       comments,
-      currentUser(),
-      window.fetchedAt,
+      me,
+      boundary,
     );
-    if (posted.length === 0 && edited.length === 0) return;
+    const rogueReviews = findUnsanctionedReviews(
+      reviews,
+      me,
+      boundary,
+      readSubmitReceipt(target),
+    );
+    const total = posted.length + edited.length + rogueReviews.length;
+    if (total === 0) return;
     writeStdoutLine(
-      `warning: ${posted.length + edited.length} issue-comment write(s) by the reviewing account on ` +
-        `${window.ownerRepo}#${window.prNumber} during this review window. ` +
-        `The only sanctioned write in /review is \`qwen review submit\`, and it never touches issue comments:`,
+      `warning: ${total} write(s) by the reviewing account on ` +
+        `${window.ownerRepo}#${window.prNumber} during this review window were not made by ` +
+        `\`qwen review submit\` — the only sanctioned write in /review:`,
     );
     for (const c of posted) {
       writeStdoutLine(
@@ -214,13 +335,18 @@ function auditPrWrites(target: string, prNumber: string): void {
         `warning:   edited comment ${c.id} at ${c.updated_at}${c.html_url ? ` — ${c.html_url}` : ''}`,
       );
     }
+    for (const r of rogueReviews) {
+      writeStdoutLine(
+        `warning:   review ${r.id} (${r.state ?? 'UNKNOWN'}) at ${r.submitted_at}${r.html_url ? ` — ${r.html_url}` : ''} — no submit receipt vouches for it`,
+      );
+    }
     writeStdoutLine(
       `warning: if the user did this themselves — or another workflow posts under the same ` +
         `account — ignore this; otherwise a write bypassed the submit gate. ` +
         `Relay this warning verbatim in the terminal summary.`,
     );
   } catch (err) {
-    skipNote(err instanceof Error ? err.message.split('\n')[0] : String(err));
+    skipNote(briefErrorLine(err));
   }
 }
 

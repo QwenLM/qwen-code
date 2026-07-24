@@ -206,6 +206,9 @@ describe('fetchPrCommand builder', () => {
 
 const producerMocks = vi.hoisted(() => ({
   writeFileSync: vi.fn(),
+  readFileSync: vi.fn((): string => {
+    throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+  }),
   gh: vi.fn(),
   git: vi.fn(),
 }));
@@ -217,9 +220,11 @@ vi.mock('node:fs', async (importOriginal) => {
     default: {
       ...actual,
       mkdirSync: vi.fn(),
+      readFileSync: producerMocks.readFileSync,
       writeFileSync: producerMocks.writeFileSync,
     },
     mkdirSync: vi.fn(),
+    readFileSync: producerMocks.readFileSync,
     writeFileSync: producerMocks.writeFileSync,
   };
 });
@@ -312,5 +317,30 @@ describe('fetch-pr report — audit-window contract', () => {
   it('carries --host into the report for the cleanup audit to reuse', async () => {
     const report = await reportFor({ host: 'ghe.example.com' });
     expect(report.host).toBe('ghe.example.com');
+  });
+
+  it('preserves the earliest window opening across drift restarts of the same PR', async () => {
+    // A drift restart reruns fetch-pr and overwrites this report; the audit
+    // boundary must keep reaching back to the abandoned attempt's opening.
+    producerMocks.readFileSync.mockReturnValue(
+      JSON.stringify({
+        prNumber: '42',
+        fetchedAt: '2020-01-01T00:00:00.000Z',
+      }),
+    );
+    const report = await reportFor({});
+    expect(report.auditSince).toBe('2020-01-01T00:00:00.000Z');
+    expect(report.fetchedAt).not.toBe('2020-01-01T00:00:00.000Z');
+  });
+
+  it('does not inherit a window from a DIFFERENT PR left at the same path', async () => {
+    producerMocks.readFileSync.mockReturnValue(
+      JSON.stringify({
+        prNumber: '999',
+        fetchedAt: '2020-01-01T00:00:00.000Z',
+      }),
+    );
+    const report = await reportFor({});
+    expect(report.auditSince).toBe(report.fetchedAt);
   });
 });

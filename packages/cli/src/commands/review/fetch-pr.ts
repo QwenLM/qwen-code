@@ -27,7 +27,7 @@
 
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createReviewWorktreeLease } from '../../services/review-worktree-lease.js';
@@ -87,6 +87,12 @@ type FetchPrResult = PlanReport & {
    * through `qwen review submit` — the submit-only contract's tripwire.
    */
   fetchedAt: string;
+  /**
+   * Earliest `fetchedAt` across drift restarts of the SAME PR (the head-drift
+   * rule reruns fetch-pr, overwriting this report). Cleanup audits from here,
+   * so a write made during an abandoned attempt stays inside the window.
+   */
+  auditSince: string;
   /** GitHub host this PR lives on (Enterprise), null for github.com — so the
    * cleanup audit queries the same host the review did. */
   host: string | null;
@@ -286,14 +292,42 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     plan = buildDiffPlan('', args.maxChunkLines);
   }
 
-  // 6. Emit the report.
+  // 6. Emit the report. The window opening survives drift restarts: this
+  // command overwrites its own report, and a reset boundary would hide any
+  // bypass write made during the abandoned attempt from cleanup's audit.
+  const fetchedAt = new Date().toISOString();
+  let auditSince = fetchedAt;
+  try {
+    const prev = JSON.parse(readFileSync(out, 'utf8')) as {
+      prNumber?: unknown;
+      fetchedAt?: unknown;
+      auditSince?: unknown;
+    };
+    const prevSince =
+      typeof prev.auditSince === 'string'
+        ? prev.auditSince
+        : typeof prev.fetchedAt === 'string'
+          ? prev.fetchedAt
+          : null;
+    if (
+      prev.prNumber === prNumber &&
+      prevSince !== null &&
+      !Number.isNaN(Date.parse(prevSince)) &&
+      prevSince < auditSince
+    ) {
+      auditSince = prevSince;
+    }
+  } catch {
+    /* no previous report — first attempt for this target */
+  }
   const result: FetchPrResult = {
     prNumber,
     ownerRepo,
     remote,
     ref,
     fetchedSha,
-    fetchedAt: new Date().toISOString(),
+    fetchedAt,
+    auditSince,
     host: args.host ?? null,
     worktreePath: wt,
     baseRefName: meta.baseRefName,

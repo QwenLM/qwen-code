@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({
   execFileSync: vi.fn(),
   existsSync: vi.fn(() => false),
   readdirSync: vi.fn(() => []),
-  readFileSync: vi.fn((): string => {
+  readFileSync: vi.fn((_path: string): string => {
     throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
   }),
   rmSync: vi.fn(),
@@ -20,7 +20,7 @@ const mocks = vi.hoisted(() => ({
     freed: false,
     reason: undefined,
   })),
-  ghApiAll: vi.fn((): unknown[] => []),
+  ghApiAll: vi.fn((_path: string): unknown[] => []),
   currentUser: vi.fn(() => 'reviewer'),
   setGhHost: vi.fn(),
 }));
@@ -84,8 +84,10 @@ vi.mock('./lib/paths.js', () => ({
 
 import {
   findUnsanctionedIssueComments,
+  findUnsanctionedReviews,
   runCleanup,
   type RawIssueComment,
+  type RawReview,
 } from './cleanup.js';
 
 describe('runCleanup', () => {
@@ -175,6 +177,22 @@ describe('findUnsanctionedIssueComments', () => {
     expect(got.posted).toEqual([]);
   });
 
+  it('still flags a comment that merely QUOTES an automation marker mid-body', () => {
+    // The filter is anchored to the body start: a hand-posted summary quoting
+    // a marked bot comment (or hiding the marker mid-body) stays visible.
+    const got = findUnsanctionedIssueComments(
+      [
+        comment({
+          id: 9,
+          body: 'summary quoting:\n<!-- qwen-triage stage=1 -->',
+        }),
+      ],
+      'reviewer',
+      since,
+    );
+    expect(got.posted.map((c) => c.id)).toEqual([9]);
+  });
+
   it('drops comments carrying the repo automation marker — CI shares the bot account', () => {
     const got = findUnsanctionedIssueComments(
       [
@@ -201,6 +219,41 @@ describe('findUnsanctionedIssueComments', () => {
     );
     expect(got.posted).toEqual([]);
     expect(got.edited).toEqual([]);
+  });
+});
+
+describe('findUnsanctionedReviews', () => {
+  const since = '2026-07-24T08:00:00Z';
+  const review = (over: Partial<RawReview> & { id: number }) =>
+    ({
+      user: { login: 'reviewer' },
+      state: 'COMMENTED',
+      submitted_at: '2026-07-24T09:00:00Z',
+      ...over,
+    }) as RawReview;
+
+  it('flags in-window reviews by the account that the receipt does not vouch for', () => {
+    const got = findUnsanctionedReviews(
+      [
+        review({ id: 1 }),
+        review({ id: 2, user: { login: 'someone-else' } }),
+        review({ id: 3, submitted_at: '2026-07-24T07:00:00Z' }),
+      ],
+      'reviewer',
+      since,
+      null,
+    );
+    expect(got.map((r) => r.id)).toEqual([1]);
+  });
+
+  it('excludes exactly the receipt-vouched review id', () => {
+    const got = findUnsanctionedReviews(
+      [review({ id: 1 }), review({ id: 2 })],
+      'reviewer',
+      since,
+      2,
+    );
+    expect(got.map((r) => r.id)).toEqual([1]);
   });
 });
 
@@ -344,6 +397,191 @@ describe('runCleanup — bypass-write audit', () => {
     runCleanup('pr-123');
 
     expect(mocks.currentUser).not.toHaveBeenCalled();
+  });
+
+  it('reaches back past the recorded opening by the clock-skew allowance', () => {
+    // fetchedAt 08:00:00 → boundary 07:58:00; a comment at 07:58:30 predates
+    // the recorded opening but only by less than the allowance, so a fast
+    // local clock cannot hide it.
+    mocks.readFileSync.mockReturnValue(fetchReport);
+    mocks.ghApiAll.mockImplementation((path: string) =>
+      path.includes('/issues/')
+        ? [
+            {
+              id: 11,
+              user: { login: 'reviewer' },
+              created_at: '2026-07-24T07:58:30Z',
+            },
+          ]
+        : [],
+    );
+
+    runCleanup('pr-123');
+
+    const warnings = mocks.writeStdoutLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('warning:'));
+    expect(warnings.join('\n')).toContain('posted comment 11');
+    expect(
+      String(
+        mocks.ghApiAll.mock.calls.find(([p]) =>
+          String(p).includes('/issues/'),
+        )![0],
+      ),
+    ).toContain(encodeURIComponent('2026-07-24T07:58:00.000Z'));
+  });
+
+  it('audits from auditSince when drift restarts pushed fetchedAt forward', () => {
+    mocks.readFileSync.mockReturnValue(
+      JSON.stringify({
+        prNumber: '123',
+        ownerRepo: 'acme/widgets',
+        fetchedAt: '2026-07-24T10:00:00Z',
+        auditSince: '2026-07-24T08:00:00Z',
+        host: null,
+      }),
+    );
+    mocks.ghApiAll.mockImplementation((path: string) =>
+      path.includes('/issues/')
+        ? [
+            {
+              id: 12,
+              user: { login: 'reviewer' },
+              created_at: '2026-07-24T08:30:00Z',
+            },
+          ]
+        : [],
+    );
+
+    runCleanup('pr-123');
+
+    const warnings = mocks.writeStdoutLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('warning:'));
+    expect(warnings.join('\n')).toContain('posted comment 12');
+  });
+
+  it('renders the edited-comment warning with id, timestamp and URL through runCleanup', () => {
+    mocks.readFileSync.mockReturnValue(fetchReport);
+    mocks.ghApiAll.mockImplementation((path: string) =>
+      path.includes('/issues/')
+        ? [
+            {
+              id: 21,
+              user: { login: 'reviewer' },
+              created_at: '2026-07-24T06:00:00Z',
+              updated_at: '2026-07-24T09:10:00Z',
+              html_url: 'https://ghe.example.com/acme/widgets/pull/123#c21',
+            },
+          ]
+        : [],
+    );
+
+    runCleanup('pr-123');
+
+    const warnings = mocks.writeStdoutLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('warning:'));
+    expect(warnings.join('\n')).toContain(
+      'edited comment 21 at 2026-07-24T09:10:00Z — https://ghe.example.com/acme/widgets/pull/123#c21',
+    );
+  });
+
+  it('flags an in-window review with no receipt, and spares the receipt-vouched one', () => {
+    mocks.readFileSync.mockImplementation((path: string) => {
+      if (String(path).endsWith('submit-receipt.json')) {
+        return JSON.stringify({ reviewId: 500 });
+      }
+      return fetchReport;
+    });
+    mocks.ghApiAll.mockImplementation((path: string) =>
+      path.includes('/reviews')
+        ? [
+            {
+              id: 500,
+              user: { login: 'reviewer' },
+              state: 'COMMENT',
+              submitted_at: '2026-07-24T09:00:00Z',
+            },
+            {
+              id: 501,
+              user: { login: 'reviewer' },
+              state: 'APPROVED',
+              submitted_at: '2026-07-24T09:05:00Z',
+              html_url: 'https://ghe.example.com/acme/widgets/pull/123#r501',
+            },
+          ]
+        : [],
+    );
+
+    runCleanup('pr-123');
+
+    const warnings = mocks.writeStdoutLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('warning:'));
+    expect(warnings.join('\n')).toContain('review 501 (APPROVED)');
+    expect(warnings.join('\n')).toContain('no submit receipt vouches for it');
+    expect(warnings.join('\n')).not.toContain('review 500');
+  });
+
+  it('names each malformed-report shape and never reaches GitHub', () => {
+    const cases: Array<[string, string]> = [
+      ['not json at all {', 'not valid JSON'],
+      [
+        JSON.stringify({ fetchedAt: '2026-07-24T08:00:00Z' }),
+        'missing prNumber/ownerRepo',
+      ],
+      [
+        JSON.stringify({
+          prNumber: '123',
+          ownerRepo: 'evil repo/../../x',
+          fetchedAt: '2026-07-24T08:00:00Z',
+        }),
+        'not owner/repo-shaped',
+      ],
+    ];
+    for (const [raw, expected] of cases) {
+      vi.clearAllMocks();
+      mocks.readFileSync.mockReturnValue(raw);
+      runCleanup('pr-123');
+      expect(mocks.ghApiAll).not.toHaveBeenCalled();
+      const notes = mocks.writeStderrLine.mock.calls
+        .map((c) => String(c[0]))
+        .filter((l) => l.startsWith('note: bypass audit skipped'));
+      expect(notes.join('\n')).toContain(expected);
+    }
+  });
+
+  it('distinguishes an unreadable report from an absent one', () => {
+    mocks.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('EACCES: permission denied'), {
+        code: 'EACCES',
+      });
+    });
+
+    runCleanup('pr-123');
+
+    const notes = mocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('note: bypass audit skipped'));
+    expect(notes.join('\n')).toContain('cannot read fetch report (EACCES)');
+    expect(notes.join('\n')).not.toContain('no fetch report');
+  });
+
+  it('surfaces the first non-empty stderr line when gh fails, not the generic wrapper', () => {
+    mocks.readFileSync.mockReturnValue(fetchReport);
+    mocks.ghApiAll.mockImplementation(() => {
+      throw Object.assign(new Error('Command failed: gh api …'), {
+        stderr: '\ngh: Not authenticated. Run gh auth login.\n',
+      });
+    });
+
+    runCleanup('pr-123');
+
+    const notes = mocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('note: bypass audit skipped'));
+    expect(notes.join('\n')).toContain('gh: Not authenticated');
   });
 
   it('never fails the cleanup when the audit itself fails', () => {
