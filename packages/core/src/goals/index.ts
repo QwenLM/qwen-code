@@ -59,3 +59,5 @@ export type {
   LegacyGoalStatusKind,
   LegacyGoalTerminal,
 } from './goal-legacy-projection.js';
+export * from './goal-evidence.js';
+export * from './goal-verifier.js';
