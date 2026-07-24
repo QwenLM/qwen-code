@@ -1,0 +1,222 @@
+name: '🚦 Qwen PR Gate Review'
+
+on:
+  pull_request_target:
+    types: ['opened']
+  pull_request:
+    types: ['opened', 'synchronize']
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'PR number to review'
+        required: true
+        type: 'number'
+
+jobs:
+  gate-review:
+    if: |-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'pull_request_target' &&
+       github.event.action == 'opened' &&
+       (github.event.pull_request.author_association == 'OWNER' ||
+        github.event.pull_request.author_association == 'MEMBER' ||
+        github.event.pull_request.author_association == 'COLLABORATOR')) ||
+      (github.event_name == 'pull_request' &&
+       (github.event.action == 'opened' || github.event.action == 'synchronize') &&
+       (github.event.pull_request.author_association == 'OWNER' ||
+        github.event.pull_request.author_association == 'MEMBER' ||
+        github.event.pull_request.author_association == 'COLLABORATOR'))
+    timeout-minutes: 15
+    runs-on: [self-hosted, linux, x64, ecs-qwen]
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+      pull-requests: 'write'
+      issues: 'write'
+    steps:
+      - name: 'Checkout PR code'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd'  # v6.0.2
+        with:
+          token: '${{ secrets.GITHUB_TOKEN }}'
+          fetch-depth: 0
+
+      - name: 'Get PR details'
+        id: 'get_pr'
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+        run: |-
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            PR_NUMBER=${{ github.event.inputs.pr_number }}
+          else
+            PR_NUMBER=${{ github.event.pull_request.number }}
+          fi
+          echo "pr_number=$PR_NUMBER" >> "$GITHUB_OUTPUT"
+          # Get PR details as JSON (use heredoc for multiline)
+          PR_DATA=$(gh pr view $PR_NUMBER --json title,body,additions,deletions,changedFiles,baseRefName,headRefName,author)
+          {
+            echo "pr_data<<EOF"
+            echo "$PR_DATA"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          # Get file changes
+          CHANGED_FILES=$(gh pr diff $PR_NUMBER --name-only)
+          {
+            echo "changed_files<<EOF"
+            echo "$CHANGED_FILES"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: 'Run Qwen PR Gate Review'
+        uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
+        env:
+          GITHUB_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
+          PR_NUMBER: '${{ steps.get_pr.outputs.pr_number }}'
+          PR_DATA: '${{ steps.get_pr.outputs.pr_data }}'
+          CHANGED_FILES: '${{ steps.get_pr.outputs.changed_files }}'
+          REPOSITORY: '${{ github.repository }}'
+        with:
+          OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
+          settings_json: |-
+            {
+              "coreTools": [
+                "run_shell_command",
+                "write_file"
+              ],
+              "sandbox": false
+            }
+          prompt: |-
+            You are the Chief Product Decision Maker for Qwen Code, a terminal-based AI coding assistant.
+            Your role is to perform a **gate review** on new Pull Requests.
+            You have access to shell commands to gather all PR information. Do NOT ask for information.
+
+            ## Gather Information
+
+            Run these commands in order:
+            1. `echo "$PR_NUMBER"` — PR number
+            2. `echo "$PR_DATA"` — PR details in JSON (title, body, additions, deletions, changedFiles, author)
+            3. `echo "$CHANGED_FILES"` — list of changed files
+            4. `cat .github/pull_request_template.md` — the required PR template
+            5. `gh pr diff $PR_NUMBER` — full code diff
+            6. For any specific files of interest: `cat filename` or `head -100 filename`
+
+            ## Review Criteria
+
+            Evaluate the PR on these 4 dimensions. Be strict but fair.
+
+            ### 1. PR 模板合规性 (Template Compliance)
+
+            Compare the PR body against `pull_request_template.md`. Check each required section:
+
+            - **What this PR does**: Must have meaningful prose description, not just "updated file X"
+            - **Why it's needed**: Must explain motivation clearly
+            - **Reviewer Test Plan / How to verify**: Must have reproducible steps
+            - **Evidence (Before & After)**: Must contain real evidence (see section 2 below)
+            - **Tested on**: OS table must be filled (at least one OS marked)
+            - **Risk & Scope**: Risks and tradeoffs identified
+            - **Linked Issues**: Must reference an existing issue (Closes/Fixes/Resolves #N)
+            - **中文说明**: Chinese translation section must be present and non-empty
+
+            Rate each section: ✅ Pass / ⚠️ Incomplete / ❌ Missing
+
+            ### 2. 测试证据 (Test Evidence)
+
+            This is critical. The PR MUST include:
+
+            - **For TUI/CLI changes**: Real screenshots or tmux session logs showing qwen running with the change. The tmux log should show actual terminal output, not fabricated text.
+            - **For non-UI changes**: Test output, logs, or a clear "N/A" with justification.
+            - **For bug fixes**: Before/after evidence demonstrating the fix.
+
+            Red flags:
+            - No evidence at all
+            - Placeholder text like "screenshot here" or "TBD"
+            - Evidence that doesn't match the described change
+            - Fabricated tmux logs (look for inconsistencies in terminal formatting)
+
+            ### 3. 产品动机评估 — KISS Principle
+
+            From the perspective of Qwen Code's product philosophy:
+
+            - **核心原则: KISS (Keep It Simple, Stupid)**
+            - **如无必要，勿增实体** — Are we adding entities/features that aren't strictly needed?
+            - Does this PR solve a **real, stated problem** or is it speculative?
+            - Is the motivation aligned with Qwen Code being a **minimal, focused terminal tool**?
+            - Could the same outcome be achieved with **less code or fewer changes**?
+            - Does this add unnecessary complexity to the codebase?
+
+            If the motivation is weak or the approach is over-engineered, flag it clearly.
+
+            ### 4. 代码简洁性 (Code Minimalism)
+
+            Evaluate the diff:
+
+            - Is this the **minimal change** to solve the stated problem?
+            - Any speculative features, "future-proofing", or unnecessary abstractions?
+            - Any error handling for impossible scenarios?
+            - If 200 lines were used where 50 would suffice, flag for rewrite
+            - Are there unrelated changes mixed in?
+            - Is the code readable without being over-commented?
+
+            Reference: The project's AGENTS.md states: "200 行能用 50 行解决就重写" (If 200 lines can be solved with 50, rewrite it)
+
+            ## Output Format
+
+            Write your review to `review.md` using `write_file`, then post it with:
+            `gh pr comment $PR_NUMBER --body-file review.md --repo $REPOSITORY`
+
+            Use this exact structure:
+
+            ```markdown
+            ## 🚦 PR Gate Review
+
+            ### 1. PR 模板合规性
+
+            | Section | Status |
+            |:---|:---:|
+            | What this PR does | ✅/⚠️/❌ |
+            | Why it's needed | ✅/⚠️/❌ |
+            | How to verify | ✅/⚠️/❌ |
+            | Evidence (Before & After) | ✅/⚠️/❌ |
+            | Tested on | ✅/⚠️/❌ |
+            | Risk & Scope | ✅/⚠️/❌ |
+            | Linked Issues | ✅/⚠️/❌ |
+            | 中文说明 | ✅/⚠️/❌ |
+
+            (Add brief notes for any ⚠️ or ❌ items)
+
+            ### 2. 测试证据
+
+            (Assessment of test evidence quality and authenticity)
+
+            ### 3. 产品动机 (KISS)
+
+            (Evaluation of motivation, necessity, and alignment with product philosophy)
+
+            ### 4. 代码简洁性
+
+            (Assessment of code minimalism and change scope)
+
+            ---
+
+            ## 📋 总体结论
+
+            **Gate: ✅ PASS / ⚠️ NEEDS REVISION / ❌ BLOCK**
+
+            - **PASS**: All dimensions satisfactory
+            - **NEEDS REVISION**: Some issues to address before merge (list key items)
+            - **BLOCK**: Fundamental problems with motivation, approach, or missing critical evidence
+
+            (Key action items if not PASS)
+
+            ---
+
+            *— Signed by Qwen Code*
+            ```
+
+            Important rules:
+            - Be specific: cite file names, line numbers, and quote relevant code when possible
+            - Be constructive: if something is wrong, suggest how to fix it
+            - If the PR is excellent, say so — positive feedback matters
+            - The gate decision must be justified by the analysis above
+            - Always sign with "— Signed by Qwen Code" at the end
