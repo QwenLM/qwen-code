@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 set -eo pipefail
 
+# Invoked as a child `bash` from the review-address verify step; inherits its
+# environment from the caller. WORKDIR and BRANCH are job-level env;
+# GITHUB_OUTPUT and RUNNER_TEMP are runner-provided. None is defined here.
+
 # Record whether the agent left a commit FIRST — this is a ref-only
 # diff, so it runs before the failure.md early-exits and covers an
 # agent that commits and then aborts. The failure handoff keys its
