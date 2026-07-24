@@ -30,6 +30,8 @@ PR #7584.
 - Suite: `dsw_release_swe_verified_v1`
 - PostgreSQL database: `qwen_benchmark_dsw_release_v1`
 - Runtime: `/mnt/workspace/qwen-benchmark-dsw-release-v1`
+- Model credential: `/mnt/workspace/qwen-benchmark-dsw-release-v1/config/model.key`
+  (`root:github-runner`, mode `0640`)
 - OSS: `/mnt/data/qwen-benchmark/dsw-release-v1`
 - Release markers: `qwen-code-dsw-swe-verified`
 

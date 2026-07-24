@@ -17,7 +17,7 @@ if [[ ! -f "${result_json}" ]]; then
 {
   "schema_version": "qwen-code-dsw-swe-verified/v1",
   "status": "PIPELINE_ERROR",
-  "qwen_ref": "${RELEASE_TAG}",
+  "qwen_ref": "${QWEN_REF:-${RELEASE_TAG}}",
   "qwen_commit": "${RELEASE_COMMIT:-unknown}",
   "score_percent": null
 }
@@ -28,7 +28,7 @@ if [[ ! -f "${result_markdown}" ]]; then
 ### SWE-bench Verified
 
 - Status: **PIPELINE_ERROR**
-- Qwen Code: \`${RELEASE_TAG}\` (\`${RELEASE_COMMIT:-unknown}\`)
+- Qwen Code: \`${QWEN_REF:-${RELEASE_TAG}}\` (\`${RELEASE_COMMIT:-unknown}\`)
 - Score: not published because the pipeline did not produce a validated result
 - Workflow: ${GITHUB_RUN_URL:-unknown}
 EOF
