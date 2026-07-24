@@ -210,6 +210,7 @@ export default {
   'toolDisplayName.ExitWorktree': '退出 Worktree',
   'toolDisplayName.Workflow': '工作流程',
   'toolDisplayName.ReadMcpResource': '讀取 MCP 資源',
+  'toolDisplayName.ImageGen': '圖像生成',
 
   '↑ to manage attachments': '↑ 管理附件',
   '← → select, Delete to remove, ↓ to exit': '← → 選擇，Delete 刪除，↓ 退出',
@@ -272,6 +273,7 @@ export default {
     '正在連接到 MCP servers... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': '輸入您的消息或 @ 檔案路徑',
   '? for shortcuts': '按 ? 查看快捷鍵',
+  'Pasting…': '正在貼上…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "按 'i' 進入插入模式，按 'Esc' 進入普通模式",
   'Cancel operation / Clear input (double press)':
@@ -444,6 +446,12 @@ export default {
   'Create a new subagent with guided setup.': '通過引導式設置創建新的子智能體',
   'Create a reusable skill from a knowledge source (file, URL, conversation, or text).':
     '從知識源（檔案、URL、對話或文字）建立可重複使用的技能。',
+  'The current model or provider does not support native video input for /learn. Switch to a video-capable model on an OpenAI-compatible provider and try again.':
+    '目前模型或供應商不支援 /learn 的原生影片輸入。請切換到 OpenAI 相容供應商上的影片模型後再試一次。',
+  'YouTube page URLs cannot be sent as native video input. Download the video into your workspace and pass the local video file path to /learn.':
+    'YouTube 頁面連結不能作為原生影片輸入傳送。請將影片下載到工作區內，再將本機影片檔案路徑傳給 /learn。',
+  'The local video could not be attached for /learn.':
+    '無法為 /learn 附加本機影片。',
   Agents: '智能體',
   'Choose Action': '選擇操作',
   'Edit {{name}}': '編輯 {{name}}',
@@ -1309,6 +1317,8 @@ export default {
     '切換此會話的模型（--fast 可設置建議模型，--voice 可設置語音轉寫模型，[model-id] 可立即切換）',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
     '切換此會話的模型（--fast 建議模型，--voice 語音轉寫模型，--vision 視覺橋接模型，--project 持久化到專案設定，--global 持久化到使用者設定，[model-id] 立即切換，或用 [model-id] [prompt] 在另一個模型上執行一次性提示；內聯提示按原文發送，不展開 @file）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    '切換此會話的模型（--fast 建議模型，--voice 語音轉寫模型，--vision 視覺橋接模型，--image 圖像生成模型，--project 持久化到專案設定，--global 持久化到使用者設定，[model-id] 立即切換，或用 [model-id] [prompt] 在另一個模型上執行一次性提示；內聯提示按原文發送，不展開 @file）',
   "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
     "此模式不支援內聯一次性覆寫——請先執行 '/model {{model}}'，再發送你的提示。",
   "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
@@ -1321,16 +1331,20 @@ export default {
   'Set the model for voice transcription': '設定語音轉寫模型',
   'Set the image-capable model used to transcribe images for a text-only main model':
     '設定用於為純文字主模型轉寫圖像的圖像能力模型',
+  'Set the model used to generate images': '設置用於生成圖像的模型',
   'Persist the model selection to the project settings (workspace scope)':
     '將模型選擇持久化到專案設定（工作區）',
   'Persist the model selection to the user settings (global scope)':
     '將模型選擇持久化到使用者設定（全域）',
   'Select Fast Model': '選擇快速模型',
   'Select Vision Model': '選擇視覺模型',
+  'Select Image Model': '選擇圖像模型',
   'Select Voice Model': '選擇語音模型',
   'Vision Model': '視覺模型',
+  'Image Model': '圖像模型',
   'Voice Model': '語音模型',
   'Selected voice model is unavailable.': '所選語音模型不可用。',
+  'Selected image model is unavailable.': '所選圖像模型不可用。',
   "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
     "語音模型 '{{model}}' 被配置了多次。請先移除重複的模型 ID，再將其選為語音轉寫模型。",
   'Voice dictation: {{status}} (mode: {{mode}}, {{modelText}}).':
@@ -1536,8 +1550,16 @@ export default {
     '當前語音模型：{{voiceModel}}\n使用 "/model --voice <model-id>" 設置語音模型。',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
     '當前視覺模型：{{visionModel}}\n使用 "/model --vision <model-id>" 設置視覺橋接模型。',
+  'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
+    '當前圖像模型：{{imageModel}}\n使用 "/model --image <model-id>" 設置圖像生成模型。',
   "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
     "語音模型 '{{modelName}}' 不唯一。請先配置唯一的模型 ID，再使用 /model --voice。",
+  "Image model '{{modelName}}' matches multiple configured endpoints. Run /model --image without an argument and choose the exact endpoint.":
+    "圖像模型 '{{modelName}}' 匹配了多個已配置的端點。請執行 /model --image（不帶參數）並選擇確切的端點。",
+  "Image model '{{modelName}}' must declare a valid HTTPS baseUrl and credential environment variable.":
+    "圖像模型 '{{modelName}}' 必須宣告有效的 HTTPS baseUrl 和憑據環境變數。",
+  "'{{model}}' must declare a valid HTTPS baseUrl and credential environment variable.":
+    "'{{model}}' 必須宣告有效的 HTTPS baseUrl 和憑據環境變數。",
   none: '無',
   unknown: '未知',
   'Manage folder trust settings': '管理檔案夾信任設置',

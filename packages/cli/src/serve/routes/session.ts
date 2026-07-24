@@ -34,6 +34,8 @@ import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifact
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { isChannelDeliveryError } from '../channel-delivery-ipc.js';
+import { parseChannelDelivery } from '../channel-delivery.js';
 import {
   canonicalizeWorkspace,
   InvalidClientIdError,
@@ -88,6 +90,14 @@ import {
 } from '../generation-sse.js';
 import { requireSessionRuntime } from './session-runtime.js';
 import {
+  branchExists,
+  isDirtyTree,
+  getHeadCommit,
+  createBranch,
+  checkoutRef,
+  deleteBranch,
+} from '../server/git-branch-ops.js';
+import {
   parseVirtualSubagentSessionId,
   type VirtualSubagentSessions,
 } from '../virtual-subagent-sessions.js';
@@ -99,6 +109,24 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import type { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
+
+// `HEAD` is the most prominent ref name git rejects as a branch name.
+// The surrounding predicate covers the remaining reserved forms (`@`, `-`,
+// `..`, `.lock` suffixes, etc.). Compared case-insensitively because ref
+// storage is case-folding on macOS/Windows.
+const GIT_RESERVED_BRANCH = 'HEAD';
+
+// Byte-length caps for branch names. git creates loose refs as files under
+// `.git/refs/heads/`, so each `/`-separated component is bounded by the
+// filesystem's per-component name limit (255 bytes on Linux/macOS, minus the
+// `.lock` suffix git appends while writing). A component over that limit fails
+// inside `git checkout -b` with a raw error that embeds the absolute workspace
+// path; rejecting here keeps every bad name a clean 400. Unicode is allowed, so
+// count UTF-8 bytes, not code points. Mirrors validateBranchName in
+// GitModePopover.tsx; keep the two in sync.
+const MAX_BRANCH_NAME_BYTES = 1000;
+const MAX_BRANCH_COMPONENT_BYTES = 200;
 
 interface RegisterSessionRoutesDeps {
   boundWorkspace: string;
@@ -108,6 +136,7 @@ interface RegisterSessionRoutesDeps {
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   sendBridgeError: SendBridgeError;
   daemonLog?: DaemonLogger;
+  channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
   promptDeadlineMs?: number;
   sessionShellCommandEnabled: boolean;
   languageCodes: string[];
@@ -118,6 +147,8 @@ const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
 const WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES = 64 * 1024;
 const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
   'Transcript pagination state exceeds the safe limit';
+// Must exceed CHANNEL_DELIVERY_IPC_TIMEOUT_MS (30 s, channel-delivery-ipc.ts) plus scheduling slack.
+const CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS = 60_000;
 const PRIMARY_ONLY_LIVE_SESSION_ROUTES = [
   'POST /session/:id/branch',
   'POST /session/:id/fork',
@@ -378,6 +409,62 @@ export function registerSessionRoutes(
     string,
     SessionTranscriptCursorCodec
   >();
+
+  // Tracks workspaces with an active branch session (workspaceCwd → sessionId).
+  // Prevents concurrent branch sessions that would conflict on HEAD. The
+  // POST /session branch block additionally rejects branch creation while any
+  // other live (client-attached) non-worktree session shares the workspace, so
+  // a concurrent current-branch session is not silently moved onto the new
+  // branch. A detached session is not blocked; the dirty-tree check still
+  // covers the most common dirty-tree case.
+  const activeBranchSessions = new Map<string, string>();
+  // Workspaces with a branch creation currently in flight (reserved between
+  // the conflict guard and `activeBranchSessions.set`, which only happens
+  // after spawn). Closes the TOCTOU where two concurrent requests both pass
+  // the guard before either populates `activeBranchSessions`.
+  const inFlightBranchWorkspaces = new Set<string>();
+
+  /** Remove the branch-session tracking entry when a session ends. */
+  const clearBranchSessionEntry = (sessionId: string): void => {
+    for (const [cwd, sid] of activeBranchSessions) {
+      if (sid === sessionId) {
+        activeBranchSessions.delete(cwd);
+      }
+    }
+  };
+
+  /** Roll back a branch creation: restore the base ref and delete the branch. */
+  const rollbackBranchCreation = async (
+    cwd: string,
+    meta: { name: string; baseBranch: string },
+    baseCommit: string | undefined,
+    log: typeof daemonLog,
+  ): Promise<void> => {
+    activeBranchSessions.delete(cwd);
+    inFlightBranchWorkspaces.delete(cwd);
+    // Restore the base ref first and only delete the new branch once the
+    // workspace is off it: `git branch -D` refuses to delete the checked-out
+    // branch, so deleting unconditionally after a failed checkout would just
+    // fail and relies on that git-specific protection. An orphaned branch left
+    // behind here is harmless and cleanable with `git branch -D`.
+    const baseRestored = await checkoutRef(
+      cwd,
+      meta.baseBranch === 'HEAD' && baseCommit ? baseCommit : meta.baseBranch,
+    )
+      .then(() => true)
+      .catch((rollbackErr) => {
+        log?.warn('branch rollback checkout failed', {
+          error: rollbackErr,
+        });
+        return false;
+      });
+    if (!baseRestored) return;
+    await deleteBranch(cwd, meta.name).catch((rollbackErr) => {
+      log?.warn('branch rollback delete failed', {
+        error: rollbackErr,
+      });
+    });
+  };
 
   const getTranscriptCursorCodec = (
     runtime: WorkspaceRuntime,
@@ -1164,6 +1251,208 @@ export function registerSessionRoutes(
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
 
+    // ── Branch creation ────────────────────────────────────────────
+    // When `branch` is present, create and checkout a new git branch
+    // before spawning. The session runs in the same working directory
+    // but on the new branch. Mutually exclusive with `worktree`.
+    let branchMeta: { name: string; baseBranch: string } | undefined;
+    let branchBaseCommit: string | undefined;
+    const rawBranch = body['branch'];
+    if (rawBranch !== undefined && rawBranch !== null) {
+      if (body['worktree'] !== undefined && body['worktree'] !== null) {
+        res.status(400).json({
+          error: '`branch` and `worktree` are mutually exclusive',
+          code: 'branch_and_worktree_conflict',
+        });
+        return;
+      }
+      if (typeof rawBranch !== 'object' || Array.isArray(rawBranch)) {
+        res.status(400).json({
+          error:
+            '`branch` must be an object (e.g. `{"name":"feat/my-feature"}`)',
+          code: 'invalid_branch',
+        });
+        return;
+      }
+      const branchReq = rawBranch as Record<string, unknown>;
+      const branchName = branchReq['name'];
+      if (typeof branchName !== 'string' || branchName.length === 0) {
+        res.status(400).json({
+          error: '`branch.name` must be a non-empty string',
+          code: 'branch_invalid_name',
+        });
+        return;
+      }
+      // Validate git branch name characters and reserved names.
+      // Mirrors validateBranchName in GitModePopover.tsx; keep in sync.
+      if (
+        /[^\p{L}\p{N}._/-]/u.test(branchName) ||
+        branchName.includes('..') ||
+        branchName.includes('//') ||
+        branchName.startsWith('.') ||
+        branchName.startsWith('-') ||
+        branchName.startsWith('/') ||
+        branchName.endsWith('/') ||
+        branchName.endsWith('.') ||
+        branchName.endsWith('.git') ||
+        branchName.includes('@{') ||
+        branchName
+          .split('/')
+          .some((c) => c.startsWith('.') || c.endsWith('.lock')) ||
+        branchName.toUpperCase() === GIT_RESERVED_BRANCH ||
+        Buffer.byteLength(branchName, 'utf8') > MAX_BRANCH_NAME_BYTES ||
+        branchName
+          .split('/')
+          .some(
+            (c) => Buffer.byteLength(c, 'utf8') > MAX_BRANCH_COMPONENT_BYTES,
+          )
+      ) {
+        res.status(400).json({
+          error: `Invalid branch name: ${branchName}`,
+          code: 'branch_invalid_name',
+        });
+        return;
+      }
+      // Reject when another branch session is already active for this
+      // workspace — concurrent branch sessions conflict on HEAD. Runs after
+      // shape/name validation so a malformed body gets 400, not 409.
+      const existingBranchSession = activeBranchSessions.get(workspaceCwd);
+      if (existingBranchSession) {
+        try {
+          // Throws if the session is gone, letting us clean up the stale entry.
+          runtime.bridge.getSessionSummary(existingBranchSession);
+          res.status(409).json({
+            error: 'A branch session is already active for this workspace',
+            code: 'branch_session_conflict',
+            existingSessionId: existingBranchSession,
+          });
+          return;
+        } catch {
+          activeBranchSessions.delete(workspaceCwd);
+        }
+      }
+      // Reject when any other live (client-attached) non-worktree session
+      // already runs in this workspace. `git checkout -b` moves the shared
+      // HEAD, so a concurrent current-branch session with a clean tree would
+      // be silently relocated onto the new branch and commit to the wrong
+      // ref. Worktree sessions are exempt (they run in their own cwd). Scoped
+      // to sessions with an attached client so a detached session left behind
+      // by a "new chat" does not block a fresh branch session.
+      const sharedCheckoutSession = runtime.bridge
+        .listWorkspaceSessions(workspaceCwd)
+        .find((session) => !session.worktree && session.clientCount > 0);
+      if (sharedCheckoutSession) {
+        res.status(409).json({
+          error:
+            'Another session is already active in this workspace; creating a branch would move its shared checkout',
+          code: 'branch_session_conflict',
+          existingSessionId: sharedCheckoutSession.sessionId,
+        });
+        return;
+      }
+      let wtService: GitWorktreeService;
+      try {
+        wtService = new GitWorktreeService(workspaceCwd);
+      } catch {
+        res.status(500).json({
+          error: 'Failed to initialize git service',
+          code: 'branch_init_failed',
+        });
+        return;
+      }
+      if (!(await wtService.isGitRepository())) {
+        res.status(400).json({
+          error: 'Branch creation requires a git repository',
+          code: 'branch_not_git_repo',
+        });
+        return;
+      }
+      // Check the branch doesn't already exist.
+      if (await branchExists(workspaceCwd, branchName)) {
+        res.status(409).json({
+          error: `Branch "${branchName}" already exists`,
+          code: 'branch_already_exists',
+        });
+        return;
+      }
+      // Gate on a dirty tree as surprise-prevention: `git checkout -b` carries
+      // uncommitted tracked changes onto the new branch, which would silently
+      // mix the user's WIP with a fresh branch. Untracked files are excluded
+      // (`--untracked-files=no`) because they survive any checkout unchanged.
+      let dirty: boolean;
+      try {
+        dirty = await isDirtyTree(workspaceCwd);
+      } catch {
+        res.status(500).json({
+          error: 'Failed to check working tree status',
+          code: 'branch_status_failed',
+        });
+        return;
+      }
+      if (dirty) {
+        res.status(409).json({
+          error: 'Uncommitted changes detected. Commit or stash first.',
+          code: 'branch_dirty_tree',
+        });
+        return;
+      }
+      const baseCommit = await getHeadCommit(workspaceCwd);
+      const baseBranch = await wtService.getCurrentBranch().catch(() => 'HEAD');
+      // Reserve the workspace before mutating HEAD. The conflict guard above
+      // runs before several awaits (rev-parse, status, checkout), so two
+      // concurrent `POST /session { branch }` can both pass it and race on
+      // `git checkout -b`. This synchronous check-and-add (no await between)
+      // serializes the checkout; every exit path below clears the reservation
+      // (transferred to `activeBranchSessions` on success). Re-check
+      // `activeBranchSessions` here too: a request that passed the early guard
+      // before a concurrent request registered can still be in flight while
+      // the first request has already completed and populated the map.
+      if (
+        inFlightBranchWorkspaces.has(workspaceCwd) ||
+        activeBranchSessions.has(workspaceCwd)
+      ) {
+        res.status(409).json({
+          error: 'A branch session is already being created for this workspace',
+          code: 'branch_session_conflict',
+        });
+        return;
+      }
+      inFlightBranchWorkspaces.add(workspaceCwd);
+      try {
+        await createBranch(workspaceCwd, branchName);
+      } catch (checkoutErr) {
+        // `git checkout -b` can reject AFTER git already created the ref and
+        // moved HEAD — a failing post-checkout hook or a timeout past the ref
+        // update both leave the workspace on the new branch while the command
+        // exits nonzero. Roll back transactionally (restore the base ref, then
+        // delete the partial branch) so the shared workspace is never silently
+        // left on the new branch; when nothing was created the rollback is a
+        // harmless no-op. Log the full git error but return a generic detail —
+        // git stderr can embed the absolute workspace path, which must not
+        // reach the caller in the 500 body.
+        daemonLog?.warn('branch checkout failed', {
+          error:
+            checkoutErr instanceof Error
+              ? checkoutErr.message
+              : String(checkoutErr),
+        });
+        await rollbackBranchCreation(
+          workspaceCwd,
+          { name: branchName, baseBranch },
+          baseCommit,
+          daemonLog,
+        );
+        res.status(500).json({
+          error: 'Failed to create branch',
+          code: 'branch_checkout_failed',
+        });
+        return;
+      }
+      branchMeta = { name: branchName, baseBranch };
+      branchBaseCommit = baseCommit;
+      sessionScope = 'thread';
+    }
+
     // ── Worktree isolation ──────────────────────────────────────────
     // When `worktree` is present, create a git worktree before spawning
     // and relocate the session into it immediately after. The workspace
@@ -1253,6 +1542,7 @@ export function registerSessionRoutes(
           : {}),
         ...(source.sourceId !== undefined ? { sourceId: source.sourceId } : {}),
         ...(worktreeMeta ? { worktree: worktreeMeta } : {}),
+        ...(branchMeta ? { branch: branchMeta } : {}),
       });
       // Client may have disconnected during the 1–3s spawn window. If
       // so, the response can't be delivered. The session is otherwise
@@ -1313,9 +1603,31 @@ export function registerSessionRoutes(
                   .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
                   .catch(() => {});
               }
+              // Roll back the branch if one was created for this session.
+              if (branchMeta) {
+                await rollbackBranchCreation(
+                  workspaceCwd,
+                  branchMeta,
+                  branchBaseCommit,
+                  daemonLog,
+                );
+              }
+            } else if (branchMeta) {
+              // Another client attached before we could reap — the session
+              // is alive. Transfer the in-flight reservation to the active
+              // map so the workspace is tracked, not permanently blocked.
+              activeBranchSessions.set(workspaceCwd, session.sessionId);
+              inFlightBranchWorkspaces.delete(workspaceCwd);
             }
           } catch {
-            // Best-effort cleanup; channel.exited will eventually reap.
+            // Best-effort cleanup; channel.exited will eventually reap the
+            // session, but it has no awareness of this route-local in-flight
+            // reservation. Pessimistically track the session so the workspace
+            // stays blocked until the stale-entry detection self-heals.
+            if (branchMeta) {
+              activeBranchSessions.set(workspaceCwd, session.sessionId);
+              inFlightBranchWorkspaces.delete(workspaceCwd);
+            }
           }
         } else {
           // When an attaching client disconnects
@@ -1332,6 +1644,12 @@ export function registerSessionRoutes(
             .catch(() => {
               // Best-effort cleanup; channel.exited will eventually reap.
             });
+          // Unreachable for branch sessions (sessionScope='thread' forces a
+          // fresh spawn, never attach), but kept as a safety net: release the
+          // in-flight reservation so the workspace is not permanently blocked.
+          if (branchMeta) {
+            inFlightBranchWorkspaces.delete(workspaceCwd);
+          }
         }
         return;
       }
@@ -1417,6 +1735,11 @@ export function registerSessionRoutes(
         }
       }
 
+      if (branchMeta) {
+        activeBranchSessions.set(workspaceCwd, session.sessionId);
+        inFlightBranchWorkspaces.delete(workspaceCwd);
+      }
+
       res.status(200).json(session);
     } catch (err) {
       // Roll back the worktree if spawn failed — otherwise the directory
@@ -1426,6 +1749,16 @@ export function registerSessionRoutes(
         await new GitWorktreeService(workspaceCwd)
           .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
           .catch(() => {});
+      }
+      // Roll back the branch if spawn failed — switch back to the base
+      // branch and delete the newly created one.
+      if (branchMeta) {
+        await rollbackBranchCreation(
+          workspaceCwd,
+          branchMeta,
+          branchBaseCommit,
+          daemonLog,
+        );
       }
       sendBridgeError(res, err, { route: 'POST /session' });
     }
@@ -2494,9 +2827,31 @@ export function registerSessionRoutes(
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
 
+        let delivery: ReturnType<typeof parseChannelDelivery> | undefined;
+        if (body['delivery'] !== undefined) {
+          try {
+            delivery = parseChannelDelivery(body['delivery']);
+          } catch (err) {
+            if (!isChannelDeliveryError(err)) throw err;
+            res.status(400).json({ error: err.message, code: err.code });
+            return;
+          }
+        }
+
         const promptId = crypto.randomUUID();
+        if (delivery && deps.channelDeliveryAuthorizations) {
+          deps.channelDeliveryAuthorizations.authorizePrompt(
+            runtime.workspaceCwd,
+            {
+              sessionId,
+              deliveryId: promptId,
+              target: delivery.target,
+            },
+          );
+        }
         const forwardedBody = { ...body };
         delete forwardedBody['deadlineMs'];
+        delete forwardedBody['delivery'];
 
         const lastEventId = ownerBridge.getSessionLastEventId(sessionId);
         // Epoch token paired with the cursor above: a client that seeds its
@@ -2543,9 +2898,22 @@ export function registerSessionRoutes(
               ...(effectiveDeadlineMs !== undefined
                 ? { deadlineMs: effectiveDeadlineMs }
                 : {}),
+              ...(delivery !== undefined
+                ? {
+                    channelDelivery: {
+                      deliveryId: promptId,
+                      target: delivery.target,
+                    },
+                  }
+                : {}),
             },
           );
         } catch (err) {
+          deps.channelDeliveryAuthorizations?.revokePrompt(
+            runtime.workspaceCwd,
+            sessionId,
+            promptId,
+          );
           res.off('close', onResClose);
           res.off('finish', onResFinish);
           if (daemonLog && err instanceof PromptQueueFullError) {
@@ -2593,6 +2961,18 @@ export function registerSessionRoutes(
               }
             },
           )
+          .finally(() => {
+            if (delivery && deps.channelDeliveryAuthorizations) {
+              const revokeTimer = setTimeout(() => {
+                deps.channelDeliveryAuthorizations?.revokePrompt(
+                  runtime.workspaceCwd,
+                  sessionId,
+                  promptId,
+                );
+              }, CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS);
+              revokeTimer.unref();
+            }
+          })
           .catch(() => {});
 
         if (daemonLog) {
@@ -2816,6 +3196,7 @@ export function registerSessionRoutes(
           clientId !== undefined ? { clientId } : undefined,
         ),
       );
+      clearBranchSessionEntry(sessionId);
       res.status(204).end();
     } catch (err) {
       sendBridgeError(res, err, {
@@ -2843,6 +3224,9 @@ export function registerSessionRoutes(
           );
         },
       });
+      for (const removedId of result.removed) {
+        clearBranchSessionEntry(removedId);
+      }
       res.status(200).json(result);
     } catch (err) {
       sendBridgeError(res, err, { route: 'POST /sessions/delete' });
@@ -2924,6 +3308,9 @@ export function registerSessionRoutes(
             );
           },
         });
+        for (const removedId of result.removed) {
+          clearBranchSessionEntry(removedId);
+        }
         res.status(200).json(result);
       } catch (err) {
         sendBridgeError(res, err, { route });

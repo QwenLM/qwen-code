@@ -771,6 +771,65 @@ describe('<ModelDialog />', () => {
     expect(props.onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('shows only image-generation models and stores the exact provider route', async () => {
+    const setImageModel = vi.fn().mockResolvedValue(undefined);
+    const baseUrl = 'https://images.example.com/api/v1';
+    const persisted = `openai:qwen-image-2.0\0${baseUrl}`;
+    const { props, mockSettings, getByText } = renderComponent(
+      { isImageModelMode: true },
+      {
+        getAuthType: vi.fn(() => AuthType.USE_OPENAI),
+        getAllConfiguredModels: vi.fn(() => [
+          {
+            id: 'qwen-plus',
+            label: 'Qwen Plus',
+            authType: AuthType.USE_OPENAI,
+          },
+          {
+            id: 'qwen-image-2.0',
+            label: 'Qwen Image 2.0',
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+            envKey: 'IMAGE_API_KEY',
+            imageOnly: true,
+          },
+          {
+            id: 'image-without-credentials',
+            label: 'Image without credentials',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://invalid.example.com/api/v1',
+            imageOnly: true,
+          },
+        ]),
+        resolveImageGenerationModel: vi.fn((selector: string) =>
+          selector === persisted
+            ? {
+                model: 'qwen-image-2.0',
+                baseUrl,
+                apiKeyEnv: 'IMAGE_API_KEY',
+              }
+            : undefined,
+        ),
+        setImageModel,
+      } as unknown as Partial<Config>,
+    );
+
+    expect(getByText('Select Image Model')).toBeDefined();
+    const selectProps = mockedSelect.mock.calls[0][0];
+    expect(selectProps.items).toHaveLength(1);
+    await selectProps.onSelect(
+      `${AuthType.USE_OPENAI}::qwen-image-2.0\0${baseUrl}`,
+    );
+
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'imageModel',
+      persisted,
+    );
+    expect(setImageModel).toHaveBeenCalledWith(persisted);
+    expect(props.onClose).toHaveBeenCalledTimes(1);
+  });
+
   it('keeps the selected baseUrl for same-provider duplicate vision model ids', async () => {
     const switchModel = vi.fn();
     const setVisionModel = vi.fn();

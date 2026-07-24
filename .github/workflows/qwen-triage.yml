@@ -178,14 +178,22 @@ jobs:
              startsWith(github.event.comment.body, '@qwen-code /triage'))) &&
            needs.authorize.outputs.should_run == 'true')
         }}
-    # Triage is the read-only analysis agent (same security profile as
-    # review-pr in qwen-code-pr-review.yml): it checks out the trusted base
-    # repo, never executes PR code, and reaches the PR/issue only via the API.
-    # In the canonical repo, run it on the self-hosted ECS pool like review-pr
-    # so it stops queueing behind the hosted CI/e2e/macOS/Windows concurrency
-    # cap while the ECS pool sits idle. Forks fall back to ubuntu-latest unless
-    # they deliberately change this workflow in their own repo.
-    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    # Triage is a static-analysis agent: it checks out the trusted base repo,
+    # reaches the PR/issue only via the API, and must NEVER execute PR-derived
+    # code — its step env carries a write PAT that executed code could read.
+    # This is defended in layers, none of which is a hard boundary on its own
+    # (see the long note on the Qwen step for why a `--yolo` command denylist
+    # cannot be): the skill forbids executing PR code
+    # (.qwen/skills/triage/SKILL.md Rules), the `settings` deny rules block the
+    # direct interpreter/build/network invocations, and the routing below keeps
+    # foreign code off the persistent pool.
+    # Runner routing: the persistent ECS pool is reserved for events whose
+    # payload carries no foreign code — issue triage and same-repo PR events.
+    # Fork PRs, and comment/dispatch-triggered reruns (which may target fork
+    # PRs), go to ephemeral hosted runners so a steered agent cannot persist
+    # anything across runs. Forks of this repo fall back to ubuntu-latest as
+    # before.
+    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && (github.event_name == 'issues' || (github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository))) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
     # startsWith (not contains) prevents false triggers from comments that
     # mention the phrase in quoted text or mid-sentence descriptions.
     # always() so the job still evaluates when the upstream `authorize` job is
@@ -239,6 +247,30 @@ jobs:
             echo "no prior workspace; nothing to clean"
             exit 0
           fi
+          # Neutralize git exec vectors a prior run could have planted in the
+          # persistent workspace: local config knobs that make a later git
+          # invocation run a command, and hook scripts. The knobs span several
+          # families — hooksPath/fsmonitor, the pager/editor/diff.external/
+          # sshCommand that fire on the plain `git log`/`diff`/`show` triage
+          # runs, filter.*.{clean,smudge,process} (run on checkout via
+          # .gitattributes), credential.helper, url.*.insteadOf, init.templateDir,
+          # aliases, and include/includeIf which pull any of them back in from an
+          # arbitrary file. Enumerate the actual keys and --unset-all each:
+          # --remove-section cannot target an includeIf subsection like
+          # [includeIf "gitdir:…"] (it errors "no such section" and the `|| true`
+          # hides it), but unsetting the resolved key removes it. This is a
+          # best-effort denylist for defense-in-depth (the `run_shell_command(git
+          # config)` deny rule already stops the current run from planting these);
+          # a keep-known-safe config allowlist is the exhaustive end-state, tracked
+          # with the workflow-test-harness follow-up since it needs a checkout test.
+          git config --local --name-only --list 2>/dev/null \
+            | grep -iE '^(core\.(hookspath|fsmonitor|pager|editor|sshcommand)|sequence\.editor|diff\.external|filter\.|credential\.|url\.|init\.templatedir|pager\.|alias\.|include\.|includeif\.)' \
+            | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
+          HOOKS_DIR="$(git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
+          # Match -type f OR -type l: a symlinked hook (e.g. post-checkout ->
+          # ../payload) survives a bare `-type f` sweep and still fires on the
+          # next actions/checkout. Parenthesize so ! -name binds to both.
+          find "$HOOKS_DIR" \( -type f -o -type l \) ! -name '*.sample' -delete 2>/dev/null || true
           rm -rf .qwen/tmp/* 2>/dev/null || true
           git worktree prune -v || true
           echo "stale agent state cleaned"
@@ -257,6 +289,43 @@ jobs:
             echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
           else
             echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The agent runs as one long step, but its output streams live to the
+      # Actions log. Post a status comment up front carrying that run link so a
+      # maintainer can watch progress instead of waiting silently until the
+      # first stage comment lands; "Finalize triage status comment" flips it to
+      # a terminal state at the end. Upsert by marker so a re-run reuses the one
+      # comment (no clutter). Best-effort: never fail the job over a status post.
+      - name: 'Post triage status comment'
+        if: "steps.resolve.outputs.number != ''"
+        shell: 'bash'
+        env:
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          NUMBER: '${{ steps.resolve.outputs.number }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |-
+          set -uo pipefail
+          MARKER='<!-- qwen-triage stage=status -->'
+          printf -v BODY '%s\n\n%s\n\n%s' \
+            "$MARKER" \
+            "🔄 **Qwen Triage is running** — [watch live progress]($RUN_URL). Stage results will post in this thread as they complete." \
+            "🔄 **Qwen Triage 正在运行** —— [查看实时进度]($RUN_URL)。各阶段结果完成后会更新在本线程。"
+          EXISTING_ID="$(
+            gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+              --method GET --paginate -F per_page=100 |
+              jq -rs --arg m "$MARKER" \
+                '[.[][] | select(.body | contains($m))] | last | .id // empty'
+          )" || EXISTING_ID=''
+          if [ -n "$EXISTING_ID" ]; then
+            gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
+              -f body="$BODY" >/dev/null ||
+              echo "::warning::Failed to update triage status comment; continuing." >&2
+          else
+            gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+              -f body="$BODY" >/dev/null ||
+              echo "::warning::Failed to post triage status comment; continuing." >&2
           fi
 
       - name: 'Inject model name into triage signature'
@@ -284,19 +353,180 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_TRIAGE_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
-          settings_json: |-
+          # The input name is `settings` — this action version has no
+          # `settings_json` input. The old `settings_json:` block was silently
+          # dropped ("Unexpected input(s) 'settings_json'" in the run log), so
+          # the agent ran with the full default toolset. Do not rename it back.
+          #
+          # ── What these settings are, and are NOT ────────────────────────────
+          # The action runs `qwen --yolo`, so every permission resolves to
+          # auto-approve EXCEPT a `permissions.deny` match, which the scheduler
+          # errors out before approval mode is consulted (verified in
+          # coreToolScheduler L5 + permissionFlow.needsConfirmation). `tools.core`
+          # additionally filters which tools register at all (fail-safe: an
+          # unlisted tool like web_fetch/web_search/save_memory never loads, so
+          # those network/persistence tool channels are gone). No `sandbox` key:
+          # the ECS pool ships no container runtime.
+          #
+          # ⚠️ A command denylist is NOT a security boundary under --yolo, and
+          # is not treated as one here. It is defense-in-depth against the
+          # NORMAL failure (the agent running `npm test`/`npx`/a build because a
+          # prompt implied it) and low-effort injection. It does NOT stop a
+          # determined prompt-injection: `$(...)` substitution is not reliably
+          # deny-matchable (parser-dependent), and even with it blocked, exec
+          # can hide in `sed s///e`, env-var interpreters, etc. — an unwinnable
+          # denylist game. Backtick and `<(` ARE hard-blocked below (verified,
+          # they were free); `$(` and `>(` are not reliably matchable and are
+          # left to the layers below, not papered over with a rule that no-ops.
+          #
+          # The REAL controls, in order of strength:
+          #   1. No PR code is ever executed (skill Rules; every legit triage
+          #      command is a gh-API call, a read-only git command, or text
+          #      processing — none touch the PR's tree in an executable way).
+          #   2. Fork PRs run on ephemeral hosted runners (see the triage job
+          #      `runs-on`), bounding persistence/lateral movement.
+          #   3. Stale git exec vectors (hooks/config/aliases) are wiped each
+          #      run (see "Clean stale agent state").
+          # RESIDUAL RISK: the agent still holds a write PAT (GH_TOKEN above),
+          # and under a successful injection it could exfiltrate it or forge bot
+          # writes — it even has a legitimate comment-posting capability. The
+          # structural fix is token isolation (agent runs read-only; a separate
+          # PR-code-free step publishes its drafted output with the PAT, as
+          # publish-tmux already does). Tracked as a follow-up; not yet wired.
+          #
+          # The deny list below therefore backs the skill's no-PR-code rule as
+          # a speed bump: interpreters/build tools, shells, exec wrappers,
+          # network binaries, path execution, and the git/gh subcommands that
+          # execute configured commands or materialize PR code. Prefix match is
+          # word-boundary ("npm" blocks `npm test`, not `npmx`); shell redirects
+          # are also checked against the write_file path rules.
+          settings: |-
             {
-              "coreTools": [
-                "run_shell_command",
-                "write_file",
-                "read_file",
-                "grep_search",
-                "glob",
-                "agent",
-                "enter_worktree",
-                "exit_worktree"
-              ],
-              "sandbox": false
+              "tools": {
+                "core": [
+                  "run_shell_command",
+                  "write_file",
+                  "read_file",
+                  "read_many_files",
+                  "list_directory",
+                  "grep_search",
+                  "glob",
+                  "todo_write",
+                  "agent",
+                  "enter_worktree",
+                  "exit_worktree"
+                ]
+              },
+              "permissions": {
+                "deny": [
+                  "run_shell_command(node)",
+                  "run_shell_command(npm)",
+                  "run_shell_command(npx)",
+                  "run_shell_command(pnpm)",
+                  "run_shell_command(yarn)",
+                  "run_shell_command(bun)",
+                  "run_shell_command(corepack)",
+                  "run_shell_command(tsx)",
+                  "run_shell_command(ts-node)",
+                  "run_shell_command(deno)",
+                  "run_shell_command(python)",
+                  "run_shell_command(python3)",
+                  "run_shell_command(pip)",
+                  "run_shell_command(pip3)",
+                  "run_shell_command(perl)",
+                  "run_shell_command(ruby)",
+                  "run_shell_command(php)",
+                  "run_shell_command(java)",
+                  "run_shell_command(go)",
+                  "run_shell_command(cargo)",
+                  "run_shell_command(make)",
+                  "run_shell_command(cmake)",
+                  "run_shell_command(sh)",
+                  "run_shell_command(bash)",
+                  "run_shell_command(zsh)",
+                  "run_shell_command(dash)",
+                  "run_shell_command(ksh)",
+                  "run_shell_command(su)",
+                  "run_shell_command(sudo)",
+                  "run_shell_command(env)",
+                  "run_shell_command(eval)",
+                  "run_shell_command(exec)",
+                  "run_shell_command(command)",
+                  "run_shell_command(xargs)",
+                  "run_shell_command(find)",
+                  "run_shell_command(awk)",
+                  "run_shell_command(nohup)",
+                  "run_shell_command(setsid)",
+                  "run_shell_command(timeout)",
+                  "run_shell_command(curl)",
+                  "run_shell_command(wget)",
+                  "run_shell_command(nc)",
+                  "run_shell_command(ncat)",
+                  "run_shell_command(socat)",
+                  "run_shell_command(ssh)",
+                  "run_shell_command(scp)",
+                  "run_shell_command(rsync)",
+                  "run_shell_command(docker)",
+                  "run_shell_command(podman)",
+                  "run_shell_command(apt)",
+                  "run_shell_command(apt-get)",
+                  "run_shell_command(chmod)",
+                  "run_shell_command(chown)",
+                  "run_shell_command(crontab)",
+                  "run_shell_command(systemctl)",
+                  "run_shell_command(tmux)",
+                  "run_shell_command(screen)",
+                  "run_shell_command(qwen)",
+                  "run_shell_command(./*)",
+                  "run_shell_command(/tmp/*)",
+                  "run_shell_command(/var/tmp/*)",
+                  "run_shell_command(/dev/shm/*)",
+                  "run_shell_command(/home/*)",
+                  "run_shell_command(~/*)",
+                  "run_shell_command(git config)",
+                  "run_shell_command(git rebase)",
+                  "run_shell_command(git filter-branch)",
+                  "run_shell_command(git bisect)",
+                  "run_shell_command(git am)",
+                  "run_shell_command(git apply)",
+                  "run_shell_command(git fetch)",
+                  "run_shell_command(git pull)",
+                  "run_shell_command(git checkout)",
+                  "run_shell_command(git clone)",
+                  "run_shell_command(git submodule)",
+                  "run_shell_command(git merge)",
+                  "run_shell_command(git push)",
+                  "run_shell_command(patch)",
+                  "run_shell_command(git -c)",
+                  "run_shell_command(*`*)",
+                  "run_shell_command(*<(*)",
+                  "run_shell_command(gh pr checkout)",
+                  "run_shell_command(gh repo clone)",
+                  "run_shell_command(gh alias)",
+                  "run_shell_command(gh extension)",
+                  "run_shell_command(gh auth)",
+                  "run_shell_command(gh secret)",
+                  "run_shell_command(gh codespace)",
+                  "write_file(/.git/hooks/**)",
+                  "write_file(/.git/config)",
+                  "write_file(**/.git/hooks/**)",
+                  "write_file(**/.git/config)",
+                  "write_file(**/.npmrc)",
+                  "write_file(**/.qwen/settings.json)",
+                  "write_file(~/.gitconfig)",
+                  "write_file(~/.config/git/**)",
+                  "write_file(~/.bashrc)",
+                  "write_file(~/.bash_profile)",
+                  "write_file(~/.bash_login)",
+                  "write_file(~/.profile)",
+                  "write_file(~/.bash_logout)",
+                  "write_file(~/.npmrc)",
+                  "write_file(~/.ssh/**)",
+                  "write_file(~/.config/gh/**)",
+                  "write_file(~/.local/bin/**)",
+                  "write_file(//etc/**)"
+                ]
+              }
             }
           prompt: '/triage ${{ steps.resolve.outputs.number }} --repo ${{ github.repository }}'
 
@@ -373,6 +603,47 @@ jobs:
             "The stage comments above were updated with the latest result. [View workflow run]($RUN_URL)."
           gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
             -f body="$BODY" >/dev/null
+
+      # Flip the early status comment to a terminal state so a lingering
+      # "running" line doesn't outlive the run. Neutral wording — the verdict
+      # lives in the stage comments above; this only records that the run ended
+      # and keeps the run link. Same marker → edits the one comment, no second
+      # post. Best-effort, on both success and failure.
+      - name: 'Finalize triage status comment'
+        if: "(success() || failure()) && steps.resolve.outputs.number != ''"
+        shell: 'bash'
+        env:
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          NUMBER: '${{ steps.resolve.outputs.number }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          TRIAGE_OUTCOME: '${{ steps.triage.outcome }}'
+        run: |-
+          set -uo pipefail
+          MARKER='<!-- qwen-triage stage=status -->'
+          if [ "${TRIAGE_OUTCOME:-}" = 'success' ]; then
+            EN="✅ **Qwen Triage finished** — [view run]($RUN_URL). See the stage comments above for the result."
+            ZH="✅ **Qwen Triage 已完成** —— [查看运行]($RUN_URL)。结果见上方各阶段评论。"
+          else
+            EN="⚠️ **Qwen Triage ended early** — [view run]($RUN_URL). It stopped before finishing; check the run log."
+            ZH="⚠️ **Qwen Triage 提前结束** —— [查看运行]($RUN_URL)。未跑完,请查看运行日志。"
+          fi
+          printf -v BODY '%s\n\n%s\n\n%s' "$MARKER" "$EN" "$ZH"
+          EXISTING_ID="$(
+            gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+              --method GET --paginate -F per_page=100 |
+              jq -rs --arg m "$MARKER" \
+                '[.[][] | select(.body | contains($m))] | last | .id // empty'
+          )" || EXISTING_ID=''
+          if [ -n "$EXISTING_ID" ]; then
+            gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
+              -f body="$BODY" >/dev/null ||
+              echo "::warning::Failed to finalize triage status comment; continuing." >&2
+          else
+            gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+              -f body="$BODY" >/dev/null ||
+              echo "::warning::Failed to post final triage status comment; continuing." >&2
+          fi
 
   # On-demand real-user testing: a write-permission user comments
   # `@qwen-code /tmux` on a PR to launch the changed app in a tmux TUI and

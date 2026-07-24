@@ -23,6 +23,7 @@ export interface ModelSpec {
   thinkingMandatory?: boolean;
   modalities?: InputModalities;
   description?: string;
+  imageOnly?: boolean;
 }
 
 export interface BaseUrlOption {

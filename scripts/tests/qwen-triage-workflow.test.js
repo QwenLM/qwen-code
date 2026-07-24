@@ -198,6 +198,29 @@ describe('qwen-triage tmux workflow', () => {
     expect(notifyStep).not.toContain('-X PATCH');
   });
 
+  it('posts an early live-progress status comment and finalizes the same one', () => {
+    const statusStep = step('Post triage status comment');
+    // Announced up front (before the long agent step) with the live run link.
+    expect(statusStep).toContain('<!-- qwen-triage stage=status -->');
+    expect(statusStep).toContain('actions/runs/${{ github.run_id }}');
+    expect(statusStep).toContain('watch live progress');
+    // Upsert by marker so a re-run reuses the one comment instead of stacking.
+    expect(statusStep).toContain('contains($m)');
+    expect(statusStep).toContain('--method PATCH');
+    // Best-effort: a failed status post warns and continues, never fails triage.
+    expect(statusStep).toContain('set -uo pipefail');
+    expect(statusStep).toContain('continuing.');
+
+    const finalizeStep = step('Finalize triage status comment');
+    // Runs on both outcomes and edits the SAME marker comment (no second post).
+    expect(finalizeStep).toContain('<!-- qwen-triage stage=status -->');
+    expect(finalizeStep).toContain('success() || failure()');
+    expect(finalizeStep).toContain('steps.triage.outcome');
+    expect(finalizeStep).toContain('--method PATCH');
+    expect(finalizeStep).toContain('Qwen Triage finished');
+    expect(finalizeStep).toContain('ended early');
+  });
+
   it('reports timeout and infra-error without claiming the flow was exercised', () => {
     const postStep = step('Post tmux result comment');
 

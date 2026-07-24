@@ -73,6 +73,7 @@ import {
   resolveGenAiProviderName,
 } from '../../telemetry/gen-ai-provider.js';
 import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
+import { createGenAiRequestObserverContext } from '../../telemetry/gen-ai-request.js';
 
 /**
  * Phase 4b — read the active retry context once, default attempt to 1 when
@@ -310,7 +311,10 @@ export class LoggingContentGenerator implements ContentGenerator {
     // Capture span context so the API call and logging activate it via
     // context.with(). Without this, nested OTel spans (HTTP instrumentation,
     // log-bridge spans) parent to session root instead of llm_request.
-    const spanContext = trace.setSpan(context.active(), llmSpan);
+    const spanContext = createGenAiRequestObserverContext(
+      trace.setSpan(context.active(), llmSpan),
+      llmSpan,
+    );
 
     const startTime = Date.now();
     const isInternal = isInternalPromptId(userPromptId);
@@ -454,7 +458,10 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     // Capture the span context so the stream wrapper can activate it
     // during iteration — not just during generator creation.
-    const spanContext = trace.setSpan(context.active(), llmSpan);
+    const spanContext = createGenAiRequestObserverContext(
+      trace.setSpan(context.active(), llmSpan),
+      llmSpan,
+    );
 
     const startTime = Date.now();
     const isInternal = isInternalPromptId(userPromptId);
