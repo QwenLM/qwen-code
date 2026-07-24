@@ -81,6 +81,7 @@ import {
 import { SessionArtifactAuthorizationError } from './sessionArtifacts.js';
 import {
   MID_TURN_QUEUE_DRAIN_METHOD,
+  PROMPT_CANCEL_METHOD,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
 } from './bridgeTypes.js';
 
@@ -5312,6 +5313,38 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('strips spoofed delivery metadata and injects only trusted context', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const target = {
+        channelName: 'dingtalk',
+        type: 'user' as const,
+        id: 'user-1',
+      };
+
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'deliver this' }],
+          delivery: { forged: true },
+          _meta: { 'qwen.daemon.channelDelivery': { forged: true } },
+        } as PromptRequest,
+        undefined,
+        {
+          promptId: 'prompt-1',
+          channelDelivery: { deliveryId: 'prompt-1', target },
+        },
+      );
+
+      expect(handle.agent.promptCalls[0]).not.toHaveProperty('delivery');
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.channelDelivery'],
+      ).toEqual({ deliveryId: 'prompt-1', target });
+      await bridge.shutdown();
+    });
+
     it('strips both spoofed retry and continue meta keys from one prompt', async () => {
       const handle = makeChannel();
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
@@ -6066,11 +6099,9 @@ describe('createAcpSessionBridge', () => {
       const evt = await peerCancel;
       expect(evt.type).toBe('prompt_cancelled');
       expect((evt.data as { reason?: string }).reason).toBe('forward_failed');
-      await vi.waitFor(() => {
-        expect(cancelSpy).toHaveBeenCalledWith({
-          sessionId: session.sessionId,
-        });
-      });
+      // A rejected prompt request has already settled in the child. Sending a
+      // late session-scoped cancel here could hit the queued successor.
+      expect(cancelSpy).not.toHaveBeenCalled();
       peerAbort.abort();
       await bridge.shutdown();
     });
@@ -7181,7 +7212,16 @@ describe('createAcpSessionBridge', () => {
     });
 
     it('publishes a deadline turn_error, unlocks the FIFO, and clears active state when the agent wedges (DAEMON-003)', async () => {
-      const handle = wedgeChannel();
+      const handle = makeChannel({
+        promptImpl: async (request) => {
+          const text = (request.prompt[0] as { text?: string }).text;
+          if (text === 'wedge') {
+            return new Promise<PromptResponse>(() => {});
+          }
+          return { stopReason: 'end_turn' };
+        },
+        cancelImpl: () => new Promise<void>(() => {}),
+      });
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       const events: BridgeEvent[] = [];
@@ -7299,6 +7339,9 @@ describe('createAcpSessionBridge', () => {
       });
       await new Promise((r) => setTimeout(r, 60));
       expect(terminalsFor(events, 'prompt-queued-deadline')).toHaveLength(1);
+      expect(
+        bridge.getSessionSummary(session.sessionId).turnError,
+      ).toBeUndefined();
 
       // A queued prompt never ran, so its deadline terminal must not
       // advertise a session-level turnError nor arm the retry path — those
@@ -7703,6 +7746,286 @@ describe('createAcpSessionBridge', () => {
   });
 
   describe('cancelSession', () => {
+    it('cancels an admitted prompt before agent dispatch', async () => {
+      const events: BridgeEvent[] = [];
+      const handle = makeChannel({
+        cancelImpl: () => {
+          throw {
+            code: -32603,
+            message: 'Internal error',
+            data: { details: 'Not currently generating' },
+          };
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const sub = (async () => {
+        for await (const event of bridge.subscribeEvents(session.sessionId)) {
+          events.push(event);
+        }
+      })();
+      sub.catch(() => {});
+
+      const prompt = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'cancel immediately' }],
+        },
+        undefined,
+        { promptId: 'prompt-admitted' },
+      );
+      await bridge.cancelSession(session.sessionId);
+
+      await expect(prompt).rejects.toMatchObject({ name: 'AbortError' });
+      expect(handle.agent.promptCalls).toHaveLength(0);
+      expect(handle.agent.cancelCalls).toHaveLength(0);
+      await vi.waitFor(() => {
+        const terminals = events.filter(
+          (event) =>
+            (event.type === 'turn_complete' || event.type === 'turn_error') &&
+            event.promptId === 'prompt-admitted',
+        );
+        expect(terminals).toHaveLength(1);
+        expect(terminals[0]).toMatchObject({
+          type: 'turn_complete',
+          data: { stopReason: 'cancelled' },
+        });
+      });
+
+      await bridge.shutdown();
+    });
+
+    it('keeps cancelling while the child admits the prompt', async () => {
+      const promptEntered = deferred<void>();
+      const cancelAccepted = deferred<void>();
+      let generating = false;
+      const handle = makeChannel({
+        promptImpl: async () => {
+          promptEntered.resolve(undefined);
+          setTimeout(() => {
+            generating = true;
+          }, 10);
+          await cancelAccepted.promise;
+          return { stopReason: 'cancelled' };
+        },
+        cancelImpl: () => {
+          if (!generating) {
+            throw new Error(NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE);
+          }
+          cancelAccepted.resolve(undefined);
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const prompt = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'cancel during admission' }],
+        },
+        undefined,
+        { promptId: 'prompt-child-admission' },
+      );
+
+      await promptEntered.promise;
+      await bridge.cancelSession(session.sessionId);
+
+      await expect(prompt).resolves.toMatchObject({ stopReason: 'cancelled' });
+      expect(handle.agent.cancelCalls.length).toBeGreaterThan(1);
+      await bridge.shutdown();
+    });
+
+    it('drains a late cancel retry before dispatching the queued successor', async () => {
+      const firstPromptEntered = deferred<void>();
+      const finishFirstPrompt = deferred<PromptResponse>();
+      const retryEntered = deferred<void>();
+      const releaseRetry = deferred<void>();
+      let cancelCalls = 0;
+      const handle = makeChannel({
+        promptImpl: async (request) => {
+          const text = (request.prompt[0] as { text?: string }).text;
+          if (text === 'first') {
+            firstPromptEntered.resolve(undefined);
+            return finishFirstPrompt.promise;
+          }
+          return { stopReason: 'end_turn' };
+        },
+        cancelImpl: async () => {
+          cancelCalls += 1;
+          if (cancelCalls === 1) {
+            throw new Error(NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE);
+          }
+          retryEntered.resolve(undefined);
+          await releaseRetry.promise;
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const first = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'first' }],
+        },
+        undefined,
+        { promptId: 'prompt-first' },
+      );
+      await firstPromptEntered.promise;
+      const second = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'second' }],
+        },
+        undefined,
+        { promptId: 'prompt-second' },
+      );
+
+      const cancel = bridge.cancelSession(session.sessionId);
+      await retryEntered.promise;
+      finishFirstPrompt.resolve({ stopReason: 'cancelled' });
+      await expect(first).resolves.toEqual({ stopReason: 'cancelled' });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(handle.agent.promptCalls).toHaveLength(1);
+
+      releaseRetry.resolve(undefined);
+      await cancel;
+      await expect(second).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(handle.agent.promptCalls).toHaveLength(2);
+      await bridge.shutdown();
+    });
+
+    it('releases cancellation and queued work when the channel exits during the handshake', async () => {
+      const firstPromptEntered = deferred<void>();
+      const handle = makeChannel({
+        promptImpl: async (request) => {
+          const text = (request.prompt[0] as { text?: string }).text;
+          if (text === 'first') {
+            firstPromptEntered.resolve(undefined);
+            return new Promise<PromptResponse>(() => {});
+          }
+          return { stopReason: 'end_turn' };
+        },
+        cancelImpl: () => new Promise<void>(() => {}),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const first = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'first' }],
+        },
+        undefined,
+        { promptId: 'prompt-first' },
+      );
+      void first.catch(() => {});
+      await firstPromptEntered.promise;
+      const second = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'second' }],
+        },
+        undefined,
+        { promptId: 'prompt-second' },
+      );
+      void second.catch(() => {});
+
+      const cancel = bridge.cancelSession(session.sessionId);
+      await vi.waitFor(() => {
+        expect(handle.agent.extMethodCalls).toContainEqual({
+          method: PROMPT_CANCEL_METHOD,
+          params: { sessionId: session.sessionId },
+        });
+      });
+      handle.crash({ exitCode: 1, signalCode: null });
+
+      await expect(cancel).rejects.toBeInstanceOf(BridgeChannelClosedError);
+      await expect(first).rejects.toBeInstanceOf(BridgeChannelClosedError);
+      await expect(second).rejects.toBeDefined();
+      expect(handle.agent.promptCalls).toHaveLength(1);
+      await bridge.shutdown();
+    });
+
+    it('falls back once to standard ACP cancellation for custom agents', async () => {
+      const promptEntered = deferred<void>();
+      const cancelAccepted = deferred<void>();
+      const handle = makeChannel({
+        promptCancelExtension: false,
+        promptImpl: async () => {
+          promptEntered.resolve(undefined);
+          await cancelAccepted.promise;
+          return { stopReason: 'cancelled' };
+        },
+        cancelImpl: () => cancelAccepted.resolve(undefined),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const prompt = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'standard ACP fallback' }],
+        },
+        undefined,
+        { promptId: 'prompt-standard-cancel' },
+      );
+
+      await promptEntered.promise;
+      await bridge.cancelSession(session.sessionId);
+
+      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      expect(handle.agent.extMethodCalls).toEqual([
+        {
+          method: PROMPT_CANCEL_METHOD,
+          params: { sessionId: session.sessionId },
+        },
+      ]);
+      expect(handle.agent.cancelCalls).toEqual([
+        { sessionId: session.sessionId },
+      ]);
+      await bridge.shutdown();
+    });
+
+    it('broadcasts immediate cancellation once for each prompt', async () => {
+      const events: BridgeEvent[] = [];
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const sub = (async () => {
+        for await (const event of bridge.subscribeEvents(session.sessionId)) {
+          events.push(event);
+        }
+      })();
+      sub.catch(() => {});
+
+      for (const promptId of ['prompt-immediate-1', 'prompt-immediate-2']) {
+        const prompt = bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: promptId }],
+          },
+          undefined,
+          { promptId },
+        );
+        await bridge.cancelSession(session.sessionId);
+        await expect(prompt).rejects.toMatchObject({ name: 'AbortError' });
+      }
+
+      await vi.waitFor(() => {
+        expect(
+          events
+            .filter((event) => event.type === 'prompt_cancelled')
+            .map((event) => event.promptId),
+        ).toEqual(['prompt-immediate-1', 'prompt-immediate-2']);
+      });
+      expect(handle.agent.promptCalls).toHaveLength(0);
+      await bridge.shutdown();
+    });
+
     it('forwards a cancel notification with the routing id', async () => {
       const handles: ChannelHandle[] = [];
       const factory: ChannelFactory = async () => {

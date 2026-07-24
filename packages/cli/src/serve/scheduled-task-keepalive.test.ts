@@ -19,6 +19,7 @@ import {
   startScheduledTaskKeepalive,
   rehydrateScheduledTaskSessions,
 } from './scheduled-task-keepalive.js';
+import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 
 function task(over: Partial<DurableCronTask>): DurableCronTask {
   return {
@@ -70,8 +71,20 @@ describe('scheduled-task keepalive', () => {
   });
 
   it('heartbeats each distinct bound session, skipping unbound tasks', async () => {
+    const onTasksRead = vi.fn();
     await updateCronTasks(workspace, () => [
-      task({ id: 'a', sessionId: 'sess-1' }),
+      task({
+        id: 'a',
+        sessionId: 'sess-1',
+        delivery: {
+          kind: 'channel',
+          target: {
+            channelName: 'dingtalk',
+            type: 'user',
+            id: 'user-1',
+          },
+        },
+      }),
       task({ id: 'b', sessionId: 'sess-2' }),
       task({ id: 'c', sessionId: 'sess-1' }), // same session as 'a'
       task({ id: 'd' }), // unbound — no session to keep alive
@@ -80,11 +93,17 @@ describe('scheduled-task keepalive', () => {
       bridge,
       boundWorkspace: workspace,
       intervalMs: 60_000,
+      onTasksRead,
     });
     await ka.tick();
     ka.stop();
     // Deduped to the distinct bound sessions; the unbound task is skipped.
     expect(beats.sort()).toEqual(['sess-1', 'sess-2']);
+    expect(onTasksRead).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'a', sessionId: 'sess-1' }),
+      ]),
+    );
   });
 
   it('skips heartbeat and revive for disabled tasks (keeps them reap-able)', async () => {
@@ -756,5 +775,54 @@ describe('scheduled-task keepalive', () => {
     ka.stop();
     // Clean up the hung spawn.
     releaseSpawn?.();
+  });
+
+  it('rehydration onTasksRead populates the authorization store for delivery-enabled tasks', async () => {
+    const authorizations = new ChannelDeliveryAuthorizationStore();
+    await updateCronTasks(workspace, () => [
+      task({
+        id: 'del-1',
+        sessionId: 'sess-del',
+        recurring: true,
+        lastFiredAt: 1_700_000_000_000,
+        delivery: {
+          kind: 'channel',
+          target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+        },
+      }),
+      task({ id: 'no-del', sessionId: 'sess-plain' }),
+    ]);
+
+    const result = await rehydrateScheduledTaskSessions({
+      bridge,
+      boundWorkspace: workspace,
+      onTasksRead: (tasks) => {
+        for (const t of tasks) {
+          if (!t.delivery || !t.sessionId) continue;
+          authorizations.registerScheduledTask(workspace, {
+            sessionId: t.sessionId,
+            taskId: t.id,
+            target: t.delivery.target,
+            recurring: t.recurring,
+            ...(typeof t.lastFiredAt === 'number'
+              ? { lastFiredAt: t.lastFiredAt }
+              : {}),
+          });
+        }
+      },
+    });
+
+    expect(result.loaded).toContain('sess-del');
+    const firedAt = 1_700_000_000_000 + 60_000;
+    expect(
+      authorizations.consume(workspace, {
+        sessionId: 'sess-del',
+        deliveryId: `del-1:${firedAt}`,
+        source: 'scheduled',
+        taskId: 'del-1',
+        firedAt,
+        target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+      }),
+    ).toBe(true);
   });
 });

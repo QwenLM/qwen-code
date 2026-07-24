@@ -60,9 +60,13 @@ const rootDir = join(__dirname, '..');
 // (workspaceGitDiff / workspaceGitDiffFile on both client classes) and the
 // ChatRecord transcript projection in the default UI API.
 // Bumped from 167KB to 168KB for workspace-level streaming generation.
-// Bumped from 167KB to 168KB for the daemon event-bus epoch token fields
+// The 168KB budget also covers the daemon event-bus epoch token fields
 // (eventEpoch / onEpoch) and their docs across the daemon SDK transports.
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 168 * 1024;
+// Bumped from 168KB to 169KB for channel delivery alongside workspace-level
+// streaming generation.
+// Bumped from 169KB to 170KB after merging the event-bus and channel-delivery
+// additions.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 170 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't

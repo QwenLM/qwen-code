@@ -99,6 +99,7 @@ const mockSetActiveGoal = vi.hoisted(() => vi.fn());
 const mockClearActiveGoal = vi.hoisted(() => vi.fn());
 const mockRefreshMemoryAfterManagedWrite = vi.hoisted(() => vi.fn());
 const mockCleanupReviewWorktreeLeases = vi.hoisted(() => vi.fn());
+const mockLogConversationFinishedEvent = vi.hoisted(() => vi.fn());
 const mockUseDualOutput = vi.hoisted(() => vi.fn());
 const mockDualOutput = vi.hoisted(() => ({
   startAssistantMessage: vi.fn(),
@@ -135,6 +136,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     clearActiveGoal: mockClearActiveGoal,
     runVisionBridge: mockRunVisionBridge,
     refreshMemoryAfterManagedWrite: mockRefreshMemoryAfterManagedWrite,
+    logConversationFinishedEvent: mockLogConversationFinishedEvent,
     finalizeToolResponses: mockFinalizeToolResponses,
   };
 });
@@ -1134,6 +1136,42 @@ describe('useGeminiStream', () => {
     expect(addedTexts.some((t) => t.includes('teammate_message'))).toBe(false);
   });
 
+  it('drains teammate reports outside the teammate runtime context', async () => {
+    const mockManager = { setLeaderMessageCallback: vi.fn() };
+    (mockConfig.getTeamManager as unknown as Mock).mockReturnValue(mockManager);
+    renderTestHook();
+
+    await waitFor(() => {
+      expect(mockManager.setLeaderMessageCallback).toHaveBeenCalledWith(
+        expect.any(Function),
+      );
+    });
+
+    let capturedRuntimeView: unknown = 'unset';
+    mockSendMessageStream.mockImplementationOnce(() => {
+      capturedRuntimeView = getRuntimeContentGenerator();
+      return (async function* () {})();
+    });
+
+    const callback = (mockManager.setLeaderMessageCallback as Mock).mock
+      .calls[0][0] as (modelText: string, display: string) => void;
+    const teammateView = {
+      contentGenerator: {},
+      contentGeneratorConfig: { model: 'teammate-model' },
+    } as never;
+    await runWithRuntimeContentGenerator(teammateView, async () => {
+      await act(async () => {
+        callback('<teammate_message>report</teammate_message>', 'reported');
+      });
+    });
+
+    await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+    expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
+      type: SendMessageType.Teammate,
+    });
+    expect(capturedRuntimeView).toBeUndefined();
+  });
+
   it('should not submit tool responses if not all tool calls are completed', () => {
     const toolCalls: TrackedToolCall[] = [
       {
@@ -1545,8 +1583,7 @@ describe('useGeminiStream', () => {
       queuedPrompt,
     );
     const queuedPromptAddItemIndex = mockAddItem.mock.calls.findIndex(
-      ([item]) =>
-        item.type === MessageType.NOTIFICATION && item.text === queuedPrompt,
+      ([item]) => item.type === MessageType.USER && item.text === queuedPrompt,
     );
     expect(queuedPromptAddItemIndex).toBeGreaterThanOrEqual(0);
     expect(recordMidTurnUserMessage.mock.invocationCallOrder[0]).toBeLessThan(
@@ -1556,7 +1593,7 @@ describe('useGeminiStream', () => {
       recordMidTurnUserMessage.mock.invocationCallOrder[0],
     );
     expect(mockAddItem).toHaveBeenCalledWith(
-      { type: MessageType.NOTIFICATION, text: queuedPrompt },
+      { type: MessageType.USER, text: queuedPrompt, sentToModel: false },
       expect.any(Number),
     );
     expect(mockSendMessageStream).toHaveBeenCalledWith(
@@ -1633,7 +1670,7 @@ describe('useGeminiStream', () => {
     expect(steerInput?.parts).toEqual([{ text: steeredPrompt }]);
     expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
     expect(mockAddItem).not.toHaveBeenCalledWith(
-      { type: MessageType.NOTIFICATION, text: steeredPrompt },
+      { type: MessageType.USER, text: steeredPrompt, sentToModel: false },
       expect.any(Number),
     );
     steerInput?.accept();
@@ -1642,7 +1679,7 @@ describe('useGeminiStream', () => {
       steeredPrompt,
     );
     expect(mockAddItem).toHaveBeenCalledWith(
-      { type: MessageType.NOTIFICATION, text: steeredPrompt },
+      { type: MessageType.USER, text: steeredPrompt, sentToModel: false },
       expect.any(Number),
     );
   });
@@ -1955,7 +1992,7 @@ describe('useGeminiStream', () => {
     expect(steerInput).toBeUndefined();
     expect(restoreSteer).toHaveBeenCalledWith([steeredPrompt]);
     expect(mockAddItem).not.toHaveBeenCalledWith(
-      { type: MessageType.NOTIFICATION, text: steeredPrompt },
+      { type: MessageType.USER, text: steeredPrompt, sentToModel: false },
       expect.any(Number),
     );
   });
@@ -2830,7 +2867,7 @@ describe('useGeminiStream', () => {
     expect(resolveSignal?.aborted).toBe(true);
     expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
     expect(mockAddItem).not.toHaveBeenCalledWith(
-      { type: MessageType.NOTIFICATION, text: queuedPrompt },
+      { type: MessageType.USER, text: queuedPrompt, sentToModel: false },
       expect.any(Number),
     );
     expect(mockSendMessageStream).not.toHaveBeenCalled();
@@ -3035,7 +3072,7 @@ describe('useGeminiStream', () => {
     });
 
     expect(mockAddItem).toHaveBeenCalledWith(
-      { type: MessageType.NOTIFICATION, text: queuedPrompt },
+      { type: MessageType.USER, text: queuedPrompt, sentToModel: false },
       expect.any(Number),
     );
     expect(mockSendMessageStream).toHaveBeenCalledWith(
@@ -10627,5 +10664,53 @@ describe('useGeminiStream', () => {
         expect(call[0]).not.toHaveProperty('timestamp');
       }
     });
+  });
+
+  it('excludes sentToModel-false steer items from YOLO turn-count telemetry', async () => {
+    mockConfig.getApprovalMode = () => ApprovalMode.YOLO;
+
+    const history: HistoryItem[] = [
+      { id: 1, type: MessageType.USER, text: 'first' },
+      { id: 2, type: MessageType.GEMINI, text: 'reply one' },
+      { id: 3, type: MessageType.USER, text: 'second' },
+      { id: 4, type: MessageType.GEMINI, text: 'reply two' },
+      { id: 5, type: MessageType.USER, text: 'steer', sentToModel: false },
+    ];
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        history,
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        undefined,
+        undefined,
+        undefined,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(mockLogConversationFinishedEvent).toHaveBeenCalledOnce();
+    });
+
+    const event = mockLogConversationFinishedEvent.mock.calls[0][1];
+    // findLastIndex should land on 'second' (index 2), not the steer (index 4).
+    // turnCount = history.length - 2 = 3.
+    expect(event.turnCount).toBe(3);
   });
 });

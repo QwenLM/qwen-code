@@ -87,6 +87,7 @@ import {
   isBtwCommand,
   isSlashCommand,
 } from '../utils/commandUtils.js';
+import { findLastUserItemIndex } from '../utils/historyUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import {
   handleAtCommand,
@@ -751,9 +752,7 @@ export const useGeminiStream = (
       config.getApprovalMode() === ApprovalMode.YOLO &&
       streamingState === StreamingState.Idle
     ) {
-      const lastUserMessageIndex = history.findLastIndex(
-        (item: HistoryItem) => item.type === MessageType.USER,
-      );
+      const lastUserMessageIndex = findLastUserItemIndex(history);
 
       const turnCount =
         lastUserMessageIndex === -1 ? 0 : history.length - lastUserMessageIndex;
@@ -2549,7 +2548,12 @@ export const useGeminiStream = (
               .getChatRecordingService?.()
               ?.recordMidTurnUserMessage(parts, message);
             addItem(
-              { type: MessageType.NOTIFICATION, text: message },
+              {
+                type: MessageType.USER,
+                text: message,
+                // Intentionally false: preserves isRealUserTurn/rewind semantics (steer is not a standalone user turn).
+                sentToModel: false,
+              },
               Date.now(),
             );
           }
@@ -4086,20 +4090,23 @@ export const useGeminiStream = (
       !isSubmittingQueryRef.current &&
       teammateQueueRef.current.length > 0
     ) {
-      const batch = teammateQueueRef.current.splice(0);
-      // Render one compact `● …` line per teammate report; the full
-      // envelope goes only to the model (the USER bubble is suppressed
-      // for SendMessageType.Teammate in prepareQueryForGemini).
-      for (const entry of batch) {
-        addItem(
-          { type: 'notification' as const, text: entry.display },
-          Date.now(),
-        );
-      }
-      const modelText = batch.map((e) => e.modelText).join('\n\n');
-      const display = batch.map((e) => e.display).join('; ');
-      submitQuery(modelText, SendMessageType.Teammate, undefined, {
-        notificationDisplayText: display,
+      // React can flush this effect after restoring the teammate frame.
+      runOutsideAgentContext(() => {
+        const batch = teammateQueueRef.current.splice(0);
+        // Render one compact `● …` line per teammate report; the full
+        // envelope goes only to the model (the USER bubble is suppressed
+        // for SendMessageType.Teammate in prepareQueryForGemini).
+        for (const entry of batch) {
+          addItem(
+            { type: 'notification' as const, text: entry.display },
+            Date.now(),
+          );
+        }
+        const modelText = batch.map((e) => e.modelText).join('\n\n');
+        const display = batch.map((e) => e.display).join('; ');
+        submitQuery(modelText, SendMessageType.Teammate, undefined, {
+          notificationDisplayText: display,
+        });
       });
     }
   }, [streamingState, submitQuery, teammateTrigger, addItem]);

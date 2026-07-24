@@ -1083,10 +1083,14 @@ function QuickActionsPanel({
   actions,
   onRun,
   onPressKey,
+  showKeyHints = true,
 }: {
   actions: readonly QuickActionItem[];
   onRun: (action: QuickActionItem) => void;
   onPressKey: (item: QuickKeyItem) => void;
+  // The keyboard shortcut grid is pointless without a hardware keyboard, so
+  // the mobile textarea backend hides it.
+  showKeyHints?: boolean;
 }) {
   const { t } = useI18n();
 
@@ -1110,20 +1114,22 @@ function QuickActionsPanel({
             </button>
           ))}
         </div>
-        <div className={styles.quickKeysGrid}>
-          {QUICK_KEY_ITEMS.map((item) => (
-            <button
-              key={item.id}
-              type="button"
-              className={styles.quickKey}
-              title={t(item.descriptionKey)}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => onPressKey(item)}
-            >
-              <span className={styles.quickKeyLabel}>{item.label}</span>
-            </button>
-          ))}
-        </div>
+        {showKeyHints && (
+          <div className={styles.quickKeysGrid}>
+            {QUICK_KEY_ITEMS.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                className={styles.quickKey}
+                title={t(item.descriptionKey)}
+                onMouseDown={(event) => event.preventDefault()}
+                onClick={() => onPressKey(item)}
+              >
+                <span className={styles.quickKeyLabel}>{item.label}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -1503,6 +1509,15 @@ export const ChatEditor = memo(
     );
     const dispatchComposerKey = useCallback(
       (event: QuickKeyItem['event']) => {
+        if (core.mobileComposer) {
+          // No CodeMirror to dispatch into. History search is the one key
+          // action with a non-keyboard equivalent; the rest are hidden on
+          // the textarea backend.
+          if (event.ctrlKey && event.key === 'r') {
+            core.searchState.openHistorySearch();
+          }
+          return;
+        }
         const view = core.viewRef.current;
         if (!view) return;
         view.focus();
@@ -2013,7 +2028,29 @@ export const ChatEditor = memo(
                   !
                 </span>
               )}
-              <div ref={core.containerRef} data-web-shell-composer-editor />
+              {core.mobileComposer ? (
+                // Touch devices get a plain textarea instead of CodeMirror:
+                // mobile virtual keyboards and IMEs interact poorly with the
+                // contenteditable editor (#5958). Enter inserts a newline
+                // natively; submission goes through the Send button.
+                <textarea
+                  ref={core.mobileComposer.textareaRef}
+                  className={styles.mobileTextarea}
+                  value={core.mobileComposer.value}
+                  onChange={core.mobileComposer.onChange}
+                  onPaste={core.mobileComposer.onPaste}
+                  placeholder={core.mobileComposer.placeholder}
+                  disabled={core.disabled}
+                  rows={1}
+                  enterKeyHint="enter"
+                  autoCapitalize="off"
+                  autoCorrect="off"
+                  spellCheck={false}
+                  data-web-shell-composer-editor
+                />
+              ) : (
+                <div ref={core.containerRef} data-web-shell-composer-editor />
+              )}
             </div>
             <div ref={toolbarRef} className={styles.toolbar}>
               <div ref={toolbarLeadingRef} className={styles.toolbarLeading}>
@@ -2468,6 +2505,7 @@ export const ChatEditor = memo(
             actions={quickActions}
             onRun={runQuickAction}
             onPressKey={pressQuickKey}
+            showKeyHints={!core.mobileComposer}
           />
         )}
       </div>
