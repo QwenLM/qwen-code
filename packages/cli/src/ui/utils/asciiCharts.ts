@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { dayKey, parseDayKey } from '../../services/insight/dates.js';
+
 const HEATMAP_CHARS = ['··', '  ', '  ', '  ', '  '] as const;
 export const MONTH_LABELS = [
   'Jan',
@@ -74,13 +76,6 @@ function computeThresholds(
   return [p(0.25), p(0.5), p(0.75), p(0.9)];
 }
 
-function formatDateKey(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
-}
-
 export function buildHeatmapData(
   data: Record<string, number>,
   weeks: number = 52,
@@ -95,8 +90,10 @@ export function buildHeatmapData(
     .sort();
   let endDate = new Date(now);
   if (dataKeys.length > 0) {
-    const latest = new Date(dataKeys[dataKeys.length - 1]!);
-    latest.setHours(0, 0, 0, 0);
+    // parseDayKey yields local midnight directly — `new Date(key)` parsed
+    // as UTC midnight, which shifted to the previous local day for
+    // negative-offset viewers (#6835).
+    const latest = parseDayKey(dataKeys[dataKeys.length - 1]!);
     if (latest.getTime() > endDate.getTime()) endDate = latest;
   }
 
@@ -127,12 +124,12 @@ export function buildHeatmapData(
   let col = 0;
   const colMondays: Array<{ col: number; date: Date }> = [];
 
-  const todayKey = formatDateKey(new Date());
+  const todayKey = dayKey(new Date());
   const cursor = new Date(startDate);
   while (cursor <= endDate) {
     const dayOfWeek = cursor.getDay();
     const row = dayOfWeek === 0 ? 6 : dayOfWeek - 1;
-    const key = formatDateKey(cursor);
+    const key = dayKey(cursor);
     const count = data[key] || 0;
     const level = intensityLevel(count, thresholds);
     const isToday = key === todayKey;
@@ -221,8 +218,8 @@ export function buildHeatmapData(
   return {
     colLabels,
     totalCols: maxCells,
-    startDate: formatDateKey(startDate),
-    endDate: formatDateKey(endDate),
+    startDate: dayKey(startDate),
+    endDate: dayKey(endDate),
     rows,
   };
 }

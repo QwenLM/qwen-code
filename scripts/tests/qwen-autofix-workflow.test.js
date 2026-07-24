@@ -25,6 +25,12 @@ const sandboxImageResolverScript = readFileSync(
   '.github/scripts/resolve-sandbox-image.mjs',
   'utf8',
 );
+const reviewVerificationRunnerPath =
+  '.github/scripts/run-autofix-review-verification.sh';
+const reviewVerificationRunner = readFileSync(
+  reviewVerificationRunnerPath,
+  'utf8',
+);
 const autofixContractsScriptPath = '.github/scripts/check-autofix-contracts.sh';
 const autofixContractsScript = readFileSync(autofixContractsScriptPath, 'utf8');
 const autofixRunnerScriptPath = '.qwen/skills/autofix/scripts/run-agent.mjs';
@@ -105,6 +111,10 @@ const resetAutofixWorkspaceSteps =
 const verificationGateSteps =
   workflow.match(/- name: 'Verification gate'[\s\S]*?(?=\n[ ]{6}- name: ')/g) ??
   [];
+const verificationGateBodies = [
+  verificationGateSteps[0] ?? '',
+  reviewVerificationRunner,
+];
 const resolveSandboxImageSteps =
   workflow.match(
     /- name: 'Resolve sandbox image'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
@@ -4100,7 +4110,7 @@ describe('qwen-autofix workflow', () => {
 
   it('allows non-package fixes after deterministic verification', () => {
     expect(verificationGateSteps).toHaveLength(2);
-    for (const step of verificationGateSteps) {
+    for (const step of verificationGateBodies) {
       expect(step).toContain('npm run build');
       expect(step).toContain('npm run typecheck');
       expect(step).toContain('npm run lint');
@@ -4154,6 +4164,11 @@ describe('qwen-autofix workflow', () => {
         /cp \.github\/scripts\/resolve-owning-packages\.sh "\$\{RUNNER_TEMP\}\/resolve-owning-packages\.sh"/g,
       ) ?? [],
     ).toHaveLength(2);
+    expect(
+      workflow.match(
+        /cp \.github\/scripts\/run-autofix-review-verification\.sh "\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh"/g,
+      ) ?? [],
+    ).toHaveLength(1);
     // In the issue-autofix job the staging must happen BEFORE the verify gate's
     // `git checkout "${BRANCH}"` (first occurrence in the file is the issue
     // job's): the agent's commits can touch .github/scripts, so a post-checkout
@@ -4168,9 +4183,20 @@ describe('qwen-autofix workflow', () => {
     // In the review-address job the staging must happen BEFORE the branch switch
     // ("Prepare branch and feedback" exists only in that job; the job's staging
     // step is the last occurrence of the staging step name in the file).
-    expect(
-      workflow.lastIndexOf("- name: 'Stage trusted schema gate'"),
-    ).toBeLessThan(workflow.indexOf("- name: 'Prepare branch and feedback'"));
+    const reviewStagingAt = workflow.indexOf(
+      "- name: 'Stage trusted schema gate and agent runner'",
+    );
+    expect(reviewStagingAt).toBeGreaterThanOrEqual(0);
+    expect(reviewStagingAt).toBeLessThan(
+      workflow.indexOf("- name: 'Prepare branch and feedback'"),
+    );
+    const reviewRunnerCopyAt = workflow.indexOf(
+      'cp .github/scripts/run-autofix-review-verification.sh',
+    );
+    expect(reviewRunnerCopyAt).toBeGreaterThan(reviewStagingAt);
+    expect(reviewRunnerCopyAt).toBeLessThan(
+      workflow.indexOf("- name: 'Prepare branch and feedback'"),
+    );
     // The shared script mirrors CI's freshness gate: regenerate + `git status
     // --porcelain` (version-agnostic — the generator's --check was reverted from
     // main by #7031 and must NOT be relied on), with a generator-crash guard, and
@@ -4210,7 +4236,7 @@ describe('qwen-autofix workflow', () => {
     // must run BEFORE the no-op/unchanged return, so a stale-schema PR the agent
     // wrongly no-ops fails (outcome=failed) instead of being reported as evaluated
     // while CI stays red (the motivating bug).
-    const reviewVerifyGate = verificationGateSteps.find((s) =>
+    const reviewVerifyGate = verificationGateBodies.find((s) =>
       s.includes('outcome=noop'),
     );
     expect(reviewVerifyGate).toBeTruthy();
@@ -4224,6 +4250,14 @@ describe('qwen-autofix workflow', () => {
         'bash "${RUNNER_TEMP}/check-settings-schema.sh"',
       ),
     ).toBeLessThan(reviewVerifyGate.indexOf('outcome=noop'));
+    const reviewVerificationGateStep = verificationGateSteps[1];
+    expect(reviewVerificationGateStep).toContain(
+      'bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+    );
+    expect(reviewVerificationGateStep).not.toContain('npm run build');
+    expect(reviewVerificationGateStep).not.toContain(
+      'bash .github/scripts/run-autofix-review-verification.sh',
+    );
     expect(
       reviewVerifyGate.indexOf(
         'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
@@ -4360,8 +4394,13 @@ describe('qwen-autofix workflow', () => {
     // AND both no-secret verification checkouts (convention: every host
     // checkout of an agent-writable branch severs hooks).
     expect(
-      workflow.split('git config core.hooksPath /dev/null').length - 1,
+      `${workflow}\n${reviewVerificationRunner}`.split(
+        'git config core.hooksPath /dev/null',
+      ).length - 1,
     ).toBe(5);
+    expect(reviewVerificationRunner).toMatch(
+      /git config core\.hooksPath \/dev\/null\ngit checkout "\$\{BRANCH\}"/,
+    );
     // …both pushes AND the prepare checkout (post-checkout hooks fire with
     // the PAT in env there); the agent step — no PAT, sandboxed tools —
     // re-points .husky itself so its commits still get checked.
@@ -4584,7 +4623,7 @@ describe('qwen-autofix workflow', () => {
     // 1 for a real diff but 128 on a bad ref — only 1 is a commit, so a git
     // error must not be misreported as a discarded commit. Drive the extracted
     // snippet with a stubbed git whose exit is scripted.
-    const snippet = verificationGateSteps[1].match(
+    const snippet = reviewVerificationRunner.match(
       /committed_rc=0[\s\S]*?committed=true[^\n]*\n\s*fi/,
     )?.[0];
     expect(snippet).toBeTruthy();
@@ -4625,7 +4664,7 @@ describe('qwen-autofix workflow', () => {
     // Neither gate carries an EXIT trap: the wording keys on committed, so an
     // outcome=failed-forcing trap (which would also fire on pre-commit
     // failures) must not creep back into either verify step.
-    for (const gate of verificationGateSteps) {
+    for (const gate of verificationGateBodies) {
       expect(gate).not.toMatch(/\btrap\b/);
     }
   });
@@ -4637,8 +4676,11 @@ describe('qwen-autofix workflow', () => {
     expect(reviewVerificationGateStep).toContain(
       "if: |-\n          ${{ always() && steps.prepare.outputs.stale != 'true' }}",
     );
-    expect(reviewVerificationGateStep).toContain('failure.md');
-    expect(reviewVerificationGateStep).toContain('outcome=failed');
+    expect(reviewVerificationGateStep).toContain(
+      'bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+    );
+    expect(reviewVerificationRunner).toContain('failure.md');
+    expect(reviewVerificationRunner).toContain('outcome=failed');
     expect(reviewAddressReportStep.length).toBeGreaterThan(0);
     expect(reviewAddressReportStep).toContain('GITHUB_STEP_SUMMARY');
     expect(reviewAddressReportStep).toContain(
@@ -5419,7 +5461,7 @@ describe('qwen-autofix workflow', () => {
     // The retry/advance split above is only sound while each real rejection
     // writes outcome=failed; an unwired check would read as a gate crash and be
     // retried instead of reported. Drive the extracted helper for real.
-    const gate = verificationGateSteps[1];
+    const gate = reviewVerificationRunner;
     // Each check runs through run_check, which tees its output to GATE_LOG and
     // calls reject_fix on failure - so the verdict is declared AND the reason
     // is captured for the retry.
@@ -5431,7 +5473,7 @@ describe('qwen-autofix workflow', () => {
     ]) {
       expect(gate).toContain(check);
     }
-    const helper = gate.match(/reject_fix\(\) \{\n[\s\S]*?\n {10}\}/)?.[0];
+    const helper = gate.match(/reject_fix\(\) \{\n[\s\S]*?\n\}/)?.[0];
     expect(helper).toBeTruthy();
     const dir = mkdtempSync(join(tmpdir(), 'reject-'));
     const out = join(dir, 'gh_output');
@@ -5793,7 +5835,7 @@ describe('qwen-autofix workflow', () => {
     // compiler output already spelled out: the gate rejected the commit, the
     // handoff showed only the agent's optimistic summary, and the next round
     // re-read the original review points with no idea why it had been refused.
-    const gate = verificationGateSteps[1];
+    const gate = reviewVerificationRunner;
     const prep =
       workflow.match(
         /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n {6}- name: )/,
@@ -5801,7 +5843,7 @@ describe('qwen-autofix workflow', () => {
 
     // 1. A failing check records WHY, not just THAT, it failed.
     const capture = gate.match(
-      /GATE_LOG="\$\{WORKDIR\}\/gate-output\.log"[\s\S]*?\n {10}\}\n {10}run_check\(\) \{[\s\S]*?\n {10}\}/,
+      /GATE_LOG="\$\{WORKDIR\}\/gate-output\.log"[\s\S]*?\n\}\nrun_check\(\) \{[\s\S]*?\n\}/,
     )?.[0];
     expect(capture).toBeTruthy();
     const dir = mkdtempSync(join(tmpdir(), 'gate-'));

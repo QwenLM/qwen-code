@@ -108,9 +108,11 @@ fetched via the API (`references/pr-workflow.md`, Stage 2b). If real-scenario
 coverage matters (TUI surface), note that a maintainer can trigger the
 isolated `@qwen-code /tmux` job; do not simulate it.
 
-**Local invocation** (no `GITHUB_EVENT_NAME`): drive the real product in tmux
-and paste the actual capture-pane output inline — not a file path, not "see
-attached", not a summary. Without inlined terminal output, the review is
+**Local invocation** (no `GITHUB_EVENT_NAME`): for PRs with user-visible
+behavioral changes, drive the real product in tmux and paste the actual
+capture-pane output inline — not a file path, not "see attached", not a
+summary. For docs/types/refactor PRs with nothing user-visible, state `N/A`.
+Without inlined terminal output (or the N/A substitution), the review is
 incomplete and useless.
 
 Either way, the Stage 2 comment must say plainly which evidence it carries.

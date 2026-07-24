@@ -122,6 +122,52 @@ describe('qwen-triage: git exec-vector cleanup', () => {
     );
   });
 
+  // Steady-state regression: on a reused runner this step has already
+  // sanitized the config, so the next run's grep matches nothing and exits 1.
+  // Under the Actions default `bash -e` shell plus the script's own
+  // `set -o pipefail`, an unguarded grep killed the whole step exactly when
+  // there was nothing to clean (run 30095456731). The allowlist test below
+  // can't catch this: it re-assembles the pipeline without the shell flags
+  // and always plants non-allowlisted keys. So run the *actual* step script
+  // under the actual flags against the nothing-to-clean state.
+  describe('steady state: nothing to clean (real step script, bash -e)', () => {
+    // The stage-draft cleanup touches a literal /tmp glob; neuter that one
+    // line so the test never deletes files outside its scratch dir.
+    const hermetic = cleanStep.run.replace(/^rm -f \/tmp\/stage-[^\n]*$/m, ':');
+    let dir;
+
+    before(() => {
+      assert.notEqual(hermetic, cleanStep.run, 'stage-draft rm line not found');
+      dir = mkdtempSync(join(tmpdir(), 'triage-steady-'));
+      spawnSync('git', ['-C', dir, 'init', '-q']);
+    });
+
+    after(() => dir && rmSync(dir, { recursive: true, force: true }));
+
+    const runStep = (script) =>
+      spawnSync('bash', ['-e', '-c', script], {
+        cwd: dir,
+        encoding: 'utf8',
+        env: { ...process.env, RUNNER_TEMP: join(dir, 'rt') },
+      });
+
+    it('succeeds when every config key is already allowlisted', () => {
+      const res = runStep(hermetic);
+      assert.equal(res.status, 0, res.stderr || res.stdout);
+      assert.match(res.stdout, /stale agent state cleaned/);
+    });
+
+    it('negative control: without the grep guard the same state kills the step', () => {
+      const unguarded = hermetic.replace(' || true; }', '; }');
+      assert.notEqual(
+        unguarded,
+        hermetic,
+        'grep guard (`|| true`) not found in clean step',
+      );
+      assert.notEqual(runStep(unguarded).status, 0);
+    });
+  });
+
   // Behavioral test: run the workflow's *actual* allowlist pattern (extracted
   // from the step) against a scratch repo. Proves the regex both unsets exec
   // vectors and preserves the plumbing actions/checkout needs — a broken
