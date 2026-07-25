@@ -541,6 +541,38 @@ describe('copyCommand', () => {
     });
   });
 
+  it('should copy single-character inline math and skip escaped/code spans', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistoryShallow.mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          {
+            text: 'Literal \\$xy$, code `$xy$`, longer ``a `$zz$` b``, then $x$ and $\\alpha$.',
+          },
+        ],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const first = await copyCommand.action(mockContext, 'inline-latex 1');
+    expect(mockCopyToClipboard).toHaveBeenLastCalledWith('x');
+    expect(first).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Inline LaTeX expression 1 copied to the clipboard',
+    });
+
+    const second = await copyCommand.action(mockContext, 'inline-latex 2');
+    expect(mockCopyToClipboard).toHaveBeenLastCalledWith('\\alpha');
+    expect(second).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Inline LaTeX expression 2 copied to the clipboard',
+    });
+  });
+
   it('should copy a numbered inline LaTeX expression with /copy latex inline 1', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 

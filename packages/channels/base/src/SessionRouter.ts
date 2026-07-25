@@ -108,6 +108,10 @@ export class SessionRouter {
     switch (scope) {
       case 'thread':
         return `${channelName}:${threadId || chatId}`;
+      case 'chat_thread':
+        return threadId
+          ? `${channelName}:${chatId}:${threadId}`
+          : `${channelName}:${chatId}`;
       case 'single':
         return `${channelName}:__single__`;
       case 'user':

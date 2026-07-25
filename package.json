@@ -14,7 +14,9 @@
     "packages/channels/wecom",
     "packages/channels/feishu",
     "packages/channels/qqbot",
+    "packages/channels/github",
     "packages/channels/plugin-example",
+    "integrations/external-context",
     "!packages/desktop"
   ],
   "repository": {
