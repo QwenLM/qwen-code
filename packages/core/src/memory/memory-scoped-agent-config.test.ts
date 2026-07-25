@@ -113,6 +113,127 @@ describe('createMemoryScopedAgentConfig', () => {
     ).resolves.toBe('deny');
   });
 
+  it('protects pinned memory and aliases while leaving ordinary memory writable', async () => {
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const pinnedDir = path.join(memoryRoot, 'pinned');
+    const pinnedFile = path.join(pinnedDir, 'architecture.md');
+    const pinnedAlias = path.join(memoryRoot, 'project', 'pinned-alias');
+    await fs.mkdir(pinnedDir, { recursive: true });
+    await fs.writeFile(pinnedFile, 'canonical architecture');
+    await fs.symlink(pinnedDir, pinnedAlias);
+
+    const protectedPm = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot, {
+        includeUserMemory: false,
+        protectPinnedMemory: true,
+      }),
+    );
+
+    await expect(
+      protectedPm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(memoryRoot, 'project', 'ordinary.md'),
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      protectedPm.evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: pinnedFile,
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      protectedPm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(pinnedDir, 'new.md'),
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      protectedPm.evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: path.join(pinnedAlias, 'architecture.md'),
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      protectedPm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(pinnedAlias, 'new.md'),
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      protectedPm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(memoryRoot, 'pinned-notes', 'ordinary.md'),
+      }),
+    ).resolves.toBe('allow');
+
+    const userPinnedFile = path.join(
+      getUserAutoMemoryRoot(),
+      'pinned',
+      'preferences.md',
+    );
+    await fs.mkdir(path.dirname(userPinnedFile), { recursive: true });
+    await fs.writeFile(userPinnedFile, 'canonical preferences');
+    const allMemoryPm = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot, {
+        protectPinnedMemory: true,
+      }),
+    );
+    await expect(
+      allMemoryPm.evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: userPinnedFile,
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      allMemoryPm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(getUserAutoMemoryRoot(), 'user', 'ordinary.md'),
+      }),
+    ).resolves.toBe('allow');
+
+    const unprotectedPm = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot, {
+        includeUserMemory: false,
+      }),
+    );
+    await expect(
+      unprotectedPm.evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: pinnedFile,
+      }),
+    ).resolves.toBe('allow');
+  });
+
+  it('protects a pinned directory symlink and its in-memory target', async () => {
+    const memoryRoot = getAutoMemoryRoot(projectRoot);
+    const targetDir = path.join(memoryRoot, 'project', 'shared');
+    const targetFile = path.join(targetDir, 'architecture.md');
+    const pinnedDir = path.join(memoryRoot, 'pinned');
+    await fs.mkdir(targetDir, { recursive: true });
+    await fs.writeFile(targetFile, 'canonical architecture');
+    await fs.symlink(targetDir, pinnedDir);
+
+    const pm = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot, {
+        includeUserMemory: false,
+        protectPinnedMemory: true,
+      }),
+    );
+
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: path.join(pinnedDir, 'architecture.md'),
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: targetFile,
+      }),
+    ).resolves.toBe('deny');
+  });
+
   it('allows creating new nested topic files inside memory roots', async () => {
     const pm = permissionManager(
       createMemoryScopedAgentConfig({} as Config, projectRoot),

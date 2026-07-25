@@ -102,6 +102,32 @@ describe('managed auto-memory indexer', () => {
     expect(index).toContain('The repo uses pnpm workspaces.');
   });
 
+  it('includes a valid pinned document in the generated index', async () => {
+    const pinnedFile = getAutoMemoryFilePath(
+      projectRoot,
+      path.join('pinned', 'architecture.md'),
+    );
+    await fs.mkdir(path.dirname(pinnedFile), { recursive: true });
+    await fs.writeFile(
+      pinnedFile,
+      [
+        '---',
+        'type: project',
+        'name: Canonical Architecture',
+        'description: The hand-curated architecture reference.',
+        '---',
+        '',
+        'This document is maintained by the user.',
+      ].join('\n'),
+      'utf-8',
+    );
+
+    const index = await rebuildManagedAutoMemoryIndex(projectRoot);
+
+    expect(index).toContain('[Canonical Architecture](pinned/architecture.md)');
+    expect(index).toContain('The hand-curated architecture reference.');
+  });
+
   it('sanitizes attacker-controlled title/description before embedding', () => {
     // Team frontmatter is attacker-controlled and lands in every collaborator's
     // system prompt via the committed MEMORY.md — it must not inject structure.

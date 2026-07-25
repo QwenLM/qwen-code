@@ -111,6 +111,20 @@ describe('dreamAgentPlanner', () => {
     );
   });
 
+  it('excludes pinned memories from consolidation', () => {
+    const prompt = buildConsolidationTaskPrompt(
+      path.join(tempDir, 'memory'),
+      path.join(tempDir, 'transcripts'),
+    );
+
+    expect(prompt).toContain('`pinned/`');
+    expect(prompt).toContain('Skip `pinned/` during Dream');
+    expect(prompt).toContain(
+      'Do not intentionally remove existing index entries for valid `pinned/` files',
+    );
+    expect(prompt).toContain('normal index limits still apply');
+  });
+
   it('returns the forked agent result', async () => {
     const mockResult: ForkedAgentResult = {
       status: 'completed',
@@ -182,8 +196,28 @@ describe('dreamAgentPlanner', () => {
     ).resolves.toBe('allow');
     await expect(
       pm.evaluate({
+        toolName: ToolNames.EDIT,
+        filePath: path.join(
+          getAutoMemoryRoot(projectRoot),
+          'pinned',
+          'architecture.md',
+        ),
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      pm.evaluate({
         toolName: ToolNames.WRITE_FILE,
         filePath: path.join(getUserAutoMemoryRoot(), 'user', 'a.md'),
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.SHELL,
+        command: `rm ${path.join(
+          getAutoMemoryRoot(projectRoot),
+          'pinned',
+          'architecture.md',
+        )}`,
       }),
     ).resolves.toBe('deny');
   });

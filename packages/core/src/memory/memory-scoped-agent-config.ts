@@ -16,6 +16,7 @@ import { ToolNames } from '../tools/tool-names.js';
 import { isShellCommandReadOnlyAST } from '../utils/shellAstParser.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import {
+  AUTO_MEMORY_PINNED_DIRNAME,
   getAutoMemoryRoot,
   getAutoMemoryTrustedAnchor,
   getUserAutoMemoryRoot,
@@ -34,6 +35,7 @@ export interface MemoryScopedAgentConfigOptions {
   allowShell?: boolean;
   bypassBaseAskForScopedPaths?: boolean;
   includeUserMemory?: boolean;
+  protectPinnedMemory?: boolean;
   restrictReadsToMemoryPaths?: boolean;
 }
 
@@ -92,6 +94,39 @@ export function isAllowedMemoryPath(
     (includeUserMemory && isWithinRoot(candidate, userMemoryRoot));
   const resolved = realpathExistingOrNew(filePath);
   return !!resolved && isAllowed(resolved);
+}
+
+function isProtectedPinnedMemoryPath(
+  filePath: string | undefined,
+  projectRoot: string,
+  options: Pick<MemoryScopedAgentConfigOptions, 'includeUserMemory'> = {},
+): boolean {
+  if (!filePath) return false;
+
+  const memoryRoots = [getAutoMemoryRoot(projectRoot)];
+  if (options.includeUserMemory ?? true) {
+    memoryRoots.push(getUserAutoMemoryRoot());
+  }
+
+  const literalCandidate = path.resolve(filePath);
+  const resolvedCandidate = realpathExistingOrNew(filePath);
+
+  return memoryRoots.some((memoryRoot) => {
+    const literalPinnedRoot = path.resolve(
+      memoryRoot,
+      AUTO_MEMORY_PINNED_DIRNAME,
+    );
+    if (isWithinRoot(literalCandidate, literalPinnedRoot)) {
+      return true;
+    }
+
+    const resolvedPinnedRoot = realpathExistingOrNew(literalPinnedRoot);
+    return (
+      !!resolvedCandidate &&
+      !!resolvedPinnedRoot &&
+      isWithinRoot(resolvedCandidate, resolvedPinnedRoot)
+    );
+  });
 }
 
 function realpathExistingOrNew(filePath: string): string | undefined {
@@ -200,6 +235,14 @@ async function evaluateScopedDecision(
         : 'deny';
     case ToolNames.EDIT:
     case ToolNames.WRITE_FILE:
+      if (
+        opts.protectPinnedMemory &&
+        isProtectedPinnedMemoryPath(ctx.filePath, projectRoot, {
+          includeUserMemory: opts.includeUserMemory,
+        })
+      ) {
+        return 'deny';
+      }
       return isAllowedMemoryPath(ctx.filePath, projectRoot, {
         includeUserMemory: opts.includeUserMemory,
       })
@@ -235,8 +278,24 @@ function getScopedDenyRule(
         `ManagedAutoMemory(list_directory: only within ` + `${allowedRoots})`
       );
     case ToolNames.EDIT:
+      if (
+        opts.protectPinnedMemory &&
+        isProtectedPinnedMemoryPath(ctx.filePath, projectRoot, {
+          includeUserMemory: opts.includeUserMemory,
+        })
+      ) {
+        return 'ManagedAutoMemory(edit: pinned memory is read-only)';
+      }
       return `ManagedAutoMemory(edit: only within ${allowedRoots})`;
     case ToolNames.WRITE_FILE:
+      if (
+        opts.protectPinnedMemory &&
+        isProtectedPinnedMemoryPath(ctx.filePath, projectRoot, {
+          includeUserMemory: opts.includeUserMemory,
+        })
+      ) {
+        return 'ManagedAutoMemory(write_file: pinned memory is read-only)';
+      }
       return `ManagedAutoMemory(write_file: only within ${allowedRoots})`;
     default:
       return undefined;
@@ -252,6 +311,7 @@ export function createMemoryScopedAgentConfig(
     allowShell: options.allowShell ?? false,
     bypassBaseAskForScopedPaths: options.bypassBaseAskForScopedPaths ?? false,
     includeUserMemory: options.includeUserMemory ?? true,
+    protectPinnedMemory: options.protectPinnedMemory ?? false,
     restrictReadsToMemoryPaths: options.restrictReadsToMemoryPaths ?? false,
   };
   const basePm = config.getPermissionManager?.();
