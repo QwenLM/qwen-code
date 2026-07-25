@@ -2425,6 +2425,7 @@ export function App({
     useState(false);
   const streamingState = useStreamingState();
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
+  const queuedShellCommandsRef = useRef<string[]>([]);
   const localStreamingStartedAtRef = useRef(Date.now());
   const previousStreamingStateRef =
     useRef<DaemonStreamingState>(streamingState);
@@ -3865,6 +3866,22 @@ export function App({
   useEffect(() => {
     streamingStateRef.current = streamingState;
   }, [streamingState]);
+
+  useEffect(() => {
+    if (streamingState !== 'idle') return;
+    const cmds = queuedShellCommandsRef.current;
+    if (cmds.length === 0) return;
+    queuedShellCommandsRef.current = [];
+    void (async () => {
+      for (const cmd of cmds) {
+        try {
+          await sessionActions.sendShellCommand(cmd);
+        } catch (error: unknown) {
+          reportError(error, 'Failed to execute shell command');
+        }
+      }
+    })();
+  }, [streamingState, sessionActions, reportError]);
 
   useEffect(() => {
     modelDialogModeRef.current = modelDialogMode;
@@ -5854,12 +5871,13 @@ export function App({
           inputAnnotations: metadata?.inputAnnotations,
         });
       } else if (text.startsWith('!')) {
-        if (promptBlocked) {
-          pushToast('error', t('queue.shellBlocked'));
-          return false;
-        }
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
+        if (promptBlocked) {
+          queuedShellCommandsRef.current.push(cmd);
+          pushToast('info', t('queue.shellQueued'));
+          return true;
+        }
         void ensureSessionForPrompt()
           .then(() => sessionActions.sendShellCommand(cmd))
           .catch((error: unknown) => {
