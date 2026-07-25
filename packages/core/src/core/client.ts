@@ -52,6 +52,7 @@ import {
   getArenaSystemReminder,
   getCoreSystemPrompt,
   getCustomSystemPrompt,
+  getManualPlanExitSystemReminder,
   getPlanModeSystemReminder,
   resolveInteractionMode,
 } from './prompts.js';
@@ -2451,6 +2452,15 @@ export class GeminiClient {
               shouldUsePlanOnlyReminderInSubagentContext() ||
                 this.config.getSdkMode(),
             ),
+          );
+        } else if (this.config.consumePendingManualPlanExitNotice()) {
+          // One-shot counterpart to the reminder above: the model was told
+          // "plan mode is active" on every turn, so a manual exit
+          // (Shift+Tab, /approval-mode, /plan) needs an explicit signal —
+          // the reminder silently disappearing goes unnoticed and the
+          // model keeps calling exit_plan_mode (#7671).
+          systemReminders.push(
+            getManualPlanExitSystemReminder(this.config.getApprovalMode()),
           );
         }
 

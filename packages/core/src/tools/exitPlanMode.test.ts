@@ -146,7 +146,9 @@ describe('ExitPlanModeTool', () => {
 
       expect(result.error).toBeUndefined();
       expect(approvalMode).toBe(targetMode);
-      expect(config.setApprovalMode).toHaveBeenCalledWith(targetMode);
+      expect(config.setApprovalMode).toHaveBeenCalledWith(targetMode, {
+        fromApprovedPlanExit: true,
+      });
       expect(config.savePlan).toHaveBeenCalledWith('Approved plan');
     },
   );
@@ -400,6 +402,35 @@ describe('ExitPlanModeTool', () => {
     expect(result.error).toBeUndefined();
     expect(result.llmContent).toContain('cancelled');
     expect(config.setApprovalMode).not.toHaveBeenCalled();
+  });
+
+  it('marks a successful leader-approved exit as an approved plan exit', async () => {
+    vi.mocked(config.getTeamManager).mockReturnValue({
+      requestPlanApproval: vi.fn(async () => ({
+        action: 'approve',
+        targetMode: ApprovalMode.DEFAULT,
+      })),
+    } as never);
+    const invocation = tool.build({ plan: 'Teammate plan' });
+
+    const result = await runWithTeammateIdentity(
+      {
+        agentId: 'planner@test',
+        agentName: 'planner',
+        teamName: 'test',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+      () => invocation.execute(new AbortController().signal),
+    );
+
+    expect(result.error).toBeUndefined();
+    expect(approvalMode).toBe(ApprovalMode.DEFAULT);
+    // Must mirror the regular approval call site: without the option, a
+    // leader-approved exit would queue the manual plan-exit reminder.
+    expect(config.setApprovalMode).toHaveBeenCalledWith(ApprovalMode.DEFAULT, {
+      fromApprovedPlanExit: true,
+    });
   });
 
   it('saves a leader-approved plan when the teammate transition fails', async () => {
