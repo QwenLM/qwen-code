@@ -146,6 +146,7 @@ describe('GetGoalTool', () => {
         ],
         lineageTurnIds: ['turn-4'],
       },
+      verifierFeedback: 'retry: missing edge case',
       fullTranscript: ['must not leak'],
     });
     const getSnapshot = vi.fn(() => structuredClone(snapshot));
@@ -171,6 +172,7 @@ describe('GetGoalTool', () => {
         ],
         lineageTurnIds: ['turn-4'],
       },
+      verifierFeedback: 'retry: missing edge case',
     });
     expect(String(result.llmContent)).not.toContain('must not leak');
     expect(result.returnDisplay).toBe('Active goal · revision 3');
@@ -281,7 +283,7 @@ describe('UpdateGoalTool', () => {
     expect(recordTerminalProposal).not.toHaveBeenCalled();
   });
 
-  it('rejects stale delivered-output evidence before recording a proposal', async () => {
+  it('rejects completion that omits current delivered output', async () => {
     const recordTerminalProposal = vi.fn();
     const getGoalForWorker = vi.fn().mockResolvedValue({
       goalId: permit.goalId,
@@ -291,11 +293,11 @@ describe('UpdateGoalTool', () => {
       evidenceCatalog: {
         entries: [
           {
-            uuid: 'letter-z',
-            provenance: 'assistant_output',
+            uuid: 'tool-result-1',
+            provenance: 'tool_result',
             turnId: 'turn-1',
-            preview: 'Z',
-            proofKind: 'delivered_output',
+            preview: 'tests passed',
+            proofKind: 'external_fact',
           },
           {
             uuid: 'letter-x',
@@ -330,7 +332,7 @@ describe('UpdateGoalTool', () => {
       tool.build({
         status: 'complete',
         reason: 'All characters were delivered',
-        evidenceRefs: ['letter-z'],
+        evidenceRefs: ['tool-result-1'],
       }),
     );
 

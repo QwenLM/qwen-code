@@ -173,21 +173,14 @@ class UpdateGoalInvocation extends BaseToolInvocation<
         };
       }
       const citedEvidenceRefs = new Set(normalizedEvidenceRefs);
-      const citesDeliveredOutput = evidenceEntries.some(
-        (entry) =>
-          citedEvidenceRefs.has(entry.uuid) &&
-          entry.proofKind === 'delivered_output',
-      );
-      const uncitedCurrentDeliveredOutput = citesDeliveredOutput
-        ? evidenceEntries
-            .filter(
-              (entry) =>
-                entry.proofKind === 'delivered_output' &&
-                entry.turnId === permit.turnId &&
-                !citedEvidenceRefs.has(entry.uuid),
-            )
-            .map((entry) => entry.uuid)
-        : [];
+      const uncitedCurrentDeliveredOutput = evidenceEntries
+        .filter(
+          (entry) =>
+            entry.proofKind === 'delivered_output' &&
+            entry.turnId === permit.turnId &&
+            !citedEvidenceRefs.has(entry.uuid),
+        )
+        .map((entry) => entry.uuid);
       if (
         this.params.status === 'complete' &&
         uncitedCurrentDeliveredOutput.length > 0

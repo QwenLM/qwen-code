@@ -2383,6 +2383,8 @@ const ZH: Messages = {
   'toolName.glob': 'Glob',
   'toolName.run_shell_command': '运行命令',
   'toolName.todo_write': '任务清单',
+  'toolName.get_goal': '目标',
+  'toolName.update_goal': '更新目标',
   'toolName.save_memory': '保存记忆',
   'toolName.agent': 'Agent',
   'toolName.skill': '查看技能',
