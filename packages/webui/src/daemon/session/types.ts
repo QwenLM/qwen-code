@@ -364,6 +364,8 @@ export interface DaemonSessionActions {
     workspaceCwd?: string;
     approvalMode?: DaemonApprovalMode;
     sourceType?: string;
+    worktree?: { slug?: string };
+    branch?: { name: string };
   }): Promise<DaemonSession>;
   attachSession(): Promise<void>;
   clearSession(): Promise<void>;

@@ -15,6 +15,7 @@ import {
   HOME_ENV_BOOTSTRAP_KEYS,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
 } from './shared-env-keys.js';
+import { publishPendingCompileCache } from './compile-cache.js';
 export {
   DEFAULT_EXCLUDED_ENV_VARS,
   ENV_CORRUPTED_PATH,
@@ -541,6 +542,7 @@ export function loadEnvironment(
     }
   }
   lastReloadSnapshotSeeded = true;
+  publishPendingCompileCache();
 }
 
 export interface EnvReloadResult {

@@ -15,6 +15,7 @@ import {
   runVisionBridge,
   selectVisionBridgeModel,
   isImageCapable,
+  isFullTurnVisionCapable,
   type VisionModelCandidate,
 } from './vision-bridge-service.js';
 import type { Config } from '../../config/config.js';
@@ -1102,5 +1103,28 @@ describe('isImageCapable', () => {
   it('falls back to name-based defaults when neither is set', () => {
     expect(isImageCapable({ id: 'qwen3-vl-plus' })).toBe(true);
     expect(isImageCapable({ id: 'qwen-text-max' })).toBe(false);
+  });
+});
+
+describe('isFullTurnVisionCapable', () => {
+  it('excludes an image-only model even when agent-capable', () => {
+    expect(
+      isFullTurnVisionCapable({
+        id: 'qwen-image-2.0',
+        imageOnly: true,
+        isVision: true,
+        capabilities: { agent: true },
+      }),
+    ).toBe(false);
+  });
+
+  it('includes a non-image-only agent-capable vision model', () => {
+    expect(
+      isFullTurnVisionCapable({
+        id: 'qwen3-vl-plus',
+        isVision: true,
+        capabilities: { agent: true },
+      }),
+    ).toBe(true);
   });
 });

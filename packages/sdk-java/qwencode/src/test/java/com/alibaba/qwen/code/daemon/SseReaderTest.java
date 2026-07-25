@@ -29,6 +29,29 @@ class SseReaderTest {
     }
 
     @Test
+    void parsesBareCarriageReturnLineEndings() throws Exception {
+        String input = "id: 7\revent: update\rdata: {}\r\r";
+        SseReader reader = new SseReader(new ByteArrayInputStream(
+                input.getBytes(StandardCharsets.UTF_8)), 1024, () -> {
+                });
+
+        SseReader.Frame frame = reader.next();
+        assertEquals(7L, frame.getId());
+        assertEquals("update", frame.getEvent());
+        assertEquals("{}", frame.getData());
+    }
+
+    @Test
+    void ignoresLeadingUtf8Bom() throws Exception {
+        String input = "\uFEFFid: 7\ndata: {}\n\n";
+        SseReader reader = new SseReader(new ByteArrayInputStream(
+                input.getBytes(StandardCharsets.UTF_8)), 1024, () -> {
+                });
+
+        assertEquals(7L, reader.next().getId());
+    }
+
+    @Test
     void rejectsMalformedUtf8() {
         byte[] invalid = new byte[] {'d', 'a', 't', 'a', ':', ' ', (byte) 0xC3,
                 (byte) 0x28, '\n', '\n'};
@@ -38,10 +61,32 @@ class SseReaderTest {
     }
 
     @Test
+    void rejectsUnicodeDigitsInIdAndRetry() {
+        for (String input : new String[] {
+                "id: \u0661\ndata: {}\n\n",
+                "retry: \u0661\n\nid: 1\ndata: {}\n\n"
+        }) {
+            SseReader reader = new SseReader(new ByteArrayInputStream(
+                    input.getBytes(StandardCharsets.UTF_8)), 1024, () -> {
+                    });
+            assertThrows(DaemonProtocolException.class, reader::next);
+        }
+    }
+
+    @Test
     void rejectsOversizedFrame() {
         String input = "data: " + "x".repeat(1024) + "\n\n";
         SseReader reader = new SseReader(new ByteArrayInputStream(
                 input.getBytes(StandardCharsets.UTF_8)), 128, () -> { });
+        assertThrows(DaemonProtocolException.class, reader::next);
+    }
+
+    @Test
+    void countsBothBytesOfCrLfTowardFrameLimit() {
+        SseReader reader = new SseReader(new ByteArrayInputStream(
+                "data: x\r\n\r\n".getBytes(StandardCharsets.UTF_8)),
+                10, () -> {
+                });
         assertThrows(DaemonProtocolException.class, reader::next);
     }
 

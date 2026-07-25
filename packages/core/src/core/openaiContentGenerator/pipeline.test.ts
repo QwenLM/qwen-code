@@ -41,6 +41,10 @@ import {
 import { setToolCallPreparations } from '../tool-call-preparation.js';
 
 // Mock dependencies
+const mockReportOpenAiRequest = vi.hoisted(() => vi.fn());
+const mockReportOpenAiResponse = vi.hoisted(() => vi.fn());
+const mockReportOpenAiChunk = vi.hoisted(() => vi.fn());
+
 vi.mock('./converter.js', () => ({
   OpenAIContentConverter: {
     convertGeminiRequestToOpenAI: vi.fn(),
@@ -52,6 +56,11 @@ vi.mock('./converter.js', () => ({
 vi.mock('openai');
 vi.mock('../../telemetry/loggers.js', () => ({
   logProtocolTagSanitized: vi.fn(),
+}));
+vi.mock('../../telemetry/gen-ai-request.js', () => ({
+  reportOpenAiRequest: mockReportOpenAiRequest,
+  reportOpenAiResponse: mockReportOpenAiResponse,
+  reportOpenAiChunk: mockReportOpenAiChunk,
 }));
 
 describe('ContentGenerationPipeline', () => {
@@ -157,6 +166,8 @@ describe('ContentGenerationPipeline', () => {
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockOpenAIResponse,
       );
+      const telemetryAttempt = {};
+      mockReportOpenAiRequest.mockReturnValueOnce(telemetryAttempt);
 
       // Act
       const result = await pipeline.execute(request, userPromptId);
@@ -182,6 +193,13 @@ describe('ContentGenerationPipeline', () => {
         expect.objectContaining({
           signal: undefined,
         }),
+      );
+      expect(mockReportOpenAiRequest).toHaveBeenCalledWith(
+        vi.mocked(mockClient.chat.completions.create).mock.calls[0]![0],
+      );
+      expect(mockReportOpenAiResponse).toHaveBeenCalledWith(
+        telemetryAttempt,
+        mockOpenAIResponse,
       );
       expect(mockConverter.convertOpenAIResponseToGemini).toHaveBeenCalledWith(
         mockOpenAIResponse,
@@ -2078,6 +2096,8 @@ describe('ContentGenerationPipeline', () => {
       expect(calls).toHaveLength(2);
       expect(calls[0][0].enable_thinking).toBe(false);
       expect(calls[1][0].enable_thinking).toBe(true);
+      expect(mockReportOpenAiRequest).toHaveBeenNthCalledWith(1, calls[0][0]);
+      expect(mockReportOpenAiRequest).toHaveBeenNthCalledWith(2, calls[1][0]);
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
 
@@ -2124,6 +2144,8 @@ describe('ContentGenerationPipeline', () => {
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockStream,
       );
+      const telemetryAttempt = {};
+      mockReportOpenAiRequest.mockReturnValueOnce(telemetryAttempt);
 
       // Act
       const resultGenerator = await pipeline.executeStream(
@@ -2165,6 +2187,19 @@ describe('ContentGenerationPipeline', () => {
           signal: expect.any(AbortSignal),
         }),
       );
+      expect(mockReportOpenAiRequest).toHaveBeenCalledWith(
+        vi.mocked(mockClient.chat.completions.create).mock.calls[0]![0],
+      );
+      expect(mockReportOpenAiChunk).toHaveBeenNthCalledWith(
+        1,
+        telemetryAttempt,
+        mockChunk1,
+      );
+      expect(mockReportOpenAiChunk).toHaveBeenNthCalledWith(
+        2,
+        telemetryAttempt,
+        mockChunk2,
+      );
     });
 
     it('should filter empty responses', async () => {
@@ -2181,6 +2216,14 @@ describe('ContentGenerationPipeline', () => {
       } as OpenAI.Chat.ChatCompletionChunk;
       const mockChunk2 = {
         id: 'chunk-2',
+        choices: [],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+      const mockChunk3 = {
+        id: 'chunk-3',
+        choices: [],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+      const mockChunk4 = {
+        id: 'chunk-4',
         choices: [
           { delta: { content: 'Hello response' }, finish_reason: 'stop' },
         ],
@@ -2190,13 +2233,18 @@ describe('ContentGenerationPipeline', () => {
         async *[Symbol.asyncIterator]() {
           yield mockChunk1;
           yield mockChunk2;
+          yield mockChunk3;
+          yield mockChunk4;
         },
       };
 
-      const mockEmptyResponse = new GenerateContentResponse();
-      mockEmptyResponse.candidates = [
+      const mockEmptyCandidateResponse = new GenerateContentResponse();
+      mockEmptyCandidateResponse.candidates = [
         { content: { parts: [], role: 'model' } },
       ];
+      const mockEmptyChoicesResponse = new GenerateContentResponse();
+      mockEmptyChoicesResponse.candidates = [];
+      const mockMissingCandidatesResponse = new GenerateContentResponse();
 
       const mockValidResponse = new GenerateContentResponse();
       mockValidResponse.candidates = [
@@ -2205,7 +2253,9 @@ describe('ContentGenerationPipeline', () => {
 
       (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
       (mockConverter.convertOpenAIChunkToGemini as Mock)
-        .mockReturnValueOnce(mockEmptyResponse)
+        .mockReturnValueOnce(mockEmptyCandidateResponse)
+        .mockReturnValueOnce(mockEmptyChoicesResponse)
+        .mockReturnValueOnce(mockMissingCandidatesResponse)
         .mockReturnValueOnce(mockValidResponse);
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockStream,
@@ -3446,7 +3496,7 @@ describe('ContentGenerationPipeline', () => {
       expect(capturedSignal!.aborted).toBe(true);
     });
 
-    it('should merge finishReason and usageMetadata from separate chunks', async () => {
+    it('should ignore empty choices while merging finishReason and usageMetadata', async () => {
       // Arrange
       const request: GenerateContentParameters = {
         model: 'test-model',
@@ -3468,9 +3518,15 @@ describe('ContentGenerationPipeline', () => {
         choices: [{ delta: { content: '' }, finish_reason: 'stop' }],
       } as OpenAI.Chat.ChatCompletionChunk;
 
-      // Usage metadata chunk (empty candidates, has usage)
+      // Empty choices chunk between finish and usage
       const mockChunk3 = {
         id: 'chunk-3',
+        choices: [],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+      // Usage metadata chunk (empty candidates, has usage)
+      const mockChunk4 = {
+        id: 'chunk-4',
         object: 'chat.completion.chunk',
         created: Date.now(),
         model: 'test-model',
@@ -3483,6 +3539,7 @@ describe('ContentGenerationPipeline', () => {
           yield mockChunk1;
           yield mockChunk2;
           yield mockChunk3;
+          yield mockChunk4;
         },
       };
 
@@ -3501,6 +3558,9 @@ describe('ContentGenerationPipeline', () => {
         },
       ];
 
+      const mockEmptyResponse = new GenerateContentResponse();
+      mockEmptyResponse.candidates = [];
+
       const mockUsageResponse = new GenerateContentResponse();
       mockUsageResponse.candidates = [];
       mockUsageResponse.usageMetadata = {
@@ -3512,24 +3572,11 @@ describe('ContentGenerationPipeline', () => {
         cachedInputTokensReported: false,
       });
 
-      // Expected merged response (finishReason + usageMetadata combined)
-      const mockMergedResponse = new GenerateContentResponse();
-      mockMergedResponse.candidates = [
-        {
-          content: { parts: [], role: 'model' },
-          finishReason: FinishReason.STOP,
-        },
-      ];
-      mockMergedResponse.usageMetadata = {
-        promptTokenCount: 10,
-        candidatesTokenCount: 20,
-        totalTokenCount: 30,
-      };
-
       (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
       (mockConverter.convertOpenAIChunkToGemini as Mock)
         .mockReturnValueOnce(mockContentResponse)
         .mockReturnValueOnce(mockFinishResponse)
+        .mockReturnValueOnce(mockEmptyResponse)
         .mockReturnValueOnce(mockUsageResponse);
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockStream,
@@ -3540,27 +3587,42 @@ describe('ContentGenerationPipeline', () => {
         request,
         userPromptId,
       );
-      const results = [];
-      for await (const result of resultGenerator) {
-        results.push(result);
-      }
+      const iterator = resultGenerator[Symbol.asyncIterator]();
 
       // Assert
-      expect(results).toHaveLength(2); // Content chunk + merged finish/usage chunk
-      expect(results[0]).toBe(mockContentResponse);
+      try {
+        const contentResult = await iterator.next();
+        if (contentResult.done) throw new Error('Expected a content response.');
+        expect(contentResult.value).toBe(mockContentResponse);
 
-      // The last result should have both finishReason and usageMetadata
-      const lastResult = results[1];
-      expect(lastResult.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
-      expect(lastResult.usageMetadata).toEqual({
-        promptTokenCount: 10,
-        candidatesTokenCount: 20,
-        totalTokenCount: 30,
-      });
-      expect(lastResult.modelVersion).toBe('actual-provider-model');
-      expect(getGenAiUsageProvenance(lastResult.usageMetadata)).toEqual({
-        cachedInputTokensReported: false,
-      });
+        const finishResult = await iterator.next();
+        if (finishResult.done) throw new Error('Expected a finish response.');
+        // Check before resuming: a later chunk can mutate the yielded object.
+        expect(finishResult.value.candidates?.[0]?.finishReason).toBe(
+          FinishReason.STOP,
+        );
+        expect(finishResult.value.usageMetadata).toEqual({
+          promptTokenCount: 10,
+          candidatesTokenCount: 20,
+          totalTokenCount: 30,
+        });
+        expect(finishResult.value.modelVersion).toBe('actual-provider-model');
+        expect(
+          getGenAiUsageProvenance(finishResult.value.usageMetadata),
+        ).toEqual({
+          cachedInputTokensReported: false,
+        });
+
+        await expect(iterator.next()).resolves.toEqual({
+          value: undefined,
+          done: true,
+        });
+      } finally {
+        let result = await iterator.next();
+        while (!result.done) {
+          result = await iterator.next();
+        }
+      }
     });
 
     it('should handle ideal case where last chunk has both finishReason and usageMetadata', async () => {

@@ -2780,6 +2780,41 @@ describe('extension tests', () => {
           hashValue('https://gitlab.company.com/team/extension-repo'),
         );
       });
+
+      it('gives plugins from the same repository distinct ids (#7568)', () => {
+        const metadataFor = (pluginName: string) => ({
+          type: 'git' as const,
+          source: 'https://github.com/dotnet/skills',
+          pluginName,
+        });
+        const dotnetId = getExtensionId(
+          { name: 'dotnet', version: '1.0.0' },
+          metadataFor('dotnet'),
+        );
+        const dotnetTestId = getExtensionId(
+          { name: 'dotnet-test', version: '1.0.0' },
+          metadataFor('dotnet-test'),
+        );
+
+        expect(dotnetId).toBe(
+          hashValue('https://github.com/dotnet/skills:dotnet'),
+        );
+        expect(dotnetTestId).toBe(
+          hashValue('https://github.com/dotnet/skills:dotnet-test'),
+        );
+        expect(dotnetId).not.toBe(dotnetTestId);
+      });
+
+      it('keeps the repo-only id when no plugin name is recorded', () => {
+        const config: ExtensionConfig = { name: 'solo-ext', version: '1.0.0' };
+        const metadata = {
+          type: 'git' as const,
+          source: 'https://github.com/owner/solo',
+        };
+        expect(getExtensionId(config, metadata)).toBe(
+          hashValue('https://github.com/owner/solo'),
+        );
+      });
     });
   });
 

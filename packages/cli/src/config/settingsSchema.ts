@@ -1309,6 +1309,17 @@ const SETTINGS_SCHEMA = {
     showInDialog: true,
   },
 
+  imageModel: {
+    type: 'string',
+    label: 'Image Model',
+    category: 'Model',
+    requiresRestart: false,
+    default: '',
+    description:
+      'Model used by the built-in image_gen tool. Set with /model --image. The selected model must be marked imageOnly in modelProviders.',
+    showInDialog: false,
+  },
+
   visionBridgeTimeoutMs: {
     type: 'integer',
     label: 'Vision Bridge Timeout (ms)',

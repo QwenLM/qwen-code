@@ -795,6 +795,7 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { CliArgs } from '../config/config.js';
 import {
+  AuthType,
   SessionEndReason,
   MCPServerConfig,
   SessionService,
@@ -2496,6 +2497,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getSessionService: vi.fn(() => new SessionService('/tmp')),
       hasSessionWriteOwnership: vi.fn().mockReturnValue(false),
       getSessionRuntimeBaseDir: vi.fn().mockReturnValue('/runtime-a'),
+      getPlansDir: vi.fn().mockReturnValue('/home/test/.qwen/plans'),
       setFileSystemService: vi.fn(),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
@@ -2514,6 +2516,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       '/tmp/user-memory',
       '/home/test/.qwen/skills',
       '/tmp/qwen-extensions',
+      '/home/test/.qwen/plans',
       ...(process.platform === 'win32' ? [] : ['/tmp']),
     ];
   }
@@ -4021,6 +4024,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           baseUrl: 'https://api.example.com',
           isRuntimeModel: false,
         },
+        {
+          id: 'qwen-image-2.0',
+          label: 'Qwen Image 2.0',
+          authType: 'qwen',
+          baseUrl: 'https://api.example.com',
+          imageOnly: true,
+          isRuntimeModel: false,
+        },
       ]),
       getToolRegistry: vi
         .fn()
@@ -4064,6 +4075,26 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(
       preflight.cells.find((c) => c.kind === 'tool_registry')?.status,
     ).toBe('ok');
+    expect(preflight.cells.find((c) => c.kind === 'providers')).toMatchObject({
+      status: 'ok',
+      detail: { count: 1, providers: ['qwen'] },
+    });
+
+    vi.mocked(mockConfig.getAllConfiguredModels).mockReturnValue([
+      {
+        id: 'qwen-image-2.0',
+        label: 'Qwen Image 2.0',
+        authType: AuthType.QWEN_OAUTH,
+        imageOnly: true,
+      },
+    ]);
+    const imageOnlyPreflight = (await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.workspacePreflight,
+      {},
+    )) as { cells: Array<{ kind: string; status: string }> };
+    expect(
+      imageOnlyPreflight.cells.find((c) => c.kind === 'providers')?.status,
+    ).toBe('error');
 
     mockConnectionState.resolve();
     await agentPromise;
