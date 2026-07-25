@@ -1022,7 +1022,7 @@ jobs:
           IS_FLAKE=false
 
           # Only applies to auto-filed CI failure issues.
-          ISSUE_JSON="$(gh issue view "${ISSUE}" --repo "${REPO}" --json title,body)"
+          ISSUE_JSON="$(gh issue view "${ISSUE}" --repo "${REPO}" --json title,body 2>/dev/null || true)"
           TITLE="$(jq -r '.title' <<< "${ISSUE_JSON}")"
           if [[ "${TITLE}" != Main\ CI\ failed:* ]]; then
             echo "Not a CI failure issue; skipping flake detection."
