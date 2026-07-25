@@ -299,6 +299,7 @@ describe('useGeminiStream', () => {
       })),
       getBackgroundShellRegistry: vi.fn(() => mockBackgroundShellRegistry),
       getMonitorRegistry: vi.fn(() => mockMonitorRegistry),
+      getHookSystem: vi.fn(() => null),
     } as unknown as Config;
     mockOnDebugMessage = vi.fn();
     mockHandleSlashCommand = vi.fn().mockResolvedValue(false);
