@@ -157,14 +157,17 @@ export interface RawReview {
  * review`, direct POSTs to `pulls/<n>/reviews`), and unlike issue comments
  * a review CAN legitimately appear here — the sanctioned submit posts one —
  * so sanctioned-vs-bypass is decided by id against the receipt submit wrote.
- * No receipt vouches for nothing: with zero sanctioned writes recorded,
- * every in-window review by the account is flagged (fail-safe).
+ * The receipt vouches for a SET of ids, not one: the window spans drift
+ * restarts, so two sanctioned submits can fall in it, and excluding only the
+ * last would flag the earlier legitimate review as a bypass. No receipt
+ * vouches for nothing: with zero sanctioned writes recorded, every in-window
+ * review by the account is flagged (fail-safe).
  */
 export function findUnsanctionedReviews(
   reviews: RawReview[],
   reviewer: string,
   sinceIso: string,
-  receiptReviewId: number | null,
+  receiptReviewIds: ReadonlySet<number>,
 ): RawReview[] {
   const reviewerLc = reviewer.toLowerCase();
   return reviews.filter(
@@ -172,7 +175,7 @@ export function findUnsanctionedReviews(
       (r.user?.login ?? '').toLowerCase() === reviewerLc &&
       typeof r.submitted_at === 'string' &&
       r.submitted_at >= sinceIso &&
-      r.id !== receiptReviewId,
+      !receiptReviewIds.has(r.id),
   );
 }
 
@@ -243,15 +246,24 @@ function readAuditWindow(
   }
 }
 
-/** The review id the sanctioned submit recorded, or null when none did. */
-function readSubmitReceipt(target: string): number | null {
+/**
+ * The set of review ids sanctioned submits recorded this session — empty when
+ * none did. Reads the current `reviewIds: number[]` shape and migrates a
+ * legacy single `reviewId` a receipt from an older CLI carries.
+ */
+function readSubmitReceipt(target: string): Set<number> {
   try {
     const receipt = JSON.parse(
       readFileSync(tmpFile(target, 'submit-receipt.json'), 'utf8'),
-    ) as { reviewId?: unknown };
-    return typeof receipt.reviewId === 'number' ? receipt.reviewId : null;
+    ) as { reviewIds?: unknown; reviewId?: unknown };
+    const ids = Array.isArray(receipt.reviewIds)
+      ? receipt.reviewIds
+      : typeof receipt.reviewId === 'number'
+        ? [receipt.reviewId]
+        : [];
+    return new Set(ids.filter((n): n is number => typeof n === 'number'));
   } catch {
-    return null;
+    return new Set();
   }
 }
 

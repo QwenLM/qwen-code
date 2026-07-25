@@ -241,17 +241,19 @@ describe('findUnsanctionedReviews', () => {
       ],
       'reviewer',
       since,
-      null,
+      new Set(),
     );
     expect(got.map((r) => r.id)).toEqual([1]);
   });
 
-  it('excludes exactly the receipt-vouched review id', () => {
+  it('excludes every receipt-vouched review id, not just the last', () => {
+    // Two sanctioned submits in one window (drift restart) — both ids are on
+    // the receipt, and NEITHER may be flagged.
     const got = findUnsanctionedReviews(
-      [review({ id: 1 }), review({ id: 2 })],
+      [review({ id: 1 }), review({ id: 2 }), review({ id: 3 })],
       'reviewer',
       since,
-      2,
+      new Set([2, 3]),
     );
     expect(got.map((r) => r.id)).toEqual([1]);
   });
@@ -522,6 +524,42 @@ describe('runCleanup — bypass-write audit', () => {
     expect(warnings.join('\n')).toContain('review 501 (APPROVED)');
     expect(warnings.join('\n')).toContain('no submit receipt vouches for it');
     expect(warnings.join('\n')).not.toContain('review 500');
+  });
+
+  it('spares every review in a multi-id receipt (two sanctioned submits in one window)', () => {
+    mocks.readFileSync.mockImplementation((path: string) => {
+      if (String(path).endsWith('submit-receipt.json')) {
+        return JSON.stringify({ reviewIds: [500, 502] });
+      }
+      return fetchReport;
+    });
+    mocks.ghApiAll.mockImplementation((path: string) =>
+      path.includes('/reviews')
+        ? [
+            {
+              id: 500,
+              user: { login: 'reviewer' },
+              state: 'COMMENT',
+              submitted_at: '2026-07-24T09:00:00Z',
+            },
+            {
+              id: 502,
+              user: { login: 'reviewer' },
+              state: 'COMMENT',
+              submitted_at: '2026-07-24T09:05:00Z',
+            },
+          ]
+        : [],
+    );
+
+    runCleanup('pr-123');
+
+    const warnings = mocks.writeStdoutLine.mock.calls
+      .map((c) => String(c[0]))
+      .filter((l) => l.startsWith('warning:'));
+    // Both are receipt-vouched → no bypass warning at all.
+    expect(warnings.join('\n')).not.toContain('review 500');
+    expect(warnings.join('\n')).not.toContain('review 502');
   });
 
   it('names each malformed-report shape and never reaches GitHub', () => {

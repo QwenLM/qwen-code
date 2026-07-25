@@ -80,6 +80,30 @@ function defaultSkillArgsPath(): string {
 const EVENTS = new Set(['APPROVE', 'REQUEST_CHANGES', 'COMMENT']);
 
 /**
+ * Review ids a prior submit in this window already recorded. Accepts both the
+ * current `reviewIds: number[]` shape and the legacy single `reviewId` a
+ * receipt written by an older CLI carries. Best-effort: an absent or
+ * unreadable receipt is an empty list, never a throw — the caller adds the
+ * current id regardless.
+ */
+function readReceiptIds(receiptPath: string): number[] {
+  try {
+    const r = JSON.parse(readFileSync(receiptPath, 'utf8')) as {
+      reviewIds?: unknown;
+      reviewId?: unknown;
+    };
+    const ids = Array.isArray(r.reviewIds)
+      ? r.reviewIds
+      : typeof r.reviewId === 'number'
+        ? [r.reviewId]
+        : [];
+    return ids.filter((n): n is number => typeof n === 'number');
+  } catch {
+    return [];
+  }
+}
+
+/**
  * A line number GitHub will take: a positive whole number.
  *
  * `typeof x === 'number'` admits `-1`, `2.5`, `NaN` and `Infinity`, every one of
@@ -528,19 +552,29 @@ export function runSubmit(args: SubmitArgs): void {
     '--input',
     '-',
   );
-  // Receipt for cleanup's bypass audit: the ONE review this run was
+  // Receipt for cleanup's bypass audit: EVERY review this session was
   // authorised to create, by id. The audit lists reviews by the reviewing
   // account inside the window and flags any the receipt does not vouch for —
   // without the id, a bypass posted through `gh pr review` (a review, not an
   // issue comment) would be indistinguishable from the sanctioned one.
-  // Best-effort: a receipt failure must never fail a review that DID post.
+  //
+  // The receipt ACCUMULATES ids rather than overwriting: the audit window
+  // spans drift restarts (fetch-pr preserves `auditSince`), so two sanctioned
+  // submits can fall in one window. A single-id receipt vouched only for the
+  // last, and the earlier legitimate review was then flagged as a bypass —
+  // a false positive for a write submit itself made. So read the prior ids,
+  // add this one, dedupe, write back. Best-effort: a receipt failure must
+  // never fail a review that DID post.
   try {
     const reviewId = (JSON.parse(response) as { id?: number }).id;
     if (typeof reviewId === 'number') {
+      const receiptPath = tmpFile(`pr-${args.pr}`, 'submit-receipt.json');
+      const priorIds = readReceiptIds(receiptPath);
+      const reviewIds = [...new Set([...priorIds, reviewId])];
       mkdirSync(REVIEW_TMP_DIR, { recursive: true });
       writeFileSync(
-        tmpFile(`pr-${args.pr}`, 'submit-receipt.json'),
-        `${JSON.stringify({ reviewId, event, postedAt: new Date().toISOString() })}\n`,
+        receiptPath,
+        `${JSON.stringify({ reviewIds, event, postedAt: new Date().toISOString() })}\n`,
         'utf8',
       );
     }
