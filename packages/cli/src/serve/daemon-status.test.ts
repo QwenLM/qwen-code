@@ -34,6 +34,8 @@ const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
     maxPendingPromptsPerSession: 5,
     eventRingSize: 8000,
     compactedReplayMaxBytes: 4 * 1024 * 1024,
+    maxJournalEvents: 10_000,
+    maxJournalBytes: 8 * 1024 * 1024,
     channelIdleTimeoutMs: 0,
     sessionIdleTimeoutMs: 1_800_000,
   },
@@ -217,6 +219,7 @@ describe('buildDaemonStatusResponse', () => {
         {
           workspaceId: 'secondary',
           workspaceCwd: '/work/secondary',
+          displayName: 'Secondary workspace',
           primary: false,
           trusted: true,
           bridge: secondaryBridge,
@@ -229,6 +232,21 @@ describe('buildDaemonStatusResponse', () => {
     expect(primarySnapshot).toHaveBeenCalledTimes(1);
     expect(secondarySnapshot).toHaveBeenCalledTimes(1);
     expect(response.runtime.sessions.active).toBe(3);
+    expect(response.workspaces).toEqual([
+      {
+        id: 'primary',
+        cwd: BASE_WORKSPACE,
+        primary: true,
+        trusted: true,
+      },
+      {
+        id: 'secondary',
+        cwd: '/work/secondary',
+        displayName: 'Secondary workspace',
+        primary: false,
+        trusted: true,
+      },
+    ]);
   });
 
   it('reports every runtime issue code from daemon counters', async () => {

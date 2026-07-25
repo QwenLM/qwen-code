@@ -236,9 +236,11 @@ function DiffHunks({ hunks, path }: { hunks: DaemonDiffHunk[]; path: string }) {
 
 function DiffFileRow({
   workspaceCwd,
+  gitCwd,
   file,
 }: {
   workspaceCwd: string;
+  gitCwd?: string;
   file: DaemonWorkspaceGitDiffFile;
 }) {
   const { t } = useI18n();
@@ -271,7 +273,7 @@ function DiffFileRow({
         .workspaceByCwd(workspaceCwd)
         // Pass the pre-rename path so a renamed file diffs old→new (rename
         // detection) instead of showing the new path as fully added.
-        .workspaceGitDiffFile(file.path, file.oldPath)
+        .workspaceGitDiffFile(file.path, file.oldPath, gitCwd)
         .then((result) => {
           if (cancelledRef.current) return;
           setHunks(result.hunks);
@@ -357,12 +359,14 @@ function DiffFileRow({
   );
 }
 
-export function GitDiffDialog({
+export function GitDiffContent({
   workspaceCwd,
-  onClose,
+  gitCwd,
+  onSubtitleChange,
 }: {
   workspaceCwd: string;
-  onClose: () => void;
+  gitCwd?: string;
+  onSubtitleChange?: (subtitle: string | undefined) => void;
 }) {
   const { t } = useI18n();
   const { client } = useWorkspace();
@@ -376,7 +380,7 @@ export function GitDiffDialog({
     setError(false);
     client
       .workspaceByCwd(workspaceCwd)
-      .workspaceGitDiff()
+      .workspaceGitDiff(gitCwd)
       .then((result) => {
         if (!cancelled) setDiff(result);
       })
@@ -389,7 +393,7 @@ export function GitDiffDialog({
     return () => {
       cancelled = true;
     };
-  }, [client, workspaceCwd]);
+  }, [client, workspaceCwd, gitCwd]);
 
   const subtitle =
     diff && diff.available
@@ -399,6 +403,10 @@ export function GitDiffDialog({
           removed: diff.linesRemoved,
         })
       : undefined;
+
+  useEffect(() => {
+    onSubtitleChange?.(subtitle);
+  }, [onSubtitleChange, subtitle]);
 
   let body: ReactNode;
   if (loading) {
@@ -417,8 +425,9 @@ export function GitDiffDialog({
             // Key by workspace + path so switching workspace remounts the row
             // instead of reusing another workspace's hunks/open state for a
             // path both workspaces share.
-            key={`${workspaceCwd}:${file.path}`}
+            key={`${workspaceCwd}:${gitCwd ?? ''}:${file.path}`}
             workspaceCwd={workspaceCwd}
+            gitCwd={gitCwd}
             file={file}
           />
         ))}
@@ -431,15 +440,25 @@ export function GitDiffDialog({
     );
   }
 
+  return <div className={styles.content}>{body}</div>;
+}
+
+export function GitDiffDialog({
+  workspaceCwd,
+  onClose,
+}: {
+  workspaceCwd: string;
+  onClose: () => void;
+}) {
+  const { t } = useI18n();
   return (
     <DialogShell
       title={t('gitDiff.title')}
-      subtitle={subtitle}
       size="xl"
       allowFullscreen
       onClose={onClose}
     >
-      {body}
+      <GitDiffContent workspaceCwd={workspaceCwd} />
     </DialogShell>
   );
 }

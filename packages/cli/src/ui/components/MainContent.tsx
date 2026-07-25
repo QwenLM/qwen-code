@@ -156,7 +156,9 @@ export const MainContent = () => {
           return { item, sourceCopyIndexOffsets: offsets };
         }
 
-        if (item.type === 'user') {
+        // Steer items (sentToModel === false) are mid-turn injections, not turn
+        // boundaries; don't reset code-block copy numbering on them.
+        if (item.type === 'user' && item.sentToModel !== false) {
           runningOffsets = createEmptySourceCopyOffsets();
         }
 
@@ -186,7 +188,9 @@ export const MainContent = () => {
         return { item, sourceCopyIndexOffsets: offsets };
       }
 
-      if (item.type === 'user') {
+      // Steer items (sentToModel === false) are mid-turn injections, not turn
+      // boundaries; don't reset code-block copy numbering on them.
+      if (item.type === 'user' && item.sentToModel !== false) {
         runningOffsets = createEmptySourceCopyOffsets();
       }
 

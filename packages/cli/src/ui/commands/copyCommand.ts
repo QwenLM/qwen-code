@@ -8,6 +8,7 @@ import { copyToClipboard } from '../utils/commandUtils.js';
 import type { SlashCommand, SlashCommandActionReturn } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
+import { findInlineMathExpressions } from '../utils/inline-math.js';
 
 interface FencedCodeBlock {
   lang: string | null;
@@ -40,12 +41,6 @@ interface SelectedInlineLatexExpression {
   expression: InlineLatexExpression;
   label: string;
 }
-
-const INLINE_MATH_MAX_CHARS = 1024;
-const INLINE_MATH_REGEX = new RegExp(
-  String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)([^$\n]{1,${INLINE_MATH_MAX_CHARS}})\$(?![\w$])`,
-  'g',
-);
 
 function parseFencedCodeBlocks(markdown: string): FencedCodeBlock[] {
   const blocks: FencedCodeBlock[] = [];
@@ -139,14 +134,11 @@ function parseInlineLatexExpressions(
       continue;
     }
 
-    for (const match of line.matchAll(INLINE_MATH_REGEX)) {
-      const content = match[1];
-      if (content) {
-        expressions.push({
-          content,
-          index: expressions.length + 1,
-        });
-      }
+    for (const content of findInlineMathExpressions(line)) {
+      expressions.push({
+        content,
+        index: expressions.length + 1,
+      });
     }
   }
 

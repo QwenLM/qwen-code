@@ -26,6 +26,8 @@ import type { safeBody as safeBodyType } from '../server/request-helpers.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
+  sendGenerationClosedError,
+  sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
 import type {
   WorkspaceRegistry,
@@ -171,6 +173,8 @@ interface RegisterWorkspaceExtensionRoutesDeps {
   sendBridgeError: SendBridgeError;
   maxExtensionOperationHistory?: number;
   credentialStore?: CredentialStore;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
   // Enables V2 workspace projection and targeted reconciliation routes.
   workspaceRegistry?: WorkspaceRegistry;
 }
@@ -205,15 +209,27 @@ export function registerWorkspaceExtensionRoutes(
     ws: string,
     wsBridge: AcpSessionBridge,
     wsService: DaemonWorkspaceService,
-  ) => ({
-    boundWorkspace: ws,
-    bridge: wsBridge,
-    workspace: wsService,
-    credentialStore,
-    ...(maxExtensionOperationHistory === undefined
-      ? {}
-      : { maxExtensionOperationHistory }),
-  });
+  ) => {
+    const isWorkspaceTrusted =
+      ws === boundWorkspace
+        ? deps.isWorkspaceTrusted
+        : workspaceRegistry
+          ? () => workspaceRegistry.getByWorkspaceCwd(ws)?.trusted ?? false
+          : undefined;
+    return {
+      boundWorkspace: ws,
+      bridge: wsBridge,
+      workspace: wsService,
+      credentialStore,
+      ...(isWorkspaceTrusted ? { isWorkspaceTrusted } : {}),
+      ...(ws === boundWorkspace && deps.captureGenerationAssertion
+        ? { captureGenerationAssertion: deps.captureGenerationAssertion }
+        : {}),
+      ...(maxExtensionOperationHistory === undefined
+        ? {}
+        : { maxExtensionOperationHistory }),
+    };
+  };
 
   const primaryController = createExtensionsController(
     controllerDeps(boundWorkspace, bridge, workspace),
@@ -490,10 +506,14 @@ export function registerWorkspaceExtensionRoutes(
   const registerFor = (base: string, resolve: ResolveController): void => {
     // GET {base} — read-only installed extension status.
     app.get(base, async (req, res) => {
+      const assertGenerationOpen = deps.captureGenerationAssertion?.();
       const ctrl = resolve(req, res, false);
       if (!ctrl) return;
       try {
-        res.status(200).json(await ctrl.buildLocalExtensionsStatus());
+        assertGenerationOpen?.();
+        const status = await ctrl.buildLocalExtensionsStatus();
+        assertGenerationOpen?.();
+        res.status(200).json(status);
       } catch (err) {
         sendBridgeError(res, err, { route: `GET ${base}` });
       }
@@ -1205,7 +1225,19 @@ export function registerWorkspaceExtensionRoutes(
   };
 
   // Legacy singular routes bound to the primary workspace (behavior unchanged).
-  registerFor('/workspace/extensions', () => primaryController);
+  registerFor('/workspace/extensions', (_req, res, requireTrust) => {
+    try {
+      deps.captureGenerationAssertion?.()?.();
+    } catch (error) {
+      if (sendGenerationClosedError(res, error)) return null;
+      throw error;
+    }
+    if (requireTrust && deps.isWorkspaceTrusted?.() === false) {
+      sendUntrustedWorkspaceResponse(res);
+      return null;
+    }
+    return primaryController;
+  });
 
   const extensionById = (
     manager: ExtensionManager,
@@ -1275,6 +1307,7 @@ export function registerWorkspaceExtensionRoutes(
         | (() => readonly WorkspaceRuntime[]);
       skipRefresh?: boolean;
       deadlineMs?: number;
+      assertGenerationOpen?: () => void;
     } = {},
   ): void => {
     if (
@@ -1730,6 +1763,7 @@ export function registerWorkspaceExtensionRoutes(
           runtime.trusted,
         );
         const snapshot = await manager.refreshCacheWithSnapshot();
+        runtime.generationGuard?.assertOpen();
         const extensions = manager.getLoadedExtensions().map((extension) => {
           const activation = manager.getExtensionActivationFromSnapshot(
             extension.id,
@@ -1804,7 +1838,10 @@ export function registerWorkspaceExtensionRoutes(
               name: extension.name,
             };
           },
-          { refreshRuntimes: [runtime] },
+          {
+            refreshRuntimes: [runtime],
+            assertGenerationOpen: () => runtime.generationGuard?.assertOpen(),
+          },
         );
       },
     );
@@ -1849,7 +1886,10 @@ export function registerWorkspaceExtensionRoutes(
               );
             return { status: activation.effective, name: extension.name };
           },
-          { refreshRuntimes: [runtime] },
+          {
+            refreshRuntimes: [runtime],
+            assertGenerationOpen: () => runtime.generationGuard?.assertOpen(),
+          },
         );
       },
     );
@@ -1872,7 +1912,10 @@ export function registerWorkspaceExtensionRoutes(
           'refresh',
           {},
           async () => ({ status: 'refreshed' }),
-          { refreshRuntimes: [runtime] },
+          {
+            refreshRuntimes: [runtime],
+            assertGenerationOpen: () => runtime.generationGuard?.assertOpen(),
+          },
         );
       },
     );

@@ -482,11 +482,17 @@ export class LoadedSettings {
     }
   }
 
-  setValue(scope: SettingScope, key: string, value: unknown): void {
+  setValue(
+    scope: SettingScope,
+    key: string,
+    value: unknown,
+    assertCanCommit?: () => void,
+  ): void {
     // Never persist a runtime snapshot ID to model.name (it re-wraps on restart).
     if (key === 'model.name' && typeof value === 'string') {
       value = stripRuntimeSnapshotPrefix(value);
     }
+    assertCanCommit?.();
     const settingsFile = this.forScope(scope);
     setNestedPropertySafe(settingsFile.settings, key, value);
     setNestedPropertySafe(settingsFile.originalSettings, key, value);
@@ -502,6 +508,7 @@ export class LoadedSettings {
       value: unknown;
     }>,
     onScopeCommitted?: (scope: SettingScope) => void,
+    assertCanCommit?: () => void,
   ): void {
     const scopes = new Set<SettingScope>();
     for (const write of writes) {
@@ -519,6 +526,7 @@ export class LoadedSettings {
     for (let i = 0; i < scopeList.length; i++) {
       const scope = scopeList[i]!;
       try {
+        assertCanCommit?.();
         saveSettings(this.forScope(scope), undefined, undefined, {
           throwOnWriteFailure: true,
         });
@@ -668,6 +676,8 @@ export interface LoadSettingsOptions {
    * instead of `process.env`, keeping them OS-invisible after scrub.
    */
   credentialStore?: CredentialStore;
+  skipWorkspaceSettings?: boolean;
+  workspaceTrusted?: boolean;
 }
 
 export function loadSettings(
@@ -923,7 +933,8 @@ export function loadSettings(
     settings: {} as Settings,
     rawJson: undefined,
   };
-  const workspaceSettingsActive = realWorkspaceDir !== realHomeDir;
+  const workspaceSettingsActive =
+    !opts.skipWorkspaceSettings && realWorkspaceDir !== realHomeDir;
   if (workspaceSettingsActive) {
     workspaceResult = loadAndMigrate(
       workspaceSettingsPath,
@@ -980,11 +991,13 @@ export function loadSettings(
     userSettings,
   );
   const isTrusted =
+    opts.workspaceTrusted ??
     isWorkspaceTrusted(
       initialTrustCheckSettings as Settings,
       undefined,
       realWorkspaceDir,
-    ).isTrusted ?? true;
+    ).isTrusted ??
+    true;
 
   // Create a temporary merged settings object to pass to loadEnvironment.
   const tempMergedSettings = mergeSettings(

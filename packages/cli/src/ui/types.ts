@@ -16,7 +16,7 @@ import type {
   ArenaDiffSummary,
 } from '@qwen-code/qwen-code-core';
 import type { PartListUnion } from '@google/genai';
-import { type ReactNode } from 'react';
+import type { ReactNode } from 'react';
 
 export type { ThoughtSummary };
 

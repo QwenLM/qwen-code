@@ -55,11 +55,18 @@ vi.mock('./App', async () => {
     },
   };
 });
+vi.mock('./components/WebShellTranscript', async () => {
+  const React = await import('react');
+  return {
+    WebShellTranscript: () =>
+      React.createElement('div', { 'data-testid': 'transcript-ok' }),
+  };
+});
 
 // A variable specifier loads the TSX library entry without requiring
 // allowImportingTsExtensions in this test configuration.
 const indexEntry = './index.tsx';
-const { WebShellWithProviders } = await import(indexEntry);
+const { WebShellTranscript, WebShellWithProviders } = await import(indexEntry);
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -94,6 +101,13 @@ afterEach(() => {
 });
 
 describe('WebShellWithProviders top-level boundary', () => {
+  it('exports the readonly transcript entry', () => {
+    const container = render(<WebShellTranscript blocks={[]} />);
+    expect(
+      container.querySelector('[data-testid="transcript-ok"]'),
+    ).not.toBeNull();
+  });
+
   it('renders normally when the providers are healthy', () => {
     const container = render(<WebShellWithProviders />);
     expect(container.querySelector('[data-testid="app-ok"]')).not.toBeNull();
@@ -146,6 +160,25 @@ describe('WebShellWithProviders top-level boundary', () => {
     expect(addWorkspace).not.toHaveBeenCalled();
     expect(sessionProviderProps[0]).toMatchObject({
       workspaceCwd: '/work/secondary',
+    });
+    expect(appProps[0]?.lockedWorkspaceCwd).toBeUndefined();
+  });
+
+  it('initializes an unlocked workspace selector from workspace id', () => {
+    workspaceCapabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true },
+        { id: 'secondary', cwd: '/work/secondary', primary: false },
+      ],
+    };
+
+    render(<WebShellWithProviders workspaceId="secondary" />);
+
+    expect(sessionProviderProps[0]).toMatchObject({
+      workspaceCwd: '/work/secondary',
+    });
+    expect(appProps[0]).toMatchObject({
+      initialSelectedWorkspaceCwd: '/work/secondary',
     });
     expect(appProps[0]?.lockedWorkspaceCwd).toBeUndefined();
   });

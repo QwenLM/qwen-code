@@ -110,6 +110,18 @@ export interface ServeOptions {
    */
   compactedReplayMaxBytes?: number;
   /**
+   * Per-session cap on the number of raw events retained in the in-flight
+   * live journal. Threaded into `BridgeOptions.maxJournalEvents`. Defaults
+   * to 10 000. Must be a positive safe integer.
+   */
+  maxJournalEvents?: number;
+  /**
+   * Per-session byte cap on the in-flight live journal. Threaded into
+   * `BridgeOptions.maxJournalBytes`. Defaults to 8 MiB. Must be a positive
+   * safe integer.
+   */
+  maxJournalBytes?: number;
+  /**
    * Absolute workspace path this daemon binds as its primary workspace.
    * The CLI parser accepts repeated `--workspace` values to register isolated
    * runtimes, but this public option remains the primary workspace string so
@@ -222,6 +234,12 @@ export interface ServeOptions {
   /** Session idle timeout in ms. 0 = disabled. Default: 1800000 (30 min). */
   sessionIdleTimeoutMs?: number;
   /**
+   * ACP child request timeout, including the `initialize` handshake,
+   * in ms. Must be a positive
+   * integer. Default: 10000 (10 s).
+   */
+  initializeTimeoutMs?: number;
+  /**
    * Wall-clock timeout in ms for a single human permission /
    * ask_user_question response in daemon (ACP) mode. 0 = disabled
    * (wait forever). Default: 300000 (5 min).
@@ -316,6 +334,7 @@ export interface CapabilitiesEnvelope {
   workspaces?: Array<{
     id: string;
     cwd: string;
+    displayName?: string;
     primary: boolean;
     trusted: boolean;
     removable?: boolean;

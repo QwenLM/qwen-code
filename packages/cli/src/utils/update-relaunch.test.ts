@@ -6,7 +6,6 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LoadedSettings } from '../config/settings.js';
-import { EventEmitter } from 'node:events';
 
 const checkForUpdatesDetailed = vi.hoisted(() => vi.fn());
 const handleAutoUpdate = vi.hoisted(() => vi.fn());
@@ -14,12 +13,24 @@ const getInstallationInfo = vi.hoisted(() => vi.fn());
 const performStandaloneUpdate = vi.hoisted(() => vi.fn());
 const writeStderrLine = vi.hoisted(() => vi.fn());
 
-vi.mock('../ui/utils/updateCheck.js', () => ({ checkForUpdatesDetailed }));
+vi.mock('../ui/utils/updateCheck.js', () => ({
+  checkForUpdatesDetailed,
+  // Classification behavior is covered by updateCheck.test.ts; a fixed reason
+  // keeps this suite from importing the real update-notifier chain.
+  describeUpdateCheckFailure: () => 'registry error',
+}));
 vi.mock('./handleAutoUpdate.js', () => ({ handleAutoUpdate }));
 vi.mock('./installationInfo.js', () => ({ getInstallationInfo }));
 vi.mock('./standalone-update.js', () => ({ performStandaloneUpdate }));
 vi.mock('./stdioHelpers.js', () => ({ writeStderrLine }));
-vi.mock('../i18n/index.js', () => ({ t: (message: string) => message }));
+vi.mock('../i18n/index.js', () => ({
+  t: (message: string, params?: Record<string, string | number>) =>
+    params
+      ? message.replace(/\{\{(\w+)\}\}/g, (match, name) =>
+          name in params ? String(params[name]) : match,
+        )
+      : message,
+}));
 
 const { updateBeforeRelaunch } = await import('./update-relaunch.js');
 
@@ -43,17 +54,21 @@ describe('updateBeforeRelaunch', () => {
   });
 
   it('waits for the package-manager update before reporting success', async () => {
-    const updateProcess = new EventEmitter();
-    handleAutoUpdate.mockReturnValue(updateProcess);
+    let finishUpdate!: (success: boolean) => void;
+    handleAutoUpdate.mockReturnValue(
+      new Promise((resolve) => {
+        finishUpdate = resolve;
+      }),
+    );
 
-    const update = updateBeforeRelaunch(settings, '/repo');
+    const update = updateBeforeRelaunch(settings, '/repo', false);
     await vi.waitFor(() => expect(handleAutoUpdate).toHaveBeenCalledTimes(1));
     expect(writeStderrLine).toHaveBeenCalledWith('Update available');
     expect(writeStderrLine).not.toHaveBeenCalledWith(
       'Update successful! The new version will be used on your next run.',
     );
 
-    updateProcess.emit('close', 0);
+    finishUpdate(true);
     await expect(update).resolves.toBe(true);
 
     expect(writeStderrLine).toHaveBeenCalledWith(
@@ -61,26 +76,31 @@ describe('updateBeforeRelaunch', () => {
     );
   });
 
-  it('reports update failure and returns so the old version can relaunch', async () => {
-    const updateProcess = new EventEmitter();
-    handleAutoUpdate.mockReturnValue(updateProcess);
+  it.each([
+    ['explicit update', true, true],
+    ['background update-on-exit', false, false],
+  ] as const)(
+    'reports %s failure and returns %s',
+    async (_source, relaunchOnFailure, expected) => {
+      handleAutoUpdate.mockResolvedValue(false);
 
-    const update = updateBeforeRelaunch(settings, '/repo');
-    await vi.waitFor(() => expect(handleAutoUpdate).toHaveBeenCalledTimes(1));
-    updateProcess.emit('close', 1);
-    await expect(update).resolves.toBe(false);
+      const update = updateBeforeRelaunch(settings, '/repo', relaunchOnFailure);
+      await expect(update).resolves.toBe(expected);
 
-    expect(writeStderrLine).toHaveBeenCalledWith(
-      'Automatic update failed. Please try updating manually.',
-    );
-  });
+      expect(writeStderrLine).toHaveBeenCalledWith(
+        'Automatic update failed. Please try updating manually.',
+      );
+    },
+  );
 
-  it('does not relaunch when the update check fails', async () => {
+  it('relaunches the old version when the update check fails', async () => {
     checkForUpdatesDetailed.mockResolvedValue({ status: 'error' });
 
-    await expect(updateBeforeRelaunch(settings, '/repo')).resolves.toBe(false);
+    await expect(updateBeforeRelaunch(settings, '/repo', true)).resolves.toBe(
+      true,
+    );
     expect(writeStderrLine).toHaveBeenCalledWith(
-      'Failed to check for updates. Please check your network or registry configuration.',
+      'Failed to check for updates (registry error). Please check your network or registry configuration.',
     );
   });
 
@@ -96,7 +116,7 @@ describe('updateBeforeRelaunch', () => {
       }),
     );
 
-    const update = updateBeforeRelaunch(settings, '/repo');
+    const update = updateBeforeRelaunch(settings, '/repo', false);
     await vi.waitFor(() =>
       expect(performStandaloneUpdate).toHaveBeenCalledWith('/qwen', '2.0.0'),
     );
@@ -113,7 +133,9 @@ describe('updateBeforeRelaunch', () => {
     });
     performStandaloneUpdate.mockResolvedValue('deferred');
 
-    await expect(updateBeforeRelaunch(settings, '/repo')).resolves.toBe(false);
+    await expect(updateBeforeRelaunch(settings, '/repo', false)).resolves.toBe(
+      false,
+    );
     expect(writeStderrLine).toHaveBeenCalledWith(
       'Update downloaded. It will be applied after you exit this session.',
     );

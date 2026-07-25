@@ -190,6 +190,7 @@ export function recordFallbackApprove(
 export function isApproveOutcome(outcome: string): boolean {
   return (
     outcome === 'proceed_once' ||
+    outcome === 'proceed_once_and_switch_to_default' ||
     outcome === 'proceed_always' ||
     outcome === 'proceed_always_project' ||
     outcome === 'proceed_always_user' ||

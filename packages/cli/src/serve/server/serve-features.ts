@@ -45,15 +45,22 @@ interface CreateServeFeaturesDeps {
   persistSettingAvailable: boolean;
   sessionArtifactsPersistenceAvailable: boolean;
   sessionGenerationAvailable: () => boolean;
+  workspaceGenerationAvailable: () => boolean;
   reloadAvailable: boolean;
   channelReloadAvailable: () => boolean;
   channelControlAvailable: boolean;
+  channelManagementAvailable: boolean;
   sessionShellCommandEnabled: boolean;
   multiWorkspaceSessionsEnabled: () => boolean;
+  dynamicWorkspaceRegistrationAvailable: boolean;
   persistentWorkspaceRegistrationAvailable: boolean;
+  scratchWorkspaceRegistrationAvailable: () => boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
+  workspaceTrustHotReloadAvailable?: boolean;
+  isPrimaryWorkspaceTrusted?: () => boolean;
   env?: Readonly<Record<string, string | undefined>>;
   credentialStore?: CredentialStore;
+  getEnv?: () => Readonly<Record<string, string | undefined>>;
 }
 
 export interface ServeFeaturesRuntime {
@@ -71,16 +78,21 @@ export function createServeFeatures(
     persistSettingAvailable,
     sessionArtifactsPersistenceAvailable,
     sessionGenerationAvailable,
+    workspaceGenerationAvailable,
     reloadAvailable,
     channelReloadAvailable,
     channelControlAvailable,
+    channelManagementAvailable,
     sessionShellCommandEnabled,
     multiWorkspaceSessionsEnabled,
+    dynamicWorkspaceRegistrationAvailable,
     persistentWorkspaceRegistrationAvailable,
+    scratchWorkspaceRegistrationAvailable,
     workspaceRuntimeRemovalAvailable,
+    workspaceTrustHotReloadAvailable,
   } = deps;
   const credentialStore = deps.credentialStore;
-  const env = deps.env ?? process.env;
+  const getEnv = deps.getEnv ?? (() => deps.env ?? process.env);
   let cachedVoiceTranscriptionAvailable: boolean | undefined;
   const invalidateServeFeaturesCache = () => {
     cachedVoiceTranscriptionAvailable = undefined;
@@ -90,8 +102,9 @@ export function createServeFeatures(
       isWorkspaceVoiceTranscriptionAvailable(
         boundWorkspace,
         credentialStore,
-        env,
-        deps.env !== undefined,
+        getEnv(),
+        deps.env !== undefined || deps.getEnv !== undefined,
+        deps.isPrimaryWorkspaceTrusted?.() ?? true,
       );
     return cachedVoiceTranscriptionAvailable;
   };
@@ -99,8 +112,9 @@ export function createServeFeatures(
   return {
     languageCodes: SERVE_LANGUAGE_CODES,
     invalidateServeFeaturesCache,
-    currentServeFeatures: () =>
-      getAdvertisedServeFeatures(undefined, {
+    currentServeFeatures: () => {
+      const env = getEnv();
+      return getAdvertisedServeFeatures(undefined, {
         requireAuth: opts.requireAuth === true,
         mcpPoolActive: opts.mcpPoolActive !== false,
         allowOriginActive:
@@ -115,13 +129,19 @@ export function createServeFeatures(
         sessionShellCommandEnabled,
         sessionArtifactsPersistenceAvailable,
         sessionGenerationAvailable: sessionGenerationAvailable(),
+        workspaceGenerationAvailable: workspaceGenerationAvailable(),
         rateLimit: opts.rateLimit === true,
         reloadAvailable,
         channelReloadAvailable: channelReloadAvailable(),
         channelControlAvailable,
+        channelManagementAvailable,
         multiWorkspaceSessionsEnabled: multiWorkspaceSessionsEnabled(),
+        dynamicWorkspaceRegistrationAvailable,
         persistentWorkspaceRegistrationAvailable,
+        scratchWorkspaceRegistrationAvailable:
+          scratchWorkspaceRegistrationAvailable(),
         workspaceRuntimeRemovalAvailable,
+        workspaceTrustHotReloadAvailable,
         acpHttpEnabled: resolveAcpHttpEnabled(),
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
         cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
@@ -135,7 +155,8 @@ export function createServeFeatures(
         // the bearer token via the WS subprotocol, which the upgrade listener
         // verifies (acp-http/index.ts).
         voiceWsAvailable: resolveAcpHttpEnabled(env),
-      }),
+      });
+    },
   };
 }
 
@@ -144,10 +165,16 @@ function isWorkspaceVoiceTranscriptionAvailable(
   credentialStore: CredentialStore | undefined,
   env: Readonly<Record<string, string | undefined>>,
   skipLoadEnvironment: boolean,
+  workspaceTrusted: boolean,
 ): boolean {
   try {
     return hasConfiguredBatchVoiceTranscriptionModel(
-      loadSettings(boundWorkspace, { credentialStore, skipLoadEnvironment }),
+      loadSettings(boundWorkspace, {
+        credentialStore,
+        skipLoadEnvironment: skipLoadEnvironment || !workspaceTrusted,
+        skipWorkspaceSettings: !workspaceTrusted,
+        workspaceTrusted,
+      }),
       { env },
     );
   } catch (err) {

@@ -93,7 +93,7 @@ describe('relaunchOnExitCode', () => {
       relaunchOnExitCode(runner, { onUpdateRelaunch }),
     ).rejects.toThrow('PROCESS_EXIT_CALLED');
 
-    expect(onUpdateRelaunch).toHaveBeenCalledTimes(1);
+    expect(onUpdateRelaunch).toHaveBeenCalledWith(true);
     expect(runner).toHaveBeenCalledTimes(1);
     expect(processExitSpy).toHaveBeenCalledWith(0);
   });
@@ -337,6 +337,29 @@ describe('relaunchAppInChildProcess', () => {
       expect(afterSpawn).toHaveBeenCalledTimes(1);
     });
 
+    it('passes child-only environment without restoring it on the parent', async () => {
+      process.argv = ['/usr/bin/node', '/app/cli.js'];
+      delete process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY'];
+      const mockChild = createMockChildProcess(0, false);
+      mockedSpawn.mockReturnValue(mockChild);
+
+      const promise = relaunchAppInChildProcess([], [], {
+        childEnv: {
+          QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
+        },
+      });
+
+      await vi.waitFor(() => expect(mockedSpawn).toHaveBeenCalledOnce());
+      expect(mockedSpawn.mock.calls[0]?.[2]?.env).toMatchObject({
+        QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
+        QWEN_CODE_NO_RELAUNCH: 'true',
+      });
+      expect(process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY']).toBeUndefined();
+
+      mockChild.emit('close', 0);
+      await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
+    });
+
     it('installs a requested automatic update only after a clean child exit', async () => {
       process.argv = ['/usr/bin/node', '/app/cli.js'];
 
@@ -354,7 +377,7 @@ describe('relaunchAppInChildProcess', () => {
       mockChild.emit('close', 0);
       await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
 
-      expect(onUpdateRelaunch).toHaveBeenCalledTimes(1);
+      expect(onUpdateRelaunch).toHaveBeenCalledWith(false);
       expect(processExitSpy).toHaveBeenCalledWith(44);
     });
 

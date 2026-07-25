@@ -7,10 +7,19 @@
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { connect as netConnect, type AddressInfo } from 'node:net';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from 'vitest';
 import { fetch as undiciFetch, type Dispatcher } from 'undici';
 import {
   getOrCreateSharedDispatcher,
+  preloadRuntimeFetchModule,
   resetDispatcherCache,
 } from './runtimeFetchOptions.js';
 
@@ -19,6 +28,10 @@ describe('shared proxy dispatcher NO_PROXY behavior', () => {
     NO_PROXY: process.env['NO_PROXY'],
     no_proxy: process.env['no_proxy'],
   };
+
+  beforeAll(async () => {
+    await preloadRuntimeFetchModule();
+  });
 
   beforeEach(() => {
     delete process.env['NO_PROXY'];

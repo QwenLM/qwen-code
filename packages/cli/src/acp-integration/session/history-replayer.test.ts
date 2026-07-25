@@ -64,6 +64,14 @@ describe('HistoryReplayer', () => {
   });
 
   const toEpochMs = (ts: string) => new Date(ts).getTime();
+  const replayMeta = (
+    record: ChatRecord,
+    extra: Record<string, unknown> = {},
+  ) => ({
+    ...extra,
+    timestamp: toEpochMs(record.timestamp),
+    qwenTranscript: { sourceRecordIds: [record.uuid] },
+  });
   const sentUpdates = () =>
     sendUpdateSpy.mock.calls.map(
       (call: unknown[]) => call[0] as Record<string, unknown>,
@@ -167,7 +175,7 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'user_message_chunk',
         content: { type: 'text', text: 'Hello, world!' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record),
       });
     });
 
@@ -196,7 +204,7 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'user_message_chunk',
         content: { type: 'text', text: 'save logs' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record),
       });
     });
   });
@@ -211,7 +219,7 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'I can help with that.' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record),
       });
     });
 
@@ -224,7 +232,7 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'agent_thought_chunk',
         content: { type: 'text', text: 'Thinking about this...' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record),
       });
     });
 
@@ -247,17 +255,17 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy.mock.calls[0][0]).toEqual({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'First part' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record),
       });
       expect(sendUpdateSpy.mock.calls[1][0]).toEqual({
         sessionUpdate: 'agent_thought_chunk',
         content: { type: 'text', text: 'Second part' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record),
       });
       expect(sendUpdateSpy.mock.calls[2][0]).toEqual({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'Third part' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record),
       });
     });
   });
@@ -281,24 +289,31 @@ describe('HistoryReplayer', () => {
 
       await replayer.replay([record]);
 
-      expect(sendUpdateSpy).toHaveBeenCalledWith(
+      expect(sendUpdateSpy).toHaveBeenNthCalledWith(
+        1,
         expect.objectContaining({
           sessionUpdate: 'tool_call',
           status: 'in_progress',
           title: 'read_file',
           rawInput: { path: '/test.ts' },
-          _meta: {
+          _meta: replayMeta(record, {
             toolName: 'read_file',
             // #4175 F4 prereq — ToolCallEmitter now stamps provenance
             // on every tool_call / tool_call_update event so the UI can
             // dispatch on builtin / mcp / subagent without string-
             // matching toolName.
             provenance: 'builtin',
-            timestamp: toEpochMs(record.timestamp),
-          },
+          }),
         }),
       );
-      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
+      expect(sendUpdateSpy).toHaveBeenCalledTimes(2);
+      expect(sendUpdateSpy).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          toolCallId: 'qwen-replay-tool:assistant-uuid:0',
+          status: 'failed',
+        }),
+      );
     });
 
     it('should use function call id as callId when available', async () => {
@@ -526,7 +541,7 @@ describe('HistoryReplayer', () => {
       ]);
     });
 
-    it('should not synthesize missing-result failures for calls without source ids', async () => {
+    it('should not guess correlation between synthesized and explicit call ids', async () => {
       const records: ChatRecord[] = [
         {
           ...createAssistantRecord(''),
@@ -551,10 +566,15 @@ describe('HistoryReplayer', () => {
       expect(updates.map((update) => update['sessionUpdate'])).toEqual([
         'tool_call',
         'tool_call_update',
+        'tool_call_update',
       ]);
       expect(updates[1]).toMatchObject({
         toolCallId: 'call-123',
         status: 'completed',
+      });
+      expect(updates[2]).toMatchObject({
+        toolCallId: 'qwen-replay-tool:assistant-uuid:0',
+        status: 'failed',
       });
     });
 
@@ -822,12 +842,38 @@ describe('HistoryReplayer', () => {
         ],
         // resultDisplay is included as rawOutput
         rawOutput: 'File contents here',
-        _meta: {
+        _meta: replayMeta(record, {
           toolName: 'read_file',
           // #4175 F4 prereq — provenance stamped on update events too.
           provenance: 'builtin',
-          timestamp: toEpochMs(record.timestamp),
-        },
+        }),
+      });
+    });
+
+    it('preserves vision bridge disclosures on replay', async () => {
+      const resultDisplay = {
+        type: 'vision_bridge_notice' as const,
+        summary: 'Transcribed PDF pages 1-2',
+        notice: 'Converted 2 images via qwen3-vl-plus.',
+      };
+      const record = createToolResultRecord('read_file', resultDisplay);
+
+      await replayer.replay([record]);
+
+      expect(sentUpdates()[0]).toMatchObject({
+        content: [
+          {
+            type: 'content',
+            content: {
+              type: 'text',
+              text: `${resultDisplay.summary}\n${resultDisplay.notice}`,
+            },
+          },
+          {
+            type: 'content',
+            content: { type: 'text', text: '{"result":"ok"}' },
+          },
+        ],
       });
     });
 
@@ -907,10 +953,24 @@ describe('HistoryReplayer', () => {
           { content: 'Task 1', priority: 'medium', status: 'pending' },
           { content: 'Task 2', priority: 'medium', status: 'completed' },
         ],
+        _meta: {
+          ...replayMeta(record, {
+            stats: {
+              promptTokens: 0,
+              cachedTokens: 0,
+              candidateTokens: 0,
+              apiTimeMs: 0,
+            },
+          }),
+          qwenTranscript: {
+            sourceRecordIds: [record.uuid],
+            planToolCallId: 'call-123',
+          },
+        },
       });
     });
 
-    it('should use record uuid as callId when toolCallResult.callId is missing', async () => {
+    it('should synthesize a stable callId when a tool result has no callId', async () => {
       const record: ChatRecord = {
         ...createToolResultRecord('test_tool'),
         uuid: 'fallback-uuid',
@@ -927,7 +987,7 @@ describe('HistoryReplayer', () => {
 
       expect(sendUpdateSpy).toHaveBeenCalledWith(
         expect.objectContaining({
-          toolCallId: 'fallback-uuid',
+          toolCallId: 'qwen-replay-tool:fallback-uuid:result',
         }),
       );
     });
@@ -1009,10 +1069,9 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'Context compressed.' },
-        _meta: {
+        _meta: replayMeta(systemRecord, {
           source: 'slash_command',
-          timestamp: toEpochMs(systemRecord.timestamp),
-        },
+        }),
       });
     });
   });
@@ -1432,18 +1491,18 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenNthCalledWith(1, {
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'Hello!' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record),
       });
       expect(sendUpdateSpy).toHaveBeenNthCalledWith(2, {
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: '' },
         _meta: {
+          timestamp: toEpochMs(record.timestamp),
+          qwenTranscript: { sourceRecordIds: [record.uuid] },
           usage: {
             inputTokens: 100,
             outputTokens: 50,
             totalTokens: 150,
-            thoughtTokens: undefined,
-            cachedReadTokens: undefined,
           },
         },
       });

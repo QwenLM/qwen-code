@@ -592,6 +592,9 @@ describe('useResumeCommand', () => {
       }),
       expect.any(Number),
     );
+    expect(historyManager.loadHistory.mock.invocationCallOrder[0]).toBeLessThan(
+      historyManager.addItem.mock.invocationCallOrder[0]!,
+    );
   });
 
   it('blocks resume when the current session still has running background work', async () => {
@@ -811,6 +814,14 @@ describe('useResumeCommand', () => {
         text: expect.stringMatching(/Failed to resume session.*init boom/),
       }),
       expect.any(Number),
+    );
+    // The rollback reloads the old session's still-on-disk background agents
+    // so `list_agents` is not left empty after core is restored. The forward
+    // path never reached its own load (initialize threw first), so this call
+    // is the rollback reload, scoped to the old session.
+    expect(config.loadPausedBackgroundAgents).toHaveBeenCalledTimes(1);
+    expect(config.loadPausedBackgroundAgents).toHaveBeenCalledWith(
+      'old-session-id',
     );
   });
 });

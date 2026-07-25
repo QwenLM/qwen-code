@@ -126,11 +126,12 @@ describe('history replay page', () => {
     expect(encodeCursor).toHaveBeenCalledWith(
       expect.objectContaining({
         replay: {
+          v: 1,
           pendingToolCalls: [
             {
               callId: 'call-1',
               toolName: 'Read',
-              recordId: 'record-1',
+              sourceRecordId: 'record-1',
             },
           ],
           cumulativeUsage: {
@@ -147,7 +148,14 @@ describe('history replay page', () => {
   it('replays backward pages without forward replay state', async () => {
     const replayPage = vi
       .spyOn(HistoryReplayer.prototype, 'replayPage')
-      .mockResolvedValueOnce({ pendingToolCalls: [] });
+      .mockResolvedValueOnce({
+        pendingToolCalls: [],
+        replay: {
+          v: 1,
+          pendingToolCalls: [],
+          cumulativeUsage: createReplayCumulativeUsage(),
+        },
+      });
     const encodeCursor = vi.fn(() => 'next-cursor');
 
     await replayTranscriptRecordPage({
@@ -201,5 +209,15 @@ describe('history replay page', () => {
     });
     expect(result.nextCursor).toBeUndefined();
     expect(encodeCursor).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unknown replay cursor state version', async () => {
+    await expect(
+      replayTranscriptRecordPage({
+        sessionId: SESSION_ID,
+        page: recordPage({ replay: { v: 2 } }),
+        encodeCursor: vi.fn(),
+      }),
+    ).rejects.toThrow('Unsupported transcript replay state version');
   });
 });

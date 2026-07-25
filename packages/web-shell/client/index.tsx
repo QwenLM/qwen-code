@@ -5,6 +5,8 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { RootErrorFallback } from './components/RootErrorFallback';
 import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider';
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
+export { WebShellTranscript } from './components/WebShellTranscript';
+export type { WebShellTranscriptProps } from './components/WebShellTranscript';
 
 export interface WebShellWithProvidersProps extends WebShellProps {
   /** Daemon API base URL. Defaults to the browser origin when omitted. */
@@ -26,6 +28,8 @@ export interface WebShellWithProvidersProps extends WebShellProps {
   clientId?: string;
   /** Restart the SSE event stream after each accepted prompt. Disabled by default. */
   restartSseOnPrompt?: boolean;
+  /** Persisted transcript records requested per page. Defaults to 100; valid range is 1–500. */
+  historyPageSize?: number;
 }
 
 function resolveBaseUrl(baseUrl: string | undefined): string {
@@ -90,6 +94,7 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
     lockWorkspaceCwd,
     clientId,
     restartSseOnPrompt,
+    historyPageSize,
     ...webShellProps
   } = props;
   const resolvedBaseUrl = resolveBaseUrl(baseUrl);
@@ -110,6 +115,7 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
           lockWorkspaceCwd={lockWorkspaceCwd}
           clientId={clientId}
           restartSseOnPrompt={restartSseOnPrompt}
+          historyPageSize={historyPageSize}
           webShellProps={webShellProps}
         />
       </DaemonWorkspaceProvider>
@@ -124,17 +130,25 @@ export type {
   WebShellApi,
   WebShellComposerPlaceholders,
   WebShellComposerPlaceholderState,
+  WebShellSlashCommand,
+  WebShellSlashCommandHandler,
   WebShellProps,
   WebShellSidebarOptions,
   BugReportInfo,
   SessionChangeEvent,
 } from './App';
+export type { WebShellShadowDom, WebShellShadowDomOptions } from './shadowDom';
 export type { ToastTone } from './components/ToastHost';
 export type {
   WebShellSidebarBranding,
   WebShellSidebarFooterItem,
   WebShellSidebarFooterOptions,
   WebShellSidebarLockedWorkspace,
+  WebShellSidebarPrimaryNavOptions,
+  WebShellSidebarPrimaryNavItem,
+  WebShellSidebarSessionActionsOptions,
+  WebShellSidebarSessionActionItem,
+  WebShellSidebarSessionInlineActionItem,
 } from './components/sidebar/WebShellSidebar';
 export type { WebShellLanguage } from './i18n';
 export type { WebShellTheme } from './themeContext';
@@ -178,6 +192,8 @@ export type {
   WebShellComposerTextOptions,
   WelcomeFooterRenderer,
   WelcomeHeaderRenderer,
+  ChatHeaderRenderer,
+  ChatHeaderRenderInfo,
   WebShellFooterRenderInfo,
   FooterRenderer,
   LoadingPhrasesResolver,

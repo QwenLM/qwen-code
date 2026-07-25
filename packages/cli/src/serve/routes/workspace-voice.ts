@@ -44,6 +44,13 @@ import {
   WorkspaceSettingsPartialPersistError,
   type WorkspaceSettingsWrite,
 } from '../workspace-service/types.js';
+import {
+  isGenerationClosedError,
+  requireTrustedWorkspaceRuntime,
+  resolveManagedWorkspaceRuntimeFromParam,
+  resolveWorkspaceRuntimeFromParam,
+  sendGenerationClosedError,
+} from '../workspace-route-runtime.js';
 import type {
   VoiceAdmissionLease,
   VoiceAdmissionResult,
@@ -52,12 +59,6 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
-import {
-  requireTrustedWorkspaceRuntime,
-  resolveManagedWorkspaceRuntimeFromParam,
-  resolveWorkspaceRuntimeFromParam,
-} from '../workspace-route-runtime.js';
-
 type WorkspaceVoiceTranscriber = (
   input: WorkspaceVoiceTranscriptionInput,
 ) => Promise<WorkspaceVoiceTranscriptionResult>;
@@ -67,11 +68,13 @@ type PersistSetting = (
   scope: SettingScope,
   key: string,
   value: unknown,
+  assertGenerationOpen?: () => void,
 ) => Promise<void | LoadedSettings>;
 
 type PersistSettings = (
   workspace: string,
   writes: WorkspaceSettingsWrite[],
+  assertGenerationOpen?: () => void,
 ) => Promise<void>;
 
 export interface WorkspaceVoiceRouteDeps {
@@ -99,6 +102,8 @@ export interface WorkspaceVoiceRouteDeps {
    * so QWEN_CUSTOM_API_KEY_* (scrubbed from process.env) reach the transcriber.
    */
   env?: Readonly<Record<string, string | undefined>>;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
 }
 
 export interface WorkspaceQualifiedVoiceRouteDeps {
@@ -219,6 +224,7 @@ async function persistVoiceUpdate(
   update: WorkspaceVoiceStateUpdate,
   clientId: string | undefined,
   workspaceTrusted: boolean,
+  assertGenerationOpen: (() => void) | undefined,
 ): Promise<void> {
   if (!deps.persistSettings && !deps.persistSetting) {
     throw new Error('workspace voice settings persistence is not available');
@@ -230,15 +236,25 @@ async function persistVoiceUpdate(
 
   if (deps.persistSettings) {
     try {
-      await deps.persistSettings(deps.boundWorkspace, writes);
+      if (assertGenerationOpen) {
+        await deps.persistSettings(
+          deps.boundWorkspace,
+          writes,
+          assertGenerationOpen,
+        );
+      } else {
+        await deps.persistSettings(deps.boundWorkspace, writes);
+      }
     } catch (err) {
       if (err instanceof WorkspaceSettingsPartialPersistError) {
+        assertGenerationOpen?.();
         for (const write of err.committedWrites) {
           broadcastVoiceWrite(deps, write, clientId);
         }
       }
       throw err;
     }
+    assertGenerationOpen?.();
     for (const write of writes) {
       broadcastVoiceWrite(deps, write, clientId);
     }
@@ -246,13 +262,25 @@ async function persistVoiceUpdate(
     const committed: WorkspaceVoiceSettingsWrite[] = [];
     for (const write of writes) {
       try {
-        await deps.persistSetting!(
-          deps.boundWorkspace,
-          write.scope,
-          write.key,
-          write.value,
-        );
+        if (assertGenerationOpen) {
+          await deps.persistSetting!(
+            deps.boundWorkspace,
+            write.scope,
+            write.key,
+            write.value,
+            assertGenerationOpen,
+          );
+        } else {
+          await deps.persistSetting!(
+            deps.boundWorkspace,
+            write.scope,
+            write.key,
+            write.value,
+          );
+        }
+        assertGenerationOpen?.();
       } catch (err) {
+        if (isGenerationClosedError(err)) throw err;
         writeStderrLine(
           `qwen serve: POST /workspace/voice partial persist error (workspace=${deps.boundWorkspace}, committed=${committed.length}/${writes.length}, failedKey=${write.key}, failedScope=${voiceSettingsScopeToWire(write.scope)}): ${
             err instanceof Error ? err.message : String(err)
@@ -290,10 +318,24 @@ function requestAbortSignal(req: Request, res: Response): AbortSignal {
 }
 
 function loadVoiceSettings(deps: WorkspaceVoiceRouteDeps): LoadedSettings {
-  return loadSettings(deps.boundWorkspace, {
-    credentialStore: deps.credentialStore,
-    ...(deps.env ? { skipLoadEnvironment: true } : {}),
-  });
+  const workspaceTrusted = deps.isWorkspaceTrusted?.();
+  return loadSettings(
+    deps.boundWorkspace,
+    deps.env
+      ? {
+          credentialStore: deps.credentialStore,
+          skipLoadEnvironment: true,
+          skipWorkspaceSettings: workspaceTrusted === false,
+          workspaceTrusted,
+        }
+      : {
+          credentialStore: deps.credentialStore,
+          consumeCorruptionEnvVars: true,
+          skipLoadEnvironment: workspaceTrusted === false,
+          skipWorkspaceSettings: workspaceTrusted === false,
+          workspaceTrusted,
+        },
+  );
 }
 
 interface VoiceAdmissionState {
@@ -407,12 +449,14 @@ function handleVoiceStatus(
   route: string,
 ): void {
   try {
+    deps.captureGenerationAssertion?.()?.();
     res
       .status(200)
       .json(
         buildWorkspaceVoiceStatus(deps.boundWorkspace, loadVoiceSettings(deps)),
       );
   } catch (err) {
+    if (sendGenerationClosedError(res, err)) return;
     writeStderrLine(
       `qwen serve: ${route} error: ${
         err instanceof Error ? err.message : String(err)
@@ -438,6 +482,8 @@ async function handleVoiceUpdate(
     });
     return;
   }
+  const assertGenerationOpen = deps.captureGenerationAssertion?.();
+  assertGenerationOpen?.();
   const parsed = parseWorkspaceVoiceUpdateParams(deps.safeBody(req));
   if ('error' in parsed) {
     res.status(400).json(parsed);
@@ -454,6 +500,7 @@ async function handleVoiceUpdate(
   if (clientId === null) return;
   try {
     const workspaceTrusted =
+      deps.isWorkspaceTrusted?.() ??
       getWorkspaceTrustStatus(settings.merged, deps.boundWorkspace).effective
         .state === 'trusted';
     await persistVoiceUpdate(
@@ -462,8 +509,10 @@ async function handleVoiceUpdate(
       parsed,
       clientId,
       workspaceTrusted,
+      assertGenerationOpen,
     );
   } catch (err) {
+    if (sendGenerationClosedError(res, err)) return;
     writeStderrLine(
       `qwen serve: ${route} persist error (workspace=${deps.boundWorkspace}): ${
         err instanceof Error ? err.message : String(err)
@@ -476,12 +525,14 @@ async function handleVoiceUpdate(
     return;
   }
   try {
+    assertGenerationOpen?.();
     res
       .status(200)
       .json(
         buildWorkspaceVoiceStatus(deps.boundWorkspace, loadVoiceSettings(deps)),
       );
   } catch (err) {
+    if (sendGenerationClosedError(res, err)) return;
     writeStderrLine(
       `qwen serve: ${route} reload error after persist (workspace=${deps.boundWorkspace}): ${
         err instanceof Error ? err.message : String(err)
@@ -699,6 +750,11 @@ function createRuntimeVoiceDeps(
     credentialStore: deps.credentialStore,
     scopeOverride: SettingScope.Workspace,
     acquireVoiceLease: () => deps.acquireVoiceLease(runtime),
+    isWorkspaceTrusted: () => runtime.trusted,
+    captureGenerationAssertion: () => {
+      const guard = runtime.generationGuard;
+      return guard ? () => guard.assertOpen() : undefined;
+    },
     broadcastSettingsChanged: (key, value, scope, clientId) => {
       if (runtime.primary) deps.invalidateServeFeaturesCache();
       runtime.bridge.publishWorkspaceEvent({

@@ -476,6 +476,14 @@
   white-space: nowrap;
 }
 
+.sessionBadgeIcon {
+  display: inline;
+  vertical-align: -1px;
+  margin-right: 3px;
+  color: var(--color-accent-fg, #8b5cf6);
+  flex-shrink: 0;
+}
+
 .projectName {
   flex: 0 1 auto;
 }
@@ -1260,14 +1268,20 @@
   color: var(--foreground);
 }
 
+.secondaryButton:disabled,
+.dangerButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 .dangerButton {
   border: 1px solid var(--error-color);
   background: transparent;
   color: var(--error-color);
 }
 
-.dangerButton:hover,
-.dangerButton:focus-visible {
+.dangerButton:hover:not(:disabled),
+.dangerButton:focus-visible:not(:disabled) {
   background: var(--error-bg);
 }
 

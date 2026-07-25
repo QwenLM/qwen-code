@@ -28,8 +28,9 @@ import type {
 } from '../workspace-registry.js';
 import {
   isPortableAbsolutePath,
-  resolveManagedWorkspaceRuntimeFromParam,
   resolveManagedWorkspaceRuntimeByPathSelector,
+  resolveWorkspaceEntryFromParam,
+  sendWorkspaceRuntimeUnavailable,
 } from '../workspace-route-runtime.js';
 import {
   ConnectionRegistry,
@@ -50,7 +51,10 @@ import {
   parseInbound,
   type JsonRpcInbound,
 } from './json-rpc.js';
-import { parseLastEventId } from '../sse-last-event-id.js';
+import {
+  parseEventEpochHeader,
+  parseLastEventId,
+} from '../sse-last-event-id.js';
 import {
   ClientMcpWsConnection,
   type ClientMcpServerProvider,
@@ -440,6 +444,8 @@ export interface MountAcpHttpOptions {
    * the primary runtime.
    */
   workspaceRegistry?: WorkspaceRegistry;
+  /** Live primary trust decision for legacy `/acp` operations. */
+  isPrimaryWorkspaceTrusted?: () => boolean;
   /**
    * Additional non-ACP WebSocket routes (e.g. `/voice/stream`) that reuse this
    * upgrade listener's security checks. Matched paths skip the ACP init flow.
@@ -585,9 +591,10 @@ export function mountAcpHttp(
   if (!enabled) return undefined;
 
   const daemonEnv = opts.daemonEnv ?? process.env;
-  const primaryEnv = opts.workspaceRegistry
-    ? runtimeEffectiveEnv(opts.workspaceRegistry.primary, daemonEnv)
-    : daemonEnv;
+  const getPrimaryEnv = () =>
+    opts.workspaceRegistry
+      ? runtimeEffectiveEnv(opts.workspaceRegistry.primary, daemonEnv)
+      : daemonEnv;
   const path = opts.path ?? '/acp';
   const dispatcherRef: { current?: AcpDispatcher } = {};
   // Lifecycle gate: once `dispose()` runs, late/in-flight HTTP requests get a
@@ -770,7 +777,7 @@ export function mountAcpHttp(
   const dispatcher = new AcpDispatcher(
     bridge,
     opts.boundWorkspace,
-    primaryEnv,
+    getPrimaryEnv,
     opts.workspace,
     opts.workspaceRememberLane,
     opts.fsFactory,
@@ -779,6 +786,17 @@ export function mountAcpHttp(
     registry,
     opts.archiveCoordinator ?? new SessionArchiveCoordinator(),
     opts.credentialStore,
+    opts.isPrimaryWorkspaceTrusted ??
+      (() => {
+        const entry = opts.workspaceRegistry?.primaryEntry;
+        return entry
+          ? entry.state === 'active' && entry.current?.runtime.trusted === true
+          : true;
+      }),
+    () => {
+      const guard = opts.workspaceRegistry?.primaryEntry.current?.guard;
+      return guard ? () => guard.assertOpen() : undefined;
+    },
   );
   dispatcherRef.current = dispatcher;
 
@@ -1111,9 +1129,6 @@ export function mountAcpHttp(
       },
       () => conn.touch(),
     );
-    // Open (write SSE headers + `retry:`) BEFORE attaching, so the protocol
-    // handshake precedes any buffered frames the attach flushes.
-    stream.open();
     // Resume cursor: an EventSource/SSE client auto-resends the last `id:` it
     // saw as `Last-Event-ID` on reconnect. Drives the EventBus ring replay so
     // content frames produced during a mid-turn proxy gap are recovered (§1.8).
@@ -1121,6 +1136,23 @@ export function mountAcpHttp(
       headerOf(req, 'last-event-id'),
       '/acp ',
     );
+    // Epoch token paired with the resume cursor (DAEMON-001). Invalid values
+    // degrade to "not provided" so the bus falls back to the numeric
+    // stale-cursor heuristic.
+    const eventEpoch = parseEventEpochHeader(
+      headerOf(req, 'x-qwen-event-epoch'),
+      '/acp ',
+    );
+    // Advertise the current bus epoch BEFORE `stream.open()` flushes headers
+    // so every subscription (including the first, cursor-less one) learns the
+    // epoch to pair with its resume cursor on later reconnects.
+    const busEpoch = mount.dispatcher.getSessionEventEpoch(sessionId);
+    if (busEpoch !== undefined) {
+      res.setHeader('X-Qwen-Event-Epoch', busEpoch);
+    }
+    // Open (write SSE headers + `retry:`) BEFORE attaching, so the protocol
+    // handshake precedes any buffered frames the attach flushes.
+    stream.open();
     // Pass the resume cursor INTO attach: when resuming, attach skips flushing
     // id-bearing buffered frames because the ring replay below redelivers every
     // bus event after `lastEventId` exactly once — including any frame lost
@@ -1171,7 +1203,7 @@ export function mountAcpHttp(
       }
     };
     void mount.dispatcher
-      .pumpSessionEvents(conn, sessionId, ac.signal, lastEventId)
+      .pumpSessionEvents(conn, sessionId, ac.signal, lastEventId, eventEpoch)
       .then(onPumpSettled, (err: unknown) => {
         writeStderrLine(
           `qwen serve: ${mount.routeLabel} event pump error (${logSafe(sessionId)}, lastEventId=${
@@ -1226,7 +1258,7 @@ export function mountAcpHttp(
     const secondaryDispatcher = new AcpDispatcher(
       rt.bridge,
       rt.workspaceCwd,
-      runtimeEffectiveEnv(rt, daemonEnv),
+      () => runtimeEffectiveEnv(rt, daemonEnv),
       rt.workspaceService,
       workspaceRememberLane,
       rt.routeFileSystemFactory,
@@ -1240,6 +1272,11 @@ export function mountAcpHttp(
       secondaryRegistry,
       opts.archiveCoordinator ?? new SessionArchiveCoordinator(),
       opts.credentialStore,
+      () => rt.trusted,
+      () => {
+        const guard = rt.generationGuard;
+        return guard ? () => guard.assertOpen() : undefined;
+      },
     );
     secondaryDispatcherRef.current = secondaryDispatcher;
     return {
@@ -1273,6 +1310,13 @@ export function mountAcpHttp(
 
   const secondaryMounts = new Map<string, RuntimeAcpMount>();
   const drainingWorkspaceIds = new Set<string>();
+  const primaryWorkspaceId = opts.workspaceRegistry?.primaryEntry.workspaceId;
+  const mountForWorkspace = (
+    workspaceId: string,
+  ): RuntimeAcpMount | undefined =>
+    workspaceId === primaryWorkspaceId
+      ? primaryMount
+      : secondaryMounts.get(workspaceId);
   const getOrCreateSecondaryMount = (
     rt: WorkspaceRuntime,
   ): RuntimeAcpMount | undefined => {
@@ -1313,12 +1357,13 @@ export function mountAcpHttp(
       });
       return null;
     }
-    const rt = resolveManagedWorkspaceRuntimeFromParam(
-      workspaceRegistry,
-      req,
-      res,
-    );
-    if (!rt) return null;
+    const entry = resolveWorkspaceEntryFromParam(workspaceRegistry, req, res);
+    if (!entry) return null;
+    const rt = entry.current?.runtime;
+    if (!rt || (entry.state !== 'active' && entry.state !== 'draining')) {
+      sendWorkspaceRuntimeUnavailable(res, entry);
+      return null;
+    }
     if (!rt.primary && !rt.trusted) {
       res.status(403).json({
         error: `Workspace "${rt.workspaceCwd}" is not trusted.`,
@@ -1610,18 +1655,33 @@ export function mountAcpHttp(
           return;
         }
         const wsRegistry = opts.workspaceRegistry;
-        const rt = wsRegistry
-          ? (wsRegistry.getManagedByWorkspaceId(selector) ??
-            (isPortableAbsolutePath(selector)
-              ? resolveManagedWorkspaceRuntimeByPathSelector(
-                  wsRegistry,
-                  selector,
-                )
-              : undefined))
-          : undefined;
+        if (!wsRegistry) {
+          logReject(`workspace-mismatch ${logSafe(selector)}`);
+          socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        const rt =
+          wsRegistry.getManagedByWorkspaceId(selector) ??
+          (isPortableAbsolutePath(selector)
+            ? resolveManagedWorkspaceRuntimeByPathSelector(wsRegistry, selector)
+            : undefined);
         if (!rt) {
           logReject(`workspace-mismatch ${logSafe(selector)}`);
           socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+          socket.destroy();
+          return;
+        }
+        const entry = wsRegistry.getEntryByWorkspaceId(rt.workspaceId);
+        if (
+          !entry ||
+          (entry.state !== 'active' && entry.state !== 'draining') ||
+          entry.current?.runtime !== rt
+        ) {
+          logReject(`workspace-unavailable ${rt.workspaceId}`);
+          socket.write(
+            'HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\n\r\n',
+          );
           socket.destroy();
           return;
         }
@@ -2256,20 +2316,20 @@ export function mountAcpHttp(
     registry,
     beginWorkspaceDrain: (workspaceId) => {
       drainingWorkspaceIds.add(workspaceId);
-      const mount = secondaryMounts.get(workspaceId);
+      const mount = mountForWorkspace(workspaceId);
       if (!mount) return;
       mount.draining = true;
       mount.workspaceRememberLane.beginDrain();
     },
     cancelWorkspaceDrain: (workspaceId) => {
       drainingWorkspaceIds.delete(workspaceId);
-      const mount = secondaryMounts.get(workspaceId);
+      const mount = mountForWorkspace(workspaceId);
       if (!mount) return;
       mount.draining = false;
       mount.workspaceRememberLane.cancelDrain();
     },
     getWorkspaceActivity: (workspaceId) => {
-      const mount = secondaryMounts.get(workspaceId);
+      const mount = mountForWorkspace(workspaceId);
       return {
         acpConnections:
           (mount?.registry.size ?? 0) + (mount?.pendingWebSockets.size ?? 0),
@@ -2277,12 +2337,20 @@ export function mountAcpHttp(
       };
     },
     commitWorkspaceRemoval: (workspaceId) => {
-      secondaryMounts.get(workspaceId)?.workspaceRememberLane.dispose();
+      const mount = secondaryMounts.get(workspaceId);
+      mount?.workspaceRememberLane.dispose();
     },
     disposeWorkspace: (workspaceId) => {
       drainingWorkspaceIds.delete(workspaceId);
-      const mount = secondaryMounts.get(workspaceId);
+      const mount = mountForWorkspace(workspaceId);
       if (!mount) return;
+      if (mount.primary) {
+        for (const ws of mount.webSockets) {
+          ws.close(1012, 'Workspace runtime reconfigured');
+        }
+        mount.registry.clear();
+        return;
+      }
       secondaryMounts.delete(workspaceId);
       try {
         mount.workspaceRememberLane.dispose();

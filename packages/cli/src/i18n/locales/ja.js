@@ -1200,6 +1200,11 @@ export default {
   reviewed: 'レビュー済み',
   'Code Changes:': 'コード変更:',
   Performance: 'パフォーマンス',
+  'Generation Metrics': '生成メトリクス',
+  'Latest Request': '最新のリクエスト',
+  'Generation Time': '生成時間',
+  'Average TTFT': '平均 TTFT',
+  'Session TPS': 'セッション TPS',
   'Wall Time:': '経過時間:',
   'Agent Active:': 'エージェント稼働時間:',
   'API Time:': 'API時間:',
@@ -1488,6 +1493,7 @@ export default {
   'to paste images': '画像を貼り付け',
   'for external editor': '外部エディタ用',
   '? for shortcuts': '? でショートカット表示',
+  'Pasting…': '貼り付け中…',
   'Invalid approval mode "{{arg}}". Valid modes: {{modes}}':
     '無効な承認モード "{{arg}}" です。有効なモード: {{modes}}',
   'Approval mode set to "{{mode}}"': '承認モードを "{{mode}}" に設定しました',
@@ -1912,8 +1918,14 @@ export default {
   'A new version of Qwen Code is available! {{current}} → {{latest}}':
     'Qwen Code の新しいバージョンがあります！{{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} は最新です！',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    'アップデートの確認に失敗しました。ネットワークまたはレジストリ設定を確認してください。',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    'アップデートの確認に失敗しました（{{reason}}）。ネットワークまたはレジストリ設定を確認してください。',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    'アップデートの確認をスキップしました（{{reason}}）— /update で再試行できます。',
+  'registry did not respond within {{seconds}}s':
+    'レジストリが {{seconds}} 秒以内に応答しませんでした',
+  'registry unreachable': 'レジストリに接続できません',
+  'registry error': 'レジストリエラー',
   'Unable to check for updates: {{reason}}':
     'アップデートを確認できません: {{reason}}',
   'Update successful! The new version will be used on your next run.':

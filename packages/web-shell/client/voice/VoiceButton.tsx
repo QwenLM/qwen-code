@@ -5,8 +5,11 @@
  */
 
 import type React from 'react';
-import { useEffect, useState } from 'react';
-import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
+import { useEffect, useRef, useState } from 'react';
+import {
+  useWorkspace,
+  useWorkspaceEventSignals,
+} from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../i18n';
 import { useVoiceCapture } from './useVoiceCapture';
 import styles from './VoiceButton.module.css';
@@ -59,8 +62,52 @@ export function VoiceButton({
   disabled,
 }: VoiceButtonProps): React.JSX.Element | null {
   const workspace = useWorkspace();
+  const settingsVersion = useWorkspaceEventSignals()?.settingsVersion;
   const { t } = useI18n();
   const features = workspace.capabilities?.features ?? [];
+  const hasVoiceCapability = features.includes(VOICE_FEATURE);
+  const [voiceGate, setVoiceGate] = useState<{
+    client: typeof workspace.client;
+    settingsVersion: number | undefined;
+    enabled: boolean;
+  }>(() => ({
+    client: workspace.client,
+    settingsVersion,
+    enabled: false,
+  }));
+
+  useEffect(() => {
+    let current = true;
+    setVoiceGate({
+      client: workspace.client,
+      settingsVersion,
+      enabled: false,
+    });
+    if (!hasVoiceCapability) return undefined;
+
+    void workspace.client
+      .workspaceVoice()
+      .then((voice) => {
+        if (current) {
+          setVoiceGate({
+            client: workspace.client,
+            settingsVersion,
+            enabled: voice.enabled === true,
+          });
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      current = false;
+    };
+  }, [hasVoiceCapability, settingsVersion, workspace.client]);
+
+  const voiceEnabled =
+    hasVoiceCapability &&
+    voiceGate.client === workspace.client &&
+    voiceGate.settingsVersion === settingsVersion &&
+    voiceGate.enabled;
   // Surfaced when a recording finalizes with no transcript (e.g. silence).
   const [noticeMessage, setNoticeMessage] = useState<string | undefined>(
     undefined,
@@ -111,8 +158,22 @@ export function VoiceButton({
     return () => clearInterval(id);
   }, [isRecording]);
 
-  // Only render when the daemon advertises a usable voice model.
-  if (!features.includes(VOICE_FEATURE)) return null;
+  const voiceWasEnabled = useRef(voiceEnabled);
+  useEffect(() => {
+    const wasEnabled = voiceWasEnabled.current;
+    voiceWasEnabled.current = voiceEnabled;
+    if (
+      wasEnabled &&
+      !voiceEnabled &&
+      (status === 'recording' ||
+        status === 'connecting' ||
+        status === 'transcribing')
+    ) {
+      abort();
+    }
+  }, [abort, status, voiceEnabled]);
+
+  if (!voiceEnabled) return null;
 
   const isConnecting = status === 'connecting';
   const isTranscribing = status === 'transcribing';

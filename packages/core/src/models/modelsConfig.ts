@@ -520,6 +520,11 @@ export class ModelsConfig {
           `Model '${modelId}' not found for authType '${authType}'`,
         );
       }
+      if (model.imageOnly) {
+        throw new Error(
+          `Image-only model '${modelId}' cannot be used as the primary model`,
+        );
+      }
 
       const previousModelId = rollbackSnapshot.generationConfig.model || '';
       const previousModel =
@@ -1030,9 +1035,7 @@ export class ModelsConfig {
     modelId?: string,
     providerBaseUrlOverride?: string,
   ): void {
-    this.strictModelProviderSelection = false;
     const previousAuthType = this.currentAuthType;
-    this.currentAuthType = authType;
 
     // Step 1: If modelId exists in registry, always use config from modelRegistry
     // Manual credentials won't have a modelId that matches a provider model (the /auth provider-setup flow prevents it),
@@ -1052,6 +1055,14 @@ export class ModelsConfig {
       ? (this.modelRegistry.getModel(authType, modelId, providerBaseUrl) ??
         this.modelRegistry.getModel(authType, modelId))
       : undefined;
+    if (resolved?.imageOnly) {
+      throw new Error(
+        `Image-only model '${modelId}' cannot be used as the primary model`,
+      );
+    }
+
+    this.strictModelProviderSelection = false;
+    this.currentAuthType = authType;
     if (resolved) {
       // When authType and modelId haven't changed (startup/restart scenario),
       // the current apiKey was already correctly resolved by

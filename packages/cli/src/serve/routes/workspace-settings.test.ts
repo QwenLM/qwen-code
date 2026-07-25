@@ -10,6 +10,7 @@ import request from 'supertest';
 import { registerWorkspaceSettingsRoutes } from './workspace-settings.js';
 import { loadSettings } from '../../config/settings.js';
 import type { CredentialStore } from '@qwen-code/qwen-code-core';
+import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
 
 vi.mock('../../config/settings.js', async (importOriginal) => {
   const actual =
@@ -26,11 +27,19 @@ beforeEach(() => {
   } as never);
 });
 
-function makeApp(credentialStore?: CredentialStore) {
+function makeApp(
+  overrides: {
+    credentialStore?: CredentialStore;
+    captureGenerationAssertion?: () => (() => void) | undefined;
+    afterPersist?: () => void;
+  } = {},
+) {
   const app = express();
   app.use(express.json());
 
-  const persistSetting = vi.fn(async () => {});
+  const persistSetting = vi.fn(async () => {
+    overrides.afterPersist?.();
+  });
   const broadcastSettingsChanged = vi.fn();
 
   registerWorkspaceSettingsRoutes(app, {
@@ -41,7 +50,8 @@ function makeApp(credentialStore?: CredentialStore) {
     persistSetting,
     broadcastSettingsChanged,
     parseAndValidateClientId: () => undefined,
-    credentialStore,
+    credentialStore: overrides.credentialStore,
+    captureGenerationAssertion: overrides.captureGenerationAssertion,
   });
 
   return { app, persistSetting, broadcastSettingsChanged };
@@ -50,7 +60,7 @@ function makeApp(credentialStore?: CredentialStore) {
 describe('POST /workspace/settings', () => {
   it('uses the credential store when reading MCP server settings', async () => {
     const credentialStore = {} as CredentialStore;
-    const { app } = makeApp(credentialStore);
+    const { app } = makeApp({ credentialStore });
 
     const res = await request(app).post('/workspace/settings').send({
       scope: 'workspace',
@@ -62,6 +72,28 @@ describe('POST /workspace/settings', () => {
     expect(loadSettings).toHaveBeenCalledWith('/workspace', {
       credentialStore,
     });
+  });
+
+  it('returns 503 without broadcasting when the runtime closes after persist', async () => {
+    let generationOpen = true;
+    const { app, broadcastSettingsChanged } = makeApp({
+      captureGenerationAssertion: () => () => {
+        if (!generationOpen) throw new WorkspaceGenerationClosedError();
+      },
+      afterPersist: () => {
+        generationOpen = false;
+      },
+    });
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'user',
+      key: 'general.cleanupPeriodDays',
+      value: 7,
+    });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+    expect(broadcastSettingsChanged).not.toHaveBeenCalled();
   });
 
   it('rejects negative general.cleanupPeriodDays values', async () => {

@@ -291,29 +291,36 @@ export class McpPromptLoader implements ICommandLoader {
       }
     }
 
-    const unfilledArgs = promptArgs.filter(
+    // Include all args not filled by named args — both required and optional —
+    // so positional input maps to optional params too (#7314).
+    // Sort required-first so positional args fill required params before
+    // optional ones regardless of declaration order.
+    const unfilledArgs = promptArgs
+      .filter((arg) => !Object.hasOwn(promptInputs, arg.name))
+      .sort((a, b) => (a.required === b.required ? 0 : a.required ? -1 : 1));
+
+    if (unfilledArgs.length === 1 && positionalArgs.length > 0) {
+      // If we have only one unfilled arg, we don't require quotes we just
+      // join all the given positional arguments together as if they were quoted.
+      promptInputs[unfilledArgs[0].name] = positionalArgs.join(' ');
+    } else if (positionalArgs.length > 0) {
+      for (
+        let i = 0;
+        i < unfilledArgs.length && i < positionalArgs.length;
+        i++
+      ) {
+        promptInputs[unfilledArgs[i].name] = positionalArgs[i];
+      }
+    }
+
+    const missingRequired = promptArgs.filter(
       (arg) => arg.required && !Object.hasOwn(promptInputs, arg.name),
     );
-
-    if (unfilledArgs.length === 1) {
-      // If we have only one unfilled arg, we don't require quotes we just
-      // join all the given arguments together as if they were quoted.
-      promptInputs[unfilledArgs[0].name] = positionalArgs.join(' ');
-    } else {
-      const missingArgs: string[] = [];
-      for (let i = 0; i < unfilledArgs.length; i++) {
-        if (positionalArgs.length > i) {
-          promptInputs[unfilledArgs[i].name] = positionalArgs[i];
-        } else {
-          missingArgs.push(unfilledArgs[i].name);
-        }
-      }
-      if (missingArgs.length > 0) {
-        const missingArgNames = missingArgs
-          .map((name) => `--${name}`)
-          .join(', ');
-        return new Error(`Missing required argument(s): ${missingArgNames}`);
-      }
+    if (missingRequired.length > 0) {
+      const missingArgNames = missingRequired
+        .map((arg) => `--${arg.name}`)
+        .join(', ');
+      return new Error(`Missing required argument(s): ${missingArgNames}`);
     }
 
     return promptInputs;

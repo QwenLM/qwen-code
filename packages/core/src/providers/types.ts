@@ -20,8 +20,10 @@ export interface ModelSpec {
   id: string;
   contextWindowSize?: number;
   enableThinking?: boolean;
+  thinkingMandatory?: boolean;
   modalities?: InputModalities;
   description?: string;
+  imageOnly?: boolean;
 }
 
 export interface BaseUrlOption {

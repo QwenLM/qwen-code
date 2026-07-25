@@ -50,6 +50,7 @@ export interface WorkspaceProvidersStatusProviderOptions {
    * process.env). Omitted in non-daemon (CLI) contexts.
    */
   credentialProvider?: CredentialProvider;
+  workspaceTrusted?: boolean;
 }
 
 export function createWorkspaceProvidersStatusProvider(
@@ -67,7 +68,18 @@ function buildWorkspaceProvidersStatus(
   try {
     const loaded = loadSettings(
       workspaceCwd,
-      options.env ? { skipLoadEnvironment: true } : true,
+      options.env
+        ? {
+            skipLoadEnvironment: true,
+            skipWorkspaceSettings: options.workspaceTrusted === false,
+            workspaceTrusted: options.workspaceTrusted,
+          }
+        : {
+            consumeCorruptionEnvVars: true,
+            skipLoadEnvironment: options.workspaceTrusted === false,
+            skipWorkspaceSettings: options.workspaceTrusted === false,
+            workspaceTrusted: options.workspaceTrusted,
+          },
     );
     const settings = loaded.merged;
     const env = options.env ?? snapshotProcessEnv();

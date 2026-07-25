@@ -57,9 +57,10 @@ export function TrustDialog({
         onExit();
       }
       if (needsRestart && key.name === 'r') {
-        commitTrustLevelChange();
-        relaunchApp();
-        onExit();
+        if (commitTrustLevelChange()) {
+          relaunchApp();
+          onExit();
+        }
       }
     },
     { isActive: true },

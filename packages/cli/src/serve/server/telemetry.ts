@@ -115,6 +115,18 @@ export const legacySessionTelemetryRoutes = [
   },
   {
     method: 'GET',
+    path: '/session/:id/subagents/:toolCallId',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/subagents/:toolCallId',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/subagents/:toolCallId/cancel',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/subagents/:toolCallId/cancel',
+  },
+  {
+    method: 'GET',
     path: '/session/:id/lsp',
     attribution: 'handler_resolved',
     route: 'GET /session/:id/lsp',

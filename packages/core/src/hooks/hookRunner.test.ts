@@ -125,8 +125,10 @@ describe('HookRunner', () => {
 
     it('scrubs daemon secrets from the hook subprocess environment', async () => {
       const originalServerToken = process.env['QWEN_SERVER_TOKEN'];
+      const originalDaemonToken = process.env['QWEN_DAEMON_TOKEN'];
       const originalGhToken = process.env['GH_TOKEN'];
       process.env['QWEN_SERVER_TOKEN'] = 'daemon-secret';
+      process.env['QWEN_DAEMON_TOKEN'] = 'daemon-token-secret';
       process.env['GH_TOKEN'] = 'user-credential';
       const mockProcess = createMockProcess();
       mockSpawn.mockReturnValue(mockProcess);
@@ -144,12 +146,20 @@ describe('HookRunner', () => {
 
         const spawnOptions = mockSpawn.mock.calls[0]![2];
         expect(spawnOptions.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+        expect(spawnOptions.env['QWEN_DAEMON_TOKEN']).toBeUndefined();
         expect(spawnOptions.env['GH_TOKEN']).toBe('user-credential');
+        expect(spawnOptions.env['PATH']).toBeDefined();
+        expect(spawnOptions.env['QWEN_PROJECT_DIR']).toBe('/test');
       } finally {
         if (originalServerToken === undefined) {
           delete process.env['QWEN_SERVER_TOKEN'];
         } else {
           process.env['QWEN_SERVER_TOKEN'] = originalServerToken;
+        }
+        if (originalDaemonToken === undefined) {
+          delete process.env['QWEN_DAEMON_TOKEN'];
+        } else {
+          process.env['QWEN_DAEMON_TOKEN'] = originalDaemonToken;
         }
         if (originalGhToken === undefined) {
           delete process.env['GH_TOKEN'];

@@ -1257,6 +1257,35 @@ function runRoster(report: PlanReport, planPath: string, rules?: string): void {
     recordPrompt(planPath, key, prompt);
     return `───── agent ${i + 1} of ${roster.length} — ${rosterLabel(req)} ─────\n\n${prompt}`;
   });
+  // Worktree-mode reviews: remind the orchestrator of the exact Agent tool
+  // parameters at the point of action. A run that passed both `working_dir`
+  // and `isolation: "worktree"` failed all 11 agents (mutually exclusive) and
+  // the review produced nothing. The roster is the last text the orchestrator
+  // reads before constructing agent calls — a reminder here is worth more than
+  // one 400 lines back in SKILL.md.
+  const wt = report.worktreePath;
+  const paramNote =
+    typeof wt === 'string' && wt
+      ? `\n\n**Agent tool parameters (worktree mode):** Set ` +
+        `\`working_dir: "${wt}"\` and ` +
+        `\`subagent_type: "general-purpose"\`, \`run_in_background: false\` ` +
+        `on EVERY agent call below. Do NOT set \`isolation\` — the worktree ` +
+        `already exists; \`isolation\` creates a new copy and is mutually ` +
+        `exclusive with \`working_dir\`.`
+      : '';
+  // The Agent tool's `description` is the task name the user watches in the
+  // TUI while the agent runs, and nothing downstream reads it — the delivery
+  // check compares prompts, coverage reads transcripts. So it is the one part
+  // of a launch the orchestrator writes itself, in the session's output
+  // language. Said here, at the point of action, because every visible string
+  // in this output is English, and without the reminder a run under a Chinese
+  // output language still hands the user twelve English task names.
+  const descNote =
+    `\n\nThe \`description\` parameter of each Agent call is the task name ` +
+    `the user watches while the agent runs — write it in your output ` +
+    `language, translating the block's ───── separator label (keep the ` +
+    `role/chunk id visible). Display only: the prompt itself stays the ` +
+    `block VERBATIM.`;
   writeStdoutLine(
     [
       `${roster.length} agents required. Launch one agent per block below, ` +
@@ -1268,7 +1297,9 @@ function runRoster(report: PlanReport, planPath: string, rules?: string): void {
         `either is missing, this output was truncated in transit: every prompt ` +
         `is also recorded on disk, so rebuild just the missing blocks with ` +
         `--chunk <id>, or --role <r> (--file <path> for an invariant agent), ` +
-        `plus the same --rules this call was given.`,
+        `plus the same --rules this call was given.` +
+        descNote +
+        paramNote,
       ...blocks,
       `───── end of roster — ${roster.length} agents ─────`,
     ].join('\n\n'),
@@ -1338,7 +1369,9 @@ function runAllChunks(
         `record. Blocks are numbered \`auditor k of ${chunks.length}\` and the ` +
         `output ends with an end-of-round line — if either is missing, the ` +
         `output was truncated in transit; rebuild just the missing chunks with ` +
-        `--chunk <id>.`,
+        `--chunk <id>. Write each Agent call's \`description\` (the task ` +
+        `name the user watches) in your output language, translating the ` +
+        `separator label — display only; the prompt stays the block VERBATIM.`,
       ...blocks,
       `───── end of round — ${chunks.length} auditors ─────`,
     ].join('\n\n'),

@@ -16,6 +16,7 @@ import type {
   HookEventName,
 } from './types.js';
 import type { Config } from '../config/config.js';
+import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { Content, GenerateContentResponse } from '@google/genai';
 
 const debugLogger = createDebugLogger('PROMPT_HOOK_RUNNER');
@@ -187,8 +188,10 @@ export class PromptHookRunner {
    * Check whether the current prompt hook model should be treated as a
    * reasoning model for request-shaping compatibility.
    */
-  private isReasoningModel(model: string): boolean {
-    const reasoningConfig = this.config.getContentGeneratorConfig().reasoning;
+  private isReasoningModel(
+    model: string,
+    reasoningConfig: ContentGeneratorConfig['reasoning'],
+  ): boolean {
     if (reasoningConfig !== undefined && reasoningConfig !== false) {
       return true;
     }
@@ -210,18 +213,6 @@ export class PromptHookRunner {
     timeoutMs: number,
     signal?: AbortSignal,
   ): Promise<LLMHookResponse> {
-    const generator = this.config.getContentGenerator();
-    if (!generator) {
-      const error = new Error(
-        'ContentGenerator not available - make sure you are authenticated',
-      );
-      debugLogger.error(
-        'Prompt hook failed: ContentGenerator not available',
-        error,
-      );
-      throw error;
-    }
-
     // Build contents array
     const contents: Content[] = [
       {
@@ -240,15 +231,54 @@ export class PromptHookRunner {
 
     // Create timeout promise that also aborts the request
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
+    let abortHandler: (() => void) | undefined;
     const timeoutPromise = new Promise<never>((_, reject) => {
       timeoutId = setTimeout(() => {
         internalAbortController.abort();
         reject(new Error(`Prompt hook timed out after ${timeoutMs}ms`));
       }, timeoutMs);
     });
+    const abortPromise = new Promise<never>((_, reject) => {
+      if (!signal) return;
+      if (signal.aborted) {
+        reject(new Error('Prompt hook execution aborted'));
+        return;
+      }
+      abortHandler = () => reject(new Error('Prompt hook execution aborted'));
+      signal.addEventListener('abort', abortHandler, { once: true });
+    });
 
     try {
-      const isReasoningModel = this.isReasoningModel(model);
+      let generator = this.config.getContentGenerator();
+      let requestModel = model;
+      let reasoningConfig = this.config.getContentGeneratorConfig().reasoning;
+      if (!generator) {
+        const error = new Error(
+          'ContentGenerator not available - make sure you are authenticated',
+        );
+        debugLogger.error(
+          'Prompt hook failed: ContentGenerator not available',
+          error,
+        );
+        throw error;
+      }
+      if (model !== this.getModel()) {
+        const resolved = await Promise.race([
+          this.config
+            .getBaseLlmClient()
+            .resolveForModel(model, { failClosed: true }),
+          timeoutPromise,
+          ...(signal ? [abortPromise] : []),
+        ]);
+        generator = resolved.contentGenerator;
+        requestModel = resolved.model;
+        reasoningConfig = resolved.contentGeneratorConfig.reasoning;
+      }
+
+      const isReasoningModel = this.isReasoningModel(
+        requestModel,
+        reasoningConfig,
+      );
       const requestConfig = {
         abortSignal: internalSignal,
         systemInstruction: {
@@ -269,21 +299,22 @@ export class PromptHookRunner {
         // output budget on hidden thoughts for hook evaluation.
         reasoning: false,
         // Thoughts are filtered out post-hoc anyway; skip generating
-        // them so we don't pay for reasoning tokens we discard.
+        // them so we don't pay to generate reasoning tokens we discard.
         thinkingConfig: { includeThoughts: false },
       };
 
-      // Race between LLM call and timeout
+      internalSignal.throwIfAborted();
       const response = await Promise.race([
         generator.generateContent(
           {
-            model,
+            model: requestModel,
             contents,
             config: requestConfig,
           },
           'prompt_hook',
         ),
         timeoutPromise,
+        ...(signal ? [abortPromise] : []),
       ]);
 
       const finishReason = (response as GenerateContentResponse).candidates?.[0]
@@ -313,6 +344,9 @@ export class PromptHookRunner {
     } finally {
       if (timeoutId) {
         clearTimeout(timeoutId);
+      }
+      if (signal && abortHandler) {
+        signal.removeEventListener('abort', abortHandler);
       }
       // Trigger reverse-cleanup of the parent-signal listener on the
       // success path; no-op if already aborted via parent/timeout.

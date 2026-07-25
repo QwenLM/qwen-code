@@ -12,7 +12,7 @@
 // in lightweight mode, therefore routed into a topology it had no chunk list
 // for — no receipts, no tiling guarantee, and the orchestrator left to improvise
 // line ranges. Those two paths now capture their diff to a file (redirection
-// bypasses the 30 000-char shell cap) and run this.
+// bypasses Shell model-output truncation) and run this.
 
 import type { CommandModule } from 'yargs';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';

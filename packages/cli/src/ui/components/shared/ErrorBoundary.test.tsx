@@ -15,6 +15,11 @@ const Thrower = ({ message }: { message: string }) => {
   throw new Error(message);
 };
 
+// A child that throws a non-Error value (string).
+const StringThrower = ({ message }: { message: string }) => {
+  throw message;
+};
+
 describe('ErrorBoundary', () => {
   // React logs caught render errors to console.error; silence it so the test
   // output stays clean (the boundary catching the error is the point).
@@ -102,5 +107,21 @@ describe('ErrorBoundary', () => {
     });
     rerender(tree);
     expect(lastFrame()).toContain('recovered');
+  });
+
+  it('normalizes a non-Error thrown value to an Error instance', () => {
+    const onError = vi.fn();
+    const { lastFrame } = render(
+      <ErrorBoundary onError={onError}>
+        <StringThrower message="string error" />
+      </ErrorBoundary>,
+    );
+    // The fallback renders the stringified value.
+    expect(lastFrame()).toContain('string error');
+    // onError receives a proper Error instance, not the raw string.
+    expect(onError).toHaveBeenCalledTimes(1);
+    const [error] = onError.mock.calls[0];
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe('string error');
   });
 });

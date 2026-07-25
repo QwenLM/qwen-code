@@ -338,6 +338,7 @@ export type {
   DaemonWorkspaceAgentDetail,
   /** Agent list entry: name, description, level, model, builtin flag. */
   DaemonWorkspaceAgentSummary,
+  DaemonWorkspaceGenerationEvent,
   /** MCP server status: name, transport, connection state, disabled reason. */
   DaemonWorkspaceMcpServerStatus,
   /** Single MCP tool: name, description, JSON schema, validity. */

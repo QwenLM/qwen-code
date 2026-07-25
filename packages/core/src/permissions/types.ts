@@ -93,6 +93,8 @@ export interface PermissionRuleSet {
 export interface PermissionCheckContext {
   /** The canonical tool name being checked. */
   toolName: string;
+  /** Historical names that may still appear in persisted rules. */
+  toolAliases?: readonly string[];
   /**
    * The shell command being executed (only for Bash / run_shell_command).
    */

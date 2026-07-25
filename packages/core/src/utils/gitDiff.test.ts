@@ -14,6 +14,8 @@ import {
   fetchGitDiff,
   fetchGitDiffHunks,
   fetchGitDiffHunksForFile,
+  fetchGitLog,
+  fetchGitCommitDetail,
   getGitWorkingTreeStatus,
   MAX_DIFF_SIZE_BYTES,
   MAX_FILES,
@@ -1920,5 +1922,271 @@ describe('getGitWorkingTreeStatus', () => {
 
     const status = await getGitWorkingTreeStatus(repo);
     expect(status).toMatchObject({ operation: 'bisect' });
+  });
+});
+
+describe('fetchGitLog', () => {
+  let repo: string;
+
+  beforeEach(async () => {
+    repo = await makeRepo();
+  });
+
+  afterEach(async () => {
+    await fs.rm(repo, { recursive: true, force: true });
+  });
+
+  it('returns null for a non-repo directory', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-norepo-'));
+    try {
+      expect(await fetchGitLog(dir)).toBeNull();
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns empty list for a repo with no commits', async () => {
+    const result = await fetchGitLog(repo);
+    expect(result).toEqual({ entries: [], hasMore: false });
+  });
+
+  it('returns commits newest-first with correct fields', async () => {
+    await fs.writeFile(path.join(repo, 'a.txt'), 'one\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'first commit');
+    await fs.writeFile(path.join(repo, 'b.txt'), 'two\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'second commit');
+
+    const result = await fetchGitLog(repo);
+    expect(result).not.toBeNull();
+    expect(result!.entries).toHaveLength(2);
+    expect(result!.hasMore).toBe(false);
+
+    const newest = result!.entries[0];
+    expect(newest.subject).toBe('second commit');
+    expect(newest.authorName).toBe('Test');
+    expect(newest.authorEmail).toBe('test@example.com');
+    expect(newest.sha).toMatch(/^[0-9a-f]{40}$/);
+    expect(newest.shortSha.length).toBeGreaterThanOrEqual(7);
+    expect(newest.authorDate).toBeGreaterThan(0);
+    expect(newest.parents).toHaveLength(1);
+
+    const oldest = result!.entries[1];
+    expect(oldest.subject).toBe('first commit');
+    expect(oldest.parents).toHaveLength(0);
+  }, 15_000);
+
+  it('paginates with limit and hasMore', async () => {
+    for (let i = 0; i < 5; i++) {
+      await fs.writeFile(path.join(repo, `f${i}.txt`), `${i}\n`);
+      await git(repo, 'add', '.');
+      await git(repo, 'commit', '-q', '-m', `commit ${i}`);
+    }
+
+    const page1 = await fetchGitLog(repo, { limit: 3 });
+    expect(page1!.entries).toHaveLength(3);
+    expect(page1!.hasMore).toBe(true);
+    expect(page1!.entries[0].subject).toBe('commit 4');
+
+    const page2 = await fetchGitLog(repo, { limit: 3, skip: 3 });
+    expect(page2!.entries).toHaveLength(2);
+    expect(page2!.hasMore).toBe(false);
+    expect(page2!.entries[0].subject).toBe('commit 1');
+  }, 15_000);
+
+  it('respects limit and clamps edge values', async () => {
+    for (let i = 0; i < 3; i++) {
+      await fs.writeFile(path.join(repo, `f${i}.txt`), `${i}\n`);
+      await git(repo, 'add', '.');
+      await git(repo, 'commit', '-q', '-m', `c${i}`);
+    }
+
+    const limited = await fetchGitLog(repo, { limit: 2 });
+    expect(limited!.entries).toHaveLength(2);
+    expect(limited!.hasMore).toBe(true);
+
+    const clamped = await fetchGitLog(repo, { limit: 0 });
+    expect(clamped!.entries).toHaveLength(1);
+  }, 15_000);
+
+  it('includes refs for HEAD', async () => {
+    await fs.writeFile(path.join(repo, 'a.txt'), 'x\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'c1');
+
+    const result = await fetchGitLog(repo);
+    expect(result!.entries[0].refs).toContain('HEAD');
+    expect(result!.entries[0].refs).toContain('main');
+  });
+
+  it('preserves a unit separator in the commit subject', async () => {
+    const subject = 'subject\x1ftail';
+    await fs.writeFile(path.join(repo, 'a.txt'), 'x\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', subject);
+
+    const result = await fetchGitLog(repo);
+    expect(result!.entries[0].subject).toBe(subject);
+    expect(result!.entries[0].refs).toContain('HEAD');
+    expect(result!.entries[0].parents).toHaveLength(0);
+  });
+});
+
+describe('fetchGitCommitDetail', () => {
+  let repo: string;
+
+  beforeEach(async () => {
+    repo = await makeRepo();
+  });
+
+  afterEach(async () => {
+    await fs.rm(repo, { recursive: true, force: true });
+  });
+
+  it('returns null for invalid sha', async () => {
+    expect(await fetchGitCommitDetail(repo, 'not-a-sha')).toBeNull();
+    expect(await fetchGitCommitDetail(repo, 'abc')).toBeNull();
+    expect(await fetchGitCommitDetail(repo, '')).toBeNull();
+  });
+
+  it('returns null for a non-repo directory', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-norepo-'));
+    try {
+      expect(await fetchGitCommitDetail(dir, 'abcdef1')).toBeNull();
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('returns detail with body and file stats', async () => {
+    await fs.writeFile(path.join(repo, 'a.txt'), 'line1\nline2\nline3\n');
+    await git(repo, 'add', '.');
+    await git(
+      repo,
+      'commit',
+      '-q',
+      '-m',
+      'subject line\n\nBody paragraph here.',
+    );
+
+    const log = await fetchGitLog(repo);
+    const sha = log!.entries[0].sha;
+
+    const detail = await fetchGitCommitDetail(repo, sha);
+    expect(detail).not.toBeNull();
+    expect(detail!.sha).toBe(sha);
+    expect(detail!.subject).toBe('subject line');
+    expect(detail!.body).toContain('Body paragraph here.');
+    expect(detail!.authorName).toBe('Test');
+    expect(detail!.filesCount).toBe(1);
+    expect(detail!.linesAdded).toBe(3);
+    expect(detail!.linesRemoved).toBe(0);
+    expect(detail!.files).toHaveLength(1);
+    expect(detail!.files[0].path).toBe('a.txt');
+    expect(detail!.files[0].added).toBe(3);
+    expect(detail!.files[0].isBinary).toBe(false);
+    expect(detail!.hiddenCount).toBe(0);
+  });
+
+  it('preserves unit separators in the subject and body', async () => {
+    const subject = 'subject\x1ftail';
+    const body = 'body\x1ftail';
+    await fs.writeFile(path.join(repo, 'a.txt'), 'x\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', `${subject}\n\n${body}`);
+
+    const log = await fetchGitLog(repo);
+    const detail = await fetchGitCommitDetail(repo, log!.entries[0].sha);
+
+    expect(detail!.subject).toBe(subject);
+    expect(detail!.body).toBe(body);
+    expect(detail!.refs).toContain('HEAD');
+    expect(detail!.parents).toHaveLength(0);
+  });
+
+  it('handles root commit (no parent)', async () => {
+    await fs.writeFile(path.join(repo, 'init.txt'), 'hello\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'root');
+
+    const log = await fetchGitLog(repo);
+    const detail = await fetchGitCommitDetail(repo, log!.entries[0].sha);
+    expect(detail).not.toBeNull();
+    expect(detail!.parents).toHaveLength(0);
+    expect(detail!.filesCount).toBe(1);
+    expect(detail!.files[0].path).toBe('init.txt');
+  });
+
+  it('detects binary files', async () => {
+    // Git needs a reasonable amount of NUL-containing data to classify as binary.
+    const buf = Buffer.alloc(1024);
+    buf.fill(0x89, 0, 512);
+    buf.fill(0x00, 512);
+    await fs.writeFile(path.join(repo, 'img.png'), buf);
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'add image');
+
+    const log = await fetchGitLog(repo);
+    const detail = await fetchGitCommitDetail(repo, log!.entries[0].sha);
+    expect(detail!.files[0].isBinary).toBe(true);
+    expect(detail!.files[0].added).toBe(0);
+  });
+
+  it('returns null for nonexistent sha', async () => {
+    await fs.writeFile(path.join(repo, 'a.txt'), 'x\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'c1');
+
+    const result = await fetchGitCommitDetail(
+      repo,
+      'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+    );
+    expect(result).toBeNull();
+  });
+
+  it('counts a renamed file by its new path (not dropped, not empty-path)', async () => {
+    await fs.writeFile(path.join(repo, 'old.txt'), 'a\nb\nc\nd\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'seed');
+    // Rename + a small edit so git reports it as a rename with numstat counts.
+    await git(repo, 'mv', 'old.txt', 'new.txt');
+    await fs.writeFile(path.join(repo, 'new.txt'), 'a\nB\nc\nd\ne\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'rename + edit');
+
+    const log = await fetchGitLog(repo);
+    const detail = await fetchGitCommitDetail(repo, log!.entries[0].sha);
+    expect(detail).not.toBeNull();
+    // The rename is one file, keyed by the NEW path — the three-token `-z`
+    // rename sequence must not record an empty path or drop it.
+    expect(detail!.filesCount).toBe(1);
+    expect(detail!.files).toHaveLength(1);
+    expect(detail!.files[0].path).toBe('new.txt');
+    expect(detail!.files[0].added).toBeGreaterThan(0);
+  });
+
+  it('shows the first-parent diff for a merge commit', async () => {
+    await fs.writeFile(path.join(repo, 'base.txt'), 'base\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'base');
+    await git(repo, 'checkout', '-q', '-b', 'feature');
+    await fs.writeFile(path.join(repo, 'feature.txt'), 'feature\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'feature work');
+    await git(repo, 'checkout', '-q', 'main');
+    await fs.writeFile(path.join(repo, 'main.txt'), 'main\n');
+    await git(repo, 'add', '.');
+    await git(repo, 'commit', '-q', '-m', 'main work');
+    await git(repo, 'merge', '-q', '--no-ff', 'feature', '-m', 'merge feature');
+
+    const log = await fetchGitLog(repo);
+    const detail = await fetchGitCommitDetail(repo, log!.entries[0].sha);
+    expect(detail).not.toBeNull();
+    expect(detail!.parents.length).toBe(2);
+    // Plain diff-tree emits nothing for a merge; the first-parent diff must
+    // surface what the merge introduced (feature.txt) — else filesCount is 0.
+    expect(detail!.filesCount).toBeGreaterThan(0);
+    expect(detail!.files.some((f) => f.path === 'feature.txt')).toBe(true);
   });
 });

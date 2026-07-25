@@ -7,13 +7,14 @@
 // Parse a unified diff and partition it into review chunks.
 //
 // Why this exists: /review used to hand each review agent the diff *command*
-// (`git diff main...HEAD`) and let the agent run it. Shell tool output is
-// capped at `ShellTool.maxOutputChars` (30 000) and split head-1/5 / tail-4/5,
-// so on a large PR every agent saw a few hundred lines off the top of the
-// first file plus the tail of the last file, and nothing in between. The rest
-// of the diff was replaced by a `[CONTENT TRUNCATED]` marker. Ten agents all
-// read the same visible sliver; coverage did not grow with the number of
-// agents.
+// (`git diff main...HEAD`) and let the agent run it. At the time, Shell tool
+// output used its 30 000-character trigger as the preview budget and split it
+// head-1/5 / tail-4/5, so on a large PR every agent saw a few hundred lines off
+// the top of the first file plus the tail of the last file, and nothing in
+// between. Shell now keeps the 30 000-character trigger but returns an even
+// smaller model preview. The rest of the diff is still replaced by a
+// `[CONTENT TRUNCATED]` marker, so direct execution cannot provide complete
+// review coverage regardless of the number of agents.
 //
 // Instead the diff is written to a file (`read_file` paginates by
 // offset/limit and is exempt from the char cap) and partitioned here into

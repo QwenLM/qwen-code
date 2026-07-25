@@ -31,14 +31,63 @@ import { pathToFileURL } from 'node:url';
 
 // % of pixels that must differ for a view to count as "changed". Kept low so a
 // small-but-real change (an icon swap ~24×24, a one-word label) still registers
-// — this is the exact failure mode the preview exists to catch. before/after
-// render on the same runner + fonts with `animations: 'disabled'`, so AA jitter
-// between two identical renders is ~0. At 1280×800, 0.02% ≈ 205 px.
+// — this is the exact failure mode the preview exists to catch. The fraction is
+// measured AFTER the cluster denoise (see MIN_CLUSTER_NEIGHBORS): base and head
+// render in SEPARATE CI jobs, so font anti-aliasing is not bit-identical
+// between them and a text-heavy view scatters ~0.1-0.3% of isolated edge pixels
+// that would otherwise cross this line; the denoise erodes that scatter to ~0.
+// At 1280×800, 0.02% ≈ 205 px.
 export const CHANGED_PCT_THRESHOLD = 0.02;
 // A pixel "differs" when |ΔR|+|ΔG|+|ΔB| exceeds this (ignores imperceptible AA).
 export const PER_PIXEL_DELTA = 30;
+// Minimum of the 8 neighbours that must ALSO differ for a differing pixel to be
+// counted. Cross-job font-AA leaves a scatter of isolated / 1px-wide differing
+// pixels along glyph edges (a 1px-line pixel has 2 differing neighbours, an
+// isolated one has 0) — below this cutoff they erode to nothing, while a real
+// change (badge, chip, icon, panel) is a solid block whose interior keeps 5-8.
+export const MIN_CLUSTER_NEIGHBORS = 4;
 // Display width of each panel in the stitched composite.
 export const PANEL_WIDTH = 560;
+
+/**
+ * Count differing pixels that sit in a cluster: (x,y) counts only when at least
+ * `minNeighbors` of its 8 neighbours also differ. `changed` is a row-major 0/1
+ * mask of length `width*height`. Pure + deterministic (unit-tested); this is
+ * what drops cross-job font-AA scatter before the changed fraction is measured.
+ */
+export function countDenoisedChanges(
+  changed,
+  width,
+  height,
+  minNeighbors = MIN_CLUSTER_NEIGHBORS,
+) {
+  let count = 0;
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (!changed[y * width + x]) continue;
+      let neighbors = 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          const nx = x + dx;
+          const ny = y + dy;
+          if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue;
+          if (changed[ny * width + nx]) neighbors++;
+        }
+      }
+      if (neighbors >= minNeighbors) count++;
+    }
+  }
+  return count;
+}
+
+/** Unpack a base64, LSB-first bit-mask into a 0/1 Uint8Array of length `n`. */
+export function unpackBitMask(base64, n) {
+  const buf = Buffer.from(base64, 'base64');
+  const out = new Uint8Array(n);
+  for (let i = 0; i < n; i++) out[i] = (buf[i >> 3] >> (i & 7)) & 1;
+  return out;
+}
 
 /** Parse `<view>-<light|dark>.png` → `{ view, theme }` or null (ignore others). */
 export function parseShot(name) {
@@ -117,13 +166,18 @@ function compositeHtml({
     </div></body></html>`;
 }
 
-// Differing-pixel fraction (%) between two PNG data URIs, measured on a canvas
-// (no native image deps). A size mismatch short-circuits to 100% (a dimension
-// change is itself a visual change); equal-size images compare pixel-for-pixel.
+// Differing-pixel fraction (%) between two PNG data URIs. The browser decodes on
+// a canvas (no native image deps) and returns a compact bit-mask of which pixels
+// differ by > PER_PIXEL_DELTA; the cluster denoise + count then run here in node
+// against the unit-tested `countDenoisedChanges`, so there is a single tested
+// implementation of the metric. A size mismatch or an undecodable image
+// short-circuits to 100% (both are themselves a visual change, and must be shown
+// rather than silently dropped).
 async function diffPct(page, beforeUri, afterUri) {
-  return page.evaluate(
-    // This arrow runs in the BROWSER (page.evaluate), where Image/document are
-    // defined; declare them so eslint's node env doesn't flag no-undef.
+  const result = await page.evaluate(
+    // This arrow runs in the BROWSER (page.evaluate), where Image and document
+    // are defined; declare them so eslint's node env doesn't flag no-undef.
+    // (btoa is a shared node+browser global, so it needs no declaration here.)
     /* global Image, document */
     async ([a, b, delta]) => {
       const load = (src) =>
@@ -137,13 +191,11 @@ async function diffPct(page, beforeUri, afterUri) {
           img.src = src;
         });
       const [ia, ib] = await Promise.all([load(a), load(b)]);
-      // An undecodable image can't be compared → treat the view as fully
-      // changed (so it is shown, not silently dropped).
-      if (!ia || !ib) return 100;
-      // A dimension change IS a visual change: comparing only the overlapping
-      // rectangle would hide it (a taller viewport whose top pixels are
-      // unchanged would read 0%). Treat any size mismatch as fully changed.
-      if (ia.width !== ib.width || ia.height !== ib.height) return 100;
+      // An undecodable image, or a dimension change, IS a visual change: show it
+      // (comparing only the overlapping rectangle would hide a size change).
+      if (!ia || !ib) return { full: true };
+      if (ia.width !== ib.width || ia.height !== ib.height)
+        return { full: true };
       const w = ia.width;
       const h = ia.height;
       const c = document.createElement('canvas');
@@ -155,8 +207,10 @@ async function diffPct(page, beforeUri, afterUri) {
       ctx.clearRect(0, 0, w, h);
       ctx.drawImage(ib, 0, 0);
       const db = ctx.getImageData(0, 0, w, h).data;
-      let diff = 0;
       const n = w * h;
+      // Bit-pack the differing-pixel mask (LSB-first) so it transfers to node in
+      // ~n/8 bytes rather than a per-pixel object.
+      const bytes = new Uint8Array((n + 7) >> 3);
       for (let i = 0; i < n; i++) {
         const j = i * 4;
         if (
@@ -165,12 +219,20 @@ async function diffPct(page, beforeUri, afterUri) {
             Math.abs(da[j + 2] - db[j + 2]) >
           delta
         )
-          diff++;
+          bytes[i >> 3] |= 1 << (i & 7);
       }
-      return n ? (diff / n) * 100 : 0;
+      let bin = '';
+      for (let i = 0; i < bytes.length; i++)
+        bin += String.fromCharCode(bytes[i]);
+      return { w, h, mask: btoa(bin) };
     },
     [beforeUri, afterUri, PER_PIXEL_DELTA],
   );
+  if (result.full) return 100;
+  const n = result.w * result.h;
+  if (!n) return 0;
+  const changed = unpackBitMask(result.mask, n);
+  return (countDenoisedChanges(changed, result.w, result.h) / n) * 100;
 }
 
 async function composeCli(beforeDir, afterDir, outDir) {

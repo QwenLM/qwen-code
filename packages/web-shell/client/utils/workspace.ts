@@ -7,17 +7,33 @@
 import type {
   DaemonCapabilities,
   DaemonSessionSummary,
+  DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 
 /**
  * Last path segment of an absolute workspace cwd, for a compact per-workspace
  * label (e.g. `/home/me/projects/api` → `api`). Falls back to the full path when
- * it has no segments. Mirrors the sidebar's `WorkspaceSection` naming so the
- * split view / overview label a workspace the same way its sidebar section does.
+ * it has no segments.
  */
 export function workspaceBasename(cwd: string): string {
   const parts = cwd.split(/[\\/]+/).filter(Boolean);
   return parts.at(-1) ?? cwd;
+}
+
+export function workspaceLabel(
+  workspace: Pick<DaemonWorkspaceCapability, 'cwd' | 'displayName'>,
+): string {
+  return workspace.displayName?.trim() || workspaceBasename(workspace.cwd);
+}
+
+export function workspaceLabelForCwd(
+  cwd: string,
+  workspaces:
+    | readonly Pick<DaemonWorkspaceCapability, 'cwd' | 'displayName'>[]
+    | undefined,
+): string {
+  const workspace = workspaces?.find((entry) => entry.cwd === cwd);
+  return workspace ? workspaceLabel(workspace) : workspaceBasename(cwd);
 }
 
 /**

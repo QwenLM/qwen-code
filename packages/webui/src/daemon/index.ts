@@ -161,6 +161,7 @@ export type {
   DaemonMetricsSeriesBucket,
   DaemonWorkspaceAgentDetail,
   DaemonWorkspaceAgentSummary,
+  DaemonWorkspaceGenerationEvent,
   DaemonWorkspaceMcpServerStatus,
   DaemonWorkspaceMcpToolStatus,
   DaemonWorkspaceMcpToolsStatus,

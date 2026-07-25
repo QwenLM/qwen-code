@@ -32,6 +32,7 @@ jobs:
       bot_login: '${{ steps.identity.outputs.bot_login }}'
       target_found: '${{ steps.scan.outputs.target_found }}'
       input_sha: '${{ steps.scan.outputs.input_sha }}'
+      has_decisions: '${{ steps.decisions.outputs.has_decisions }}'
     steps:
       - name: 'Resolve patrol identity'
         id: 'identity'
@@ -70,6 +71,16 @@ jobs:
 
       - name: 'Classify with ci-flaky-patrol skill'
         if: "${{ steps.scan.outputs.target_found == 'true' }}"
+        # The model can outlast the WHOLE job budget when it is under load:
+        # across a busy 9-hour window every scheduled patrol spent ~9m40s in
+        # this step and was killed by the 10-minute job timeout, so Validate
+        # and Upload never ran, `act` was skipped, and nothing was ever re-run
+        # (28 of 30 runs cancelled; the 2 that passed took ~2 minutes at 00:0x
+        # when the model was idle). Bounding the STEP below the job turns a
+        # slow model into one wasted cycle instead of a dead patrol - the next
+        # tick simply tries again.
+        timeout-minutes: 5
+        continue-on-error: true
         env:
           GH_TOKEN: ''
           GITHUB_TOKEN: ''
@@ -92,11 +103,25 @@ jobs:
             Read ci-flaky-input.json and write ci-flaky-decisions.json.
 
       - name: 'Validate patrol decisions'
+        id: 'decisions'
         if: "${{ steps.scan.outputs.target_found == 'true' }}"
-        run: 'test -s "${WORKDIR}/ci-flaky-decisions.json"'
+        run: |-
+          # No decisions is a legitimate outcome now that the classifier can
+          # time out without taking the job with it. A timeout can also kill
+          # the process mid-write, leaving a non-empty but unparseable file,
+          # so validate JSON syntax alongside the size check. Report the
+          # result and let the run finish cleanly so the next tick retries,
+          # rather than failing the patrol and skipping the act job that
+          # reruns real flakes.
+          if [[ -s "${WORKDIR}/ci-flaky-decisions.json" ]] && node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))" "${WORKDIR}/ci-flaky-decisions.json" 2>/dev/null; then
+            echo 'has_decisions=true' >> "${GITHUB_OUTPUT}"
+          else
+            echo 'has_decisions=false' >> "${GITHUB_OUTPUT}"
+            echo "::warning::patrol classifier produced no valid decisions this cycle; nothing to act on"
+          fi
 
       - name: 'Upload patrol input and decisions'
-        if: "${{ steps.scan.outputs.target_found == 'true' }}"
+        if: "${{ steps.decisions.outputs.has_decisions == 'true' }}"
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a'
         with:
           name: 'ci-flaky-patrol-decisions'
@@ -109,7 +134,7 @@ jobs:
   act:
     name: 'Act on classified PR failures'
     needs: 'classify'
-    if: "${{ needs.classify.result == 'success' }}"
+    if: "${{ needs.classify.result == 'success' && needs.classify.outputs.has_decisions == 'true' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 10
     # GitHub writes use CI_BOT_PAT; keep the generated GITHUB_TOKEN read-only.

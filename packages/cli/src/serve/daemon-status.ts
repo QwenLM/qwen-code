@@ -162,6 +162,8 @@ interface DaemonStatusLimits {
   listenerMaxConnections: number | null;
   eventRingSize: number;
   compactedReplayMaxBytes: number;
+  maxJournalEvents: number;
+  maxJournalBytes: number;
   promptDeadlineMs: number | null;
   writerIdleTimeoutMs: number | null;
   channelIdleTimeoutMs: number;
@@ -267,6 +269,7 @@ export interface DaemonStatusResponse {
   workspaces?: Array<{
     id: string;
     cwd: string;
+    displayName?: string;
     primary: boolean;
     trusted: boolean;
   }>;
@@ -474,6 +477,8 @@ export async function buildDaemonStatusResponse(
       listenerMaxConnections: listenerMaxConnections(input.opts.maxConnections),
       eventRingSize: bridgeSnapshot.limits.eventRingSize,
       compactedReplayMaxBytes: bridgeSnapshot.limits.compactedReplayMaxBytes,
+      maxJournalEvents: bridgeSnapshot.limits.maxJournalEvents,
+      maxJournalBytes: bridgeSnapshot.limits.maxJournalBytes,
       promptDeadlineMs: positiveFiniteOrNull(input.opts.promptDeadlineMs),
       writerIdleTimeoutMs: positiveFiniteOrNull(input.opts.writerIdleTimeoutMs),
       channelIdleTimeoutMs: bridgeSnapshot.limits.channelIdleTimeoutMs,
@@ -485,6 +490,9 @@ export async function buildDaemonStatusResponse(
           workspaces: workspaceRuntimes.map((runtime) => ({
             id: runtime.workspaceId,
             cwd: runtime.workspaceCwd,
+            ...(runtime.displayName !== undefined
+              ? { displayName: runtime.displayName }
+              : {}),
             primary: runtime.primary,
             trusted: runtime.trusted,
           })),

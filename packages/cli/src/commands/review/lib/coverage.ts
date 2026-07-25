@@ -140,12 +140,65 @@ export interface CoverageFromTranscripts {
   uncoverableChunks: number[];
   /** Chunk ids a working agent actually reviewed. */
   coveredChunks: number[];
+  /**
+   * The pre-formed disclosure entries (`rewrittenPrompts`, `missingRoles`,
+   * `unreadBriefs`), as `{subject, reason}` pairs in push order — for
+   * `compose-review`, which dedupes caller echoes by subject and groups
+   * same-reason subjects into one sentence. The prose twins above remain for
+   * the stderr formatting; REPARSING them was the bug: a reason is free-form
+   * text (labels carry ` — ` for an invariant's file, error interpolations
+   * can carry anything), so a subject/reason boundary recovered from rendered
+   * prose garbles exactly the entries it matters for.
+   */
+  disclosures: Array<{
+    subject: string;
+    reason: string;
+    /**
+     * The subject, said in the POSTED body's register (`Brief.publicLabel`) —
+     * absent when the internal subject already is that register (`chunk N`
+     * is translated downstream by `describeChunkGap`; `every dimension`,
+     * `coverage` and the Step 4/5 subjects are plain English). The internal
+     * `subject` stays the dedup and certification key, and the stderr twin
+     * keeps it: the codename is the selector an operator acts on.
+     */
+    publicSubject?: string;
+    /**
+     * The reason for the POSTED body, when the internal one carries something
+     * only an operator can use — today, the unread brief's filesystem path.
+     */
+    publicReason?: string;
+    /**
+     * The printed subject and reason, for the Chinese half of a bilingual
+     * body (the plan's `prDescriptionHasHan`). `subjectZh` is absent for
+     * chunk subjects — the chunk collapse translates those — and for
+     * subjects with no Chinese variant the renderer falls back to the
+     * English text rather than dropping the disclosure.
+     */
+    subjectZh?: string;
+    reasonZh?: string;
+  }>;
+  /**
+   * Every planned chunk with the source files it covers, in plan order — the
+   * body renderer's translation table. A chunk id is the run's own
+   * bookkeeping: it selects a rebuild command on stderr, and nothing on the PR
+   * page maps it to code, so the POSTED body names files (the author's units)
+   * or counts against this list's length instead. The ids themselves stay in
+   * the structural entries — the caps, the dedup and the remediation
+   * selectors all still key on them. `files` is empty for a plan written
+   * before chunks carried them.
+   */
+  plannedChunks: Array<{ id: number; files: string[] }>;
 }
 
 /** The plan, as far as coverage needs it. The roster reads more of it — see RosterPlan. */
 interface Plan {
   diffPathAbsolute: string;
-  chunks: Array<{ id: number; startLine: number; endLine: number }>;
+  chunks: Array<{
+    id: number;
+    startLine: number;
+    endLine: number;
+    files?: Array<{ path: string }>;
+  }>;
 }
 
 function readPlan(path: string): { plan: Plan; mtimeMs: number } {
@@ -253,6 +306,27 @@ function roleLabel(req: RequiredAgent): string {
   return req.file ? `${base} — ${req.file}` : base;
 }
 
+/**
+ * The same requirement, named for the PR author — or undefined when the
+ * internal label already is that register. A chunk requirement stays `chunk N`
+ * here on purpose: the body renderer translates chunk ids collectively
+ * (`describeChunkGap`), and a public subject would hide the id from that
+ * partition. The invariant agents' file rides `on`, not ` — `: in the posted
+ * sentence an em-dash reads as the subject/reason boundary.
+ */
+function publicRoleLabel(req: RequiredAgent): string | undefined {
+  if (req.role === 'chunk') return undefined;
+  const base = BRIEFS[req.role].publicLabel;
+  return req.file ? `${base} on ${req.file}` : base;
+}
+
+/** `publicRoleLabel`, for the Chinese half of a bilingual body. */
+function publicRoleLabelZh(req: RequiredAgent): string | undefined {
+  if (req.role === 'chunk') return undefined;
+  const base = BRIEFS[req.role].publicLabelZh;
+  return req.file ? `${base}（${req.file}）` : base;
+}
+
 /** Something a reader can act on. `agentName` is `general-purpose` for all of them. */
 function label(rec: AgentRecord, chunk: number | null): string {
   if (chunk !== null) return `chunk ${chunk}`;
@@ -285,6 +359,34 @@ export function coverageFromTranscripts(
   const idleAgents: string[] = [];
   const unopenedAgents: string[] = [];
   const rewrittenPrompts: string[] = [];
+  const disclosures: CoverageFromTranscripts['disclosures'] = [];
+  // The one source for both registers: the structural entry feeds the posted
+  // body (compose-review), and the returned prose feeds the stderr arrays —
+  // maintained as a pair, an edit to one and not the other would silently
+  // diverge what the operator reads from what the author was told. `pub`
+  // carries the body-register variants; the returned prose always keeps the
+  // internal subject and reason, because stderr is where the codename and the
+  // path are the things a reader acts on.
+  const disclose = (
+    subject: string,
+    reason: string,
+    pub?: {
+      subject?: string;
+      reason?: string;
+      subjectZh?: string;
+      reasonZh?: string;
+    },
+  ): string => {
+    disclosures.push({
+      subject,
+      reason,
+      publicSubject: pub?.subject,
+      publicReason: pub?.reason,
+      subjectZh: pub?.subjectZh,
+      reasonZh: pub?.reasonZh,
+    });
+    return `${subject} — ${reason}`;
+  };
   const covered = new Set<number>();
   const uncoverable = new Set<number>();
 
@@ -392,15 +494,27 @@ export function coverageFromTranscripts(
         rewrittenThisRecord = true;
         if (!nothingBuiltAtAll && !superseded(rec, chunk)) {
           rewrittenPrompts.push(
-            `${name} — ran on a prompt the run wrote itself (none was built for ` +
-              `this chunk), so the brief with its method and rules never reached it`,
+            disclose(
+              name,
+              'ran on a prompt the run wrote itself (none was built for this ' +
+                'chunk), so the brief with its method and rules never reached it',
+              {
+                reasonZh:
+                  '运行在这次 run 自行编写的 prompt 上（该 chunk 从未构建过 ' +
+                  'prompt），承载方法与规则的 brief 从未到达该 agent',
+              },
+            ),
           );
         }
       } else if (!wasDeliveredVerbatim(rec.launchPrompt, b)) {
         rewrittenThisRecord = true;
         if (!superseded(rec, chunk)) {
           rewrittenPrompts.push(
-            `${name} — launched with a prompt that is not the one the CLI built`,
+            disclose(
+              name,
+              'launched with a prompt that is not the one the CLI built',
+              { reasonZh: '启动时使用的 prompt 不是 CLI 构建的那一份' },
+            ),
           );
         }
       }
@@ -483,11 +597,22 @@ export function coverageFromTranscripts(
     // Phrased to read under the `Not reviewed: ` prefix `compose-review` renders it
     // with, which is where a PR author meets it.
     missingRoles.push(
-      `every dimension — none of the ${roster.length} required agents is on ` +
-        `record as launched with a prompt this skill built, so this diff was ` +
-        `reviewed, if at all, from prompts the run wrote for itself: no record ` +
-        `shows the severity bar, the finding format or this project's own rules ` +
-        `reaching an agent`,
+      disclose(
+        'every dimension',
+        `none of the ${roster.length} required agents is on record as ` +
+          `launched with a prompt this skill built, so this diff was ` +
+          `reviewed, if at all, from prompts the run wrote for itself: no ` +
+          `record shows the severity bar, the finding format or this ` +
+          `project's own rules reaching an agent`,
+        {
+          subjectZh: '所有维度',
+          reasonZh:
+            `${roster.length} 个必需 agent 中没有任何一个有记录表明是用本 ` +
+            `skill 构建的 prompt 启动的，这个 diff 即便被审查过，也是基于这次 ` +
+            `run 自行编写的 prompt：没有记录表明严重级别标准、发现格式或本项目` +
+            `自己的规则到达过任何 agent`,
+        },
+      ),
     );
   }
 
@@ -547,9 +672,18 @@ export function coverageFromTranscripts(
     if (b === undefined) {
       if (!nobodyBuiltAnything) {
         missingRoles.push(
-          `${roleLabel(req)} — no record shows its brief reaching an agent, so ` +
-            `this dimension was reviewed, if at all, from a prompt the run ` +
-            `wrote for itself`,
+          disclose(
+            roleLabel(req),
+            'no record shows its brief reaching an agent, so this dimension ' +
+              'was reviewed, if at all, from a prompt the run wrote for itself',
+            {
+              subject: publicRoleLabel(req),
+              subjectZh: publicRoleLabelZh(req),
+              reasonZh:
+                '没有记录表明它的 brief 到达过任何 agent，这个维度即便被审查' +
+                '过，也是基于这次 run 自行编写的 prompt',
+            },
+          ),
         );
       }
       missingRoleSelectors.push(selectorOf(req));
@@ -562,12 +696,23 @@ export function coverageFromTranscripts(
       // shortage of transcripts, not an artifact of claim order.
       const anyMatch = candidatesOf[buildableIdx].length > 0;
       missingRoles.push(
-        anyMatch
-          ? `${roleLabel(req)} — its prompt reached only an agent already ` +
-              `credited with another block; one agent was given several blocks, ` +
-              `and one transcript cannot certify two dimensions`
-          : `${roleLabel(req)} — its prompt was built, but no agent on record ` +
-              `was launched with it`,
+        disclose(
+          roleLabel(req),
+          anyMatch
+            ? 'its prompt reached only an agent already credited with ' +
+                'another block; one agent was given several blocks, and one ' +
+                'transcript cannot certify two dimensions'
+            : 'its prompt was built, but no agent on record was launched ' +
+                'with it',
+          {
+            subject: publicRoleLabel(req),
+            subjectZh: publicRoleLabelZh(req),
+            reasonZh: anyMatch
+              ? '它的 prompt 只到达了一个已被记入其他区块的 agent；一个 agent ' +
+                '被塞进了多个区块，而一份运行记录无法为两个维度作证'
+              : '它的 prompt 已构建，但没有任何 agent 有记录用它启动过',
+          },
+        ),
       );
       missingRoleSelectors.push(selectorOf(req));
       continue;
@@ -596,9 +741,23 @@ export function coverageFromTranscripts(
       a.includes(JSON.stringify(brief)),
     );
     if (!opened) {
+      // The brief PATH is the operator's — it names the file to make the agent
+      // open. The author's copy drops it: a filesystem path in a posted PR
+      // body is the same register leak as a chunk id.
       unreadBriefs.push(
-        `${roleLabel(req)} — never opened its brief (${brief}), so it reviewed ` +
-          'without the instructions it was launched to follow',
+        disclose(
+          roleLabel(req),
+          `never opened its brief (${brief}), so it reviewed without the ` +
+            'instructions it was launched to follow',
+          {
+            subject: publicRoleLabel(req),
+            reason:
+              'never opened its brief, so it reviewed without the ' +
+              'instructions it was launched to follow',
+            subjectZh: publicRoleLabelZh(req),
+            reasonZh: '从未打开自己的 brief，审查时缺失了它本应遵循的指令',
+          },
+        ),
       );
     }
   }
@@ -628,10 +787,17 @@ export function coverageFromTranscripts(
     rewrittenPrompts,
     missingRoles,
     missingRoleSelectors,
+    disclosures,
     unreadBriefs,
     missingChunks,
     uncoverableChunks: [...uncoverable].sort((a, b) => a - b),
     coveredChunks: [...covered].sort((a, b) => a - b),
+    plannedChunks: plan.chunks.map((c) => ({
+      id: c.id,
+      files: (c.files ?? [])
+        .map((f) => f?.path)
+        .filter((p): p is string => typeof p === 'string' && p !== ''),
+    })),
   };
 }
 
@@ -670,6 +836,8 @@ type Delivery =
 interface GapEntry {
   /** Author-facing: what this review cannot certify, and why. */
   gap: string;
+  /** `gap`, for the Chinese half of a bilingual posted body. */
+  gapZh: string;
   /** Orchestrator-facing: the exact fix, printed to stderr. */
   fix: string;
 }
@@ -712,6 +880,9 @@ const REVERSE_AUDIT_GAP: GapText = {
       'no auditor was launched with a prompt this skill builds — the pass ' +
       'that hunts what the rest of the review missed ran, if at all, without ' +
       'the method its brief carries',
+    gapZh:
+      '没有审计 agent 是用本 skill 构建的 prompt 启动的——负责搜寻评审其余部分' +
+      '遗漏问题的这道工序，即便运行过，也缺失了 brief 承载的方法',
     fix: rebuildFix('reverse-audit', 'round'),
   },
   // Same reach limit as `not-built`: a hand-written auditor that never opened
@@ -722,6 +893,9 @@ const REVERSE_AUDIT_GAP: GapText = {
       'its prompt was built, but no agent was launched with it — the pass ' +
       'that hunts what the rest of the review missed ran, if at all, without ' +
       'the method its brief carries, and cannot be certified',
+    gapZh:
+      '它的 prompt 已构建，但没有 agent 用它启动——负责搜寻评审其余部分遗漏' +
+      '问题的这道工序，即便运行过，也缺失了 brief 承载的方法，无法作证',
     fix: rebuildFix('reverse-audit', 'round'),
   },
   // `rewritten` is reached only after a successful call OPENED the brief — so
@@ -733,6 +907,10 @@ const REVERSE_AUDIT_GAP: GapText = {
       'an auditor ran and opened its brief, but no agent was launched with the ' +
       'prompt the CLI built — the launch was written by hand, and what the ' +
       'agent was actually asked is not what this skill certifies',
+    gapZh:
+      '有审计 agent 运行并打开了自己的 brief，但没有 agent 是用 CLI 构建的 ' +
+      'prompt 启动的——启动 prompt 是手写的，agent 实际被要求做的并不是本 ' +
+      'skill 所认证的内容',
     fix: rebuildFix('reverse-audit', 'round'),
   },
   'brief-unread': {
@@ -740,6 +918,9 @@ const REVERSE_AUDIT_GAP: GapText = {
       'it was launched with the built prompt but never opened its brief, so it ' +
       'audited without the gaps-only method and the finding format it was ' +
       'launched to follow',
+    gapZh:
+      '它用构建的 prompt 启动，却从未打开自己的 brief，审计时缺失了只报缺口的' +
+      '方法和它本应遵循的发现格式',
     fix:
       'relaunch with the same printed prompt — the agent must OPEN the brief ' +
       'file the prompt names; that read is the receipt',
@@ -754,12 +935,17 @@ const VERIFY_GAP: GapText = {
       'the review posts findings, but no verifier was launched with a prompt ' +
       'this skill builds — they were ruled on, if at all, without the verdict ' +
       'bar its brief carries',
+    gapZh:
+      '本次评审发布了发现，但没有验证 agent 是用本 skill 构建的 prompt 启动的' +
+      '——这些发现即便被裁定过，也缺失了 brief 承载的裁定标准',
     fix: rebuildFix('verify', 'shard'),
   },
   'not-launched': {
     gap:
       'its prompt was built, but no agent was launched with it, so the posted ' +
       'findings cannot be counted as verified',
+    gapZh:
+      '它的 prompt 已构建，但没有 agent 用它启动，发布的发现不能算作已验证',
     fix: rebuildFix('verify', 'shard'),
   },
   rewritten: {
@@ -767,15 +953,79 @@ const VERIFY_GAP: GapText = {
       'a verifier ran and opened its brief, but no agent was launched with the ' +
       'prompt the CLI built — the launch was written by hand, and the posted ' +
       'findings cannot be counted as verified against it',
+    gapZh:
+      '有验证 agent 运行并打开了自己的 brief，但没有 agent 是用 CLI 构建的 ' +
+      'prompt 启动的——启动 prompt 是手写的，发布的发现不能算作经它验证',
     fix: rebuildFix('verify', 'shard'),
   },
   'brief-unread': {
     gap:
       'it was launched with the built prompt but never opened its brief, so it ' +
       'ruled on the findings without the verdict bar it was launched to apply',
+    gapZh:
+      '它用构建的 prompt 启动，却从未打开自己的 brief，裁定发现时缺失了它本应' +
+      '使用的裁定标准',
     fix:
       'relaunch with the same printed prompt — the agent must OPEN the brief ' +
       'file the prompt names; that read is the receipt',
+  },
+};
+
+/**
+ * Both steps down the same way is ONE failure with two subjects, not two
+ * paragraphs. #7268's posted body carried the verify and reverse-audit
+ * `rewritten` sentences back to back, near-identical but for the tail — the
+ * same repetition the chunk grouping exists to kill, one layer up. Merged only
+ * on an EXACT shape match: mixed shapes have different mechanisms and
+ * different fixes, and a sentence vague enough to cover both would misname
+ * one of them. Each text keeps both steps' consequences and both honesty
+ * limits of its per-role twins: `not-built`/`not-launched` may not claim
+ * nobody ran, `rewritten` may not claim the brief never arrived. The
+ * remediation stays per-role — the two rebuild commands differ.
+ */
+const COMBINED_STEP45_GAP: Record<
+  Exclude<Delivery, 'ok'>,
+  { en: string; zh: string }
+> = {
+  'not-built': {
+    en:
+      'neither the verifier nor the reverse auditor was launched with a prompt ' +
+      'this skill builds — the posted findings were ruled on, and the misses ' +
+      'the rest of the review left were hunted, if at all, without the briefs ' +
+      'this skill certifies against',
+    zh:
+      '验证 agent 与反向审计 agent 都没有用本 skill 构建的 prompt 启动——发布的' +
+      '发现即便被裁定过、评审其余部分遗漏的问题即便被搜寻过，也都缺失了本 ' +
+      'skill 用以认证的 brief',
+  },
+  'not-launched': {
+    en:
+      'both prompts were built, but no agent was launched with either — the ' +
+      'posted findings cannot be counted as verified, and the pass that hunts ' +
+      'what the rest of the review missed cannot be certified',
+    zh:
+      '两份 prompt 都已构建，但都没有 agent 用它们启动——发布的发现不能算作已' +
+      '验证，搜寻评审遗漏问题的工序也无法作证',
+  },
+  rewritten: {
+    en:
+      'each ran and opened its brief, but neither was launched with the prompt ' +
+      'the CLI built — the launches were written by hand, so the posted ' +
+      'findings cannot be counted as verified, and what the agents were ' +
+      'actually asked is not what this skill certifies',
+    zh:
+      '两者都运行并打开了各自的 brief，但都不是用 CLI 构建的 prompt 启动的——' +
+      '启动 prompt 是手写的，发布的发现不能算作已验证，agent 实际被要求做的也' +
+      '不是本 skill 所认证的内容',
+  },
+  'brief-unread': {
+    en:
+      'each was launched with its built prompt and never opened its brief, so ' +
+      'the findings were ruled on without the verdict bar, and the audit ran ' +
+      'without the gaps-only method it was launched to follow',
+    zh:
+      '两者都用构建的 prompt 启动，却都从未打开自己的 brief——发现的裁定缺失了' +
+      '裁定标准，审计也缺失了它本应遵循的只报缺口的方法',
   },
 };
 
@@ -783,18 +1033,32 @@ export interface VerificationReport {
   /** True when every required Step 4/5 agent ran and read its brief. */
   ok: boolean;
   /**
-   * Self-explanatory gap lines, shaped to drop straight into
-   * `unreviewedDimensions` — each carries its own ` — ` reason, so
-   * `compose-review` renders it verbatim rather than appending the whiff sentence.
+   * The Step 4/5 gaps, structural — subject and reason apart, in both body
+   * languages, so `compose-review` never recovers a boundary from rendered
+   * prose (reparsing was the bug the disclosure entries already fixed).
    * These reach the POSTED review body: author-facing register, no internal
    * commands.
    */
-  gaps: string[];
+  gaps: Array<{
+    subject: string;
+    reason: string;
+    subjectZh: string;
+    reasonZh: string;
+  }>;
   /**
    * The per-shape fix for each gap, in the same order — for stderr, where the
    * orchestrator reads. Never rendered into the body.
    */
   remediation: string[];
+  /**
+   * True when this review posts findings and NO verifier's delivery came back
+   * clean — the structured form of the `verification — …` gap line, for the
+   * verdict computation. A Request changes is "earned by a confirmed
+   * Critical", and this is the bit that says the confirmation never happened;
+   * parsing the gap text for it would put the verdict at the mercy of a
+   * wording change.
+   */
+  unverifiedFindings: boolean;
 }
 
 /**
@@ -829,7 +1093,7 @@ export function verificationGaps(
   const { plan, mtimeMs } = readPlan(planPath);
   const records = readTranscripts(mtimeMs, env, plan.diffPathAbsolute);
   const built = readRecordedPrompts(planPath);
-  const gaps: string[] = [];
+  const gaps: VerificationReport['gaps'] = [];
   const remediation: string[] = [];
 
   // How a step's agents actually got their prompt. The floor needs the four shapes
@@ -893,7 +1157,6 @@ export function verificationGaps(
   );
   const reverse = bestDelivery(reverseKeys);
   if (reverse !== 'ok') {
-    gaps.push(`reverse audit — ${REVERSE_AUDIT_GAP[reverse].gap}`);
     // The fix template carries `--plan <plan>`; a literal `<plan>` pasted into a
     // POSIX shell parses as input redirection, so the one repair round Step 6
     // prescribes could never run. This function is handed the real path.
@@ -912,6 +1175,8 @@ export function verificationGaps(
   // non-deterministic body Criticals, and excludes deterministic `[build]`/`[test]`
   // findings, which are pre-confirmed and skip verification by design. A review that
   // confirmed nothing has nothing to verify.
+  let unverifiedFindings = false;
+  let verify: Delivery | null = null;
   if (opts.postsFindings) {
     // The whole key family: `verify--<digest>` per shard (the record now folds
     // the findings in, so a launch that dropped them matches nothing), plus the
@@ -919,9 +1184,9 @@ export function verificationGaps(
     const verifyKeys = [...built.keys()].filter(
       (k) => k === 'verify' || k.startsWith('verify--'),
     );
-    const verify = bestDelivery(verifyKeys);
+    verify = bestDelivery(verifyKeys);
     if (verify !== 'ok') {
-      gaps.push(`verification — ${VERIFY_GAP[verify].gap}`);
+      unverifiedFindings = true;
       remediation.push(
         `verification: ${VERIFY_GAP[verify].fix.replace(
           '--plan <plan>',
@@ -933,7 +1198,38 @@ export function verificationGaps(
     }
   }
 
-  return { ok: gaps.length === 0, gaps, remediation };
+  // The gaps, after both shapes are known: both steps failing the SAME way is
+  // one sentence with two subjects (see COMBINED_STEP45_GAP); anything else
+  // keeps its own precise text. The remediation above stays per-role either
+  // way — the two rebuild commands differ, and the combined sentence lands in
+  // the posted body while the fixes land on stderr.
+  if (reverse !== 'ok' && verify !== null && verify === reverse) {
+    gaps.push({
+      subject: 'verification and reverse audit',
+      reason: COMBINED_STEP45_GAP[reverse].en,
+      subjectZh: '验证与反向审计',
+      reasonZh: COMBINED_STEP45_GAP[reverse].zh,
+    });
+  } else {
+    if (reverse !== 'ok') {
+      gaps.push({
+        subject: 'reverse audit',
+        reason: REVERSE_AUDIT_GAP[reverse].gap,
+        subjectZh: '反向审计',
+        reasonZh: REVERSE_AUDIT_GAP[reverse].gapZh,
+      });
+    }
+    if (verify !== null && verify !== 'ok') {
+      gaps.push({
+        subject: 'verification',
+        reason: VERIFY_GAP[verify].gap,
+        subjectZh: '验证',
+        reasonZh: VERIFY_GAP[verify].gapZh,
+      });
+    }
+  }
+
+  return { ok: gaps.length === 0, gaps, remediation, unverifiedFindings };
 }
 
 export { TranscriptsUnavailableError };

@@ -72,6 +72,19 @@ describe('buildAgentContentGeneratorConfig', () => {
       expect(result.contextWindowSize).toBe(128000);
       expect(result.extra_body).toEqual({ custom: 'value' });
     });
+
+    it('does not inherit mandatory thinking from another model', () => {
+      const config = createMockConfig({
+        ...parentConfig,
+        thinkingMandatory: true,
+      });
+
+      const result = buildAgentContentGeneratorConfig(config, 'custom-model', {
+        authType: 'openai',
+      });
+
+      expect(result.thinkingMandatory).toBeUndefined();
+    });
   });
 
   describe('cross-provider, no registry match', () => {
@@ -208,6 +221,39 @@ describe('buildAgentContentGeneratorConfig', () => {
         'anthropic',
         'registry-model-id',
         'https://registry.example.com',
+      );
+    });
+
+    it('does not inherit mandatory thinking from another same-provider model', () => {
+      const config = createMockConfig(
+        { ...parentConfig, thinkingMandatory: true },
+        {
+          ...resolvedModel,
+          authType: 'openai' as ResolvedModelConfig['authType'],
+        },
+      );
+
+      const result = buildAgentContentGeneratorConfig(
+        config,
+        'registry-model-id',
+        { authType: 'openai' },
+      );
+
+      expect(result.thinkingMandatory).toBeUndefined();
+    });
+
+    it('rejects image-only models for agent content generation', () => {
+      const config = createMockConfig(parentConfig, {
+        ...resolvedModel,
+        imageOnly: true,
+      });
+
+      expect(() =>
+        buildAgentContentGeneratorConfig(config, 'registry-model-id', {
+          authType: 'anthropic',
+        }),
+      ).toThrow(
+        "Image-only model 'registry-model-id' cannot be used for content generation",
       );
     });
   });

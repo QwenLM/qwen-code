@@ -27,6 +27,7 @@ interface DialogShellProps {
   subtitle?: string;
   size?: DialogSize;
   allowFullscreen?: boolean;
+  dismissible?: boolean;
   onClose: () => void;
   children: ReactNode;
 }
@@ -68,6 +69,7 @@ export function DialogShell({
   subtitle,
   size = 'md',
   allowFullscreen = false,
+  dismissible = true,
   onClose,
   children,
 }: DialogShellProps) {
@@ -152,7 +154,7 @@ export function DialogShell({
       event.target === event.currentTarget;
     backdropPressStartedRef.current = false;
     backdropPressEndedRef.current = false;
-    if (shouldClose) onClose();
+    if (shouldClose && dismissible) onClose();
   };
 
   const themeClass =
@@ -162,7 +164,7 @@ export function DialogShell({
     <Dialog
       open
       onOpenChange={(open) => {
-        if (!open) onClose();
+        if (!open && dismissible) onClose();
       }}
     >
       <DialogShellIdContext.Provider value={shellIdRef.current}>
@@ -195,7 +197,7 @@ export function DialogShell({
               return;
             }
             event.preventDefault();
-            onCloseRef.current();
+            if (dismissible) onCloseRef.current();
           }}
           onOpenAutoFocus={(event) => {
             event.preventDefault();
@@ -232,18 +234,20 @@ export function DialogShell({
                 {fullscreen ? <Minimize2Icon /> : <Maximize2Icon />}
               </Button>
             )}
-            <DialogClose asChild>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon-sm"
-                aria-label={t('common.close')}
-                title={t('common.close')}
-                data-dialog-close
-              >
-                <XIcon />
-              </Button>
-            </DialogClose>
+            {dismissible && (
+              <DialogClose asChild>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon-sm"
+                  aria-label={t('common.close')}
+                  title={t('common.close')}
+                  data-dialog-close
+                >
+                  <XIcon />
+                </Button>
+              </DialogClose>
+            )}
           </DialogHeader>
           <div
             className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4"

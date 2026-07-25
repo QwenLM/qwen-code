@@ -331,6 +331,15 @@ export function createDaemonWorkspaceActions({
       return withActionTimeout(client.workspaceTools(), 'Load tools timed out');
     },
 
+    async preheatAcp(timeoutMs) {
+      const client = requireClient(getClient, 'Preheat ACP failed');
+      return withActionTimeout(
+        client.workspaceAcpPreheat(timeoutMs),
+        'Preheat ACP timed out',
+        timeoutMs === undefined ? undefined : timeoutMs + 2_000,
+      );
+    },
+
     async setWorkspaceToolEnabled(toolName, enabled) {
       const client = requireClient(getClient, 'Set tool enabled failed');
       return withActionTimeout(
@@ -386,6 +395,13 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async *generateContent(prompt, opts) {
+      const client = requireClient(getClient, 'Generate content failed');
+      yield* client.generateWorkspaceContent(prompt, {
+        signal: opts?.signal,
+      });
+    },
+
     async listAgents() {
       const client = requireClient(getClient, 'List agents failed');
       return withActionTimeout(
@@ -394,10 +410,10 @@ export function createDaemonWorkspaceActions({
       );
     },
 
-    async getAgent(agentType) {
+    async getAgent(agentType, scope) {
       const client = requireClient(getClient, 'Get agent failed');
       return withActionTimeout(
-        client.getWorkspaceAgent(agentType),
+        client.getWorkspaceAgent(agentType, scope ? { scope } : {}),
         'Get agent timed out',
       );
     },
@@ -874,6 +890,15 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    /** Applies the standard mutation timeout without retrying the POST. */
+    async addScratchWorkspace() {
+      const client = requireClient(getClient, 'Add scratch workspace failed');
+      return withActionTimeout(
+        client.addScratchWorkspace(),
+        'Add scratch workspace timed out',
+      );
+    },
+
     async suggestWorkspacePaths(prefix) {
       const client = requireClient(getClient, 'Suggest workspace paths failed');
       const result = await withActionTimeout(
@@ -881,6 +906,14 @@ export function createDaemonWorkspaceActions({
         'Suggest workspace paths timed out',
       );
       return result as DaemonWorkspacePathSuggestions;
+    },
+
+    async updateWorkspace(workspaceSelector, update) {
+      const client = requireClient(getClient, 'Update workspace failed');
+      return withActionTimeout(
+        client.updateWorkspace(workspaceSelector, update),
+        'Update workspace timed out',
+      );
     },
 
     async removeWorkspace(workspaceId, options) {

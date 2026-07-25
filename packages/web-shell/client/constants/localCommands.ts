@@ -90,6 +90,8 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
       argumentHint: '[<name>]',
     },
     { name: 'diff', description: t('local.diff') },
+    { name: 'log', description: t('local.log') },
+    { name: 'prs', description: t('local.prs') },
     {
       name: 'fork',
       description: t('local.fork'),

@@ -43,6 +43,11 @@ export interface WorkspaceSkillsStatusProvider {
   invalidate?(workspaceCwd: string): void;
 }
 
+export interface WorkspaceSkillsStatusProviderOptions {
+  credentialStore?: CredentialStore;
+  workspaceTrusted?: boolean;
+}
+
 /**
  * The `Config` surface `SkillManager.listSkills()` actually reads. Declaring it
  * as a `Pick` (rather than casting an inline object literal) type-checks the
@@ -58,7 +63,7 @@ type SkillManagerConfigShim = Pick<
 >;
 
 export function createWorkspaceSkillsStatusProvider(
-  credentialStore?: CredentialStore,
+  options: WorkspaceSkillsStatusProviderOptions = {},
 ): WorkspaceSkillsStatusProvider {
   // Reuse one SkillManager per workspace so repeat queries hit its in-memory
   // skills cache instead of re-scanning (and re-parsing frontmatter / compiling
@@ -71,7 +76,8 @@ export function createWorkspaceSkillsStatusProvider(
     buildWorkspaceSkillsStatus(
       workspaceCwd,
       managers,
-      credentialStore,
+      options.credentialStore,
+      options.workspaceTrusted ?? true,
     )) as WorkspaceSkillsStatusProvider;
   provider.invalidate = (workspaceCwd) => managers.delete(workspaceCwd);
   return provider;
@@ -81,6 +87,7 @@ async function buildWorkspaceSkillsStatus(
   workspaceCwd: string,
   managers: Map<string, SkillManager>,
   credentialStore?: CredentialStore,
+  workspaceTrusted: boolean = true,
 ): Promise<ServeWorkspaceSkillsStatus> {
   try {
     let skillManager = managers.get(workspaceCwd);
@@ -89,7 +96,7 @@ async function buildWorkspaceSkillsStatus(
         // Honor the safe-mode env the same way `Config` does when no explicit
         // flag is passed, so an operator running in safe mode gets the same
         // bundled-only listing the child would produce.
-        isSafeMode: () => isSafeModeEnv(),
+        isSafeMode: () => !workspaceTrusted || isSafeModeEnv(),
         // Bare mode is the interactive `--bare` CLI flag; the daemon never runs
         // bare, so it is always off here.
         getBareMode: () => false,
@@ -101,7 +108,11 @@ async function buildWorkspaceSkillsStatus(
       skillManager = new SkillManager(shim as Config);
       managers.set(workspaceCwd, skillManager);
     }
-    const disabled = readDisabledSkillNames(workspaceCwd, credentialStore);
+    const disabled = readDisabledSkillNames(
+      workspaceCwd,
+      credentialStore,
+      workspaceTrusted,
+    );
     const skills = await skillManager.listSkills();
     return {
       v: STATUS_SCHEMA_VERSION,
@@ -133,10 +144,14 @@ async function buildWorkspaceSkillsStatus(
 function readDisabledSkillNames(
   workspaceCwd: string,
   credentialStore?: CredentialStore,
+  workspaceTrusted: boolean = true,
 ): ReadonlySet<string> {
   const raw = loadSettings(workspaceCwd, {
     consumeCorruptionEnvVars: false,
     credentialStore,
+    skipLoadEnvironment: !workspaceTrusted,
+    skipWorkspaceSettings: !workspaceTrusted,
+    workspaceTrusted,
   }).merged.skills?.disabled;
   if (!Array.isArray(raw)) return new Set();
   return new Set(

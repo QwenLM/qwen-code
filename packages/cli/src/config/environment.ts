@@ -21,6 +21,7 @@ import {
   HOME_ENV_BOOTSTRAP_KEYS,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
 } from './shared-env-keys.js';
+import { publishPendingCompileCache } from './compile-cache.js';
 export {
   DEFAULT_EXCLUDED_ENV_VARS,
   ENV_CORRUPTED_PATH,
@@ -208,6 +209,7 @@ export function findEnvFiles(
   settings: Settings,
   startDir: string,
   userLevelPaths: Set<string> = getUserLevelEnvPaths(),
+  workspaceTrusted?: boolean,
 ): string[] {
   const homeDir = os.homedir();
   let realStartDir = path.resolve(startDir);
@@ -216,11 +218,9 @@ export function findEnvFiles(
   } catch {
     // Match loadSettings(): use the resolved path when realpath is unavailable.
   }
-  const isTrusted = isWorkspaceTrusted(
-    settings,
-    undefined,
-    realStartDir,
-  ).isTrusted;
+  const isTrusted =
+    workspaceTrusted ??
+    isWorkspaceTrusted(settings, undefined, realStartDir).isTrusted;
 
   const globalQwenDir = Storage.getGlobalQwenDir();
   const legacyQwenDir = path.normalize(path.join(homeDir, QWEN_DIR));
@@ -420,9 +420,15 @@ export function buildRuntimeEnvironment(
   settings: Settings,
   startDir: string = process.cwd(),
   baseEnv: Readonly<NodeJS.ProcessEnv> = process.env,
+  workspaceTrusted?: boolean,
 ): RuntimeEnvironmentSnapshot {
   const userLevelPaths = getUserLevelEnvPaths();
-  const envFilePaths = findEnvFiles(settings, startDir, userLevelPaths);
+  const envFilePaths = findEnvFiles(
+    settings,
+    startDir,
+    userLevelPaths,
+    workspaceTrusted,
+  );
   const parsedEnvFiles = parseEnvFiles(envFilePaths, userLevelPaths);
   const effectiveEnv: NodeJS.ProcessEnv = { ...baseEnv };
 
@@ -548,6 +554,7 @@ export function loadEnvironment(
     }
   }
   lastReloadSnapshotSeeded = true;
+  publishPendingCompileCache();
 }
 
 export interface EnvReloadResult {
@@ -564,9 +571,15 @@ export function reloadEnvironment(
   settings: Settings,
   workspaceCwd: string,
   credentialStore?: CredentialStore,
+  workspaceTrusted?: boolean,
 ): EnvReloadResult {
   const userLevelPaths = getUserLevelEnvPaths();
-  const envFilePaths = findEnvFiles(settings, workspaceCwd, userLevelPaths);
+  const envFilePaths = findEnvFiles(
+    settings,
+    workspaceCwd,
+    userLevelPaths,
+    workspaceTrusted,
+  );
   const parsedEnvFiles = parseEnvFiles(envFilePaths, userLevelPaths);
 
   if (process.env['CLOUD_SHELL'] === 'true') {

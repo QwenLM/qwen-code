@@ -21,7 +21,7 @@ import {
   hasMultipleWorkspaces,
   isNonPrimaryWorkspaceSession,
   mergeSessionsById,
-  workspaceBasename,
+  workspaceLabelForCwd,
 } from '../utils/workspace';
 import { useOtherWorkspaceSessions } from '../hooks/useOtherWorkspaceSessions';
 import { useScopedSessions } from '../hooks/useScopedSessions';
@@ -447,7 +447,10 @@ function SessionOverviewPanelInner({
                   )}
                   title={card.workspaceCwd}
                 >
-                  {workspaceBasename(card.workspaceCwd)}
+                  {workspaceLabelForCwd(
+                    card.workspaceCwd,
+                    connection.capabilities?.workspaces,
+                  )}
                 </span>
               )}
               {card.model && (

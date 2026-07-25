@@ -41,10 +41,13 @@ const NUMBER_OPTIONS = new Map<
   ['maxConnections', 'max-connections'],
   ['eventRingSize', 'event-ring-size'],
   ['compactedReplayMaxBytes', 'compacted-replay-max-bytes'],
+  ['maxJournalEvents', 'max-journal-events'],
+  ['maxJournalBytes', 'max-journal-bytes'],
   ['mcp-client-budget', 'mcp-client-budget'],
   ['promptDeadlineMs', 'prompt-deadline-ms'],
   ['writerIdleTimeoutMs', 'writer-idle-timeout-ms'],
   ['channelIdleTimeoutMs', 'channel-idle-timeout-ms'],
+  ['initializeTimeoutMs', 'initialize-timeout-ms'],
   ['sessionReapIntervalMs', 'session-reap-interval-ms'],
   ['sessionIdleTimeoutMs', 'session-idle-timeout-ms'],
   ['permissionResponseTimeoutMs', 'permission-response-timeout-ms'],
@@ -206,6 +209,22 @@ function getServeFastPathValidationError(
       'qwen serve: --compacted-replay-max-bytes must be a positive ' +
       `safe integer in [1, ${MAX_COMPACTED_REPLAY_MAX_BYTES}].`
     );
+  }
+
+  const maxJournalEvents = parsed.options.maxJournalEvents;
+  if (
+    maxJournalEvents !== undefined &&
+    (!Number.isSafeInteger(maxJournalEvents) || maxJournalEvents < 1)
+  ) {
+    return 'qwen serve: --max-journal-events must be a positive safe integer.';
+  }
+
+  const maxJournalBytes = parsed.options.maxJournalBytes;
+  if (
+    maxJournalBytes !== undefined &&
+    (!Number.isSafeInteger(maxJournalBytes) || maxJournalBytes < 1)
+  ) {
+    return 'qwen serve: --max-journal-bytes must be a positive safe integer.';
   }
 
   return null;

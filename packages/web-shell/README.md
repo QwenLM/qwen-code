@@ -52,6 +52,45 @@ Web Shell 内部使用；没有明确的公共 API 需求时，不要从包入�
 Tailwind 会在发布前编译并内联到 npm 包，接入方不需要安装或配置 Tailwind，也不
 需要额外引入 `globals.css`。
 
+## 可选 Shadow DOM 隔离
+
+宿主页面存在 `*`、`h2`、`button` 等全局规则时，可以按场景开启 Shadow DOM：
+
+```tsx
+import customShadowStyles from './web-shell-shadow.css?inline';
+
+<WebShellWithProviders
+  shadowDom={{
+    plugins: true,
+    portals: true,
+    styles: customShadowStyles,
+  }}
+/>;
+```
+
+- `plugins` 隔离所有插件管理页面主体，包括统一的 Plugins 页面，以及
+  `/extensions`、`/mcp`、`/skills` 等兼容入口打开的页面。
+- `portals` 统一隔离 Web Shell 的所有弹窗层，包括 Dialog、Drawer、Popover、
+  DropdownMenu、Select 和 Tooltip；插件页面发起的弹窗也由这个开关管理。
+- `styles` 会追加到每个启用的 ShadowRoot，供 render props 等业务自定义内容继续
+  使用 class 样式。内联样式和通过 Web Shell `style` 设置的 CSS 变量不需要迁移。
+- `--web-shell-portal-root-z-index` 控制 Shadow portal host 的整体层级，默认
+  `1000`。需要与宿主自己的全局浮层协调时，可以通过 Web Shell `style` 覆盖。
+- `shadowDom={true}` 是同时开启 `plugins` 和 `portals` 的简写。
+
+默认不开启，现有 Light DOM 接入行为不变。两个场景相互独立，例如
+`{ plugins: true, portals: false }` 会隔离插件页面主体，但所有弹窗仍挂载到原来的
+Light DOM portal root。
+
+Shadow 内部仍由原 React 树通过 portal 渲染，不会创建第二个 React root；props、
+context、事件、ref 和状态语义保持不变。开启后，宿主普通选择器不会匹配 Shadow
+内部节点，但宿主也无法再用普通选择器直接覆盖这些节点，所需定制样式应通过
+`shadowDom.styles` 传入。
+
+Web Shell 会在挂载 Shadow 内容前安装样式，并在浏览器支持时让多个 ShadowRoot
+复用已经解析的 constructable stylesheet，以避免页面首次进入时的无样式闪烁和
+重复解析 CSS。
+
 ### 图标约定
 
 - 新增图标统一优先使用 `lucide-react`，不要为已有的常见图标重复编写 SVG。
@@ -136,6 +175,33 @@ export function App() {
 > **注意**：不要在已有 `DaemonSessionProvider` 下使用
 > `WebShellWithProviders`，否则会创建嵌套的重复 Provider。
 
+### 3. 只读 ChatRecord JSONL
+
+`WebShellTranscript` 只接收已经投影完成的 blocks，不连接 daemon，也不提供 composer、
+审批或 session mutation。浏览器宿主可以逐行解析 JSONL，再通过 SDK 的 opt-in facade
+投影：
+
+```tsx
+import { projectChatRecordsToDaemonTranscript } from '@qwen-code/sdk/daemon/transcript';
+import { WebShellTranscript } from '@qwen-code/web-shell';
+
+const records = jsonl
+  .split(/\r?\n/)
+  .filter((line) => line.trim())
+  .map((line) => JSON.parse(line) as unknown);
+const projection = projectChatRecordsToDaemonTranscript(records);
+
+<WebShellTranscript
+  blocks={projection.blocks}
+  theme="dark"
+  language="zh-CN"
+  style={{ height: 640 }}
+/>;
+```
+
+宿主应显示 `projection.diagnostics`，并在 `complete=false` 或 `truncated=true` 时提示
+历史可能不完整。组件需要一个可用高度；自定义 renderer 的副作用仍由宿主负责。
+
 ## Props
 
 ### WebShellWithProviders
@@ -162,6 +228,23 @@ export function App() {
 | `onThemeChange`     | `(theme: WebShellTheme) => void`                                                        | `/theme` 命令切换主题后触发                                                      |
 | `language`          | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`                                                    | UI 语言                                                                          |
 | `onLanguageChange`  | `(language: WebShellLanguage) => void`                                                  | `/language ui` 切换 UI 语言后触发                                                |
+| `onSlashCommand`    | `(command: WebShellSlashCommand) => boolean \| void`                                    | 斜杠命令进入默认处理前触发；返回 `true` 时由宿主接管并跳过默认行为               |
+
+宿主可以监听命令，也可以返回 `true` 接管对应操作：
+
+```tsx
+<WebShell
+  onSlashCommand={({ command, args, input }) => {
+    if (command !== 'deploy') return;
+    openDeployDialog({ environment: args, source: input });
+    return true;
+  }}
+/>
+```
+
+回调在主聊天和分屏聊天中都会触发，也可以在 daemon 断连时处理纯宿主操作。
+命令名后必须是空白或输入结束，因此 `/usr/local/bin/tool` 等绝对路径不会触发
+回调。如果回调抛出异常，Web Shell 会报告错误并继续执行默认命令流程。
 
 锁定工作区时，可以自定义 Sidebar 文件夹行的内容：
 

@@ -304,9 +304,14 @@ export function useQueuedPrompts({
       const next = mergeRestoredPromptText(current, text);
       if (next !== current) {
         editorRef.current?.setText(next);
-      }
-      if (images && images.length > 0) {
-        editorRef.current?.restoreImages(images);
+        // Restore images only alongside a text change: restoreImages appends
+        // to the pasted-image list, so running it on a deduplicated restore
+        // (same prompt restored twice across reconnects/retries) would double
+        // the attachments while the text correctly stays single (#7134
+        // review follow-up).
+        if (images && images.length > 0) {
+          editorRef.current?.restoreImages(images);
+        }
       }
       editorRef.current?.focus();
     },
