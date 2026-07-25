@@ -469,7 +469,7 @@ Interaction mode reminder: ${interaction.questions}
   });
 }
 
-export function buildSystemPromptSuffix(text?: string): string {
+function buildSystemPromptSuffix(text?: string): string {
   const trimmed = text?.trim();
   return trimmed ? `\n\n---\n\n${trimmed}` : '';
 }
