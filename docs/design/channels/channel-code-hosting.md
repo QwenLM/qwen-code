@@ -55,7 +55,7 @@ Because the cursor is global (not per-thread), a notification that arrives in a 
 | Non-comment activity (push/label) | Appears → zero new comments in window → skip                                                                                  |
 | User marks read on github.com     | Disappears from API → not processed                                                                                           |
 | markNotificationsAsRead fails     | Cursor window still prevents duplicates → no impact on correctness                                                            |
-| Crash after markRead, before done | Comments lost (best-effort) → user re-mentions to retry                                                                       |
+| Crash after markRead, before done | Cursor not saved → next startup re-fetches same notifications → crashed batch re-processed, not lost                          |
 | Bot replies to a thread           | `updated_at` bumped → notification may stay unread → next poll fetches it → comments excluded by cursor window → no duplicate |
 | New issue with @bot in body       | No comments → body contains mention → feed body as trigger (deduped via `dispatchedBodies`)                                   |
 

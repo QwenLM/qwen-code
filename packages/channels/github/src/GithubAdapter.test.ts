@@ -216,7 +216,7 @@ describe('GithubChannel', () => {
       channel.disconnect();
     });
 
-    it('keeps the login and warns when allowedUser resolution fails', async () => {
+    it('throws when allowedUser resolution fails', async () => {
       channel = new TestableGithubChannel(
         'test-github',
         makeConfig({ senderPolicy: 'allowlist', allowedUsers: ['alice'] }),
@@ -226,24 +226,10 @@ describe('GithubChannel', () => {
         new Error('transient 502'),
       );
       mockOctokit.paginate.mockResolvedValue([]);
-      const stderrSpy = vi
-        .spyOn(process.stderr, 'write')
-        .mockImplementation(() => true);
-      try {
-        await channel.connect();
-        expect(
-          (channel as unknown as { config: { allowedUsers: string[] } }).config
-            .allowedUsers,
-        ).toEqual(['alice']);
-        expect(
-          stderrSpy.mock.calls.some((call) =>
-            String(call[0]).includes('could not resolve allowedUser "alice"'),
-          ),
-        ).toBe(true);
-      } finally {
-        stderrSpy.mockRestore();
-        channel.disconnect();
-      }
+
+      await expect(channel.connect()).rejects.toThrow(
+        'could not resolve allowedUser "alice"',
+      );
     });
   });
 
@@ -407,6 +393,20 @@ describe('GithubChannel', () => {
         last_read_at: '2026-07-02T10:00:00.000Z',
         read: true,
       });
+    });
+
+    it('aborts the poll cycle without advancing cursor when markNotificationsAsRead fails', async () => {
+      await initWithoutLoop();
+      mockOctokit.paginate.mockResolvedValueOnce([
+        makeNotification({ updated_at: '2026-07-02T10:00:00.000Z' }),
+      ]);
+      mockOctokit.rest.activity.markNotificationsAsRead.mockRejectedValue(
+        new Error('server error'),
+      );
+
+      await expect(pollOnce()).rejects.toThrow('server error');
+      expect(channel.cursor.lastProcessedAt).toBe('2026-07-01T00:00:00.000Z');
+      expect(channel.inboundEnvelopes).toHaveLength(0);
     });
 
     it('continues processing remaining notifications after a per-thread error', async () => {
