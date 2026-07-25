@@ -193,10 +193,10 @@ describe('GithubChannel', () => {
       );
     });
 
-    it('passes allowedUsers logins directly to the gate', async () => {
+    it('normalizes allowedUsers to lowercase for case-insensitive matching', async () => {
       const config = makeConfig({
         senderPolicy: 'allowlist',
-        allowedUsers: ['alice'],
+        allowedUsers: ['Alice'],
       });
       channel = new TestableGithubChannel('test-github', config, makeBridge());
       mockOctokit.paginate.mockResolvedValue([]);
@@ -209,7 +209,23 @@ describe('GithubChannel', () => {
       ).gate;
       expect(gate.isAllowed('alice')).toBe(true);
       expect(gate.isAllowed('bob')).toBe(false);
+      // config is normalized too — ChannelBase reads it directly
+      expect(config.allowedUsers).toEqual(['alice']);
       channel.disconnect();
+    });
+
+    it('connect() is idempotent across reconnects', async () => {
+      const config = makeConfig({
+        senderPolicy: 'allowlist',
+        allowedUsers: ['Alice'],
+      });
+      channel = new TestableGithubChannel('test-github', config, makeBridge());
+      mockOctokit.paginate.mockResolvedValue([]);
+      await channel.connect();
+      channel.disconnect();
+      await expect(channel.connect()).resolves.toBeUndefined();
+      channel.disconnect();
+      expect(config.allowedUsers).toEqual(['alice']);
     });
   });
 
@@ -231,6 +247,13 @@ describe('GithubChannel', () => {
       expect(env.isMentioned).toBe(true);
       expect(env.isGroup).toBe(true);
       expect(env.metadata).toContain('Test Issue');
+      // senderId must be comparable to config.allowedUsers — ChannelBase
+      // compares them directly in isAuthorizedForSharedSessionTarget.
+      const cfg = channel as unknown as {
+        config: { allowedUsers: string[] };
+      };
+      cfg.config.allowedUsers = ['alice'];
+      expect(cfg.config.allowedUsers).toContain(env.senderId);
     });
 
     it('skips bot own comments', async () => {

@@ -80,7 +80,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         `[Channel:${this.name}] failed to resolve bot identity: ${err}`,
       );
     }
-    this.gate.replaceAllowedUsers(this.config.allowedUsers ?? []);
+    // GitHub logins are case-insensitive; normalize both sides so the
+    // allowlist gate and ChannelBase's shared-session authorization match
+    // regardless of how the operator typed the config entry.
+    const allowed = (this.config.allowedUsers ?? []).map((u) =>
+      u.toLowerCase(),
+    );
+    this.config.allowedUsers = allowed;
+    this.gate.replaceAllowedUsers(allowed);
     this.startPollLoop();
   }
 
@@ -182,7 +189,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         );
 
         const newComments = comments.filter((c) => {
-          if (c.user?.login != null && c.user.login === this.botUsername) {
+          if (c.user?.login === this.botUsername) {
             return false;
           }
           if (c.created_at && c.created_at > maxUpdatedAt) {
@@ -208,7 +215,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
           const envelope: Envelope = {
             channelName: this.name,
-            senderId: comment.user?.login || 'unknown',
+            senderId: (comment.user?.login || 'unknown').toLowerCase(),
             senderName: comment.user?.login || 'unknown',
             chatId,
             threadId,
@@ -290,7 +297,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
       const envelope: Envelope = {
         channelName: this.name,
-        senderId: issue.user?.login || 'unknown',
+        senderId: (issue.user?.login || 'unknown').toLowerCase(),
         senderName: issue.user?.login || 'unknown',
         chatId,
         threadId,
