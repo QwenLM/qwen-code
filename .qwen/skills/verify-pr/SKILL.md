@@ -70,8 +70,10 @@ beats ten unverified observations.
 Run the identical scenario against the PR build and a control build that
 differs only by the change under test; the verdict is the pair of counts.
 
-- Base side: `git worktree add tmp/base-tree HEAD^1` (keep worktrees under
-  `tmp/` so the workflow's cleanup finds them), then rebuild **only the
+- Base side: `git worktree add tmp/base-tree HEAD^1` (keep scratch worktrees
+  under `tmp/` and `git worktree remove --force` them once the A/B cells are
+  captured — the workflow sweeps leftover `tmp/` worktrees as a backstop, but
+  never rely on it), then rebuild **only the
   affected workspace or file** — e.g. `npm run build -w packages/<ws>` inside
   the base tree wired to the already-installed root `node_modules`, or
   recompile the single changed module. A full base `npm ci` rarely fits the

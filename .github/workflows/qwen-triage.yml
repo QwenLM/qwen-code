@@ -52,8 +52,9 @@ jobs:
     #     EXECUTES the PR author's code, so it is keyed on the PR author (whose
     #     code runs), not the commenter/dispatcher (see principal resolution).
     #   - `/verify` comments launch sandboxed deep verification, which also
-    #     EXECUTES the PR author's code, so it is gated on the PR author
-    #     exactly like `/tmux`.
+    #     EXECUTES the PR author's code AND burns a scarce self-hosted runner
+    #     slot plus a full model budget, so it is gated on BOTH the PR author
+    #     (whose code runs) and the commenter (who spends the budget).
     # The `issues` and `workflow_dispatch`-with-`number` (triage) triggers need
     # no gate: triage is read-only and dispatch already requires write to
     # invoke. But `tmux_pr` dispatch runs the *PR author's* code, not the
@@ -107,51 +108,83 @@ jobs:
           fi
           case "$EVENT_NAME" in
             issue_comment)
-              # /tmux and /verify execute the PR AUTHOR's code, so gate on the
-              # author's permission (whose code runs), not the commenter's.
-              # /triage only reads content, so the commenter's permission
-              # gates it.
+              # /tmux and /verify execute the PR AUTHOR's code, so they gate
+              # on the author's permission (whose code runs). /verify
+              # ADDITIONALLY gates on the commenter: it consumes a scarce
+              # self-hosted runner slot and a full model budget, so a
+              # drive-by account must not be able to spend that on someone
+              # else's PR. /triage only reads content, so the commenter's
+              # permission gates it.
               case "$COMMENT_BODY" in
-                '@qwen-code /tmux'|'@qwen-code /tmux '*|'@qwen-code /verify'|'@qwen-code /verify '*) principal="$ISSUE_AUTHOR" ;;
-                *) principal="$COMMENT_USER" ;;
+                '@qwen-code /verify'|'@qwen-code /verify '*) principals="$ISSUE_AUTHOR $COMMENT_USER" ;;
+                '@qwen-code /tmux'|'@qwen-code /tmux '*) principals="$ISSUE_AUTHOR" ;;
+                *) principals="$COMMENT_USER" ;;
               esac
               ;;
             workflow_dispatch)
               # Only the tmux_pr dispatch reaches authorize. It runs the PR
               # author's code, so resolve and gate on that author (not the
               # dispatcher). Empty/unresolvable author fails closed below.
-              principal="$(gh pr view "$TMUX_PR" --repo "$GITHUB_REPOSITORY" --json author --jq '.author.login' 2>/dev/null || true)"
+              principals="$(gh pr view "$TMUX_PR" --repo "$GITHUB_REPOSITORY" --json author --jq '.author.login' 2>/dev/null || true)"
               ;;
-            *) principal="" ;;
+            *) principals="" ;;
           esac
-          if [ -z "$principal" ]; then
+          if [ -z "${principals// /}" ]; then
             echo "No principal resolved for ${EVENT_NAME}; denying." >> "$GITHUB_STEP_SUMMARY"
             echo "should_run=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          # Fail closed: any API error or non-write permission denies the run.
-          api_error_file="$(mktemp)"
-          if ! permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${principal}/permission" --jq '.permission' 2>"$api_error_file")"; then
-            api_error="$(cat "$api_error_file")"
-            rm -f "$api_error_file"
-            api_error="${api_error:-unknown error}"
-            api_error="${api_error//$'\r'/ }"
-            api_error="${api_error//$'\n'/ }"
-            echo "::error::Permission API call failed for ${principal}: ${api_error}"
-            echo "Failed to check permission for ${principal} (API error: ${api_error}); denying." >> "$GITHUB_STEP_SUMMARY"
-            echo "should_run=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          rm -f "$api_error_file"
-          case "$permission" in
-            admin|maintain|write)
-              echo "should_run=true" >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "Denying triage: ${principal} permission is '${permission}' (needs write)." >> "$GITHUB_STEP_SUMMARY"
+          # Fail closed: any API error or non-write permission for ANY
+          # required principal denies the run. Duplicates (an author
+          # commenting on their own PR) are checked once.
+          checked=' '
+          for principal in $principals; do
+            case "$checked" in *" $principal "*) continue ;; esac
+            checked="${checked}${principal} "
+            api_error_file="$(mktemp)"
+            if ! permission="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${principal}/permission" --jq '.permission' 2>"$api_error_file")"; then
+              api_error="$(cat "$api_error_file")"
+              rm -f "$api_error_file"
+              api_error="${api_error:-unknown error}"
+              api_error="${api_error//$'\r'/ }"
+              api_error="${api_error//$'\n'/ }"
+              echo "::error::Permission API call failed for ${principal}: ${api_error}"
+              echo "Failed to check permission for ${principal} (API error: ${api_error}); denying." >> "$GITHUB_STEP_SUMMARY"
               echo "should_run=false" >> "$GITHUB_OUTPUT"
-              ;;
-          esac
+              exit 0
+            fi
+            rm -f "$api_error_file"
+            case "$permission" in
+              admin|maintain|write) ;;
+              *)
+                echo "Denying: ${principal} permission is '${permission}' (needs write)." >> "$GITHUB_STEP_SUMMARY"
+                echo "should_run=false" >> "$GITHUB_OUTPUT"
+                exit 0
+                ;;
+            esac
+          done
+          echo "should_run=true" >> "$GITHUB_OUTPUT"
+
+      # The verify job needs a scarce self-hosted runner; when the pool is
+      # saturated (or disabled) the job sits queued with no visible feedback.
+      # Acknowledge the authorized request from this always-hosted job so a
+      # /verify commenter gets a receipt even when the sandbox lane is backed
+      # up. The verify job itself no longer reacts.
+      - name: 'Acknowledge verify request'
+        if: >-
+          steps.perm.outputs.should_run == 'true' &&
+          github.event_name == 'issue_comment' &&
+          (github.event.comment.body == '@qwen-code /verify' ||
+           startsWith(github.event.comment.body, '@qwen-code /verify '))
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          COMMENT_ID: '${{ github.event.comment.id }}'
+        run: |-
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
+            -f content='eyes' > /dev/null ||
+            echo "Failed to add verify acknowledgement reaction; continuing." >&2
 
   triage:
     needs: ['authorize']
@@ -1449,23 +1482,17 @@ jobs:
 
           gh --version
 
-      - name: 'Resolve PR, acknowledge, and snapshot metadata'
+      - name: 'Resolve PR and snapshot metadata'
         id: 'pr'
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           PR_NUMBER: '${{ github.event.issue.number }}'
-          COMMENT_ID: '${{ github.event.comment.id }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -euo pipefail
           echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
-          # Acknowledge immediately: the run takes tens of minutes and the
-          # status comment below only appears once the PR resolves as runnable.
-          gh api \
-            --method POST \
-            "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
-            -f content='eyes' > /dev/null ||
-            echo "Failed to add verify acknowledgement reaction; continuing." >&2
+          # The 👀 acknowledgement lives in the hosted authorize job, so the
+          # requester gets a receipt even when this self-hosted job is queued.
           # Same mergeability settling loop as the tmux job: refs/pull/N/merge
           # is only current once GitHub has computed mergeability.
           for attempt in 1 2 3 4 5; do
@@ -1560,7 +1587,12 @@ jobs:
           set -euo pipefail
           apt-get install -y --no-install-recommends util-linux
 
-          npm install -g --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest'
+          # Run the global install from RUNNER_TEMP: the persistent workspace
+          # still holds the PREVIOUS run's checked-out tree at this point, and
+          # npm reads a cwd .npmrc — whose settings (script-shell, hooks) a
+          # --registry flag does not override — into a root-privileged
+          # install.
+          (cd "${RUNNER_TEMP:?}" && npm install -g --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest')
           qwen --version
 
       # This container mounts the persistent runner workspace, and a previous
@@ -1586,6 +1618,14 @@ jobs:
           # Stale result dirs from an interrupted run must not leak into this
           # run's artifact collection.
           find tmp -maxdepth 2 -type d -name '*-verify-*' -exec rm -rf {} + 2>/dev/null || true
+          # Scratch worktrees the previous agent left under tmp/ (the A/B
+          # base tree): `git worktree prune` only drops metadata for deleted
+          # dirs, so remove the live ones explicitly.
+          git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | while IFS= read -r wt; do
+            case "$wt" in
+              "${GITHUB_WORKSPACE:-$PWD}"/tmp/*) git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt" ;;
+            esac
+          done
           git worktree prune -v || true
           echo "stale agent state cleaned"
 
@@ -1902,7 +1942,10 @@ jobs:
           fi
 
           mkdir -p "$RUNNER_TEMP/verify-results"
-          chown -R node:node "$GITHUB_WORKSPACE" "$RUNNER_TEMP/verify-results" "$RUNNER_TEMP/verify-context"
+          # The workspace was already chowned in the prepare step and nothing
+          # ran as root since; re-chowning ~50k node_modules files here would
+          # just burn critical-path time.
+          chown -R node:node "$RUNNER_TEMP/verify-results" "$RUNNER_TEMP/verify-context"
           QWEN_ENV=(
             "HOME=/home/node"
             "USER=node"
@@ -1962,7 +2005,7 @@ jobs:
           # output of a run that executed untrusted PR code, so allowlist it
           # instead of echoing it into workflow outputs.
           AGENT_VERDICT=''
-          VERDICT_FILE="$(find tmp -maxdepth 2 -type f -path '*-verify-*/verdict.txt' 2>/dev/null | head -1 || true)"
+          VERDICT_FILE="$(find tmp -maxdepth 2 -type f -path '*-verify-*/verdict.txt' 2>/dev/null | sort | head -1 || true)"
           if [ -n "$VERDICT_FILE" ]; then
             CANDIDATE="$(tr -d '[:space:]' < "$VERDICT_FILE" | head -c 32)"
             case "$CANDIDATE" in
@@ -1994,6 +2037,11 @@ jobs:
           [ -e .git ] || exit 0
           find tmp -maxdepth 2 -type d -name '*-verify-*' -exec rm -rf {} + 2>/dev/null || true
           rm -rf .qwen/tmp/* 2>/dev/null || true
+          git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | while IFS= read -r wt; do
+            case "$wt" in
+              "${GITHUB_WORKSPACE:-$PWD}"/tmp/*) git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt" ;;
+            esac
+          done
           git worktree prune -v || true
 
   # Post the verification report back to the PR. Runs on a clean GitHub-hosted
@@ -2044,23 +2092,31 @@ jobs:
           }
 
           emit_block() {
-            local summary="$1" file="$2" max="$3" content truncated='' summary_html
+            local summary="$1" file="$2" max="$3" esc truncated='' summary_html
             [ -n "$file" ] && [ -f "$file" ] || return 0
             summary_html="$(printf '%s' "$summary" | html_escape)"
-            if [ "$(wc -c < "$file")" -gt "$max" ]; then
-              truncated=$'\n\n...truncated -- full report in the run artifacts.'
-            fi
-            if ! content="$(
+            # Escape FIRST, then cap: the cap must bound what actually lands
+            # in the comment, and escaping inflates every & < > by 4-5 bytes —
+            # a raw-side cap can push the assembled body past GitHub's 65,536
+            # char comment limit, 422 the post, and strand the "running"
+            # status comment with no report at all. head -c 400000 bounds the
+            # escaping work itself; iconv -c drops a UTF-8 sequence the byte
+            # cut split (the mandated 中文 summary makes that likely) instead
+            # of shipping a broken character.
+            if ! esc="$(
               set -o pipefail
-              head -c "$max" "$file" | tr -d '\000' | html_escape
+              head -c 400000 "$file" | tr -d '\000' | html_escape
             )"; then
               echo "::warning::emit_block failed while rendering $summary; see run artifacts." >&2
-              content='<em>Content could not be rendered; see run artifacts.</em>'
-            elif [ -n "$truncated" ]; then
-              content="${content}${truncated}"
+              esc='<em>Content could not be rendered; see run artifacts.</em>'
+            elif [ "$(printf '%s' "$esc" | wc -c)" -gt "$max" ] ||
+                 [ "$(wc -c < "$file")" -gt 400000 ]; then
+              truncated=$'\n\n...truncated -- full content in the run artifacts.'
+              esc="$(printf '%s' "$esc" | head -c "$max" | iconv -c -f UTF-8 -t UTF-8 2>/dev/null)" ||
+                esc="$(printf '%s' "$esc" | head -c "$max")"
             fi
             printf '<details>\n<summary>%s</summary>\n\n<pre><code>\n' "$summary_html"
-            printf '%s\n' "$content"
+            printf '%s%s\n' "$esc" "$truncated"
             printf '</code></pre>\n\n</details>\n\n'
           }
 
@@ -2074,19 +2130,31 @@ jobs:
           # VERIFY_ASSETS_REMOTE override exists as a test seam only.
           EVIDENCE_SECTION=''
           collect_and_host_evidence() {
-            local imgs=() f base safe hosted=0
+            local imgs=() f base safe seen=' ' hosted=0 total=0 skipped=0
             local dest_dir="verify/pr${PR_NUMBER}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
             local clone_dir="${RUNNER_TEMP:-/tmp}/pr-assets"
             local remote="${VERIFY_ASSETS_REMOTE:-https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git}"
+            total="$(find verify-results -type f -path '*/evidence/*.png' 2>/dev/null | wc -l | tr -d ' ')"
+            [ "$total" -gt 0 ] || return 0
+            # Byte-exact size cap: find's -2M unit rounds file sizes UP to
+            # whole MiB first, silently turning a documented 2 MB cap into a
+            # 1 MiB one; the c (bytes) unit does not round.
             while IFS= read -r f; do imgs+=("$f"); done < <(
-              find verify-results -type f -path '*/evidence/*.png' -size -2M 2>/dev/null | sort | head -8
+              find verify-results -type f -path '*/evidence/*.png' -size -2097153c 2>/dev/null | sort | head -8
             )
-            [ "${#imgs[@]}" -gt 0 ] || return 0
+            if [ "${#imgs[@]}" -eq 0 ]; then
+              EVIDENCE_SECTION="_${total} evidence image(s) were produced but none passed the hosting caps (8 images, ≤2 MB each); see the run artifacts._"$'\n\n'
+              return 0
+            fi
             rm -rf "$clone_dir"
             if ! git clone -q --depth 1 --branch pr-assets "$remote" "$clone_dir" 2>/dev/null; then
               echo "::warning::pr-assets branch unavailable; posting a text-only report." >&2
               return 0
             fi
+            # Rebase in the racing-push retry needs a committer identity, so
+            # set it once on the clone instead of per-command -c flags.
+            git -C "$clone_dir" config user.name 'qwen-code-ci-bot'
+            git -C "$clone_dir" config user.email 'qwen-code-ci-bot@users.noreply.github.com'
             mkdir -p "$clone_dir/$dest_dir"
             for f in "${imgs[@]}"; do
               base="$(basename "$f")"
@@ -2097,18 +2165,25 @@ jobs:
                 *) continue ;;
               esac
               [ -n "${safe%.png}" ] || continue
+              # Two artifact dirs can sanitize to the same name; the second
+              # copy would silently overwrite the first and render twice.
+              case "$seen" in *" $safe "*) continue ;; esac
+              # Extension is attacker-choosable; the magic bytes are what
+              # raw.githubusercontent.com will actually serve. PNG only.
+              [ "$(head -c 8 "$f" | od -An -tx1 | tr -d ' \n')" = '89504e470d0a1a0a' ] || continue
               cp "$f" "$clone_dir/$dest_dir/$safe" || continue
+              seen="${seen}${safe} "
               hosted=$((hosted + 1))
             done
-            [ "$hosted" -gt 0 ] || return 0
+            skipped=$((total - hosted))
+            if [ "$hosted" -eq 0 ]; then
+              EVIDENCE_SECTION="_${total} evidence image(s) were produced but none passed the hosting checks (PNG magic, unique sanitized name, ≤2 MB, max 8); see the run artifacts._"$'\n\n'
+              return 0
+            fi
             if ! (
               cd "$clone_dir" &&
-              git -c user.name='qwen-code-ci-bot' \
-                  -c user.email='qwen-code-ci-bot@users.noreply.github.com' \
-                add "$dest_dir" &&
-              git -c user.name='qwen-code-ci-bot' \
-                  -c user.email='qwen-code-ci-bot@users.noreply.github.com' \
-                commit -q -m "verify evidence for PR #${PR_NUMBER} (run ${GITHUB_RUN_ID})" &&
+              git add "$dest_dir" &&
+              git commit -q -m "verify evidence for PR #${PR_NUMBER} (run ${GITHUB_RUN_ID})" &&
               {
                 git push -q origin HEAD:pr-assets 2>/dev/null ||
                 {
@@ -2119,23 +2194,32 @@ jobs:
               }
             ); then
               echo "::warning::Failed to push evidence images; posting a text-only report." >&2
+              EVIDENCE_SECTION=''
               return 0
             fi
             local raw_base="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/pr-assets/${dest_dir}"
             EVIDENCE_SECTION=$'### Evidence images\n\n'
-            for f in "${imgs[@]}"; do
-              base="$(basename "$f")"
-              safe="$(printf '%s' "$base" | tr -cd 'a-zA-Z0-9._-' | head -c 80)"
-              [ -f "$clone_dir/$dest_dir/$safe" ] || continue
+            for f in "$clone_dir/$dest_dir"/*.png; do
+              [ -f "$f" ] || continue
+              safe="$(basename "$f")"
               EVIDENCE_SECTION+="![${safe%.png}](${raw_base}/${safe})"$'\n\n'
             done
+            if [ "$skipped" -gt 0 ]; then
+              EVIDENCE_SECTION+="_${skipped} additional image(s) did not pass the hosting checks (PNG magic, unique sanitized name, ≤2 MB, max 8) and remain in the run artifacts._"$'\n\n'
+            fi
           }
 
           # Fixed bilingual framing shared by every terminal body below.
           SCOPE_EN='Ran the PR in an isolated, token-free container: A/B against the base build, mock-free harness assertions, targeted gates. **Advisory evidence for human reviewers — not a review, an approval, or a CI check.**'
           SCOPE_ZH='沙箱验证在隔离、无凭证的容器中执行了该 PR 的代码（与 base 构建 A/B 对照、无 mock harness 断言、定向门禁）。仅作为评审证据，**不构成评审、批准或 CI 检查**。'
 
+          # Weak terminal notices (cancelled / infra / skipped / n-a) carry no
+          # new evidence, so they must never overwrite a previous round's real
+          # report — they only replace this run's own "running" status (see
+          # the upsert below). Real outcomes (report, prepare-fail) upsert.
+          WEAK_BODY=false
           if [ "${VERIFY_RESULT:-}" = "cancelled" ]; then
+            WEAK_BODY=true
             {
               printf '%s\n\n' '<!-- qwen-triage:verify -->'
               printf '**Sandboxed verification: cancelled** - [workflow run](%s)\n\n' "$RUN_URL"
@@ -2143,6 +2227,7 @@ jobs:
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
             } > "$BODY_FILE"
           elif [ "${VERIFY_RESULT:-}" != "success" ] || [ -z "${VERDICT:-}" ]; then
+            WEAK_BODY=true
             {
               printf '%s\n\n' '<!-- qwen-triage:verify -->'
               printf '**Sandboxed verification: infrastructure failure** - [workflow run](%s)\n\n' "$RUN_URL"
@@ -2150,6 +2235,7 @@ jobs:
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
             } > "$BODY_FILE"
           elif [ "${VERDICT:-}" = "skipped" ]; then
+            WEAK_BODY=true
             {
               printf '%s\n\n' '<!-- qwen-triage:verify -->'
               printf '**Sandboxed verification: not run** - [workflow run](%s)\n\n' "$RUN_URL"
@@ -2157,6 +2243,7 @@ jobs:
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
             } > "$BODY_FILE"
           elif [ "${VERDICT:-}" = "n/a" ]; then
+            WEAK_BODY=true
             {
               printf '%s\n\n' '<!-- qwen-triage:verify -->'
               printf '**Sandboxed verification: n/a** - [workflow run](%s)\n\n' "$RUN_URL"
@@ -2186,8 +2273,10 @@ jobs:
             } > "$BODY_FILE"
           else
             collect_and_host_evidence
-            REPORT="$(find verify-results -name 'report.md' 2>/dev/null | head -1 || true)"
-            ASSERTIONS_FILE="$(find verify-results -name 'assertions.json' 2>/dev/null | head -1 || true)"
+            # Pin the artifact-dir shape and sort: a bare -name search takes
+            # whatever directory find visits first, which is unordered.
+            REPORT="$(find verify-results -mindepth 2 -type f -path '*-verify-*/report.md' 2>/dev/null | sort | head -1 || true)"
+            ASSERTIONS_FILE="$(find verify-results -mindepth 2 -type f -path '*-verify-*/assertions.json' 2>/dev/null | sort | head -1 || true)"
             ASSERT_LINE=''
             if [ -n "$ASSERTIONS_FILE" ]; then
               # Numbers only — coerce anything non-numeric to 0 so untrusted
@@ -2230,7 +2319,7 @@ jobs:
               if [ -n "${MISSING_REPORT_NOTE:-}" ]; then
                 printf '%s\n\n' "$MISSING_REPORT_NOTE"
               fi
-              emit_block 'Verification report (report.md)' "$REPORT" 50000
+              emit_block 'Verification report (report.md)' "$REPORT" 45000
               if [ -n "$EVIDENCE_SECTION" ]; then
                 printf '%s' "$EVIDENCE_SECTION"
               fi
@@ -2239,19 +2328,26 @@ jobs:
             } > "$BODY_FILE"
           fi
 
-          # Upsert by marker: replaces the "running" status comment posted by
-          # the verify job's resolve step, or any previous report.
-          if ! EXISTING="$(
+          # Upsert by marker: a real outcome (report / prepare-fail) replaces
+          # whatever carries the marker — the "running" status or an older
+          # report. A WEAK_BODY notice only replaces this run's own "running"
+          # status; if the marker comment is a previous round's real report,
+          # post fresh so that report survives.
+          EXISTING='' EXISTING_RUNNING='false'
+          if EXISTING_META="$(
             gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
               --method GET \
               --paginate \
               -F per_page=100 \
-              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-triage:verify -->"))] | last | .id // empty'
+              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-triage:verify -->"))] | last
+                        | if . == null then "" else "\(.id)\t\(.body | contains("Sandboxed verification is running"))" end'
           )"; then
+            EXISTING="${EXISTING_META%%$'\t'*}"
+            case "$EXISTING_META" in *$'\t'true) EXISTING_RUNNING='true' ;; esac
+          else
             echo "::warning::Failed to look up existing verify comments; will create a new one."
-            EXISTING=""
           fi
-          if [ -n "$EXISTING" ]; then
+          if [ -n "$EXISTING" ] && { [ "$WEAK_BODY" = false ] || [ "$EXISTING_RUNNING" = 'true' ]; }; then
             gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING" -F body=@"$BODY_FILE" >/dev/null
           else
             gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@"$BODY_FILE" >/dev/null
