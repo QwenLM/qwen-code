@@ -64,6 +64,10 @@ export interface WebShellDaemonScenario {
    * empty pull-request list.
    */
   gitHubPrs?: DaemonGitHubPullRequestList;
+  /**
+   * When set, the mock returns this error instead of the normal PR list.
+   */
+  gitHubPrsError?: { status: number; body: Record<string, unknown> };
 }
 
 export interface MockDaemonController {
@@ -318,6 +322,7 @@ export function createWebShellDaemonScenario(
     state,
     gitStatus: overrides.gitStatus,
     gitHubPrs: overrides.gitHubPrs,
+    gitHubPrsError: overrides.gitHubPrsError,
   };
 }
 
@@ -708,6 +713,14 @@ async function handleDaemonRoute(
     return;
   }
   if (method === 'GET' && /^\/workspaces\/.+\/github\/prs\/?$/.test(path)) {
+    if (scenario.gitHubPrsError) {
+      await json(
+        route,
+        scenario.gitHubPrsError.body,
+        scenario.gitHubPrsError.status,
+      );
+      return;
+    }
     await json(
       route,
       scenario.gitHubPrs ?? {

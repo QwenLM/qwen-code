@@ -135,6 +135,30 @@ test('shows the not-a-repository state when the daemon reports unavailable @smok
   );
 });
 
+test('shows the gh-not-installed guidance when the daemon returns 502 @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = prsScenario({
+    gitHubPrsError: {
+      status: 502,
+      body: {
+        error:
+          'The GitHub CLI (gh) is not installed on the daemon host; install it and run `gh auth login`.',
+        code: 'github_cli_unavailable',
+        status: 502,
+      },
+    },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoSession(page, scenario, daemon);
+
+  await submitLocalCommand(page, '/prs');
+
+  await expect(page.locator('[data-web-shell-dialog]')).toContainText(
+    'GitHub CLI (gh) is not installed',
+  );
+});
+
 test('hides the Pull requests tab when the daemon lacks the capability @smoke', async ({
   page,
 }, testInfo) => {

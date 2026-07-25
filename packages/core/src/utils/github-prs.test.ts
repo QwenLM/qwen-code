@@ -133,6 +133,20 @@ describe('parseGhPrList', () => {
     expect(result[0]?.checks).toBe(expected);
   });
 
+  it('treats an unknown __typename as pending', () => {
+    const result = parseGhPrList(
+      JSON.stringify([
+        ghPrEntry({
+          statusCheckRollup: [
+            { __typename: 'CheckRun', conclusion: 'SUCCESS' },
+            { __typename: 'FutureCheckType', conclusion: 'FAILURE' },
+          ],
+        }),
+      ]),
+    );
+    expect(result[0]?.checks).toBe('pending');
+  });
+
   it('failing wins over pending and passing', () => {
     const result = parseGhPrList(
       JSON.stringify([
@@ -296,5 +310,23 @@ describe('fetchGitHubPullRequests', () => {
     const result = await fetchGitHubPullRequests(dir);
 
     expect(result.kind).toBe('failed');
+  });
+
+  it('returns failed when gh output exceeds maxBuffer', async () => {
+    fs.mkdirSync(path.join(dir, '.git'));
+    mockGhError(
+      Object.assign(new Error('write ENOBUFS'), {
+        code: 'ENOBUFS',
+        stderr: '',
+      }),
+    );
+
+    const result = await fetchGitHubPullRequests(dir);
+
+    expect(result).toEqual({
+      kind: 'failed',
+      message: 'write ENOBUFS',
+      gitRoot: dir,
+    });
   });
 });

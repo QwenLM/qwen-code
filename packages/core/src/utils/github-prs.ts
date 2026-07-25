@@ -91,7 +91,7 @@ function aggregateChecks(
       if (state && FAILING_STATUS_CONTEXT_STATES.has(state)) return 'failing';
       if (state === 'SUCCESS') sawPassing = true;
       else sawPending = true;
-    } else {
+    } else if (entry.__typename === 'CheckRun') {
       const conclusion = (entry as GhCheckRun).conclusion?.toUpperCase();
       if (conclusion) {
         if (FAILING_CHECK_RUN_CONCLUSIONS.has(conclusion)) return 'failing';
@@ -99,6 +99,8 @@ function aggregateChecks(
       } else {
         sawPending = true;
       }
+    } else {
+      sawPending = true;
     }
   }
   if (sawPending) return 'pending';

@@ -64,8 +64,12 @@ function ChecksIcon({ checks }: { checks: DaemonGitHubPullRequestChecks }) {
           <ClockIcon size={12} />
         </span>
       );
-    default:
+    case 'none':
       return null;
+    default: {
+      const _exhaustive: never = checks;
+      return null;
+    }
   }
 }
 
