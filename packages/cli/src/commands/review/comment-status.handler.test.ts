@@ -260,5 +260,8 @@ describe('comment-status handler', () => {
     expect(report.headDrift).toBe(false);
     expect(report.summary).toMatchObject({ threads: 0, blockers: 0 });
     expect(report.inlineComments).toBe(0);
+    // worktreeMissing must not contradict worktreeHeadSha: null.
+    expect(report.worktreeHeadSha).toBeNull();
+    expect(report.worktreeMissing).toBe(true);
   });
 });

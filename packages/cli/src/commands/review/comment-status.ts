@@ -482,7 +482,11 @@ async function runCommentStatus(args: CommentStatusArgs): Promise<void> {
           liveHeadSha: '',
           liveHeadBefore: '',
           worktreeHeadSha: null,
-          worktreeMissing: false,
+          // Consistent with `worktreeHeadSha: null` (the success path derives
+          // worktreeMissing from exactly that) and fail-safe: a degraded run
+          // has no usable worktree, so `true` reads code facts as unavailable
+          // rather than falsely asserting the worktree is present.
+          worktreeMissing: true,
           headDrift: false,
           headMovedDuringFetch: false,
           inlineComments: 0,
