@@ -201,6 +201,29 @@ describe('useDaemonChannels', () => {
     expect(Object.keys(result?.channels ?? {})).toEqual(['bot-b']);
   });
 
+  it('reloads a new workspace after a manual load', async () => {
+    actions.loadChannels
+      .mockResolvedValueOnce(channelData('bot-a'))
+      .mockResolvedValueOnce(channelData('bot-b'));
+    let result: ReturnType<typeof useDaemonChannels> | undefined;
+
+    function TestComponent() {
+      result = useDaemonChannels();
+      return null;
+    }
+
+    await act(async () => root.render((<TestComponent />) as ReactNode));
+    await act(async () => {
+      await result?.reload();
+    });
+
+    context.current = { workspaceCwd: '/workspace-b' };
+    await act(async () => root.render((<TestComponent />) as ReactNode));
+
+    expect(actions.loadChannels).toHaveBeenCalledTimes(2);
+    expect(Object.keys(result?.channels ?? {})).toEqual(['bot-b']);
+  });
+
   it('exposes pairing operations without reloading Channel settings', async () => {
     const pairing = { requests: [] };
     const approval = {
