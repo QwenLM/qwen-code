@@ -632,7 +632,7 @@ describe('useCommandCompletion', () => {
       },
     );
 
-    it.each(['/stats /sto', '/unknown /sto'])(
+    it.each(['/stats /sto', '/unknown /sto', '/unknown\n/sto'])(
       'should not treat an invalid stacked prefix as mid-input completion: %s',
       async (input) => {
         const skillCommand: SlashCommand = {
@@ -648,7 +648,7 @@ describe('useCommandCompletion', () => {
           modelInvocable: false,
         };
 
-        renderHook(() =>
+        const { result } = renderHook(() =>
           useCommandCompletion(
             useTextBufferForTest(input),
             testRootDir,
@@ -659,14 +659,22 @@ describe('useCommandCompletion', () => {
           ),
         );
 
+        expect(result.current.midInputGhostText).toBeNull();
+
         await waitFor(() => {
-          expect(useSlashCompletion).toHaveBeenLastCalledWith(
-            expect.objectContaining({
-              enabled: true,
-              query: input,
-              slashCommands: [skillCommand, builtInCommand],
-            }),
-          );
+          if (input.includes('\n')) {
+            expect(useSlashCompletion).toHaveBeenLastCalledWith(
+              expect.objectContaining({ enabled: false }),
+            );
+          } else {
+            expect(useSlashCompletion).toHaveBeenLastCalledWith(
+              expect.objectContaining({
+                enabled: true,
+                query: input,
+                slashCommands: [skillCommand, builtInCommand],
+              }),
+            );
+          }
         });
       },
     );

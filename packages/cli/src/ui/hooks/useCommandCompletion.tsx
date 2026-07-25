@@ -384,6 +384,10 @@ export function useCommandCompletion(
     const midCmd = findMidInputSlashCommand(buffer.text, cursorOffset);
     if (midCmd) {
       if (isMidInputSlashCompletion) return null;
+      const prefix = toCodePoints(buffer.text)
+        .slice(0, midCmd.startPos)
+        .join('');
+      if (prefix.trimStart().startsWith('/')) return null;
       const match = getBestSlashCommandMatch(
         midCmd.partialCommand,
         slashCommands,
