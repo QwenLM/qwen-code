@@ -202,10 +202,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           if (c.user?.id != null && c.user.id === this.botUserId) {
             return false;
           }
-          if (c.updated_at && c.updated_at > maxUpdatedAt) {
+          if (c.created_at && c.created_at > maxUpdatedAt) {
             return false;
           }
-          if (c.updated_at && c.updated_at <= windowSince) {
+          if (c.created_at && c.created_at <= windowSince) {
             return false;
           }
           return true;
@@ -387,7 +387,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
         let cooldown: number;
         if (headers['retry-after']) {
-          cooldown = Number(headers['retry-after']) * 1000;
+          const retryAfter = Number(headers['retry-after']);
+          cooldown = Number.isFinite(retryAfter)
+            ? retryAfter * 1000
+            : 1000 * 2 ** (attempt - 1);
         } else if (
           (e.status === 403 || e.status === 429) &&
           Number(headers['x-ratelimit-remaining']) === 0 &&

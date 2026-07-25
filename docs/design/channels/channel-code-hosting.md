@@ -35,16 +35,20 @@ Poll cycle:
 3. `markNotificationsAsRead(maxUpdatedAt)` — best-effort global mark (cleans up non-issue notifications)
 4. Advance global cursor to `max(notification.updated_at)`
 5. Per thread: `listComments(since=windowSince)` — enumerate comments
-6. Filter: bot's own comments, `updated_at > maxUpdatedAt` (upper bound), `updated_at <= windowSince` (lower bound, exclusive)
+6. Exclude: bot's own comments; comments with `created_at > maxUpdatedAt` (above window); comments with `created_at <= windowSince` (below window)
 7. Process: mention detection → envelope → `handleInbound`
 
-The effective comment window is `(windowSince, maxUpdatedAt]`. Comments processed in a previous poll have `updated_at <= windowSince` (the previous poll's `maxUpdatedAt`) and are excluded. This prevents duplicates regardless of whether `PUT /notifications` succeeded.
+The effective comment window is `(windowSince, maxUpdatedAt]`. Comments processed in a previous poll have `created_at <= windowSince` (the previous poll's `maxUpdatedAt`) and are excluded. This prevents duplicates regardless of whether `PUT /notifications` succeeded. Comment edits do not re-trigger processing — only `created_at` is used for window membership.
 
 The global mark is still called (step 3) to clean up non-issue/PR notifications and reduce the unread list, but it is not load-bearing for dedup.
 
 ### Known Limitation: Late Notification Delivery
 
-Because the cursor is global (not per-thread), a notification that arrives in a later poll than its comments' `updated_at` can have those comments excluded by the cursor window. This requires notification delivery to be delayed across a poll boundary AND another thread's comments to advance the cursor past them in the interim. In practice this window is narrow (notification delivery typically completes within one poll interval); the user can re-mention to retry.
+Because the cursor is global (not per-thread), a notification that arrives in a later poll than its comments' `created_at` can have those comments excluded by the cursor window. This requires notification delivery to be delayed across a poll boundary AND another thread's comments to advance the cursor past them in the interim. In practice this window is narrow (notification delivery typically completes within one poll interval); the user can re-mention to retry.
+
+### Known Limitation: PR Review Comments
+
+`issues.listComments` returns only general conversation comments, not PR review comments (per-line diff comments). An @-mention in a PR review comment is silently dropped. Use a general conversation comment on the PR instead.
 
 ### Scenario Behavior
 

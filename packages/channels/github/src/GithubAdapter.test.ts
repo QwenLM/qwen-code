@@ -132,6 +132,14 @@ class TestableGithubChannel extends GithubChannel {
     if (this.handleInboundError) throw this.handleInboundError;
     this.inboundEnvelopes.push(envelope);
   }
+
+  async testSendThreadMessage(
+    chatId: string,
+    threadId: string,
+    text: string,
+  ): Promise<void> {
+    return this.sendThreadMessage(chatId, threadId, text);
+  }
 }
 
 describe('GithubChannel', () => {
@@ -456,15 +464,15 @@ describe('GithubChannel', () => {
       ]);
     });
 
-    it('excludes comments updated after the batch maxUpdatedAt', async () => {
+    it('excludes comments created after the batch maxUpdatedAt', async () => {
       await initWithoutLoop();
       mockOctokit.paginate
         .mockResolvedValueOnce([
           makeNotification({ updated_at: '2026-07-02T10:00:00.000Z' }),
         ])
         .mockResolvedValueOnce([
-          makeComment({ id: 1, updated_at: '2026-07-02T09:00:00.000Z' }),
-          makeComment({ id: 2, updated_at: '2026-07-02T10:30:00.000Z' }),
+          makeComment({ id: 1, created_at: '2026-07-02T09:00:00.000Z' }),
+          makeComment({ id: 2, created_at: '2026-07-02T10:30:00.000Z' }),
         ]);
 
       await pollOnce();
@@ -500,14 +508,43 @@ describe('GithubChannel', () => {
           makeNotification({ updated_at: '2026-07-02T10:00:00.000Z' }),
         ])
         .mockResolvedValueOnce([
-          makeComment({ id: 1, updated_at: '2026-07-01T00:00:00.000Z' }),
-          makeComment({ id: 2, updated_at: '2026-07-02T09:00:00.000Z' }),
+          makeComment({ id: 1, created_at: '2026-07-01T00:00:00.000Z' }),
+          makeComment({ id: 2, created_at: '2026-07-02T09:00:00.000Z' }),
         ]);
 
       await pollOnce();
 
       expect(channel.inboundEnvelopes).toHaveLength(1);
       expect(channel.inboundEnvelopes[0]!.messageId).toBe('2');
+    });
+
+    it('retries on transient API failure and succeeds', async () => {
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockRejectedValueOnce(new Error('transient'))
+        .mockResolvedValueOnce([]);
+      mockOctokit.paginate.mockClear();
+
+      await pollOnce();
+
+      expect(mockOctokit.paginate).toHaveBeenCalledTimes(2);
+    });
+
+    it('propagates error after all retries exhausted', async () => {
+      await initWithoutLoop();
+      mockOctokit.paginate.mockRejectedValue(new Error('persistent'));
+      mockOctokit.paginate.mockClear();
+
+      await expect(pollOnce()).rejects.toThrow('persistent');
+      expect(mockOctokit.paginate).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe('sendThreadMessage', () => {
+    it('throws on invalid threadId format', async () => {
+      await expect(
+        channel.testSendThreadMessage('owner/repo', 'discussion:42', 'text'),
+      ).rejects.toThrow('invalid threadId format');
     });
   });
 
