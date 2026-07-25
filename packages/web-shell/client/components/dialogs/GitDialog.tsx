@@ -85,6 +85,8 @@ export function GitDialog({
   } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const genAbortRef = useRef<AbortController | null>(null);
+  const resolveSessionRef = useRef(resolveSessionForWorkspace);
+  resolveSessionRef.current = resolveSessionForWorkspace;
 
   const isCommit = view === 'commit';
   const effectiveTab = isCommit ? 'diff' : view;
@@ -99,8 +101,8 @@ export function GitDialog({
 
     const resolveSession = sessionId
       ? Promise.resolve(sessionId)
-      : resolveSessionForWorkspace
-        ? resolveSessionForWorkspace(workspaceCwd)
+      : resolveSessionRef.current
+        ? resolveSessionRef.current(workspaceCwd)
         : Promise.resolve(undefined);
 
     resolveSession
@@ -147,14 +149,7 @@ export function GitDialog({
     return () => {
       abort.abort();
     };
-  }, [
-    isCommit,
-    sessionId,
-    resolveSessionForWorkspace,
-    client,
-    workspaceCwd,
-    gitCwd,
-  ]);
+  }, [isCommit, sessionId, client, workspaceCwd, gitCwd]);
 
   // Clamp if the PR tab vanishes mid-session.
   const clampedTab = tabViews.includes(
@@ -259,8 +254,8 @@ export function GitDialog({
 
     const resolveSession = sessionId
       ? Promise.resolve(sessionId)
-      : resolveSessionForWorkspace
-        ? resolveSessionForWorkspace(workspaceCwd)
+      : resolveSessionRef.current
+        ? resolveSessionRef.current(workspaceCwd)
         : Promise.resolve(undefined);
 
     setPrGenerating(true);
@@ -353,15 +348,7 @@ export function GitDialog({
       });
 
     return () => abort.abort();
-  }, [
-    prFormOpen,
-    isCommit,
-    sessionId,
-    resolveSessionForWorkspace,
-    client,
-    workspaceCwd,
-    gitCwd,
-  ]);
+  }, [prFormOpen, isCommit, sessionId, client, workspaceCwd, gitCwd]);
 
   const doCreatePr = useCallback(async () => {
     if (!prTitle.trim()) return;
