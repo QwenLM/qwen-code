@@ -48,7 +48,10 @@ export function GitDialog({
   gitCwd?: string;
   initialView: GitDialogView;
   sessionId?: string;
-  resolveSessionForWorkspace?: (cwd: string) => Promise<string | undefined>;
+  resolveSessionForWorkspace?: (
+    cwd: string,
+    forceCreate?: boolean,
+  ) => Promise<string | undefined>;
   onClose: () => void;
 }) {
   const { t } = useI18n();
@@ -87,6 +90,31 @@ export function GitDialog({
   const genAbortRef = useRef<AbortController | null>(null);
   const resolveSessionRef = useRef(resolveSessionForWorkspace);
   resolveSessionRef.current = resolveSessionForWorkspace;
+
+  // btwSession with automatic retry: if the resolved session is stale
+  // (daemon restarted, session evicted), force-create a new one and retry.
+  const btwWithRetry = useCallback(
+    async (sid: string, prompt: string, signal: AbortSignal) => {
+      try {
+        return await client.btwSession(sid, prompt, { signal });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (/no session/i.test(msg) && resolveSessionRef.current) {
+          // Session is stale — force-create via the workspace resolver.
+          // The resolver's listWorkspaceSessions path returned a dead id;
+          // calling createSession directly guarantees a live session.
+          const fresh = await resolveSessionRef.current(workspaceCwd, true);
+          if (fresh && fresh !== sid && !signal.aborted) {
+            return client.btwSession(fresh, prompt, { signal });
+          }
+        }
+        throw err;
+      }
+    },
+    [client, workspaceCwd],
+  );
+  const btwWithRetryRef = useRef(btwWithRetry);
+  btwWithRetryRef.current = btwWithRetry;
 
   const isCommit = view === 'commit';
   const effectiveTab = isCommit ? 'diff' : view;
@@ -131,8 +159,8 @@ export function GitDialog({
           const prompt =
             `Generate a concise git commit message for these changes. ` +
             `Reply with ONLY the commit message text, no quotes, no explanation.\n\n${fileSummary}`;
-          return client
-            .btwSession(sid, prompt, { signal: abort.signal })
+          return btwWithRetryRef
+            .current(sid, prompt, abort.signal)
             .then((result) => {
               if (abort.signal.aborted) return;
               if (result.answer) setCommitMsg(result.answer.trim());
@@ -321,8 +349,8 @@ export function GitDialog({
             `3. Do NOT hard-wrap paragraphs — write each paragraph as one long line.\n` +
             `4. Reply with the title on the first line, then a blank line, then the body. No extra explanation.\n\n` +
             `Changed files:\n${fileSummary}`;
-          return client
-            .btwSession(sid, prompt, { signal: abort.signal })
+          return btwWithRetryRef
+            .current(sid, prompt, abort.signal)
             .then((result) => {
               if (abort.signal.aborted) return;
               if (result.answer) {

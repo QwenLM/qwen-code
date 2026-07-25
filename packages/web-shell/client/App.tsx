@@ -3262,18 +3262,20 @@ export function App({
   );
 
   const resolveSessionForWorkspace = useCallback(
-    async (cwd: string): Promise<string | undefined> => {
+    async (cwd: string, forceCreate?: boolean): Promise<string | undefined> => {
       try {
-        // If the connected session is for this workspace, use it directly.
-        if (connection.sessionId && activeWorkspaceCwd === cwd) {
-          return connection.sessionId;
+        if (!forceCreate) {
+          // If the connected session is for this workspace, use it directly.
+          if (connection.sessionId && activeWorkspaceCwd === cwd) {
+            return connection.sessionId;
+          }
+          // Fetch the most recent session for this workspace.
+          const sessions = await workspace.client
+            .workspaceByCwd(cwd)
+            .listWorkspaceSessions({ pageSize: 1, archiveState: 'active' });
+          if (sessions.length > 0) return sessions[0].sessionId;
         }
-        // Fetch the most recent session for this workspace.
-        const sessions = await workspace.client
-          .workspaceByCwd(cwd)
-          .listWorkspaceSessions({ pageSize: 1, archiveState: 'active' });
-        if (sessions.length > 0) return sessions[0].sessionId;
-        // No session exists: create one.
+        // No session exists or forced: create one.
         const result = await (
           sessionActions as typeof sessionActions & SessionActionsWithCreate
         ).createSession({ workspaceCwd: cwd });
