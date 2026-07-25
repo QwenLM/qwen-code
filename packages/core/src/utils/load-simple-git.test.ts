@@ -47,7 +47,7 @@ describe('loadSimpleGit', () => {
     vi.doMock('simple-git', () => ({
       CheckRepoActions: undefined,
       simpleGit: undefined,
-      default: undefined,
+      default: {},
     }));
     const { loadSimpleGit } = await import('./load-simple-git.js');
 

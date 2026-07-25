@@ -13,16 +13,30 @@ export type SimpleGitModule = {
 
 let simpleGitModulePromise: Promise<SimpleGitModule> | undefined;
 
+function isSimpleGitModule(
+  candidate: Partial<SimpleGitModule> | undefined,
+): candidate is SimpleGitModule {
+  return (
+    candidate !== undefined &&
+    'simpleGit' in candidate &&
+    typeof candidate.simpleGit === 'function' &&
+    'CheckRepoActions' in candidate &&
+    typeof candidate.CheckRepoActions === 'object' &&
+    candidate.CheckRepoActions !== null
+  );
+}
+
 export function loadSimpleGit(): Promise<SimpleGitModule> {
   simpleGitModulePromise ??= import('simple-git').then((module) => {
     const imported = module as unknown as Partial<SimpleGitModule> & {
       default?: SimpleGitModule;
     };
-    const candidate =
-      imported.simpleGit && imported.CheckRepoActions
-        ? (imported as SimpleGitModule)
-        : imported.default;
-    if (!candidate) {
+    const candidate = isSimpleGitModule(imported)
+      ? imported
+      : 'default' in imported
+        ? imported.default
+        : undefined;
+    if (!isSimpleGitModule(candidate)) {
       throw new Error('simple-git module does not match the expected API');
     }
     return {

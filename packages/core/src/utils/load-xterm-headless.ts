@@ -12,13 +12,30 @@ export type XtermHeadlessModule = {
 
 let xtermHeadlessModulePromise: Promise<XtermHeadlessModule> | undefined;
 
+function isXtermHeadlessModule(
+  candidate: Partial<XtermHeadlessModule> | undefined,
+): candidate is XtermHeadlessModule {
+  return (
+    candidate !== undefined &&
+    'Terminal' in candidate &&
+    typeof candidate.Terminal === 'function'
+  );
+}
+
 export function loadXtermHeadless(): Promise<XtermHeadlessModule> {
   xtermHeadlessModulePromise ??= import('@xterm/headless').then((module) => {
-    const candidate =
-      'Terminal' in module
-        ? module
-        : (module as unknown as { default: XtermHeadlessModule }).default;
-    return candidate as XtermHeadlessModule;
+    const imported = module as unknown as Partial<XtermHeadlessModule> & {
+      default?: XtermHeadlessModule;
+    };
+    const candidate = isXtermHeadlessModule(imported)
+      ? imported
+      : 'default' in imported
+        ? imported.default
+        : undefined;
+    if (!isXtermHeadlessModule(candidate)) {
+      throw new Error('@xterm/headless module does not match the expected API');
+    }
+    return candidate;
   });
   return xtermHeadlessModulePromise;
 }

@@ -31,4 +31,13 @@ describe('loadXtermHeadless', () => {
 
     await expect(loadXtermHeadless()).resolves.toEqual({ Terminal });
   });
+
+  it('rejects an unexpected module shape', async () => {
+    vi.doMock('@xterm/headless', () => ({ default: {} }));
+    const { loadXtermHeadless } = await import('./load-xterm-headless.js');
+
+    await expect(loadXtermHeadless()).rejects.toThrow(
+      '@xterm/headless module does not match the expected API',
+    );
+  });
 });
