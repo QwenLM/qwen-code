@@ -191,13 +191,23 @@ jobs:
           }
           # --- end triage-finalize helpers ---
 
-          # Open PRs whose current head is this SHA. (workflow_run carries
-          # pull_requests only for same-repo PRs; the commits/:sha/pulls
-          # association works for fork PRs too.)
+          # Open PRs for this SHA. Primary source: the open-PR list filtered
+          # by current head — the commits/:sha/pulls association is NOT
+          # reliable for fork-branch commits (observed live: it returned
+          # empty for the current head of an open fork PR, which silently
+          # dropped that PR's deferred approval; workflow_run.pull_requests
+          # is likewise empty for forks). The association endpoint is still
+          # consulted second: when it works it also surfaces PRs whose head
+          # has moved past this SHA, which is what powers the stale note.
           PR_NUMBERS="$(
-            gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/pulls?per_page=100" --paginate \
-              --jq '.[] | select(.state == "open") | .number'
-          )" || PR_NUMBERS=''
+            {
+              gh api "repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100" --paginate \
+                --jq '.' | jq -rs --arg sha "$HEAD_SHA" \
+                'add // [] | .[] | select(.head.sha == $sha) | .number' || true
+              gh api "repos/$GITHUB_REPOSITORY/commits/$HEAD_SHA/pulls?per_page=100" --paginate \
+                --jq '.[] | select(.state == "open") | .number' 2>/dev/null || true
+            } | sort -un
+          )"
           if [ -z "$PR_NUMBERS" ]; then
             echo "No open PR for $SHORT_SHA; nothing to finalize."
             exit 0
