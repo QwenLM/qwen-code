@@ -316,132 +316,163 @@ async function runCommentStatus(args: CommentStatusArgs): Promise<void> {
   }
   const [owner, repo] = ownerRepo.split('/');
 
-  ensureAuthenticated();
+  // Graceful degradation per SKILL.md: this command is an index, not the
+  // evidence — a runtime failure (auth, network, gh) must not kill the
+  // review. On any throw, write a minimal empty report so downstream jq
+  // still parses, warn, and exit 0; Step 6 then re-derives statuses per
+  // comment.
+  try {
+    ensureAuthenticated();
 
-  // Sample the live head BEFORE the comments fetch and AGAIN after: GitHub
-  // maps comment lines against whatever head is current when the list is
-  // served, so a push landing mid-fetch would pair anchor facts from a newer
-  // head with a stale drift comparison. If the two samples disagree the PR is
-  // moving right now — treat it as drift.
-  const meta = JSON.parse(
-    gh(
-      'pr',
-      'view',
+    // Sample the live head BEFORE the comments fetch and AGAIN after: GitHub
+    // maps comment lines against whatever head is current when the list is
+    // served, so a push landing mid-fetch would pair anchor facts from a newer
+    // head with a stale drift comparison. If the two samples disagree the PR is
+    // moving right now — treat it as drift.
+    const meta = JSON.parse(
+      gh(
+        'pr',
+        'view',
+        prNumber,
+        '--repo',
+        ownerRepo,
+        '--json',
+        'author,headRefOid',
+      ),
+    ) as { author?: { login?: string } | null; headRefOid?: string };
+    const prAuthor = meta.author?.login ?? '';
+    const liveHeadBefore = meta.headRefOid ?? '';
+
+    const comments = ghApiAll(
+      `repos/${owner}/${repo}/pulls/${prNumber}/comments`,
+    ) as RawStatusComment[];
+
+    const liveHeadAfter =
+      (
+        JSON.parse(
+          gh(
+            'pr',
+            'view',
+            prNumber,
+            '--repo',
+            ownerRepo,
+            '--json',
+            'headRefOid',
+          ),
+        ) as { headRefOid?: string }
+      ).headRefOid ?? '';
+
+    const worktree = worktreePath(prNumber);
+    const worktreeHeadSha = gitOpt('-C', worktree, 'rev-parse', 'HEAD');
+    // A null HEAD means the worktree is absent (comment-status run before
+    // fetch-pr, or after cleanup) — every thread's code facts then degrade to
+    // 'unknown', which must not pass silently as if the files were unchanged.
+    const worktreeMissing = worktreeHeadSha === null;
+    // Anchor facts (`line`, outdated) describe the LIVE head — GitHub maps
+    // comments against the latest diff it serves. Code facts (`touchedBy`,
+    // changedSinceComment) describe the WORKTREE head — the code this review
+    // rules on. Two distinct conditions:
+    //  - worktreeStale: the checked-out code lags the live head, so the code
+    //    facts describe a SUPERSEDED checkout (this is what staleWorktree means
+    //    per-thread — NOT the union below).
+    //  - headMovedDuringFetch: the head moved between the two samples, so the
+    //    anchor facts may be mixed across commits even if the worktree happens
+    //    to match the final head; that is a separate warning, not staleness.
+    const headMovedDuringFetch =
+      liveHeadBefore !== '' &&
+      liveHeadAfter !== '' &&
+      liveHeadBefore !== liveHeadAfter;
+    const worktreeStale =
+      !worktreeMissing &&
+      liveHeadAfter !== '' &&
+      worktreeHeadSha !== liveHeadAfter;
+    const headDrift = headMovedDuringFetch || worktreeStale;
+
+    const threads = buildThreadStatuses(
+      comments,
+      prAuthor,
+      makeGitProbe(worktree),
+    );
+    if (worktreeStale) {
+      // Denormalize onto every thread: the code facts describe a superseded
+      // checkout, and a jq consumer of threads[] must not need to remember a
+      // top-level flag to see that. Keyed on worktreeStale specifically — a
+      // head that merely moved mid-fetch while the worktree matches the final
+      // head is NOT a superseded checkout.
+      for (const t of threads) t.code.staleWorktree = true;
+    }
+    const summary = summarizeThreads(threads);
+
+    const report = {
       prNumber,
-      '--repo',
       ownerRepo,
-      '--json',
-      'author,headRefOid',
-    ),
-  ) as { author?: { login?: string } | null; headRefOid?: string };
-  const prAuthor = meta.author?.login ?? '';
-  const liveHeadBefore = meta.headRefOid ?? '';
+      prAuthor,
+      liveHeadSha: liveHeadAfter,
+      liveHeadBefore,
+      worktreeHeadSha,
+      worktreeMissing,
+      headDrift,
+      headMovedDuringFetch,
+      inlineComments: comments.length,
+      summary,
+      threads,
+    };
 
-  const comments = ghApiAll(
-    `repos/${owner}/${repo}/pulls/${prNumber}/comments`,
-  ) as RawStatusComment[];
-
-  const liveHeadAfter =
-    (
-      JSON.parse(
-        gh('pr', 'view', prNumber, '--repo', ownerRepo, '--json', 'headRefOid'),
-      ) as { headRefOid?: string }
-    ).headRefOid ?? '';
-
-  const worktree = worktreePath(prNumber);
-  const worktreeHeadSha = gitOpt('-C', worktree, 'rev-parse', 'HEAD');
-  // A null HEAD means the worktree is absent (comment-status run before
-  // fetch-pr, or after cleanup) — every thread's code facts then degrade to
-  // 'unknown', which must not pass silently as if the files were unchanged.
-  const worktreeMissing = worktreeHeadSha === null;
-  // Anchor facts (`line`, outdated) describe the LIVE head — GitHub maps
-  // comments against the latest diff it serves. Code facts (`touchedBy`,
-  // changedSinceComment) describe the WORKTREE head — the code this review
-  // rules on. Two distinct conditions:
-  //  - worktreeStale: the checked-out code lags the live head, so the code
-  //    facts describe a SUPERSEDED checkout (this is what staleWorktree means
-  //    per-thread — NOT the union below).
-  //  - headMovedDuringFetch: the head moved between the two samples, so the
-  //    anchor facts may be mixed across commits even if the worktree happens
-  //    to match the final head; that is a separate warning, not staleness.
-  const headMovedDuringFetch =
-    liveHeadBefore !== '' &&
-    liveHeadAfter !== '' &&
-    liveHeadBefore !== liveHeadAfter;
-  const worktreeStale =
-    !worktreeMissing &&
-    liveHeadAfter !== '' &&
-    worktreeHeadSha !== liveHeadAfter;
-  const headDrift = headMovedDuringFetch || worktreeStale;
-
-  const threads = buildThreadStatuses(
-    comments,
-    prAuthor,
-    makeGitProbe(worktree),
-  );
-  if (worktreeStale) {
-    // Denormalize onto every thread: the code facts describe a superseded
-    // checkout, and a jq consumer of threads[] must not need to remember a
-    // top-level flag to see that. Keyed on worktreeStale specifically — a
-    // head that merely moved mid-fetch while the worktree matches the final
-    // head is NOT a superseded checkout.
-    for (const t of threads) t.code.staleWorktree = true;
-  }
-  const summary = summarizeThreads(threads);
-
-  const report = {
-    prNumber,
-    ownerRepo,
-    prAuthor,
-    liveHeadSha: liveHeadAfter,
-    liveHeadBefore,
-    worktreeHeadSha,
-    worktreeMissing,
-    headDrift,
-    headMovedDuringFetch,
-    inlineComments: comments.length,
-    summary,
-    threads,
-  };
-
-  mkdirSync(dirname(out), { recursive: true });
-  const json = JSON.stringify(report, null, 2) + '\n';
-  writeFileSync(out, json, 'utf8');
-  writeStdoutLine(
-    `Wrote comment-status report to ${out} (${comments.length} inline comments in ${summary.threads} threads: ` +
-      `${summary.outdated} outdated, ${summary.blockers} blocker(s), ` +
-      `${summary.changedSinceComment} on files changed since their comment, ` +
-      `${summary.withReplies} with replies, ${summary.authorReplied} answered by the PR author)`,
-  );
-  if (worktreeMissing) {
+    mkdirSync(dirname(out), { recursive: true });
+    const json = JSON.stringify(report, null, 2) + '\n';
+    writeFileSync(out, json, 'utf8');
     writeStdoutLine(
-      `warning: no worktree at ${worktree} — run \`qwen review fetch-pr\` first. ` +
-        `Every thread's code facts (changedSinceComment, touchedBy) are \`unknown\`; ` +
-        `only the anchor and reply facts are usable.`,
+      `Wrote comment-status report to ${out} (${comments.length} inline comments in ${summary.threads} threads: ` +
+        `${summary.outdated} outdated, ${summary.blockers} blocker(s), ` +
+        `${summary.changedSinceComment} on files changed since their comment, ` +
+        `${summary.withReplies} with replies, ${summary.authorReplied} answered by the PR author)`,
     );
-  }
-  if (headMovedDuringFetch) {
+    if (worktreeMissing) {
+      writeStdoutLine(
+        `warning: no worktree at ${worktree} — run \`qwen review fetch-pr\` first. ` +
+          `Every thread's code facts (changedSinceComment, touchedBy) are \`unknown\`; ` +
+          `only the anchor and reply facts are usable.`,
+      );
+    }
+    if (headMovedDuringFetch) {
+      writeStdoutLine(
+        `warning: PR head moved during the comments fetch (${liveHeadBefore.slice(0, 8)} → ${liveHeadAfter.slice(0, 8)}) — ` +
+          `anchor facts may be mixed across commits. Re-run after the push settles.`,
+      );
+    } else if (worktreeStale) {
+      writeStdoutLine(
+        `warning: worktree HEAD ${(worktreeHeadSha ?? '').slice(0, 8)} != live PR head ${liveHeadAfter.slice(0, 8)} — ` +
+          `the PR advanced since fetch-pr. Anchor facts describe the live head; ` +
+          `code facts describe the worktree.`,
+      );
+    }
+    // Same silent-tail hazard pr-context already warns about, with sharper
+    // teeth here: `threads` is sorted by path, so a truncated read drops the
+    // alphabetically-later files WHOLESALE (measured on a 71-thread PR: one
+    // read showed 35 threads and lost 24 blocker-flagged ones), and cut JSON
+    // is not merely incomplete but unparseable.
+    if (json.length > DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD) {
+      writeStdoutLine(
+        `warning: ${out} is ${json.length} chars; read_file returns the first ` +
+          `${DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD} and sets isTruncated — cut JSON does not parse. ` +
+          `Query it with jq (it is machine-shaped), or page with offset/limit until isTruncated is false.`,
+      );
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
     writeStdoutLine(
-      `warning: PR head moved during the comments fetch (${liveHeadBefore.slice(0, 8)} → ${liveHeadAfter.slice(0, 8)}) — ` +
-        `anchor facts may be mixed across commits. Re-run after the push settles.`,
+      `warning: comment-status failed: ${msg}. It is an index, not the ` +
+        `evidence — re-derive thread statuses per-comment if needed.`,
     );
-  } else if (worktreeStale) {
-    writeStdoutLine(
-      `warning: worktree HEAD ${(worktreeHeadSha ?? '').slice(0, 8)} != live PR head ${liveHeadAfter.slice(0, 8)} — ` +
-        `the PR advanced since fetch-pr. Anchor facts describe the live head; ` +
-        `code facts describe the worktree.`,
-    );
-  }
-  // Same silent-tail hazard pr-context already warns about, with sharper
-  // teeth here: `threads` is sorted by path, so a truncated read drops the
-  // alphabetically-later files WHOLESALE (measured on a 71-thread PR: one
-  // read showed 35 threads and lost 24 blocker-flagged ones), and cut JSON
-  // is not merely incomplete but unparseable.
-  if (json.length > DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD) {
-    writeStdoutLine(
-      `warning: ${out} is ${json.length} chars; read_file returns the first ` +
-        `${DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD} and sets isTruncated — cut JSON does not parse. ` +
-        `Query it with jq (it is machine-shaped), or page with offset/limit until isTruncated is false.`,
+    mkdirSync(dirname(out), { recursive: true });
+    writeFileSync(
+      out,
+      JSON.stringify(
+        { prNumber, ownerRepo, error: msg, threads: [] },
+        null,
+        2,
+      ) + '\n',
+      'utf8',
     );
   }
 }

@@ -215,4 +215,19 @@ describe('comment-status handler', () => {
     expect(report.threads[0].code.changedSinceComment).toBe('unknown');
     expect(warnings().join('\n')).toContain('no worktree at');
   });
+
+  it('degrades gracefully when gh auth fails: no throw, empty report, warning', async () => {
+    // SKILL.md promises this command cannot kill the pipeline on an auth or
+    // network failure. A throw must become a minimal empty report + warning,
+    // not an unhandled rejection.
+    mocks.ensureAuthenticated.mockImplementation(() => {
+      throw new Error('gh CLI is not authenticated. Run `gh auth login`.');
+    });
+
+    await expect(run()).resolves.toBeUndefined();
+    const report = reportWritten();
+    expect(report.threads).toEqual([]);
+    expect(report.error).toContain('not authenticated');
+    expect(warnings().join('\n')).toContain('comment-status failed');
+  });
 });
