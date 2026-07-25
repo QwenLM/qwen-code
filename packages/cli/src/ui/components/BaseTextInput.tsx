@@ -329,6 +329,8 @@ export const BaseTextInput = ({
     linesToRender,
     prefixWidth,
   });
+  // Ink snapshots this value in its insertion effect, so it must be set
+  // during render rather than from another effect.
   setCursorPosition(cursorPosition);
 
   const resolvedBorderColor = borderColor ?? theme.border.focused;
