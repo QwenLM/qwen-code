@@ -1696,6 +1696,10 @@ jobs:
           # quotes the running sentence as a live status — and the next run
           # would then overwrite that report.
           STATUS_MARKER='<!-- qwen-triage:verify-state=running -->'
+          # Bodies that carry findings mark themselves. Selecting "newest
+          # comment without the running marker" would pick a cancelled or
+          # infra notice, silently dropping the last real round's findings.
+          SUBSTANTIVE_MARKER='<!-- qwen-triage:verify-substantive -->'
           printf -v BODY '%s\n%s\n\n%s\n\n%s' \
             "$MARKER" \
             "$STATUS_MARKER" \
@@ -1720,10 +1724,10 @@ jobs:
             EXISTING_META="$(
               gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
                 --method GET --paginate -F per_page=100 |
-                jq -rs --arg m "$MARKER" --arg s "$STATUS_MARKER" --arg bot "$BOT_LOGIN" \
+                jq -rs --arg m "$MARKER" --arg s "$STATUS_MARKER" --arg sub "$SUBSTANTIVE_MARKER" --arg bot "$BOT_LOGIN" \
                   '[.[][] | select((.body | startswith($m)) and .user.login == $bot)] as $mine
                    | ($mine | last) as $latest
-                   | ($mine | map(select(.body | contains($s) | not)) | last) as $report
+                   | ($mine | map(select(.body | contains($sub))) | last) as $report
                    | if $latest == null then ""
                      else "\($latest.id)\t\($latest.body | contains($s))\t\($report.id // "")" end'
             )" || EXISTING_META=''
@@ -2463,6 +2467,7 @@ jobs:
       pull-requests: 'write'
     steps:
       - name: 'Download verify results'
+        id: 'download'
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v5.0.0
         with:
           name: 'verify-results-${{ needs.verify.outputs.pr_number }}-${{ github.run_id }}-${{ github.run_attempt }}'
@@ -2478,6 +2483,7 @@ jobs:
           SKIP_REASON: '${{ needs.verify.outputs.skip_reason }}'
           PREPARE_FAILURE_PHASE: '${{ needs.verify.outputs.failure_phase }}'
           VERIFY_RESULT: '${{ needs.verify.result }}'
+          DOWNLOAD_OUTCOME: '${{ steps.download.outcome }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         # shellcheck disable=SC2016
         run: |-
@@ -2672,6 +2678,20 @@ jobs:
               printf 'The verification job did not complete (checkout, runner, or setup error) and produced no report. See the workflow run for details.\n\n'
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
             } > "$BODY_FILE"
+          elif [ "${DOWNLOAD_OUTCOME:-success}" != "success" ]; then
+            # The verify job may have succeeded, but its artifact never
+            # arrived (the download step is continue-on-error). Without this
+            # branch the full-report path still runs and its scope paragraph
+            # claims the A/B, the harnesses and the gates were delivered —
+            # when nothing was.
+            WEAK_BODY=true
+            {
+              printf '%s\n\n' '<!-- qwen-triage:verify -->'
+              printf '**Sandboxed verification: results unavailable** - [workflow run](%s)\n\n' "$RUN_URL"
+              printf 'The verification ran, but its result artifact could not be retrieved for publishing, so there is nothing to report here. The run log still has the agent output; re-run `@qwen-code /verify` for a fresh report.\n\n'
+              printf '验证已执行，但结果产物未能取回用于发布，因此此处没有可报告的内容。运行日志中仍有 agent 输出；如需完整报告请重新运行 `@qwen-code /verify`。\n\n'
+              printf '%s\n' '— _Qwen Code · sandboxed verification_'
+            } > "$BODY_FILE"
           elif [ "${VERDICT:-}" = "skipped" ]; then
             WEAK_BODY=true
             {
@@ -2690,6 +2710,9 @@ jobs:
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
             } > "$BODY_FILE"
           elif [ -n "${PREPARE_FAILURE_PHASE:-}" ]; then
+            # An infra-classified prepare failure says nothing about the PR,
+            # so it must not overwrite a previous round's real report.
+            [ "${VERDICT:-}" = 'infra-error' ] && WEAK_BODY=true
             PREPARE_LOG="$(find verify-results -name 'prepare.log' 2>/dev/null | head -1 || true)"
             case "$PREPARE_FAILURE_PHASE" in
               install) PREPARE_COMMAND='npm ci' ;;
@@ -2702,10 +2725,21 @@ jobs:
                 echo "::warning::Unrecognized prepare failure phase: ${UNKNOWN_PREPARE_PHASE}"
                 ;;
             esac
+            # The prepare step already classified this (signals, ENOSPC,
+            # registry/network errors -> infra-error). Saying "treated as a
+            # PR failure" for an infrastructure incident tells the author
+            # their code is broken when the workflow decided otherwise.
             {
               printf '%s\n\n' '<!-- qwen-triage:verify -->'
-              printf '**Sandboxed verification: fail** - [workflow run](%s)\n\n' "$RUN_URL"
-              printf 'The PR could not be built because `%s` failed before any verification started. This is treated as a PR failure verdict rather than an infrastructure failure.\n\n' "$PREPARE_COMMAND"
+              if [ "${VERDICT:-}" = 'infra-error' ]; then
+                printf '**Sandboxed verification: infrastructure failure** - [workflow run](%s)\n\n' "$RUN_URL"
+                printf '`%s` failed before any verification started, and the failure looks like an infrastructure incident (a signal/OOM kill, a full disk, or a registry/network error) rather than a problem with this PR. Re-running `@qwen-code /verify` is the fix.\n\n' "$PREPARE_COMMAND"
+                printf '`%s` 在验证开始前失败，且失败特征属于基础设施问题（信号/OOM、磁盘写满、镜像源或网络错误），而非本 PR 的代码问题。重新运行 `@qwen-code /verify` 即可。\n\n' "$PREPARE_COMMAND"
+              else
+                printf '%s\n\n' '<!-- qwen-triage:verify-substantive -->'
+                printf '**Sandboxed verification: fail** - [workflow run](%s)\n\n' "$RUN_URL"
+                printf 'The PR could not be built because `%s` failed before any verification started. This is treated as a PR failure verdict rather than an infrastructure failure.\n\n' "$PREPARE_COMMAND"
+              fi
               emit_block 'Install/build log' "$PREPARE_LOG" 20000
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
             } > "$BODY_FILE"
@@ -2777,7 +2811,11 @@ jobs:
               echo "::warning::${MISSING_REPORT_NOTE}"
             fi
             {
-              printf '%s\n\n' '<!-- qwen-triage:verify -->'
+              printf '%s\n' '<!-- qwen-triage:verify -->'
+              # Substantive marker: this body carries findings, so a later
+              # weak notice must not displace it as the follow-up round's
+              # previous-report snapshot.
+              printf '%s\n\n' '<!-- qwen-triage:verify-substantive -->'
               printf '**Sandboxed verification: %s** - [workflow run](%s)\n\n' "$HEADLINE" "$RUN_URL"
               if [ "${VERDICT:-}" = 'pass' ]; then
                 printf '%s\n\n' "$SCOPE_EN"

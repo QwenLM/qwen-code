@@ -1055,3 +1055,217 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(publishStep).toContain('all(type == "number" and . >= 0');
   });
 });
+
+describe('qwen-triage verify publish fidelity', () => {
+  const publishScript = () =>
+    step('Post verification report comment')
+      .match(/run: \|-\n([\s\S]*)$/)?.[1]
+      .replace(/^ {10}/gm, '');
+
+  // Render the publisher for a given outcome with a stubbed gh, and return
+  // the comment body it would post.
+  const render = (dir, env) => {
+    const out = join(dir, `body-${env.NAME}.md`);
+    const work = join(dir, 'work');
+    const res = spawnSync('bash', ['-c', publishScript()], {
+      cwd: work,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        PATH: `${dir}:${process.env.PATH}`,
+        GH_STUB_OUT: out,
+        GH_TOKEN: 'x',
+        GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+        RUNNER_TEMP: dir,
+        GITHUB_STEP_SUMMARY: '/dev/null',
+        GITHUB_RUN_ID: '1',
+        GITHUB_RUN_ATTEMPT: '1',
+        PR_NUMBER: '7999',
+        RUN_URL: 'u',
+        VERIFY_RESULT: 'success',
+        DOWNLOAD_OUTCOME: 'success',
+        VERDICT: 'pass',
+        AGENT_VERDICT: '',
+        SKIP_REASON: '',
+        PREPARE_FAILURE_PHASE: '',
+        VERIFY_ASSETS_REMOTE: join(dir, 'nonexistent.git'),
+        ...env,
+      },
+    });
+    expect(res.status).toBe(0);
+    return readFileSync(out, 'utf8');
+  };
+
+  const fixture = () => {
+    const dir = mkdtempSync(join(tmpdir(), 'verify-publish2-'));
+    writeFileSync(
+      join(dir, 'gh'),
+      [
+        '#!/usr/bin/env bash',
+        'for a in "$@"; do case "$a" in body=@*) cp "${a#body=@}" "$GH_STUB_OUT";; esac; done',
+        'case "$*" in *user*--jq*) echo qwen-code-ci-bot ;; *comments*GET*) echo "[]" ;; esac',
+        'exit 0',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    const art = join(dir, 'work', 'verify-results', 'prA-verify-1');
+    mkdirSync(art, { recursive: true });
+    writeFileSync(join(art, 'report.md'), '## real report\n');
+    writeFileSync(
+      join(art, 'assertions.json'),
+      '{"pass":10,"fail":0,"total":10}',
+    );
+    writeFileSync(
+      join(dir, 'work', 'verify-results', 'prepare.log'),
+      'npm ERR boom\n',
+    );
+    return dir;
+  };
+
+  // The artifact download is continue-on-error, so the publisher can run
+  // with no results at all. It must say so instead of rendering the
+  // completed-method paragraph over an empty report.
+  it('does not claim the phases ran when the artifact never arrived', () => {
+    const dir = fixture();
+    try {
+      const body = render(dir, {
+        NAME: 'dl',
+        DOWNLOAD_OUTCOME: 'failure',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(body).toContain('results unavailable');
+      expect(body).not.toContain('A/B against the base build');
+      expect(body).not.toContain('merge-ready');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The prepare step classifies install/build failures; the comment must
+  // agree with that classification instead of always blaming the PR.
+  it('reports an infra-classified prepare failure as infrastructure', () => {
+    const dir = fixture();
+    try {
+      const infra = render(dir, {
+        NAME: 'infra',
+        VERDICT: 'infra-error',
+        PREPARE_FAILURE_PHASE: 'install',
+      });
+      expect(infra).toContain('infrastructure failure');
+      expect(infra).not.toContain('treated as a PR failure');
+
+      const real = render(dir, {
+        NAME: 'fail',
+        VERDICT: 'fail',
+        PREPARE_FAILURE_PHASE: 'install',
+      });
+      expect(real).toContain('treated as a PR failure');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Only bodies carrying findings are substantive; weak notices must not be
+  // snapshotted as the previous round's report.
+  it('marks only finding-bearing bodies as substantive', () => {
+    const dir = fixture();
+    const M = 'qwen-triage:verify-substantive';
+    try {
+      expect(render(dir, { NAME: 's1', AGENT_VERDICT: 'findings' })).toContain(
+        M,
+      );
+      expect(
+        render(dir, {
+          NAME: 's2',
+          VERDICT: 'fail',
+          PREPARE_FAILURE_PHASE: 'install',
+        }),
+      ).toContain(M);
+      expect(
+        render(dir, {
+          NAME: 's3',
+          VERDICT: 'infra-error',
+          PREPARE_FAILURE_PHASE: 'install',
+        }),
+      ).not.toContain(M);
+      expect(
+        render(dir, { NAME: 's4', DOWNLOAD_OUTCOME: 'failure' }),
+      ).not.toContain(M);
+      expect(
+        render(dir, {
+          NAME: 's5',
+          VERDICT: 'skipped',
+          SKIP_REASON: 'the PR is not open',
+        }),
+      ).not.toContain(M);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The follow-up snapshot must select the newest SUBSTANTIVE report, not
+  // the newest non-running comment: a cancelled notice passes that test.
+  it('snapshots the newest substantive report, not a weak notice', () => {
+    const resolve = step('Resolve PR and snapshot metadata');
+    // Run the workflow's own selector verbatim against a fixture shaped
+    // exactly like one page of `gh api --paginate` output, so no rewriting
+    // of the expression is needed.
+    const jqProgram = resolve.match(/jq -rs --arg m[^']*'([\s\S]*?end)'/)?.[1];
+    expect(jqProgram).toBeTruthy();
+    expect(jqProgram).toContain('contains($sub)');
+
+    const dir = mkdtempSync(join(tmpdir(), 'verify-snap-'));
+    try {
+      const comments = join(dir, 'c.json');
+      writeFileSync(
+        comments,
+        JSON.stringify([
+          {
+            id: 101,
+            user: { login: 'qwen-code-ci-bot' },
+            body: '<!-- qwen-triage:verify -->\n<!-- qwen-triage:verify-substantive -->\n\nREAL REPORT',
+          },
+          {
+            id: 102,
+            user: { login: 'qwen-code-ci-bot' },
+            body: '<!-- qwen-triage:verify -->\n\ncancelled notice',
+          },
+        ]),
+      );
+      const runJq = (program) =>
+        spawnSync(
+          'jq',
+          [
+            '-rs',
+            '--arg',
+            'm',
+            '<!-- qwen-triage:verify -->',
+            '--arg',
+            's',
+            '<!-- qwen-triage:verify-state=running -->',
+            '--arg',
+            'sub',
+            '<!-- qwen-triage:verify-substantive -->',
+            '--arg',
+            'bot',
+            'qwen-code-ci-bot',
+            program,
+            comments,
+          ],
+          { encoding: 'utf8' },
+        ).stdout.trim();
+
+      // The newest comment is the weak notice, but the snapshot must be the
+      // substantive report behind it.
+      expect(runJq(jqProgram)).toBe('102\tfalse\t101');
+      // Control: selecting "newest non-running comment" picks the notice.
+      expect(
+        runJq(
+          '[.[][] | select((.body | startswith($m)) and .user.login == $bot)] | map(select(.body | contains($s) | not)) | last | "\\(.id)"',
+        ),
+      ).toBe('102');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
