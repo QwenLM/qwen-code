@@ -35,6 +35,11 @@
   background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
 }
 
+.prRow:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 2px;
+}
+
 .prLine {
   display: flex;
   align-items: center;
