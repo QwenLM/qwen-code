@@ -143,8 +143,24 @@ jobs:
               ;;
             *) principals="" ;;
           esac
-          if [ -z "${principals// /}" ]; then
-            echo "No principal resolved for ${EVENT_NAME}; denying." >> "$GITHUB_STEP_SUMMARY"
+          # Validate each principal SEPARATELY, not the joined string: an
+          # empty ISSUE_AUTHOR (deleted account) would otherwise vanish in
+          # word splitting, the aggregate would still look non-empty, and
+          # only the commenter would be checked before the author's code runs.
+          for principal in $principals; do
+            if [ -z "$principal" ]; then
+              principals=''
+              break
+            fi
+          done
+          expected=1
+          [ "$IS_VERIFY" = true ] && expected=2
+          resolved_count=0
+          for principal in $principals; do
+            resolved_count=$((resolved_count + 1))
+          done
+          if [ -z "${principals// /}" ] || [ "$resolved_count" -lt "$expected" ]; then
+            echo "Could not resolve every required principal for ${EVENT_NAME} (got ${resolved_count}, need ${expected}); denying." >> "$GITHUB_STEP_SUMMARY"
             echo "should_run=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -217,6 +233,30 @@ jobs:
             "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
             -f content='eyes' > /dev/null ||
             echo "Failed to add verify acknowledgement reaction; continuing." >&2
+
+      # The verify job is ECS-only (it needs the container + the persistent
+      # pool). When the maintainer kill switch is set, that job would queue
+      # against a disabled pool forever, so say so here instead of leaving an
+      # acknowledged request hanging. The verify job's `if` excludes the same
+      # condition.
+      - name: 'Report disabled verify lane'
+        if: >-
+          steps.perm.outputs.should_run == 'true' &&
+          vars.MAINTAINER_ECS_RUNNER_DISABLED == 'true' &&
+          github.event_name == 'issue_comment' &&
+          github.event.issue.pull_request &&
+          (github.event.comment.body == '@qwen-code /verify' ||
+           startsWith(github.event.comment.body, '@qwen-code /verify '))
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          NUMBER: '${{ github.event.issue.number }}'
+        run: |-
+          printf -v BODY '%s\n\n%s' \
+            '**Sandboxed verification unavailable** — the maintainer runner pool is currently disabled, so `/verify` cannot run. Try again once the pool is back, or use `@qwen-code /triage` for the static review.' \
+            '**沙箱验证当前不可用** —— 维护者 runner 池已停用，`/verify` 无法运行。请待恢复后重试，或使用 `@qwen-code /triage` 进行静态评审。'
+          gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+            -f body="$BODY" >/dev/null ||
+            echo "Failed to post disabled-lane notice; continuing." >&2
 
       # A trusted maintainer asking /verify on a PR whose AUTHOR lacks write
       # would otherwise get pure silence: no ack, verify skipped,
@@ -1483,7 +1523,8 @@ jobs:
       github.event.issue.state == 'open' &&
       (github.event.comment.body == '@qwen-code /verify' ||
        startsWith(github.event.comment.body, '@qwen-code /verify ')) &&
-      needs.authorize.outputs.should_run == 'true'
+      needs.authorize.outputs.should_run == 'true' &&
+      vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'
     # One verification per PR at a time, mirroring the tmux job: concurrent
     # runs would share the same self-hosted workspace and clobber each other.
     # GitHub evaluates concurrency before the job `if`, but after `needs`, so
@@ -1622,12 +1663,42 @@ jobs:
           gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
             --json number,title,body,author,baseRefName,baseRefOid,headRefOid,commits \
             > "$RUNNER_TEMP/verify-context/pr.json"
+          # Re-authorize at execution time, not just at queue time. This job
+          # waits for a scarce runner, and in that window the author can lose
+          # access or push a new head. Re-check the author's permission now
+          # and record the head OID the checkout below must land on.
+          AUTHOR="$(jq -r '.author.login // empty' "$RUNNER_TEMP/verify-context/pr.json")"
+          if [ -z "$AUTHOR" ] ||
+             ! AUTHOR_PERM="$(gh api "repos/${GITHUB_REPOSITORY}/collaborators/${AUTHOR}/permission" --jq '.permission')"; then
+            echo "::error::Could not re-verify the PR author's permission at execution time; refusing to run."
+            echo "decision=skip" >> "$GITHUB_OUTPUT"
+            echo "verdict=skipped" >> "$GITHUB_OUTPUT"
+            echo "skip_reason=the PR author's write permission could not be re-verified at execution time" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          case "$AUTHOR_PERM" in
+            admin|maintain|write) ;;
+            *)
+              echo "::error::PR author ${AUTHOR} no longer has write access (${AUTHOR_PERM}); refusing to execute their code."
+              echo "decision=skip" >> "$GITHUB_OUTPUT"
+              echo "verdict=skipped" >> "$GITHUB_OUTPUT"
+              echo "skip_reason=the PR author no longer has write access to this repository, and /verify executes the author's code" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+          esac
+          echo "head_oid=$(jq -r '.headRefOid' "$RUNNER_TEMP/verify-context/pr.json")" >> "$GITHUB_OUTPUT"
           # Status comment with the live run link, upserted by marker so
           # re-runs reuse one comment; publish-verify rewrites the same
           # comment with the final report. Best-effort.
           MARKER='<!-- qwen-triage:verify -->'
-          printf -v BODY '%s\n\n%s\n\n%s' \
+          # A dedicated machine marker for the live status. Inferring the
+          # lifecycle state from prose would misread a REPORT that merely
+          # quotes the running sentence as a live status — and the next run
+          # would then overwrite that report.
+          STATUS_MARKER='<!-- qwen-triage:verify-state=running -->'
+          printf -v BODY '%s\n%s\n\n%s\n\n%s' \
             "$MARKER" \
+            "$STATUS_MARKER" \
             "🔬 **Sandboxed verification is running** — [watch live progress]($RUN_URL). The report will be posted here when the run completes." \
             "🔬 **沙箱验证正在运行** —— [查看实时进度]($RUN_URL)。运行结束后验证报告会发布在这里。"
           # Marker lookup, shared with publish-verify: only BOT-OWNED
@@ -1637,21 +1708,34 @@ jobs:
           # comment (403) and strand the run. `stale` marks a marker comment
           # that is a previous round's terminal report rather than a live
           # status.
-          BOT_LOGIN="$(gh api user --jq '.login' 2>/dev/null || echo '')"
-          EXISTING_META="$(
-            gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-              --method GET --paginate -F per_page=100 |
-              jq -rs --arg m "$MARKER" --arg bot "$BOT_LOGIN" \
-                '[.[][] | select((.body | startswith($m)) and ($bot == "" or .user.login == $bot))] | last
-                 | if . == null then "" else "\(.id)\t\(.body | contains("Sandboxed verification is running"))" end'
-          )" || EXISTING_META=''
+          # Fail CLOSED on an identity lookup failure: an empty bot login
+          # used to widen the filter to every user's comments, so one
+          # transient API error could point the bot at an attacker's comment.
+          if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
+            echo "::warning::Could not resolve the bot identity; posting a fresh status comment instead of reusing one."
+            BOT_LOGIN=''
+          fi
+          EXISTING_META=''
+          if [ -n "$BOT_LOGIN" ]; then
+            EXISTING_META="$(
+              gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+                --method GET --paginate -F per_page=100 |
+                jq -rs --arg m "$MARKER" --arg s "$STATUS_MARKER" --arg bot "$BOT_LOGIN" \
+                  '[.[][] | select((.body | startswith($m)) and .user.login == $bot)] as $mine
+                   | ($mine | last) as $latest
+                   | ($mine | map(select(.body | contains($s) | not)) | last) as $report
+                   | if $latest == null then ""
+                     else "\($latest.id)\t\($latest.body | contains($s))\t\($report.id // "")" end'
+            )" || EXISTING_META=''
+          fi
           EXISTING_ID="${EXISTING_META%%$'\t'*}"
-          if [ -n "$EXISTING_ID" ]; then
-            # A previous verify report exists: snapshot it for the agent so a
-            # re-run can carry each earlier finding's status
-            # (fixed/stands/superseded) instead of starting blind.
-            # Best-effort; the skill treats the file as untrusted input.
-            gh api "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
+          # Snapshot the newest SUBSTANTIVE report, not simply the newest
+          # marker comment: after a real report followed by a weak notice
+          # (cancelled / infra), snapshotting the notice would drop the prior
+          # round's unresolved findings from the follow-up table.
+          REPORT_ID="${EXISTING_META##*$'\t'}"
+          if [ -n "$REPORT_ID" ] && [ "$REPORT_ID" != "$EXISTING_META" ]; then
+            gh api "repos/$GITHUB_REPOSITORY/issues/comments/$REPORT_ID" \
               --jq '.body' > "$RUNNER_TEMP/verify-context/previous-report.md" 2>/dev/null ||
               rm -f "$RUNNER_TEMP/verify-context/previous-report.md"
           fi
@@ -1659,7 +1743,7 @@ jobs:
           # a previous round's REPORT with "running" would destroy evidence
           # that a cancelled or infra-failed re-run then never restores.
           case "$EXISTING_META" in
-            *$'\t'true)
+            *$'\t'true$'\t'*)
               gh api --method PATCH \
                 "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
                 -f body="$BODY" >/dev/null ||
@@ -1727,7 +1811,11 @@ jobs:
           elif [ -n "$HOOKS_ABS" ]; then
             echo "::warning::hooksPath resolves outside the git dir (${HOOKS_ABS}); not sweeping it."
           fi
-          rm -rf .qwen/tmp/* 2>/dev/null || true
+          # Remove the entry itself, never a glob BELOW it: PR code can
+          # replace .qwen/tmp with a symlink (verified: `rm -rf .qwen/tmp/*`
+          # then deletes the link TARGET's contents, outside the workspace,
+          # as root). `rm -rf` on a symlink unlinks the link only.
+          rm -rf .qwen/tmp 2>/dev/null || true
           # Stale result dirs from an interrupted run must not leak into this
           # run's artifact collection.
           find tmp -maxdepth 2 -type d -name '*-verify-*' -exec rm -rf {} + 2>/dev/null || true
@@ -1773,6 +1861,8 @@ jobs:
       # version by design; deleting the skill on base disables the lane.
       - name: 'Pin agent inputs from base'
         if: "steps.pr.outputs.decision == 'run'"
+        env:
+          EXPECTED_HEAD: '${{ steps.pr.outputs.head_oid }}'
         run: |-
           set -euo pipefail
           STAGE_DIR="$(mktemp -d)"
@@ -1781,7 +1871,16 @@ jobs:
           mv "$STAGE_DIR/.qwen" .qwen
           rm -rf "$STAGE_DIR"
           find tmp -maxdepth 2 -type d -name '*-verify-*' -exec rm -rf {} + 2>/dev/null || true
-          echo "agent inputs pinned from base $(git rev-parse --short 'HEAD^1')"
+          # The merge ref is resolved by the checkout above, AFTER this job
+          # queued for a scarce runner. Assert the head we authorized is the
+          # head we got: otherwise a push during the wait would have us
+          # execute code nobody checked.
+          ACTUAL_HEAD="$(git rev-parse 'HEAD^2')"
+          if [ "$ACTUAL_HEAD" != "$EXPECTED_HEAD" ]; then
+            echo "::error::PR head moved after authorization (authorized ${EXPECTED_HEAD}, checked out ${ACTUAL_HEAD}); refusing to execute it."
+            exit 1
+          fi
+          echo "agent inputs pinned from base $(git rev-parse --short 'HEAD^1'); head ${ACTUAL_HEAD} matches the authorized head"
 
       - name: 'Install and build PR app'
         id: 'prepare'
@@ -1820,16 +1919,35 @@ jobs:
           } > "$prepare_log" 2>&1
           set -e
 
+          # A failed install/build is only the PR's fault when it is
+          # deterministic and tree-attributable. Registry/proxy outages, a
+          # full disk, and OOM/signal kills are infrastructure — reporting
+          # those as a PR verdict tells the author their code is broken when
+          # it is not. Classify from the exit status and the log.
+          classify_failure() { # $1 status -> echoes fail|infra-error
+            local status="$1"
+            if [ "$status" -gt 128 ]; then
+              echo infra-error
+              return
+            fi
+            if grep -qiE 'ENOSPC|no space left|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up|network timeout|registry error|503 Service|502 Bad Gateway|Killed|out of memory|Cannot allocate memory' "$prepare_log" 2>/dev/null; then
+              echo infra-error
+            else
+              echo fail
+            fi
+          }
           if [ "${install_status:-0}" -ne 0 ]; then
-            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            KIND="$(classify_failure "$install_status")"
+            echo "verdict=$KIND" >> "$GITHUB_OUTPUT"
             echo "failure_phase=install" >> "$GITHUB_OUTPUT"
-            echo "::error::npm ci failed; reporting a verification fail verdict instead of an infrastructure failure."
+            echo "::error::npm ci failed (exit ${install_status}); classified as ${KIND}."
             exit 0
           fi
           if [ "${build_status:-0}" -ne 0 ]; then
-            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            KIND="$(classify_failure "$build_status")"
+            echo "verdict=$KIND" >> "$GITHUB_OUTPUT"
             echo "failure_phase=build" >> "$GITHUB_OUTPUT"
-            echo "::error::npm run build failed; reporting a verification fail verdict instead of an infrastructure failure."
+            echo "::error::npm run build failed (exit ${build_status}); classified as ${KIND}."
             exit 0
           fi
           echo "Install/build completed before verification." >> "$GITHUB_STEP_SUMMARY"
@@ -1855,20 +1973,59 @@ jobs:
             exit 1
           fi
 
-          # The prepare step just ran the PR's npm lifecycle scripts
-          # (postinstall and friends), which could have re-planted fake
-          # tmp/*-verify-* artifact dirs AFTER the pin step's sweep — and a
-          # zeroed timestamp in the name would sort AHEAD of the agent's real
-          # dir at collection time. Sweep again here, after the last
-          # PR-controlled process and before the agent starts: from this
-          # point on, only the agent writes those dirs. (A steered agent can
-          # still forge its own artifacts — that residual is why the report
-          # is advisory and never a review.)
+          # ── Re-establish the trust boundary after the PR's own code ran ──
+          # `npm ci`/`npm run build` executed PR-authored lifecycle scripts as
+          # `node`. Everything below undoes what those could have left behind,
+          # in order, BEFORE the agent starts.
+
+          # 1. Kill anything still running as node. A detached postinstall
+          #    child can outlive its step, wait for the sweeps below, and then
+          #    re-plant artifacts or tamper with the agent's inputs. Without
+          #    this, every one-shot cleanup here is racing a live process.
+          pkill -KILL -u node 2>/dev/null || true
+          for _ in 1 2 3; do
+            pgrep -u node >/dev/null 2>&1 || break
+            sleep 1
+            pkill -KILL -u node 2>/dev/null || true
+          done
+          if pgrep -u node >/dev/null 2>&1; then
+            echo "::error::Processes owned by the build user survived; refusing to start the agent."
+            exit 1
+          fi
+
+          # 2. Re-pin the verifier itself. The prepare step chowned the
+          #    workspace to node, so a lifecycle script could have rewritten
+          #    the base-pinned skill that defines /verify-pr. Restore it from
+          #    the base commit again and make it root-owned and read-only, so
+          #    the agent (running as node) loads instructions the PR cannot
+          #    have touched.
+          STAGE_DIR="$(mktemp -d)"
+          git archive 'HEAD^1' -- .qwen | tar -x -C "$STAGE_DIR"
+          rm -rf .qwen
+          mv "$STAGE_DIR/.qwen" .qwen
+          rm -rf "$STAGE_DIR"
+          chown -R root:root .qwen
+          chmod -R a-w,a+rX .qwen
+
+          # 3. Fake artifact dirs planted during the build: a zeroed
+          #    timestamp sorts AHEAD of the agent's real dir at collection
+          #    time. (A steered agent can still forge its own artifacts —
+          #    that residual is why the report is advisory, never a review.)
           find tmp -maxdepth 2 -type d -name '*-verify-*' -exec rm -rf {} + 2>/dev/null || true
-          # Same for the upload staging dir: it is flushed before npm ci, but
-          # the lifecycle scripts that ran since could have planted files
-          # there too, and everything in it is uploaded verbatim. Recreate it
-          # empty (prepare.log is re-copied below only if it exists).
+          # 4. A fresh agent home, created after the lifecycle processes are
+          #    gone: qwen loads user-scope file commands from $HOME/.qwen, and
+          #    a postinstall could have written
+          #    /home/node/.qwen/commands/verify-pr.toml to shadow the
+          #    base-pinned skill with attacker-authored instructions.
+          AGENT_HOME="${RUNNER_TEMP:?}/verify-agent-home"
+          rm -rf "$AGENT_HOME"
+          mkdir -p "$AGENT_HOME"
+          chown node:node "$AGENT_HOME"
+
+          # 5. Same for the upload staging dir: it is flushed before npm ci,
+          #    but the lifecycle scripts that ran since could have planted
+          #    files there too, and everything in it is uploaded verbatim.
+          #    Recreate it empty (prepare.log is re-copied below if present).
           if [ -f "$RUNNER_TEMP/verify-results/prepare.log" ]; then
             cp "$RUNNER_TEMP/verify-results/prepare.log" "$RUNNER_TEMP/prepare.log.keep"
           fi
@@ -1961,6 +2118,14 @@ jobs:
             proxy_script="${RUNNER_TEMP:-/tmp}/qwen-openai-proxy.js"
             port_file="${RUNNER_TEMP:-/tmp}/qwen-openai-proxy.port"
             proxy_nonce="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+            # Bearer the agent must present. Without it the loopback relay is
+            # an unauthenticated signer for the REAL model credential: any
+            # process on the runner (a detached lifecycle child scanning
+            # localhost) could spend it. Not a full boundary — a command the
+            # agent itself launches inherits this env — but it removes the
+            # blind-scan path. Exported for the agent env below.
+            PROXY_TOKEN="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+            export PROXY_TOKEN
             rm -f "$port_file"
             cat > "$proxy_script" <<'NODE'
           const http = require('node:http');
@@ -1971,7 +2136,8 @@ jobs:
           const baseUrl = process.env.REVIEW_OPENAI_BASE_URL;
           const apiKey = process.env.REVIEW_OPENAI_API_KEY;
           const nonce = process.env.QWEN_PROXY_NONCE;
-          if (!baseUrl || !apiKey || !portFile || !nonce) {
+          const token = process.env.PROXY_TOKEN;
+          if (!baseUrl || !apiKey || !portFile || !nonce || !token) {
             console.error('missing proxy configuration');
             process.exit(1);
           }
@@ -2008,6 +2174,14 @@ jobs:
                 return;
               }
 
+              // Only the agent knows this run's token; anything else on the
+              // runner that finds the port cannot get the key used.
+              if (req.headers.authorization !== `Bearer ${token}`) {
+                res.writeHead(401, { 'content-type': 'text/plain' });
+                res.end('proxy: unauthorized\n');
+                return;
+              }
+
               const headers = new Headers(req.headers);
               headers.delete('host');
               headers.delete('content-length');
@@ -2034,9 +2208,11 @@ jobs:
                   return;
                 }
                 throw error;
-              } finally {
-                clearTimeout(timer);
               }
+              // NOTE: the timer is deliberately NOT cleared here. fetch()
+              // resolves on HEADERS, so clearing now would let an upstream
+              // that stalls mid-body hang until the outer 25-minute
+              // watchdog. It is cleared when the body ends or errors below.
               const responseHeaders = {};
               upstream.headers.forEach((value, key) => {
                 const lower = key.toLowerCase();
@@ -2046,8 +2222,19 @@ jobs:
               });
               res.writeHead(upstream.status, responseHeaders);
               if (upstream.body) {
-                Readable.fromWeb(upstream.body).pipe(res);
+                const body = Readable.fromWeb(upstream.body);
+                const done = () => clearTimeout(timer);
+                body.on('end', done);
+                body.on('error', done);
+                // A downstream disconnect must abort the upstream request
+                // too, or the stalled fetch keeps the socket alive.
+                res.on('close', () => {
+                  done();
+                  controller.abort();
+                });
+                body.pipe(res);
               } else {
+                clearTimeout(timer);
                 res.end();
               }
             } catch (error) {
@@ -2119,7 +2306,11 @@ jobs:
           # just burn critical-path time.
           chown -R node:node "$RUNNER_TEMP/verify-results" "$RUNNER_TEMP/verify-context"
           QWEN_ENV=(
-            "HOME=/home/node"
+            # Fresh home (created above, after the lifecycle processes were
+            # killed) so user-scope file commands planted in /home/node/.qwen
+            # cannot shadow the base-pinned /verify-pr skill.
+            "HOME=$AGENT_HOME"
+            "QWEN_HOME=$AGENT_HOME/.qwen"
             "USER=node"
             "SHELL=/bin/bash"
             "PATH=$PATH"
@@ -2130,7 +2321,7 @@ jobs:
             "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
             "GITHUB_TOKEN="
             "GH_TOKEN="
-            "OPENAI_API_KEY=qwen-loopback-proxy"
+            "OPENAI_API_KEY=$PROXY_TOKEN"
             "OPENAI_BASE_URL=$LOCAL_OPENAI_BASE_URL"
             "QWEN_VERIFY_CONTEXT=$RUNNER_TEMP/verify-context/pr.json"
             "NO_PROXY=${NO_PROXY:-}"
@@ -2146,6 +2337,10 @@ jobs:
             QWEN_ENV+=("OPENAI_MODEL=$OPENAI_MODEL")
           fi
 
+          # Elapsed time of the WATCHDOG CHILD only: $SECONDS includes proxy
+          # and network setup, so an OOM kill late in the step could cross a
+          # global threshold and be mislabeled a configured timeout.
+          AGENT_START=$SECONDS
           set +e
           timeout --kill-after=10s 25m runuser -u node -- env -i "${QWEN_ENV[@]}" "${QWEN_CMD[@]}" \
             --prompt "/verify-pr ${PR_NUMBER} --repo ${REPOSITORY}" \
@@ -2170,8 +2365,9 @@ jobs:
           # 137 is ambiguous: the watchdog escalating past --kill-after looks
           # identical to an OOM kill. Use the elapsed budget to tell them
           # apart instead of labelling every 137 a crash.
+          AGENT_ELAPSED=$((SECONDS - AGENT_START))
           WATCHDOG_FIRED=false
-          if [ "$EXIT_CODE" -eq 137 ] && [ "$SECONDS" -ge 1500 ]; then
+          if [ "$EXIT_CODE" -eq 137 ] && [ "$AGENT_ELAPSED" -ge 1500 ]; then
             WATCHDOG_FIRED=true
           fi
           if [ "$EXIT_CODE" -eq 124 ] || [ "$WATCHDOG_FIRED" = true ]; then
@@ -2234,7 +2430,7 @@ jobs:
           set -uo pipefail
           [ -e .git ] || exit 0
           find tmp -maxdepth 2 -type d -name '*-verify-*' -exec rm -rf {} + 2>/dev/null || true
-          rm -rf .qwen/tmp/* 2>/dev/null || true
+          rm -rf .qwen/tmp 2>/dev/null || true
           git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | while IFS= read -r wt; do
             case "$wt" in
               "${GITHUB_WORKSPACE:-$PWD}"/tmp/*) git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt" ;;
@@ -2251,12 +2447,16 @@ jobs:
   publish-verify:
     needs: ['verify']
     if: "always() && needs.verify.result != 'skipped'"
-    # Same per-PR group as the verify job: the verify job releases its slot
-    # when it ends, so without this a second /verify could snapshot and
-    # replace run A's status while publisher A is still pending, and the two
-    # publishers would then race over one marker comment.
+    # Per-RUN group, deliberately not per-PR. A GitHub concurrency group
+    # holds at most one running plus one pending job, and a newer pending job
+    # REPLACES the older one even with cancel-in-progress: false — so a
+    # per-PR group here would let a second /verify cancel a completed run's
+    # pending publisher and drop its report entirely. Overlap between
+    # publishers is instead made safe by the marker discipline below
+    # (bot-owned + prefix match, live-status-only reuse, post-fresh
+    # fallback), which is a correctness property rather than a scheduling one.
     concurrency:
-      group: "${{ format('{0}-verify-{1}', github.workflow, github.event.issue.number) }}"
+      group: "${{ format('{0}-publish-verify-{1}', github.workflow, github.run_id) }}"
       cancel-in-progress: false
     runs-on: 'ubuntu-latest'
     permissions:
@@ -2308,17 +2508,41 @@ jobs:
             # escaping work itself; iconv -c drops a UTF-8 sequence the byte
             # cut split (the mandated 中文 summary makes that likely) instead
             # of shipping a broken character.
-            if ! esc="$(
+            # Materialize the escaped text and let `head` read the FILE, so
+            # no producer can take SIGPIPE at the cut. (Measured: the old
+            # `printf | head` chain self-healed even at ~2 MB of escaped
+            # content — the first capture already held the truncated value,
+            # so the `||` fallback re-truncated something short. Correct by
+            # accident is not a property to keep.)
+            local esc_file="${TMPDIR:-/tmp}/verify-emit-$$"
+            if ! (
               set -o pipefail
-              head -c 400000 "$file" | tr -d '\000' | html_escape
-            )"; then
+              head -c 400000 "$file" | tr -d '\000' | html_escape > "$esc_file"
+            ); then
               echo "::warning::emit_block failed while rendering $summary; see run artifacts." >&2
+              rm -f "$esc_file"
               esc='<em>Content could not be rendered; see run artifacts.</em>'
-            elif [ "$(printf '%s' "$esc" | wc -c)" -gt "$max" ] ||
+            else
+              if [ "$(wc -c < "$esc_file")" -gt "$max" ] ||
                  [ "$(wc -c < "$file")" -gt 400000 ]; then
-              truncated=$'\n\n...truncated -- full content in the run artifacts.'
-              esc="$(printf '%s' "$esc" | head -c "$max" | iconv -c -f UTF-8 -t UTF-8 2>/dev/null)" ||
-                esc="$(printf '%s' "$esc" | head -c "$max")"
+                truncated=$'\n\n...truncated -- full content in the run artifacts.'
+              fi
+              # Cut on a CHARACTER boundary. `iconv -c` is not portable here:
+              # on BSD/macOS it warns and passes the incomplete trailing
+              # sequence through unchanged (measured), so the comment body
+              # would ship a broken character — likely, given the mandated
+              # 中文 summary. Node is present on every runner that runs this
+              # job; decode the truncated bytes and drop a replacement
+              # character the cut itself produced at the end.
+              esc="$(node -e '
+                const fs = require("node:fs");
+                const [file, max] = process.argv.slice(1);
+                const buf = fs.readFileSync(file).subarray(0, Number(max));
+                const text = new TextDecoder("utf-8").decode(buf);
+                process.stdout.write(text.replace(/�+$/, ""));
+              ' "$esc_file" "$max")" ||
+                esc="$(head -c "$max" "$esc_file")"
+              rm -f "$esc_file"
             fi
             printf '<details>\n<summary>%s</summary>\n\n<pre><code>\n' "$summary_html"
             printf '%s%s\n' "$esc" "$truncated"
@@ -2495,13 +2719,24 @@ jobs:
             if [ -n "$ASSERTIONS_FILE" ]; then
               # Numbers only — coerce anything non-numeric to 0 so untrusted
               # JSON cannot smuggle text into the comment body.
+              # Full-object validation, not per-field coercion: {"fail":0}
+              # used to render "0 passed · 0 failed · 0 total" and still
+              # count as evidence, and {pass:1,fail:0,total:0} was accepted
+              # despite being internally inconsistent. Require three
+              # non-negative integers, a positive total, and total == pass +
+              # fail; anything else yields no line and (below) no trusted
+              # agent verdict.
               ASSERT_LINE="$(
-                jq -r 'if type == "object"
-                       then ([.pass, .fail, .total]
-                             | map(if type == "number" then floor else 0 end)
-                             | "Scripted assertions: \(.[0]) passed · \(.[1]) failed · \(.[2]) total")
+                jq -r 'if (type == "object")
+                          and ([.pass, .fail, .total] | all(type == "number" and . >= 0 and . == floor))
+                          and (.total > 0)
+                          and (.total == .pass + .fail)
+                       then "Scripted assertions: \(.pass) passed · \(.fail) failed · \(.total) total"
                        else empty end' "$ASSERTIONS_FILE" 2>/dev/null || true
               )"
+              if [ -z "$ASSERT_LINE" ]; then
+                echo "::warning::assertions.json missing or inconsistent; not treating it as evidence."
+              fi
             fi
             # The agent's own verdict is only honoured for a run that
             # actually completed AND left consistent evidence: an early
@@ -2510,7 +2745,9 @@ jobs:
             # headline comes from the process outcome.
             TRUST_AGENT_VERDICT=false
             if [ "${VERDICT:-}" = 'pass' ] && [ -n "$REPORT" ] && [ -n "$ASSERT_LINE" ]; then
-              ASSERT_FAIL="$(jq -r 'if type == "object" and (.fail | type) == "number" then (.fail | floor) else 1 end' "$ASSERTIONS_FILE" 2>/dev/null || echo 1)"
+              # ASSERT_LINE is only non-empty when the whole object
+              # validated above, so .fail is known to be a sane integer here.
+              ASSERT_FAIL="$(jq -r '.fail' "$ASSERTIONS_FILE" 2>/dev/null || echo 1)"
               case "${AGENT_VERDICT:-}" in
                 merge-ready) [ "$ASSERT_FAIL" = '0' ] && TRUST_AGENT_VERDICT=true ;;
                 findings|blocked|inconclusive) TRUST_AGENT_VERDICT=true ;;
@@ -2573,20 +2810,26 @@ jobs:
           # comments STARTING with the marker are candidates, so a marker
           # pasted by any user cannot divert the bot into PATCHing (and
           # failing on) someone else's comment.
+          # Fail CLOSED on identity failure (an empty login previously
+          # widened the filter to every user's comments), and match the
+          # live-status MARKER rather than prose a report could quote.
           EXISTING='' EXISTING_RUNNING='false'
-          BOT_LOGIN="$(gh api user --jq '.login' 2>/dev/null || echo '')"
-          if EXISTING_META="$(
+          if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
+            echo "::warning::Could not resolve the bot identity; posting a fresh comment instead of reusing one."
+            BOT_LOGIN=''
+          fi
+          if [ -n "$BOT_LOGIN" ] && EXISTING_META="$(
             gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
               --method GET \
               --paginate \
               -F per_page=100 \
               | jq -sr --arg bot "$BOT_LOGIN" \
-                '[.[][] | select((.body | startswith("<!-- qwen-triage:verify -->")) and ($bot == "" or .user.login == $bot))] | last
-                 | if . == null then "" else "\(.id)\t\(.body | contains("Sandboxed verification is running"))" end'
+                '[.[][] | select((.body | startswith("<!-- qwen-triage:verify -->")) and .user.login == $bot)] | last
+                 | if . == null then "" else "\(.id)\t\(.body | contains("<!-- qwen-triage:verify-state=running -->"))" end'
           )"; then
             EXISTING="${EXISTING_META%%$'\t'*}"
             case "$EXISTING_META" in *$'\t'true) EXISTING_RUNNING='true' ;; esac
-          else
+          elif [ -n "$BOT_LOGIN" ]; then
             echo "::warning::Failed to look up existing verify comments; will create a new one."
           fi
           # A failed PATCH (comment deleted, or ownership changed under us)

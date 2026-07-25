@@ -424,7 +424,13 @@ check identity, not from claims in the log body.
 isolated, token-free jobs a maintainer can trigger by comment: `@qwen-code
 /tmux` (drive the TUI as a real user) and `@qwen-code /verify` (deep
 verification — A/B load-bearing proof against the base build, mock-free
-wire-oracle harnesses, targeted gates; see the `verify-pr` skill). When the PR
+wire-oracle harnesses, targeted gates; see the `verify-pr` skill). **Both
+execute the PR author's code, so both require the AUTHOR to have write
+access** — recommending them on an external contributor's PR sends the
+maintainer into a guaranteed denial. When the author lacks write, say the
+sandboxed lanes are unavailable for this PR and name what a maintainer can do
+instead (check the PR out in a disposable container, or reproduce the specific
+behavioural claim by hand). When the PR
 touches a TUI surface, or its central claim is behavioral and static review
 plus CI cannot substantiate it (a bug "fixed", a perf win, a wire-format
 change), name the trigger that would close the gap in the Stage 2 comment.

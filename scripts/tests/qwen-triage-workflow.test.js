@@ -699,3 +699,347 @@ describe('qwen-triage verify hardening', () => {
     expect(publishStep).toContain('PARTIAL_EN');
   });
 });
+
+describe('qwen-triage verify hardening round 2', () => {
+  const permScript = () => {
+    const body = step('Check principal write permission').match(
+      /run: \|-\n([\s\S]*)$/,
+    )?.[1];
+    return body.replace(/^ {10}/gm, '');
+  };
+
+  // Execute the gate rather than substring-matching it: substring checks
+  // stay green if lowercasing becomes disconnected from the value the
+  // `case` actually reads, and Actions still admits `@QWEN-CODE /VERIFY`.
+  it('routes uppercase commands to the same principals as lowercase', () => {
+    const script = permScript();
+    const dir = mkdtempSync(join(tmpdir(), 'verify-case-'));
+    writeFileSync(
+      join(dir, 'gh'),
+      [
+        '#!/usr/bin/env bash',
+        'u="${2##*collaborators/}"; u="${u%%/*}"',
+        'case "$u" in',
+        '  alice) echo write ;;',
+        '  bob) echo admin ;;',
+        '  mallory) echo none ;;',
+        '  *) echo "HTTP 404" >&2; exit 1 ;;',
+        'esac',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+    let n = 0;
+    const gate = (commentBody, author, commenter) => {
+      const out = join(dir, `o${n++}`);
+      writeFileSync(out, '');
+      spawnSync('bash', ['-c', script], {
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GH_TOKEN: 'x',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          GITHUB_STEP_SUMMARY: '/dev/null',
+          GITHUB_OUTPUT: out,
+          EVENT_NAME: 'issue_comment',
+          COMMENT_BODY: commentBody,
+          ISSUE_AUTHOR: author,
+          COMMENT_USER: commenter,
+          PR_NUMBER: '1',
+          TMUX_PR: '',
+        },
+        encoding: 'utf8',
+      });
+      return readFileSync(out, 'utf8');
+    };
+    try {
+      // An untrusted author must be denied however the command is cased.
+      for (const cmd of [
+        '@qwen-code /verify',
+        '@QWEN-CODE /VERIFY',
+        '@Qwen-Code /Verify',
+      ]) {
+        expect(gate(cmd, 'mallory', 'bob')).toContain('should_run=false');
+      }
+      // ...and /TMUX keeps its author-only routing when uppercased.
+      expect(gate('@QWEN-CODE /TMUX', 'alice', 'mallory')).toContain(
+        'should_run=true',
+      );
+      expect(gate('@QWEN-CODE /TMUX', 'mallory', 'alice')).toContain(
+        'should_run=false',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // An empty principal (deleted author) must not vanish in word splitting
+  // and leave only the commenter checked.
+  it('denies /verify when a required principal cannot be resolved', () => {
+    const script = permScript();
+    const dir = mkdtempSync(join(tmpdir(), 'verify-empty-'));
+    writeFileSync(join(dir, 'gh'), '#!/usr/bin/env bash\necho admin\n', {
+      mode: 0o755,
+    });
+    const out = join(dir, 'o');
+    writeFileSync(out, '');
+    try {
+      spawnSync('bash', ['-c', script], {
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GH_TOKEN: 'x',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          GITHUB_STEP_SUMMARY: '/dev/null',
+          GITHUB_OUTPUT: out,
+          EVENT_NAME: 'issue_comment',
+          COMMENT_BODY: '@qwen-code /verify',
+          ISSUE_AUTHOR: '',
+          COMMENT_USER: 'bob',
+          PR_NUMBER: '1',
+          TMUX_PR: '',
+        },
+        encoding: 'utf8',
+      });
+      expect(readFileSync(out, 'utf8')).toContain('should_run=false');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Execute the docs-only classifier: a refactor could drop the behavioral
+  // exception or restore a producer-to-`grep -q` pipeline (which makes a
+  // long list with an early code file classify as n/a via SIGPIPE) while
+  // every substring test stays green.
+  it('classifies changed-file lists without a SIGPIPE false negative', () => {
+    const resolve = step('Resolve PR and snapshot metadata');
+    const body = resolve.match(/run: \|-\n([\s\S]*)$/)?.[1];
+    const full = body.replace(/^ {10}/gm, '');
+    const start = full.indexOf('# Behavioral paths first');
+    const end = full.indexOf('# Snapshot PR metadata');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const classifier = `set -uo pipefail\nfiles="$1"\n${full
+      .slice(start, end)
+      .replace(/echo "::notice::[^\n]*\n/g, '')
+      .replace(/echo "verdict=n\/a" >> "\$GITHUB_OUTPUT"/, 'echo NA')
+      .replace(/echo "decision=na" >> "\$GITHUB_OUTPUT"/, '')}\necho RUN`;
+    const classify = (files) =>
+      spawnSync('bash', ['-c', classifier, '_', files], {
+        encoding: 'utf8',
+        maxBuffer: 20 * 1024 * 1024,
+      })
+        .stdout.trim()
+        .split('\n')
+        .pop();
+
+    const bigEarlyCode = [
+      'packages/core/src/a.ts',
+      ...Array.from({ length: 60000 }, (_, i) => `docs/f${i}.md`),
+    ].join('\n');
+    expect(classify(bigEarlyCode)).toBe('RUN');
+    expect(classify('docs/a.md\nREADME.md\nassets/x.png')).toBe('NA');
+    expect(classify('.qwen/skills/verify-pr/SKILL.md')).toBe('RUN');
+    expect(classify('.github/workflows/x.yml')).toBe('RUN');
+    expect(classify('scripts/lint.js')).toBe('RUN');
+  });
+
+  // Symlink stripping must happen AFTER the artifacts are copied in;
+  // moving it earlier would keep a presence-only assertion green while
+  // copied symlinks still reach upload-artifact, which dereferences them.
+  it('strips symlinks after collecting artifacts, not before', () => {
+    const runStep = step('Run verification agent');
+    const copy = runStep.indexOf(
+      '-exec cp -r {} "$RUNNER_TEMP/verify-results/"',
+    );
+    const strip = runStep.indexOf('-type l -delete');
+    expect(copy).toBeGreaterThan(-1);
+    expect(strip).toBeGreaterThan(copy);
+  });
+
+  // The trust boundary is re-established after the PR's lifecycle scripts:
+  // kill leftover build processes, re-pin the verifier root-owned, and give
+  // the agent a fresh home before it starts.
+  it('re-establishes the verifier trust boundary after the build', () => {
+    const runStep = step('Run verification agent');
+    const kill = runStep.indexOf('pkill -KILL -u node');
+    const repin = runStep.indexOf("git archive 'HEAD^1' -- .qwen");
+    const chown = runStep.indexOf('chown -R root:root .qwen');
+    const home = runStep.indexOf('verify-agent-home');
+    const launch = runStep.indexOf('QWEN_CMD=(');
+    for (const i of [kill, repin, chown, home, launch]) {
+      expect(i).toBeGreaterThan(-1);
+    }
+    expect(repin).toBeGreaterThan(kill);
+    expect(chown).toBeGreaterThan(repin);
+    expect(launch).toBeGreaterThan(home);
+    // Killing is not enough on its own: surviving build processes must
+    // fail the step rather than race the sweeps that follow.
+    expect(runStep).toContain('pgrep -u node');
+    expect(runStep).toContain('refusing to start the agent');
+    expect(runStep).toContain('"HOME=$AGENT_HOME"');
+    // The proxy must require this run's bearer, not just a fixed dummy key.
+    expect(runStep).toContain('"OPENAI_API_KEY=$PROXY_TOKEN"');
+    expect(runStep).toContain(
+      'req.headers.authorization !== `Bearer ${token}`',
+    );
+  });
+
+  // Cleanups must not glob below a PR-writable path: .qwen/tmp can be a
+  // symlink, and `rm -rf .qwen/tmp/*` then deletes the target's contents.
+  it('removes .qwen/tmp itself rather than globbing through it', () => {
+    // Strip comment lines: the fix's own comment quotes the unsafe form.
+    const code = job('verify')
+      .split('\n')
+      .filter((l) => !/^\s*#/.test(l))
+      .join('\n');
+    expect(code).not.toContain('rm -rf .qwen/tmp/*');
+    expect(code).toContain('rm -rf .qwen/tmp ');
+  });
+
+  // Status/report lifecycle is keyed on a machine marker, and identity
+  // failures must not widen the ownership filter to every user.
+  it('keys the status comment on a marker and fails closed on identity', () => {
+    for (const name of [
+      'Resolve PR and snapshot metadata',
+      'Post verification report comment',
+    ]) {
+      const s = step(name);
+      expect(s).toContain('qwen-triage:verify-state=running');
+      expect(s).not.toContain('$bot == ""');
+      expect(s).toContain('.user.login == $bot');
+    }
+  });
+
+  // The evidence-hosting path carries the untrusted-image checks; exercise
+  // it end to end against a bare local remote.
+  it('hosts only valid, unique, in-limit PNGs and degrades to text', () => {
+    const publishStep = step('Post verification report comment');
+    const script = publishStep
+      .match(/run: \|-\n([\s\S]*)$/)?.[1]
+      .replace(/^ {10}/gm, '');
+    const dir = mkdtempSync(join(tmpdir(), 'verify-imgs-'));
+    const sh = (cmd, opts = {}) =>
+      spawnSync('bash', ['-c', cmd], { encoding: 'utf8', ...opts });
+    try {
+      // A bare remote with a pr-assets branch, plus a gh stub.
+      sh(`git init -q --bare "${dir}/assets.git"`);
+      sh(
+        `mkdir -p "${dir}/seed" && cd "${dir}/seed" && git init -q && git checkout -q -b pr-assets && echo s > s.txt && git add . && git -c user.name=t -c user.email=t@t commit -qm s && git push -q "${dir}/assets.git" pr-assets`,
+      );
+      writeFileSync(
+        join(dir, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          'for a in "$@"; do case "$a" in body=@*) cp "${a#body=@}" "$GH_STUB_OUT";; esac; done',
+          'case "$*" in *user*--jq*) echo qwen-code-ci-bot ;; *comments*GET*) echo "[]" ;; esac',
+          'exit 0',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      const work = join(dir, 'work');
+      const art = join(work, 'verify-results', 'prA-verify-1');
+      mkdirSync(join(art, 'evidence'), { recursive: true });
+      mkdirSync(join(work, 'verify-results', 'prB-verify-2', 'evidence'), {
+        recursive: true,
+      });
+      const png = (p, bytes) =>
+        writeFileSync(
+          p,
+          Buffer.concat([
+            Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+            Buffer.alloc(bytes),
+          ]),
+        );
+      png(join(art, 'evidence', '01-ab.png'), 500);
+      // Same sanitized name in a second artifact dir -> must not duplicate.
+      png(
+        join(work, 'verify-results', 'prB-verify-2', 'evidence', '01-ab.png'),
+        500,
+      );
+      writeFileSync(join(art, 'evidence', '02-fake.png'), 'not a png');
+      png(join(art, 'evidence', '03-big.png'), 2 * 1024 * 1024);
+      png(join(art, 'evidence', '04-edge.png'), 2 * 1024 * 1024 - 9);
+      writeFileSync(join(art, 'report.md'), '## r\n');
+
+      const out = join(dir, 'comment.md');
+      const res = sh(script, {
+        cwd: work,
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GH_STUB_OUT: out,
+          GH_TOKEN: 'x',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          RUNNER_TEMP: dir,
+          GITHUB_STEP_SUMMARY: '/dev/null',
+          GITHUB_RUN_ID: '77',
+          GITHUB_RUN_ATTEMPT: '1',
+          PR_NUMBER: '7999',
+          RUN_URL: 'u',
+          VERIFY_RESULT: 'success',
+          VERDICT: 'pass',
+          AGENT_VERDICT: 'findings',
+          SKIP_REASON: '',
+          PREPARE_FAILURE_PHASE: '',
+          VERIFY_ASSETS_REMOTE: `${dir}/assets.git`,
+        },
+      });
+      expect(res.status).toBe(0);
+      const hosted = sh(
+        `git -C "${dir}/assets.git" ls-tree -r --name-only pr-assets | grep verify/ || true`,
+      )
+        .stdout.trim()
+        .split('\n')
+        .filter(Boolean);
+      // Valid + at the exact 2 MiB boundary are hosted; the text file, the
+      // oversize file and the duplicate name are not.
+      expect(hosted.map((p) => p.split('/').pop()).sort()).toEqual([
+        '01-ab.png',
+        '04-edge.png',
+      ]);
+      const comment = readFileSync(out, 'utf8');
+      expect(comment).toContain('![01-ab](');
+      expect(comment).not.toContain('02-fake');
+      expect(comment).toContain('did not pass the hosting checks');
+
+      // No reachable pr-assets branch -> text-only, never an aborted report.
+      sh(`git init -q --bare "${dir}/empty.git"`);
+      const out2 = join(dir, 'comment2.md');
+      const res2 = sh(script, {
+        cwd: work,
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GH_STUB_OUT: out2,
+          GH_TOKEN: 'x',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          RUNNER_TEMP: dir,
+          GITHUB_STEP_SUMMARY: '/dev/null',
+          GITHUB_RUN_ID: '78',
+          GITHUB_RUN_ATTEMPT: '1',
+          PR_NUMBER: '7999',
+          RUN_URL: 'u',
+          VERIFY_RESULT: 'success',
+          VERDICT: 'pass',
+          AGENT_VERDICT: 'findings',
+          SKIP_REASON: '',
+          PREPARE_FAILURE_PHASE: '',
+          VERIFY_ASSETS_REMOTE: `${dir}/empty.git`,
+        },
+      });
+      expect(res2.status).toBe(0);
+      const comment2 = readFileSync(out2, 'utf8');
+      expect(comment2).toContain('Sandboxed verification');
+      expect(comment2).not.toContain('Evidence images');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Only a validated assertions object counts as evidence.
+  it('rejects inconsistent assertions objects', () => {
+    const publishStep = step('Post verification report comment');
+    expect(publishStep).toContain('.total == .pass + .fail');
+    expect(publishStep).toContain('all(type == "number" and . >= 0');
+  });
+});
