@@ -11,6 +11,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
+  existsSync,
   mkdtempSync,
   mkdirSync,
   readFileSync,
@@ -755,5 +756,17 @@ describe('submit receipt (producer half of the audit contract)', () => {
     runSubmit(authorizedPost());
     const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
     expect(receipt.reviewIds).toEqual([7, 8]);
+  });
+
+  it('writes atomically, leaving no .tmp sibling behind', () => {
+    // The receipt is written to a sibling tmp then renamed over the target, so
+    // a crash mid-write can never leave a truncated receipt (which parseReceiptIds
+    // would read as [] and drop every accumulated id). A successful submit
+    // consumes the tmp via the rename — its lingering presence would mean the
+    // rename never happened.
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
+    runSubmit(authorizedPost());
+    expect(readFileSync(receiptPath(), 'utf8')).toContain('"reviewIds"');
+    expect(existsSync(`${receiptPath()}.tmp`)).toBe(false);
   });
 });

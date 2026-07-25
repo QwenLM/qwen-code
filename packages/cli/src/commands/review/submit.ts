@@ -44,7 +44,7 @@
 // caller's.
 
 import type { CommandModule } from 'yargs';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { ghWithInput, setGhHost } from './lib/gh.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
@@ -563,11 +563,22 @@ export function runSubmit(args: SubmitArgs): void {
       const priorIds = readReceiptIds(receiptPath);
       const reviewIds = [...new Set([...priorIds, reviewId])];
       mkdirSync(REVIEW_TMP_DIR, { recursive: true });
+      // Write a sibling tmp then rename over the target: renameSync is atomic
+      // on every filesystem Node supports, so a crash or an interleaved read
+      // mid-write can never leave a truncated receipt. That matters here
+      // because parseReceiptIds tolerates torn JSON by returning [] — which
+      // would silently drop ALL prior accumulated ids and make cleanup flag an
+      // earlier sanctioned review as a bypass. (The read-modify-write above is
+      // still not serialized against a truly concurrent submit, but that needs
+      // two processes on one PR receipt — near-zero in a single-session CLI —
+      // whereas a torn write from a crash is the realistic failure.)
+      const receiptTmp = `${receiptPath}.tmp`;
       writeFileSync(
-        receiptPath,
+        receiptTmp,
         `${JSON.stringify({ reviewIds, event, postedAt: new Date().toISOString() })}\n`,
         'utf8',
       );
+      renameSync(receiptTmp, receiptPath);
     }
   } catch {
     /* audit metadata only — the post itself succeeded */

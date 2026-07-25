@@ -307,6 +307,11 @@ interface CommentStatusArgs {
   pr_number: string;
   owner_repo: string;
   out: string;
+  // Read by the handler via setGhHost before runCommentStatus. Declared here so
+  // the full contract is visible at the type level: if a future cleanup moves
+  // the setGhHost call inside runCommentStatus, dropping host becomes a type
+  // error rather than a silent runtime regression.
+  host?: string;
 }
 
 async function runCommentStatus(args: CommentStatusArgs): Promise<void> {
@@ -347,20 +352,32 @@ async function runCommentStatus(args: CommentStatusArgs): Promise<void> {
       `repos/${owner}/${repo}/pulls/${prNumber}/comments`,
     ) as RawStatusComment[];
 
-    const liveHeadAfter =
-      (
-        JSON.parse(
-          gh(
-            'pr',
-            'view',
-            prNumber,
-            '--repo',
-            ownerRepo,
-            '--json',
-            'headRefOid',
-          ),
-        ) as { headRefOid?: string }
-      ).headRefOid ?? '';
+    // Second head sample for race detection (headMovedDuringFetch). This is an
+    // enhancement, not a core fact: if it fails transiently AFTER the comments
+    // were already fetched, fall back to liveHeadBefore instead of discarding
+    // the whole report (comments + anchor facts are already in hand). With the
+    // fallback, headMovedDuringFetch reads false — the safe default (assume the
+    // head did not move) — and worktreeStale still compares the worktree against
+    // liveHeadBefore, so a usable drift signal survives.
+    let liveHeadAfter = liveHeadBefore;
+    try {
+      liveHeadAfter =
+        (
+          JSON.parse(
+            gh(
+              'pr',
+              'view',
+              prNumber,
+              '--repo',
+              ownerRepo,
+              '--json',
+              'headRefOid',
+            ),
+          ) as { headRefOid?: string }
+        ).headRefOid ?? liveHeadBefore;
+    } catch {
+      // Race-detection sample unavailable; liveHeadBefore is a usable fallback.
+    }
 
     const worktree = worktreePath(prNumber);
     const worktreeHeadSha = gitOpt('-C', worktree, 'rev-parse', 'HEAD');
@@ -478,7 +495,12 @@ async function runCommentStatus(args: CommentStatusArgs): Promise<void> {
           prNumber,
           ownerRepo,
           error: msg,
-          prAuthor: '',
+          // null, not '': the success path emits '' only for a legitimately
+          // absent author (deleted account). A degraded run knows nothing about
+          // the author, so a structural null (matching worktreeHeadSha below)
+          // keeps a consumer that displays the author name from rendering a
+          // blank as if it were a real empty value.
+          prAuthor: null,
           liveHeadSha: '',
           liveHeadBefore: '',
           worktreeHeadSha: null,

@@ -263,5 +263,50 @@ describe('comment-status handler', () => {
     // worktreeMissing must not contradict worktreeHeadSha: null.
     expect(report.worktreeHeadSha).toBeNull();
     expect(report.worktreeMissing).toBe(true);
+    // prAuthor is null (not '') when degraded: '' is reserved for a legitimately
+    // absent author on the success path, so a structural null keeps a total
+    // index failure distinguishable from a deleted PR-author account.
+    expect(report.prAuthor).toBeNull();
+  });
+
+  it('keeps the already-fetched comments when the second head sample fails', async () => {
+    // The comments were fetched successfully; a transient failure on the
+    // race-detection head sample (the SECOND gh pr view) must fall back to
+    // liveHeadBefore rather than discarding everything into a degraded report.
+    // clearAllMocks does not reset implementations, so pin auth to a no-op in
+    // case a prior test left a throwing one (this must NOT take the degraded
+    // path).
+    mocks.ensureAuthenticated.mockImplementation(() => {});
+    mocks.ghApiAll.mockReturnValue([
+      {
+        id: 1,
+        user: { login: 'r' },
+        path: 'a.ts',
+        line: 1,
+        original_commit_id: 's',
+      },
+    ]);
+    let n = 0;
+    mocks.gh.mockImplementation((..._args: string[]) => {
+      n += 1;
+      if (n === 1) {
+        return JSON.stringify({
+          author: { login: 'octocat' },
+          headRefOid: 'headA',
+        });
+      }
+      throw new Error('gh pr view: 502 Bad Gateway');
+    });
+    await run();
+    const report = reportWritten();
+    // Not degraded: no top-level error, comments survived.
+    expect(report.error).toBeUndefined();
+    expect(report.inlineComments).toBe(1);
+    expect(report.threads).toHaveLength(1);
+    // Fell back to the pre-fetch sample: liveHeadAfter === liveHeadBefore, so
+    // headMovedDuringFetch reads false (the safe "head did not move" default).
+    expect(report.liveHeadBefore).toBe('headA');
+    expect(report.liveHeadSha).toBe('headA');
+    expect(report.headMovedDuringFetch).toBe(false);
   });
 });
