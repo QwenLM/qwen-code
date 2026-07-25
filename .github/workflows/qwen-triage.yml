@@ -1534,6 +1534,14 @@ jobs:
                 '[.[][] | select(.body | contains($m))] | last | .id // empty'
           )" || EXISTING_ID=''
           if [ -n "$EXISTING_ID" ]; then
+            # A previous verify report exists: snapshot it for the agent
+            # BEFORE the status upsert overwrites it, so a re-run can carry
+            # each earlier finding's status (fixed/stands/superseded) instead
+            # of starting blind. Best-effort; the skill treats the file as
+            # untrusted input.
+            gh api "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
+              --jq '.body' > "$RUNNER_TEMP/verify-context/previous-report.md" 2>/dev/null ||
+              rm -f "$RUNNER_TEMP/verify-context/previous-report.md"
             gh api --method PATCH \
               "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
               -f body="$BODY" >/dev/null ||
