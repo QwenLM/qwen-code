@@ -30,6 +30,18 @@ describe('humanReadableCron', () => {
     expect(humanReadableCron('0 0 */40 * *')).toBe('0 0 */40 * *');
   });
 
+  it('falls back for a step that spans the whole field', () => {
+    // At `N === unit` the step clears the field in one stride, so only the
+    // first value matches and the step never repeats within its own field.
+    // `*/60` is the hourly `0 * * * *` and `*/24` the daily `0 0 * * *`,
+    // spelled in a way that invites being read as something else.
+    expect([...parseCron('*/60 * * * *').minute]).toEqual([0]);
+    expect(humanReadableCron('*/60 * * * *')).toBe('*/60 * * * *');
+
+    expect([...parseCron('0 */24 * * *').hour]).toEqual([0]);
+    expect(humanReadableCron('0 */24 * * *')).toBe('0 */24 * * *');
+  });
+
   it('falls back for in-range steps that do not divide the field evenly', () => {
     // `*/25` fits in 0-59 but wraps unevenly: :00, :25, :50, then :00 again is
     // a 10-minute gap, so "Every 25 minutes" would be wrong too.

@@ -15,9 +15,17 @@ function parsePositiveInteger(token: string): number | undefined {
 // `*/25` on minutes fires at :00, :25, :50 and then :00 again — a 10-minute
 // gap, not 25. `*/90` is worse: every step past 59 is out of range, so only
 // minute 0 survives and the job actually runs hourly.
+//
+// N must also be strictly smaller than the unit. At `N === unit` the step
+// clears the whole field in one stride, so only the first value matches:
+// `*/60` on minutes is really the hourly job `0 * * * *`, and `*/24` on hours
+// is really the daily `0 0 * * *`. Naming those "Every 60 minutes" / "Every 24
+// hours" describes the firing interval correctly, but it also puts a label on
+// an expression whose step never actually repeats within its field, so the raw
+// expression is left to speak for itself.
 function evenStepOf(token: string, unit: number): number | undefined {
   const n = parsePositiveInteger(token);
-  if (n === undefined || unit % n !== 0) return undefined;
+  if (n === undefined || n >= unit || unit % n !== 0) return undefined;
   return n;
 }
 
