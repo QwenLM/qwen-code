@@ -182,16 +182,12 @@ describe('isDestructiveCommand — git patterns', () => {
       'git checkout .;rm -rf /tmp/x',
       'git checkout .&&npm test',
       'git checkout .|tee out.txt',
-      // A directory pathspec discards everything under it; the `-- ./src`
-      // spelling is already blocked by the sibling pattern.
-      'git checkout ./src',
-      'git checkout ./packages/core',
+      'git checkout ./',
       // The parent forms discard a whole tree from a subdirectory — strictly
       // more than `.` does — and the `--` spelling of both is already blocked
       // by the sibling pattern, so the bare spelling cannot be the lenient one.
       'git checkout ..',
       'git checkout ../',
-      'git checkout ../src',
       // Redirects bind to the command, not the pathspec: bash tokenizes `.>`
       // as the word `.` plus a redirect, so the checkout still runs.
       'git checkout .>/dev/null',
@@ -256,6 +252,19 @@ describe('isDestructiveCommand — git patterns', () => {
       'git checkout .gitignore',
       'git checkout .github/workflows/ci.yml',
       'git checkout .env.local',
+      // The same single files written with an explicit `./` or `../` prefix.
+      // Real git reverts exactly one file for these — byte-identical in effect
+      // to the undotted spellings above — so blocking them would be blocking a
+      // spelling rather than a blast radius.
+      'git checkout ./package.json',
+      'git checkout ./.gitignore',
+      'git checkout ./src/foo.ts',
+      'git checkout ../README.md',
+      // Directory pathspecs, consistent with the already-allowed `src` and
+      // `packages/core`: a `./` prefix does not change what is discarded.
+      'git checkout ./src',
+      'git checkout ./packages/core',
+      'git checkout ../src',
       // `--force` only counts on `git clean`; these are unrelated commands.
       'git push --force-with-lease',
       'git fetch --force',

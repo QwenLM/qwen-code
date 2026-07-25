@@ -25,15 +25,20 @@ const DESTRUCTIVE_GIT_PATTERNS: readonly RegExp[] = Object.freeze([
   /\bgit\s+reset\s+--hard\b/,
   /\bgit\s+checkout\s+--\s+\./,
   // `git checkout .` discards the same tracked changes as the `-- .` form
-  // above. The lookahead rejects what could continue a filename rather than
-  // enumerating shell metacharacters, so it cannot be outrun by an operator
-  // nobody listed: `.>/dev/null`, `.<in`, `$(git checkout .)` and `.;rm -rf /`
-  // are all caught, as are directory pathspecs — `./src`, and the parent forms
-  // `..` and `../src`, which discard a whole tree from a subdirectory and are
-  // blocked by the `-- .` pattern in their `--` spelling. Single files stay
-  // out: `.gitignore`, `.env.local` and `.github/workflows/ci.yml` all
-  // continue with a word character.
-  /\bgit\s+checkout\s+\.(?![\w-])/,
+  // above. Only the four spellings that mean the whole tree are matched — `.`,
+  // `./`, `..` and `../` — because anything deeper is a pathspec whose blast
+  // radius this pattern cannot know. The lookahead rejects what could continue
+  // a path rather than enumerating shell metacharacters, so it cannot be
+  // outrun by an operator nobody listed: `.>/dev/null`, `.<in`,
+  // `$(git checkout .)` and `.;rm -rf /` are all caught.
+  //
+  // Deeper pathspecs are left to the rule that already allows `src` and
+  // `packages/core`: blocking by spelling rather than by blast radius would
+  // stop `git checkout ./package.json`, which reverts exactly one file, while
+  // still allowing `git checkout src`, which reverts a whole directory. That
+  // asymmetry is worse than the gap it closes, so `./src` and `../src` are
+  // allowed for the same reason their undotted spellings are.
+  /\bgit\s+checkout\s+\.\.?\/?(?![\w.\-/])/,
   // The force flag must be matched wherever it appears in the argument list,
   // not only as the first token: `git clean -d -f` and `git clean -d --force`
   // delete exactly what `git clean -fd` does. `--force` is the long spelling
