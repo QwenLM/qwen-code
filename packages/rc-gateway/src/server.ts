@@ -90,6 +90,8 @@ import type { UsageTickBroadcaster } from './cost/usageTickBroadcaster.js';
 import { createForkRoute } from './routes/fork.js';
 import { createRewindRoute } from './routes/rewind.js';
 import { createApprovalModeRoute } from './routes/approvalMode.js';
+import { createPolicyExplainRoute } from './routes/policyExplain.js';
+import type { PolicyExplainAccess } from './routes/policyExplain.js';
 import {
   createIdleToggleRoute,
   createIdleStatusRoute,
@@ -200,6 +202,8 @@ export interface GatewayDeps {
    * Global Constraints note on this being a currently-dark wiring path.
    */
   walDir?: string;
+  /** Live policy access for POST /policy/explain (P4). Absent → route not mounted. */
+  policyExplain?: PolicyExplainAccess;
   /**
    * Per-sub-actor write cap within the limiter's rolling window (bridge
    * fan-in protection). Defaults to {@link DEFAULT_SUB_ACTOR_CAP}. Falls back to
@@ -1078,6 +1082,18 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       },
     ),
   );
+
+  // POST /policy/explain (P4) — gateway-global (no :id), OWNER-scoped,
+  // read-only dry-run against the live policy. No session lock (not
+  // session-scoped) and no daemon call. Route not mounted when
+  // deps.policyExplain is absent (e.g. policy failed to load / dark wiring).
+  if (deps.policyExplain) {
+    app.post(
+      '/policy/explain',
+      requireScope(OWNER, audit),
+      createPolicyExplainRoute(deps.policyExplain, { audit }),
+    );
+  }
 
   // POST /session/:id/approval-mode — WRITE is the floor (plan/default);
   // the in-handler OWNER gate escalates for power modes (auto-edit/auto/

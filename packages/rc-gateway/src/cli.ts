@@ -541,6 +541,9 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // mDNS advertiser is created after listen() (it needs the bound port); the
   // capability route reads its live state through this closure.
   let mdnsAdvertiser: MdnsAdvertiser | undefined;
+  // Live policy for POST /policy/explain, read through a closure so the route
+  // always sees the hot-reloaded ruleset (set at load + in the reloader apply).
+  let currentPolicy: Policy | undefined;
 
   const {
     app,
@@ -588,6 +591,17 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       mdnsAdvertiser?.advertising
         ? { advertising: true, instanceName: mdnsAdvertiser.instanceName }
         : { advertising: false },
+    policyExplain: {
+      policy: () => currentPolicy,
+      projectRoot: () => workspaceCwd ?? process.cwd(),
+      // Local alias so the truthiness narrowing survives into the nested
+      // arrow at tsc time (a bare `quota.state` inside the inner closure does
+      // not stay narrowed — this is why enforcer.ts:106 uses `this.quota!`).
+      quotaOracle: () => {
+        const q = quota;
+        return q ? { state: (id, ms) => q.state(id, ms) } : undefined;
+      },
+    },
     clientsManifestReadToml: () =>
       readFile(join(homedir(), '.qwen', 'rc', 'clients.toml'), 'utf8').then(
         (text) => text,
@@ -697,6 +711,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // eslint-disable-next-line no-console
   const warn = (msg: string) => console.warn(msg);
   const policy = await loadLayeredPolicy(userPolicyPath, workspaceCwd, warn);
+  currentPolicy = policy;
   // Advisory-only lint warnings: alias-widened `allow` rules and the
   // newly-live-allow-rules note from policyAdvisories. Emitted ONCE at boot on
   // the merged policy — never on hot-reload (cycle 45's reloader), which fires
@@ -793,6 +808,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       apply: (p) => {
         activeEnforcer.setPolicy(p);
         applyQuotaLimits(p);
+        currentPolicy = p;
       },
       onReloaded: (p) => {
         void audit.record({
