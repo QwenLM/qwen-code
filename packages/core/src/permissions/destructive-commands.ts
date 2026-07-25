@@ -180,10 +180,19 @@ export function isDestructiveCommand(
   userPrompt: string,
   cwd: string = process.cwd(),
 ): DestructiveCommandResult | null {
-  const expanded = command + ' ' + stripShellQuotes(command);
+  const stripped = stripShellQuotes(command);
+  const expanded = command + ' ' + stripped;
+  // Test the two spellings separately rather than scanning the concatenation.
+  // For an unquoted command `stripShellQuotes` is the identity, so `expanded`
+  // is `cmd + ' ' + cmd`, and a pattern whose match spans more than two tokens
+  // runs off the end of the first copy into the second: the `-f` in
+  // `rm -f stale.log && git clean` is separator-bounded within one copy, but
+  // not across the seam between them.
+  const matchesAny = (pattern: RegExp) =>
+    pattern.test(command) || pattern.test(stripped);
 
   for (const pattern of DESTRUCTIVE_GIT_PATTERNS) {
-    if (pattern.test(expanded) && !userMentionsDiscard(userPrompt)) {
+    if (matchesAny(pattern) && !userMentionsDiscard(userPrompt)) {
       const matched = command.match(pattern)?.[0] ?? command;
       return {
         blocked: true,

@@ -156,6 +156,23 @@ describe('isDestructiveCommand — git patterns', () => {
     }
   });
 
+  it('does not pull a -f from an earlier command segment into git clean', () => {
+    // The mirror of the case above, and the one a self-concatenated haystack
+    // gets wrong: with `git clean` in the final segment, a scan over
+    // `cmd + ' ' + cmd` leaves the first copy and picks the `-f` out of the
+    // second. Every command here deletes nothing.
+    for (const cmd of [
+      'rm -f stale.log && git clean',
+      'tail -f log.txt; git clean -n',
+      'npm ci --force && git clean -n',
+      'grep -rf pat.txt src | head; git clean -n',
+      './deploy.sh && git checkout',
+    ]) {
+      const result = isDestructiveCommand(cmd, 'look at logs');
+      expect(result).toBeNull();
+    }
+  });
+
   it('blocks git checkout . (same discard as the -- . form)', () => {
     for (const cmd of [
       'git checkout .',
