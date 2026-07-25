@@ -308,6 +308,13 @@ describe('user-level auto-memory', () => {
 
       expect(result).toContain('USER memory');
       expect(result).toContain('/tmp/global/memories');
+      // Separation guard: the managed auto-memory section is standalone. It is
+      // no longer concatenated onto the user-memory/context blob (the former
+      // `appendManagedAutoMemoryToUserMemory` wrapper was removed), so nothing
+      // is prepended before the `# auto memory` heading — even when a user
+      // section is present. A regression that re-introduced that concatenation
+      // here would push context ahead of the heading and fail this assertion.
+      expect(result.startsWith('# auto memory')).toBe(true);
     });
   });
 });
