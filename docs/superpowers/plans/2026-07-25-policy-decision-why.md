@@ -185,26 +185,74 @@ Leave every existing field exactly as-is; `reason` is purely additive.
 
 - [ ] **Step 6: Write failing tests asserting the audit `reason` at the branches**
 
-Add to `enforcer.test.ts`. Use the file's existing enforcer-construction
-
-- spy-audit harness (mirror the nearest existing `policy_decision` audit
-  assertion in that file for the exact setup — a fake `DaemonClient`, a
-  recording `audit`, and a permission-request frame). Assert:
+Add to `enforcer.test.ts`. `enforcer.test.ts` has NO existing eval-error
+test and does not import `vi`; the rule-decided branches ARE exercised —
+mirror the existing `decisionSource` test (`enforcer.test.ts:304`,
+`"stamps decisionSource:'policy' … 'default' on no-match"`) for the fake
+`DaemonClient` + recording `audit` + frame harness. A helper to read the
+recorded row (define once or reuse the file's existing accessor):
 
 ```ts
-// deny path (a rule denies): the recorded policy_decision detail carries reason 'rule-deny'
-//   → find the recorded entry with action === 'policy_decision'
-//   → expect(entry.detail).toMatchObject({ action: 'deny', decisionSource: 'policy', reason: 'rule-deny' })
-// default fall-through (no rule matches): reason 'default'
-// eval-error: force frameToContext/evaluate to throw (e.g. a frame whose
-//   shape makes evaluate throw, as the existing catch-branch test does — reuse
-//   that test's setup) → expect reason 'eval-error' with decisionSource 'default'
+const policyDecisionDetail = (audit: {
+  entries: Array<{ action: string; detail?: unknown }>;
+}) =>
+  audit.entries.find((e) => e.action === 'policy_decision')?.detail as
+    | Record<string, unknown>
+    | undefined;
 ```
 
-Write one `it(...)` per branch you can drive with the existing harness
-(deny, default, eval-error at minimum; add allow/prompt if the harness
-already exercises them). Each asserts the `policy_decision` entry's
-`detail.reason`.
+**Rule-decided cases** — drive the same way `:304` does (a policy whose
+rule denies → `deny`; an empty policy → no-match `default`):
+
+```ts
+it("reason 'rule-deny' on a rule-decided deny", async () => {
+  // build the enforcer with a policy: rules:[{ match:{tool:<the frame's tool>}, action:'deny' }]
+  // drive one permission frame, then:
+  expect(policyDecisionDetail(audit)).toMatchObject({
+    action: 'deny',
+    decisionSource: 'policy',
+    reason: 'rule-deny',
+  });
+});
+
+it("reason 'default' on a no-rule-match", async () => {
+  // enforcer with an empty policy (rules:[]) → default prompt, as :304's second half does
+  expect(policyDecisionDetail(audit)).toMatchObject({
+    decisionSource: 'default',
+    reason: 'default',
+  });
+});
+```
+
+**Eval-error case** — there is no way to make `frameToContext`/`evaluate`
+throw from outside (both read defensively), so spy the evaluator. Import
+the module namespace and add `vi` to the vitest import; Vitest resolves the
+enforcer's named `evaluate` import through the module namespace, so the
+spy takes effect:
+
+```ts
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import * as evaluatorMod from './evaluator.js';
+
+it("reason 'eval-error' when evaluation throws (fail-safe)", async () => {
+  const spy = vi.spyOn(evaluatorMod, 'evaluate').mockImplementationOnce(() => {
+    throw new Error('boom');
+  });
+  // drive one normal permission frame through the enforcer, then:
+  expect(policyDecisionDetail(audit)).toMatchObject({
+    action: 'prompt',
+    decisionSource: 'default',
+    reason: 'eval-error',
+  });
+  expect(spy).toHaveBeenCalled();
+  spy.mockRestore();
+});
+```
+
+If any PRE-EXISTING `policy_decision` assertion in this file uses `toEqual`
+(exact match) on the detail, the new `reason` field will break it — switch
+that assertion to `toMatchObject`, or add `reason` to its expected object.
+Step 7's full run surfaces any such case.
 
 - [ ] **Step 7: Run to verify all enforcer tests pass**
 
@@ -688,8 +736,13 @@ let currentPolicy: Policy | undefined;
     policyExplain: {
       policy: () => currentPolicy,
       projectRoot: () => workspaceCwd ?? process.cwd(),
-      quotaOracle: () =>
-        quota ? { state: (id, ms) => quota.state(id, ms) } : undefined,
+      // Local alias so the truthiness narrowing survives into the nested
+      // arrow at tsc time (a bare `quota.state` inside the inner closure does
+      // not stay narrowed — this is why enforcer.ts:106 uses `this.quota!`).
+      quotaOracle: () => {
+        const q = quota;
+        return q ? { state: (id, ms) => q.state(id, ms) } : undefined;
+      },
     },
 ```
 
