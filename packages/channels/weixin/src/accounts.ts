@@ -8,9 +8,8 @@ import {
   mkdirSync,
   readFileSync,
   writeFileSync,
-  renameSync,
   unlinkSync,
-  chmodSync,
+  renameSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { getGlobalQwenDir } from '@qwen-code/channel-base';
@@ -50,18 +49,24 @@ export function loadAccount(): AccountData | null {
 
 export function saveAccount(data: AccountData): void {
   const p = accountPath();
-  const tmp = `${p}.tmp`;
+  // The temp path must not be guessable. A fixed `${p}.tmp` can be pre-created
+  // by anyone with write access to the directory, and `writeFileSync` follows a
+  // symlink found there — which would send the token wherever it points. A
+  // unique name also stops two concurrent saves from interleaving their writes
+  // into one file. Same shape `channel-base` uses for its own atomic stores.
+  const tmp = `${p}.${Date.now()}-${process.pid}-${Math.random()
+    .toString(16)
+    .slice(2)}.tmp`;
   try {
     // Create the file already private. Writing first and narrowing afterwards
-    // leaves the token readable at the umask default (0644 under the usual
-    // 022) for the window between the two calls.
+    // leaves the token readable at the umask default (0644 under the usual 022)
+    // for the window between the two calls. `mode` is honoured here only
+    // because the unique name guarantees this call creates the file — it is
+    // silently ignored when the path already exists.
     writeFileSync(tmp, JSON.stringify(data, null, 2), {
       encoding: 'utf-8',
       mode: 0o600,
     });
-    // `mode` above only applies when the file is created, so a stale tmp left
-    // behind by a crashed run keeps whatever permissions it already had.
-    chmodSync(tmp, 0o600);
     // Rename carries the 0600 mode onto the destination, so an account.json
     // written by an older version is narrowed rather than left as it was.
     renameSync(tmp, p);

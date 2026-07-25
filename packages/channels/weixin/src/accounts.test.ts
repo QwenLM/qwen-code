@@ -10,6 +10,8 @@ import {
   existsSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -24,13 +26,17 @@ import {
   type AccountData,
 } from './accounts.js';
 
-// Pass-through spy: the real fs is used, but the mode the credential file is
-// *created* with stays observable. A permission check after the fact cannot
-// see it — write-then-chmod ends at 0600 too, it is just briefly readable on
-// the way there.
+// Pass-through spies: the real fs is used, but the mode the credential file is
+// *created* with stays observable, and the rename can be made to fail on
+// demand. A permission check after the fact cannot see the mode — write-then-
+// chmod ends at 0600 too, it is just briefly readable on the way there.
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
-  return { ...actual, writeFileSync: vi.fn(actual.writeFileSync) };
+  return {
+    ...actual,
+    writeFileSync: vi.fn(actual.writeFileSync),
+    renameSync: vi.fn(actual.renameSync),
+  };
 });
 
 const DATA: AccountData = {
@@ -48,8 +54,15 @@ function mode(path: string): string {
   return (statSync(path).mode & 0o777).toString(8);
 }
 
+/** Temp files left in the state dir. The name is unique per save, so this
+ *  cannot be a fixed path. */
+function tmpFiles(): string[] {
+  return readdirSync(stateDir).filter((f) => f.endsWith('.tmp'));
+}
+
 beforeEach(() => {
   vi.mocked(writeFileSync).mockClear();
+  vi.mocked(renameSync).mockClear();
   stateDir = mkdtempSync(join(tmpdir(), 'weixin-accounts-'));
   process.env['WEIXIN_STATE_DIR'] = stateDir;
 });
@@ -90,7 +103,8 @@ describe('saveAccount', () => {
 
   it('narrows a world-readable file left by an older version', () => {
     // `mode` on writeFileSync is ignored for a file that already exists, so a
-    // fix that only passes the option would leave this at 644.
+    // fix that only passes the option would leave this at 644. The rename is
+    // what repairs it: it carries the temp file's 0600 onto the destination.
     const p = join(stateDir, 'account.json');
     writeFileSync(p, '{"token":"stale"}', 'utf-8');
     chmodSync(p, 0o644);
@@ -102,22 +116,53 @@ describe('saveAccount', () => {
     expect(loadAccount()).toEqual(DATA);
   });
 
-  it('narrows a stale tmp file left by a crashed run', () => {
-    // Same blind spot one level down: the tmp path already exists, so it keeps
-    // its own permissions unless they are set explicitly.
-    const tmp = join(stateDir, 'account.json.tmp');
-    writeFileSync(tmp, 'leftover', 'utf-8');
-    chmodSync(tmp, 0o644);
+  it('never writes through a planted account.json.tmp', () => {
+    // A fixed `${p}.tmp` was guessable: on a shared host anyone able to write
+    // to the directory could pre-create it — as a symlink, this redirects the
+    // token. The unique name means a planted file is simply never opened.
+    const planted = join(stateDir, 'account.json.tmp');
+    writeFileSync(planted, 'planted', 'utf-8');
 
     saveAccount(DATA);
 
+    expect(readFileSync(planted, 'utf-8')).toBe('planted');
     expect(mode(join(stateDir, 'account.json'))).toBe('600');
-    expect(existsSync(tmp)).toBe(false);
+    expect(loadAccount()).toEqual(DATA);
+  });
+
+  it('uses a different temp path on every save', () => {
+    const paths = new Set<string>();
+    for (let i = 0; i < 5; i++) {
+      saveAccount(DATA);
+      paths.add(String(vi.mocked(renameSync).mock.calls.at(-1)?.[0]));
+    }
+    expect(paths.size).toBe(5);
   });
 
   it('leaves no tmp file behind on success', () => {
     saveAccount(DATA);
-    expect(existsSync(join(stateDir, 'account.json.tmp'))).toBe(false);
+    expect(tmpFiles()).toEqual([]);
+  });
+
+  it('removes the tmp file and re-throws when the rename fails', () => {
+    // The rename is the step that can fail with the temp file already on disk,
+    // so it is the one that exercises the cleanup path.
+    vi.mocked(renameSync).mockImplementationOnce(() => {
+      throw new Error('EXDEV: cross-device link not permitted');
+    });
+
+    expect(() => saveAccount(DATA)).toThrow('EXDEV');
+    expect(tmpFiles()).toEqual([]);
+  });
+
+  it('re-throws a write failure without leaving a credential file', () => {
+    vi.mocked(writeFileSync).mockImplementationOnce(() => {
+      throw new Error('ENOSPC: no space left on device');
+    });
+
+    expect(() => saveAccount(DATA)).toThrow('ENOSPC');
+    expect(tmpFiles()).toEqual([]);
+    expect(existsSync(join(stateDir, 'account.json'))).toBe(false);
   });
 
   it('replaces the previous account rather than appending', () => {
