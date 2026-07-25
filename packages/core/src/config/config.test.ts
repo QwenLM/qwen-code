@@ -6460,6 +6460,51 @@ describe('setApprovalMode with folder trust', () => {
       expect(config.getApprovalModeRevision()).toBe(initialRevision + 2);
     });
 
+    it('queues a one-shot manual plan-exit notice on a manual exit', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(true);
+      // One-shot: consumed on first read.
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
+    });
+
+    it('does not queue the exit notice for an approved plan exit', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT, {
+        fromApprovedPlanExit: true,
+      });
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
+    });
+
+    it('clears a stale exit notice when plan mode is re-entered', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      config.setApprovalMode(ApprovalMode.PLAN);
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
+    });
+
+    it('does not queue the exit notice for non-plan mode changes', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
+    });
+
     it('records prePlanMode=yolo for a Shift+Tab cycle into plan mode', () => {
       const config = new Config(baseParams);
       vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);

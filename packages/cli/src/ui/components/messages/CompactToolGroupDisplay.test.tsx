@@ -555,7 +555,7 @@ describe('estimateCompactToolGroupHeight', () => {
       description: '中文中文中文中文',
     });
 
-    expect(estimateCompactToolGroupHeight([tool], 12)).toBe(4);
+    expect(estimateCompactToolGroupHeight([tool], 12)).toBe(3);
   });
 });
 

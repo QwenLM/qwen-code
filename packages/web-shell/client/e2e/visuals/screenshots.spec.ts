@@ -423,16 +423,31 @@ for (const theme of THEMES) {
       // Open: the three-mode popover (current / new branch / worktree). Assert
       // an option is visible (not just the chip's aria-label) so a regression
       // that fails to open the popover fails here, not only in the visually
-      // reviewed screenshot. The branch-name sub-state is intentionally not
-      // captured: its input autoFocuses, and the popover then dismisses on the
-      // idle frame captureScreenshot waits for — so it can't be shot stably
-      // through this pipeline (the functional web-shell.git-mode.spec.ts drives
-      // that path). The chip + open popover already show the new UI head-only.
+      // reviewed screenshot.
       await chip.click();
       await expect(
         page.getByText('Current branch', { exact: true }),
       ).toBeVisible();
       await captureScreenshot(page, `git-mode-popover-${theme}`);
+
+      // #7668 keeps this sub-state open. Match the option by role — its label
+      // spans a name + description span, so getByText is ambiguous.
+      const popover = page.locator('[data-slot="popover-content"]');
+      await popover.getByRole('radio', { name: /New branch/ }).click();
+      const branchInput = page.locator('[data-testid="git-mode-branch-input"]');
+      await expect(branchInput).toBeVisible();
+      await branchInput.fill('feat/my-feature');
+      // Regression guard for #7668: the input flashes visible on click, but the
+      // pre-fix dismissal landed ~100ms later, so an immediate assertion still
+      // passed. Settle past that window and re-assert, so a re-dismissal hard-fails
+      // here — mirroring the functional web-shell.git-mode.spec.ts.
+      await page.waitForTimeout(300);
+      await expect(popover).toBeVisible();
+      await expect(branchInput).toBeVisible();
+      await expect(
+        page.locator('[data-testid="git-mode-confirm-branch"]'),
+      ).toBeEnabled();
+      await captureScreenshot(page, `git-mode-branch-${theme}`);
     });
 
     test(`slash menu`, async ({ page }, testInfo) => {
