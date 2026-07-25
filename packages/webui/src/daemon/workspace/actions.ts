@@ -16,6 +16,7 @@ import type {
 } from './types.js';
 
 const AGENT_GENERATE_TIMEOUT_MS = 330_000;
+const CHANNEL_ACTION_TIMEOUT_MS = 5 * 60_000;
 
 export interface CreateDaemonWorkspaceActionsArgs {
   getClient: () => DaemonClient | undefined;
@@ -151,6 +152,126 @@ export function createDaemonWorkspaceActions({
         throw new Error(result.errors[0].error);
       }
       return result.unarchived.length > 0 || result.alreadyActive.length > 0;
+    },
+
+    async loadChannels() {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load channels failed',
+      );
+      const [catalog, snapshot] = await withActionTimeout(
+        Promise.all([
+          workspace.workspaceChannelTypes(),
+          workspace.workspaceChannels(),
+        ]),
+        'Load channels timed out',
+      );
+      return { catalog, snapshot };
+    },
+
+    async upsertChannel(name, request) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Update channel failed',
+      );
+      return withActionTimeout(
+        workspace.upsertWorkspaceChannel(name, request),
+        'Update channel timed out',
+        CHANNEL_ACTION_TIMEOUT_MS,
+      );
+    },
+
+    async removeChannel(name, request) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Remove channel failed',
+      );
+      return withActionTimeout(
+        workspace.deleteWorkspaceChannel(name, request),
+        'Remove channel timed out',
+        CHANNEL_ACTION_TIMEOUT_MS,
+      );
+    },
+
+    async setChannelStartup(name, request) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Update channel startup failed',
+      );
+      return withActionTimeout(
+        workspace.setWorkspaceChannelStartup(name, request),
+        'Update channel startup timed out',
+        CHANNEL_ACTION_TIMEOUT_MS,
+      );
+    },
+
+    async startChannel(name) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Start channel failed',
+      );
+      return withActionTimeout(
+        workspace.startWorkspaceChannel(name),
+        'Start channel timed out',
+        CHANNEL_ACTION_TIMEOUT_MS,
+      );
+    },
+
+    async stopChannel(name) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Stop channel failed',
+      );
+      return withActionTimeout(
+        workspace.stopWorkspaceChannel(name),
+        'Stop channel timed out',
+        CHANNEL_ACTION_TIMEOUT_MS,
+      );
+    },
+
+    async restartChannel(name) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Restart channel failed',
+      );
+      return withActionTimeout(
+        workspace.restartWorkspaceChannel(name),
+        'Restart channel timed out',
+        CHANNEL_ACTION_TIMEOUT_MS,
+      );
+    },
+
+    channelPairing: {
+      async list(name) {
+        const workspace = requireWorkspaceClient(
+          getClient,
+          getWorkspaceCwd,
+          'Load channel pairing requests failed',
+        );
+        return withActionTimeout(
+          workspace.workspaceChannelPairingRequests(name),
+          'Load channel pairing requests timed out',
+        );
+      },
+
+      async approve(name, code) {
+        const workspace = requireWorkspaceClient(
+          getClient,
+          getWorkspaceCwd,
+          'Approve channel pairing failed',
+        );
+        return withActionTimeout(
+          workspace.approveWorkspaceChannelPairing(name, { code }),
+          'Approve channel pairing timed out',
+        );
+      },
     },
 
     async loadMcpStatus() {
@@ -950,6 +1071,15 @@ function requireWorkspaceCwd(
     throw new Error('Daemon workspace is not connected');
   }
   return cwd;
+}
+
+function requireWorkspaceClient(
+  getClient: () => DaemonClient | undefined,
+  getWorkspaceCwd: () => string | undefined,
+  action: string,
+) {
+  const client = requireClient(getClient, action);
+  return client.workspaceByCwd(requireWorkspaceCwd(getWorkspaceCwd));
 }
 
 // Builds a scheduled-tasks REST path. With a `workspaceId` it targets that
