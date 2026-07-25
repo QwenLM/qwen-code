@@ -249,6 +249,90 @@ describe('SubagentManager', () => {
     manager = new SubagentManager(mockConfig);
   });
 
+  describe('resolveModelGrade', () => {
+    const builtinConfig: SubagentConfig = {
+      name: 'Explore',
+      description: 'Explore files',
+      systemPrompt: 'Explore.',
+      level: 'builtin',
+      isBuiltin: true,
+      model: 'fast',
+    };
+
+    it('resolves allowed grades and lets them override built-in defaults', () => {
+      const configuredManager = new SubagentManager(
+        makeFakeConfig({
+          agents: {
+            modelGrades: { small: 'fast', high: 'qwen-max' },
+            allowedGrades: ['high'],
+          },
+        }),
+      );
+
+      expect(configuredManager.resolveModelGrade('high', builtinConfig)).toBe(
+        'qwen-max',
+      );
+      expect(
+        configuredManager.resolveModelGrade('small', builtinConfig),
+      ).toBeUndefined();
+      expect(
+        configuredManager.resolveModelGrade('missing', builtinConfig),
+      ).toBeUndefined();
+    });
+
+    it('ignores malformed grade settings', () => {
+      const configuredManager = new SubagentManager(
+        makeFakeConfig({
+          agents: {
+            modelGrades: { high: 'qwen-max' },
+            allowedGrades: {} as string[],
+          },
+        }),
+      );
+
+      expect(
+        configuredManager.resolveModelGrade('high', builtinConfig),
+      ).toBeUndefined();
+    });
+
+    it('keeps an explicit custom-agent model ahead of a runtime grade', () => {
+      const configuredManager = new SubagentManager(
+        makeFakeConfig({
+          agents: { modelGrades: { high: 'qwen-max' } },
+        }),
+      );
+
+      expect(
+        configuredManager.resolveModelGrade('high', {
+          ...builtinConfig,
+          level: 'project',
+          isBuiltin: false,
+          model: 'custom-model',
+        }),
+      ).toBeUndefined();
+      expect(
+        configuredManager.resolveModelGrade('high', {
+          ...builtinConfig,
+          level: 'project',
+          isBuiltin: false,
+          model: 'inherit',
+        }),
+      ).toBe('qwen-max');
+    });
+
+    it('does not resolve inherited object properties as grade names', () => {
+      const configuredManager = new SubagentManager(
+        makeFakeConfig({
+          agents: { modelGrades: {} },
+        }),
+      );
+
+      expect(
+        configuredManager.resolveModelGrade('toString', builtinConfig),
+      ).toBeUndefined();
+    });
+  });
+
   afterEach(() => {
     vi.restoreAllMocks();
   });

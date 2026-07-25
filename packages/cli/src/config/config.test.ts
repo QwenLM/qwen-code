@@ -1197,6 +1197,26 @@ describe('loadCliConfig', () => {
     expect(config.getAgentsSettings().builtin?.exploreModel).toBe('fast');
   });
 
+  it('passes model grade settings to core config', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      {
+        agents: {
+          modelGrades: { small: 'fast', high: 'qwen-max' },
+          allowedGrades: ['small'],
+        },
+      },
+      argv,
+    );
+
+    expect(config.getAgentsSettings().modelGrades).toEqual({
+      small: 'fast',
+      high: 'qwen-max',
+    });
+    expect(config.getAgentsSettings().allowedGrades).toEqual(['small']);
+  });
+
   it('should ignore blank settings fallback models', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

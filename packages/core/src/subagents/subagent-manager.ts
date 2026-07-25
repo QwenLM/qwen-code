@@ -144,6 +144,42 @@ export class SubagentManager {
     return { ...config, model: exploreModel };
   }
 
+  resolveModelGrade(
+    grade: string | undefined,
+    agentConfig: SubagentConfig,
+  ): string | undefined {
+    const configuredModel = agentConfig.model?.trim();
+    if (
+      !agentConfig.isBuiltin &&
+      configuredModel &&
+      configuredModel !== 'inherit'
+    ) {
+      return undefined;
+    }
+
+    if (!grade) {
+      return undefined;
+    }
+
+    const { modelGrades, allowedGrades } = this.config.getAgentsSettings();
+    if (
+      !modelGrades ||
+      typeof modelGrades !== 'object' ||
+      Array.isArray(modelGrades) ||
+      (allowedGrades !== undefined &&
+        (!Array.isArray(allowedGrades) || !allowedGrades.includes(grade))) ||
+      !Object.hasOwn(modelGrades, grade)
+    ) {
+      return undefined;
+    }
+
+    const model = modelGrades[grade];
+    if (typeof model !== 'string') {
+      return undefined;
+    }
+    return model.trim() || undefined;
+  }
+
   private getBuiltinAgent(name: string): SubagentConfig | null {
     const config = BuiltinAgentRegistry.getBuiltinAgent(name);
     return config ? this.applyBuiltinSettings(config) : null;
