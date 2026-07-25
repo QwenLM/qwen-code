@@ -172,6 +172,30 @@ describe('workspace GitHub PR routes', () => {
     expect(response.body.error).not.toContain('/work/main');
   });
 
+  it('sanitizes a path straddling the display cap before truncating', async () => {
+    const gitRoot = '/work/main';
+    // Place the git root across the 512-char display boundary; the route must
+    // redact it before truncating, not cut it off mid-token.
+    const message = 'e'.repeat(505) + gitRoot + ' denied';
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'failed',
+      message,
+      gitRoot,
+    });
+    const app = express();
+    registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+      workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
+      sendBridgeError,
+    });
+
+    const response = await request(app).get('/workspaces/primary/github/prs');
+
+    expect(response.status).toBe(502);
+    expect(response.body.code).toBe('github_prs_failed');
+    expect(response.body.error).not.toContain(gitRoot);
+    expect(response.body.error.length).toBeLessThanOrEqual(512);
+  });
+
   it('falls back to the bridge error mapper on unexpected throws', async () => {
     fetchGitHubPullRequestsMock.mockRejectedValue(new Error('boom'));
     const app = express();

@@ -9,7 +9,13 @@ import { findGitRoot } from './gitUtils.js';
 
 const GH_TIMEOUT_MS = 10_000;
 const GH_MAX_BUFFER = 16 * 1024 * 1024;
-const GH_ERROR_MESSAGE_MAX = 512;
+// Wire-safety bound for raw gh stderr. The route re-sanitizes workspace paths
+// and re-truncates to GITHUB_PR_ERROR_MESSAGE_MAX, so a path that straddles the
+// display boundary is still whole here and gets redacted before it is cut.
+const GH_ERROR_RAW_MAX = 4096;
+
+/** Display cap applied by the route after path sanitization. */
+export const GITHUB_PR_ERROR_MESSAGE_MAX = 512;
 
 export const GITHUB_PR_LIST_LIMIT = 30;
 
@@ -196,7 +202,7 @@ function ghErrorMessage(error: unknown): string {
       : error instanceof Error
         ? error.message
         : String(error);
-  return raw.replace(/\s+/g, ' ').trim().slice(0, GH_ERROR_MESSAGE_MAX);
+  return raw.replace(/\s+/g, ' ').trim().slice(0, GH_ERROR_RAW_MAX);
 }
 
 /**

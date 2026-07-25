@@ -43,7 +43,7 @@ function ChecksIcon({ checks }: { checks: DaemonGitHubPullRequestChecks }) {
           className={styles.checksPassing}
           title={t('githubPrs.checksPassing')}
         >
-          <CheckIcon size={13} />
+          <CheckIcon size={12} />
         </span>
       );
     case 'failing':
@@ -52,7 +52,7 @@ function ChecksIcon({ checks }: { checks: DaemonGitHubPullRequestChecks }) {
           className={styles.checksFailing}
           title={t('githubPrs.checksFailing')}
         >
-          <XIcon size={13} />
+          <XIcon size={12} />
         </span>
       );
     case 'pending':
@@ -61,7 +61,7 @@ function ChecksIcon({ checks }: { checks: DaemonGitHubPullRequestChecks }) {
           className={styles.checksPending}
           title={t('githubPrs.checksPending')}
         >
-          <ClockIcon size={13} />
+          <ClockIcon size={12} />
         </span>
       );
     default:
@@ -88,6 +88,10 @@ function PullRequestRow({
       <span className={`${styles.badge} ${styles.badgeChanges}`}>
         {t('githubPrs.reviewChanges')}
       </span>
+    ) : pr.reviewDecision === 'review_required' ? (
+      <span className={`${styles.badge} ${styles.badgeReviewRequired}`}>
+        {t('githubPrs.reviewRequired')}
+      </span>
     ) : null;
 
   return (
@@ -101,7 +105,7 @@ function PullRequestRow({
     >
       <span className={styles.prLine}>
         <StateIcon
-          size={14}
+          size={12}
           className={
             pr.state === 'draft' ? styles.stateDraft : styles.stateOpen
           }

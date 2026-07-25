@@ -264,6 +264,26 @@ describe('fetchGitHubPullRequests', () => {
     });
   });
 
+  it('keeps stderr past the display cap so the route can sanitize paths', async () => {
+    fs.mkdirSync(path.join(dir, '.git'));
+    // Push the absolute path beyond the 512-char display cap; core must not
+    // cut it off before the route redacts it.
+    const padding = 'x'.repeat(600);
+    mockGhError(
+      Object.assign(new Error('exit 1'), {
+        stderr: `${padding} ${dir} denied`,
+      }),
+    );
+
+    const result = await fetchGitHubPullRequests(dir);
+
+    expect(result.kind).toBe('failed');
+    if (result.kind === 'failed') {
+      expect(result.message).toContain(`${dir} denied`);
+      expect(result.message.length).toBeGreaterThan(512);
+    }
+  });
+
   it('returns failed when gh emits invalid JSON', async () => {
     fs.mkdirSync(path.join(dir, '.git'));
     mockExecFile.mockImplementation(

@@ -79,6 +79,11 @@
   color: var(--error-color);
 }
 
+.badgeReviewRequired {
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.12));
+  color: var(--muted-foreground);
+}
+
 .checksPassing {
   flex-shrink: 0;
   display: inline-flex;

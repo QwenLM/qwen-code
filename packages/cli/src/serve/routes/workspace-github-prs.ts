@@ -5,7 +5,10 @@
  */
 
 import type { Application } from 'express';
-import { fetchGitHubPullRequests } from '@qwen-code/qwen-code-core';
+import {
+  GITHUB_PR_ERROR_MESSAGE_MAX,
+  fetchGitHubPullRequests,
+} from '@qwen-code/qwen-code-core';
 import type { SendBridgeError } from '../server/error-response.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
@@ -63,16 +66,20 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
             status: 502,
           });
           return;
-        case 'failed':
+        case 'failed': {
+          // Sanitize workspace paths before truncating so a path straddling
+          // the display boundary is redacted rather than cut mid-token.
+          const error = sanitizeMessage(
+            sanitizeMessage(result.message, runtime.workspaceCwd),
+            result.gitRoot,
+          ).slice(0, GITHUB_PR_ERROR_MESSAGE_MAX);
           res.status(502).json({
-            error: sanitizeMessage(
-              sanitizeMessage(result.message, runtime.workspaceCwd),
-              result.gitRoot,
-            ),
+            error,
             code: 'github_prs_failed',
             status: 502,
           });
           return;
+        }
         default:
           throw new Error(
             `unexpected fetchGitHubPullRequests result: ${JSON.stringify(result)}`,

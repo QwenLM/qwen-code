@@ -147,6 +147,18 @@ describe('GitHubPrsContent', () => {
     expect(text).toContain('Changes requested');
   });
 
+  it('renders the review-required badge', async () => {
+    workspaceGitHubPullRequests.mockResolvedValue(
+      listPayload([pr({ number: 9, reviewDecision: 'review_required' })]),
+    );
+    mount();
+    await flush();
+
+    const badge = document.body.querySelector('[class*="badgeReviewRequired"]');
+    expect(badge).toBeTruthy();
+    expect(badge?.textContent).toBe('Review required');
+  });
+
   it('renders the pending checks indicator', async () => {
     workspaceGitHubPullRequests.mockResolvedValue(
       listPayload([pr({ checks: 'pending' })]),
