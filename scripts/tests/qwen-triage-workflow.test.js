@@ -324,6 +324,16 @@ describe('qwen-triage tmux workflow', () => {
     const body = injectStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
     expect(body).toBeTruthy();
     const script = body.replace(/^ {10}/gm, '');
+    // The workflow step only ever executes on ubuntu runners (GNU sed), but
+    // this suite also runs in the macOS merge-queue job, where BSD sed
+    // requires an extension argument after -i. Shim ONLY on darwin: on GNU
+    // sed a separated '' is parsed as the sed script (not the -i suffix), so
+    // an unconditional rewrite would break the Linux runs that actually
+    // mirror production.
+    const portableScript =
+      process.platform === 'darwin'
+        ? script.replace(/sed -i /g, "sed -i '' ")
+        : script;
 
     const run = (model, content) => {
       const dir = mkdtempSync(join(tmpdir(), 'triage-inject-'));
@@ -331,7 +341,7 @@ describe('qwen-triage tmux workflow', () => {
         const target = join(dir, '.qwen/skills/triage/references');
         mkdirSync(target, { recursive: true });
         writeFileSync(join(target, 'pr-workflow.md'), content);
-        const proc = spawnSync('bash', ['-c', script], {
+        const proc = spawnSync('bash', ['-c', portableScript], {
           cwd: dir,
           env: { ...process.env, OPENAI_MODEL: model },
           encoding: 'utf8',
