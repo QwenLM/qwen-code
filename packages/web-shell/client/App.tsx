@@ -5860,10 +5860,11 @@ export function App({
         }
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
-        if (!requireActiveSessionForLocalCommand()) return false;
-        sessionActions.sendShellCommand(cmd).catch((error: unknown) => {
-          reportError(error, 'Failed to execute shell command');
-        });
+        void ensureSessionForPrompt()
+          .then(() => sessionActions.sendShellCommand(cmd))
+          .catch((error: unknown) => {
+            reportError(error, 'Failed to execute shell command');
+          });
         return true;
       } else {
         if (promptBlocked) {
@@ -5893,6 +5894,7 @@ export function App({
       openScheduledTasks,
       openGoals,
       createNewSession,
+      ensureSessionForPrompt,
       gitDiffWorkspaceCwd,
       sessionWorktree,
       gitHubPrsSupported,
