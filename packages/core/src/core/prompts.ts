@@ -193,8 +193,13 @@ export function resolvePathFromEnv(envVar?: string): {
  * This function should only be used when there is actually a custom instruction.
  *
  * @param customInstruction - Custom system instruction (ContentUnion from @google/genai)
- * @param userMemory - User memory to append
- * @param appendInstruction - Extra instructions to append after user memory
+ * @param userMemory - Back-compat convenience slot for context files.
+ *   @deprecated Prefer composing layers explicitly via `assembleSystemPrompt`
+ *   (e.g. `assembleSystemPrompt({ base: getCustomSystemPrompt(instruction), contextFiles })`)
+ *   so a single site owns the layer order. Passing memory here *and* wrapping
+ *   the result in `assembleSystemPrompt({ contextFiles })` double-includes it.
+ * @param appendInstruction - Back-compat convenience slot for the append prompt.
+ *   @deprecated Prefer the `appendPrompt` slot of `assembleSystemPrompt`.
  * @returns Processed custom system instruction with user memory and extra append instructions applied
  */
 export function getCustomSystemPrompt(
@@ -231,6 +236,19 @@ export function getCustomSystemPrompt(
   });
 }
 
+/**
+ * Builds the stable base system prompt (identity, mandates, tool guidance).
+ *
+ * @param userMemory - Back-compat convenience slot for context files.
+ *   @deprecated Prefer composing layers explicitly via `assembleSystemPrompt`
+ *   (e.g. `assembleSystemPrompt({ base: getCoreSystemPrompt(undefined, model), contextFiles })`)
+ *   so a single site owns the layer order. Passing memory here *and* wrapping
+ *   the result in `assembleSystemPrompt({ contextFiles })` double-includes it.
+ * @param model - Model id, used to select model-specific prompt variants.
+ * @param appendInstruction - Back-compat convenience slot for the append prompt.
+ *   @deprecated Prefer the `appendPrompt` slot of `assembleSystemPrompt`.
+ * @param interactionMode - Interactive vs. headless prompt variant.
+ */
 export function getCoreSystemPrompt(
   userMemory?: string,
   model?: string,
