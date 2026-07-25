@@ -354,6 +354,8 @@ describe('modelConfigResolver', () => {
           settings: {
             generationConfig: {
               timeout: 30000,
+              retryInitialDelayMs: 60_000,
+              retryMaxDelayMs: 300_000,
             },
           },
           env: {
@@ -366,12 +368,20 @@ describe('modelConfigResolver', () => {
             baseUrl: 'https://api.example.com',
             generationConfig: {
               timeout: 60000,
+              retryInitialDelayMs: 3_000,
+              retryMaxDelayMs: 30_000,
             },
           },
         });
 
         expect(result.config.timeout).toBe(60000);
+        expect(result.config.retryInitialDelayMs).toBe(3_000);
+        expect(result.config.retryMaxDelayMs).toBe(30_000);
         expect(result.sources['timeout'].kind).toBe('modelProviders');
+        expect(result.sources['retryInitialDelayMs'].kind).toBe(
+          'modelProviders',
+        );
+        expect(result.sources['retryMaxDelayMs'].kind).toBe('modelProviders');
       });
 
       it('resolves stream retry delay config from settings', () => {

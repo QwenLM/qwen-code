@@ -683,11 +683,13 @@
             },
             "retryInitialDelayMs": {
               "description": "Initial delay in milliseconds for stream rate-limit retries.",
-              "type": "number"
+              "type": "number",
+              "minimum": 1
             },
             "retryMaxDelayMs": {
               "description": "Maximum delay in milliseconds for stream rate-limit retries.",
-              "type": "number"
+              "type": "number",
+              "minimum": 1
             },
             "enableCacheControl": {
               "description": "Enable cache control for DashScope providers.",

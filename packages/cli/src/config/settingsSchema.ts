@@ -1565,6 +1565,7 @@ const SETTINGS_SCHEMA = {
             default: undefined as number | undefined,
             description:
               'Initial delay in milliseconds for stream rate-limit retries.',
+            minimum: 1,
             parentKey: 'generationConfig',
             showInDialog: false,
           },
@@ -1576,6 +1577,7 @@ const SETTINGS_SCHEMA = {
             default: undefined as number | undefined,
             description:
               'Maximum delay in milliseconds for stream rate-limit retries.',
+            minimum: 1,
             parentKey: 'generationConfig',
             showInDialog: false,
           },
