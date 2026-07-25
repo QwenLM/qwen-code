@@ -1516,7 +1516,9 @@ export function App({
           .then((status) => {
             if (!cancelled) setSelectedWorkspaceGitStatus(status);
           })
-          .catch(() => {});
+          .catch((err) => {
+            console.warn('[web-shell] git status fresh path failed:', err);
+          });
       }
     };
     fetchStatus();

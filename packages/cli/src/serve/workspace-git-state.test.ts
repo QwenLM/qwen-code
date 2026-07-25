@@ -524,6 +524,30 @@ describe('WorkspaceGitState', () => {
     expect(publishWorkspaceEvent).not.toHaveBeenCalled();
   });
 
+  it('does not publish git_branch_changed when the watcher fires after dispose', async () => {
+    let onChange: (() => void) | undefined;
+    const dispose = vi.fn();
+    resolveBranchNameMock
+      .mockResolvedValueOnce('main')
+      .mockResolvedValueOnce('feature');
+    watchRepoBranchMock.mockImplementation(async (_cwd, callback) => {
+      onChange = callback;
+      return dispose;
+    });
+    const state = new WorkspaceGitState();
+    const { bridge, publishWorkspaceEvent } = bridgeWith();
+
+    await state.getStatus('/workspace', bridge);
+    state.dispose();
+    await vi.waitFor(() => expect(dispose).toHaveBeenCalledOnce());
+
+    onChange?.();
+    await vi.waitFor(() =>
+      expect(resolveBranchNameMock).toHaveBeenCalledTimes(2),
+    );
+    expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+  });
+
   it('keeps the cache and resolves wait:true when publishWorkspaceEvent throws', async () => {
     resolveBranchNameMock.mockResolvedValue('main');
     watchRepoBranchMock.mockResolvedValue(() => {});
