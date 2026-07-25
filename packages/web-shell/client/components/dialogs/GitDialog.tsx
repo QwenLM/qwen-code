@@ -99,10 +99,10 @@ export function GitDialog({
     setGenerating(true);
     setCommitMsg('');
 
-    const resolveSession = sessionId
-      ? Promise.resolve(sessionId)
-      : resolveSessionRef.current
-        ? resolveSessionRef.current(workspaceCwd)
+    const resolveSession = resolveSessionRef.current
+      ? resolveSessionRef.current(workspaceCwd)
+      : sessionId
+        ? Promise.resolve(sessionId)
         : Promise.resolve(undefined);
 
     resolveSession
@@ -252,10 +252,10 @@ export function GitDialog({
       })
       .catch(() => setPrBranches(null));
 
-    const resolveSession = sessionId
-      ? Promise.resolve(sessionId)
-      : resolveSessionRef.current
-        ? resolveSessionRef.current(workspaceCwd)
+    const resolveSession = resolveSessionRef.current
+      ? resolveSessionRef.current(workspaceCwd)
+      : sessionId
+        ? Promise.resolve(sessionId)
         : Promise.resolve(undefined);
 
     setPrGenerating(true);
@@ -329,12 +329,19 @@ export function GitDialog({
                 const lines = result.answer.trim().split('\n');
                 setPrTitle(lines[0] ?? '');
                 setPrBody(lines.slice(1).join('\n').trim());
+              } else {
+                console.warn('[GitDialog] btwSession returned null answer');
               }
             });
         });
       })
-      .catch(() => {
+      .catch((err) => {
         if (!abort.signal.aborted) {
+          console.error('[GitDialog] PR generation failed:', err);
+          setPrStatus({
+            msg: err instanceof Error ? err.message : String(err),
+            type: 'error',
+          });
           ws.workspaceGit()
             .then((git) => {
               if (!abort.signal.aborted && git.branch && !git.detached)
