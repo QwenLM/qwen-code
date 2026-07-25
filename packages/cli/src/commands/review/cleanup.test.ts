@@ -553,8 +553,14 @@ describe('runCleanup — bypass-write audit', () => {
     // asserting a gate bypass outright. A concurrent same-account write on an
     // observe-only run must not read as "you bypassed the submit gate".
     expect(warnings.join('\n')).toContain('likely cause is benign');
-    expect(warnings.join('\n')).toContain('reviewer');
+    // Pin the interpolation SHAPE `(${me})`, not the bare word — the header
+    // also says "reviewing account", so `toContain('reviewer')` would stay
+    // green even if the account name were dropped from the footer.
+    expect(warnings.join('\n')).toContain('(reviewer)');
     expect(warnings.join('\n')).toMatch(/real bypass of that gate only if/);
+    // The relay instruction is the sentence that actually moves the warning to
+    // a human — the rest of the audit is inert without it, so pin it here.
+    expect(warnings.join('\n')).toContain('Relay this warning verbatim');
   });
 
   it('spares every review in a multi-id receipt (two sanctioned submits in one window)', () => {

@@ -68,8 +68,8 @@ function isAutomationComment(body: string | null | undefined): boolean {
  * is used as the audit boundary. `fetchedAt` is a LOCAL timestamp compared
  * against GitHub's SERVER timestamps: a fast local clock would otherwise
  * hide bypass writes made in the first moments of the review. Two minutes
- * errs toward over-flagging (fail-safe — the warning copy already covers
- * "the user did this themselves").
+ * errs toward over-flagging (fail-safe — the warning copy frames a flagged
+ * write as most likely an external same-account one, not a bypass).
  */
 const CLOCK_SKEW_MS = 2 * 60 * 1000;
 
@@ -356,8 +356,9 @@ function auditPrWrites(target: string, prNumber: string): void {
       );
     }
     writeStdoutLine(
-      `warning: The likely cause is benign — you, another workflow, or a bot ` +
-        `posting under the same account (${me}) produces exactly this shape. ` +
+      `warning: The likely cause is benign — the user (from another terminal), ` +
+        `another workflow, or a bot posting under the same account (${me}) produces ` +
+        `exactly this shape. ` +
         `\`/review\` writes to the PR only through \`qwen review submit\`; a write ` +
         `here is a real bypass of that gate only if its content is this review's own ` +
         `output. Relay this warning verbatim in the terminal summary so a human can judge.`,
