@@ -12,6 +12,7 @@ import {
   type GitWorkingTreeStatus,
 } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from './acp-session-bridge.js';
+import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
@@ -28,6 +29,7 @@ vi.mock('../utils/stdioHelpers.js', () => ({
 const getGitWorkingTreeStatusMock = vi.mocked(getGitWorkingTreeStatus);
 const resolveBranchNameMock = vi.mocked(resolveBranchName);
 const watchRepoBranchMock = vi.mocked(watchRepoBranch);
+const writeStderrLineSafeMock = vi.mocked(writeStderrLineSafe);
 
 function summary(
   overrides: Partial<GitWorkingTreeStatus> = {},
@@ -498,6 +500,9 @@ describe('WorkspaceGitState', () => {
       state.getStatus('/workspace', bridge, { wait: true }),
     ).resolves.toMatchObject({ staged: 1 });
     expect(publishWorkspaceEvent).toHaveBeenCalledTimes(1);
+    expect(writeStderrLineSafeMock).toHaveBeenCalledWith(
+      expect.stringContaining('git status failed'),
+    );
     state.dispose();
   });
 
