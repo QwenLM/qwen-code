@@ -122,7 +122,7 @@ export abstract class PollingChannelBase<Cursor> extends ChannelBase {
   }
 
   private cursorPath(): string {
-    const encoded = this.name.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const encoded = this.name.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 200);
     const hash = createHash('sha256')
       .update(this.name)
       .digest('hex')

@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import {
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -189,5 +190,40 @@ describe('PollingChannelBase', () => {
       'pollInterval',
     )!.get!;
     expect(base.call(poller)).toBe(60_000);
+  });
+
+  it('keeps cursor filename within filesystem limits for long names', () => {
+    const longName = 'a'.repeat(300);
+    const poller = new TestPoller(longName, makeConfig(), makeBridge());
+    poller.saveCursor();
+    const expectedHash = createHash('sha256')
+      .update(longName)
+      .digest('hex')
+      .slice(0, 16);
+    const files = readdirSync(join(testHome, 'channels'));
+    const cursorFile = files.find((f: string) => f.includes(expectedHash));
+    expect(cursorFile).toBeDefined();
+    expect(cursorFile!.length).toBeLessThanOrEqual(255);
+  });
+
+  it('produces distinct cursor files for names sharing a long prefix', () => {
+    const prefix = 'x'.repeat(250);
+    const p1 = new TestPoller(`${prefix}-alpha`, makeConfig(), makeBridge());
+    const p2 = new TestPoller(`${prefix}-beta`, makeConfig(), makeBridge());
+    p1.saveCursor();
+    p2.saveCursor();
+    const files = readdirSync(join(testHome, 'channels')).filter((f: string) =>
+      f.endsWith('-poll-cursor.json'),
+    );
+    const h1 = createHash('sha256')
+      .update(`${prefix}-alpha`)
+      .digest('hex')
+      .slice(0, 16);
+    const h2 = createHash('sha256')
+      .update(`${prefix}-beta`)
+      .digest('hex')
+      .slice(0, 16);
+    expect(files.some((f: string) => f.includes(h1))).toBe(true);
+    expect(files.some((f: string) => f.includes(h2))).toBe(true);
   });
 });

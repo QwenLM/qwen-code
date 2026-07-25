@@ -12164,6 +12164,28 @@ describe('ChannelBase', () => {
       );
       stderr.mockRestore();
     });
+
+    it('passes threadId through to sendThreadMessage', async () => {
+      const ch = createChannel({ senderPolicy: 'pairing', allowedUsers: [] });
+      const threadMessages: Array<{
+        chatId: string;
+        threadId?: string;
+        text: string;
+      }> = [];
+      vi.spyOn(ch as never, 'sendThreadMessage').mockImplementation(
+        async (chatId: string, threadId: string | undefined, text: string) => {
+          threadMessages.push({ chatId, threadId, text });
+        },
+      );
+
+      await ch.handleInbound(
+        envelope({ senderId: 'stranger', threadId: 'issue:42' }),
+      );
+
+      expect(threadMessages).toHaveLength(1);
+      expect(threadMessages[0]!.threadId).toBe('issue:42');
+      expect(threadMessages[0]!.text).toContain('pairing code');
+    });
   });
 
   describe('setBridge', () => {

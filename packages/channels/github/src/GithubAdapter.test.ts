@@ -338,6 +338,28 @@ describe('GithubChannel', () => {
       ).toHaveBeenCalledWith(expect.objectContaining({ read: true }));
     });
 
+    it('processes valid notification after a null-URL notification', async () => {
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            id: '1',
+            updated_at: '2026-07-02T08:00:00.000Z',
+            subject: { title: 'Discussion', url: null, type: 'Discussion' },
+          }),
+          makeNotification({
+            id: '2',
+            updated_at: '2026-07-02T10:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]!.chatId).toBe('owner/repo');
+    });
+
     it('marks notifications as read before processing (best-effort)', async () => {
       const notification = makeNotification({
         updated_at: '2026-07-02T10:00:00.000Z',
@@ -354,6 +376,11 @@ describe('GithubChannel', () => {
         last_read_at: '2026-07-02T10:00:00.000Z',
         read: true,
       });
+      const markOrder =
+        mockOctokit.rest.activity.markNotificationsAsRead.mock
+          .invocationCallOrder[0]!;
+      const commentOrder = mockOctokit.paginate.mock.invocationCallOrder[2]!;
+      expect(markOrder).toBeLessThan(commentOrder);
     });
 
     it('marks all fetched notifications read even on failure', async () => {
@@ -376,7 +403,10 @@ describe('GithubChannel', () => {
 
       expect(
         mockOctokit.rest.activity.markNotificationsAsRead,
-      ).toHaveBeenCalledWith(expect.objectContaining({ read: true }));
+      ).toHaveBeenCalledWith({
+        last_read_at: '2026-07-02T10:00:00.000Z',
+        read: true,
+      });
     });
 
     it('continues processing remaining notifications after a per-thread error', async () => {
@@ -453,11 +483,12 @@ describe('GithubChannel', () => {
         .mockResolvedValueOnce([makeComment()]);
       await pollOnce();
 
-      // The loop's initial poll is call #1; the test's direct pollOnce is #2
+      // Call 1: initWithoutLoop's poll; call 2: listNotifications;
+      // call 3: listComments — the comment enumeration window.
       expect(mockOctokit.paginate).toHaveBeenNthCalledWith(
-        2,
+        3,
         expect.anything(),
-        expect.objectContaining({ since: '2026-06-30T23:59:59.000Z' }),
+        expect.objectContaining({ since: '2026-07-01T00:00:00.000Z' }),
       );
     });
 
@@ -825,6 +856,27 @@ describe('GithubChannel', () => {
       expect((ch as unknown as { pollInterval: number }).pollInterval).toBe(
         60000,
       );
+    });
+
+    it.each([0, -1, NaN, Infinity, '60000'])(
+      'falls back to 60000 for invalid pollInterval %s',
+      (value) => {
+        const ch = new TestableGithubChannel(
+          'test',
+          makeConfig({ pollInterval: value }),
+          makeBridge(),
+        );
+        expect((ch as unknown as { pollInterval: number }).pollInterval).toBe(
+          60000,
+        );
+      },
+    );
+  });
+
+  describe('plugin', () => {
+    it('declares chat_thread as defaultSessionScope', async () => {
+      const { plugin } = await import('./index.js');
+      expect(plugin.defaultSessionScope).toBe('chat_thread');
     });
   });
 
