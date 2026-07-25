@@ -339,6 +339,8 @@ describe('modelConfigResolver', () => {
 
         expect(result.config.timeout).toBe(60000);
         expect(result.config.maxRetries).toBe(5);
+        expect(result.config.retryInitialDelayMs).toBeUndefined();
+        expect(result.config.retryMaxDelayMs).toBeUndefined();
         expect(result.config.samplingParams?.temperature).toBe(0.7);
 
         expect(result.sources['timeout'].kind).toBe('settings');
@@ -370,6 +372,28 @@ describe('modelConfigResolver', () => {
 
         expect(result.config.timeout).toBe(60000);
         expect(result.sources['timeout'].kind).toBe('modelProviders');
+      });
+
+      it('resolves stream retry delay config from settings', () => {
+        const result = resolveModelConfig({
+          authType: AuthType.USE_OPENAI,
+          cli: {},
+          settings: {
+            apiKey: 'key',
+            generationConfig: {
+              maxRetries: 4,
+              retryInitialDelayMs: 3000,
+              retryMaxDelayMs: 30000,
+            },
+          },
+          env: {},
+        });
+
+        expect(result.config.maxRetries).toBe(4);
+        expect(result.config.retryInitialDelayMs).toBe(3000);
+        expect(result.config.retryMaxDelayMs).toBe(30000);
+        expect(result.sources['retryInitialDelayMs'].kind).toBe('settings');
+        expect(result.sources['retryMaxDelayMs'].kind).toBe('settings');
       });
 
       it('QWEN_CODE_API_TIMEOUT_MS env var overrides settings timeout', () => {
