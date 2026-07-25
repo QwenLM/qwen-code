@@ -856,6 +856,16 @@ export function WebShellSidebar({
       (scope.kind === 'locked' && workspaceQualifiedRestCoreEnabled),
     [workspaceQualifiedRestCoreEnabled],
   );
+  // Organization (pin/group) is safe for any trusted workspace — not just
+  // locked ones — because it only mutates display metadata, never executes
+  // code or touches the filesystem.
+  const canUseOrganizationActions = useCallback(
+    (scope: SessionWorkspaceScope) => {
+      if (scope.kind === 'unknown' || scope.kind === 'untrusted') return false;
+      return scope.kind === 'primary' || workspaceQualifiedRestCoreEnabled;
+    },
+    [workspaceQualifiedRestCoreEnabled],
+  );
   const isActiveSessionReadOnly = useCallback(
     (session: DaemonSessionSummary) =>
       !isMutableSessionScope(resolveSessionWorkspaceScope(session)),
@@ -865,7 +875,7 @@ export function WebShellSidebar({
     (session: DaemonSessionSummary) => {
       const scope = resolveSessionWorkspaceScope(session);
       if (scope.kind === 'primary') return workspaceActions;
-      if (scope.kind === 'locked') {
+      if (scope.kind === 'locked' || scope.kind === 'restricted') {
         return workspace.client.workspaceByCwd(scope.cwd);
       }
       return undefined;
@@ -913,9 +923,9 @@ export function WebShellSidebar({
     (session: DaemonSessionSummary, item: 'pin' | 'group') =>
       organizationEnabled &&
       sessionActionItems.has(item) &&
-      canUseWorkspaceQualifiedActions(resolveSessionWorkspaceScope(session)),
+      canUseOrganizationActions(resolveSessionWorkspaceScope(session)),
     [
-      canUseWorkspaceQualifiedActions,
+      canUseOrganizationActions,
       organizationEnabled,
       resolveSessionWorkspaceScope,
       sessionActionItems,
@@ -933,9 +943,9 @@ export function WebShellSidebar({
     (workspaceCwd?: string) =>
       organizationEnabled &&
       sessionActionItems.has('group') &&
-      canUseWorkspaceQualifiedActions(resolveWorkspaceScope(workspaceCwd)),
+      canUseOrganizationActions(resolveWorkspaceScope(workspaceCwd)),
     [
-      canUseWorkspaceQualifiedActions,
+      canUseOrganizationActions,
       organizationEnabled,
       resolveWorkspaceScope,
       sessionActionItems,
@@ -2011,7 +2021,7 @@ export function WebShellSidebar({
         const groupActions =
           scope.kind === 'primary'
             ? workspaceActions
-            : scope.kind === 'locked'
+            : scope.kind === 'locked' || scope.kind === 'restricted'
               ? workspace.client.workspaceByCwd(scope.cwd)
               : undefined;
         if (!groupActions) return;
@@ -2127,7 +2137,7 @@ export function WebShellSidebar({
     const groupActions =
       scope.kind === 'primary'
         ? workspaceActions
-        : scope.kind === 'locked'
+        : scope.kind === 'locked' || scope.kind === 'restricted'
           ? workspace.client.workspaceByCwd(scope.cwd)
           : undefined;
     if (!groupActions) {
@@ -3072,7 +3082,7 @@ export function WebShellSidebar({
                         )}
                       </div>
                     )}
-                    {!readOnly && (
+                    {(!readOnly || showPin) && (
                       <div
                         className={styles.sessionActions}
                         onClick={(event) => event.stopPropagation()}
