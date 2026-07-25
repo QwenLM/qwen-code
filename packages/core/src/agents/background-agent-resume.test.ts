@@ -1474,6 +1474,94 @@ describe('BackgroundAgentResumeService', () => {
     expect(overriddenConfig.getMaxSubagentDepth()).toBe(100);
   }, 20000);
 
+  it('preserves the configured subagent model when launch flags are absent', async () => {
+    const sessionId = 'session-no-launch-flags';
+    const agentId = 'agent-no-launch-flags';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume without launch flags',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'auto-edit',
+      // persistedCliFlags 不含 model 和 authType → launchModel 为 falsy，
+      // 走 else 分支：保留 subagentConfig.model，不强制 'inherit'。
+      persistedCliFlags: {
+        approvalMode: 'auto-edit',
+        bare: true,
+        sandbox: { command: 'docker', image: 'qwen-code-sandbox' },
+        screenReader: true,
+        baseUrl: 'https://launch-provider.example.com',
+        maxSessionTurns: 7,
+        maxToolCalls: 11,
+        maxSubagentDepth: 100,
+      },
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Resume' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume without launch flags',
+      subagentType: 'researcher',
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume without launch flags',
+      outputFile,
+      metaPath,
+      isBackgrounded: true,
+    });
+
+    const createAgentHeadless = vi.fn().mockResolvedValue({
+      subagent: {
+        execute: vi.fn(async () => undefined),
+        setExternalMessageProvider: vi.fn(),
+        getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+        getExecutionSummary: () => ({
+          totalTokens: 0,
+          outputTokens: 0,
+          totalDurationMs: 0,
+        }),
+        getTerminateMode: () => AgentTerminateMode.GOAL,
+        getFinalText: () => 'done',
+      },
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const { service, subagentManager } = createService();
+    subagentManager.loadSubagent.mockResolvedValue({
+      name: 'researcher',
+      color: 'cyan',
+      model: 'configured-model',
+    });
+    subagentManager.createAgentHeadless = createAgentHeadless;
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    expect(createAgentHeadless).toHaveBeenCalledTimes(1);
+    const [resumeConfig] = createAgentHeadless.mock.calls[0]!;
+    // 无 launchModel + authType → 不强制 inherit，保留 subagentConfig 的 configured model
+    expect(resumeConfig.model).toBe('configured-model');
+  }, 20000);
+
   it.each([
     // Out-of-range values clamp with Config semantics.
     { persisted: 5000, expected: 100 },

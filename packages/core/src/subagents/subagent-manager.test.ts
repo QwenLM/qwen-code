@@ -331,6 +331,44 @@ describe('SubagentManager', () => {
         configuredManager.resolveModelGrade('toString', builtinConfig),
       ).toBeUndefined();
     });
+
+    it('rejects malformed grade values and shapes', () => {
+      // 非字符串值
+      const withNonString = new SubagentManager(
+        makeFakeConfig({
+          agents: { modelGrades: { high: 42 as unknown as string } },
+        }),
+      );
+      expect(
+        withNonString.resolveModelGrade('high', builtinConfig),
+      ).toBeUndefined();
+
+      // 仅空白的值
+      const withBlank = new SubagentManager(
+        makeFakeConfig({ agents: { modelGrades: { high: '  ' } } }),
+      );
+      expect(
+        withBlank.resolveModelGrade('high', builtinConfig),
+      ).toBeUndefined();
+
+      // modelGrades 是数组而非 plain object
+      const withArray = new SubagentManager(
+        makeFakeConfig({
+          agents: {
+            modelGrades: ['high'] as unknown as Record<string, string>,
+          },
+        }),
+      );
+      expect(
+        withArray.resolveModelGrade('high', builtinConfig),
+      ).toBeUndefined();
+
+      // 无 modelGrades（带 grade 请求）
+      const withoutGrades = new SubagentManager(makeFakeConfig({ agents: {} }));
+      expect(
+        withoutGrades.resolveModelGrade('high', builtinConfig),
+      ).toBeUndefined();
+    });
   });
 
   afterEach(() => {
