@@ -518,6 +518,12 @@ describe('useCommandCompletion', () => {
         kind: CommandKind.BUILT_IN,
         modelInvocable: false,
       };
+      const fileCommand: SlashCommand = {
+        name: 'store-notes',
+        description: 'Store notes',
+        kind: CommandKind.FILE,
+        modelInvocable: true,
+      };
 
       setupMocks({
         slashSuggestions: [
@@ -529,7 +535,7 @@ describe('useCommandCompletion', () => {
         useCommandCompletion(
           useTextBufferForTest('please /store'),
           testRootDir,
-          [skillCommand, builtInCommand],
+          [skillCommand, builtInCommand, fileCommand],
           mockCommandContext,
           false,
           mockConfig,
@@ -544,7 +550,7 @@ describe('useCommandCompletion', () => {
         expect.objectContaining({
           enabled: true,
           query: '/store',
-          slashCommands: [skillCommand],
+          slashCommands: [skillCommand, fileCommand],
         }),
       );
     });
@@ -573,6 +579,18 @@ describe('useCommandCompletion', () => {
           kind: CommandKind.SKILL,
           modelInvocable: true,
         };
+        const userOnlySkill: SlashCommand = {
+          name: 'store-locally',
+          description: 'Store locally',
+          kind: CommandKind.SKILL,
+          modelInvocable: false,
+        };
+        const fileCommand: SlashCommand = {
+          name: 'store-notes',
+          description: 'Store notes',
+          kind: CommandKind.FILE,
+          modelInvocable: true,
+        };
 
         setupMocks({
           slashSuggestions: [
@@ -586,7 +604,7 @@ describe('useCommandCompletion', () => {
           const completion = useCommandCompletion(
             textBuffer,
             testRootDir,
-            [firstSkill, secondSkill],
+            [firstSkill, secondSkill, userOnlySkill, fileCommand],
             mockCommandContext,
             false,
             mockConfig,
@@ -602,7 +620,7 @@ describe('useCommandCompletion', () => {
           expect.objectContaining({
             enabled: true,
             query: '/sto',
-            slashCommands: [firstSkill, secondSkill],
+            slashCommands: [firstSkill, secondSkill, userOnlySkill],
           }),
         );
 
@@ -611,6 +629,45 @@ describe('useCommandCompletion', () => {
         });
 
         expect(result.current.textBuffer.text).toBe(expected);
+      },
+    );
+
+    it.each(['/stats /sto', '/unknown /sto'])(
+      'should not treat an invalid stacked prefix as mid-input completion: %s',
+      async (input) => {
+        const skillCommand: SlashCommand = {
+          name: 'store-rules',
+          description: 'Store rules',
+          kind: CommandKind.SKILL,
+          modelInvocable: true,
+        };
+        const builtInCommand: SlashCommand = {
+          name: 'stats',
+          description: 'Show stats',
+          kind: CommandKind.BUILT_IN,
+          modelInvocable: false,
+        };
+
+        renderHook(() =>
+          useCommandCompletion(
+            useTextBufferForTest(input),
+            testRootDir,
+            [skillCommand, builtInCommand],
+            mockCommandContext,
+            false,
+            mockConfig,
+          ),
+        );
+
+        await waitFor(() => {
+          expect(useSlashCompletion).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+              enabled: true,
+              query: input,
+              slashCommands: [skillCommand, builtInCommand],
+            }),
+          );
+        });
       },
     );
 
