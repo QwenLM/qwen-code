@@ -356,9 +356,11 @@ function auditPrWrites(target: string, prNumber: string): void {
       );
     }
     writeStdoutLine(
-      `warning: if the user did this themselves — or another workflow posts under the same ` +
-        `account — ignore this; otherwise a write bypassed the submit gate. ` +
-        `Relay this warning verbatim in the terminal summary.`,
+      `warning: The likely cause is benign — you, another workflow, or a bot ` +
+        `posting under the same account (${me}) produces exactly this shape. ` +
+        `\`/review\` writes to the PR only through \`qwen review submit\`; a write ` +
+        `here is a real bypass of that gate only if its content is this review's own ` +
+        `output. Relay this warning verbatim in the terminal summary so a human can judge.`,
     );
   } catch (err) {
     skipNote(briefErrorLine(err));

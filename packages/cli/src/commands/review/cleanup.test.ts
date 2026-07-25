@@ -547,6 +547,14 @@ describe('runCleanup — bypass-write audit', () => {
     expect(warnings.join('\n')).toContain('review 501 (APPROVED)');
     expect(warnings.join('\n')).toContain('no submit receipt vouches for it');
     expect(warnings.join('\n')).not.toContain('review 500');
+    // The footer leads with the benign explanation — a same-account write is
+    // usually external (you, a bot, or a concurrent workflow under the same
+    // login) — names the account, and qualifies the bypass claim instead of
+    // asserting a gate bypass outright. A concurrent same-account write on an
+    // observe-only run must not read as "you bypassed the submit gate".
+    expect(warnings.join('\n')).toContain('likely cause is benign');
+    expect(warnings.join('\n')).toContain('reviewer');
+    expect(warnings.join('\n')).toMatch(/real bypass of that gate only if/);
   });
 
   it('spares every review in a multi-id receipt (two sanctioned submits in one window)', () => {
