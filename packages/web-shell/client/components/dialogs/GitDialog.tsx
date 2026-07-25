@@ -25,10 +25,12 @@ const TITLE_KEYS: Record<GitDialogView, string> = {
 
 export function GitDialog({
   workspaceCwd,
+  gitCwd,
   initialView,
   onClose,
 }: {
   workspaceCwd: string;
+  gitCwd?: string;
   initialView: GitDialogView;
   onClose: () => void;
 }) {
@@ -113,11 +115,13 @@ export function GitDialog({
           {effectiveView === 'diff' ? (
             <GitDiffContent
               workspaceCwd={workspaceCwd}
+              gitCwd={gitCwd}
               onSubtitleChange={setSubtitle}
             />
           ) : effectiveView === 'log' ? (
             <GitLogContent
               workspaceCwd={workspaceCwd}
+              gitCwd={gitCwd}
               onSubtitleChange={setSubtitle}
             />
           ) : (

@@ -4758,10 +4758,12 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  workspaceGitDiff(): Promise<DaemonWorkspaceGitDiff> {
+  workspaceGitDiff(cwd?: string): Promise<DaemonWorkspaceGitDiff> {
+    const suffix =
+      cwd != null ? `/git/diff?cwd=${urlEncode(cwd)}` : '/git/diff';
     return this.client.workspaceJsonRequest<DaemonWorkspaceGitDiff>(
       this.workspaceSelector,
-      '/git/diff',
+      suffix,
       'GET /workspaces/:workspace/git/diff',
       { mode: 'rest' },
     );
@@ -4770,10 +4772,12 @@ export class WorkspaceDaemonClient {
   workspaceGitDiffFile(
     path: string,
     oldPath?: string,
+    cwd?: string,
   ): Promise<DaemonWorkspaceGitDiffHunks> {
     const query =
       `/git/diff/file?path=${urlEncode(path)}` +
-      (oldPath != null ? `&oldPath=${urlEncode(oldPath)}` : '');
+      (oldPath != null ? `&oldPath=${urlEncode(oldPath)}` : '') +
+      (cwd != null ? `&cwd=${urlEncode(cwd)}` : '');
     return this.client.workspaceJsonRequest<DaemonWorkspaceGitDiffHunks>(
       this.workspaceSelector,
       query,
@@ -4782,10 +4786,15 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  workspaceGitLog(limit?: number, skip?: number): Promise<DaemonGitLog> {
+  workspaceGitLog(
+    limit?: number,
+    skip?: number,
+    cwd?: string,
+  ): Promise<DaemonGitLog> {
     const params = new URLSearchParams();
     if (limit != null) params.set('limit', String(limit));
     if (skip != null) params.set('skip', String(skip));
+    if (cwd != null) params.set('cwd', cwd);
     const qs = params.toString();
     return this.client.workspaceJsonRequest<DaemonGitLog>(
       this.workspaceSelector,
@@ -4795,10 +4804,16 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  workspaceGitCommitDetail(sha: string): Promise<DaemonGitCommitDetail> {
+  workspaceGitCommitDetail(
+    sha: string,
+    cwd?: string,
+  ): Promise<DaemonGitCommitDetail> {
+    const query =
+      `/git/log/commit?sha=${urlEncode(sha)}` +
+      (cwd != null ? `&cwd=${urlEncode(cwd)}` : '');
     return this.client.workspaceJsonRequest<DaemonGitCommitDetail>(
       this.workspaceSelector,
-      `/git/log/commit?sha=${urlEncode(sha)}`,
+      query,
       'GET /workspaces/:workspace/git/log/commit',
       { mode: 'rest' },
     );
