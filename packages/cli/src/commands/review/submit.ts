@@ -44,7 +44,8 @@
 // caller's.
 
 import type { CommandModule } from 'yargs';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { atomicWriteFileSync } from '@qwen-code/qwen-code-core';
+import { mkdirSync, readFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { ghWithInput, setGhHost } from './lib/gh.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
@@ -563,10 +564,9 @@ export function runSubmit(args: SubmitArgs): void {
       const priorIds = readReceiptIds(receiptPath);
       const reviewIds = [...new Set([...priorIds, reviewId])];
       mkdirSync(REVIEW_TMP_DIR, { recursive: true });
-      writeFileSync(
+      atomicWriteFileSync(
         receiptPath,
         `${JSON.stringify({ reviewIds, event, postedAt: new Date().toISOString() })}\n`,
-        'utf8',
       );
     }
   } catch {

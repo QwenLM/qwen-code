@@ -42,10 +42,12 @@ function parseRefs(refs: string): { label: string; isHead: boolean }[] {
 function CommitRow({
   entry,
   workspaceCwd,
+  gitCwd,
   now,
 }: {
   entry: DaemonGitLogEntry;
   workspaceCwd: string;
+  gitCwd?: string;
   now: number;
 }) {
   const { client } = useWorkspace();
@@ -82,7 +84,7 @@ function CommitRow({
       setError(false);
       client
         .workspaceByCwd(workspaceCwd)
-        .workspaceGitCommitDetail(entry.sha)
+        .workspaceGitCommitDetail(entry.sha, gitCwd)
         .then((result) => {
           if (cancelledRef.current) return;
           setDetail(result);
@@ -207,9 +209,11 @@ function CommitRow({
 
 export function GitLogContent({
   workspaceCwd,
+  gitCwd,
   onSubtitleChange,
 }: {
   workspaceCwd: string;
+  gitCwd?: string;
   onSubtitleChange?: (subtitle: string | undefined) => void;
 }) {
   const { client } = useWorkspace();
@@ -235,7 +239,7 @@ export function GitLogContent({
     nextSkipRef.current = 0;
     client
       .workspaceByCwd(workspaceCwd)
-      .workspaceGitLog(PAGE_SIZE, 0)
+      .workspaceGitLog(PAGE_SIZE, 0, gitCwd)
       .then((result) => {
         if (!cancelled) {
           nextSkipRef.current = result.entries.length;
@@ -251,14 +255,14 @@ export function GitLogContent({
     return () => {
       cancelled = true;
     };
-  }, [client, workspaceCwd]);
+  }, [client, workspaceCwd, gitCwd]);
 
   const loadMore = useCallback(() => {
     if (!log || loadingMore) return;
     setLoadingMore(true);
     client
       .workspaceByCwd(workspaceCwd)
-      .workspaceGitLog(PAGE_SIZE, nextSkipRef.current)
+      .workspaceGitLog(PAGE_SIZE, nextSkipRef.current, gitCwd)
       .then((result) => {
         nextSkipRef.current += result.entries.length;
         setLog((prev) => {
@@ -280,7 +284,7 @@ export function GitLogContent({
       .finally(() => {
         setLoadingMore(false);
       });
-  }, [client, workspaceCwd, log, loadingMore]);
+  }, [client, workspaceCwd, gitCwd, log, loadingMore]);
 
   const subtitle = log?.available
     ? t('gitLog.subtitle', { count: log.entries.length })
@@ -308,6 +312,7 @@ export function GitLogContent({
               key={entry.sha}
               entry={entry}
               workspaceCwd={workspaceCwd}
+              gitCwd={gitCwd}
               now={now}
             />
           ))}

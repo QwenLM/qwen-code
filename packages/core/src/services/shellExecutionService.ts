@@ -395,6 +395,8 @@ const replayTerminalOutput = async (
     rows,
     scrollback: 10000,
     convertEol: true,
+    // This headless terminal only captures output, so suppress parser diagnostics.
+    logLevel: 'off',
   });
 
   try {
@@ -1486,6 +1488,8 @@ export class ShellExecutionService {
           cols,
           rows,
           scrollback: MAX_LIVE_TERMINAL_SCROLLBACK_LINES,
+          // This headless terminal only captures output, so suppress parser diagnostics.
+          logLevel: 'off',
         });
         headlessTerminal.scrollToTop();
 

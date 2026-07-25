@@ -49,7 +49,7 @@ const debugLogger = createDebugLogger('CLIENT');
 import { GeminiChat } from './geminiChat.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
-  buildSystemPromptSuffix,
+  assembleSystemPrompt,
   getArenaSystemReminder,
   getCoreSystemPrompt,
   getCustomSystemPrompt,
@@ -503,6 +503,22 @@ export class GeminiClient {
   }
 
   /**
+   * Fire-and-forget StopFailure hook for loop-detection early returns.
+   * Matches the detached pattern used by the CLI's API-error path
+   * (useGeminiStream.ts) — output and errors are ignored.
+   */
+  private fireLoopDetectedStopFailure(loopType: string | null): void {
+    if (this.config.getDisableAllHooks()) return;
+    const hookSystem = this.config.getHookSystem();
+    if (!hookSystem || !this.config.hasHooksForEvent('StopFailure')) return;
+    hookSystem
+      .fireStopFailureEvent('loop_detected', loopType ?? undefined)
+      .catch((err) => {
+        debugLogger.warn(`StopFailure hook failed: ${err}`);
+      });
+  }
+
+  /**
    * Walk-only accessor for the set of `functionResponse.id` strings in
    * raw history. Callers that only need the dedup id set (notably
    * `useGeminiStream.handleCompletedTools`) MUST prefer this over
@@ -866,30 +882,22 @@ export class GeminiClient {
   }
 
   private getMainSessionSystemInstruction(): string {
-    const userMemory = this.config.getUserMemory();
     const overrideSystemPrompt = this.config.getSystemPrompt();
-    const appendSystemPrompt = this.config.getAppendSystemPrompt();
-    const gitStatus = this.getCachedGitStatus();
-
     const base = overrideSystemPrompt
-      ? getCustomSystemPrompt(
-          overrideSystemPrompt,
-          userMemory,
-          appendSystemPrompt,
-        )
+      ? getCustomSystemPrompt(overrideSystemPrompt)
       : getCoreSystemPrompt(
-          userMemory,
+          undefined,
           this.config.getModel(),
-          appendSystemPrompt,
+          undefined,
           resolveInteractionMode(this.config),
         );
-    const withGitStatus = gitStatus ? base + '\n\n' + gitStatus : base;
-    // The auto-memory section is the volatile layer — rewritten in-session on
-    // every memory save. It goes after all stable/context content so a save
-    // invalidates the shortest possible cached prompt prefix.
-    return (
-      withGitStatus + buildSystemPromptSuffix(this.config.getAutoMemoryPrompt())
-    );
+    return assembleSystemPrompt({
+      base,
+      contextFiles: this.config.getUserMemory(),
+      appendPrompt: this.config.getAppendSystemPrompt(),
+      gitStatus: this.getCachedGitStatus(),
+      autoMemory: this.config.getAutoMemoryPrompt(),
+    });
   }
 
   async refreshStartupContextReminder(): Promise<void> {
@@ -2625,6 +2633,7 @@ export class GeminiClient {
             if (isTopLevelInteraction)
               endInteractionSpan('error', { errorMessage: 'loop detected' });
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+            this.fireLoopDetectedStopFailure(loopType);
             return turn;
           }
 
@@ -2656,6 +2665,7 @@ export class GeminiClient {
             // finally cleanup catches this, but cancel explicitly to match
             // the cleanup pattern at other early-return sites.
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+            this.fireLoopDetectedStopFailure(loopType);
             return turn;
           }
           // Update arena status on Finished events — stats are derived
@@ -3158,12 +3168,12 @@ export class GeminiClient {
     let currentAttemptModel: string = model;
 
     try {
-      const userMemory = this.config.getUserMemory();
       const finalSystemInstruction = generationConfig.systemInstruction
-        ? getCustomSystemPrompt(
-            generationConfig.systemInstruction,
-            userMemory,
-          ) + buildSystemPromptSuffix(this.config.getAutoMemoryPrompt())
+        ? assembleSystemPrompt({
+            base: getCustomSystemPrompt(generationConfig.systemInstruction),
+            contextFiles: this.config.getUserMemory(),
+            autoMemory: this.config.getAutoMemoryPrompt(),
+          })
         : this.getMainSessionSystemInstruction();
 
       const requestConfig: GenerateContentConfig = {

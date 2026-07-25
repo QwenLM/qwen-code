@@ -14,6 +14,7 @@ import {
   mkdtempSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   rmSync,
   utimesSync,
   writeFileSync,
@@ -755,5 +756,14 @@ describe('submit receipt (producer half of the audit contract)', () => {
     runSubmit(authorizedPost());
     const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
     expect(receipt.reviewIds).toEqual([7, 8]);
+  });
+
+  it('writes atomically, leaving no .tmp sibling behind', () => {
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
+    runSubmit(authorizedPost());
+    expect(readFileSync(receiptPath(), 'utf8')).toContain('"reviewIds"');
+    const tmpDir = join(dir, '.qwen', 'tmp');
+    const leftovers = readdirSync(tmpDir).filter((f) => f.endsWith('.tmp'));
+    expect(leftovers).toEqual([]);
   });
 });

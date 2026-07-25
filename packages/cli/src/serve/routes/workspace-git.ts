@@ -5,8 +5,6 @@
  */
 
 import type { Application, Request, Response } from 'express';
-import * as fs from 'node:fs';
-import * as path from 'node:path';
 import { getGitWorkingTreeStatus } from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { SendBridgeError } from '../server/error-response.js';
@@ -17,6 +15,7 @@ import type {
 } from '../workspace-registry.js';
 import {
   requireTrustedWorkspaceRuntime,
+  resolveContainedCwd,
   resolveWorkspaceRuntimeFromParam,
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
@@ -89,23 +88,7 @@ export function registerWorkspaceQualifiedGitRoutes(
       deps.sendBridgeError(res, err, { route });
       return;
     }
-    // Optional ?cwd= override for worktree sessions whose working directory
-    // differs from the workspace root. Canonicalize both paths with realpath
-    // to prevent symlink escape, then validate containment.
-    const rawCwd = req.query['cwd'];
-    let gitCwd = runtime.workspaceCwd;
-    if (typeof rawCwd === 'string' && rawCwd.length > 0) {
-      try {
-        const resolved = fs.realpathSync(path.resolve(rawCwd));
-        const root = fs.realpathSync(runtime.workspaceCwd);
-        const rel = path.relative(root, resolved);
-        if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
-          gitCwd = resolved;
-        }
-      } catch {
-        // Path doesn't exist or can't be resolved — use workspace root.
-      }
-    }
+    const gitCwd = resolveContainedCwd(req, runtime.workspaceCwd);
     try {
       if (gitCwd !== runtime.workspaceCwd) {
         // Worktree cwd: call getGitWorkingTreeStatus directly to avoid

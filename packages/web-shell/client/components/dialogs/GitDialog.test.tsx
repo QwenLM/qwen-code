@@ -68,7 +68,7 @@ async function flush() {
   });
 }
 
-function mount(initialView: 'diff' | 'log' | 'prs' = 'diff') {
+function mount(initialView: 'diff' | 'log' | 'prs' = 'diff', gitCwd?: string) {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
@@ -77,6 +77,7 @@ function mount(initialView: 'diff' | 'log' | 'prs' = 'diff') {
       <I18nProvider language="en">
         <GitDialog
           workspaceCwd="/repo"
+          gitCwd={gitCwd}
           initialView={initialView}
           onClose={vi.fn()}
         />
@@ -146,7 +147,7 @@ describe('GitDialog', () => {
     ).toHaveLength(1);
     expect(historyTab?.getAttribute('aria-selected')).toBe('true');
     expect(panel?.getAttribute('aria-labelledby')).toBe('git-dialog-tab-log');
-    expect(workspaceGitLog).toHaveBeenCalledWith(50, 0);
+    expect(workspaceGitLog).toHaveBeenCalledWith(50, 0, undefined);
   });
 
   it('supports arrow-key tab navigation', async () => {
@@ -183,6 +184,38 @@ describe('GitDialog', () => {
         .getElementById('git-dialog-tab-log')
         ?.getAttribute('aria-selected'),
     ).toBe('true');
+  });
+
+  it('forwards gitCwd to both diff and log SDK calls', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+      files: [],
+      hiddenCount: 0,
+    });
+    workspaceGitLog.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      entries: [],
+      hasMore: false,
+    });
+    mount('diff', '/worktrees/feature-x');
+    await flush();
+
+    expect(workspaceGitDiff).toHaveBeenCalledWith('/worktrees/feature-x');
+
+    const historyTab = document.getElementById('git-dialog-tab-log');
+    await act(async () => {
+      historyTab?.click();
+    });
+    await flush();
+
+    expect(workspaceGitLog).toHaveBeenCalledWith(50, 0, '/worktrees/feature-x');
   });
 
   it('shows the pull requests tab only when the daemon advertises the capability', async () => {
