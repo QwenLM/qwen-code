@@ -96,7 +96,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         );
       }
     }
-    this.config.allowedUsers = resolved;
+    // Only the gate consumes the resolved IDs. Keep this.config.allowedUsers as
+    // the original logins so connect() stays idempotent — the daemon reconnect
+    // path calls disconnect() + connect() on the same instance, and re-resolving
+    // already-numeric IDs would 404 (GET /users/{username} expects a login).
     this.gate.replaceAllowedUsers(resolved);
     this.startPollLoop();
   }

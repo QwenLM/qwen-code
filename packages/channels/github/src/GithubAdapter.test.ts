@@ -195,12 +195,12 @@ describe('GithubChannel', () => {
       );
     });
 
-    it('resolves allowedUsers logins to numeric IDs and updates the sender gate', async () => {
-      channel = new TestableGithubChannel(
-        'test-github',
-        makeConfig({ senderPolicy: 'allowlist', allowedUsers: ['alice'] }),
-        makeBridge(),
-      );
+    it('resolves allowedUsers logins to numeric IDs for the gate without mutating config', async () => {
+      const config = makeConfig({
+        senderPolicy: 'allowlist',
+        allowedUsers: ['alice'],
+      });
+      channel = new TestableGithubChannel('test-github', config, makeBridge());
       mockOctokit.rest.users.getByUsername.mockResolvedValue({
         data: { id: 10001, login: 'alice' },
       });
@@ -210,10 +210,11 @@ describe('GithubChannel', () => {
       expect(mockOctokit.rest.users.getByUsername).toHaveBeenCalledWith({
         username: 'alice',
       });
+      // config keeps the original logins so reconnect can re-resolve them.
       expect(
         (channel as unknown as { config: { allowedUsers: string[] } }).config
           .allowedUsers,
-      ).toEqual(['10001']);
+      ).toEqual(['alice']);
       const gate = (
         channel as unknown as {
           gate: { isAllowed: (senderId: string) => boolean };
@@ -222,6 +223,37 @@ describe('GithubChannel', () => {
       expect(gate.isAllowed('10001')).toBe(true);
       expect(gate.isAllowed('alice')).toBe(false);
       channel.disconnect();
+    });
+
+    it('connect() is idempotent across reconnects (does not re-resolve numeric IDs)', async () => {
+      const config = makeConfig({
+        senderPolicy: 'allowlist',
+        allowedUsers: ['alice'],
+      });
+      channel = new TestableGithubChannel('test-github', config, makeBridge());
+      // Resolve the login, but 404 on a numeric ID — as GitHub does for
+      // GET /users/{username} when given an ID instead of a login.
+      mockOctokit.rest.users.getByUsername.mockImplementation(
+        async ({ username }: { username: string }) => {
+          if (username === 'alice') {
+            return { data: { id: 10001, login: 'alice' } };
+          }
+          throw new Error(`Not Found: ${username}`);
+        },
+      );
+      mockOctokit.paginate.mockResolvedValue([]);
+
+      await channel.connect();
+      channel.disconnect();
+      // Daemon bridge-crash restart calls disconnect() + connect() on the same
+      // instance; this must not attempt to resolve the already-numeric ID.
+      await expect(channel.connect()).resolves.toBeUndefined();
+      channel.disconnect();
+
+      expect(config.allowedUsers).toEqual(['alice']);
+      expect(mockOctokit.rest.users.getByUsername).toHaveBeenCalledWith({
+        username: 'alice',
+      });
     });
 
     it('throws when allowedUser resolution fails', async () => {
@@ -954,6 +986,136 @@ describe('GithubChannel', () => {
       });
       expect(result).not.toBeNull();
       expect(result!.dispatchedBodies).toBeUndefined();
+    });
+  });
+
+  describe('githubApi retry backoff', () => {
+    function githubApi(
+      fn: () => Promise<unknown>,
+      retries = 3,
+    ): Promise<unknown> {
+      return (
+        channel as unknown as {
+          githubApi: (
+            fn: () => Promise<unknown>,
+            label: string,
+            retries?: number,
+          ) => Promise<unknown>;
+        }
+      ).githubApi(fn, 'test-op', retries);
+    }
+
+    function stubSleep(): ReturnType<typeof vi.fn> {
+      const sleep = vi.fn().mockResolvedValue(undefined);
+      (
+        channel as unknown as {
+          abortableSleep: (ms: number) => Promise<void>;
+        }
+      ).abortableSleep = sleep;
+      return sleep;
+    }
+
+    function httpError(
+      status: number,
+      headers: Record<string, string | number> = {},
+    ): Error {
+      return Object.assign(new Error(`HTTP ${status}`), {
+        status,
+        response: { headers },
+      });
+    }
+
+    it('honors the retry-after header (seconds → ms)', async () => {
+      const sleep = stubSleep();
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(httpError(429, { 'retry-after': '2' }))
+        .mockResolvedValueOnce('ok');
+      await expect(githubApi(fn)).resolves.toBe('ok');
+      expect(fn).toHaveBeenCalledTimes(2);
+      expect(sleep).toHaveBeenCalledWith(2000);
+    });
+
+    it('computes cooldown from x-ratelimit-reset on a 403 rate limit', async () => {
+      const now = 1_700_000_000_000;
+      const dateSpy = vi.spyOn(Date, 'now').mockReturnValue(now);
+      const sleep = stubSleep();
+      const resetSeconds = now / 1000 + 5; // rate limit resets in 5s
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(
+          httpError(403, {
+            'x-ratelimit-remaining': '0',
+            'x-ratelimit-reset': String(resetSeconds),
+          }),
+        )
+        .mockResolvedValueOnce('ok');
+      await expect(githubApi(fn)).resolves.toBe('ok');
+      expect(sleep).toHaveBeenCalledWith(6000); // 5000 until reset + 1000 buffer
+      dateSpy.mockRestore();
+    });
+
+    it('falls back to exponential backoff without rate-limit headers', async () => {
+      const sleep = stubSleep();
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(httpError(500))
+        .mockRejectedValueOnce(httpError(502))
+        .mockResolvedValueOnce('ok');
+      await expect(githubApi(fn)).resolves.toBe('ok');
+      expect(sleep).toHaveBeenNthCalledWith(1, 1000); // 1000 * 2^0
+      expect(sleep).toHaveBeenNthCalledWith(2, 2000); // 1000 * 2^1
+    });
+
+    it('rethrows once retries are exhausted', async () => {
+      const sleep = stubSleep();
+      const fn = vi.fn().mockRejectedValue(httpError(500));
+      await expect(githubApi(fn, 3)).rejects.toThrow('HTTP 500');
+      expect(fn).toHaveBeenCalledTimes(3);
+      expect(sleep).toHaveBeenCalledTimes(2); // no sleep after the final attempt
+    });
+  });
+
+  describe('webOrigin', () => {
+    async function connectAndReadWebOrigin(
+      config: ChannelConfig & Record<string, unknown>,
+    ): Promise<string> {
+      const ch = new TestableGithubChannel('test-ghe', config, makeBridge());
+      mockOctokit.paginate.mockResolvedValue([]);
+      await ch.connect();
+      const origin = (ch as unknown as { webOrigin: string }).webOrigin;
+      ch.disconnect();
+      return origin;
+    }
+
+    it('defaults to https://github.com when no baseUrl is set', async () => {
+      await expect(connectAndReadWebOrigin(makeConfig())).resolves.toBe(
+        'https://github.com',
+      );
+    });
+
+    it('rewrites the api.github.com baseUrl to github.com', async () => {
+      await expect(
+        connectAndReadWebOrigin(
+          makeConfig({ baseUrl: 'https://api.github.com' }),
+        ),
+      ).resolves.toBe('https://github.com');
+    });
+
+    it('strips /api/v3 from a GitHub Enterprise baseUrl', async () => {
+      await expect(
+        connectAndReadWebOrigin(
+          makeConfig({ baseUrl: 'https://github.example.com/api/v3' }),
+        ),
+      ).resolves.toBe('https://github.example.com');
+    });
+
+    it('strips a trailing-slash /api/v3/ from a GitHub Enterprise baseUrl', async () => {
+      await expect(
+        connectAndReadWebOrigin(
+          makeConfig({ baseUrl: 'https://github.example.com/api/v3/' }),
+        ),
+      ).resolves.toBe('https://github.example.com');
     });
   });
 });
