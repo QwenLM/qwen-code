@@ -171,17 +171,19 @@
 
 .prBody {
   width: 100%;
-  min-height: 60px;
-  max-height: 120px;
+  min-height: 200px;
+  max-height: 400px;
   resize: vertical;
   border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
-  border-radius: 6px;
+  border-radius: 0 0 6px 6px;
+  border-top: none;
   background: var(--background, transparent);
   color: var(--foreground, #e0e0e0);
   font-size: 13px;
-  padding: 6px 10px;
+  padding: 8px 10px;
   outline: none;
-  line-height: 1.4;
+  line-height: 1.5;
+  font-family: 'JetBrains Mono', monospace;
 }
 
 .prBody:focus {
@@ -190,6 +192,59 @@
 
 .prBody::placeholder {
   color: var(--muted-foreground, #666);
+}
+
+.prBodyWrap {
+  display: flex;
+  flex-direction: column;
+}
+
+.prBodyToolbar {
+  display: flex;
+  gap: 0;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  overflow: hidden;
+}
+
+.prBodyTab {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border: none;
+  background: transparent;
+  color: var(--muted-foreground, #888);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.prBodyTab:hover {
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
+}
+
+.prBodyTabActive {
+  color: var(--foreground, #e0e0e0);
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.1));
+  font-weight: 500;
+}
+
+.prBodyPreview {
+  min-height: 200px;
+  max-height: 400px;
+  overflow-y: auto;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-top: none;
+  border-radius: 0 0 6px 6px;
+  padding: 8px 10px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.prBodyEmpty {
+  color: var(--muted-foreground, #666);
+  font-style: italic;
 }
 
 .prFormRow {

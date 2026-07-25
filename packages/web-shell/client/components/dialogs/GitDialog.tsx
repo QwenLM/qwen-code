@@ -13,8 +13,9 @@ import {
 } from 'react';
 import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
 import type { DaemonWorkspaceGitDiffFile } from '@qwen-code/sdk/daemon';
-import { Loader2Icon } from 'lucide-react';
+import { EyeIcon, Loader2Icon, PencilIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
+import { Markdown } from '../messages/Markdown';
 import { DialogShell } from './DialogShell';
 import { GitDiffContent } from './GitDiffDialog';
 import { GitLogContent } from './GitLogDialog';
@@ -68,6 +69,7 @@ export function GitDialog({
   const [prBase, setPrBase] = useState('');
   const [prBusy, setPrBusy] = useState(false);
   const [prGenerating, setPrGenerating] = useState(false);
+  const [prPreview, setPrPreview] = useState(false);
   const [prStatus, setPrStatus] = useState<{
     msg: string;
     type: 'error' | 'success';
@@ -264,10 +266,35 @@ export function GitDialog({
             })
             .join('\n');
           const prompt =
-            `Generate a GitHub pull request title and description for these changes. ` +
-            `The title must be on the first line, concise (under 70 chars). ` +
-            `The description follows on subsequent lines. ` +
-            `Reply with ONLY the title and description, no extra explanation.\n\n${fileSummary}`;
+            `Generate a GitHub pull request title and body for these changes. ` +
+            `Follow these rules strictly:\n` +
+            `1. Title: conventional commit format, e.g. "feat(web-shell): add branch picker". Under 70 chars.\n` +
+            `2. Body must follow this exact template structure (fill in each section):\n\n` +
+            `## What this PR does\n` +
+            `<Describe the change in prose. Do NOT reference file names or function names.>\n\n` +
+            `## Why it is needed\n` +
+            `<Motivation, problem being solved, or user-facing benefit.>\n\n` +
+            `## Reviewer Test Plan\n` +
+            `### How to verify\n` +
+            `<Steps a reviewer should follow to confirm the change works.>\n` +
+            `### Evidence (Before & After)\n` +
+            `N/A\n` +
+            `### Tested on\n` +
+            `|     OS     | Status |\n` +
+            `| :--------: | :----: |\n` +
+            `|  macOS  | ✅ |\n` +
+            `| Windows | ⚠️ |\n` +
+            `|  Linux  | ⚠️ |\n\n` +
+            `## Risk & Scope\n` +
+            `- Main risk or tradeoff: <fill in>\n` +
+            `- Not validated / out of scope: <fill in>\n` +
+            `- Breaking changes / migration notes: none\n\n` +
+            `<details>\n<summary>中文说明</summary>\n\n` +
+            `<Full Chinese translation of the English body above, section by section.>\n\n` +
+            `</details>\n\n` +
+            `3. Do NOT hard-wrap paragraphs — write each paragraph as one long line.\n` +
+            `4. Reply with the title on the first line, then a blank line, then the body. No extra explanation.\n\n` +
+            `Changed files:\n${fileSummary}`;
           return client
             .btwSession(sid, prompt, { signal: abort.signal })
             .then((result) => {
@@ -467,18 +494,49 @@ export function GitDialog({
                   disabled={prGenerating}
                   onChange={(e) => setPrTitle(e.target.value)}
                 />
-                <textarea
-                  className={styles.prBody}
-                  placeholder={
-                    prGenerating
-                      ? t('gitCommit.generating')
-                      : t('gitCommit.prBodyPlaceholder')
-                  }
-                  value={prBody}
-                  disabled={prGenerating}
-                  onChange={(e) => setPrBody(e.target.value)}
-                  rows={3}
-                />
+                <div className={styles.prBodyWrap}>
+                  <div className={styles.prBodyToolbar}>
+                    <button
+                      type="button"
+                      className={`${styles.prBodyTab} ${!prPreview ? styles.prBodyTabActive : ''}`}
+                      onClick={() => setPrPreview(false)}
+                    >
+                      <PencilIcon size={12} />
+                      {t('gitCommit.prEdit')}
+                    </button>
+                    <button
+                      type="button"
+                      className={`${styles.prBodyTab} ${prPreview ? styles.prBodyTabActive : ''}`}
+                      onClick={() => setPrPreview(true)}
+                    >
+                      <EyeIcon size={12} />
+                      {t('gitCommit.prPreview')}
+                    </button>
+                  </div>
+                  {prPreview ? (
+                    <div className={styles.prBodyPreview}>
+                      {prBody ? (
+                        <Markdown content={prBody} />
+                      ) : (
+                        <span className={styles.prBodyEmpty}>
+                          {t('gitCommit.prBodyPlaceholder')}
+                        </span>
+                      )}
+                    </div>
+                  ) : (
+                    <textarea
+                      className={styles.prBody}
+                      placeholder={
+                        prGenerating
+                          ? t('gitCommit.generating')
+                          : t('gitCommit.prBodyPlaceholder')
+                      }
+                      value={prBody}
+                      disabled={prGenerating}
+                      onChange={(e) => setPrBody(e.target.value)}
+                    />
+                  )}
+                </div>
                 <div className={styles.prFormRow}>
                   <input
                     className={styles.prInputSmall}

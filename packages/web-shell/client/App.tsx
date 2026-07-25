@@ -3261,28 +3261,34 @@ export function App({
     [clearFollowup, ensureSessionForPrompt, sessionActions],
   );
 
-  const getOrCreateSessionId = useCallback(async (): Promise<
-    string | undefined
-  > => {
-    if (connection.sessionId) return connection.sessionId;
-    try {
-      const primaryCwd = workspaces.find((w) => w.primary)?.cwd;
-      const result = await (
-        sessionActions as typeof sessionActions & SessionActionsWithCreate
-      ).createSession({
-        workspaceCwd: lockedWorkspaceCwd ?? selectedWorkspaceCwd ?? primaryCwd,
-      });
-      return result.sessionId;
-    } catch {
-      return undefined;
-    }
-  }, [
-    connection.sessionId,
-    sessionActions,
-    workspaces,
-    lockedWorkspaceCwd,
-    selectedWorkspaceCwd,
-  ]);
+  const resolveSessionForWorkspace = useCallback(
+    async (cwd: string): Promise<string | undefined> => {
+      try {
+        // If the connected session is for this workspace, use it directly.
+        if (connection.sessionId && activeWorkspaceCwd === cwd) {
+          return connection.sessionId;
+        }
+        // Fetch the most recent session for this workspace.
+        const sessions = await workspace.client
+          .workspaceByCwd(cwd)
+          .listWorkspaceSessions({ pageSize: 1, archiveState: 'active' });
+        if (sessions.length > 0) return sessions[0].sessionId;
+        // No session exists: create one.
+        const result = await (
+          sessionActions as typeof sessionActions & SessionActionsWithCreate
+        ).createSession({ workspaceCwd: cwd });
+        return result.sessionId;
+      } catch {
+        return undefined;
+      }
+    },
+    [
+      connection.sessionId,
+      activeWorkspaceCwd,
+      workspace.client,
+      sessionActions,
+    ],
+  );
 
   const availableModels = useMemo(
     () =>
@@ -6776,7 +6782,9 @@ export function App({
               gitCwd={gitDialog.gitCwd}
               initialView={gitDialog.view}
               sessionId={connection.sessionId}
-              getOrCreateSessionId={getOrCreateSessionId}
+              getOrCreateSessionId={() =>
+                resolveSessionForWorkspace(gitDialog.workspaceCwd)
+              }
               onClose={() => setGitDialog(undefined)}
             />
           )}
