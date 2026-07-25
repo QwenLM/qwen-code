@@ -556,6 +556,35 @@ describe('UpdateGoalTool', () => {
     expect(getGoalRuntime).toHaveBeenCalledTimes(2);
   });
 
+  it('propagates unexpected worker-view errors from both tools', async () => {
+    const unexpectedError = new Error('unexpected database failure');
+    const getGoalForWorker = vi.fn().mockRejectedValue(unexpectedError);
+    const runtime = {
+      getGoalForWorker,
+      recordTerminalProposal: vi.fn(),
+    } as unknown as GoalRuntime;
+    const config = makeConfig(runtime);
+    const getInvocation = goalTurnContext.run(permit, () =>
+      new GetGoalTool(config).build({}),
+    );
+    const updateInvocation = goalTurnContext.run(permit, () =>
+      new UpdateGoalTool(config).build({
+        status: 'complete',
+        reason: 'done',
+        evidenceRefs: ['evidence-1'],
+      }),
+    );
+
+    await expect(
+      getInvocation.execute(new AbortController().signal),
+    ).rejects.toBe(unexpectedError);
+    await expect(
+      updateInvocation.execute(new AbortController().signal),
+    ).rejects.toBe(unexpectedError);
+    expect(getGoalForWorker).toHaveBeenCalledTimes(2);
+    expect(runtime.recordTerminalProposal).not.toHaveBeenCalled();
+  });
+
   it.each(['missing snapshot API', 'mismatched session snapshot'] as const)(
     'fails both tools closed with a stable stale-permit error for a %s',
     async (scenario) => {

@@ -224,9 +224,7 @@ class UpdateGoalInvocation extends BaseToolInvocation<
         'A Goal proposal is already recorded for this turn; no terminal lifecycle change was committed.';
     } else if (
       receipt.readyForVerification &&
-      snapshot.goal?.goalId === this.permit.goalId &&
-      snapshot.goal.revision === this.permit.revision &&
-      snapshot.goal.status === 'active'
+      snapshot.goal?.status === 'active'
     ) {
       returnDisplay =
         'Proposal queued for independent verification at the turn boundary; no terminal lifecycle change was committed.';
