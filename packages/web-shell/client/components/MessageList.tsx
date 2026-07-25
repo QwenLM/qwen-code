@@ -63,6 +63,7 @@ interface MessageListProps {
   hasOlderHistory?: boolean;
   loadingOlderHistory?: boolean;
   historyCapacityReached?: boolean;
+  historyPaginationError?: boolean;
   onLoadOlderHistory?: () => Promise<void>;
   transcriptBlockCount?: number;
   transcriptActivity?: {
@@ -2184,6 +2185,7 @@ export const MessageList = memo(
       hasOlderHistory = false,
       loadingOlderHistory = false,
       historyCapacityReached = false,
+      historyPaginationError = false,
       onLoadOlderHistory,
       transcriptBlockCount = 0,
       transcriptActivity,
@@ -3171,6 +3173,7 @@ export const MessageList = memo(
           !onLoadOlderHistory ||
           loadingOlderHistory ||
           olderHistoryLoadInFlight.current ||
+          historyPaginationError ||
           (olderHistoryRetryBlocked.current && !allowRetry)
         ) {
           return;
@@ -3194,7 +3197,7 @@ export const MessageList = memo(
           setSuppressOlderHistoryLoadingStatus(false);
         }
       },
-      [loadingOlderHistory, onLoadOlderHistory],
+      [loadingOlderHistory, onLoadOlderHistory, historyPaginationError],
     );
 
     // Rules 2 & 3: detect scroll direction to toggle follow mode.
@@ -3811,6 +3814,13 @@ export const MessageList = memo(
             {t('history.capacityReached')}
           </div>
         )}
+        {historyPaginationError &&
+          !showLoadingSkeleton &&
+          !historyCapacityReached && (
+            <div className={styles.historyStatus} role="alert">
+              {t('history.paginationError')}
+            </div>
+          )}
         <SessionTimeline
           entries={sessionTimelineEntries}
           currentTurnId={currentTimelineTurnId}

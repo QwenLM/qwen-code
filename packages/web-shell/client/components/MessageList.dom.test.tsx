@@ -1578,6 +1578,50 @@ describe('MessageList — turn collapse (DOM)', () => {
     );
   });
 
+  it('shows a persistent error when history pagination fails', () => {
+    const c = mount([userMsg('u1')], undefined, {
+      historyPaginationError: true,
+    });
+    expect(c.querySelector('[role="alert"]')?.textContent).toBe(
+      'Failed to load earlier history. Some older messages may be unavailable.',
+    );
+  });
+
+  it('does not auto-load older history when a pagination error is present', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 300,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    // historyPaginationError is true, hasOlderHistory is true
+    const c = mount([userMsg('u1')], undefined, {
+      hasOlderHistory: true,
+      historyPaginationError: true,
+      onLoadOlderHistory,
+    });
+
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+
+    // It should NOT call loadMore because paginationError blocks it
+    expect(onLoadOlderHistory).not.toHaveBeenCalled();
+  });
+
   it('does not smooth-scroll when existing session history loads after an empty render', () => {
     const scrollTo = vi.fn();
     let scrollTop = 0;
