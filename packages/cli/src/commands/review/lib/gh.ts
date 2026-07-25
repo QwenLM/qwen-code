@@ -94,6 +94,16 @@ export function setGhHost(host: string | undefined): void {
 }
 
 /**
+ * The host `gh` calls are currently routed at, or `undefined` for the
+ * default (github.com / an operator-exported GH_HOST). Lets a caller that
+ * overrides the host for a scoped block save and restore the prior value
+ * instead of leaking the override into module state.
+ */
+export function getGhHost(): string | undefined {
+  return ghHost;
+}
+
+/**
  * Environment for `gh` child processes. `undefined` means "inherit the
  * parent env untouched"; with a host set, the inherited env is extended
  * with GH_HOST, which `gh` honours on every command.
