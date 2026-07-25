@@ -24,6 +24,14 @@ export type ParsedStackedSkillCommands = {
   exceededMax: boolean;
 };
 
+/** Returns whether a command can be offered in a stacked skill completion. */
+export const isStackedSkillCompletableCommand = (
+  command: SlashCommand,
+): boolean =>
+  command.kind === CommandKind.SKILL &&
+  command.userInvocable !== false &&
+  !command.hidden;
+
 /**
  * Returns whether the text before a partial slash token is a valid stacked
  * skill prefix. A further skill can only be completed while the existing
@@ -42,11 +50,7 @@ export const isValidStackedSkillPrefix = (
   return tokens.every((token) => {
     if (!token.startsWith('/') || token.length === 1) return false;
     const command = findCommandByName(token.slice(1), commands);
-    return (
-      command?.kind === CommandKind.SKILL &&
-      command.userInvocable !== false &&
-      !command.hidden
-    );
+    return command !== undefined && isStackedSkillCompletableCommand(command);
   });
 };
 

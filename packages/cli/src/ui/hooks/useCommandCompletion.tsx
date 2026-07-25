@@ -9,11 +9,7 @@ import type {
   Suggestion,
   SuggestionCategory,
 } from '../components/SuggestionsDisplay.js';
-import {
-  CommandKind,
-  type CommandContext,
-  type SlashCommand,
-} from '../commands/types.js';
+import type { CommandContext, SlashCommand } from '../commands/types.js';
 import type { TextBuffer } from '../components/shared/text-buffer.js';
 import { logicalPosToOffset } from '../components/shared/text-buffer.js';
 import {
@@ -31,6 +27,7 @@ import {
 import type { Config } from '@qwen-code/qwen-code-core';
 import { useCompletion } from './useCompletion.js';
 import {
+  isStackedSkillCompletableCommand,
   isValidStackedSkillPrefix,
   parseSlashCommand,
 } from '../../utils/commands.js';
@@ -58,12 +55,6 @@ function isExactMidInputModelInvocableCommand(
   return slashCommands.some(
     (cmd) =>
       isMidInputCompletableCommand(cmd) && cmd.name.toLowerCase() === query,
-  );
-}
-
-function isStackedSkillCompletableCommand(cmd: SlashCommand): boolean {
-  return (
-    cmd.kind === CommandKind.SKILL && cmd.userInvocable !== false && !cmd.hidden
   );
 }
 

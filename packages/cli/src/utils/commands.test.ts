@@ -211,6 +211,31 @@ describe('isValidStackedSkillPrefix', () => {
     ).toBe(false);
   });
 
+  it('rejects non-user-invocable and hidden skills', () => {
+    const restrictedSkills: readonly SlashCommand[] = [
+      ...mockCommandsWithSkills,
+      {
+        name: 'model-only',
+        description: 'Model-only skill',
+        kind: CommandKind.SKILL,
+        userInvocable: false,
+      },
+      {
+        name: 'hidden-skill',
+        description: 'Hidden skill',
+        kind: CommandKind.SKILL,
+        hidden: true,
+      },
+    ];
+
+    expect(isValidStackedSkillPrefix('/model-only ', restrictedSkills)).toBe(
+      false,
+    );
+    expect(isValidStackedSkillPrefix('/hidden-skill ', restrictedSkills)).toBe(
+      false,
+    );
+  });
+
   it('rejects a prefix that already contains the maximum skill count', () => {
     expect(
       isValidStackedSkillPrefix(
