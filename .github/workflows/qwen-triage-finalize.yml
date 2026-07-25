@@ -92,7 +92,7 @@ jobs:
           CI_BEGIN="<!-- qwen-triage-ci sha=${HEAD_SHA} -->"
           CI_END='<!-- /qwen-triage-ci -->'
           APPROVE_MARKER="<!-- qwen-triage approve-on-green sha=${HEAD_SHA} -->"
-          STATUS_MARKER='<!-- qwen-triage stage=status -->'
+          STATUS_MARKER='<!-- qwen-triage-lifecycle -->'
 
           if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
             echo "::warning::Cannot resolve the bot identity; skipping (markers cannot be author-verified)."
