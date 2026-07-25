@@ -34,6 +34,7 @@ import {
   isSafeModeEnv,
   isToolEnabled,
   isTlsVerificationDisabled,
+  parseBooleanEnvFlag,
   SchemaValidator,
   type ConfigParameters,
   type MCPServerConfig,
@@ -2110,14 +2111,16 @@ export async function loadCliConfig(
     showResponseTokensPerSecond:
       settings.ui?.showResponseTokensPerSecond === true,
     telemetry: telemetrySettings,
-    // Ordinary interactive TUI defers telemetry until after first paint. Auth
-    // events emitted before the deferred init are an accepted startup-latency
-    // tradeoff. This intentionally differs from IDE deferral: `qwen -i
-    // "prompt"` must await IDE context before auto-submit, but telemetry can
-    // still initialize after render unless an initial prompt is present.
-    deferTelemetryInitialization: interactive && !isAcpMode && !question,
+    // Ordinary interactive TUI defers telemetry until after first paint; ACP
+    // defers it until after the initialize response is written. Events emitted
+    // before deferred init are an accepted startup-latency tradeoff. `qwen -i
+    // "prompt"` still initializes eagerly because it auto-submits after render.
+    deferTelemetryInitialization: isAcpMode || (interactive && !question),
     outboundCorrelation: settings.outboundCorrelation,
-    usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
+    usageStatisticsEnabled:
+      parseBooleanEnvFlag(process.env['QWEN_USAGE_STATISTICS_ENABLED']) ??
+      settings.privacy?.usageStatisticsEnabled ??
+      true,
     clearContextOnIdle: settings.context?.clearContextOnIdle,
     fileFiltering: settings.context?.fileFiltering,
     plansDirectory: settings.plansDirectory,
@@ -2258,6 +2261,7 @@ export async function loadCliConfig(
     webSearch:
       bareMode || safeMode ? undefined : resolveWebSearchSettings(settings),
     visionModel: settings.visionModel || undefined,
+    imageModel: settings.imageModel || undefined,
     visionBridgeTimeoutMs: settings.visionBridgeTimeoutMs,
     modelFallbacks: resolveModelFallbacks(
       argv.fallbackModel,

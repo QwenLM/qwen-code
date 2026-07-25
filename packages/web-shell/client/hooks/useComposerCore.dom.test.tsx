@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
+import { WebShellPortalRootContext } from '../portalRoot';
 import { useComposerCore, type UseComposerCoreReturn } from './useComposerCore';
 import type {
   UserMessageContentParser,
@@ -73,21 +74,32 @@ async function mount({
   document.body.append(container);
   root = createRoot(container);
 
-  await act(async () => {
+  const render = (portalRoot: HTMLElement | null) => {
     root!.render(
-      <I18nProvider language="en">
-        <Harness
-          composerInput={composerInput}
-          onSubmit={onSubmit}
-          renderComposerTag={renderComposerTag}
-          renderComposerTagTooltip={renderComposerTagTooltip}
-          parseUserMessageContent={parseUserMessageContent}
-          followupState={followupState}
-        />
-      </I18nProvider>,
+      <WebShellPortalRootContext.Provider value={portalRoot}>
+        <I18nProvider language="en">
+          <Harness
+            composerInput={composerInput}
+            onSubmit={onSubmit}
+            renderComposerTag={renderComposerTag}
+            renderComposerTagTooltip={renderComposerTagTooltip}
+            parseUserMessageContent={parseUserMessageContent}
+            followupState={followupState}
+          />
+        </I18nProvider>
+      </WebShellPortalRootContext.Provider>,
     );
+  };
+
+  await act(async () => {
+    render(null);
   });
-  return { onSubmit };
+  return {
+    onSubmit,
+    setPortalRoot(portalRoot: HTMLElement | null) {
+      act(() => render(portalRoot));
+    },
+  };
 }
 
 afterEach(() => {
@@ -95,9 +107,34 @@ afterEach(() => {
   container?.remove();
   localStorage.removeItem('qwen-web-shell-history');
   localStorage.removeItem('qwen-web-shell-command-history');
+  document.getElementById('web-shell-tooltip-styles')?.remove();
   root = null;
   container = null;
   latest = null;
+});
+
+describe('useComposerCore tooltip portal', () => {
+  it('moves the CodeMirror tooltip portal and styles into the shared shadow root', async () => {
+    const { setPortalRoot } = await mount();
+    const tooltipPortal = document.querySelector(
+      '[data-web-shell-tooltip-portal]',
+    );
+    expect(tooltipPortal?.parentElement).toBe(document.body);
+
+    const host = document.createElement('div');
+    document.body.append(host);
+    const shadowRoot = host.attachShadow({ mode: 'open' });
+    const portalRoot = document.createElement('div');
+    shadowRoot.append(portalRoot);
+
+    setPortalRoot(portalRoot);
+
+    expect(tooltipPortal?.parentElement).toBe(portalRoot);
+    expect(
+      shadowRoot.getElementById('web-shell-tooltip-styles'),
+    ).not.toBeNull();
+    host.remove();
+  });
 });
 
 describe('useComposerCore tags', () => {

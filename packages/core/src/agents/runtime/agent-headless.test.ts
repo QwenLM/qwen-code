@@ -43,6 +43,7 @@ import {
 import {
   AgentEventEmitter,
   AgentEventType,
+  type AgentRoundTextEvent,
   type AgentStreamTextEvent,
   type AgentToolCallEvent,
   type AgentToolResultEvent,
@@ -813,6 +814,7 @@ describe('subagent.ts', () => {
       it('should not append userMemory separator when userMemory is empty', async () => {
         const { config } = await createMockConfig();
         vi.spyOn(config, 'getUserMemory').mockReturnValue('');
+        vi.spyOn(config, 'getAutoMemoryPrompt').mockReturnValue('');
 
         vi.mocked(GeminiChat).mockClear();
 
@@ -842,6 +844,7 @@ describe('subagent.ts', () => {
       it('should not append userMemory separator when userMemory is whitespace-only', async () => {
         const { config } = await createMockConfig();
         vi.spyOn(config, 'getUserMemory').mockReturnValue('   \n\n  ');
+        vi.spyOn(config, 'getAutoMemoryPrompt').mockReturnValue('');
 
         vi.mocked(GeminiChat).mockClear();
 
@@ -865,6 +868,43 @@ describe('subagent.ts', () => {
         const generationConfig = getGenerationConfigFromMock();
         const sysPrompt = generationConfig.systemInstruction as string;
         expect(sysPrompt).not.toContain('---');
+      });
+
+      it('should append the auto-memory section to the system prompt when available', async () => {
+        const { config } = await createMockConfig();
+        const autoMemoryContent = '# auto memory\nMEMORY_INDEX_MARKER';
+        vi.spyOn(config, 'getUserMemory').mockReturnValue('');
+        vi.spyOn(config, 'getAutoMemoryPrompt').mockReturnValue(
+          autoMemoryContent,
+        );
+
+        vi.mocked(GeminiChat).mockClear();
+
+        const promptConfig: PromptConfig = {
+          systemPrompt: 'You are a test agent.',
+        };
+        const context = new ContextState();
+
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.execute(context);
+
+        const generationConfig = getGenerationConfigFromMock();
+        const sysPrompt = generationConfig.systemInstruction as string;
+        expect(sysPrompt).toContain('You are a test agent.');
+        // The volatile auto-memory section must be present as the trailing
+        // block, separated by the `---` suffix separator.
+        expect(sysPrompt).toContain('MEMORY_INDEX_MARKER');
+        expect(sysPrompt).toContain('---');
+        expect(sysPrompt.trimEnd().endsWith(autoMemoryContent)).toBe(true);
       });
 
       it('should replace env history with initialMessages when both initialMessages and systemPrompt are set', async () => {
@@ -2088,6 +2128,59 @@ describe('subagent.ts', () => {
         expect(events[0]!.thought).toBe(true);
         expect(events[1]!.text).toBe('Here is the answer.');
         expect(events[1]!.thought).toBe(false);
+      });
+
+      it('should emit usage for a tool-call-only model round', async () => {
+        const { config } = await createMockConfig();
+        const usageMetadata = {
+          promptTokenCount: 100,
+          candidatesTokenCount: 10,
+          cachedContentTokenCount: 5,
+          totalTokenCount: 110,
+        };
+        mockSendMessageStream.mockImplementation(async () =>
+          (async function* () {
+            yield {
+              type: 'chunk',
+              value: {
+                functionCalls: [
+                  {
+                    id: 'call-1',
+                    name: 'missing_tool',
+                    args: {},
+                  },
+                ],
+                usageMetadata,
+              },
+            };
+          })(),
+        );
+
+        const eventEmitter = new AgentEventEmitter();
+        const events: AgentRoundTextEvent[] = [];
+        eventEmitter.on(AgentEventType.ROUND_TEXT, (event) => {
+          events.push(event);
+        });
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          { ...defaultRunConfig, max_turns: 1 },
+          undefined,
+          eventEmitter,
+        );
+
+        await scope.execute(new ContextState());
+
+        expect(events).toEqual([
+          expect.objectContaining({
+            round: 1,
+            text: '',
+            thoughtText: '',
+            usageMetadata,
+          }),
+        ]);
       });
 
       it('should exclude thought text from finalText', async () => {

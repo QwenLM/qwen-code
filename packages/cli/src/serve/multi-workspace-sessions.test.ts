@@ -406,6 +406,9 @@ function makeBridge(
     getSessionLastEventId() {
       return 41;
     },
+    getSessionEventEpoch() {
+      return 'fake-epoch';
+    },
     sendPrompt(
       sessionId: string,
       _req: unknown,
@@ -898,6 +901,29 @@ describe('multi-workspace session dispatch', () => {
       workspaceCwd: SECONDARY_CWD,
     });
     expect(res.body.workspaceCwd).toBe(SECONDARY_CWD);
+  });
+
+  it('returns retryable unavailable for explicit session creation on a transitioning workspace', async () => {
+    const { app, registry, primaryBridge, secondaryBridge } = makeHarness();
+    const secondaryEntry = registry.getEntryByWorkspaceId('secondary-id');
+    expect(secondaryEntry).toBeDefined();
+    registry.beginReplacement(secondaryEntry!, 'policy-2');
+
+    const res = await request(app)
+      .post('/session')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+
+    expect(res.status).toBe(503);
+    expect(res.headers['retry-after']).toBe('1');
+    expect(res.body).toEqual({
+      error: 'Workspace runtime is not active.',
+      code: 'workspace_runtime_unavailable',
+      workspaceCwd: SECONDARY_CWD,
+      workspaceId: 'secondary-id',
+    });
+    expect(primaryBridge.spawnCalls).toEqual([]);
+    expect(secondaryBridge.spawnCalls).toEqual([]);
   });
 
   it('applies a creation-time approvalMode on the owning non-primary runtime', async () => {

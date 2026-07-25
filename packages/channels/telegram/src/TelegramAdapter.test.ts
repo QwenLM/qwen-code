@@ -55,6 +55,29 @@ class TestTelegramChannel extends TelegramChannel {
       text,
     );
   }
+
+  sendTestResponse(chatId: string, text: string, sessionId: string) {
+    return this.sendResponseMessage(chatId, text, sessionId);
+  }
+
+  sendTestResponseFromThread(
+    threadId: string | undefined,
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ) {
+    const inboundRoute = (
+      this as unknown as {
+        inboundRoute: {
+          run<T>(store: { threadId?: string }, callback: () => T): T;
+        };
+      }
+    ).inboundRoute;
+    const route = threadId === undefined ? {} : { threadId };
+    return inboundRoute.run(route, () =>
+      this.sendResponseMessage(chatId, text, sessionId),
+    );
+  }
 }
 
 const config: ChannelConfig = {
@@ -333,6 +356,89 @@ describe('TelegramChannel', () => {
     expect(bot.api.sendMessage).toHaveBeenCalledWith(
       'chat-1',
       expect.stringContaining('Qwen Code Telegram bot'),
+      { parse_mode: 'HTML' },
+    );
+  });
+
+  it('sends command replies back to the Telegram forum topic', async () => {
+    const channel = createChannel({
+      groupPolicy: 'open',
+      groups: { '*': { requireMention: false } },
+    });
+    const bot = installFakeBot(channel);
+
+    await channel.handleInbound(
+      envelope({
+        chatId: '2',
+        threadId: '42',
+        text: '/start',
+        isGroup: true,
+      }),
+    );
+
+    expect(bot.api.sendMessage).toHaveBeenCalledWith(
+      '2',
+      expect.stringContaining('Qwen Code Telegram bot'),
+      { parse_mode: 'HTML', message_thread_id: 42 },
+    );
+  });
+
+  it('sends agent responses back to their routed Telegram forum topic', async () => {
+    const router = {
+      getTarget: vi.fn().mockReturnValue({
+        channelName: 'telegram',
+        senderId: 'user-1',
+        chatId: '2',
+        threadId: '42',
+      }),
+    };
+    const channel = createChannel({}, router);
+    const bot = installFakeBot(channel);
+
+    await channel.sendTestResponse('2', 'topic response', 'session-1');
+
+    expect(router.getTarget).toHaveBeenCalledWith('session-1');
+    expect(bot.api.sendMessage).toHaveBeenCalledWith('2', expect.any(String), {
+      parse_mode: 'HTML',
+      message_thread_id: 42,
+    });
+  });
+
+  it('prefers the current inbound topic over a stale session route', async () => {
+    const router = {
+      getTarget: vi.fn().mockReturnValue({
+        channelName: 'telegram',
+        senderId: 'user-1',
+        chatId: '2',
+        threadId: '42',
+      }),
+    };
+    const channel = createChannel({}, router);
+    const bot = installFakeBot(channel);
+
+    await channel.sendTestResponseFromThread(
+      '43',
+      '2',
+      'new topic response',
+      'session-1',
+    );
+    await channel.sendTestResponseFromThread(
+      undefined,
+      '2',
+      'general response',
+      'session-1',
+    );
+
+    expect(bot.api.sendMessage).toHaveBeenNthCalledWith(
+      1,
+      '2',
+      expect.any(String),
+      { parse_mode: 'HTML', message_thread_id: 43 },
+    );
+    expect(bot.api.sendMessage).toHaveBeenNthCalledWith(
+      2,
+      '2',
+      expect.any(String),
       { parse_mode: 'HTML' },
     );
   });

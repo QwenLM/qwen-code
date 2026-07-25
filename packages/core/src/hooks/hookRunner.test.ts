@@ -123,6 +123,49 @@ describe('HookRunner', () => {
       expect(mockSpawn).toHaveBeenCalled();
     });
 
+    it('strips Qwen-internal daemon secrets from the hook child env (#6601)', async () => {
+      const originalServerToken = process.env['QWEN_SERVER_TOKEN'];
+      const originalDaemonToken = process.env['QWEN_DAEMON_TOKEN'];
+      process.env['QWEN_SERVER_TOKEN'] = 'serve-secret';
+      process.env['QWEN_DAEMON_TOKEN'] = 'daemon-secret';
+      try {
+        const mockProcess = createMockProcess(0, 'hello');
+        mockSpawn.mockImplementation(() => mockProcess);
+
+        const hookConfig: HookConfig = {
+          type: HookType.Command,
+          command: 'echo hello',
+          source: HooksConfigSource.Project,
+        };
+
+        await hookRunner.executeHook(
+          hookConfig,
+          HookEventName.PreToolUse,
+          createMockInput(),
+        );
+
+        const spawnOptions = mockSpawn.mock.calls[0][2];
+        // A user-authored hook command is a child process launched on the
+        // agent's behalf; internal daemon secrets must not leak into it.
+        expect(spawnOptions.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+        expect(spawnOptions.env['QWEN_DAEMON_TOKEN']).toBeUndefined();
+        // Benign inherited env and the hook's own vars are still present.
+        expect(spawnOptions.env['PATH']).toBeDefined();
+        expect(spawnOptions.env['QWEN_PROJECT_DIR']).toBe('/test');
+      } finally {
+        if (originalServerToken === undefined) {
+          delete process.env['QWEN_SERVER_TOKEN'];
+        } else {
+          process.env['QWEN_SERVER_TOKEN'] = originalServerToken;
+        }
+        if (originalDaemonToken === undefined) {
+          delete process.env['QWEN_DAEMON_TOKEN'];
+        } else {
+          process.env['QWEN_DAEMON_TOKEN'] = originalDaemonToken;
+        }
+      }
+    });
+
     it('should return failure for non-zero exit code', async () => {
       const mockProcess = createMockProcess(1, '', 'error');
       mockSpawn.mockImplementation(() => mockProcess);

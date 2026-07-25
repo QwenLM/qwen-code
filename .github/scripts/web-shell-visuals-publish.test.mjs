@@ -283,3 +283,59 @@ test('buildComment neutralises a path that tries to break out of its code span',
   assert.equal(bullets.length, 1);
   assert.equal((bullets[0].match(/`/g) ?? []).length, 2);
 });
+
+// --- Render-incomplete honesty (a failed scenario must not read as "no change") ---
+
+test('buildComment: empty preview + renderIncomplete says RENDER FAILED, not no-change or coverage-gap', () => {
+  const body = buildComment([], {
+    shortSha: 'abc1234',
+    runUrl: 'https://run.example/9',
+    renderIncomplete: true,
+    // Even with render-shaping files changed, a failed render must NOT show the
+    // coverage-gap prompt — that would imply the render actually ran.
+    changedPaths: ['packages/web-shell/client/components/WelcomeScreen.tsx'],
+  });
+  assert.match(body, /failed to render/i);
+  assert.doesNotMatch(body, /✅/); // never the clean check
+  assert.doesNotMatch(body, /No screenshot changes against the PR base/);
+  assert.doesNotMatch(body, /coverage gap/); // coverage-gap prompt suppressed
+  assert.doesNotMatch(body, /render-shaping/);
+  assert.match(body, /https:\/\/run\.example\/9/); // links the run
+});
+
+test('buildComment: composites present + renderIncomplete warns the preview is PARTIAL', () => {
+  const body = buildComment(['home-dark.png'], {
+    rawBase: 'r',
+    runUrl: 'https://run.example/9',
+    renderIncomplete: true,
+  });
+  assert.match(body, /<img src="r\/home-dark\.png"/); // the shots that rendered still show
+  assert.match(body, /failed to render/i); // ...prefixed by the partial-preview warning
+  assert.match(body, /may be missing views/i);
+});
+
+test('buildComment: renderIncomplete false keeps the existing no-change / coverage-gap behavior', () => {
+  // Complete render, no shots, no render-shaping files → the plain green check.
+  const clean = buildComment([], {
+    shortSha: 'abc1234',
+    renderIncomplete: false,
+    changedPaths: ['packages/core/src/index.ts'],
+  });
+  assert.match(clean, /✅ _No screenshot changes against the PR base\._/);
+  assert.doesNotMatch(clean, /failed to render/i);
+
+  // Complete render, no shots, render-shaping files → the coverage-gap prompt.
+  const gap = buildComment([], {
+    shortSha: 'abc1234',
+    renderIncomplete: false,
+    changedPaths: ['packages/web-shell/client/components/WelcomeScreen.tsx'],
+  });
+  assert.match(gap, /no scenario renders this UI/);
+  assert.doesNotMatch(gap, /failed to render/i);
+});
+
+test('buildComment: render-failure note omits the run link when runUrl is absent', () => {
+  const body = buildComment([], { renderIncomplete: true });
+  assert.match(body, /failed to render/i);
+  assert.doesNotMatch(body, /\[workflow run\]/); // no dangling empty link
+});

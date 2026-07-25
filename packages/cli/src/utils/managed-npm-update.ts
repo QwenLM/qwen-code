@@ -48,6 +48,68 @@ function launcherId(bootstrapPath: string): string {
   return createHash('sha256').update(bootstrapPath).digest('hex').slice(0, 16);
 }
 
+function processDoesNotExist(pidText: string): boolean {
+  const pid = Number(pidText);
+  if (!Number.isSafeInteger(pid)) return false;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'ESRCH';
+  }
+}
+
+function readDirectoryEntries(directory: string): fs.Dirent[] {
+  try {
+    return fs.readdirSync(directory, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+}
+
+function cleanupOrphanedManagedNpmUpdateArtifacts(
+  launcherRoot: string,
+  versionsDir: string,
+): void {
+  for (const entry of readDirectoryEntries(versionsDir)) {
+    const match = /^\.(.+)-([1-9]\d*)-[A-Za-z0-9]{6}$/.exec(entry.name);
+    if (
+      !entry.isDirectory() ||
+      entry.isSymbolicLink() ||
+      !match ||
+      semver.valid(match[1]) !== match[1] ||
+      !processDoesNotExist(match[2])
+    ) {
+      continue;
+    }
+    try {
+      fs.rmSync(path.join(versionsDir, entry.name), {
+        recursive: true,
+        force: true,
+      });
+    } catch {
+      continue;
+    }
+  }
+
+  for (const entry of readDirectoryEntries(launcherRoot)) {
+    const match = /^active\.json\.([1-9]\d*)$/.exec(entry.name);
+    if (
+      !entry.isFile() ||
+      entry.isSymbolicLink() ||
+      !match ||
+      !processDoesNotExist(match[1])
+    ) {
+      continue;
+    }
+    try {
+      fs.rmSync(path.join(launcherRoot, entry.name), { force: true });
+    } catch {
+      continue;
+    }
+  }
+}
+
 function resolveNpmGlobalConfigPath(): string {
   const configured = process.env['NPM_CONFIG_GLOBALCONFIG'];
   if (configured) return path.resolve(configured);
@@ -156,6 +218,7 @@ export function prepareManagedNpmUpdate(
   const launcherRoot = path.join(updateRoot, launcherId(resolvedBootstrapPath));
   const versionsDir = path.join(launcherRoot, 'versions');
   fs.mkdirSync(versionsDir, { recursive: true });
+  cleanupOrphanedManagedNpmUpdateArtifacts(launcherRoot, versionsDir);
   const stagingDir = fs.mkdtempSync(
     path.join(versionsDir, `.${version}-${process.pid}-`),
   );

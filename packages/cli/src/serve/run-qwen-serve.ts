@@ -89,9 +89,14 @@ import {
 } from './types.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
 import type {
+  WorkspaceGenerationGuard,
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from './workspace-registry.js';
+import type {
+  DaemonTrustPolicySnapshot,
+  DaemonWorkspaceTrustDecision,
+} from '../config/daemon-trust-policy.js';
 import {
   isManagedScratchChild,
   prepareManagedScratchRoot,
@@ -103,9 +108,14 @@ import {
   type WorkspaceRegistrationStore,
 } from './workspace-registration-store.js';
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
+import type {
+  ChannelDeliveryHandler,
+  ChannelDeliveryHostResult,
+} from '@qwen-code/acp-bridge/bridgeOptions';
 import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
 import type { AcpHttpHandle } from './acp-http/index.js';
+import type { ChannelManagementService } from './channel-management-service.js';
 import type { WorkspaceRuntimeRemovalController } from './routes/workspace-management.js';
 import {
   allowOriginMode,
@@ -126,6 +136,16 @@ import type {
 } from './channel-worker-supervisor.js';
 import { QWEN_SERVER_TOKEN_ENV } from './channel-worker-env.js';
 import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
+import {
+  ChannelDeliveryError,
+  isChannelDeliveryError,
+} from './channel-delivery-ipc.js';
+import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
+import {
+  normalizeWorkerDiagnostic,
+  sanitizeWorkerDiagnostic,
+  type WorkerDiagnosticRedactionOptions,
+} from './channel-worker-diagnostics.js';
 import { channelSelectionNames } from './channel-selection.js';
 import {
   resolveChannelWorkspaceGroups,
@@ -168,6 +188,107 @@ const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
 const DAEMON_LOG_FORCED_FLUSH_BUDGET_MS = 250;
+
+function channelDeliveryPublicError(
+  code: Extract<ChannelDeliveryHostResult, { status: 'failed' }>['code'],
+): string {
+  switch (code) {
+    case 'channel_worker_unavailable':
+      return 'Channel worker is unavailable.';
+    case 'channel_delivery_timeout':
+      return 'Channel delivery timed out.';
+    case 'channel_delivery_invalid':
+      return 'Channel delivery is invalid.';
+    case 'channel_delivery_rejected':
+      return 'Channel delivery was rejected.';
+    case 'channel_delivery_queue_full':
+      return 'Channel delivery queue is full.';
+    case 'channel_delivery_failed':
+      return 'Channel delivery failed.';
+    default:
+      return 'Channel delivery failed.';
+  }
+}
+
+export function createBoundChannelDeliveryHandler(
+  boundWorkspace: string,
+  getManager: () => ChannelWorkerManager | undefined,
+  authorizations: ChannelDeliveryAuthorizationStore,
+  daemonLog?: Pick<DaemonLogger, 'warn'>,
+  diagnosticRedaction: WorkerDiagnosticRedactionOptions = {
+    workerEnv: {},
+  },
+): ChannelDeliveryHandler {
+  return async (info): Promise<ChannelDeliveryHostResult> => {
+    const failed = (
+      code: Extract<ChannelDeliveryHostResult, { status: 'failed' }>['code'],
+      error: string,
+      diagnostic?: unknown,
+    ): ChannelDeliveryHostResult => {
+      writeDaemonLifecycleBestEffort(() => {
+        if (!daemonLog) return;
+        let diagnosticText: string | undefined;
+        if (diagnostic !== undefined) {
+          const message =
+            diagnostic instanceof Error
+              ? diagnostic.message
+              : String(diagnostic);
+          const sanitized = sanitizeWorkerDiagnostic(
+            message,
+            512,
+            diagnosticRedaction,
+          );
+          const targetId = normalizeWorkerDiagnostic(info.target.id);
+          diagnosticText = sanitizeLogText(
+            targetId.length > 0
+              ? sanitized.replaceAll(targetId, '<redacted>')
+              : sanitized,
+            512,
+          );
+        }
+        daemonLog.warn('channel delivery failed', {
+          sessionId: info.sessionId,
+          deliveryId: info.deliveryId,
+          source: info.source,
+          channelName: info.target.channelName,
+          code,
+          ...(diagnosticText ? { diagnostic: diagnosticText } : {}),
+        });
+      });
+      return { status: 'failed', code, error };
+    };
+    if (!authorizations.consume(boundWorkspace, info)) {
+      return failed(
+        'channel_delivery_invalid',
+        'Channel delivery is not authorized.',
+      );
+    }
+    if (info.text.trim().length === 0) {
+      return { status: 'skipped' };
+    }
+    const manager = getManager();
+    if (!manager) {
+      return failed(
+        'channel_worker_unavailable',
+        'Channel worker is not running.',
+      );
+    }
+    try {
+      await manager.deliverChannelMessage(boundWorkspace, {
+        deliveryId: info.deliveryId,
+        channelName: info.target.channelName,
+        target: { type: info.target.type, id: info.target.id },
+        text: info.text,
+      });
+      return { status: 'delivered' };
+    } catch (err) {
+      if (isChannelDeliveryError(err)) {
+        return failed(err.code, channelDeliveryPublicError(err.code), err);
+      }
+      return failed('channel_delivery_failed', 'Channel delivery failed.', err);
+    }
+  };
+}
 
 async function flushDaemonLogBounded(
   daemonLog: DaemonLogger,
@@ -492,6 +613,16 @@ function formatHostForUrl(host: string): string {
   return host;
 }
 
+function workspaceRuntimeEffectiveEnv(
+  runtime: WorkspaceRuntime,
+  daemonEnv: Readonly<NodeJS.ProcessEnv>,
+): Readonly<NodeJS.ProcessEnv> {
+  if (runtime.env.mode === 'runtime-overlay') {
+    return runtime.env.effectiveEnv ?? {};
+  }
+  return runtime.env.effectiveEnv ?? daemonEnv;
+}
+
 export function formatChannelWorkerDaemonUrl(
   host: string,
   port: number,
@@ -776,10 +907,10 @@ export interface RunQwenServeDeps {
    * `untrusted_workspace` when this is false. Defaults to true:
    * the daemon binds at boot to a workspace the operator
    * explicitly chose, and the trust dialog flow that ungates write
-   * permissions in the interactive CLI is not yet replicated for
-   * the daemon. Tests pin this to false to assert the gate is
-   * actually wired through `runQwenServe → createServeApp →
-   * fsFactory`.
+   * permissions in the interactive CLI is not used by the daemon.
+   * When omitted, the daemon evaluates the current trust policy and
+   * hot-reloads runtime generations as that policy changes. Tests can pin
+   * this value to disable hot reload and assert a fixed trust state.
    */
   trustedWorkspace?: boolean;
   /**
@@ -956,6 +1087,8 @@ async function loadServeRuntimeModules() {
     createWorkspaceRegistry: workspaceRegistryModule.createWorkspaceRegistry,
     createWorkspaceSessionOwnerIndex:
       workspaceRegistryModule.createWorkspaceSessionOwnerIndex,
+    createWorkspaceGenerationGuard:
+      workspaceRegistryModule.createWorkspaceGenerationGuard,
   };
 }
 
@@ -1006,10 +1139,12 @@ function currentServeFeaturesForRunQwenServe(
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
     sessionGenerationAvailable: true,
+    workspaceGenerationAvailable: true,
     rateLimit: opts.rateLimit === true,
     reloadAvailable: true,
     channelReloadAvailable: opts.channelSelection !== undefined,
     channelControlAvailable: true,
+    channelManagementAvailable: true,
     persistentWorkspaceRegistrationAvailable: true,
     workspaceRuntimeRemovalAvailable: true,
     // Advertise the same WS feature flags as the runtime path (serve-features.ts)
@@ -1797,6 +1932,7 @@ async function runQwenServeImpl(
   loggerLifecycle: DaemonLoggerLifecycleCallbacks,
 ): Promise<RunHandle> {
   const runStartedAt = performance.now();
+  const channelDeliveryAuthorizations = new ChannelDeliveryAuthorizationStore();
   const shouldPreheat = !deps.bridge && shouldPreheatBridge(deps);
   const startup: DaemonStartupSnapshot = {
     processStartedAt: new Date(
@@ -1826,6 +1962,10 @@ async function runQwenServeImpl(
     typeof rawToken === 'string' && rawToken.trim().length > 0
       ? rawToken.trim()
       : undefined;
+  const channelDeliveryDiagnosticRedaction: WorkerDiagnosticRedactionOptions = {
+    workerEnv: daemonRuntimeBaseEnv,
+    ...(token ? { daemonToken: token } : {}),
+  };
   const sessionShellCommandEnabled =
     optsIn.enableSessionShell === true && token !== undefined;
   if (optsIn.enableSessionShell === true && token === undefined) {
@@ -2739,6 +2879,23 @@ async function runQwenServeImpl(
   const disposedRuntimeApps = new WeakSet<Application>();
   const stoppedRuntimeAppProducers = new WeakSet<Application>();
   const stoppedExtensionReconcilers = new WeakSet<Application>();
+  const stoppedTrustPolicyMonitors = new WeakSet<Application>();
+  const stopTrustPolicyMonitor = (app: Application | undefined): void => {
+    if (!app || stoppedTrustPolicyMonitors.has(app)) return;
+    stoppedTrustPolicyMonitors.add(app);
+    const stop = app.locals?.['stopTrustPolicyMonitor'] as
+      | (() => void)
+      | undefined;
+    try {
+      stop?.();
+    } catch (err) {
+      daemonLog.warn(
+        `trust policy monitor dispose error: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  };
   const stopExtensionReconciler = (app: Application | undefined): void => {
     if (!app || stoppedExtensionReconcilers.has(app)) return;
     stoppedExtensionReconcilers.add(app);
@@ -2776,6 +2933,7 @@ async function runQwenServeImpl(
     };
     stopSafely('scheduled-task keepalive', locals.stopScheduledTaskKeepalive);
     stopSafely('workspace git state', locals.stopWorkspaceGitState);
+    stopTrustPolicyMonitor(app);
     for (const stop of locals.subSessionStoppers ?? []) {
       stopSafely('sub-session launcher', stop);
     }
@@ -2846,16 +3004,30 @@ async function runQwenServeImpl(
 
   const buildRuntime = async (): Promise<{
     app: Application;
-    bridge: AcpSessionBridge;
+    bridge: AcpSessionBridge | undefined;
   }> => {
-    const [runtime, core, settingsRuntime, resolvedCliVersion] =
+    const [runtime, core, settingsRuntime, resolvedCliVersion, trustPolicy] =
       await Promise.all([
         loadServeRuntimeModules(),
         loadCoreRuntime(),
         loadSettingsRuntimeModules(),
         cliVersionPromise,
+        import('../config/daemon-trust-policy.js'),
       ]);
     cliVersion = resolvedCliVersion;
+    settingsRuntime.environment.preResolveHomeEnvOverrides();
+    const bootTrustSnapshot = await trustPolicy.readDaemonTrustPolicySnapshot();
+    let latestTrustPolicySnapshot = bootTrustSnapshot;
+    const bootPrimaryTrustDecision = trustPolicy.evaluateDaemonWorkspaceTrust(
+      bootTrustSnapshot,
+      boundWorkspace,
+    );
+    const trustedWorkspace =
+      deps.trustedWorkspace ?? bootPrimaryTrustDecision.targetTrusted;
+    const workspaceTrustHotReloadAvailable =
+      deps.trustedWorkspace === undefined &&
+      deps.bridge === undefined &&
+      deps.fsFactory === undefined;
     let managedScratchRoot: ManagedScratchRoot | undefined;
     try {
       // Root acceptance is fail-closed and happens only after every startup
@@ -2875,22 +3047,20 @@ async function runQwenServeImpl(
       | ReturnType<SettingsRuntime['loadSettings']>
       | undefined;
     try {
-      runtimeBootSettings =
-        settingsRuntime.settings.loadSettings(boundWorkspace);
+      runtimeBootSettings = settingsRuntime.settings.loadSettings(
+        boundWorkspace,
+        {
+          skipLoadEnvironment: true,
+          skipWorkspaceSettings: !trustedWorkspace,
+          workspaceTrusted: trustedWorkspace,
+        },
+      );
     } catch (err) {
       writeStderrLine(
         `qwen serve: could not read full settings for runtime startup ` +
           `(${err instanceof Error ? err.message : String(err)}); falling back to defaults.`,
       );
     }
-    const trustedWorkspace =
-      deps.trustedWorkspace ??
-      (runtimeBootSettings
-        ? settingsRuntime.trustedFolders.getWorkspaceTrustStatus(
-            runtimeBootSettings.merged,
-            boundWorkspace,
-          ).effective.state === 'trusted'
-        : true);
     if (
       deps.trustedWorkspace === undefined &&
       runtimeBootSettings &&
@@ -2906,6 +3076,7 @@ async function runQwenServeImpl(
           runtimeBootSettings.merged,
           boundWorkspace,
           daemonRuntimeBaseEnv,
+          trustedWorkspace,
         )
       : {
           effectiveEnv: { ...daemonRuntimeBaseEnv },
@@ -3126,18 +3297,10 @@ async function runQwenServeImpl(
       undefined,
       (workspace: string, index: number) => {
         if (index === 0) return true;
-        if (!runtimeBootSettings) {
-          daemonLog.warn(
-            'excluding secondary workspace root because trust settings are unavailable',
-            { workspace },
-          );
-          return false;
-        }
-        const trustedSecondary =
-          settingsRuntime.trustedFolders.getWorkspaceTrustStatus(
-            runtimeBootSettings.merged,
-            workspace,
-          ).effective.state === 'trusted';
+        const trustedSecondary = trustPolicy.evaluateDaemonWorkspaceTrust(
+          bootTrustSnapshot,
+          workspace,
+        ).targetTrusted;
         if (!trustedSecondary) {
           daemonLog.warn(
             'excluding untrusted secondary workspace root from file-system access',
@@ -3152,7 +3315,15 @@ async function runQwenServeImpl(
       secondary: boundWorkspaces.slice(1),
       ideEnvPresent: !!process.env['QWEN_CODE_IDE_WORKSPACE_PATH'],
     });
+    const primaryGenerationGuard = runtime.createWorkspaceGenerationGuard();
+    const primaryTrustMaterialization = JSON.stringify({
+      trusted: trustedWorkspace,
+      boundWorkspaces: [...boundWorkspaces].sort(),
+    });
     const sharedPathLocks = new PathMutexRegistry();
+    const workspaceTrustOperationGate = new PathMutexRegistry();
+    const runWorkspaceTrustOperation = <T>(operation: () => Promise<T>) =>
+      workspaceTrustOperationGate.runExclusive('runtime-topology', operation);
     const fsFactory = runtime.resolveBridgeFsFactory({
       // Secondary roots share a write-capable factory only after their own
       // folder trust check passes; untrusted secondary roots stay outside.
@@ -3161,6 +3332,7 @@ async function runQwenServeImpl(
       trusted: trustedWorkspace,
       emit: deps.fsAuditEmit,
       pathLocks: sharedPathLocks,
+      generationGuard: primaryGenerationGuard,
       ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
     });
     const routeFsFactory = runtime.resolveBridgeFsFactory({
@@ -3170,6 +3342,7 @@ async function runQwenServeImpl(
       trusted: trustedWorkspace,
       emit: deps.fsAuditEmit,
       pathLocks: sharedPathLocks,
+      generationGuard: primaryGenerationGuard,
       ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
     });
     const channelFactory = runtime.createSpawnChannelFactory({
@@ -3195,9 +3368,12 @@ async function runQwenServeImpl(
     const workspaceProvidersStatusProvider =
       runtime.createWorkspaceProvidersStatusProvider({
         env: runtimeEffectiveEnv,
+        workspaceTrusted: trustedWorkspace,
       });
     const workspaceSkillsStatusProvider =
-      runtime.createWorkspaceSkillsStatusProvider();
+      runtime.createWorkspaceSkillsStatusProvider({
+        workspaceTrusted: trustedWorkspace,
+      });
     // Reverse tool channel (issue #5626, Phase 2). ONE sender registry shared
     // between the bridge (which answers the ACP child's `client_mcp/message`
     // ext-method via `clientMcpSender`) and the WS provider in `createServeApp`
@@ -3217,13 +3393,32 @@ async function runQwenServeImpl(
       },
     );
     const sessionOwnerIndex = runtime.createWorkspaceSessionOwnerIndex();
+    const workspaceRegistryForPersistence: {
+      current: WorkspaceRegistry | undefined;
+    } = { current: undefined };
+    const isWorkspaceTrustedForPersistence = (workspace: string): boolean =>
+      workspaceRegistryForPersistence.current?.getByWorkspaceCwd(workspace)
+        ?.trusted ??
+      (workspaceRegistryForPersistence.current === undefined &&
+        workspace === boundWorkspace &&
+        trustedWorkspace);
+    const loadSettingsForPersistence = (workspace: string) => {
+      const trusted = isWorkspaceTrustedForPersistence(workspace);
+      return settingsRuntime.settings.loadSettings(workspace, {
+        skipLoadEnvironment: true,
+        skipWorkspaceSettings: !trusted,
+        workspaceTrusted: trusted,
+      });
+    };
     const persistDisabledToolsFn = (
       workspace: string,
       toolName: string,
       enabled: boolean,
+      assertGenerationOpen?: () => void,
     ): Promise<void> =>
       withSettingsLock(workspace, async () => {
-        const fresh = settingsRuntime.settings.loadSettings(workspace);
+        assertGenerationOpen?.();
+        const fresh = loadSettingsForPersistence(workspace);
         const wsScope = fresh.forScope(WORKSPACE_SETTING_SCOPE).settings;
         const wsDisabled = wsScope.tools?.disabled;
         const current = Array.isArray(wsDisabled)
@@ -3232,24 +3427,28 @@ async function runQwenServeImpl(
         const next = new Set(current);
         if (enabled) next.delete(toolName);
         else next.add(toolName);
+        assertGenerationOpen?.();
         fresh.setValue(
           WORKSPACE_SETTING_SCOPE,
           'tools.disabled',
           [...next].sort(),
+          assertGenerationOpen,
         );
       });
     const persistDisabledSkillsFn = (
       workspace: string,
       skillName: string,
       enabled: boolean,
+      assertGenerationOpen?: () => void,
     ) =>
       withSettingsLock(workspace, async () => {
+        assertGenerationOpen?.();
         const {
           resolveSkillSettings,
           skillSettingStrings,
           updateWorkspaceSkillSettingLists,
         } = await import('../config/skill-settings.js');
-        const fresh = settingsRuntime.settings.loadSettings(workspace);
+        const fresh = loadSettingsForPersistence(workspace);
         const normalizedName = skillName.trim().toLowerCase();
         const resolved = resolveSkillSettings(fresh);
         const disablement = resolved.disablements.get(normalizedName);
@@ -3300,11 +3499,14 @@ async function runQwenServeImpl(
           return { changed: false, disabled: workspaceDisabled };
         }
 
+        assertGenerationOpen?.();
         fresh.setValues(
           settingsChanges.map((change) => ({
             scope: WORKSPACE_SETTING_SCOPE,
             ...change,
           })),
+          undefined,
+          assertGenerationOpen,
         );
         return {
           changed: true,
@@ -3317,18 +3519,23 @@ async function runQwenServeImpl(
       scope: import('../config/settings.js').SettingScope,
       key: string,
       value: unknown,
+      assertGenerationOpen?: () => void,
     ) =>
       withSettingsLock(workspace, async () => {
-        const fresh = settingsRuntime.settings.loadSettings(workspace);
-        fresh.setValue(scope, key, value);
+        assertGenerationOpen?.();
+        const fresh = loadSettingsForPersistence(workspace);
+        assertGenerationOpen?.();
+        fresh.setValue(scope, key, value, assertGenerationOpen);
         return fresh;
       });
     const persistSettingsFn = (
       workspace: string,
       writes: WorkspaceSettingsWrite[],
+      assertGenerationOpen?: () => void,
     ): Promise<void> =>
       withSettingsLock(workspace, async () => {
-        const fresh = settingsRuntime.settings.loadSettings(workspace);
+        assertGenerationOpen?.();
+        const fresh = loadSettingsForPersistence(workspace);
         const writesByScope = new Map<
           import('../config/settings.js').SettingScope,
           number
@@ -3344,10 +3551,15 @@ async function runQwenServeImpl(
         >();
         let committed = 0;
         try {
-          fresh.setValues(writes, (scope) => {
-            committedScopes.add(scope);
-            committed += writesByScope.get(scope) ?? 0;
-          });
+          assertGenerationOpen?.();
+          fresh.setValues(
+            writes,
+            (scope) => {
+              committedScopes.add(scope);
+              committed += writesByScope.get(scope) ?? 0;
+            },
+            assertGenerationOpen,
+          );
         } catch (err) {
           const failedWrite =
             writes.find((write) => !committedScopes.has(write.scope)) ??
@@ -3384,9 +3596,21 @@ async function runQwenServeImpl(
         // connection that hosts a named client MCP server (#5626).
         clientMcpSender: clientMcpSenderRegistry.lookup,
         onCreateSubSession: subSessionLauncher.launch,
+        onChannelDelivery: createBoundChannelDeliveryHandler(
+          boundWorkspace,
+          () => channelWorkerManager,
+          channelDeliveryAuthorizations,
+          daemonLog,
+          channelDeliveryDiagnosticRedaction,
+        ),
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
-        sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
+        sessionLifecycle: (event) => {
+          if (event.type === 'registered' && primaryGenerationGuard.closed) {
+            return;
+          }
+          sessionOwnerIndex.handleBridgeSessionLifecycle(event);
+        },
         ...(opts.maxPendingPromptsPerSession !== undefined
           ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
           : {}),
@@ -3426,8 +3650,23 @@ async function runQwenServeImpl(
         fileSystem: createBridgeFileSystemAdapter(fsFactory),
         persistApprovalMode: (workspace, mode) =>
           withSettingsLock(workspace, async () => {
-            const fresh = settingsRuntime.settings.loadSettings(workspace);
-            fresh.setValue(WORKSPACE_SETTING_SCOPE, 'tools.approvalMode', mode);
+            primaryGenerationGuard.assertOpen();
+            if (!trustedWorkspace) {
+              throw new Error(
+                'Cannot persist approval mode for an untrusted workspace.',
+              );
+            }
+            const fresh = settingsRuntime.settings.loadSettings(workspace, {
+              skipLoadEnvironment: true,
+              workspaceTrusted: trustedWorkspace,
+            });
+            primaryGenerationGuard.assertOpen();
+            fresh.setValue(
+              WORKSPACE_SETTING_SCOPE,
+              'tools.approvalMode',
+              mode,
+              () => primaryGenerationGuard.assertOpen(),
+            );
           }),
       });
     if (!deps.bridge) {
@@ -3438,6 +3677,8 @@ async function runQwenServeImpl(
     let invalidatePrimaryServeFeaturesCache = () => {};
     const workspaceService = runtime.createDaemonWorkspaceService({
       boundWorkspace,
+      isWorkspaceTrusted: () => trustedWorkspace,
+      assertGenerationOpen: () => primaryGenerationGuard.assertOpen(),
       contextFilename: contextFilenameForInit ?? 'QWEN.md',
       statusProvider,
       workspaceProvidersStatusProvider,
@@ -3450,14 +3691,19 @@ async function runQwenServeImpl(
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
       preheatAcpChild: () => bridge.preheat(),
-      reloadDaemonEnv: (workspace) =>
+      reloadDaemonEnv: (workspace, assertGenerationOpen) =>
         withSettingsLock(workspace, async () => {
+          assertGenerationOpen?.();
           const fresh = settingsRuntime.settings.loadSettings(workspace, {
             skipLoadEnvironment: true,
+            skipWorkspaceSettings: !trustedWorkspace,
+            workspaceTrusted: trustedWorkspace,
           });
+          assertGenerationOpen?.();
           const result = settingsRuntime.settings.reloadEnvironment(
             fresh.merged,
             workspace,
+            trustedWorkspace,
           );
           let refreshedRuntimeEnv: ReturnType<
             EnvironmentRuntime['buildRuntimeEnvironment']
@@ -3469,6 +3715,7 @@ async function runQwenServeImpl(
                 fresh.merged,
                 workspace,
                 daemonRuntimeBaseEnv,
+                trustedWorkspace,
               );
           } catch (err) {
             fallbackReason = err instanceof Error ? err.message : String(err);
@@ -3547,12 +3794,15 @@ async function runQwenServeImpl(
         workspaceService,
         routeFileSystemFactory: routeFsFactory,
         clientMcpSenderRegistry,
+        generationGuard: primaryGenerationGuard,
+        trustMaterialization: primaryTrustMaterialization,
       },
     ];
 
     const createRuntimeEnvMetadata = (
       workspace: string,
       settings: ReturnType<SettingsRuntime['loadSettings']> | undefined,
+      trusted: boolean,
     ): {
       metadata: {
         mode: 'runtime-overlay';
@@ -3571,6 +3821,7 @@ async function runQwenServeImpl(
             settings.merged,
             workspace,
             daemonRuntimeBaseEnv,
+            trusted,
           )
         : {
             effectiveEnv: { ...daemonRuntimeBaseEnv },
@@ -3613,7 +3864,10 @@ async function runQwenServeImpl(
     // (primary + secondaries). Called during shutdown so no new sub-sessions
     // are admitted while bridges are being torn down.
     const subSessionStoppers: Array<() => void> = [];
-    const subSessionStoppersByWorkspace = new Map<string, () => void>();
+    const subSessionStoppersByRuntime = new WeakMap<
+      WorkspaceRuntime,
+      () => void
+    >();
     const runtimeCleanupPromises = new WeakMap<
       WorkspaceRuntime,
       Promise<void>
@@ -3624,12 +3878,22 @@ async function runQwenServeImpl(
     };
 
     for (const workspaceInput of workspaceInputs.slice(1)) {
+      const secondaryDecision = trustPolicy.evaluateDaemonWorkspaceTrust(
+        bootTrustSnapshot,
+        workspaceInput.cwd,
+      );
+      const secondaryTrusted = secondaryDecision.targetTrusted;
       let secondarySettings:
         | ReturnType<SettingsRuntime['loadSettings']>
         | undefined;
       try {
         secondarySettings = settingsRuntime.settings.loadSettings(
           workspaceInput.cwd,
+          {
+            skipLoadEnvironment: true,
+            skipWorkspaceSettings: !secondaryTrusted,
+            workspaceTrusted: secondaryTrusted,
+          },
         );
       } catch (err) {
         writeStderrLine(
@@ -3638,12 +3902,6 @@ async function runQwenServeImpl(
             `falling back to defaults.`,
         );
       }
-      const secondaryTrusted = secondarySettings
-        ? settingsRuntime.trustedFolders.getWorkspaceTrustStatus(
-            secondarySettings.merged,
-            workspaceInput.cwd,
-          ).effective.state === 'trusted'
-        : false;
       if (!secondaryTrusted) {
         daemonLog.warn('secondary workspace is not trusted', {
           workspace: workspaceInput.cwd,
@@ -3653,10 +3911,18 @@ async function runQwenServeImpl(
       const secondaryEnv = createRuntimeEnvMetadata(
         workspaceInput.cwd,
         secondarySettings,
+        secondaryTrusted,
       );
+      const secondaryCustomIgnoreFiles =
+        secondarySettings?.merged.context?.fileFiltering?.customIgnoreFiles;
+      const secondaryContextFilename =
+        extractContextFilename(secondarySettings?.merged.context?.fileName) ??
+        contextFilenameForInit ??
+        'QWEN.md';
       const secondaryWorkspaceHash = core.hashDaemonWorkspace(
         workspaceInput.cwd,
       );
+      const secondaryGenerationGuard = runtime.createWorkspaceGenerationGuard();
       const secondaryStatusProvider = runtime.createDaemonStatusProvider({
         env: secondaryEnv.effectiveEnv,
       });
@@ -3665,7 +3931,10 @@ async function runQwenServeImpl(
         trusted: secondaryTrusted,
         emit: deps.fsAuditEmit,
         pathLocks: sharedPathLocks,
-        ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
+        generationGuard: secondaryGenerationGuard,
+        ...(secondaryCustomIgnoreFiles !== undefined
+          ? { customIgnoreFiles: secondaryCustomIgnoreFiles }
+          : {}),
       });
       const secondaryChannelFactory = runtime.createSpawnChannelFactory({
         sourceEnv: secondaryEnv.effectiveEnv,
@@ -3699,9 +3968,21 @@ async function runQwenServeImpl(
       const secondaryBridge = runtime.createAcpSessionBridge({
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
         onCreateSubSession: secondarySubSessionLauncher.launch,
+        onChannelDelivery: createBoundChannelDeliveryHandler(
+          workspaceInput.cwd,
+          () => channelWorkerManager,
+          channelDeliveryAuthorizations,
+          daemonLog,
+          channelDeliveryDiagnosticRedaction,
+        ),
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
-        sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
+        sessionLifecycle: (event) => {
+          if (event.type === 'registered' && secondaryGenerationGuard.closed) {
+            return;
+          }
+          sessionOwnerIndex.handleBridgeSessionLifecycle(event);
+        },
         ...(opts.maxPendingPromptsPerSession !== undefined
           ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
           : {}),
@@ -3743,28 +4024,44 @@ async function runQwenServeImpl(
         fileSystem: createBridgeFileSystemAdapter(secondaryBridgeFsFactory),
         persistApprovalMode: (workspace, mode) =>
           withSettingsLock(workspace, async () => {
-            const fresh = settingsRuntime.settings.loadSettings(workspace);
-            fresh.setValue(WORKSPACE_SETTING_SCOPE, 'tools.approvalMode', mode);
+            secondaryGenerationGuard.assertOpen();
+            if (!secondaryTrusted) {
+              throw new Error(
+                'Cannot persist approval mode for an untrusted workspace.',
+              );
+            }
+            const fresh = settingsRuntime.settings.loadSettings(workspace, {
+              skipLoadEnvironment: true,
+              workspaceTrusted: secondaryTrusted,
+            });
+            secondaryGenerationGuard.assertOpen();
+            fresh.setValue(
+              WORKSPACE_SETTING_SCOPE,
+              'tools.approvalMode',
+              mode,
+              () => secondaryGenerationGuard.assertOpen(),
+            );
           }),
       });
       secondaryBridgeRef = secondaryBridge;
       runtimeBridges.push(secondaryBridge);
       internalRuntimeBridgesForCleanup.push(secondaryBridge);
       subSessionStoppers.push(secondarySubSessionLauncher.stop);
-      subSessionStoppersByWorkspace.set(
-        workspaceInput.cwd,
-        secondarySubSessionLauncher.stop,
-      );
       const secondaryWorkspaceService = runtime.createDaemonWorkspaceService({
         boundWorkspace: workspaceInput.cwd,
-        contextFilename: contextFilenameForInit ?? 'QWEN.md',
+        isWorkspaceTrusted: () => secondaryTrusted,
+        assertGenerationOpen: () => secondaryGenerationGuard.assertOpen(),
+        contextFilename: secondaryContextFilename,
         statusProvider: secondaryStatusProvider,
         workspaceProvidersStatusProvider:
           runtime.createWorkspaceProvidersStatusProvider({
             env: secondaryEnv.effectiveEnv,
+            workspaceTrusted: secondaryTrusted,
           }),
         workspaceSkillsStatusProvider:
-          runtime.createWorkspaceSkillsStatusProvider(),
+          runtime.createWorkspaceSkillsStatusProvider({
+            workspaceTrusted: secondaryTrusted,
+          }),
         skillInstallEnv: secondaryEnv.effectiveEnv,
         voiceEnv: secondaryEnv.effectiveEnv,
         voiceSettingsScope: WORKSPACE_SETTING_SCOPE,
@@ -3774,14 +4071,19 @@ async function runQwenServeImpl(
         persistDisabledSkills: persistDisabledSkillsFn,
         persistSetting: persistSettingFn,
         persistSettings: persistSettingsFn,
-        reloadDaemonEnv: (workspace) =>
+        reloadDaemonEnv: (workspace, assertGenerationOpen) =>
           withSettingsLock(workspace, async () => {
+            assertGenerationOpen?.();
             const fresh = settingsRuntime.settings.loadSettings(workspace, {
               skipLoadEnvironment: true,
+              skipWorkspaceSettings: !secondaryTrusted,
+              workspaceTrusted: secondaryTrusted,
             });
+            assertGenerationOpen?.();
             const result = settingsRuntime.settings.reloadEnvironment(
               fresh.merged,
               workspace,
+              secondaryTrusted,
             );
             try {
               const refreshedRuntimeEnv =
@@ -3789,6 +4091,7 @@ async function runQwenServeImpl(
                   fresh.merged,
                   workspace,
                   daemonRuntimeBaseEnv,
+                  secondaryTrusted,
                 );
               logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
               secondaryEnv.replace(refreshedRuntimeEnv.effectiveEnv);
@@ -3832,7 +4135,7 @@ async function runQwenServeImpl(
         publishWorkspaceEvent: (event) =>
           secondaryBridge.publishWorkspaceEvent(event),
       });
-      workspaceRuntimes.push({
+      const secondaryRuntime: WorkspaceRuntime = {
         workspaceId: secondaryWorkspaceHash,
         workspaceCwd: workspaceInput.cwd,
         ...(workspaceInput.displayName
@@ -3847,13 +4150,25 @@ async function runQwenServeImpl(
         workspaceService: secondaryWorkspaceService,
         routeFileSystemFactory: secondaryBridgeFsFactory,
         clientMcpSenderRegistry: secondaryClientMcpSenderRegistry,
-      });
+        generationGuard: secondaryGenerationGuard,
+        trustMaterialization: JSON.stringify({
+          trusted: secondaryTrusted,
+          boundWorkspaces: [workspaceInput.cwd],
+        }),
+      };
+      subSessionStoppersByRuntime.set(
+        secondaryRuntime,
+        secondarySubSessionLauncher.stop,
+      );
+      workspaceRuntimes.push(secondaryRuntime);
     }
 
     const workspaceRegistry: WorkspaceRegistry =
       runtime.createWorkspaceRegistry(workspaceRuntimes, {
         sessionOwnerIndex,
+        scanUnindexedOwners: deps.bridge !== undefined,
       });
+    workspaceRegistryForPersistence.current = workspaceRegistry;
     const workspaceVoiceCoordinator = new WorkspaceVoiceCoordinator();
 
     core.registerDaemonGaugeCallbacks({
@@ -3930,13 +4245,24 @@ async function runQwenServeImpl(
         // and kick an async refresh for the next tick, keeping the sampler
         // sync. Optional-chained: an injected bridge (RunQwenServeDeps.bridge)
         // built against the older contract may not implement these hooks.
-        const child = bridge.getChildResourceSnapshot?.();
+        const primaryEntry = workspaceRegistry.primaryEntry;
+        const primaryRuntimeBridge =
+          primaryEntry.state === 'active'
+            ? primaryEntry.current?.runtime.bridge
+            : undefined;
+        const child = primaryRuntimeBridge?.getChildResourceSnapshot?.();
         // Only poll the child's resources when someone is watching: the
         // staleness guard already drops the reading to 0 when idle, so gating
         // avoids a 5s RPC round-trip (pipe + child CPU) for a chart nobody has
         // open.
         if (runtime.getActiveSseCount() > 0 || (acp?.wsStreams ?? 0) > 0) {
-          void bridge.refreshChildResource?.();
+          void primaryRuntimeBridge?.refreshChildResource?.().catch((err) => {
+            daemonLog.warn(
+              `ACP child resource refresh failed: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          });
         }
         metricsRing.sample(nowMs, {
           cpuPercent,
@@ -4012,14 +4338,29 @@ async function runQwenServeImpl(
     };
 
     // Factory for dynamically creating workspace runtimes (POST /workspaces).
+    interface WorkspaceRuntimeBuildOptions {
+      readonly provenance?: WorkspaceRuntimeProvenance;
+      readonly trusted?: boolean;
+      readonly snapshot?: DaemonTrustPolicySnapshot;
+      readonly decision?: DaemonWorkspaceTrustDecision;
+      readonly generationGuard?: WorkspaceGenerationGuard;
+      readonly primary?: boolean;
+      readonly removable?: boolean;
+      readonly displayName?: string;
+      readonly registrationIds?: readonly string[];
+      readonly boundWorkspaces?: readonly string[];
+      readonly trustMaterialization?: string;
+      readonly validationAttempt?: number;
+    }
     const createDynamicWorkspaceRuntime = async (
       cwd: string,
-      options: { provenance: WorkspaceRuntimeProvenance },
+      buildOptions?: WorkspaceRuntimeBuildOptions,
     ): Promise<import('./workspace-registry.js').WorkspaceRuntime> => {
+      const provenance = buildOptions?.provenance ?? 'existing';
       // HTTP clients cannot choose provenance. This second boundary prevents a
       // future caller from granting managed trust to an arbitrary directory.
       if (
-        options.provenance === 'managed-scratch' &&
+        provenance === 'managed-scratch' &&
         (!managedScratchRoot ||
           !isManagedScratchChild(cwd, managedScratchRoot.canonicalRoot))
       ) {
@@ -4027,9 +4368,23 @@ async function runQwenServeImpl(
           'Managed scratch runtime must use an accepted direct child directory',
         );
       }
+      const snapshot =
+        buildOptions?.snapshot ??
+        (await trustPolicy.readDaemonTrustPolicySnapshot());
+      const decision =
+        buildOptions?.decision ??
+        trustPolicy.evaluateDaemonWorkspaceTrust(snapshot, cwd);
+      const trusted =
+        provenance === 'managed-scratch'
+          ? true
+          : (buildOptions?.trusted ?? decision.targetTrusted);
       let wsSettings: ReturnType<SettingsRuntime['loadSettings']> | undefined;
       try {
-        wsSettings = settingsRuntime.settings.loadSettings(cwd);
+        wsSettings = settingsRuntime.settings.loadSettings(cwd, {
+          skipLoadEnvironment: true,
+          skipWorkspaceSettings: !trusted,
+          workspaceTrusted: trusted,
+        });
       } catch (err) {
         // Match the startup secondary-workspace path: surface why full settings
         // couldn't be read instead of silently falling back to defaults.
@@ -4039,23 +4394,41 @@ async function runQwenServeImpl(
             `falling back to defaults.`,
         );
       }
-      const trusted =
-        options.provenance === 'managed-scratch' ||
-        (wsSettings
-          ? settingsRuntime.trustedFolders.getWorkspaceTrustStatus(
-              wsSettings.merged,
-              cwd,
-            ).effective.state === 'trusted'
-          : false);
-      const wsEnv = createRuntimeEnvMetadata(cwd, wsSettings);
+      const wsEnv = createRuntimeEnvMetadata(cwd, wsSettings, trusted);
+      const wsCustomIgnoreFiles =
+        wsSettings?.merged.context?.fileFiltering?.customIgnoreFiles;
+      const wsContextFilename =
+        extractContextFilename(wsSettings?.merged.context?.fileName) ??
+        contextFilenameForInit ??
+        'QWEN.md';
       const wsHash = core.hashDaemonWorkspace(cwd);
+      const generationGuard =
+        buildOptions?.generationGuard ??
+        runtime.createWorkspaceGenerationGuard();
+      const runtimeBoundWorkspaces = buildOptions?.boundWorkspaces ?? [cwd];
       const wsFsFactory = runtime.resolveBridgeFsFactory({
-        boundWorkspaces: [cwd],
+        boundWorkspaces: runtimeBoundWorkspaces,
         trusted,
         emit: deps.fsAuditEmit,
         pathLocks: sharedPathLocks,
-        ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
+        generationGuard,
+        ...(wsCustomIgnoreFiles !== undefined
+          ? { customIgnoreFiles: wsCustomIgnoreFiles }
+          : {}),
       });
+      const wsRouteFsFactory =
+        buildOptions?.primary === true && runtimeBoundWorkspaces.length > 1
+          ? runtime.resolveBridgeFsFactory({
+              boundWorkspaces: [cwd],
+              trusted,
+              emit: deps.fsAuditEmit,
+              pathLocks: sharedPathLocks,
+              generationGuard,
+              ...(wsCustomIgnoreFiles !== undefined
+                ? { customIgnoreFiles: wsCustomIgnoreFiles }
+                : {}),
+            })
+          : wsFsFactory;
       const wsChannelFactory = runtime.createSpawnChannelFactory({
         sourceEnv: wsEnv.effectiveEnv,
         onDiagnosticLine: diagnosticSink,
@@ -4087,9 +4460,19 @@ async function runQwenServeImpl(
         wsBridge = runtime.createAcpSessionBridge({
           clientMcpSender: wsClientMcpRegistry.lookup,
           onCreateSubSession: wsSubSessionLauncher.launch,
+          onChannelDelivery: createBoundChannelDeliveryHandler(
+            cwd,
+            () => channelWorkerManager,
+            channelDeliveryAuthorizations,
+            daemonLog,
+            channelDeliveryDiagnosticRedaction,
+          ),
           maxSessions: opts.maxSessions,
           freshSessionAdmission: totalSessionAdmission.admit,
-          sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
+          sessionLifecycle: (event) => {
+            if (event.type === 'registered' && generationGuard.closed) return;
+            sessionOwnerIndex.handleBridgeSessionLifecycle(event);
+          },
           ...(opts.maxPendingPromptsPerSession !== undefined
             ? { maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession }
             : {}),
@@ -4122,7 +4505,9 @@ async function runQwenServeImpl(
           telemetry: createRuntimeBridgeTelemetry(wsHash),
           ...(permissionPolicy !== undefined ? { permissionPolicy } : {}),
           ...(permissionConsensusQuorum !== undefined
-            ? { permissionConsensusQuorum }
+            ? {
+                permissionConsensusQuorum,
+              }
             : {}),
           permissionAudit: permissionAuditPublisher,
           statusProvider: runtime.createDaemonStatusProvider({
@@ -4131,11 +4516,22 @@ async function runQwenServeImpl(
           fileSystem: createBridgeFileSystemAdapter(wsFsFactory),
           persistApprovalMode: (workspace, mode) =>
             withSettingsLock(workspace, async () => {
-              const fresh = settingsRuntime.settings.loadSettings(workspace);
+              generationGuard.assertOpen();
+              if (!trusted) {
+                throw new Error(
+                  'Cannot persist approval mode for an untrusted workspace.',
+                );
+              }
+              const fresh = settingsRuntime.settings.loadSettings(workspace, {
+                skipLoadEnvironment: true,
+                workspaceTrusted: trusted,
+              });
+              generationGuard.assertOpen();
               fresh.setValue(
                 WORKSPACE_SETTING_SCOPE,
                 'tools.approvalMode',
                 mode,
+                () => generationGuard.assertOpen(),
               );
             }),
         });
@@ -4148,33 +4544,45 @@ async function runQwenServeImpl(
       try {
         wsService = runtime.createDaemonWorkspaceService({
           boundWorkspace: cwd,
-          contextFilename: contextFilenameForInit ?? 'QWEN.md',
+          isWorkspaceTrusted: () => trusted,
+          assertGenerationOpen: () => generationGuard.assertOpen(),
+          contextFilename: wsContextFilename,
           statusProvider: runtime.createDaemonStatusProvider({
             env: wsEnv.effectiveEnv,
           }),
           workspaceProvidersStatusProvider:
             runtime.createWorkspaceProvidersStatusProvider({
               env: wsEnv.effectiveEnv,
+              workspaceTrusted: trusted,
             }),
           workspaceSkillsStatusProvider:
-            runtime.createWorkspaceSkillsStatusProvider(),
+            runtime.createWorkspaceSkillsStatusProvider({
+              workspaceTrusted: trusted,
+            }),
           skillInstallEnv: wsEnv.effectiveEnv,
           voiceEnv: wsEnv.effectiveEnv,
-          voiceSettingsScope: WORKSPACE_SETTING_SCOPE,
+          ...(buildOptions?.primary === true
+            ? {}
+            : { voiceSettingsScope: WORKSPACE_SETTING_SCOPE }),
           isChannelLive: () => wsBridge.isChannelLive(),
           preheatAcpChild: () => wsBridge.preheat(),
           persistDisabledTools: persistDisabledToolsFn,
           persistDisabledSkills: persistDisabledSkillsFn,
           persistSetting: persistSettingFn,
           persistSettings: persistSettingsFn,
-          reloadDaemonEnv: (workspace) =>
+          reloadDaemonEnv: (workspace, assertGenerationOpen) =>
             withSettingsLock(workspace, async () => {
+              assertGenerationOpen?.();
               const fresh = settingsRuntime.settings.loadSettings(workspace, {
                 skipLoadEnvironment: true,
+                skipWorkspaceSettings: !trusted,
+                workspaceTrusted: trusted,
               });
+              assertGenerationOpen?.();
               const result = settingsRuntime.settings.reloadEnvironment(
                 fresh.merged,
                 workspace,
+                trusted,
               );
               // Mirror the startup secondary-workspace path: rebuild the runtime
               // env snapshot and update the metadata so `.env` changes actually
@@ -4185,6 +4593,7 @@ async function runQwenServeImpl(
                     fresh.merged,
                     workspace,
                     daemonRuntimeBaseEnv,
+                    trusted,
                   );
                 logRuntimeEnvFileReadFailures(workspace, refreshedRuntimeEnv);
                 wsEnv.replace(refreshedRuntimeEnv.effectiveEnv);
@@ -4225,8 +4634,16 @@ async function runQwenServeImpl(
             wsBridge.invokeWorkspaceCommand(method, params, invokeOpts),
           refreshExtensionsForAllSessions: () =>
             wsBridge.refreshExtensionsForAllSessions(),
-          publishWorkspaceEvent: (event) =>
-            wsBridge.publishWorkspaceEvent(event),
+          publishWorkspaceEvent: (event) => {
+            if (
+              buildOptions?.primary === true &&
+              (event.type === 'settings_changed' ||
+                event.type === 'settings_reloaded')
+            ) {
+              invalidatePrimaryServeFeaturesCache();
+            }
+            wsBridge.publishWorkspaceEvent(event);
+          },
         });
       } catch (err) {
         wsSubSessionLauncher.stop();
@@ -4245,34 +4662,91 @@ async function runQwenServeImpl(
       runtimeBridges.push(wsBridge);
       internalRuntimeBridgesForCleanup.push(wsBridge);
       subSessionStoppers.push(wsSubSessionLauncher.stop);
-      subSessionStoppersByWorkspace.set(cwd, wsSubSessionLauncher.stop);
-      return {
+      const wsRuntime: WorkspaceRuntime = {
         workspaceId: wsHash,
         workspaceCwd: cwd,
-        primary: false,
+        ...(buildOptions?.displayName !== undefined
+          ? { displayName: buildOptions.displayName }
+          : {}),
+        primary: buildOptions?.primary ?? false,
         trusted,
-        removable: true,
-        registrationIds: [],
+        provenance,
+        removable: buildOptions?.removable ?? true,
+        registrationIds: [...(buildOptions?.registrationIds ?? [])],
         env: wsEnv.metadata,
         bridge: wsBridge,
         workspaceService: wsService,
-        routeFileSystemFactory: wsFsFactory,
+        routeFileSystemFactory: wsRouteFsFactory,
         clientMcpSenderRegistry: wsClientMcpRegistry,
+        generationGuard,
+        trustMaterialization:
+          buildOptions?.trustMaterialization ??
+          JSON.stringify({
+            trusted,
+            boundWorkspaces: [...runtimeBoundWorkspaces].sort(),
+          }),
       };
+      subSessionStoppersByRuntime.set(wsRuntime, wsSubSessionLauncher.stop);
+      if (provenance !== 'managed-scratch' && !buildOptions?.snapshot) {
+        const latest = await trustPolicy.readDaemonTrustPolicySnapshot();
+        if (latest.revision !== snapshot.revision) {
+          generationGuard.close();
+          wsSubSessionLauncher.stop();
+          await wsBridge
+            .shutdown({ reason: 'trust_reconfigured' })
+            .catch(() => {
+              try {
+                wsBridge.killAllSync();
+              } catch {
+                // Continue removing the stale unpublished runtime.
+              }
+            });
+          subSessionStoppersByRuntime.delete(wsRuntime);
+          removeArrayValue(subSessionStoppers, wsSubSessionLauncher.stop);
+          removeArrayValue(runtimeBridges, wsBridge);
+          removeArrayValue(internalRuntimeBridgesForCleanup, wsBridge);
+          if ((buildOptions?.validationAttempt ?? 0) >= 2) {
+            throw new Error(
+              'Workspace trust policy kept changing during runtime creation.',
+            );
+          }
+          const { generationGuard: _staleGuard, ...retryOptions } =
+            buildOptions ?? {};
+          return createDynamicWorkspaceRuntime(cwd, {
+            ...retryOptions,
+            validationAttempt: (buildOptions?.validationAttempt ?? 0) + 1,
+          });
+        }
+      }
+      return wsRuntime;
     };
 
+    const serveAppForRuntimeLifecycle: {
+      current: Application | undefined;
+    } = { current: undefined };
     const workspaceRuntimeRemoval = {
       async runtimeAdded(runtimeAdded: WorkspaceRuntime): Promise<void> {
-        const app = runtimeApp ?? runtimeAppForCleanup;
+        channelWebhookEnvByWorkspace.set(
+          runtimeAdded.workspaceCwd,
+          workspaceRuntimeEffectiveEnv(runtimeAdded, daemonRuntimeBaseEnv),
+        );
+        channelWebhookConfigVersion += 1;
+        refreshChannelWebhookConfigs?.();
+        const app =
+          serveAppForRuntimeLifecycle.current ??
+          runtimeApp ??
+          runtimeAppForCleanup;
         const startScheduledTaskKeepaliveForWorkspace = app?.locals?.[
           'startScheduledTaskKeepaliveForWorkspace'
         ] as ((runtime: WorkspaceRuntime) => void) | undefined;
         startScheduledTaskKeepaliveForWorkspace?.(runtimeAdded);
         if (!channelWorkerManager) return;
         try {
-          await channelWorkerManager.restoreWorkspace(
-            runtimeAdded.workspaceCwd,
-          );
+          if (runtimeAdded.trusted) {
+            await channelWorkerManager.restoreWorkspace(
+              runtimeAdded.workspaceCwd,
+            );
+          }
           await channelWorkerManager.refreshWorkspaces();
         } catch (err) {
           daemonLog.error(
@@ -4284,14 +4758,61 @@ async function runQwenServeImpl(
         }
       },
       beginDrain(runtimeToDrain: WorkspaceRuntime): void {
+        if (runtimeToDrain.primary) {
+          if (bridgeRef === runtimeToDrain.bridge) bridgeRef = undefined;
+          invalidatePrimaryServeFeaturesCache();
+        }
         totalSessionAdmission.beginWorkspaceDrain(runtimeToDrain.workspaceCwd);
         channelWorkerManager?.beginWorkspaceDrain(runtimeToDrain.workspaceCwd);
         workspaceVoiceCoordinator.beginWorkspaceDrain(runtimeToDrain);
+        channelWebhookEnvByWorkspace.delete(runtimeToDrain.workspaceCwd);
+        channelWebhookConfigVersion += 1;
+        refreshChannelWebhookConfigs?.();
+        const app =
+          serveAppForRuntimeLifecycle.current ??
+          runtimeApp ??
+          runtimeAppForCleanup;
+        const stopScheduledTaskKeepaliveForWorkspace = app?.locals?.[
+          'stopScheduledTaskKeepaliveForWorkspace'
+        ] as ((workspaceCwd: string) => void) | undefined;
+        try {
+          stopScheduledTaskKeepaliveForWorkspace?.(runtimeToDrain.workspaceCwd);
+        } catch (err) {
+          daemonLog.error(
+            'workspace scheduled-task drain error',
+            err instanceof Error ? err : null,
+          );
+        }
       },
       cancelDrain(runtimeToDrain: WorkspaceRuntime): void {
+        if (runtimeToDrain.primary && bridgeRef === undefined) {
+          bridgeRef = runtimeToDrain.bridge;
+          invalidatePrimaryServeFeaturesCache();
+        }
         channelWorkerManager?.cancelWorkspaceDrain(runtimeToDrain.workspaceCwd);
         totalSessionAdmission.cancelWorkspaceDrain(runtimeToDrain.workspaceCwd);
         workspaceVoiceCoordinator.cancelWorkspaceDrain(runtimeToDrain);
+        channelWebhookEnvByWorkspace.set(
+          runtimeToDrain.workspaceCwd,
+          workspaceRuntimeEffectiveEnv(runtimeToDrain, daemonRuntimeBaseEnv),
+        );
+        channelWebhookConfigVersion += 1;
+        refreshChannelWebhookConfigs?.();
+        const app =
+          serveAppForRuntimeLifecycle.current ??
+          runtimeApp ??
+          runtimeAppForCleanup;
+        const startScheduledTaskKeepaliveForWorkspace = app?.locals?.[
+          'startScheduledTaskKeepaliveForWorkspace'
+        ] as ((runtime: WorkspaceRuntime) => void) | undefined;
+        try {
+          startScheduledTaskKeepaliveForWorkspace?.(runtimeToDrain);
+        } catch (err) {
+          daemonLog.error(
+            'workspace scheduled-task drain rollback error',
+            err instanceof Error ? err : null,
+          );
+        }
       },
       completeDrain(runtimeToDrain: WorkspaceRuntime): void {
         totalSessionAdmission.completeWorkspaceDrain(
@@ -4314,24 +4835,42 @@ async function runQwenServeImpl(
       },
       disposeRuntime(
         runtimeToDrain: WorkspaceRuntime,
-        reason: 'daemon_shutdown' | 'workspace_removed' = 'workspace_removed',
+        reason:
+          | 'daemon_shutdown'
+          | 'workspace_removed'
+          | 'trust_reconfigured' = 'workspace_removed',
       ): Promise<void> {
         const existing = runtimeCleanupPromises.get(runtimeToDrain);
         if (existing) return existing;
         const cleanup = (async () => {
-          await workspaceVoiceCoordinator.disposeRuntime(
-            runtimeToDrain,
-            reason,
-          );
-          const stopSubSessions = subSessionStoppersByWorkspace.get(
-            runtimeToDrain.workspaceCwd,
-          );
+          const containmentErrors: Error[] = [];
+          try {
+            await workspaceVoiceCoordinator.disposeRuntime(
+              runtimeToDrain,
+              reason,
+            );
+          } catch (err) {
+            daemonLog.error(
+              'workspace voice cleanup error',
+              err instanceof Error ? err : null,
+            );
+          }
+          if (
+            reason === 'trust_reconfigured' &&
+            workspaceVoiceCoordinator.getWorkspaceActivity(runtimeToDrain) > 0
+          ) {
+            containmentErrors.push(
+              new Error('Workspace voice sessions are still active.'),
+            );
+          }
+          const stopSubSessions =
+            subSessionStoppersByRuntime.get(runtimeToDrain);
           try {
             stopSubSessions?.();
           } catch {
             // Continue to bridge teardown.
           }
-          if (reason === 'workspace_removed' && channelWorkerManager) {
+          if (reason !== 'daemon_shutdown' && channelWorkerManager) {
             await channelWorkerManager
               .removeWorkspace(runtimeToDrain.workspaceCwd)
               .catch((err) => {
@@ -4354,29 +4893,78 @@ async function runQwenServeImpl(
               );
             }
             writeChannelWorkerPidfile();
+            if (
+              reason === 'trust_reconfigured' &&
+              channelWorkerManager.workspaceActivity(
+                runtimeToDrain.workspaceCwd,
+              ) > 0
+            ) {
+              containmentErrors.push(
+                new Error('Workspace channel workers are still active.'),
+              );
+            }
           }
-          if (reason === 'workspace_removed') {
-            const app = runtimeApp ?? runtimeAppForCleanup;
+          if (reason !== 'daemon_shutdown') {
+            const app =
+              serveAppForRuntimeLifecycle.current ??
+              runtimeApp ??
+              runtimeAppForCleanup;
             const stopWorkspaceGitStateForWorkspace = app?.locals?.[
               'stopWorkspaceGitStateForWorkspace'
             ] as ((workspaceCwd: string) => void) | undefined;
             const stopScheduledTaskKeepaliveForWorkspace = app?.locals?.[
               'stopScheduledTaskKeepaliveForWorkspace'
             ] as ((workspaceCwd: string) => void) | undefined;
-            stopWorkspaceGitStateForWorkspace?.(runtimeToDrain.workspaceCwd);
-            stopScheduledTaskKeepaliveForWorkspace?.(
-              runtimeToDrain.workspaceCwd,
-            );
+            try {
+              stopWorkspaceGitStateForWorkspace?.(runtimeToDrain.workspaceCwd);
+            } catch (err) {
+              daemonLog.error(
+                'workspace git-state cleanup error',
+                err instanceof Error ? err : null,
+              );
+            }
+            try {
+              stopScheduledTaskKeepaliveForWorkspace?.(
+                runtimeToDrain.workspaceCwd,
+              );
+            } catch (err) {
+              daemonLog.error(
+                'workspace scheduled-task cleanup error',
+                err instanceof Error ? err : null,
+              );
+            }
           }
           let bridgeStopped = false;
           try {
             if (!shutdownBridges.has(runtimeToDrain.bridge)) {
-              await runtimeToDrain.bridge.shutdown({ reason });
+              try {
+                await runtimeToDrain.bridge.shutdown({ reason });
+              } catch (shutdownError) {
+                try {
+                  runtimeToDrain.bridge.killAllSync();
+                  daemonLog.warn(
+                    'workspace bridge required forceful shutdown',
+                    {
+                      workspace: runtimeToDrain.workspaceCwd,
+                      reason,
+                      error:
+                        shutdownError instanceof Error
+                          ? shutdownError.message
+                          : String(shutdownError),
+                    },
+                  );
+                } catch (killError) {
+                  throw new AggregateError(
+                    [shutdownError, killError],
+                    'Workspace bridge shutdown could not be confirmed.',
+                  );
+                }
+              }
             }
             bridgeStopped = true;
           } finally {
-            if (bridgeStopped || reason === 'workspace_removed') {
-              subSessionStoppersByWorkspace.delete(runtimeToDrain.workspaceCwd);
+            if (bridgeStopped) {
+              subSessionStoppersByRuntime.delete(runtimeToDrain);
               if (stopSubSessions) {
                 removeArrayValue(subSessionStoppers, stopSubSessions);
               }
@@ -4388,13 +4976,16 @@ async function runQwenServeImpl(
               shutdownBridges.add(runtimeToDrain.bridge);
             }
           }
+          if (containmentErrors.length > 0) {
+            throw new AggregateError(
+              containmentErrors,
+              'Workspace runtime containment could not be confirmed.',
+            );
+          }
         })();
         runtimeCleanupPromises.set(runtimeToDrain, cleanup);
         void cleanup.catch(() => {
-          if (
-            reason === 'daemon_shutdown' &&
-            runtimeCleanupPromises.get(runtimeToDrain) === cleanup
-          ) {
+          if (runtimeCleanupPromises.get(runtimeToDrain) === cleanup) {
             runtimeCleanupPromises.delete(runtimeToDrain);
           }
         });
@@ -4402,12 +4993,99 @@ async function runQwenServeImpl(
       },
     };
 
+    const channelManagementServices = new WeakMap<
+      WorkspaceRuntime,
+      Promise<ChannelManagementService>
+    >();
+    const channelManagementService = (
+      targetRuntime: WorkspaceRuntime,
+    ): Promise<ChannelManagementService> => {
+      const existing = channelManagementServices.get(targetRuntime);
+      if (existing) return existing;
+      const pending = (async () => {
+        if (!ensureChannelWorkerManager) {
+          throw Object.assign(
+            new Error('Channel worker manager is unavailable.'),
+            { code: 'channel_worker_unavailable' },
+          );
+        }
+        const [
+          { createChannelManagementService },
+          { WorkspaceChannelSettingsStore },
+        ] = await Promise.all([
+          import('./channel-management-service.js'),
+          import('./channel-settings-store.js'),
+        ]);
+        return createChannelManagementService({
+          workspaceCwd: targetRuntime.workspaceCwd,
+          store: new WorkspaceChannelSettingsStore(targetRuntime.workspaceCwd),
+          manager: await ensureChannelWorkerManager(),
+        });
+      })();
+      channelManagementServices.set(targetRuntime, pending);
+      void pending.catch(() => {
+        if (channelManagementServices.get(targetRuntime) === pending) {
+          channelManagementServices.delete(targetRuntime);
+        }
+      });
+      return pending;
+    };
+
+    const validateWorkspaceRuntimeForPublication = async (
+      runtimeForPublication: WorkspaceRuntime,
+    ): Promise<WorkspaceRuntime> => {
+      let candidate = runtimeForPublication;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        const snapshot = await trustPolicy.readDaemonTrustPolicySnapshot();
+        const decision = trustPolicy.evaluateDaemonWorkspaceTrust(
+          snapshot,
+          candidate.workspaceCwd,
+        );
+        const materialization = JSON.stringify({
+          trusted: decision.targetTrusted,
+          boundWorkspaces: [candidate.workspaceCwd],
+        });
+        if (candidate.trustMaterialization === materialization) {
+          return candidate;
+        }
+
+        candidate.generationGuard?.close();
+        await workspaceRuntimeRemoval.disposeRuntime(
+          candidate,
+          'trust_reconfigured',
+        );
+        if (attempt === 2) {
+          throw new Error(
+            'Workspace trust policy kept changing before runtime publication.',
+          );
+        }
+        candidate = await createDynamicWorkspaceRuntime(
+          runtimeForPublication.workspaceCwd,
+          {
+            primary: runtimeForPublication.primary,
+            removable: runtimeForPublication.removable,
+            displayName: runtimeForPublication.displayName,
+            registrationIds: runtimeForPublication.registrationIds,
+          },
+        );
+      }
+      throw new Error('Workspace runtime publication validation failed.');
+    };
+
     const app = runtime.createServeApp(opts, () => actualPort, {
       workspaceRegistry,
       createWorkspaceRuntime: createDynamicWorkspaceRuntime,
+      ...(workspaceTrustHotReloadAvailable
+        ? {
+            validateWorkspaceRuntimeForPublication,
+            runWorkspaceTrustOperation,
+            getWorkspaceTrustPolicySnapshot: () => latestTrustPolicySnapshot,
+          }
+        : {}),
       managedScratchRoot,
       workspaceRegistrationStore,
       workspaceRuntimeRemoval,
+      workspaceTrustHotReloadAvailable,
       voiceCoordinator: workspaceVoiceCoordinator,
       bridge,
       webShellDir,
@@ -4445,7 +5123,21 @@ async function runQwenServeImpl(
         }
         return channelWorkerManager.enqueueWebhookTask(task);
       },
+      deliverChannelMessage: async (workspaceCwd, request) => {
+        if (!channelWorkerManager) {
+          throw new ChannelDeliveryError(
+            'channel_worker_unavailable',
+            'Channel worker is not running.',
+          );
+        }
+        return channelWorkerManager.deliverChannelMessage(
+          workspaceCwd,
+          request,
+        );
+      },
+      channelDeliveryAuthorizations,
       reloadChannelWorker,
+      channelManagementService,
       getPerfSnapshot: () => ({
         eventLoop: currentDaemonEventLoopMonitor.snapshot(),
         promptQueueWait: {
@@ -4478,10 +5170,11 @@ async function runQwenServeImpl(
         sessionArtifactsPersistenceAvailableFromSettings(
           runtimeBootSettings?.merged,
         ),
-      installAuthProvider: (req) =>
+      installAuthProvider: (req, assertGenerationOpen) =>
         withSettingsLock(
           boundWorkspace,
           async (): Promise<ServeAuthProviderInstallResult> => {
+            assertGenerationOpen?.();
             const provider = core.findProviderById(req.providerId);
             if (!provider) {
               throw new Error(`Unsupported auth provider: ${req.providerId}`);
@@ -4491,7 +5184,7 @@ async function runQwenServeImpl(
               resolveBaseUrl: core.resolveBaseUrl,
             });
             const plan = core.buildInstallPlan(provider, inputs);
-            const fresh = settingsRuntime.settings.loadSettings(boundWorkspace);
+            const fresh = loadSettingsForPersistence(boundWorkspace);
             const adapter =
               settingsRuntime.loadedSettingsAdapter.createLoadedSettingsAdapter(
                 fresh,
@@ -4500,6 +5193,7 @@ async function runQwenServeImpl(
               settings: adapter,
               doRefreshAuth: false,
             });
+            assertGenerationOpen?.();
             core.emitDaemonLog('Auth provider installed.', {
               'qwen-code.daemon.auth.provider_id': provider.id,
               'qwen-code.daemon.auth.auth_type': plan.authType,
@@ -4523,6 +5217,7 @@ async function runQwenServeImpl(
           },
         ),
     });
+    serveAppForRuntimeLifecycle.current = app;
     invalidatePrimaryServeFeaturesCache =
       (
         app.locals as {
@@ -4537,8 +5232,211 @@ async function runQwenServeImpl(
       app.locals as { subSessionStoppers?: Array<() => void> }
     ).subSessionStoppers = subSessionStoppers;
     subSessionStoppers.push(subSessionLauncher.stop);
-    subSessionStoppersByWorkspace.set(boundWorkspace, subSessionLauncher.stop);
-    return { app, bridge };
+    subSessionStoppersByRuntime.set(
+      workspaceRegistry.primary,
+      subSessionLauncher.stop,
+    );
+    if (workspaceTrustHotReloadAvailable) {
+      const [
+        { createWorkspaceTrustReconciler },
+        { createDaemonTrustPolicyMonitor },
+      ] = await Promise.all([
+        import('./workspace-trust-reconciler.js'),
+        import('../config/daemon-trust-policy-monitor.js'),
+      ]);
+      const materializationFor = (
+        entry: import('./workspace-registry.js').WorkspaceEntry,
+        snapshot: DaemonTrustPolicySnapshot,
+        decision: DaemonWorkspaceTrustDecision,
+      ): { key: string; boundWorkspaces: readonly string[] } => {
+        const boundWorkspaces =
+          entry.primary && decision.targetTrusted
+            ? runtime.resolveBoundWorkspacesFromIdeEnv(
+                entry.workspaceCwd,
+                undefined,
+                (workspace: string, index: number) =>
+                  index === 0 ||
+                  trustPolicy.evaluateDaemonWorkspaceTrust(snapshot, workspace)
+                    .targetTrusted,
+              )
+            : [entry.workspaceCwd];
+        return {
+          key: JSON.stringify({
+            trusted: decision.targetTrusted,
+            boundWorkspaces: [...boundWorkspaces].sort(),
+          }),
+          boundWorkspaces,
+        };
+      };
+      const acpHandle = () =>
+        app.locals?.['acpHandle'] as AcpHttpHandle | undefined;
+      const trustReconciler = createWorkspaceTrustReconciler({
+        registry: workspaceRegistry,
+        readLatestSnapshot: trustPolicy.readDaemonTrustPolicySnapshot,
+        materializationKey: ({ entry, snapshot, decision }) =>
+          materializationFor(entry, snapshot, decision).key,
+        isTrustDecrease: ({
+          runtime: current,
+          nextMaterialization,
+          decision,
+        }) => {
+          if (current.trusted && !decision.targetTrusted) return true;
+          if (!current.primary || !current.trusted) return false;
+          try {
+            const previous = JSON.parse(
+              current.trustMaterialization ?? '{}',
+            ) as {
+              boundWorkspaces?: unknown;
+            };
+            const next = JSON.parse(nextMaterialization) as {
+              boundWorkspaces?: unknown;
+            };
+            if (
+              !Array.isArray(previous.boundWorkspaces) ||
+              !Array.isArray(next.boundWorkspaces)
+            ) {
+              return true;
+            }
+            const nextRoots = new Set(
+              next.boundWorkspaces.filter(
+                (value): value is string => typeof value === 'string',
+              ),
+            );
+            return previous.boundWorkspaces.some(
+              (value) => typeof value !== 'string' || !nextRoots.has(value),
+            );
+          } catch {
+            return true;
+          }
+        },
+        buildRuntime: async ({
+          entry,
+          trusted,
+          snapshot,
+          decision,
+          generationGuard,
+        }) => {
+          const materialized = materializationFor(
+            entry,
+            snapshot,
+            trusted === decision.targetTrusted
+              ? decision
+              : { ...decision, targetTrusted: trusted },
+          );
+          return createDynamicWorkspaceRuntime(entry.workspaceCwd, {
+            trusted,
+            snapshot,
+            decision,
+            generationGuard,
+            primary: entry.primary,
+            removable: entry.removable,
+            displayName: entry.displayName,
+            registrationIds: entry.registrationIds,
+            boundWorkspaces: materialized.boundWorkspaces,
+            trustMaterialization: materialized.key,
+          });
+        },
+        drainRuntime: async (runtimeToDrain) => {
+          workspaceRuntimeRemoval.beginDrain(runtimeToDrain);
+          acpHandle()?.beginWorkspaceDrain(runtimeToDrain.workspaceId);
+        },
+        disposeRuntime: async (runtimeToDispose, reason) => {
+          const errors: unknown[] = [];
+          try {
+            await workspaceRuntimeRemoval.disposeRuntime(
+              runtimeToDispose,
+              reason,
+            );
+          } catch (error) {
+            errors.push(error);
+          }
+          try {
+            const handle = acpHandle();
+            if (!runtimeToDispose.primary) {
+              handle?.commitWorkspaceRemoval(runtimeToDispose.workspaceId);
+            }
+            handle?.disposeWorkspace(runtimeToDispose.workspaceId);
+            const deadline = Date.now() + 1000;
+            while (
+              (handle?.getWorkspaceActivity(runtimeToDispose.workspaceId)
+                .memoryTasks ?? 0) > 0 &&
+              Date.now() < deadline
+            ) {
+              await new Promise((resolve) => setTimeout(resolve, 25));
+            }
+            if (
+              (handle?.getWorkspaceActivity(runtimeToDispose.workspaceId)
+                .memoryTasks ?? 0) > 0
+            ) {
+              throw new Error(
+                'Workspace memory tasks did not stop after runtime disposal.',
+              );
+            }
+          } catch (error) {
+            errors.push(error);
+          }
+          if (errors.length === 1) throw errors[0];
+          if (errors.length > 1) {
+            throw new AggregateError(
+              errors,
+              'Workspace runtime and ACP cleanup failed.',
+            );
+          }
+        },
+        runtimeActivated: async (runtimeAdded) => {
+          workspaceRuntimeRemoval.cancelDrain(runtimeAdded);
+          acpHandle()?.cancelWorkspaceDrain(runtimeAdded.workspaceId);
+          if (runtimeAdded.primary) {
+            bridgeRef = runtimeAdded.bridge;
+            invalidatePrimaryServeFeaturesCache();
+          }
+          await workspaceRuntimeRemoval.runtimeAdded(runtimeAdded);
+        },
+        onError: (entry, error) => {
+          daemonLog.error(
+            `workspace trust reconciliation failed for ${entry.workspaceCwd}`,
+            error instanceof Error ? error : null,
+          );
+        },
+      });
+      const trustMonitor = createDaemonTrustPolicyMonitor({
+        onSnapshot: (snapshot) => {
+          latestTrustPolicySnapshot = snapshot;
+          return runWorkspaceTrustOperation(() =>
+            trustReconciler.reconcile(snapshot),
+          );
+        },
+        onError: (error) => {
+          daemonLog.error(
+            'workspace trust policy monitor failed',
+            error instanceof Error ? error : null,
+          );
+        },
+      });
+      (
+        app.locals as {
+          stopTrustPolicyMonitor?: () => void;
+          requestTrustReconcile?: () => Promise<void>;
+          waitForTrustPolicyIdle?: () => Promise<void>;
+        }
+      ).stopTrustPolicyMonitor = () => trustMonitor.stop();
+      (
+        app.locals as {
+          requestTrustReconcile?: () => Promise<void>;
+        }
+      ).requestTrustReconcile = () => trustMonitor.requestReconcile('manual');
+      (
+        app.locals as {
+          waitForTrustPolicyIdle?: () => Promise<void>;
+        }
+      ).waitForTrustPolicyIdle = () =>
+        runWorkspaceTrustOperation(async () => undefined);
+      await trustMonitor.start();
+    }
+    const activePrimaryBridge =
+      workspaceRegistry.primaryEntry.current?.runtime.bridge;
+    bridgeRef = activePrimaryBridge;
+    return { app, bridge: activePrimaryBridge };
   };
 
   if (deps.bridge) {
@@ -4640,6 +5538,12 @@ async function runQwenServeImpl(
   const channelValidationSettingsRuntime = opts.channelSelection
     ? await loadSettingsRuntimeModules()
     : undefined;
+  const channelValidationTrustPolicy = opts.channelSelection
+    ? await import('../config/daemon-trust-policy.js')
+    : undefined;
+  const channelValidationTrustSnapshot = channelValidationTrustPolicy
+    ? await channelValidationTrustPolicy.readDaemonTrustPolicySnapshot()
+    : undefined;
   const resolveChannelWorkspaceGroupsAtListen = () => {
     if (
       !opts.channelSelection ||
@@ -4648,48 +5552,96 @@ async function runQwenServeImpl(
     ) {
       return undefined;
     }
+    const registry = (runtimeApp ?? runtimeAppForCleanup)?.locals?.[
+      'workspaceRegistry'
+    ] as WorkspaceRegistry | undefined;
+    const resolveRuntime = (workspaceCwd: string) => {
+      const runtime = registry?.getByWorkspaceCwd(workspaceCwd);
+      if (registry && !runtime) {
+        throw Object.assign(
+          new Error(`Workspace "${workspaceCwd}" is unavailable.`),
+          { code: 'workspace_unavailable' },
+        );
+      }
+      return runtime;
+    };
+    const resolveTrusted = (
+      workspaceCwd: string,
+      primary: boolean,
+      runtime: WorkspaceRuntime | undefined,
+    ): boolean => {
+      if (runtime) return runtime.trusted;
+      if (primary && deps.trustedWorkspace !== undefined) {
+        return deps.trustedWorkspace;
+      }
+      if (!channelValidationTrustPolicy || !channelValidationTrustSnapshot) {
+        return false;
+      }
+      return channelValidationTrustPolicy.evaluateDaemonWorkspaceTrust(
+        channelValidationTrustSnapshot,
+        workspaceCwd,
+      ).targetTrusted;
+    };
     const settingsByWorkspace = new Map<
       string,
       ReturnType<SettingsRuntime['loadSettings']>
     >();
     if (workspaceInputs.length === 1) {
       const workspace = workspaceInputs[0]!;
-      const settings = channelValidationSettingsRuntime.settings.loadSettings(
-        workspace.cwd,
-      );
-      channelWebhookEnvByWorkspace.set(
-        workspace.cwd,
-        channelValidationSettingsRuntime.environment.buildRuntimeEnvironment(
-          settings.merged,
-          workspace.cwd,
-          daemonRuntimeBaseEnv,
-        ).effectiveEnv,
-      );
+      const runtime = resolveRuntime(workspace.cwd);
+      const trusted = resolveTrusted(workspace.cwd, true, runtime);
+      if (!trusted) {
+        throw Object.assign(
+          new Error(
+            `Primary workspace "${workspace.cwd}" is not trusted; cannot host channels.`,
+          ),
+          { code: 'untrusted_workspace' },
+        );
+      }
+      const effectiveEnv = runtime
+        ? workspaceRuntimeEffectiveEnv(runtime, daemonRuntimeBaseEnv)
+        : channelValidationSettingsRuntime.environment.buildRuntimeEnvironment(
+            channelValidationSettingsRuntime.settings.loadSettings(
+              workspace.cwd,
+              {
+                skipLoadEnvironment: true,
+                skipWorkspaceSettings: false,
+                workspaceTrusted: true,
+              },
+            ).merged,
+            workspace.cwd,
+            daemonRuntimeBaseEnv,
+            trusted,
+          ).effectiveEnv;
+      channelWebhookEnvByWorkspace.set(workspace.cwd, effectiveEnv);
       return undefined;
     }
     const workspaces = workspaceInputs.map((workspace, index) => {
+      const runtime = resolveRuntime(workspace.cwd);
+      const trusted = resolveTrusted(workspace.cwd, index === 0, runtime);
       const settings = channelValidationSettingsRuntime.settings.loadSettings(
         workspace.cwd,
+        {
+          skipLoadEnvironment: true,
+          skipWorkspaceSettings: !trusted,
+          workspaceTrusted: trusted,
+        },
       );
       settingsByWorkspace.set(workspace.cwd, settings);
       channelWebhookEnvByWorkspace.set(
         workspace.cwd,
-        channelValidationSettingsRuntime.environment.buildRuntimeEnvironment(
-          settings.merged,
-          workspace.cwd,
-          daemonRuntimeBaseEnv,
-        ).effectiveEnv,
-      );
-      const trusted =
-        index === 0 && deps.trustedWorkspace !== undefined
-          ? deps.trustedWorkspace
-          : channelValidationSettingsRuntime.trustedFolders.getWorkspaceTrustStatus(
+        runtime
+          ? workspaceRuntimeEffectiveEnv(runtime, daemonRuntimeBaseEnv)
+          : channelValidationSettingsRuntime.environment.buildRuntimeEnvironment(
               settings.merged,
               workspace.cwd,
-            ).effective.state === 'trusted';
+              daemonRuntimeBaseEnv,
+              trusted,
+            ).effectiveEnv,
+      );
       return {
         workspaceCwd: workspace.cwd,
-        primary: index === 0,
+        primary: runtime?.primary ?? index === 0,
         trusted,
       };
     });
@@ -4721,7 +5673,11 @@ async function runQwenServeImpl(
     // `server.maxConnections`, `server.address()`, `attachServer(server)`,
     // graceful close — is unchanged). Otherwise `app.listen()` keeps the
     // existing plain-HTTP path bit-for-bit.
-    const onListening = () => {
+    const onListening = (error?: Error) => {
+      // Error handling (retry/reject) is owned by tryListen's
+      // server.once('error') handler.
+      if (error) return;
+
       startup.listenerReadyAt = new Date().toISOString();
       startup.processToListenMs = Math.round(process.uptime() * 1000);
       startup.runQwenServeToListenMs = Math.round(
@@ -4982,9 +5938,18 @@ async function runQwenServeImpl(
         }
         const runtimes = registry.list();
         if (runtimes.length <= 1 && operation === 'initial') {
+          const primary = registry.primary;
+          if (!primary.trusted) {
+            throw Object.assign(
+              new Error(
+                `Primary workspace "${primary.workspaceCwd}" is not trusted; cannot host channels.`,
+              ),
+              { code: 'untrusted_workspace' },
+            );
+          }
           return [
             {
-              workspaceCwd: registry.primary.workspaceCwd,
+              workspaceCwd: primary.workspaceCwd,
               selection: channelSelection,
             },
           ];
@@ -4999,6 +5964,11 @@ async function runQwenServeImpl(
           workspaces: runtimes.map((runtime) => {
             const settings = settingsRuntime.settings.loadSettings(
               runtime.workspaceCwd,
+              {
+                skipLoadEnvironment: true,
+                skipWorkspaceSettings: !runtime.trusted,
+                workspaceTrusted: runtime.trusted,
+              },
             );
             settingsByWorkspace.set(runtime.workspaceCwd, settings);
             return {
@@ -5198,7 +6168,7 @@ async function runQwenServeImpl(
               );
               return;
             }
-            if (shouldPreheat) {
+            if (shouldPreheat && runtime.bridge) {
               startBridgePreheat(runtime.bridge);
             }
             await completeRuntimeStartup(runtime.app);
@@ -5460,6 +6430,16 @@ async function runQwenServeImpl(
                 if (workspaceManagementHandle !== initiallyMountedManagement) {
                   await workspaceManagementHandle?.sealAndWait?.();
                 }
+                stopTrustPolicyMonitor(appForCleanup);
+                const waitForTrustPolicyIdle = appForCleanup?.locals?.[
+                  'waitForTrustPolicyIdle'
+                ] as (() => Promise<void>) | undefined;
+                await waitForTrustPolicyIdle?.().catch((err) => {
+                  daemonLog.error(
+                    'workspace trust reconciliation shutdown wait failed',
+                    err instanceof Error ? err : null,
+                  );
+                });
                 disposeRuntimeAppResources(appForCleanup);
                 disposeDaemonEventLoopMonitor();
                 // The worker owns daemon-backed sessions; disconnect it before

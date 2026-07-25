@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import type { ConfigParameters, SandboxConfig } from './config.js';
 import {
   Config,
@@ -64,7 +64,15 @@ import {
 } from '../confirmation-bus/types.js';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
 import type { LoadServerHierarchicalMemoryOptions } from '../utils/memoryDiscovery.js';
-import { readAutoMemoryIndex } from '../memory/store.js';
+import {
+  readAutoMemoryIndexWithStats,
+  readUserAutoMemoryIndexWithStats,
+} from '../memory/store.js';
+import {
+  clearAutoMemoryRootCache,
+  getAutoMemoryIndexPath,
+  getUserAutoMemoryIndexPath,
+} from '../memory/paths.js';
 import {
   rebuildTeamAutoMemoryIndex,
   TeamMemoryRootSecurityError,
@@ -83,6 +91,8 @@ import {
   SessionWriterLease,
 } from '../services/session-writer-lease.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import { checkPriorRead } from '../tools/priorReadEnforcement.js';
+import { ToolErrorType } from '../tools/tool-error.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -170,8 +180,8 @@ vi.mock('../utils/memoryDiscovery.js', () => ({
 }));
 
 vi.mock('../memory/store.js', () => ({
-  readAutoMemoryIndex: vi.fn().mockResolvedValue(null),
-  readUserAutoMemoryIndex: vi.fn().mockResolvedValue(null),
+  readAutoMemoryIndexWithStats: vi.fn().mockResolvedValue(null),
+  readUserAutoMemoryIndexWithStats: vi.fn().mockResolvedValue(null),
 }));
 vi.mock('../memory/indexer.js', async (importActual) => ({
   // Keep the real exports (notably TeamMemoryRootSecurityError, which the sync
@@ -357,6 +367,19 @@ const MEMORY_PRESSURE_ENV_KEYS = [
   'QWEN_MEMORY_PRESSURE_CRITICAL',
 ];
 
+let mockAutoMemoryInode = 1;
+function mockAutoMemoryIndexRead(content: string) {
+  return {
+    content,
+    stats: {
+      dev: 1,
+      ino: mockAutoMemoryInode++,
+      mtimeMs: 1,
+      size: Buffer.byteLength(content),
+    } as fs.Stats,
+  };
+}
+
 vi.mock('../core/baseLlmClient.js');
 // Mock fireNotificationHook from toolHookTriggers
 vi.mock('../core/toolHookTriggers.js', () => ({
@@ -484,6 +507,7 @@ describe('Server Config (config.ts)', () => {
   beforeEach(() => {
     // Reset mocks if necessary
     vi.clearAllMocks();
+    mockAutoMemoryInode = 1;
     for (const envName of MEMORY_PRESSURE_ENV_KEYS) {
       delete process.env[envName];
     }
@@ -2865,6 +2889,137 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).not.toContain(ToolNames.RECORD_ARTIFACT);
     });
 
+    it('registers image_gen when an image-only model route is selected', async () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+        imageModel: `openai:qwen-image-2.0\0${baseUrl}`,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.IMAGE_GEN);
+      expect(config.getImageGenerationConfig()).toEqual({
+        model: 'qwen-image-2.0',
+        baseUrl,
+        apiKeyEnv: 'TEST_IMAGE_GENERATION_KEY',
+      });
+    });
+
+    it('does not register image_gen without an image model selection', async () => {
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl: 'https://images.example.com/api/v1',
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.IMAGE_GEN);
+    });
+
+    it('does not use a protocol default as the image generation endpoint', () => {
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+        imageModel: 'openai:qwen-image-2.0',
+      });
+
+      expect(config.getImageGenerationConfig()).toBeUndefined();
+    });
+
+    it('registers image_gen immediately when the image model changes at runtime', async () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+      });
+      await config.initialize();
+      vi.mocked(ToolRegistry.prototype.registerFactory).mockClear();
+
+      await config.setImageModel(`openai:qwen-image-2.0\0${baseUrl}`);
+
+      expect(ToolRegistry.prototype.registerFactory).toHaveBeenCalledWith(
+        ToolNames.IMAGE_GEN,
+        expect.any(Function),
+      );
+      expect(ToolRegistry.prototype.ensureTool).toHaveBeenCalledWith(
+        ToolNames.IMAGE_GEN,
+      );
+    });
+
+    it('does not register image_gen when the permission manager disables it', async () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+      });
+      await config.initialize();
+      vi.mocked(ToolRegistry.prototype.registerFactory).mockClear();
+      (
+        config as unknown as {
+          permissionManager: { isToolEnabled: () => Promise<boolean> };
+        }
+      ).permissionManager = {
+        isToolEnabled: vi.fn().mockResolvedValue(false),
+      };
+
+      await config.setImageModel(`openai:qwen-image-2.0\0${baseUrl}`);
+
+      expect(ToolRegistry.prototype.registerFactory).not.toHaveBeenCalledWith(
+        ToolNames.IMAGE_GEN,
+        expect.any(Function),
+      );
+    });
+
     it('registers both artifact tools by default for interactive sessions', async () => {
       const config = new Config({
         ...baseParams,
@@ -3889,7 +4044,7 @@ describe('Server Config (config.ts)', () => {
     expect(config.getPreventSystemSleepEnabled()).toBe(false);
   });
 
-  it('refreshHierarchicalMemory should append managed auto-memory index when present', async () => {
+  it('refreshHierarchicalMemory should build the managed auto-memory prompt when present', async () => {
     const config = new Config(baseParams);
 
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
@@ -3899,15 +4054,151 @@ describe('Server Config (config.ts)', () => {
       conditionalRules: [],
       projectRoot: '/tmp',
     });
-    vi.mocked(readAutoMemoryIndex).mockResolvedValue(
-      '# Managed Auto-Memory Index\n\n- [Project Memory](project.md)',
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValue(
+      mockAutoMemoryIndexRead(
+        '# Managed Auto-Memory Index\n\n- [Project Memory](project.md)',
+      ),
     );
 
     await config.refreshHierarchicalMemory();
 
+    // Context files stay in userMemory; the volatile auto-memory section is
+    // kept separate so prompt assembly can order stable → context → volatile.
     expect(config.getUserMemory()).toContain('Project rules');
-    expect(config.getUserMemory()).toContain('# auto memory');
-    expect(config.getUserMemory()).toContain('[Project Memory](project.md)');
+    expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toContain(
+      '[Project Memory](project.md)',
+    );
+  });
+
+  it('refreshHierarchicalMemory seeds the FileReadCache for project and user MEMORY.md indexes', async () => {
+    const originalMemoryBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), 'auto-memory-cache-'));
+    const projectRoot = path.join(tempDir, 'project');
+    const memoryBaseDir = path.join(tempDir, 'memory-base');
+
+    await mkdir(projectRoot, { recursive: true });
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = memoryBaseDir;
+    clearAutoMemoryRootCache();
+
+    const managedIndexPath = getAutoMemoryIndexPath(projectRoot);
+    const userIndexPath = getUserAutoMemoryIndexPath();
+
+    await mkdir(path.dirname(managedIndexPath), { recursive: true });
+    await mkdir(path.dirname(userIndexPath), { recursive: true });
+    await writeFile(managedIndexPath, '# managed memory\n', 'utf-8');
+    await writeFile(userIndexPath, '# user memory\n', 'utf-8');
+
+    try {
+      const config = new Config({
+        ...baseParams,
+        cwd: projectRoot,
+        targetDir: projectRoot,
+      });
+
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce({
+        memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+        fileCount: 1,
+        ruleCount: 0,
+        conditionalRules: [],
+        projectRoot,
+      });
+      vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce({
+        content: '# managed memory\n',
+        stats: await stat(managedIndexPath),
+      });
+      vi.mocked(readUserAutoMemoryIndexWithStats).mockResolvedValueOnce({
+        content: '# user memory\n',
+        stats: await stat(userIndexPath),
+      });
+
+      await config.refreshHierarchicalMemory();
+
+      await expect(
+        checkPriorRead(
+          config.getFileReadCache(),
+          managedIndexPath,
+          'overwriting',
+        ),
+      ).resolves.toEqual({ ok: true });
+      await expect(
+        checkPriorRead(config.getFileReadCache(), userIndexPath, 'overwriting'),
+      ).resolves.toEqual({ ok: true });
+    } finally {
+      if (originalMemoryBaseDir === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBaseDir;
+      }
+      clearAutoMemoryRootCache();
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('refreshHierarchicalMemory records the stats captured with the auto-memory index read', async () => {
+    const originalMemoryBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    const tempDir = await mkdtemp(
+      path.join(os.tmpdir(), 'auto-memory-cache-race-'),
+    );
+    const projectRoot = path.join(tempDir, 'project');
+    const memoryBaseDir = path.join(tempDir, 'memory-base');
+
+    await mkdir(projectRoot, { recursive: true });
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = memoryBaseDir;
+    clearAutoMemoryRootCache();
+
+    const managedIndexPath = getAutoMemoryIndexPath(projectRoot);
+
+    await mkdir(path.dirname(managedIndexPath), { recursive: true });
+    await writeFile(managedIndexPath, '# old managed memory\n', 'utf-8');
+    const oldStats = await stat(managedIndexPath);
+    await writeFile(
+      managedIndexPath,
+      '# newer managed memory with extra bytes\n',
+      'utf-8',
+    );
+
+    try {
+      const config = new Config({
+        ...baseParams,
+        cwd: projectRoot,
+        targetDir: projectRoot,
+      });
+
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce({
+        memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+        fileCount: 1,
+        ruleCount: 0,
+        conditionalRules: [],
+        projectRoot,
+      });
+      vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce({
+        content: '# old managed memory\n',
+        stats: oldStats,
+      });
+
+      await config.refreshHierarchicalMemory();
+
+      await expect(
+        checkPriorRead(
+          config.getFileReadCache(),
+          managedIndexPath,
+          'overwriting',
+        ),
+      ).resolves.toMatchObject({
+        ok: false,
+        type: ToolErrorType.FILE_CHANGED_SINCE_READ,
+      });
+    } finally {
+      if (originalMemoryBaseDir === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBaseDir;
+      }
+      clearAutoMemoryRootCache();
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('refreshHierarchicalMemory should not load team memory from untrusted workspaces', async () => {
@@ -4097,14 +4388,18 @@ describe('Server Config (config.ts)', () => {
       conditionalRules: [],
       projectRoot: '/tmp',
     });
-    vi.mocked(readAutoMemoryIndex).mockResolvedValueOnce(
-      '# Managed Auto-Memory Index\n\n' + 'remember this '.repeat(80),
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce(
+      mockAutoMemoryIndexRead(
+        '# Managed Auto-Memory Index\n\n' + 'remember this '.repeat(80),
+      ),
     );
 
     await config.refreshHierarchicalMemory();
 
     expect(config.getWarnings()).toContainEqual(
-      expect.stringContaining('Loaded QWEN.md/context instructions'),
+      expect.stringContaining(
+        'Loaded always-on context (QWEN.md context files + auto-memory)',
+      ),
     );
   });
 
@@ -4125,7 +4420,9 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     expect(config.getWarnings()).toContainEqual(
-      expect.stringContaining('Loaded QWEN.md/context instructions'),
+      expect.stringContaining(
+        'Loaded always-on context (QWEN.md context files + auto-memory)',
+      ),
     );
     expect(config.getWarnings()).toContainEqual(
       expect.stringContaining("model's 1,000 token context window"),
@@ -4143,7 +4440,9 @@ describe('Server Config (config.ts)', () => {
     });
 
     expect(config.getWarnings()).toContainEqual(
-      expect.stringContaining('Loaded QWEN.md/context instructions'),
+      expect.stringContaining(
+        'Loaded always-on context (QWEN.md context files + auto-memory)',
+      ),
     );
   });
 
@@ -4176,7 +4475,7 @@ describe('Server Config (config.ts)', () => {
       conditionalRules: [],
       projectRoot: '/tmp',
     });
-    vi.mocked(readAutoMemoryIndex).mockResolvedValueOnce(null);
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce(null);
 
     await config.refreshHierarchicalMemory();
 
@@ -4184,7 +4483,9 @@ describe('Server Config (config.ts)', () => {
       config
         .getWarnings()
         .some((warning) =>
-          warning.includes('Loaded QWEN.md/context instructions'),
+          warning.includes(
+            'Loaded always-on context (QWEN.md context files + auto-memory)',
+          ),
         ),
     ).toBe(false);
   });
@@ -4619,13 +4920,16 @@ describe('Server Config (config.ts)', () => {
       conditionalRules: [],
       projectRoot: '/tmp',
     });
-    vi.mocked(readAutoMemoryIndex).mockResolvedValue(null);
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValue(null);
 
     await config.refreshHierarchicalMemory();
 
     expect(config.getUserMemory()).toContain('Project rules');
-    expect(config.getUserMemory()).toContain('# auto memory');
-    expect(config.getUserMemory()).toContain('MEMORY.md is currently empty');
+    expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toContain(
+      'MEMORY.md is currently empty',
+    );
   });
 
   it('refreshHierarchicalMemory should omit managed auto-memory prompt when disabled', async () => {
@@ -4641,13 +4945,14 @@ describe('Server Config (config.ts)', () => {
       conditionalRules: [],
       projectRoot: '/tmp',
     });
-    vi.mocked(readAutoMemoryIndex).mockResolvedValue(null);
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValue(null);
 
     await config.refreshHierarchicalMemory();
 
     expect(config.getUserMemory()).toContain('Project rules');
     expect(config.getUserMemory()).not.toContain('# auto memory');
-    expect(readAutoMemoryIndex).not.toHaveBeenCalled();
+    expect(config.getAutoMemoryPrompt()).toBe('');
+    expect(readAutoMemoryIndexWithStats).not.toHaveBeenCalled();
   });
 
   it('refreshHierarchicalMemory should only use explicit inputs in bare mode', async () => {
@@ -4669,9 +4974,9 @@ describe('Server Config (config.ts)', () => {
     const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
     expect(lastCall?.at(-1)).toMatchObject({ explicitOnly: true });
     expect(lastCall?.[1]).toEqual([]);
-    expect(readAutoMemoryIndex).not.toHaveBeenCalled();
+    expect(readAutoMemoryIndexWithStats).not.toHaveBeenCalled();
     expect(config.getUserMemory()).toContain('Project rules');
-    expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toBe('');
   });
 
   describe('isManagedMemoryAvailable', () => {
@@ -6170,6 +6475,51 @@ describe('setApprovalMode with folder trust', () => {
       expect(config.getApprovalModeRevision()).toBe(initialRevision + 1);
       config.setApprovalMode(ApprovalMode.DEFAULT);
       expect(config.getApprovalModeRevision()).toBe(initialRevision + 2);
+    });
+
+    it('queues a one-shot manual plan-exit notice on a manual exit', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(true);
+      // One-shot: consumed on first read.
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
+    });
+
+    it('does not queue the exit notice for an approved plan exit', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT, {
+        fromApprovedPlanExit: true,
+      });
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
+    });
+
+    it('clears a stale exit notice when plan mode is re-entered', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      config.setApprovalMode(ApprovalMode.PLAN);
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
+    });
+
+    it('does not queue the exit notice for non-plan mode changes', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
     });
 
     it('records prePlanMode=yolo for a Shift+Tab cycle into plan mode', () => {

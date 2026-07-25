@@ -253,6 +253,14 @@ describe('specToModelConfig (via buildProviderTemplate)', () => {
     const template = buildProviderTemplate(config);
     expect(template[0]?.description).toBe('A model');
   });
+
+  it('preserves image-only model metadata in the provider template', () => {
+    const config = makeConfig({
+      models: [{ id: 'image-model', imageOnly: true }],
+    });
+
+    expect(buildProviderTemplate(config)[0]?.imageOnly).toBe(true);
+  });
 });
 
 describe('resolveOwnsModel (via buildInstallPlan)', () => {

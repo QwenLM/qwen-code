@@ -13,6 +13,11 @@
       "type": "object",
       "additionalProperties": true
     },
+    "serve": {
+      "description": "Persistent qwen serve settings.",
+      "type": "object",
+      "additionalProperties": true
+    },
     "modelProviders": {
       "description": "Model providers configuration keyed by provider id (a built-in AuthType such as \"openai\" or \"gemini\", or a custom id mapped via providerProtocol). Each entry is an array of model configurations.",
       "type": "object",
@@ -558,6 +563,11 @@
       "type": "string",
       "default": ""
     },
+    "imageModel": {
+      "description": "Model used by the built-in image_gen tool. Set with /model --image. The selected model must be marked imageOnly in modelProviders.",
+      "type": "string",
+      "default": ""
+    },
     "visionBridgeTimeoutMs": {
       "description": "Per-attempt timeout in milliseconds for the vision bridge image transcription call (a positive integer up to 2147483647). Unset uses the built-in 30s. Raise for slow or proxied vision endpoints.",
       "type": "integer",
@@ -670,6 +680,16 @@
             "maxRetries": {
               "description": "Maximum number of retries for failed requests.",
               "type": "number"
+            },
+            "retryInitialDelayMs": {
+              "description": "Initial delay in milliseconds for stream rate-limit retries.",
+              "type": "number",
+              "minimum": 1
+            },
+            "retryMaxDelayMs": {
+              "description": "Maximum delay in milliseconds for stream rate-limit retries.",
+              "type": "number",
+              "minimum": 1
             },
             "enableCacheControl": {
               "description": "Enable cache control for DashScope providers.",

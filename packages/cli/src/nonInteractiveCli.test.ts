@@ -3283,6 +3283,95 @@ describe('runNonInteractive', () => {
     expect(userEnvelopes).toHaveLength(0);
   });
 
+  it('drops a queued running monitor event after cancellation', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
+    setupMetricsMock();
+
+    const writes: string[] = [];
+    processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+      if (typeof chunk === 'string') {
+        writes.push(chunk);
+      } else {
+        writes.push(Buffer.from(chunk).toString('utf8'));
+      }
+      return true;
+    });
+
+    const notificationXml =
+      '<task-notification>\n' +
+      '<task-id>mon_1</task-id>\n' +
+      '<kind>monitor</kind>\n' +
+      '<status>running</status>\n' +
+      '<summary>Monitor emitted event #1.</summary>\n' +
+      '<result>ready</result>\n' +
+      '</task-notification>';
+    let monitorStatus = 'running';
+    mockMonitorRegistry.get.mockImplementation(() => ({
+      status: monitorStatus,
+    }));
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      if (!cb) return;
+      cb('Monitor "logs" event #1: ready', notificationXml, {
+        monitorId: 'mon_1',
+        toolUseId: 'tool_mon_1',
+        status: 'running',
+        eventCount: 1,
+      });
+      monitorStatus = 'cancelled';
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([
+        { type: GeminiEventType.Content, value: 'Monitor stopped.' },
+        {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 2 },
+          },
+        },
+      ]),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Start then stop a monitor',
+      'prompt-monitor-cancel',
+    );
+
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledTimes(1);
+    const envelopes = writes
+      .join('')
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line));
+    expect(
+      envelopes.some(
+        (env) =>
+          env.type === 'user' &&
+          Array.isArray(env.message?.content) &&
+          env.message.content.some(
+            (block: unknown) =>
+              typeof block === 'object' &&
+              block !== null &&
+              'text' in block &&
+              block.text === 'Monitor "logs" event #1: ready',
+          ),
+      ),
+    ).toBe(false);
+    expect(
+      envelopes.some(
+        (env) =>
+          env.type === 'system' &&
+          env.subtype === 'task_notification' &&
+          env.data?.task_id === 'mon_1',
+      ),
+    ).toBe(false);
+  });
+
   it('does not let late monitor output keep one-shot runs alive', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue(
       OutputFormat.STREAM_JSON,

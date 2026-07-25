@@ -20,6 +20,7 @@ import {
   _recoverObjectsFromLine,
   _resetEnsuredDirsCacheForTest,
   countLines,
+  exists,
   parseLineTolerant,
   read,
   readLines,
@@ -354,6 +355,24 @@ describe('writeLine / writeLineSync / write', () => {
   // branch is never exercised. A regression that dropped that branch would
   // make write() fail with ENOENT only when callers target a brand-new
   // subdirectory.
+  it('write() with an empty array leaves a genuinely empty file', async () => {
+    const file = path.join(
+      tmpRoot,
+      `we-${Math.random().toString(36).slice(2)}.jsonl`,
+    );
+    await writeLine(file, { v: 1 });
+    expect(exists(file)).toBe(true);
+
+    // Clearing the file must not leave a stray newline behind: a 1-byte file
+    // makes exists() (size > 0) disagree with read() (no records).
+    write(file, []);
+
+    expect(fs.readFileSync(file, 'utf8')).toBe('');
+    expect(fs.statSync(file).size).toBe(0);
+    expect(await read(file)).toEqual([]);
+    expect(exists(file)).toBe(false);
+  });
+
   it('write() creates parent dirs when missing', () => {
     const nested = path.join(tmpRoot, 'a', 'b', 'c', 'file.jsonl');
     write(nested, [{ x: 1 }]);

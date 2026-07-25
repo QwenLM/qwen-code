@@ -253,6 +253,23 @@ describe('SessionRouter', () => {
       expect(d1).not.toBe(d2);
     });
 
+    it('chat_thread scope: routes by channel + chatId + threadId', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'chat_thread');
+      const s1 = await router.resolve('ch', 'alice', 'repo-a', 'issue:1');
+      const s2 = await router.resolve('ch', 'bob', 'repo-a', 'issue:1');
+      expect(s1).toBe(s2); // same chat+thread = same session
+
+      const s3 = await router.resolve('ch', 'alice', 'repo-b', 'issue:1');
+      expect(s1).not.toBe(s3); // different chatId = different session
+    });
+
+    it('chat_thread scope: falls back to chatId when no threadId', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'chat_thread');
+      const s1 = await router.resolve('ch', 'alice', 'repo-a');
+      const s2 = await router.resolve('ch', 'bob', 'repo-a');
+      expect(s1).toBe(s2);
+    });
+
     it('mixed per-channel scopes work independently', async () => {
       const router = new SessionRouter(bridge, '/tmp');
       router.setChannelScope('ch-thread', 'thread');
