@@ -13,7 +13,6 @@ vi.mock('@octokit/rest', () => {
     rest: {
       users: {
         getAuthenticated: vi.fn(),
-        getByUsername: vi.fn(),
       },
       activity: {
         listNotificationsForAuthenticatedUser: vi.fn(),
@@ -51,7 +50,6 @@ const mockOctokit = (
   rest: {
     users: {
       getAuthenticated: ReturnType<typeof vi.fn>;
-      getByUsername: ReturnType<typeof vi.fn>;
     };
     activity: {
       listNotificationsForAuthenticatedUser: ReturnType<typeof vi.fn>;
@@ -195,81 +193,23 @@ describe('GithubChannel', () => {
       );
     });
 
-    it('resolves allowedUsers logins to numeric IDs for the gate without mutating config', async () => {
+    it('passes allowedUsers logins directly to the gate', async () => {
       const config = makeConfig({
         senderPolicy: 'allowlist',
         allowedUsers: ['alice'],
       });
       channel = new TestableGithubChannel('test-github', config, makeBridge());
-      mockOctokit.rest.users.getByUsername.mockResolvedValue({
-        data: { id: 10001, login: 'alice' },
-      });
       mockOctokit.paginate.mockResolvedValue([]);
       await channel.connect();
 
-      expect(mockOctokit.rest.users.getByUsername).toHaveBeenCalledWith({
-        username: 'alice',
-      });
-      // config keeps the original logins so reconnect can re-resolve them.
-      expect(
-        (channel as unknown as { config: { allowedUsers: string[] } }).config
-          .allowedUsers,
-      ).toEqual(['alice']);
       const gate = (
         channel as unknown as {
           gate: { isAllowed: (senderId: string) => boolean };
         }
       ).gate;
-      expect(gate.isAllowed('10001')).toBe(true);
-      expect(gate.isAllowed('alice')).toBe(false);
+      expect(gate.isAllowed('alice')).toBe(true);
+      expect(gate.isAllowed('bob')).toBe(false);
       channel.disconnect();
-    });
-
-    it('connect() is idempotent across reconnects (does not re-resolve numeric IDs)', async () => {
-      const config = makeConfig({
-        senderPolicy: 'allowlist',
-        allowedUsers: ['alice'],
-      });
-      channel = new TestableGithubChannel('test-github', config, makeBridge());
-      // Resolve the login, but 404 on a numeric ID — as GitHub does for
-      // GET /users/{username} when given an ID instead of a login.
-      mockOctokit.rest.users.getByUsername.mockImplementation(
-        async ({ username }: { username: string }) => {
-          if (username === 'alice') {
-            return { data: { id: 10001, login: 'alice' } };
-          }
-          throw new Error(`Not Found: ${username}`);
-        },
-      );
-      mockOctokit.paginate.mockResolvedValue([]);
-
-      await channel.connect();
-      channel.disconnect();
-      // Daemon bridge-crash restart calls disconnect() + connect() on the same
-      // instance; this must not attempt to resolve the already-numeric ID.
-      await expect(channel.connect()).resolves.toBeUndefined();
-      channel.disconnect();
-
-      expect(config.allowedUsers).toEqual(['alice']);
-      expect(mockOctokit.rest.users.getByUsername).toHaveBeenCalledWith({
-        username: 'alice',
-      });
-    });
-
-    it('throws when allowedUser resolution fails', async () => {
-      channel = new TestableGithubChannel(
-        'test-github',
-        makeConfig({ senderPolicy: 'allowlist', allowedUsers: ['alice'] }),
-        makeBridge(),
-      );
-      mockOctokit.rest.users.getByUsername.mockRejectedValue(
-        new Error('transient 502'),
-      );
-      mockOctokit.paginate.mockResolvedValue([]);
-
-      await expect(channel.connect()).rejects.toThrow(
-        'could not resolve allowedUser "alice"',
-      );
     });
   });
 
@@ -284,7 +224,7 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes).toHaveLength(1);
       const env = channel.inboundEnvelopes[0]!;
       expect(env.text).toBe(' please fix this');
-      expect(env.senderId).toBe('10001');
+      expect(env.senderId).toBe('alice');
       expect(env.senderName).toBe('alice');
       expect(env.chatId).toBe('owner/repo');
       expect(env.threadId).toBe('issue:42');
@@ -601,7 +541,7 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes).toHaveLength(1);
       const env = channel.inboundEnvelopes[0]!;
       expect(env.text).toBe(' implement this feature');
-      expect(env.senderId).toBe('10002');
+      expect(env.senderId).toBe('bob');
     });
 
     it('dispatches issue body without mention as isMentioned false', async () => {
@@ -651,7 +591,7 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes).toHaveLength(1);
       const env = channel.inboundEnvelopes[0]!;
       expect(env.text).toBe(' review this PR');
-      expect(env.senderId).toBe('10003');
+      expect(env.senderId).toBe('carol');
       expect(env.threadId).toBe('pr:99');
       expect(env.metadata).toContain('Pull Request');
     });
@@ -767,9 +707,6 @@ describe('GithubChannel', () => {
         makeConfig({ senderPolicy: 'allowlist', allowedUsers: ['bob'] }),
         makeBridge(),
       );
-      mockOctokit.rest.users.getByUsername.mockResolvedValue({
-        data: { id: 10002, login: 'bob' },
-      });
       mockOctokit.paginate.mockResolvedValueOnce([]);
       await channel.connect();
       channel.disconnect();
@@ -797,7 +734,7 @@ describe('GithubChannel', () => {
         e.messageId.startsWith('issue-body-'),
       );
       expect(bodyEnvelope).toBeDefined();
-      expect(bodyEnvelope!.senderId).toBe('10002');
+      expect(bodyEnvelope!.senderId).toBe('bob');
     });
   });
 
