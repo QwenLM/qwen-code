@@ -15,6 +15,7 @@
     "packages/channels/feishu",
     "packages/channels/qqbot",
     "packages/channels/plugin-example",
+    "integrations/external-context",
     "!packages/desktop"
   ],
   "repository": {

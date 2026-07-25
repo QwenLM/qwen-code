@@ -179,6 +179,21 @@ describe('qwen-triage-finalize workflow', () => {
     expect(script).toContain('if [ -z "${GH_TOKEN:-}" ]');
     expect(script).toContain('No open PR for $SHORT_SHA; nothing to finalize.');
   });
+
+  it('resolves PRs from the open-PR list by head sha, not only the commit association', () => {
+    // commits/:sha/pulls returns empty for fork-branch commits (observed
+    // live on the current head of an open fork PR), and
+    // workflow_run.pull_requests is empty for forks too — filtering the
+    // open-PR list by head.sha is the source that cannot miss the PR the
+    // deferred approval belongs to. The association endpoint stays as the
+    // second source (it powers the stale note when it works).
+    expect(script).toContain('pulls?state=open&per_page=100');
+    expect(script).toContain('select(.head.sha == $sha)');
+    expect(script.indexOf('pulls?state=open')).toBeLessThan(
+      script.indexOf('commits/$HEAD_SHA/pulls'),
+    );
+    expect(script).toContain('sort -un');
+  });
 });
 
 describe('qwen-triage-finalize helpers', () => {

@@ -25,11 +25,20 @@ or Stage 1c direction escalation), submit exactly one `CHANGES_REQUESTED`
 review and stop. Do not also post or update a Stage 1 issue comment, and do not
 continue to Stage 2, Stage 3, or approval.
 
-**Re-runs:** if the triage runs again on the same PR, update each comment in place:
+**Re-runs:** if the triage runs again on the same PR, update each comment in place. **Resolve the comment id by its stage marker AT PATCH TIME — never from memory, list position, or an earlier stage's bookkeeping.** On a re-run the thread holds four or more bot comments whose list order is not the stage order, and a wrong id silently overwrites another stage's comment (observed on a real re-run: the stage=3 comment clobbered with stage=1 content mid-run). The author filter matters too — the marker is public text anyone can paste into a comment, and the bot PAT may be able to edit other users' comments:
 
 ```bash
-gh api -X PATCH "/repos/$REPO/issues/comments/$COMMENT_ID" -F body=@/tmp/stage-N-updated.md
+BOT_LOGIN=$(gh api user --jq '.login')
+stage_comment_id() { # $1 = stage number (1, 2, 3) or "status"
+  gh api "repos/$REPO/issues/$PR_NUMBER/comments" --method GET --paginate -F per_page=100 |
+    jq -rs --arg bot "$BOT_LOGIN" --arg m "<!-- qwen-triage stage=$1 -->" \
+      '[.[][] | select(.user.login == $bot) | select(.body | startswith($m))] | last | .id // empty'
+}
+CID=$(stage_comment_id 2)   # re-resolve immediately before EACH patch
+[ -n "$CID" ] && gh api -X PATCH "/repos/$REPO/issues/comments/$CID" -F body=@/tmp/stage-2-updated.md
 ```
+
+`startswith`, not `contains`: stage comments carry their marker as the first line, and a substring match would also hit a comment that merely quotes the marker. An empty `CID` means that stage has no comment yet — POST a new one instead of patching.
 
 Never create duplicates. For terminal-exit reviews (submitted via
 `gh pr review --request-changes`), the GitHub API does not support editing PR

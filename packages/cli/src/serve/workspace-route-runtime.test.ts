@@ -7,9 +7,16 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import type { Request } from 'express';
-import { resolveContainedCwd } from './workspace-route-runtime.js';
+import type { Request, Response } from 'express';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  createSingleWorkspaceRegistry,
+  type WorkspaceRuntime,
+} from './workspace-registry.js';
+import {
+  resolveContainedCwd,
+  resolveWorkspaceRuntimeFromParam,
+} from './workspace-route-runtime.js';
 
 function fakeReq(cwd?: unknown): Request {
   return { query: cwd !== undefined ? { cwd } : {} } as Request;
@@ -68,5 +75,72 @@ describe('resolveContainedCwd', () => {
   it('returns workspaceCwd when the path does not exist', () => {
     const missing = path.join(workspace, 'missing');
     expect(resolveContainedCwd(fakeReq(missing), workspace)).toBe(workspace);
+  });
+});
+
+function makeRuntime(): WorkspaceRuntime {
+  return {
+    workspaceId: 'ws-primary',
+    workspaceCwd: '/work/primary',
+    primary: true,
+    trusted: true,
+    env: { mode: 'parent-process', overlayKeys: [] },
+    bridge: {},
+    workspaceService: {},
+    routeFileSystemFactory: {},
+    clientMcpSenderRegistry: {},
+  } as unknown as WorkspaceRuntime;
+}
+
+function makeResponse(): Response {
+  const response = {
+    set: vi.fn(),
+    status: vi.fn(),
+    json: vi.fn(),
+  };
+  response.status.mockReturnValue(response);
+  response.json.mockReturnValue(response);
+  return response as unknown as Response;
+}
+
+describe('resolveWorkspaceRuntimeFromParam', () => {
+  it('returns retryable unavailable for a registered transitioning workspace', () => {
+    const registry = createSingleWorkspaceRegistry(makeRuntime());
+    registry.beginReplacement(registry.primaryEntry, 'policy-2');
+    const response = makeResponse();
+
+    expect(
+      resolveWorkspaceRuntimeFromParam(
+        registry,
+        { params: { workspace: 'ws-primary' } } as unknown as Request,
+        response,
+      ),
+    ).toBeNull();
+    expect(response.set).toHaveBeenCalledWith('Retry-After', '1');
+    expect(response.status).toHaveBeenCalledWith(503);
+    expect(response.json).toHaveBeenCalledWith({
+      error: 'Workspace runtime is not active.',
+      code: 'workspace_runtime_unavailable',
+      workspaceCwd: '/work/primary',
+      workspaceId: 'ws-primary',
+    });
+  });
+
+  it('keeps unknown workspaces distinct from unavailable registrations', () => {
+    const registry = createSingleWorkspaceRegistry(makeRuntime());
+    const response = makeResponse();
+
+    expect(
+      resolveWorkspaceRuntimeFromParam(
+        registry,
+        { params: { workspace: 'missing' } } as unknown as Request,
+        response,
+      ),
+    ).toBeNull();
+    expect(response.status).toHaveBeenCalledWith(400);
+    expect(response.json).toHaveBeenCalledWith({
+      error: '`:workspace` must decode to a workspace id or absolute path',
+      code: 'workspace_mismatch',
+    });
   });
 });

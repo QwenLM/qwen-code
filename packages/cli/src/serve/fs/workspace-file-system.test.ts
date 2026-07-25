@@ -34,6 +34,7 @@ async function makeHarness(opts?: {
   trusted?: boolean;
   ignore?: Ignore;
   includeRawPaths?: boolean;
+  generationGuard?: { assertOpen(): void };
 }): Promise<Harness> {
   const scratch = await fsp.mkdtemp(
     path.join(os.tmpdir(), `qwen-wfs-${randomBytes(4).toString('hex')}-`),
@@ -48,6 +49,7 @@ async function makeHarness(opts?: {
     emit: (e) => events.push(e),
     ignore: opts?.ignore,
     includeRawPaths: opts?.includeRawPaths,
+    generationGuard: opts?.generationGuard,
   });
   const fs = factory.forRequest({
     originatorClientId: 'client-x',
@@ -204,6 +206,30 @@ describe('WorkspaceFileSystem - readText', () => {
     const r = await h.fs.resolve('app.log', 'read');
     const out = await h.fs.readText(r);
     expect(out.meta.matchedIgnore).toBe('file');
+  });
+
+  it('rejects a read result when its runtime generation closes in flight', async () => {
+    let checks = 0;
+    await teardown(h);
+    h = await makeHarness({
+      generationGuard: {
+        assertOpen() {
+          checks += 1;
+          if (checks === 2) {
+            throw Object.assign(new Error('generation closed'), {
+              code: 'workspace_generation_closed',
+            });
+          }
+        },
+      },
+    });
+    const target = path.join(h.workspace, 'stale.txt');
+    await fsp.writeFile(target, 'must not be returned');
+
+    await expect(h.fs.readText(target as ResolvedPath)).rejects.toMatchObject({
+      code: 'workspace_generation_closed',
+    });
+    expect(checks).toBe(2);
   });
 });
 
@@ -478,6 +504,27 @@ describe('WorkspaceFileSystem - write/edit', () => {
     expect(await fsp.readFile(r as string, 'utf-8')).toBe('hello\n');
   });
 
+  it('rechecks the runtime generation immediately before an atomic write', async () => {
+    let checks = 0;
+    await teardown(h);
+    h = await makeHarness({
+      generationGuard: {
+        assertOpen() {
+          checks += 1;
+          if (checks === 5) throw new Error('generation closed');
+        },
+      },
+    });
+    const target = path.join(h.workspace, 'generation-closed.txt');
+    const r = await h.fs.resolve(target, 'write');
+
+    await expect(
+      h.fs.writeTextAtomic(r, 'must not be written', { mode: 'create' }),
+    ).rejects.toThrow('generation closed');
+    expect(checks).toBe(5);
+    await expect(fsp.stat(target)).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('writeTextAtomic create rejects existing files', async () => {
     const target = path.join(h.workspace, 'exists.txt');
     await fsp.writeFile(target, 'old');
@@ -733,6 +780,28 @@ describe('WorkspaceFileSystem - write/edit', () => {
     expect(out.writtenBytes).toBeGreaterThan(0);
     const after = await fsp.readFile(target, 'utf-8');
     expect(after).toBe('foo=42\nbar=2\n');
+  });
+
+  it('rechecks the runtime generation immediately before an edit commit', async () => {
+    let checks = 0;
+    await teardown(h);
+    h = await makeHarness({
+      generationGuard: {
+        assertOpen() {
+          checks += 1;
+          if (checks === 5) throw new Error('generation closed');
+        },
+      },
+    });
+    const target = path.join(h.workspace, 'stale-edit.txt');
+    await fsp.writeFile(target, 'foo=1\n');
+    const r = await h.fs.resolve('stale-edit.txt', 'edit');
+
+    await expect(h.fs.edit(r, 'foo=1', 'foo=2')).rejects.toThrow(
+      'generation closed',
+    );
+    expect(checks).toBe(5);
+    expect(await fsp.readFile(target, 'utf-8')).toBe('foo=1\n');
   });
 
   it('edit() preserves the tail of files larger than the default range cap', async () => {

@@ -198,6 +198,7 @@ export class SubagentManager {
 
     // Ensure directory exists
     const dir = path.dirname(filePath);
+    options.assertCanCommit?.();
     await fs.mkdir(dir, { recursive: true });
 
     // Update config with actual file path and level
@@ -210,6 +211,7 @@ export class SubagentManager {
     // Serialize and write the file
     const content = this.serializeSubagent(finalConfig);
 
+    options.assertCanCommit?.();
     try {
       await fs.writeFile(filePath, content, 'utf8');
       // Refresh cache after successful creation
@@ -301,6 +303,7 @@ export class SubagentManager {
     name: string,
     updates: Partial<SubagentConfig>,
     level?: SubagentLevel,
+    options?: { assertCanCommit?: () => void },
   ): Promise<void> {
     const existing = await this.loadSubagent(name, level);
     if (!existing) {
@@ -347,6 +350,7 @@ export class SubagentManager {
     // Write the updated configuration
     const content = this.serializeSubagent(updatedConfig);
 
+    options?.assertCanCommit?.();
     try {
       await fs.writeFile(existing.filePath, content, 'utf8');
       // Refresh cache after successful update
@@ -371,6 +375,7 @@ export class SubagentManager {
     name: string,
     level?: SubagentLevel,
     extensionName?: string,
+    options?: { assertCanCommit?: () => void },
   ): Promise<void> {
     // Check if it's a built-in agent first
     if (BuiltinAgentRegistry.isBuiltinAgent(name)) {
@@ -393,6 +398,9 @@ export class SubagentManager {
       : ['project', 'user'];
     let deleted = false;
 
+    // Assert once before any deletion so a closed generation fails atomically
+    // instead of unlinking some level files and then throwing mid-loop.
+    options?.assertCanCommit?.();
     for (const currentLevel of levelsToCheck) {
       // Skip builtin and session levels for deletion
       if (currentLevel === 'builtin' || currentLevel === 'session') {

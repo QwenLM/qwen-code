@@ -1130,6 +1130,22 @@ You are weird.
       );
     });
 
+    it('rejects creation at the commit boundary without writing', async () => {
+      const commitError = new Error('generation closed');
+
+      await expect(
+        manager.createSubagent(validConfig, {
+          level: 'project',
+          assertCanCommit: () => {
+            throw commitError;
+          },
+        }),
+      ).rejects.toBe(commitError);
+
+      expect(fs.mkdir).not.toHaveBeenCalled();
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
     it('should throw error if file already exists and overwrite is false', async () => {
       vi.mocked(fs.access).mockResolvedValue(undefined); // File exists
 
@@ -1455,6 +1471,20 @@ You are a helpful assistant.`;
       );
     });
 
+    it('rejects updates at the commit boundary without writing', async () => {
+      const commitError = new Error('generation closed');
+
+      await expect(
+        manager.updateSubagent('test-agent', {}, undefined, {
+          assertCanCommit: () => {
+            throw commitError;
+          },
+        }),
+      ).rejects.toBe(commitError);
+
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
     it('should throw error if subagent not found', async () => {
       vi.mocked(fs.readdir).mockRejectedValue(new Error('Directory not found'));
 
@@ -1492,6 +1522,23 @@ You are a helpful assistant.`;
       expect(fs.unlink).toHaveBeenCalledWith(
         path.normalize('/test/project/.qwen/agents/test-agent.md'),
       );
+    });
+
+    it('rejects deletion at the commit boundary without unlinking', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(fs.readdir).mockResolvedValue(['test-agent.md'] as any);
+      vi.mocked(fs.readFile).mockResolvedValue(validMarkdown);
+      const commitError = new Error('generation closed');
+
+      await expect(
+        manager.deleteSubagent('test-agent', 'project', undefined, {
+          assertCanCommit: () => {
+            throw commitError;
+          },
+        }),
+      ).rejects.toBe(commitError);
+
+      expect(fs.unlink).not.toHaveBeenCalled();
     });
 
     it('should delete from both levels if no level specified', async () => {

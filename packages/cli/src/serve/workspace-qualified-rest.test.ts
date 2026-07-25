@@ -18,6 +18,7 @@ import {
 } from './fs/index.js';
 import type { ServeOptions } from './types.js';
 import {
+  createWorkspaceGenerationGuard,
   createWorkspaceRegistry,
   type WorkspaceRuntime,
 } from './workspace-registry.js';
@@ -224,6 +225,7 @@ async function makeHarness(opts?: {
     workspaceService: primaryWorkspaceService,
     routeFileSystemFactory: primaryFsFactory,
     clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
+    generationGuard: createWorkspaceGenerationGuard(),
   };
   const secondary: WorkspaceRuntime = {
     workspaceId: hashDaemonWorkspace(secondaryCwd),
@@ -238,14 +240,16 @@ async function makeHarness(opts?: {
         ? untrustedFsFactory
         : secondaryFsFactory,
     clientMcpSenderRegistry: new ClientMcpSenderRegistry(),
+    generationGuard: createWorkspaceGenerationGuard(),
   };
 
   const persistSetting = vi.fn(async () => {});
+  const workspaceRegistry = createWorkspaceRegistry([primary, secondary]);
   const app = createServeApp(
     { ...baseOpts, workspace: primaryCwd, token: opts?.token },
     undefined,
     {
-      workspaceRegistry: createWorkspaceRegistry([primary, secondary]),
+      workspaceRegistry,
       ...(opts?.persistSetting === false ? {} : { persistSetting }),
     },
   );
@@ -258,6 +262,7 @@ async function makeHarness(opts?: {
     secondaryId: secondary.workspaceId,
     secondaryWorkspaceService,
     persistSetting,
+    workspaceRegistry,
   };
 }
 
@@ -581,6 +586,7 @@ describe('workspace-qualified core REST', () => {
         expect.any(String),
         'general.cleanupPeriodDays',
         30,
+        expect.any(Function),
       );
 
       const badScope = await request(h.app)
@@ -616,6 +622,34 @@ describe('workspace-qualified core REST', () => {
       expect(res.body).not.toHaveProperty('workspaceId');
     } finally {
       await fsp.rm(untrusted.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('does not publish qualified settings from a closed generation', async () => {
+    const h = await makeHarness({ token: 'secret' });
+    try {
+      const entry = h.workspaceRegistry.getEntryByWorkspaceId(h.secondaryId)!;
+      h.persistSetting.mockImplementationOnce(async () => {
+        entry.current!.guard.close();
+      });
+
+      const res = await request(h.app)
+        .post(`/workspaces/${encodeURIComponent(h.secondaryId)}/settings`)
+        .set('Authorization', 'Bearer secret')
+        .set('Host', host())
+        .send({
+          scope: 'workspace',
+          key: 'general.cleanupPeriodDays',
+          value: 30,
+        });
+
+      expect(res.status).toBe(503);
+      expect(res.body.code).toBe('workspace_runtime_unavailable');
+      expect(
+        entry.current!.runtime.bridge.publishWorkspaceEvent,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });
 
