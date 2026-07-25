@@ -1569,7 +1569,7 @@ export interface AcpSessionBridge {
 }
 
 export interface BridgeShutdownOptions {
-  reason?: 'daemon_shutdown' | 'workspace_removed';
+  reason?: 'daemon_shutdown' | 'workspace_removed' | 'trust_reconfigured';
 }
 
 export interface ShellCommandResult {
