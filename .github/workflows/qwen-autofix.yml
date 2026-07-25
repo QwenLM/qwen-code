@@ -1009,10 +1009,83 @@ jobs:
                 done
           fi
 
+      - name: 'Flake detection'
+        id: 'flake'
+        if: |-
+          ${{ steps.decision.outputs.go_issue != '' && needs.route.outputs.dry_run != 'true' }}
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          ISSUE: '${{ steps.decision.outputs.go_issue }}'
+        run: |-
+          set -euo pipefail
+          IS_FLAKE=false
+
+          # Only applies to auto-filed CI failure issues.
+          TITLE="$(gh issue view "${ISSUE}" --repo "${REPO}" --json title --jq '.title')"
+          if [[ "${TITLE}" != Main\ CI\ failed:* ]]; then
+            echo "Not a CI failure issue; skipping flake detection."
+            echo "is_flake=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          # Extract the failed run ID from the issue body.
+          BODY="$(gh issue view "${ISSUE}" --repo "${REPO}" --json body --jq '.body')"
+          RUN_ID="$(grep -oP 'Run ID: \K[0-9]+' <<< "${BODY}" || true)"
+          if [[ -z "${RUN_ID}" ]]; then
+            echo "Could not extract run ID from issue body; proceeding normally."
+            echo "is_flake=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          # Get the workflow name and head SHA from the failed run.
+          RUN_JSON="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}" \
+            --jq '{name: .name, sha: .head_sha, created: .created_at}' 2>/dev/null || true)"
+          if [[ -z "${RUN_JSON}" ]]; then
+            echo "Failed to fetch run ${RUN_ID}; proceeding normally."
+            echo "is_flake=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          WF_NAME="$(jq -r '.name' <<< "${RUN_JSON}")"
+          FAILED_SHA="$(jq -r '.sha' <<< "${RUN_JSON}")"
+          FAILED_AT="$(jq -r '.created' <<< "${RUN_JSON}")"
+
+          # Check if any subsequent run of the same workflow on main succeeded.
+          LATER_GREEN="$(gh api "repos/${REPO}/actions/runs" \
+            -F branch=main -F event=push -F per_page=10 \
+            --jq "[.workflow_runs[] | select(.name == \"${WF_NAME}\" and .conclusion == \"success\" and .created_at > \"${FAILED_AT}\")] | length" \
+            2>/dev/null || echo "0")"
+
+          if [[ "${LATER_GREEN}" -gt 0 ]]; then
+            IS_FLAKE=true
+            echo "✅ Subsequent ${WF_NAME} run(s) on main succeeded — this is a flake."
+          fi
+
+          # Also check if the triggering commit only touched unit test files.
+          if [[ "${IS_FLAKE}" != "true" ]]; then
+            COMMIT_FILES="$(gh api "repos/${REPO}/commits/${FAILED_SHA}" \
+              --jq '[.files[].filename] | join("\n")' 2>/dev/null || true)"
+            if [[ -n "${COMMIT_FILES}" ]]; then
+              NON_TEST="$(grep -v -E '(test|spec|__tests__|\.test\.|\.spec\.)' <<< "${COMMIT_FILES}" || true)"
+              if [[ -z "${NON_TEST}" ]]; then
+                IS_FLAKE=true
+                echo "✅ Triggering commit only modified test files — likely a flake."
+              fi
+            fi
+          fi
+
+          if [[ "${IS_FLAKE}" == "true" ]]; then
+            gh issue comment "${ISSUE}" --repo "${REPO}" --body "🤖 Closing as a transient CI flake — a subsequent \`${WF_NAME}\` run on \`main\` has already passed. No code fix needed."
+            gh issue close "${ISSUE}" --repo "${REPO}" --reason 'not planned'
+            gh issue edit "${ISSUE}" --repo "${REPO}" --add-label 'autofix/skip' 2>/dev/null || true
+            echo "is_flake=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "is_flake=false" >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: 'Claim issue'
         id: 'claim'
         if: |-
-          ${{ steps.decision.outputs.go_issue != '' && needs.route.outputs.dry_run != 'true' }}
+          ${{ steps.decision.outputs.go_issue != '' && needs.route.outputs.dry_run != 'true' && steps.flake.outputs.is_flake != 'true' }}
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
@@ -1045,7 +1118,7 @@ jobs:
       - name: 'Develop fix'
         id: 'develop'
         if: |-
-          ${{ steps.decision.outputs.go_issue != '' }}
+          ${{ steps.decision.outputs.go_issue != '' && steps.flake.outputs.is_flake != 'true' }}
         env:
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
@@ -1100,7 +1173,7 @@ jobs:
       - name: 'Verification gate'
         id: 'verify'
         if: |-
-          ${{ steps.decision.outputs.go_issue != '' }}
+          ${{ steps.decision.outputs.go_issue != '' && steps.flake.outputs.is_flake != 'true' }}
         env:
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
         run: |-

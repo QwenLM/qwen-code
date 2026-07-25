@@ -38,6 +38,25 @@ const IS_CONTAINER_SANDBOX =
 const LOCAL_OPENAI_NO_PROXY = IS_CONTAINER_SANDBOX
   ? '127.0.0.1,localhost,host.docker.internal'
   : '127.0.0.1,localhost';
+const FAKE_SERVER_OPTIONS = IS_CONTAINER_SANDBOX
+  ? { listenHost: '0.0.0.0' as const, baseUrlHost: 'host.docker.internal' }
+  : undefined;
+
+/** Shared query options fragment for tests backed by a fake OpenAI server. */
+function fakeModelOptions(baseUrl: string) {
+  return {
+    model: 'fake-model',
+    authType: 'openai' as const,
+    env: {
+      NO_PROXY: LOCAL_OPENAI_NO_PROXY,
+      no_proxy: LOCAL_OPENAI_NO_PROXY,
+      OPENAI_API_KEY: 'fake-key',
+      OPENAI_BASE_URL: baseUrl,
+      OPENAI_MODEL: 'fake-model',
+      QWEN_MODEL: 'fake-model',
+    },
+  };
+}
 
 describe('Tool Control Parameters (E2E)', () => {
   let helper: SDKTestHelper;
@@ -373,12 +392,7 @@ describe('Tool Control Parameters (E2E)', () => {
 
             return { content: 'Done.' };
           },
-          IS_CONTAINER_SANDBOX
-            ? {
-                listenHost: '0.0.0.0',
-                baseUrlHost: 'host.docker.internal',
-              }
-            : undefined,
+          FAKE_SERVER_OPTIONS,
         );
 
         const q = query({
@@ -442,15 +456,45 @@ describe('Tool Control Parameters (E2E)', () => {
         await helper.createFile('test/spec.ts', 'describe("test", () => {});');
         await helper.createFile('readme.md', '# Readme');
 
+        const fakeServer = await startFakeOpenAIServer(
+          ({ requestIndex }) => {
+            if (requestIndex === 0) {
+              return {
+                toolCalls: [
+                  fakeToolCall(
+                    'edit',
+                    {
+                      file_path: helper.getPath('src/app.ts'),
+                      old_string: 'const app = "original";',
+                      new_string: 'const app = "original"; // touched',
+                    },
+                    'edit-src',
+                  ),
+                  fakeToolCall(
+                    'edit',
+                    {
+                      file_path: helper.getPath('readme.md'),
+                      old_string: '# Readme',
+                      new_string: '# Readme\n\nUpdated.',
+                    },
+                    'edit-readme',
+                  ),
+                ],
+              };
+            }
+            return { content: 'Done.' };
+          },
+          FAKE_SERVER_OPTIONS,
+        );
+
         const q = query({
           prompt:
             'Use the edit tool to modify src/app.ts (add a semicolon), edit test/spec.ts (add a test case), and edit readme.md (add a line).',
           options: {
             ...SHARED_TEST_OPTIONS,
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'yolo',
-            // Only offer edit (not write_file) so the model must use edit,
-            // making the excludeTools assertion deterministic.
             coreTools: ['read_file', 'edit', 'list_directory'],
             // Block editing files in /src/** directory
             excludeTools: ['Edit(/src/**)'],
@@ -465,36 +509,33 @@ describe('Tool Control Parameters (E2E)', () => {
             messages.push(message);
           }
 
-          const toolCalls = findToolCalls(messages);
-          const editCalls = toolCalls.filter(
-            (tc) => tc.toolUse.name === 'edit',
+          assertSuccessfulCompletion(messages);
+
+          const editResults = findToolResults(messages, 'edit');
+
+          // src/app.ts edit must have been attempted and blocked
+          const srcEditResult = editResults.find(
+            (r) => r.toolUseId === 'edit-src',
+          );
+          expect(srcEditResult).toBeDefined();
+          expect(srcEditResult!.isError).toBe(true);
+          expect(srcEditResult!.content).toMatch(
+            /permission.*(?:declined|denied)|denied.*permission/i,
           );
 
-          // Should have attempted edits
-          expect(editCalls.length).toBeGreaterThan(0);
-
-          // Check that src/app.ts edit was blocked
-          const srcEditResults = findToolResults(messages, 'edit').filter(
-            (result) => {
-              return (
-                result.content.includes('src/app.ts') ||
-                result.content.includes('/src/')
-              );
-            },
+          // readme.md edit should have succeeded
+          const readmeResult = editResults.find(
+            (r) => r.toolUseId === 'edit-readme',
           );
-          if (srcEditResults.length > 0) {
-            for (const result of srcEditResults) {
-              expect(result.content).toMatch(
-                /permission.*(?:declined|denied)|denied.*permission/i,
-              );
-            }
-          }
+          expect(readmeResult).toBeDefined();
+          expect(readmeResult!.isError).toBe(false);
 
           // src/app.ts should remain unchanged
           const srcContent = await helper.readFile('src/app.ts');
           expect(srcContent).toBe('const app = "original";');
         } finally {
           await q.close();
+          await fakeServer.close();
         }
       },
       TEST_TIMEOUT,
@@ -503,10 +544,39 @@ describe('Tool Control Parameters (E2E)', () => {
     it(
       'should block specific shell commands with prefix pattern',
       async () => {
+        const fakeServer = await startFakeOpenAIServer(
+          ({ requestIndex }) => {
+            if (requestIndex === 0) {
+              return {
+                toolCalls: [
+                  fakeToolCall(
+                    'run_shell_command',
+                    { command: 'echo hello' },
+                    'shell-echo',
+                  ),
+                  fakeToolCall(
+                    'run_shell_command',
+                    { command: 'rm file.txt' },
+                    'shell-rm',
+                  ),
+                  fakeToolCall(
+                    'run_shell_command',
+                    { command: 'ls' },
+                    'shell-ls',
+                  ),
+                ],
+              };
+            }
+            return { content: 'Done.' };
+          },
+          FAKE_SERVER_OPTIONS,
+        );
+
         const q = query({
           prompt: 'Run "echo hello", "rm file.txt", and "ls" commands.',
           options: {
             ...SHARED_TEST_OPTIONS,
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'yolo',
             // Block all rm commands
@@ -522,31 +592,35 @@ describe('Tool Control Parameters (E2E)', () => {
             messages.push(message);
           }
 
-          const toolCalls = findToolCalls(messages);
-          const shellCalls = toolCalls.filter(
-            (tc) => tc.toolUse.name === 'run_shell_command',
+          assertSuccessfulCompletion(messages);
+
+          const shellResults = findToolResults(messages, 'run_shell_command');
+
+          // rm command must have been attempted and blocked
+          const rmResult = shellResults.find(
+            (r) => r.toolUseId === 'shell-rm',
+          );
+          expect(rmResult).toBeDefined();
+          expect(rmResult!.isError).toBe(true);
+          expect(rmResult!.content).toMatch(
+            /permission.*(?:declined|denied)|denied.*permission/i,
           );
 
-          // Should have attempted shell commands
-          expect(shellCalls.length).toBeGreaterThan(0);
+          // echo and ls should have succeeded
+          const echoResult = shellResults.find(
+            (r) => r.toolUseId === 'shell-echo',
+          );
+          expect(echoResult).toBeDefined();
+          expect(echoResult!.isError).toBe(false);
 
-          // Check that rm commands were blocked
-          for (const call of shellCalls) {
-            const input = call.toolUse.input as { command?: string };
-            if (input.command?.includes('rm')) {
-              const results = findToolResults(messages, 'run_shell_command');
-              const rmResults = results.filter((r) => {
-                return (
-                  r.content.includes('permission') ||
-                  r.content.includes('declined') ||
-                  r.content.includes('denied')
-                );
-              });
-              expect(rmResults.length).toBeGreaterThan(0);
-            }
-          }
+          const lsResult = shellResults.find(
+            (r) => r.toolUseId === 'shell-ls',
+          );
+          expect(lsResult).toBeDefined();
+          expect(lsResult!.isError).toBe(false);
         } finally {
           await q.close();
+          await fakeServer.close();
         }
       },
       TEST_TIMEOUT,
@@ -609,10 +683,34 @@ describe('Tool Control Parameters (E2E)', () => {
     it(
       'should allow specific shell commands with pattern matching',
       async () => {
+        const fakeServer = await startFakeOpenAIServer(
+          ({ requestIndex }) => {
+            if (requestIndex === 0) {
+              return {
+                toolCalls: [
+                  fakeToolCall(
+                    'run_shell_command',
+                    { command: 'echo hello' },
+                    'shell-echo',
+                  ),
+                  fakeToolCall(
+                    'run_shell_command',
+                    { command: 'ls -la' },
+                    'shell-ls',
+                  ),
+                ],
+              };
+            }
+            return { content: 'Done.' };
+          },
+          FAKE_SERVER_OPTIONS,
+        );
+
         const q = query({
           prompt: 'Run "echo hello" and "ls -la" commands.',
           options: {
             ...SHARED_TEST_OPTIONS,
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'default',
             // Allow specific shell commands
@@ -628,23 +726,25 @@ describe('Tool Control Parameters (E2E)', () => {
             messages.push(message);
           }
 
-          const toolCalls = findToolCalls(messages);
-          const shellCalls = toolCalls.filter(
-            (tc) => tc.toolUse.name === 'run_shell_command',
+          assertSuccessfulCompletion(messages);
+
+          const shellResults = findToolResults(messages, 'run_shell_command');
+
+          // Both commands should have been auto-approved and executed
+          const echoResult = shellResults.find(
+            (r) => r.toolUseId === 'shell-echo',
           );
+          expect(echoResult).toBeDefined();
+          expect(echoResult!.isError).toBe(false);
 
-          // Should have executed shell commands
-          expect(shellCalls.length).toBeGreaterThan(0);
-
-          // All shell commands should be echo or ls
-          for (const call of shellCalls) {
-            const input = call.toolUse.input as { command?: string };
-            if (input.command) {
-              expect(input.command).toMatch(/^(echo |ls )/);
-            }
-          }
+          const lsResult = shellResults.find(
+            (r) => r.toolUseId === 'shell-ls',
+          );
+          expect(lsResult).toBeDefined();
+          expect(lsResult!.isError).toBe(false);
         } finally {
           await q.close();
+          await fakeServer.close();
         }
       },
       TEST_TIMEOUT,
@@ -760,15 +860,46 @@ describe('Tool Control Parameters (E2E)', () => {
         await helper.createFile('data.txt', 'text data');
         await helper.createFile('.env', 'SECRET=secret');
 
+        const canUseToolCalls: string[] = [];
+        const fakeServer = await startFakeOpenAIServer(
+          ({ requestIndex }) => {
+            if (requestIndex === 0) {
+              return {
+                toolCalls: [
+                  fakeToolCall(
+                    'read_file',
+                    { file_path: helper.getPath('config.json') },
+                    'read-json',
+                  ),
+                  fakeToolCall(
+                    'read_file',
+                    { file_path: helper.getPath('data.txt') },
+                    'read-txt',
+                  ),
+                  fakeToolCall(
+                    'read_file',
+                    { file_path: helper.getPath('.env') },
+                    'read-env',
+                  ),
+                ],
+              };
+            }
+            return { content: 'Done.' };
+          },
+          FAKE_SERVER_OPTIONS,
+        );
+
         const q = query({
           prompt: 'Read config.json, data.txt, and .env files.',
           options: {
             ...SHARED_TEST_OPTIONS,
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'default',
             // Auto-approve reading .json and .txt files
             allowedTools: ['Read(.json)', 'Read(.txt)'],
-            canUseTool: async (_toolName) => {
+            canUseTool: async (toolName) => {
+              canUseToolCalls.push(toolName);
               return {
                 behavior: 'deny',
                 message: 'Should not be called for allowed patterns',
@@ -785,20 +916,35 @@ describe('Tool Control Parameters (E2E)', () => {
             messages.push(message);
           }
 
-          const toolCalls = findToolCalls(messages);
-          const readCalls = toolCalls.filter(
-            (tc) => tc.toolUse.name === 'read_file',
+          assertSuccessfulCompletion(messages);
+
+          const readResults = findToolResults(messages, 'read_file');
+
+          // .json and .txt should be auto-approved (no canUseTool)
+          const jsonResult = readResults.find(
+            (r) => r.toolUseId === 'read-json',
           );
+          expect(jsonResult).toBeDefined();
+          expect(jsonResult!.isError).toBe(false);
+          expect(jsonResult!.content).toContain('"key"');
 
-          // Should have attempted reads
-          expect(readCalls.length).toBeGreaterThan(0);
+          const txtResult = readResults.find(
+            (r) => r.toolUseId === 'read-txt',
+          );
+          expect(txtResult).toBeDefined();
+          expect(txtResult!.isError).toBe(false);
+          expect(txtResult!.content).toContain('text data');
 
-          // .env should trigger canUseTool (not in allowed pattern)
-          // but .json and .txt should be auto-approved
-          // Note: canUseTool may be called for .env or not used at all
-          // depending on model behavior
+          // .env should trigger canUseTool and be denied
+          const envResult = readResults.find(
+            (r) => r.toolUseId === 'read-env',
+          );
+          expect(envResult).toBeDefined();
+          expect(envResult!.isError).toBe(true);
+          expect(canUseToolCalls).toContain('read_file');
         } finally {
           await q.close();
+          await fakeServer.close();
         }
       },
       TEST_TIMEOUT,
@@ -807,16 +953,52 @@ describe('Tool Control Parameters (E2E)', () => {
     it(
       'should auto-approve specific shell commands with pattern matching',
       async () => {
+        const canUseToolCalls: string[] = [];
+        const fakeServer = await startFakeOpenAIServer(
+          ({ requestIndex }) => {
+            if (requestIndex === 0) {
+              return {
+                toolCalls: [
+                  fakeToolCall(
+                    'run_shell_command',
+                    { command: 'echo test' },
+                    'shell-echo-test',
+                  ),
+                  fakeToolCall(
+                    'run_shell_command',
+                    { command: 'echo build' },
+                    'shell-echo-build',
+                  ),
+                  fakeToolCall(
+                    'run_shell_command',
+                    { command: 'pwd' },
+                    'shell-pwd',
+                  ),
+                  fakeToolCall(
+                    'run_shell_command',
+                    { command: 'whoami' },
+                    'shell-whoami',
+                  ),
+                ],
+              };
+            }
+            return { content: 'Done.' };
+          },
+          FAKE_SERVER_OPTIONS,
+        );
+
         const q = query({
           prompt:
             'Run "echo test", "echo build", "pwd", and "whoami" commands.',
           options: {
             ...SHARED_TEST_OPTIONS,
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'default',
             // Auto-approve echo commands
             allowedTools: ['ShellTool(echo *)'],
-            canUseTool: async (_toolName) => {
+            canUseTool: async (toolName) => {
+              canUseToolCalls.push(toolName);
               return {
                 behavior: 'deny',
                 message: 'Non-allowed tools should trigger this',
@@ -833,22 +1015,40 @@ describe('Tool Control Parameters (E2E)', () => {
             messages.push(message);
           }
 
-          const toolCalls = findToolCalls(messages);
-          const shellCalls = toolCalls.filter(
-            (tc) => tc.toolUse.name === 'run_shell_command',
+          assertSuccessfulCompletion(messages);
+
+          const shellResults = findToolResults(messages, 'run_shell_command');
+
+          // echo commands should be auto-approved and executed
+          const echoTestResult = shellResults.find(
+            (r) => r.toolUseId === 'shell-echo-test',
           );
+          expect(echoTestResult).toBeDefined();
+          expect(echoTestResult!.isError).toBe(false);
 
-          // Should have attempted shell commands
-          expect(shellCalls.length).toBeGreaterThan(0);
+          const echoBuildResult = shellResults.find(
+            (r) => r.toolUseId === 'shell-echo-build',
+          );
+          expect(echoBuildResult).toBeDefined();
+          expect(echoBuildResult!.isError).toBe(false);
 
-          // Check that echo commands were executed without canUseTool
-          const echoCalls = shellCalls.filter((call) => {
-            const input = call.toolUse.input as { command?: string };
-            return input.command?.startsWith('echo');
-          });
-          expect(echoCalls.length).toBeGreaterThan(0);
+          // pwd and whoami should trigger canUseTool and be denied
+          const pwdResult = shellResults.find(
+            (r) => r.toolUseId === 'shell-pwd',
+          );
+          expect(pwdResult).toBeDefined();
+          expect(pwdResult!.isError).toBe(true);
+
+          const whoamiResult = shellResults.find(
+            (r) => r.toolUseId === 'shell-whoami',
+          );
+          expect(whoamiResult).toBeDefined();
+          expect(whoamiResult!.isError).toBe(true);
+
+          expect(canUseToolCalls).toContain('run_shell_command');
         } finally {
           await q.close();
+          await fakeServer.close();
         }
       },
       TEST_TIMEOUT,
@@ -1102,12 +1302,7 @@ describe('Tool Control Parameters (E2E)', () => {
 
             return { content: 'Plan: leave the file unchanged.' };
           },
-          IS_CONTAINER_SANDBOX
-            ? {
-                listenHost: '0.0.0.0',
-                baseUrlHost: 'host.docker.internal',
-              }
-            : undefined,
+          FAKE_SERVER_OPTIONS,
         );
 
         const q = query({

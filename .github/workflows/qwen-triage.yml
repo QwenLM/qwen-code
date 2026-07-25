@@ -576,6 +576,27 @@ jobs:
           fi
           echo "Triage response received (${#RESPONSE} chars)."
 
+      - name: 'Verify stage comment posted'
+        if: 'success()'
+        shell: 'bash'
+        env:
+          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
+          NUMBER: '${{ steps.resolve.outputs.number }}'
+        run: |-
+          set -euo pipefail
+          # The triage agent must post at least a stage=1 comment.
+          # Check that one actually landed — the summary output being
+          # non-empty does NOT guarantee the comment was posted.
+          STAGE_FOUND="$(gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+            --paginate -F per_page=100 \
+            --jq '[.[] | select(.body | contains("<!-- qwen-triage stage="))] | length' \
+            2>/dev/null || echo "0")"
+          if [[ "${STAGE_FOUND}" -eq 0 ]]; then
+            echo "::warning title=Triage silent gap::Triage produced a summary but no stage comment was posted to #${NUMBER}. The agent may have failed at the comment-posting step."
+          else
+            echo "Stage comment verified (${STAGE_FOUND} marker(s) found)."
+          fi
+
       - name: 'Notify silent triage re-run'
         if: >-
           success() &&
