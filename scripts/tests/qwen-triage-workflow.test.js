@@ -17,6 +17,10 @@ import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/qwen-triage.yml', 'utf8');
+const prSkill = readFileSync(
+  '.qwen/skills/triage/references/pr-workflow.md',
+  'utf8',
+);
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -359,5 +363,23 @@ describe('qwen-triage tmux workflow', () => {
     const empty = run('', 'sig: qwen3.7-max end');
     expect(empty.status).toBe(0);
     expect(empty.out).toBe('sig: qwen3.7-max end');
+  });
+
+  it('pins the re-run comment-id recipe to startswith and the bot-author filter', () => {
+    // The skill's stage_comment_id() exists because a re-run once PATCHed the
+    // stage=3 comment with stage=1 content (#7693). Its two load-bearing
+    // constraints must not silently regress: `startswith` (a `contains` match
+    // would also hit a comment that merely quotes a marker) and the
+    // bot-author filter (markers are public text; the PAT may be able to
+    // edit other users' comments).
+    const section = prSkill.slice(
+      prSkill.indexOf('**Re-runs:**'),
+      prSkill.indexOf('Never create duplicates'),
+    );
+    expect(section).toContain('stage_comment_id()');
+    expect(section).toContain('select(.user.login == $bot)');
+    expect(section).toContain('startswith($m)');
+    expect(section).not.toContain('contains($m)');
+    expect(section).toContain('re-resolve immediately before EACH patch');
   });
 });
