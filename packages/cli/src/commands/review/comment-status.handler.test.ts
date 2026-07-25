@@ -254,5 +254,11 @@ describe('comment-status handler', () => {
     expect(report.threads).toEqual([]);
     expect(report.error).toContain('not authenticated');
     expect(warnings().join('\n')).toContain('comment-status failed');
+    // The degraded report carries the SAME shape as success so a consumer
+    // reading headDrift/summary gets a neutral value, not a misleading
+    // `undefined` (which reads as "no drift").
+    expect(report.headDrift).toBe(false);
+    expect(report.summary).toMatchObject({ threads: 0, blockers: 0 });
+    expect(report.inlineComments).toBe(0);
   });
 });

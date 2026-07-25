@@ -465,10 +465,30 @@ async function runCommentStatus(args: CommentStatusArgs): Promise<void> {
         `evidence — re-derive thread statuses per-comment if needed.`,
     );
     mkdirSync(dirname(out), { recursive: true });
+    // Emit the SAME shape as the success report (with an added `error`), not a
+    // stripped one: a consumer reading `report.headDrift` on a stripped report
+    // gets `undefined` (falsy = "no drift"), silently mistaking a total index
+    // failure for a clean "nothing moved". Safe defaults + `error` let a
+    // consumer that checks `error` see the failure and one that reads a fact
+    // get a neutral value, never a misleading one.
     writeFileSync(
       out,
       JSON.stringify(
-        { prNumber, ownerRepo, error: msg, threads: [] },
+        {
+          prNumber,
+          ownerRepo,
+          error: msg,
+          prAuthor: '',
+          liveHeadSha: '',
+          liveHeadBefore: '',
+          worktreeHeadSha: null,
+          worktreeMissing: false,
+          headDrift: false,
+          headMovedDuringFetch: false,
+          inlineComments: 0,
+          summary: summarizeThreads([]),
+          threads: [],
+        },
         null,
         2,
       ) + '\n',
