@@ -12,13 +12,21 @@ import {
   type CompactionEngine,
   type SessionReplaySnapshot,
 } from './eventBus.js';
-import { normalizeCompactedReplayMaxBytes } from './replayWindowLimits.js';
+import {
+  normalizeCompactedReplayMaxBytes,
+  normalizeMaxJournalBytes,
+  normalizeMaxJournalEvents,
+} from './replayWindowLimits.js';
 
 export type { CompactionEngine, SessionReplaySnapshot };
 export {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
+  DEFAULT_MAX_JOURNAL_BYTES,
+  DEFAULT_MAX_JOURNAL_EVENTS,
   MAX_COMPACTED_REPLAY_MAX_BYTES,
   normalizeCompactedReplayMaxBytes,
+  normalizeMaxJournalBytes,
+  normalizeMaxJournalEvents,
 } from './replayWindowLimits.js';
 
 interface SessionUpdateData {
@@ -119,21 +127,6 @@ export interface TurnBoundaryCompactionEngineOptions {
   maxJournalBytes?: number;
 }
 
-export const DEFAULT_MAX_JOURNAL_EVENTS = 2000;
-export const DEFAULT_MAX_JOURNAL_BYTES = 2 * 1024 * 1024;
-
-function normalizeJournalCap(
-  value: number | undefined,
-  fallback: number,
-  name: string,
-): number {
-  if (value === undefined) return fallback;
-  if (!Number.isSafeInteger(value) || value < 1) {
-    throw new TypeError(`${name} must be a positive safe integer`);
-  }
-  return value;
-}
-
 /**
  * Compaction engine that merges events at turn boundaries.
  *
@@ -177,16 +170,8 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
 
   constructor(opts: TurnBoundaryCompactionEngineOptions = {}) {
     this.maxReplayBytes = normalizeCompactedReplayMaxBytes(opts.maxReplayBytes);
-    this.maxJournalEvents = normalizeJournalCap(
-      opts.maxJournalEvents,
-      DEFAULT_MAX_JOURNAL_EVENTS,
-      'maxJournalEvents',
-    );
-    this.maxJournalBytes = normalizeJournalCap(
-      opts.maxJournalBytes,
-      DEFAULT_MAX_JOURNAL_BYTES,
-      'maxJournalBytes',
-    );
+    this.maxJournalEvents = normalizeMaxJournalEvents(opts.maxJournalEvents);
+    this.maxJournalBytes = normalizeMaxJournalBytes(opts.maxJournalBytes);
     this.onReplayWindowEviction = opts.onReplayWindowEviction;
   }
 

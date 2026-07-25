@@ -911,6 +911,8 @@ export function createServeApp(
       maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
       eventRingSize: opts.eventRingSize,
       compactedReplayMaxBytes: opts.compactedReplayMaxBytes,
+      maxJournalEvents: opts.maxJournalEvents,
+      maxJournalBytes: opts.maxJournalBytes,
       initializeTimeoutMs: opts.initializeTimeoutMs,
       permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs,
       boundWorkspace,

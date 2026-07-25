@@ -22,7 +22,11 @@ import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
+  DEFAULT_MAX_JOURNAL_BYTES,
+  DEFAULT_MAX_JOURNAL_EVENTS,
   normalizeCompactedReplayMaxBytes,
+  normalizeMaxJournalBytes,
+  normalizeMaxJournalEvents,
 } from '@qwen-code/acp-bridge/replayWindowLimits';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import type { NdJsonMessageObservation } from '@qwen-code/acp-bridge/ndJsonStream';
@@ -1534,6 +1538,8 @@ function createBootstrapServeApp(input: {
         eventRingSize: opts.eventRingSize ?? DEFAULT_EVENT_RING_SIZE,
         compactedReplayMaxBytes:
           opts.compactedReplayMaxBytes ?? DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
+        maxJournalEvents: opts.maxJournalEvents ?? DEFAULT_MAX_JOURNAL_EVENTS,
+        maxJournalBytes: opts.maxJournalBytes ?? DEFAULT_MAX_JOURNAL_BYTES,
         promptDeadlineMs: positiveFiniteOrNull(opts.promptDeadlineMs),
         writerIdleTimeoutMs: positiveFiniteOrNull(opts.writerIdleTimeoutMs),
         channelIdleTimeoutMs: channelIdleTimeoutMs(opts.channelIdleTimeoutMs),
@@ -2529,6 +2535,12 @@ async function runQwenServeImpl(
   }
   if (opts.compactedReplayMaxBytes !== undefined) {
     normalizeCompactedReplayMaxBytes(opts.compactedReplayMaxBytes);
+  }
+  if (opts.maxJournalEvents !== undefined) {
+    normalizeMaxJournalEvents(opts.maxJournalEvents);
+  }
+  if (opts.maxJournalBytes !== undefined) {
+    normalizeMaxJournalBytes(opts.maxJournalBytes);
   }
   if (opts.writerIdleTimeoutMs !== undefined) {
     if (!isPositiveIntegerMs(opts.writerIdleTimeoutMs)) {
@@ -3614,6 +3626,12 @@ async function runQwenServeImpl(
         ...(opts.compactedReplayMaxBytes !== undefined
           ? { compactedReplayMaxBytes: opts.compactedReplayMaxBytes }
           : {}),
+        ...(opts.maxJournalEvents !== undefined
+          ? { maxJournalEvents: opts.maxJournalEvents }
+          : {}),
+        ...(opts.maxJournalBytes !== undefined
+          ? { maxJournalBytes: opts.maxJournalBytes }
+          : {}),
         ...(opts.channelIdleTimeoutMs !== undefined
           ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
           : {}),
@@ -3985,6 +4003,12 @@ async function runQwenServeImpl(
           : {}),
         ...(opts.compactedReplayMaxBytes !== undefined
           ? { compactedReplayMaxBytes: opts.compactedReplayMaxBytes }
+          : {}),
+        ...(opts.maxJournalEvents !== undefined
+          ? { maxJournalEvents: opts.maxJournalEvents }
+          : {}),
+        ...(opts.maxJournalBytes !== undefined
+          ? { maxJournalBytes: opts.maxJournalBytes }
           : {}),
         ...(opts.channelIdleTimeoutMs !== undefined
           ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
@@ -4475,6 +4499,12 @@ async function runQwenServeImpl(
             : {}),
           ...(opts.compactedReplayMaxBytes !== undefined
             ? { compactedReplayMaxBytes: opts.compactedReplayMaxBytes }
+            : {}),
+          ...(opts.maxJournalEvents !== undefined
+            ? { maxJournalEvents: opts.maxJournalEvents }
+            : {}),
+          ...(opts.maxJournalBytes !== undefined
+            ? { maxJournalBytes: opts.maxJournalBytes }
             : {}),
           ...(opts.channelIdleTimeoutMs !== undefined
             ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }

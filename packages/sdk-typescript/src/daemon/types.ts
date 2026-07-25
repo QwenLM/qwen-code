@@ -556,6 +556,8 @@ export interface DaemonStatusReport {
     sessionIdleTimeoutMs: number;
     acpConnectionCap: number | null;
     compactedReplayMaxBytes: number;
+    maxJournalEvents: number;
+    maxJournalBytes: number;
   };
   capabilities: {
     protocolVersions: DaemonProtocolVersions;
