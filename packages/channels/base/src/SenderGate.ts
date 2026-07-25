@@ -21,6 +21,10 @@ export class SenderGate {
     this.pairingStore = pairingStore || null;
   }
 
+  replaceAllowedUsers(users: string[]): void {
+    this.allowedUsers = new Set(users);
+  }
+
   isAllowed(senderId: string): boolean {
     switch (this.policy) {
       case 'open':

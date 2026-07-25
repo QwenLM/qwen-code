@@ -32,6 +32,10 @@ import type {
   BridgeSessionSummary,
 } from '@qwen-code/acp-bridge';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  sendGenerationClosedError,
+  sendUntrustedWorkspaceResponse,
+} from '../workspace-route-runtime.js';
 
 /**
  * The slice of the session bridge this route needs. Narrowed to a structural
@@ -45,6 +49,8 @@ export interface GoalsSessionBridge {
 export interface RegisterGoalsRoutesDeps {
   boundWorkspace: string;
   bridge: GoalsSessionBridge;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
 }
 
 /**
@@ -108,7 +114,13 @@ export function registerGoalsRoutes(
   const { boundWorkspace, bridge } = deps;
 
   app.get('/goals', async (_req, res) => {
+    if (deps.isWorkspaceTrusted?.() === false) {
+      sendUntrustedWorkspaceResponse(res);
+      return;
+    }
+    const assertGenerationOpen = deps.captureGenerationAssertion?.();
     try {
+      assertGenerationOpen?.();
       const sessions = bridge.listWorkspaceSessions(boundWorkspace);
       const settled = await allSettledWithLimit(
         sessions,
@@ -161,8 +173,10 @@ export function registerGoalsRoutes(
       // `droppedCount` lets the client tell "no goals" apart from "we could not
       // ask". Without it a brownout looks like an empty workspace, and the user
       // re-creates goals that are already running.
+      assertGenerationOpen?.();
       res.status(200).json({ v: 1, goals, droppedCount: dropped.length });
     } catch (err) {
+      if (sendGenerationClosedError(res, err)) return;
       writeStderrLine(
         `qwen serve: GET /goals failed: ${err instanceof Error ? err.message : String(err)}`,
       );

@@ -148,6 +148,23 @@ pullRequests: DaemonGitHubPullRequest[] }`(`pullRequests` 恒在,不可用时为
 | `packages/web-shell/client/components/dialogs/GitDialog.tsx`                    | 第三 tab    |
 | `packages/web-shell/client/App.tsx` / `constants/localCommands.ts` / `i18n.tsx` | 入口 + 文案 |
 
+## 性能优化:daemon 侧 TTL 缓存
+
+`gh pr list --json …,statusCheckRollup` 是慢点——为 30 个 PR 各拉 CI rollup
+要多秒级 GitHub 往返(实测本仓库冷启动 ~8s,CPU 时间仅 ~0.07s,纯网络
+I/O)。面板是"瞟一眼"性质,数据 stale 一分钟完全可接受,故在 daemon 路由
+加闭包级、按 workspaceCwd 分键的短 TTL 缓存(默认 60s,`cacheTtlMs` 可注入,
+对齐 `usage-stats.ts` 的既有约定):
+
+- **单飞合并**:进行中的 load 无论新旧都复用,并发打开共享一次 `gh` 拉起
+  (即使它超过 TTL);TTL 窗口从 load 落定后开始计。
+- **仅缓存 `ok`**:`cli_unavailable`/`failed`/`not_a_repo` 落定即清条目,
+  下次打开重试(用户可能刚装好/登录 gh,或工作区刚变成仓库)。
+- 实测:冷启动 8.0s → 缓存命中 ~2ms(约 2500 倍)。
+
+首次打开仍慢(~8s)是 `gh` 本身的延迟;如需改善首屏,后续可做两阶段加载
+(先不带 `statusCheckRollup` 快速渲染列表,再异步补 CI 图标),不在本次范围。
+
 ## 开放问题
 
 - 无。`gh` 缺失/未登录、非 git 仓库、旧 daemon 三条降级路径均有明确

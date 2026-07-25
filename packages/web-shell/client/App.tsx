@@ -1494,20 +1494,41 @@ export function App({
     }
     let cancelled = false;
     const fetchStatus = () => {
-      void workspace.client
-        .workspaceByCwd(activeWorkspaceCwd)
-        .workspaceGit(sessionWorktree?.path)
-        .then((git) => {
-          if (!cancelled) setSelectedWorkspaceGitStatus(git);
+      const git = workspace.client.workspaceByCwd(activeWorkspaceCwd);
+      // Fast path: last-known cache (branch-only on a cold start) paints the
+      // chip immediately.
+      void git
+        .workspaceGit({ cwd: sessionWorktree?.path })
+        .then((status) => {
+          if (!cancelled) setSelectedWorkspaceGitStatus(status);
         })
         .catch(() => {
           if (!cancelled) setSelectedWorkspaceGitStatus(undefined);
         });
+      // Fresh path: resolves when the daemon's recomputation lands, so the
+      // enriched counters fill in without depending on SSE — the
+      // `git_status_changed` push only flows on a per-session event stream,
+      // which doesn't exist before the first prompt (deferred connect).
+      // Daemon-side in-flight dedup shares one `git status` computation
+      // across both requests. Worktree `?cwd=` reads always compute
+      // directly, so a second request would be a duplicate there.
+      if (!sessionWorktree) {
+        void git
+          .workspaceGit({ wait: true })
+          .then((status) => {
+            if (!cancelled) setSelectedWorkspaceGitStatus(status);
+          })
+          .catch((err) => {
+            console.warn('[web-shell] git status fresh path failed:', err);
+          });
+      }
     };
     fetchStatus();
-    // The enriched working-tree summary isn't pushed over SSE, so refresh it on
-    // focus and on a slow poll for the active workspace only. A live branch
-    // change re-runs this effect via the connection.gitBranch dependency.
+    // Refresh triggers stay on focus and on a slow poll for the active
+    // workspace only. A live branch change re-runs this effect via the
+    // connection.gitBranch dependency. With an active session the daemon's
+    // `git_status_changed` push (mirrored by the effect below) additionally
+    // covers realtime updates between polls.
     const onFocus = () => fetchStatus();
     window.addEventListener('focus', onFocus);
     const poll = window.setInterval(() => {
@@ -1524,6 +1545,17 @@ export function App({
     workspace.client,
     sessionWorktree,
   ]);
+  // Mirror the daemon's `git_status_changed` push (surfaced as
+  // connection.gitStatus by the session provider) into the chip state so the
+  // enriched counters fill in right after the branch-only first paint.
+  // Worktree sessions bypass the daemon cache/SSE path — their status comes
+  // from the ?cwd= fetch above.
+  useEffect(() => {
+    const status = connection.gitStatus;
+    if (!status || sessionWorktree) return;
+    if (status.workspaceCwd !== activeWorkspaceCwd) return;
+    setSelectedWorkspaceGitStatus(status);
+  }, [connection.gitStatus, activeWorkspaceCwd, sessionWorktree]);
   const onToastRef = useRef(onToast);
   onToastRef.current = onToast;
   const toastIdRef = useRef(0);
@@ -2478,7 +2510,7 @@ export function App({
   // it — the composer git chip / `/diff` (current workspace) or a sidebar
   // folder's git chip (that workspace) — so each can target its own repo.
   const [gitDialog, setGitDialog] = useState<
-    { workspaceCwd: string; view: GitDialogView } | undefined
+    { workspaceCwd: string; gitCwd?: string; view: GitDialogView } | undefined
   >(undefined);
   // Main content view. The scheduled-tasks page replaces the chat pane inline
   // (not a modal overlay), mirroring the reference design; creating or opening
@@ -5032,7 +5064,11 @@ export function App({
               pushToast('info', t('localCommand.diffNoWorkspace'));
               return true;
             }
-            setGitDialog({ workspaceCwd: gitDiffWorkspaceCwd, view: 'diff' });
+            setGitDialog({
+              workspaceCwd: gitDiffWorkspaceCwd,
+              gitCwd: sessionWorktree?.path,
+              view: 'diff',
+            });
             return true;
           }
           if (cmd === 'log') {
@@ -5040,7 +5076,11 @@ export function App({
               pushToast('info', t('localCommand.logNoWorkspace'));
               return true;
             }
-            setGitDialog({ workspaceCwd: gitDiffWorkspaceCwd, view: 'log' });
+            setGitDialog({
+              workspaceCwd: gitDiffWorkspaceCwd,
+              gitCwd: sessionWorktree?.path,
+              view: 'log',
+            });
             return true;
           }
           if (cmd === 'prs') {
@@ -5854,6 +5894,7 @@ export function App({
       openGoals,
       createNewSession,
       gitDiffWorkspaceCwd,
+      sessionWorktree,
       gitHubPrsSupported,
       handleBusyGoalClear,
       handleGoalSlashCommand,
@@ -6706,8 +6747,9 @@ export function App({
           )}
           {gitDialog && (
             <GitDialog
-              key={`${gitDialog.workspaceCwd}:${gitDialog.view}`}
+              key={`${gitDialog.workspaceCwd}:${gitDialog.gitCwd ?? ''}:${gitDialog.view}`}
               workspaceCwd={gitDialog.workspaceCwd}
+              gitCwd={gitDialog.gitCwd}
               initialView={gitDialog.view}
               onClose={() => setGitDialog(undefined)}
             />
@@ -7889,10 +7931,11 @@ export function App({
                           onGitModeIntentChange={gitModeEligible ? setGitModeIntent : undefined}
                           gitStatus={selectedWorkspaceGitStatus}
                           onOpenGitDiff={
-                            gitDiffWorkspaceCwd && !sessionWorktree
+                            gitDiffWorkspaceCwd
                               ? () =>
                                   setGitDialog({
                                     workspaceCwd: gitDiffWorkspaceCwd,
+                                    gitCwd: sessionWorktree?.path,
                                     view: 'diff',
                                   })
                               : undefined

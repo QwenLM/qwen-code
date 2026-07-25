@@ -187,6 +187,8 @@ import type {
   DaemonWorkspaceTrustChangeRequest,
   DaemonWorkspaceTrustChangeResult,
   DaemonWorkspaceTrustStatus,
+  DaemonWorkspaceTrustStatusResponse,
+  DaemonWorkspaceTrustStatusV2,
   DaemonUnarchiveSessionsResult,
 } from './types.js';
 import { parseSseStream } from './sse.js';
@@ -1100,9 +1102,11 @@ export class DaemonClient {
     );
   }
 
-  async workspaceGit(): Promise<DaemonWorkspaceGitStatus> {
+  async workspaceGit(opts?: {
+    wait?: boolean;
+  }): Promise<DaemonWorkspaceGitStatus> {
     return await this.jsonRequest<DaemonWorkspaceGitStatus>(
-      '/workspace/git',
+      `/workspace/git${opts?.wait ? '?wait=1' : ''}`,
       'GET /workspace/git',
       { mode: 'rest' },
     );
@@ -3143,9 +3147,19 @@ export class DaemonClient {
 
   async workspaceTrust(opts?: {
     clientId?: string;
-  }): Promise<DaemonWorkspaceTrustStatus> {
+    statusVersion?: 1;
+  }): Promise<DaemonWorkspaceTrustStatus>;
+  async workspaceTrust(opts: {
+    clientId?: string;
+    statusVersion: 2;
+  }): Promise<DaemonWorkspaceTrustStatus | DaemonWorkspaceTrustStatusV2>;
+  async workspaceTrust(opts?: {
+    clientId?: string;
+    statusVersion?: 1 | 2;
+  }): Promise<DaemonWorkspaceTrustStatusResponse> {
+    const query = opts?.statusVersion === 2 ? '?statusVersion=2' : '';
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/trust`,
+      `${this.baseUrl}/workspace/trust${query}`,
       {
         method: 'GET',
         headers: this.headers({}, opts?.clientId),
@@ -3154,7 +3168,7 @@ export class DaemonClient {
         if (!res.ok) {
           throw await this.failOnError(res, 'GET /workspace/trust');
         }
-        return (await res.json()) as DaemonWorkspaceTrustStatus;
+        return (await res.json()) as DaemonWorkspaceTrustStatusResponse;
       },
     );
   }
@@ -4727,8 +4741,15 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  workspaceGit(cwd?: string): Promise<DaemonWorkspaceGitStatus> {
-    const suffix = cwd ? `/git?cwd=${encodeURIComponent(cwd)}` : '/git';
+  workspaceGit(opts?: {
+    cwd?: string;
+    wait?: boolean;
+  }): Promise<DaemonWorkspaceGitStatus> {
+    const params = new URLSearchParams();
+    if (opts?.cwd) params.set('cwd', opts.cwd);
+    if (opts?.wait) params.set('wait', '1');
+    const query = params.toString();
+    const suffix = query ? `/git?${query}` : '/git';
     return this.client.workspaceJsonRequest<DaemonWorkspaceGitStatus>(
       this.workspaceSelector,
       suffix,
@@ -4737,10 +4758,12 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  workspaceGitDiff(): Promise<DaemonWorkspaceGitDiff> {
+  workspaceGitDiff(cwd?: string): Promise<DaemonWorkspaceGitDiff> {
+    const suffix =
+      cwd != null ? `/git/diff?cwd=${urlEncode(cwd)}` : '/git/diff';
     return this.client.workspaceJsonRequest<DaemonWorkspaceGitDiff>(
       this.workspaceSelector,
-      '/git/diff',
+      suffix,
       'GET /workspaces/:workspace/git/diff',
       { mode: 'rest' },
     );
@@ -4749,10 +4772,12 @@ export class WorkspaceDaemonClient {
   workspaceGitDiffFile(
     path: string,
     oldPath?: string,
+    cwd?: string,
   ): Promise<DaemonWorkspaceGitDiffHunks> {
     const query =
       `/git/diff/file?path=${urlEncode(path)}` +
-      (oldPath != null ? `&oldPath=${urlEncode(oldPath)}` : '');
+      (oldPath != null ? `&oldPath=${urlEncode(oldPath)}` : '') +
+      (cwd != null ? `&cwd=${urlEncode(cwd)}` : '');
     return this.client.workspaceJsonRequest<DaemonWorkspaceGitDiffHunks>(
       this.workspaceSelector,
       query,
@@ -4761,10 +4786,15 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  workspaceGitLog(limit?: number, skip?: number): Promise<DaemonGitLog> {
+  workspaceGitLog(
+    limit?: number,
+    skip?: number,
+    cwd?: string,
+  ): Promise<DaemonGitLog> {
     const params = new URLSearchParams();
     if (limit != null) params.set('limit', String(limit));
     if (skip != null) params.set('skip', String(skip));
+    if (cwd != null) params.set('cwd', cwd);
     const qs = params.toString();
     return this.client.workspaceJsonRequest<DaemonGitLog>(
       this.workspaceSelector,
@@ -4774,10 +4804,16 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  workspaceGitCommitDetail(sha: string): Promise<DaemonGitCommitDetail> {
+  workspaceGitCommitDetail(
+    sha: string,
+    cwd?: string,
+  ): Promise<DaemonGitCommitDetail> {
+    const query =
+      `/git/log/commit?sha=${urlEncode(sha)}` +
+      (cwd != null ? `&cwd=${urlEncode(cwd)}` : '');
     return this.client.workspaceJsonRequest<DaemonGitCommitDetail>(
       this.workspaceSelector,
-      `/git/log/commit?sha=${urlEncode(sha)}`,
+      query,
       'GET /workspaces/:workspace/git/log/commit',
       { mode: 'rest' },
     );
@@ -5235,9 +5271,18 @@ export class WorkspaceDaemonClient {
 
   workspaceTrust(opts?: {
     clientId?: string;
-  }): Promise<DaemonWorkspaceTrustStatus> {
-    return this.get(
-      '/trust',
+    statusVersion?: 1;
+  }): Promise<DaemonWorkspaceTrustStatus>;
+  workspaceTrust(opts: {
+    clientId?: string;
+    statusVersion: 2;
+  }): Promise<DaemonWorkspaceTrustStatus | DaemonWorkspaceTrustStatusV2>;
+  workspaceTrust(opts?: {
+    clientId?: string;
+    statusVersion?: 1 | 2;
+  }): Promise<DaemonWorkspaceTrustStatusResponse> {
+    return this.get<DaemonWorkspaceTrustStatusResponse>(
+      opts?.statusVersion === 2 ? '/trust?statusVersion=2' : '/trust',
       'GET /workspaces/:workspace/trust',
       opts?.clientId,
     );

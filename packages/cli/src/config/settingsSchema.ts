@@ -1557,6 +1557,30 @@ const SETTINGS_SCHEMA = {
             parentKey: 'generationConfig',
             showInDialog: false,
           },
+          retryInitialDelayMs: {
+            type: 'number',
+            label: 'Retry Initial Delay',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: undefined as number | undefined,
+            description:
+              'Initial delay in milliseconds for stream rate-limit retries.',
+            minimum: 1,
+            parentKey: 'generationConfig',
+            showInDialog: false,
+          },
+          retryMaxDelayMs: {
+            type: 'number',
+            label: 'Retry Max Delay',
+            category: 'Generation Configuration',
+            requiresRestart: false,
+            default: undefined as number | undefined,
+            description:
+              'Maximum delay in milliseconds for stream rate-limit retries.',
+            minimum: 1,
+            parentKey: 'generationConfig',
+            showInDialog: false,
+          },
           enableCacheControl: {
             type: 'boolean',
             label: 'Enable Cache Control',
@@ -3116,6 +3140,18 @@ const SETTINGS_SCHEMA = {
         default: [],
         description:
           'Hooks that execute after agent processing. Can post-process responses or log interactions.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
+      StopFailure: {
+        type: 'array',
+        label: 'After Agent Failure Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute when a turn ends due to an API error or loop detection, instead of the normal Stop hooks. Receives error type and details.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.CONCAT,
         items: HOOK_DEFINITION_ITEMS,

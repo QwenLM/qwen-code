@@ -50,6 +50,7 @@
     "@qwen-code/channel-dingtalk": "file:../channels/dingtalk",
     "@qwen-code/channel-wecom": "file:../channels/wecom",
     "@qwen-code/channel-qqbot": "file:../channels/qqbot",
+    "@qwen-code/channel-github": "file:../channels/github",
     "@qwen-code/channel-feishu": "file:../channels/feishu",
     "@qwen-code/channel-telegram": "file:../channels/telegram",
     "@qwen-code/channel-weixin": "file:../channels/weixin",

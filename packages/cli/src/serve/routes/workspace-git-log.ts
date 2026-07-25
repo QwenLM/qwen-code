@@ -20,6 +20,7 @@ import type {
 } from '../workspace-registry.js';
 import {
   requireTrustedWorkspaceRuntime,
+  resolveContainedCwd,
   resolveWorkspaceRuntimeFromParam,
 } from '../workspace-route-runtime.js';
 import { applyReadHeaders } from './workspace-file-read.js';
@@ -196,7 +197,7 @@ export function registerWorkspaceQualifiedGitLogRoutes(
     void handleLogList(
       req,
       res,
-      runtime.workspaceCwd,
+      resolveContainedCwd(req, runtime.workspaceCwd),
       deps.sendBridgeError,
       'GET /workspaces/:workspace/git/log',
     );
@@ -207,7 +208,7 @@ export function registerWorkspaceQualifiedGitLogRoutes(
     void handleCommitDetail(
       req,
       res,
-      runtime.workspaceCwd,
+      resolveContainedCwd(req, runtime.workspaceCwd),
       deps.sendBridgeError,
       'GET /workspaces/:workspace/git/log/commit',
     );

@@ -2294,6 +2294,11 @@ export class GeminiChat {
           : undefined;
         const maxRateLimitRetries =
           cgConfig?.maxRetries ?? RATE_LIMIT_RETRY_OPTIONS.maxRetries;
+        const retryInitialDelayMs =
+          cgConfig?.retryInitialDelayMs ??
+          RATE_LIMIT_RETRY_OPTIONS.initialDelayMs;
+        const retryMaxDelayMs =
+          cgConfig?.retryMaxDelayMs ?? RATE_LIMIT_RETRY_OPTIONS.maxDelayMs;
         const extraRetryErrorCodes = cgConfig?.retryErrorCodes;
 
         // Max output tokens escalation: when no user/env override is set and
@@ -2388,6 +2393,8 @@ export class GeminiChat {
                 rateLimitRetryCount++;
                 const delayMs = getRateLimitRetryDelayMs(rateLimitRetryCount, {
                   ...RATE_LIMIT_RETRY_OPTIONS,
+                  initialDelayMs: retryInitialDelayMs,
+                  maxDelayMs: retryMaxDelayMs,
                   error,
                 });
                 const message = parseAndFormatApiError(

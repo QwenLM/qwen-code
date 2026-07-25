@@ -22,6 +22,8 @@ export const MODEL_GENERATION_CONFIG_FIELDS = [
   'samplingParams',
   'timeout',
   'maxRetries',
+  'retryInitialDelayMs',
+  'retryMaxDelayMs',
   'retryErrorCodes',
   'enableCacheControl',
   'forceGlobalCacheScope',
