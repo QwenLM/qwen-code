@@ -114,6 +114,21 @@ describe('useDaemonChannels', () => {
     expect(result?.snapshot?.revision).toBe('1');
   });
 
+  it('reports errors when loading Channel data fails', async () => {
+    actions.loadChannels.mockRejectedValue(new Error('network down'));
+    let result: ReturnType<typeof useDaemonChannels> | undefined;
+
+    function TestComponent() {
+      result = useDaemonChannels({ autoLoad: true });
+      return null;
+    }
+
+    await act(async () => root.render((<TestComponent />) as ReactNode));
+
+    expect(result?.error?.message).toBe('network down');
+    expect(result?.loading).toBe(false);
+  });
+
   it('stays idle with safe defaults until explicitly loaded', async () => {
     let result: ReturnType<typeof useDaemonChannels> | undefined;
 
@@ -175,6 +190,27 @@ describe('useDaemonChannels', () => {
     expect(actions.stopChannel).toHaveBeenCalledOnce();
     expect(actions.restartChannel).toHaveBeenCalledOnce();
     expect(actions.loadChannels).toHaveBeenCalledTimes(7);
+  });
+
+  it('propagates mutation errors without reloading', async () => {
+    actions.loadChannels.mockResolvedValue(channelData('bot'));
+    actions.upsertChannel.mockRejectedValue(new Error('conflict'));
+    let result: ReturnType<typeof useDaemonChannels> | undefined;
+
+    function TestComponent() {
+      result = useDaemonChannels({ autoLoad: true });
+      return null;
+    }
+
+    await act(async () => root.render((<TestComponent />) as ReactNode));
+
+    await expect(
+      result?.createOrUpdate('bot', {
+        expectedRevision: '1',
+        config: { type: 'dingtalk' },
+      }),
+    ).rejects.toThrow('conflict');
+    expect(actions.loadChannels).toHaveBeenCalledOnce();
   });
 
   it('does not expose stale Channel data while the workspace changes', async () => {
