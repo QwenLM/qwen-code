@@ -9,6 +9,14 @@ import { EnvHttpProxyAgent } from 'undici';
 
 const runMcp = vi.hoisted(() => vi.fn());
 const setGlobalDispatcher = vi.hoisted(() => vi.fn());
+const proxyEnvironmentNames = [
+  'http_proxy',
+  'HTTP_PROXY',
+  'https_proxy',
+  'HTTPS_PROXY',
+  'no_proxy',
+  'NO_PROXY',
+] as const;
 
 vi.mock('./mcp.js', () => ({ runMcp }));
 vi.mock('undici', async (importOriginal) => ({
@@ -23,10 +31,14 @@ beforeEach(() => {
   runMcp.mockReset();
   setGlobalDispatcher.mockReset();
   previousExitCode = process.exitCode;
+  for (const name of proxyEnvironmentNames) {
+    vi.stubEnv(name, undefined);
+  }
 });
 
 afterEach(() => {
   process.exitCode = previousExitCode;
+  vi.unstubAllEnvs();
   vi.restoreAllMocks();
 });
 
@@ -40,6 +52,19 @@ describe('external context startup', () => {
       expect.any(EnvHttpProxyAgent),
     );
     expect(runMcp).toHaveBeenCalledOnce();
+  });
+
+  it('prints a sanitized error for invalid proxy configuration', async () => {
+    process.env['HTTP_PROXY'] = 'not a URL';
+    const write = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    await import('./main.js');
+
+    expect(write).toHaveBeenCalledWith(
+      '[external-context] Proxy environment configuration is invalid. Check HTTP_PROXY, HTTPS_PROXY, and NO_PROXY.\n',
+    );
+    expect(runMcp).not.toHaveBeenCalled();
+    expect(process.exitCode).toBe(1);
   });
 
   it('prints sanitized configuration errors', async () => {

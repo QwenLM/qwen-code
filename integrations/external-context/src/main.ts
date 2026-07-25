@@ -9,7 +9,13 @@ import { ConfigurationError } from './config.js';
 import { runMcp } from './mcp.js';
 
 try {
-  setGlobalDispatcher(new EnvHttpProxyAgent());
+  try {
+    setGlobalDispatcher(new EnvHttpProxyAgent());
+  } catch {
+    throw new ConfigurationError(
+      'Proxy environment configuration is invalid. Check HTTP_PROXY, HTTPS_PROXY, and NO_PROXY.',
+    );
+  }
   await runMcp();
 } catch (error) {
   const message =
