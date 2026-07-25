@@ -13,6 +13,7 @@ import { SettingScope } from '../../config/settings.js';
 import { getScopeMessageForSetting } from '../../utils/dialogScopeUtils.js';
 import { ScopeSelector } from './shared/ScopeSelector.js';
 import { t } from '../../i18n/index.js';
+import { ICON } from '../constants.js';
 import {
   getDialogSettingKeys,
   setPendingSettingValue,
@@ -1323,7 +1324,7 @@ export function SettingsDialog({
                       isActive ? theme.status.success : theme.text.secondary
                     }
                   >
-                    {isActive ? '●' : ''}
+                    {isActive ? ICON.CIRCLE_FILLED : ''}
                   </Text>
                 </Box>
                 <Box flexGrow={1} flexShrink={1}>

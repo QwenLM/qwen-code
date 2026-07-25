@@ -127,6 +127,8 @@ import {
   SessionWriterError,
   startToolSpan,
   endToolSpan,
+  addToolArgumentsAttributes,
+  addToolCallResultAttributes,
   runInToolSpanContext,
   startToolExecutionSpan,
   endToolExecutionSpan,
@@ -141,6 +143,7 @@ import {
   clearGoalTerminalObserver,
   setGoalTerminalObserver,
   sessionIdContext,
+  promptIdContext,
   dedupeToolCallsById,
   getProviderToolCallId,
   parsePositiveIntegerEnv,
@@ -166,6 +169,7 @@ import {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
+import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
 import { normalizeChannelDeliveryText } from '../../serve/channel-delivery.js';
 import { readVoiceModel } from '../../services/voice-settings.js';
@@ -2423,6 +2427,16 @@ export class Session implements SessionContext {
         this.turn += 1;
 
         const promptId = this.config.getSessionId() + '########' + this.turn;
+        // Bind the prompt ID for the remainder of this turn, mirroring the
+        // sessionIdContext.run wrapper in #executePrompt. Shell subprocesses
+        // read it via getShellContextEnvVars (QWEN_CODE_PROMPT_ID) — without
+        // it, `qwen review fetch-pr` cannot record its worktree lease and an
+        // interrupted /review leaves the review worktree behind. TUI and
+        // headless enter this context at their prompt entry points
+        // (useGeminiStream.ts / nonInteractiveCli.ts); ACP had no equivalent.
+        // enterWith (not run) so the 500-line turn body below stays unnested;
+        // the binding dies with this async scope.
+        promptIdContext.enterWith(promptId);
         const parentContext = extractDaemonTraceContext(params);
 
         return await withInteractionSpan(
@@ -3007,6 +3021,19 @@ export class Session implements SessionContext {
                   turnCount,
                 ),
               );
+              // Remove review worktrees leased during this prompt and not
+              // released by the skill's own cleanup step — a cancelled or
+              // errored /review otherwise leaves `.qwen/tmp/review-pr-<n>`
+              // and its branch behind. Unconditional like the headless
+              // finally (nonInteractiveCli.ts): the ACP turn loop runs
+              // whole turns, so unlike the TUI's per-continuation
+              // submitQuery this can never fire mid-review. No-op when the
+              // lease was already cleared by `qwen review cleanup`.
+              cleanupReviewWorktreeLeases({
+                sessionId: this.config.getSessionId(),
+                promptId,
+                repositoryRoot: this.config.getProjectRoot(),
+              });
             }
           },
           (result: { stopReason: PromptResponse['stopReason'] }) =>
@@ -6589,15 +6616,19 @@ export class Session implements SessionContext {
         ? structuredClone(args)
         : args;
 
-    const toolSpan = startToolSpan(policyToolName, {
-      'tool.call_id': callId,
-      'gen_ai.tool.call.id': getProviderToolCallId(fc) ?? callId,
-      // Dual-emit the legacy call_id/tool_name aliases like CoreToolScheduler
-      // (coreToolScheduler.ts) so pre-Phase-2 dashboards keyed off call_id keep
-      // matching daemon/ACP tool spans during the migration window.
-      call_id: callId,
-      tool_name: policyToolName,
-    });
+    const toolSpan = startToolSpan(
+      policyToolName,
+      {
+        'tool.call_id': callId,
+        'gen_ai.tool.call.id': getProviderToolCallId(fc) ?? callId,
+        // Dual-emit the legacy call_id/tool_name aliases like CoreToolScheduler
+        // (coreToolScheduler.ts) so pre-Phase-2 dashboards keyed off call_id keep
+        // matching daemon/ACP tool spans during the migration window.
+        call_id: callId,
+        tool_name: policyToolName,
+      },
+      tool.description,
+    );
     let spanSuccess = false;
 
     try {
@@ -7418,6 +7449,17 @@ export class Session implements SessionContext {
               `Qwen Code is executing tool ${toolName}`,
             );
             try {
+              try {
+                addToolArgumentsAttributes(
+                  this.config,
+                  toolSpan,
+                  invocation.params,
+                );
+              } catch {
+                debugLogger.debug(
+                  '[Session.runTool] Failed to record tool arguments telemetry',
+                );
+              }
               toolResult = await invocation.execute(
                 activeToolAbortSignal,
                 onToolProgress,
@@ -7654,6 +7696,20 @@ export class Session implements SessionContext {
           });
 
           spanSuccess = succeeded;
+          if (succeeded && !nestedPermissionCancelled) {
+            const result = responseParts.find(
+              (part) => part.functionResponse !== undefined,
+            )?.functionResponse?.response;
+            if (result !== undefined) {
+              try {
+                addToolCallResultAttributes(this.config, toolSpan, result);
+              } catch {
+                debugLogger.debug(
+                  '[Session.runTool] Failed to record tool result telemetry',
+                );
+              }
+            }
+          }
           if (toolResult.error) {
             spanError = toolResult.error.message;
           } else if (aborted) {

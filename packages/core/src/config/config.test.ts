@@ -2889,6 +2889,137 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).not.toContain(ToolNames.RECORD_ARTIFACT);
     });
 
+    it('registers image_gen when an image-only model route is selected', async () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+        imageModel: `openai:qwen-image-2.0\0${baseUrl}`,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.IMAGE_GEN);
+      expect(config.getImageGenerationConfig()).toEqual({
+        model: 'qwen-image-2.0',
+        baseUrl,
+        apiKeyEnv: 'TEST_IMAGE_GENERATION_KEY',
+      });
+    });
+
+    it('does not register image_gen without an image model selection', async () => {
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl: 'https://images.example.com/api/v1',
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.IMAGE_GEN);
+    });
+
+    it('does not use a protocol default as the image generation endpoint', () => {
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+        imageModel: 'openai:qwen-image-2.0',
+      });
+
+      expect(config.getImageGenerationConfig()).toBeUndefined();
+    });
+
+    it('registers image_gen immediately when the image model changes at runtime', async () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+      });
+      await config.initialize();
+      vi.mocked(ToolRegistry.prototype.registerFactory).mockClear();
+
+      await config.setImageModel(`openai:qwen-image-2.0\0${baseUrl}`);
+
+      expect(ToolRegistry.prototype.registerFactory).toHaveBeenCalledWith(
+        ToolNames.IMAGE_GEN,
+        expect.any(Function),
+      );
+      expect(ToolRegistry.prototype.ensureTool).toHaveBeenCalledWith(
+        ToolNames.IMAGE_GEN,
+      );
+    });
+
+    it('does not register image_gen when the permission manager disables it', async () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+      });
+      await config.initialize();
+      vi.mocked(ToolRegistry.prototype.registerFactory).mockClear();
+      (
+        config as unknown as {
+          permissionManager: { isToolEnabled: () => Promise<boolean> };
+        }
+      ).permissionManager = {
+        isToolEnabled: vi.fn().mockResolvedValue(false),
+      };
+
+      await config.setImageModel(`openai:qwen-image-2.0\0${baseUrl}`);
+
+      expect(ToolRegistry.prototype.registerFactory).not.toHaveBeenCalledWith(
+        ToolNames.IMAGE_GEN,
+        expect.any(Function),
+      );
+    });
+
     it('registers both artifact tools by default for interactive sessions', async () => {
       const config = new Config({
         ...baseParams,
@@ -4266,7 +4397,9 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     expect(config.getWarnings()).toContainEqual(
-      expect.stringContaining('Loaded QWEN.md/context instructions'),
+      expect.stringContaining(
+        'Loaded always-on context (QWEN.md context files + auto-memory)',
+      ),
     );
   });
 
@@ -4287,7 +4420,9 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     expect(config.getWarnings()).toContainEqual(
-      expect.stringContaining('Loaded QWEN.md/context instructions'),
+      expect.stringContaining(
+        'Loaded always-on context (QWEN.md context files + auto-memory)',
+      ),
     );
     expect(config.getWarnings()).toContainEqual(
       expect.stringContaining("model's 1,000 token context window"),
@@ -4305,7 +4440,9 @@ describe('Server Config (config.ts)', () => {
     });
 
     expect(config.getWarnings()).toContainEqual(
-      expect.stringContaining('Loaded QWEN.md/context instructions'),
+      expect.stringContaining(
+        'Loaded always-on context (QWEN.md context files + auto-memory)',
+      ),
     );
   });
 
@@ -4346,7 +4483,9 @@ describe('Server Config (config.ts)', () => {
       config
         .getWarnings()
         .some((warning) =>
-          warning.includes('Loaded QWEN.md/context instructions'),
+          warning.includes(
+            'Loaded always-on context (QWEN.md context files + auto-memory)',
+          ),
         ),
     ).toBe(false);
   });
@@ -6336,6 +6475,51 @@ describe('setApprovalMode with folder trust', () => {
       expect(config.getApprovalModeRevision()).toBe(initialRevision + 1);
       config.setApprovalMode(ApprovalMode.DEFAULT);
       expect(config.getApprovalModeRevision()).toBe(initialRevision + 2);
+    });
+
+    it('queues a one-shot manual plan-exit notice on a manual exit', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(true);
+      // One-shot: consumed on first read.
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
+    });
+
+    it('does not queue the exit notice for an approved plan exit', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT, {
+        fromApprovedPlanExit: true,
+      });
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
+    });
+
+    it('clears a stale exit notice when plan mode is re-entered', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      config.setApprovalMode(ApprovalMode.PLAN);
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
+    });
+
+    it('does not queue the exit notice for non-plan mode changes', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
     });
 
     it('records prePlanMode=yolo for a Shift+Tab cycle into plan mode', () => {

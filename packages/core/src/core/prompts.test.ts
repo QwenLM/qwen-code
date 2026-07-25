@@ -9,6 +9,7 @@ import {
   assembleSystemPrompt,
   getCoreSystemPrompt,
   getCustomSystemPrompt,
+  getManualPlanExitSystemReminder,
   getPlanModeSystemReminder,
   resolvePathFromEnv,
   getCompressionPrompt,
@@ -784,6 +785,27 @@ describe('getPlanModeSystemReminder', () => {
     const result2 = getPlanModeSystemReminder();
 
     expect(result1).toBe(result2);
+  });
+});
+
+describe('getManualPlanExitSystemReminder', () => {
+  it('should name the new mode and forbid exit_plan_mode', () => {
+    const result = getManualPlanExitSystemReminder('default');
+
+    expect(result).toMatch(/^<system-reminder>[\s\S]*<\/system-reminder>$/);
+    expect(result).toContain('manually switched out of plan mode');
+    expect(result).toContain('current approval mode: default');
+    expect(result).toContain('Do NOT call exit_plan_mode');
+    expect(result).toContain('no longer apply');
+  });
+
+  it('should render whichever mode the user switched to', () => {
+    expect(getManualPlanExitSystemReminder('yolo')).toContain(
+      'current approval mode: yolo',
+    );
+    expect(getManualPlanExitSystemReminder('auto-edit')).toContain(
+      'current approval mode: auto-edit',
+    );
   });
 });
 

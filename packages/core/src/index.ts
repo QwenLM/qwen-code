@@ -267,6 +267,7 @@ export * from './services/visionBridge/image-part-utils.js';
 export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
+export * from './services/session-reference-service.js';
 export * from './services/sessionService.js';
 export * from './services/session-writer-lease.js';
 export {
@@ -511,6 +512,7 @@ export * from './utils/gitDiff.js';
 export * from './utils/gitDirect.js';
 export * from './utils/gitIgnoreParser.js';
 export * from './utils/gitUtils.js';
+export * from './utils/github-prs.js';
 export * from './utils/ignorePatterns.js';
 export * from './utils/invocation-context.js';
 export {
