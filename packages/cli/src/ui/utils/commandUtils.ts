@@ -242,7 +242,9 @@ export function isMidInputCompletableCommand(cmd: SlashCommand): boolean {
  * Only triggers when the "/" is preceded by whitespace and the cursor is
  * right at or within the partial command (no text between cursor and slash).
  *
- * Returns null when input starts with "/" (handled by start-of-line completion).
+ * A buffer may start with a slash command and still contain a later mid-input
+ * slash token (for example, "/review /skill" or "/review\n/skill"). The
+ * whitespace-before-slash anchor below excludes only the slash at position 0.
  *
  * `cursorOffset` and all returned positions are code-point offsets, so non-BMP
  * characters before the token (e.g. "please 👍 /sto") don't skew the result.
@@ -251,9 +253,6 @@ export function findMidInputSlashCommand(
   input: string,
   cursorOffset: number,
 ): MidInputSlashCommand | null {
-  // Start-of-line slash handled by existing dropdown completion
-  if (input.startsWith('/')) return null;
-
   // Work in code points. The slash and command chars are always BMP, so once we
   // anchor on the slash, lengths map 1:1 to UTF-16 — only the prefix can drift.
   const codePoints = toCodePoints(input);

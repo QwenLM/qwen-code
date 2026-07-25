@@ -142,28 +142,24 @@ export function useCommandCompletion(
       }
     }
 
-    if (cursorRow === 0 && isSlashCommand(currentLine.trim())) {
-      return {
-        completionMode: CompletionMode.SLASH,
-        query: currentLine,
-        completionStart: 0,
-        completionEnd: currentLine.length,
-        isMidInputSlashCompletion: false,
-      };
-    }
-
     const cursorOffset = logicalPosToOffset(buffer.lines, cursorRow, cursorCol);
     const midCmd = findMidInputSlashCommand(buffer.text, cursorOffset);
-    if (
-      midCmd &&
-      !isExactMidInputModelInvocableCommand(
-        midCmd.partialCommand,
-        slashCommands,
-      )
-    ) {
+    if (midCmd) {
       const lineStartOffset = logicalPosToOffset(buffer.lines, cursorRow, 0);
       const startOnLine = midCmd.startPos - lineStartOffset;
-      if (startOnLine >= 0) {
+      const isInitialCommandOnFirstLine =
+        cursorRow === 0 &&
+        isSlashCommand(currentLine.trim()) &&
+        startOnLine >= 0 &&
+        codePoints.slice(0, startOnLine).join('').trim().length === 0;
+      if (
+        startOnLine >= 0 &&
+        !isInitialCommandOnFirstLine &&
+        !isExactMidInputModelInvocableCommand(
+          midCmd.partialCommand,
+          slashCommands,
+        )
+      ) {
         return {
           completionMode: CompletionMode.SLASH,
           query: midCmd.token,
@@ -172,6 +168,16 @@ export function useCommandCompletion(
           isMidInputSlashCompletion: true,
         };
       }
+    }
+
+    if (cursorRow === 0 && isSlashCommand(currentLine.trim())) {
+      return {
+        completionMode: CompletionMode.SLASH,
+        query: currentLine,
+        completionStart: 0,
+        completionEnd: currentLine.length,
+        isMidInputSlashCompletion: false,
+      };
     }
 
     return {

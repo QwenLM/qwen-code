@@ -640,8 +640,26 @@ describe('commandUtils', () => {
 });
 
 describe('findMidInputSlashCommand', () => {
-  it('returns null when input starts with / (handled by start-of-line completion)', () => {
+  it('returns null for a slash at position 0 (handled by start-of-line completion)', () => {
     expect(findMidInputSlashCommand('/review', 7)).toBeNull();
+  });
+
+  it('returns match for a later slash token when the buffer starts with /', () => {
+    const result = findMidInputSlashCommand('/review /sto', 12);
+    expect(result).toEqual({
+      token: '/sto',
+      startPos: 8,
+      partialCommand: 'sto',
+    });
+  });
+
+  it('returns match for a slash token after a newline when the buffer starts with /', () => {
+    const result = findMidInputSlashCommand('/review\n/sto', 12);
+    expect(result).toEqual({
+      token: '/sto',
+      startPos: 8,
+      partialCommand: 'sto',
+    });
   });
 
   it('returns null when cursor is before the slash token', () => {

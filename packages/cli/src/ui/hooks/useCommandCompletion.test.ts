@@ -549,6 +549,107 @@ describe('useCommandCompletion', () => {
       );
     });
 
+    it.each([
+      {
+        input: '/review /sto',
+        expected: '/review /front-end-store-rules ',
+      },
+      {
+        input: '/review\n/sto',
+        expected: '/review\n/front-end-store-rules ',
+      },
+    ])(
+      'should complete a repeated skill in $input',
+      async ({ input, expected }) => {
+        const firstSkill: SlashCommand = {
+          name: 'review',
+          description: 'Review changes',
+          kind: CommandKind.SKILL,
+          modelInvocable: true,
+        };
+        const secondSkill: SlashCommand = {
+          name: 'front-end-store-rules',
+          description: 'Store rules',
+          kind: CommandKind.SKILL,
+          modelInvocable: true,
+        };
+
+        setupMocks({
+          slashSuggestions: [
+            { label: 'front-end-store-rules', value: 'front-end-store-rules' },
+          ],
+          slashCompletionRange: { completionStart: 1, completionEnd: 4 },
+        });
+
+        const { result } = renderHook(() => {
+          const textBuffer = useTextBufferForTest(input);
+          const completion = useCommandCompletion(
+            textBuffer,
+            testRootDir,
+            [firstSkill, secondSkill],
+            mockCommandContext,
+            false,
+            mockConfig,
+          );
+          return { ...completion, textBuffer };
+        });
+
+        await waitFor(() => {
+          expect(result.current.showSuggestions).toBe(true);
+        });
+
+        expect(useSlashCompletion).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            enabled: true,
+            query: '/sto',
+            slashCommands: [firstSkill, secondSkill],
+          }),
+        );
+
+        act(() => {
+          result.current.handleAutocomplete(0);
+        });
+
+        expect(result.current.textBuffer.text).toBe(expected);
+      },
+    );
+
+    it('should keep an indented first command in line-start completion', async () => {
+      const skillCommand: SlashCommand = {
+        name: 'front-end-store-rules',
+        description: 'Store rules',
+        kind: CommandKind.SKILL,
+        modelInvocable: true,
+      };
+      const builtInCommand: SlashCommand = {
+        name: 'stats',
+        description: 'Show stats',
+        kind: CommandKind.BUILT_IN,
+        modelInvocable: false,
+      };
+
+      renderHook(() =>
+        useCommandCompletion(
+          useTextBufferForTest('  /sto'),
+          testRootDir,
+          [skillCommand, builtInCommand],
+          mockCommandContext,
+          false,
+          mockConfig,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(useSlashCompletion).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            enabled: true,
+            query: '  /sto',
+            slashCommands: [skillCommand, builtInCommand],
+          }),
+        );
+      });
+    });
+
     it('should complete a file path when @ appears after a slash command', async () => {
       setupMocks({
         atSuggestions: [{ label: 'src/index.ts', value: 'src/index.ts' }],
