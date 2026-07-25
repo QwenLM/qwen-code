@@ -71,7 +71,7 @@ jobs:
     # Canonical same-repo guard: this job loads CI_BOT_PAT, so fork-triggered
     # runs stay on hosted (ephemeral); only in-repo PR events on QwenLM/qwen-code
     # use the persistent ECS runner.
-    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       contents: 'read'
@@ -193,7 +193,7 @@ jobs:
     # PRs), go to ephemeral hosted runners so a steered agent cannot persist
     # anything across runs. Forks of this repo fall back to ubuntu-latest as
     # before.
-    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && (github.event_name == 'issues' || (github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository))) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''issues'' || (github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # startsWith (not contains) prevents false triggers from comments that
     # mention the phrase in quoted text or mid-sentence descriptions.
     # always() so the job still evaluates when the upstream `authorize` job is
@@ -281,7 +281,7 @@ jobs:
           echo "stale agent state cleaned"
 
       - name: 'Checkout repo'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           token: '${{ secrets.GITHUB_TOKEN }}'
 
@@ -339,9 +339,22 @@ jobs:
           OPENAI_MODEL: '${{ vars.QWEN_TRIAGE_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
         run: |-
           set -euo pipefail
-          if [ -n "${OPENAI_MODEL:-}" ]; then
-            sed -i "s/qwen3\.7-max/${OPENAI_MODEL}/g" .qwen/skills/triage/references/pr-workflow.md
+          if [ -z "${OPENAI_MODEL:-}" ]; then
+            exit 0
           fi
+          TARGET=.qwen/skills/triage/references/pr-workflow.md
+          # The default signature literal must still exist in the skill, or
+          # this injection silently no-ops and every staged comment ships the
+          # wrong model name. Fail loudly so a skill edit that renames the
+          # default surfaces here instead of in production comments.
+          if ! grep -q 'qwen3\.7-max' "$TARGET"; then
+            echo "::error::Signature literal 'qwen3.7-max' not found in $TARGET — update this step's sed target to match the skill."
+            exit 1
+          fi
+          # Escape sed replacement metacharacters (& / \) so a model name
+          # containing them cannot corrupt the skill text.
+          ESCAPED=$(printf '%s' "$OPENAI_MODEL" | sed -e 's/[&/\]/\\&/g')
+          sed -i "s/qwen3\.7-max/${ESCAPED}/g" "$TARGET"
 
       - name: 'Run Qwen Triage'
         id: 'triage'
@@ -626,8 +639,8 @@ jobs:
           set -uo pipefail
           MARKER='<!-- qwen-triage stage=status -->'
           if [ "${TRIAGE_OUTCOME:-}" = 'success' ]; then
-            EN="✅ **Qwen Triage finished** — [view run]($RUN_URL). See the stage comments above for the result."
-            ZH="✅ **Qwen Triage 已完成** —— [查看运行]($RUN_URL)。结果见上方各阶段评论。"
+            EN="✅ **Qwen Triage finished** — [view run]($RUN_URL). See the stage comments in this thread for the result."
+            ZH="✅ **Qwen Triage 已完成** —— [查看运行]($RUN_URL)。结果见本线程中的各阶段评论。"
           else
             EN="⚠️ **Qwen Triage ended early** — [view run]($RUN_URL). It stopped before finishing; check the run log."
             ZH="⚠️ **Qwen Triage 提前结束** —— [查看运行]($RUN_URL)。未跑完,请查看运行日志。"
@@ -803,7 +816,7 @@ jobs:
 
       - name: 'Checkout PR merge ref'
         if: "steps.pr.outputs.decision == 'run'"
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           # Untrusted PR code — keep the token out of .git/config.
           persist-credentials: false

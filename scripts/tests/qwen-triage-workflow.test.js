@@ -5,7 +5,15 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/qwen-triage.yml', 'utf8');
@@ -305,5 +313,51 @@ describe('qwen-triage tmux workflow', () => {
     expect(
       workflow.indexOf("- name: 'Install tmux runner tools'"),
     ).toBeLessThan(workflow.indexOf("- name: 'Checkout PR merge ref'"));
+  });
+
+  it('escapes injected model names and fails loudly when the signature literal is gone', () => {
+    const injectStep = step('Inject model name into triage signature');
+    const body = injectStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
+    expect(body).toBeTruthy();
+    const script = body.replace(/^ {10}/gm, '');
+
+    const run = (model, content) => {
+      const dir = mkdtempSync(join(tmpdir(), 'triage-inject-'));
+      try {
+        const target = join(dir, '.qwen/skills/triage/references');
+        mkdirSync(target, { recursive: true });
+        writeFileSync(join(target, 'pr-workflow.md'), content);
+        const proc = spawnSync('bash', ['-c', script], {
+          cwd: dir,
+          env: { ...process.env, OPENAI_MODEL: model },
+          encoding: 'utf8',
+        });
+        return {
+          status: proc.status,
+          out: readFileSync(join(target, 'pr-workflow.md'), 'utf8'),
+          log: `${proc.stdout}${proc.stderr}`,
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    // A model name carrying every sed replacement metacharacter (/ & \) must
+    // land verbatim — the old unescaped sed corrupted the skill text on these.
+    const meta = run('m1/pre&post\\x', 'sig: qwen3.7-max end');
+    expect(meta.status).toBe(0);
+    expect(meta.out).toBe('sig: m1/pre&post\\x end');
+
+    // The signature literal disappearing from the skill must fail the step —
+    // the old silent no-op shipped the wrong model name in every comment.
+    const missing = run('m2', 'sig: some-other-model end');
+    expect(missing.status).not.toBe(0);
+    expect(missing.log).toContain('Signature literal');
+    expect(missing.out).toBe('sig: some-other-model end');
+
+    // No model configured → file untouched, step succeeds.
+    const empty = run('', 'sig: qwen3.7-max end');
+    expect(empty.status).toBe(0);
+    expect(empty.out).toBe('sig: qwen3.7-max end');
   });
 });
