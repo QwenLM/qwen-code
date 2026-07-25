@@ -12,6 +12,7 @@ import {
   findLastUserItemIndex,
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
+  realUserPromptTexts,
 } from './historyUtils.js';
 
 const mk = (
@@ -63,6 +64,25 @@ describe('isSyntheticHistoryItem', () => {
         } as never),
       ),
     ).toBe(false);
+  });
+
+  it('treats regular user items as meaningful', () => {
+    expect(isSyntheticHistoryItem(mk({ type: 'user', text: 'hello' }))).toBe(
+      false,
+    );
+    expect(
+      isSyntheticHistoryItem(
+        mk({ type: 'user', text: 'hi', sentToModel: true }),
+      ),
+    ).toBe(false);
+  });
+
+  it('treats steer items (sentToModel === false) as synthetic', () => {
+    expect(
+      isSyntheticHistoryItem(
+        mk({ type: 'user', text: 'steer', sentToModel: false }),
+      ),
+    ).toBe(true);
   });
 });
 
@@ -120,6 +140,15 @@ describe('itemsAfterAreOnlySynthetic', () => {
       ),
     ];
     expect(itemsAfterAreOnlySynthetic(h, 0)).toBe(false);
+  });
+
+  it('treats a trailing steer (sentToModel false) as synthetic, enabling full rewind', () => {
+    const h: HistoryItem[] = [
+      mk({ type: 'user', text: 'real prompt' }, 1),
+      mk({ type: 'user', text: 'steer msg', sentToModel: false }, 2),
+      mk({ type: 'info', text: 'Request cancelled.' }, 3),
+    ];
+    expect(itemsAfterAreOnlySynthetic(h, 0)).toBe(true);
   });
 });
 
@@ -194,5 +223,41 @@ describe('findLastUserItemIndex', () => {
       mk({ type: 'info', text: 'Request cancelled.' }, 4),
     ];
     expect(findLastUserItemIndex(h)).toBe(2);
+  });
+
+  it('skips user items with sentToModel false', () => {
+    const h: HistoryItem[] = [
+      mk({ type: 'user', text: 'real' }, 1),
+      mk({ type: 'user', text: 'steer', sentToModel: false }, 2),
+    ];
+    expect(findLastUserItemIndex(h)).toBe(0);
+  });
+});
+
+describe('realUserPromptTexts', () => {
+  it('returns texts of real user prompts oldest-first', () => {
+    const h: HistoryItem[] = [
+      mk({ type: 'user', text: 'first' }, 1),
+      mk({ type: 'gemini_content', text: 'reply' }, 2),
+      mk({ type: 'user', text: 'second' }, 3),
+    ];
+    expect(realUserPromptTexts(h)).toEqual(['first', 'second']);
+  });
+
+  it('excludes steer messages with sentToModel false', () => {
+    const h: HistoryItem[] = [
+      mk({ type: 'user', text: 'real' }, 1),
+      mk({ type: 'user', text: 'steer', sentToModel: false }, 2),
+    ];
+    expect(realUserPromptTexts(h)).toEqual(['real']);
+  });
+
+  it('excludes empty and whitespace-only prompts', () => {
+    const h: HistoryItem[] = [
+      mk({ type: 'user', text: '' }, 1),
+      mk({ type: 'user', text: '   ' }, 2),
+      mk({ type: 'user', text: 'valid' }, 3),
+    ];
+    expect(realUserPromptTexts(h)).toEqual(['valid']);
   });
 });

@@ -20,13 +20,15 @@ import {
   detectRuntime,
   getAllProviderBaseUrls,
   getOrCreateSharedDispatcher,
+  preloadRuntimeFetchModule,
   redactProxyCredentials,
 } from '@qwen-code/qwen-code-core';
-import { fetch as undiciFetch } from 'undici';
+import { loadUndici } from './load-undici.js';
 
 const debugLogger = createDebugLogger('PRECONNECT');
 
 let preconnectFired = false;
+let preconnectInFlight: Promise<void> | undefined;
 
 /**
  * Default API base URLs by AuthType.
@@ -189,9 +191,12 @@ export function preconnectApi(
   preconnectFired = true;
   debugLogger.debug(`Preconnecting to: ${targetUrl}`);
 
-  try {
+  // Fire-and-forget: undici loads behind a dynamic import to keep it out of
+  // the eager startup closure (issue #7264).
+  preconnectInFlight = (async () => {
     // Use the same shared undici dispatcher that SDK clients will use,
     // so the warmed TCP+TLS connection is reused by subsequent API calls.
+    await preloadRuntimeFetchModule();
     const dispatcher = getOrCreateSharedDispatcher(proxy);
 
     // Fire HEAD request to warm connection (fire-and-forget).
@@ -199,26 +204,21 @@ export function preconnectApi(
     // and fetch come from the same undici version — Node's bundled undici
     // may differ in major version from the packaged one (e.g. v8 vs v7),
     // causing handler-interface mismatches like `invalid onError method`.
-    undiciFetch(targetUrl, {
+    const { fetch: undiciFetch } = await loadUndici();
+    await undiciFetch(targetUrl, {
       method: 'HEAD',
       signal: AbortSignal.timeout(5_000),
       headers: {
         'User-Agent': 'QwenCode-Preconnect/1.0',
       },
       dispatcher,
-    })
-      .then(() => {
-        debugLogger.debug('Preconnect completed');
-      })
-      .catch((error) => {
-        const redactedError = redactProxyCredentials(String(error));
-        debugLogger.debug(`Preconnect failed (ignored): ${redactedError}`);
-      });
-  } catch (error) {
+    });
+    debugLogger.debug('Preconnect completed');
+  })().catch((error) => {
     // Preconnect failure doesn't affect main flow
     const redactedError = redactProxyCredentials(String(error));
     debugLogger.debug(`Preconnect failed (ignored): ${redactedError}`);
-  }
+  });
 }
 
 /**
@@ -227,4 +227,13 @@ export function preconnectApi(
  */
 export function resetPreconnectState(): void {
   preconnectFired = false;
+  preconnectInFlight = undefined;
+}
+
+/**
+ * Wait for the in-flight preconnect request, if any (for testing only)
+ * @internal
+ */
+export function waitForPreconnect(): Promise<void> {
+  return preconnectInFlight ?? Promise.resolve();
 }

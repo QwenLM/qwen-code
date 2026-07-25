@@ -1,7 +1,6 @@
-@layer theme, base, components, utilities;
-
-@import 'tailwindcss/theme.css' layer(theme);
-@import 'tailwindcss/utilities.css' layer(utilities);
+@import './preflight.css';
+@import 'tailwindcss/theme.css';
+@import 'tailwindcss/utilities.css';
 @import 'tw-animate-css';
 @import 'shadcn/tailwind.css';
 
@@ -32,9 +31,9 @@
   --radius-xl: calc(var(--radius) + 4px);
 }
 
-:where(
-  [data-web-shell-root][data-web-shell-shadcn],
-  [data-web-shell-portal-root][data-web-shell-shadcn]
+:is(
+  [data-web-shell-root]:where([data-web-shell-shadcn]),
+  [data-web-shell-portal-root]:where([data-web-shell-shadcn])
 ) {
   --background: oklch(1 0 0);
   --foreground: oklch(0.145 0 0);
@@ -61,9 +60,9 @@
   --radius-xl: calc(var(--radius) + 4px);
 }
 
-:where(
-  [data-web-shell-root][data-web-shell-shadcn],
-  [data-web-shell-portal-root][data-web-shell-shadcn]
+:is(
+  [data-web-shell-root]:where([data-web-shell-shadcn]),
+  [data-web-shell-portal-root]:where([data-web-shell-shadcn])
 ).dark {
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
@@ -85,139 +84,51 @@
   --ring: oklch(0.556 0 0);
 }
 
-@layer base {
-  :where(
-    [data-web-shell-root][data-web-shell-shadcn],
-    [data-web-shell-portal-root][data-web-shell-shadcn]
-  ),
-  :where(
-      [data-web-shell-root][data-web-shell-shadcn],
-      [data-web-shell-portal-root][data-web-shell-shadcn]
-    )
-    *,
-  :where(
-      [data-web-shell-root][data-web-shell-shadcn],
-      [data-web-shell-portal-root][data-web-shell-shadcn]
-    )
-    ::before,
-  :where(
-      [data-web-shell-root][data-web-shell-shadcn],
-      [data-web-shell-portal-root][data-web-shell-shadcn]
-    )
-    ::after,
-  :where(
-      [data-web-shell-root][data-web-shell-shadcn],
-      [data-web-shell-portal-root][data-web-shell-shadcn]
-    )
-    ::backdrop,
-  :where(
-      [data-web-shell-root][data-web-shell-shadcn],
-      [data-web-shell-portal-root][data-web-shell-shadcn]
-    )
-    ::file-selector-button {
-    box-sizing: border-box;
-    border: 0 solid;
-    border-color: var(--border);
-    outline-color: color-mix(in oklab, var(--ring) 50%, transparent);
-  }
+:is(
+  [data-web-shell-root]:where([data-web-shell-shadcn]),
+  [data-web-shell-portal-root]:where([data-web-shell-shadcn])
+),
+:is(
+    [data-web-shell-root]:where([data-web-shell-shadcn]),
+    [data-web-shell-portal-root]:where([data-web-shell-shadcn])
+  )
+  * {
+  box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
 
-  :where(
-    [data-web-shell-root][data-web-shell-shadcn],
-    [data-web-shell-portal-root][data-web-shell-shadcn]
-  ) {
-    -webkit-text-size-adjust: 100%;
-    tab-size: 4;
-    font-family: var(--font-sans, ui-sans-serif, system-ui, sans-serif);
-    line-height: 1.5;
-  }
+:is(
+    [data-web-shell-root]:where([data-web-shell-shadcn]),
+    [data-web-shell-portal-root]:where([data-web-shell-shadcn])
+  )
+  *::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
 
-  :where(
-      [data-web-shell-root][data-web-shell-shadcn],
-      [data-web-shell-portal-root][data-web-shell-shadcn]
-    )
-    :is(h1, h2, h3, h4, h5, h6, p, blockquote, figure, dl, dd) {
-    margin: 0;
-  }
+:is(
+    [data-web-shell-root]:where([data-web-shell-shadcn]),
+    [data-web-shell-portal-root]:where([data-web-shell-shadcn])
+  )
+  *::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
 
-  :where(
-      [data-web-shell-root][data-web-shell-shadcn],
-      [data-web-shell-portal-root][data-web-shell-shadcn]
-    )
-    :is(ol, ul, menu) {
-    margin: 0;
-    padding: 0;
-    list-style: none;
-  }
+:is(
+    [data-web-shell-root]:where([data-web-shell-shadcn]),
+    [data-web-shell-portal-root]:where([data-web-shell-shadcn])
+  )
+  *::-webkit-scrollbar-thumb {
+  border: 2px solid var(--scrollbar-track);
+  border-radius: 999px;
+  background: var(--scrollbar-thumb);
+}
 
-  :where(
-      [data-web-shell-root][data-web-shell-shadcn],
-      [data-web-shell-portal-root][data-web-shell-shadcn]
-    )
-    :is(button, input, optgroup, select, textarea) {
-    margin: 0;
-    padding: 0;
-    background-color: transparent;
-    color: inherit;
-    font: inherit;
-    font-feature-settings: inherit;
-    font-variation-settings: inherit;
-    letter-spacing: inherit;
-  }
-
-  :where(
-      [data-web-shell-root][data-web-shell-shadcn],
-      [data-web-shell-portal-root][data-web-shell-shadcn]
-    )
-    ::file-selector-button {
-    margin: 0;
-    padding: 0;
-    background-color: transparent;
-    color: inherit;
-    font: inherit;
-    font-feature-settings: inherit;
-    font-variation-settings: inherit;
-    letter-spacing: inherit;
-  }
-
-  :where(
-      [data-web-shell-root][data-web-shell-shadcn],
-      [data-web-shell-portal-root][data-web-shell-shadcn]
-    )
-    :is(button, select) {
-    text-transform: none;
-  }
-
-  :where(
-      [data-web-shell-root][data-web-shell-shadcn],
-      [data-web-shell-portal-root][data-web-shell-shadcn]
-    )
-    :is(button, [type='button'], [type='reset'], [type='submit']) {
-    appearance: button;
-  }
-
-  :where(
-      [data-web-shell-root][data-web-shell-shadcn],
-      [data-web-shell-portal-root][data-web-shell-shadcn]
-    )
-    :is(img, svg, video, canvas, audio, iframe, embed, object) {
-    display: block;
-    vertical-align: middle;
-  }
-
-  :where(
-      [data-web-shell-root][data-web-shell-shadcn],
-      [data-web-shell-portal-root][data-web-shell-shadcn]
-    )
-    :is(img, video) {
-    max-width: 100%;
-    height: auto;
-  }
-
-  :where(
-      [data-web-shell-root][data-web-shell-shadcn],
-      [data-web-shell-portal-root][data-web-shell-shadcn]
-    )
-    [hidden] {
-    display: none !important;
-  }
+:is(
+    [data-web-shell-root]:where([data-web-shell-shadcn]),
+    [data-web-shell-portal-root]:where([data-web-shell-shadcn])
+  )
+  *::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
 }

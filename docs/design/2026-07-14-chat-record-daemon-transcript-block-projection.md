@@ -353,6 +353,7 @@ The first version stabilizes at least the following diagnostic codes. Codes are 
 | malformed_part                  | true                | A recognized malformed part was skipped       |
 | unknown_record_or_part          | true                | An unknown extension may contain visible data |
 | ambiguous_tool_call_correlation | true                | A tool result cannot be correlated uniquely   |
+| missing_tool_result             | true                | A tool call has no persisted result           |
 | presentation_fallback           | false               | Presentation adapter failed; fallback used    |
 | transcript_blocks_truncated     | true                | `maxBlocks` removed older blocks              |
 | transcript_text_truncated       | true                | A text block exceeded the character limit     |

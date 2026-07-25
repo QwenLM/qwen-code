@@ -13,12 +13,24 @@ const getInstallationInfo = vi.hoisted(() => vi.fn());
 const performStandaloneUpdate = vi.hoisted(() => vi.fn());
 const writeStderrLine = vi.hoisted(() => vi.fn());
 
-vi.mock('../ui/utils/updateCheck.js', () => ({ checkForUpdatesDetailed }));
+vi.mock('../ui/utils/updateCheck.js', () => ({
+  checkForUpdatesDetailed,
+  // Classification behavior is covered by updateCheck.test.ts; a fixed reason
+  // keeps this suite from importing the real update-notifier chain.
+  describeUpdateCheckFailure: () => 'registry error',
+}));
 vi.mock('./handleAutoUpdate.js', () => ({ handleAutoUpdate }));
 vi.mock('./installationInfo.js', () => ({ getInstallationInfo }));
 vi.mock('./standalone-update.js', () => ({ performStandaloneUpdate }));
 vi.mock('./stdioHelpers.js', () => ({ writeStderrLine }));
-vi.mock('../i18n/index.js', () => ({ t: (message: string) => message }));
+vi.mock('../i18n/index.js', () => ({
+  t: (message: string, params?: Record<string, string | number>) =>
+    params
+      ? message.replace(/\{\{(\w+)\}\}/g, (match, name) =>
+          name in params ? String(params[name]) : match,
+        )
+      : message,
+}));
 
 const { updateBeforeRelaunch } = await import('./update-relaunch.js');
 
@@ -88,7 +100,7 @@ describe('updateBeforeRelaunch', () => {
       true,
     );
     expect(writeStderrLine).toHaveBeenCalledWith(
-      'Failed to check for updates. Please check your network or registry configuration.',
+      'Failed to check for updates (registry error). Please check your network or registry configuration.',
     );
   });
 

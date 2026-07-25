@@ -23,6 +23,7 @@ import type OpenAI from 'openai';
 import { convertToFunctionResponse } from '../coreToolScheduler.js';
 import { getToolCallPreparations } from '../tool-call-preparation.js';
 import { isOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
+import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 
 describe('OpenAIContentConverter', () => {
   let converter: typeof OpenAIContentConverter;
@@ -150,6 +151,15 @@ describe('OpenAIContentConverter', () => {
       expect(ctx1).toBeInstanceOf(StreamingToolCallParser);
       expect(ctx2).toBeInstanceOf(StreamingToolCallParser);
       expect(ctx1).not.toBe(ctx2);
+    });
+
+    it('preserves the provider model from stream chunks', () => {
+      const response = converter.convertOpenAIChunkToGemini(
+        streamChunk('model', { content: 'ok' }),
+        withStreamParser(),
+      );
+
+      expect(response.modelVersion).toBe('test');
     });
 
     it('isolates two contexts so writes to one do not leak into the other', () => {
@@ -3617,12 +3627,10 @@ describe('OpenAIContentConverter', () => {
       );
 
       expect(response.candidates).toEqual([]);
+      expect(response.modelVersion).toBe('test-model');
     });
 
-    it('keeps the estimated prompt/completion split summing to total tokens', () => {
-      // When a provider reports only total_tokens, the 70/30 estimate must
-      // still add back up to the total instead of rounding each half on its
-      // own (5 would otherwise become 4 + 2 = 6).
+    it('omits the input/output breakdown when only total tokens are reported', () => {
       const response = converter.convertOpenAIResponseToGemini(
         {
           object: 'chat.completion',
@@ -3644,9 +3652,71 @@ describe('OpenAIContentConverter', () => {
 
       const usage = response.usageMetadata;
       expect(usage?.totalTokenCount).toBe(5);
+      expect(usage?.promptTokenCount).toBeUndefined();
+      expect(usage?.candidatesTokenCount).toBeUndefined();
+      expect(getGenAiUsageProvenance(usage)).toMatchObject({
+        cachedInputTokensReported: false,
+      });
+    });
+
+    it('omits the streaming input/output breakdown when only total tokens are reported', () => {
+      const response = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-usage',
+          created: 123,
+          model: 'test-model',
+          choices: [],
+          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 5 },
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        withStreamParser(),
+      );
+
+      const usage = response.usageMetadata;
+      expect(usage?.totalTokenCount).toBe(5);
+      expect(usage?.promptTokenCount).toBeUndefined();
+      expect(usage?.candidatesTokenCount).toBeUndefined();
+      expect(getGenAiUsageProvenance(usage)).toMatchObject({
+        cachedInputTokensReported: false,
+      });
+    });
+
+    it('distinguishes an absent cache field from an explicitly reported zero', () => {
+      const base = {
+        object: 'chat.completion',
+        id: 'chatcmpl-cache',
+        created: 123,
+        model: 'provider-model',
+        choices: [],
+      } as const;
+      const absent = converter.convertOpenAIResponseToGemini(
+        {
+          ...base,
+          usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+      const zero = converter.convertOpenAIResponseToGemini(
+        {
+          ...base,
+          usage: {
+            prompt_tokens: 3,
+            completion_tokens: 1,
+            total_tokens: 4,
+            prompt_tokens_details: { cached_tokens: 0 },
+          },
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+
+      expect(absent.modelVersion).toBe('provider-model');
       expect(
-        (usage?.promptTokenCount ?? 0) + (usage?.candidatesTokenCount ?? 0),
-      ).toBe(5);
+        getGenAiUsageProvenance(absent.usageMetadata)
+          ?.cachedInputTokensReported,
+      ).toBe(false);
+      expect(
+        getGenAiUsageProvenance(zero.usageMetadata)?.cachedInputTokensReported,
+      ).toBe(true);
     });
 
     it('estimates missing reasoning tokens from non-streaming content', () => {
@@ -5645,6 +5715,66 @@ describe('OpenAIContentConverter', () => {
       });
     });
 
+    // Regression for #7315: the wire schema must not carry
+    // additionalProperties:false on levels with optional properties —
+    // OpenAI-compatible gateways promote every property to required,
+    // forcing mutually exclusive optional fields (Agent working_dir vs
+    // isolation) into every call.
+    it('relaxes additionalProperties:false for schemas with optional fields', async () => {
+      const agentLikeTools = [
+        {
+          functionDeclarations: [
+            {
+              name: 'agent',
+              description: 'Launch a new agent',
+              parametersJsonSchema: {
+                $schema: 'http://json-schema.org/draft-07/schema#',
+                type: 'object',
+                properties: {
+                  description: { type: 'string' },
+                  prompt: { type: 'string' },
+                  working_dir: { type: 'string' },
+                  isolation: { type: 'string', enum: ['worktree'] },
+                },
+                required: ['description', 'prompt'],
+                additionalProperties: false,
+              },
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertGeminiToolsToOpenAI(agentLikeTools);
+      const params = result[0]!.function.parameters as Record<string, unknown>;
+      expect(params['additionalProperties']).toBeUndefined();
+      expect(params['$schema']).toBeUndefined();
+      // Required stays exactly as authored — optional fields remain optional.
+      expect(params['required']).toEqual(['description', 'prompt']);
+    });
+
+    it('keeps additionalProperties:false when every property is required', async () => {
+      const strictTools = [
+        {
+          functionDeclarations: [
+            {
+              name: 'strict_tool',
+              description: 'All fields required',
+              parametersJsonSchema: {
+                type: 'object',
+                properties: { path: { type: 'string' } },
+                required: ['path'],
+                additionalProperties: false,
+              },
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertGeminiToolsToOpenAI(strictTools);
+      const params = result[0]!.function.parameters as Record<string, unknown>;
+      expect(params['additionalProperties']).toBe(false);
+    });
+
     it('should convert MCP tools with parametersJsonSchema field', async () => {
       // MCP tools use parametersJsonSchema which contains plain JSON schema (not Gemini types)
       const mcpTools = [
@@ -5809,6 +5939,35 @@ describe('OpenAIContentConverter', () => {
           name: { type: 'string' },
         },
       });
+    });
+
+    it('converts subschemas of properties named after schema keywords', () => {
+      // A tool can declare a parameter literally called `maximum` or
+      // `minItems`. Those are property NAMES, not constraints, so their
+      // subschemas must still be converted like any other property.
+      const params = {
+        type: 'OBJECT',
+        properties: {
+          maximum: {
+            type: 'INTEGER',
+            description: 'upper bound',
+            minimum: '5',
+          },
+          minItems: { type: 'STRING' },
+          normalProp: { type: 'STRING' },
+        },
+      };
+
+      const result = converter.convertGeminiToolParametersToOpenAI(params);
+      const properties = result?.['properties'] as Record<string, unknown>;
+
+      expect(properties?.['maximum']).toEqual({
+        type: 'integer',
+        description: 'upper bound',
+        minimum: 5,
+      });
+      expect(properties?.['minItems']).toEqual({ type: 'string' });
+      expect(properties?.['normalProp']).toEqual({ type: 'string' });
     });
 
     it('should convert string numeric constraints to numbers', () => {

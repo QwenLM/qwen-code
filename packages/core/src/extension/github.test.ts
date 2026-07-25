@@ -284,6 +284,10 @@ describe('git extension helpers', () => {
           'protocol.allow=never',
           'protocol.https.allow=always',
         ],
+        unsafe: {
+          allowUnsafeConfigPaths: true,
+          allowUnsafeProtocolOverride: true,
+        },
       });
       expect(mockGit.env).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -591,6 +595,10 @@ describe('git extension helpers', () => {
           'protocol.allow=never',
           'protocol.https.allow=always',
         ],
+        unsafe: {
+          allowUnsafeConfigPaths: true,
+          allowUnsafeProtocolOverride: true,
+        },
       });
       expect(mockGit.listRemote).toHaveBeenCalledWith([
         'https://github.com/owner/repo.git',

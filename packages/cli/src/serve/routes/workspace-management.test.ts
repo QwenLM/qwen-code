@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { _setSandboxMountExistsForTest } from '@qwen-code/acp-bridge/workspacePaths';
 import express, { type Request, type Response } from 'express';
 import request from 'supertest';
 import {
@@ -18,7 +19,14 @@ import type {
 } from '../workspace-registry.js';
 import { tmpdir } from 'node:os';
 import { realpathSync } from 'node:fs';
-import { mkdir, mkdtemp, rm, symlink, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   workspaceRegistrationId,
@@ -27,6 +35,7 @@ import {
   type WorkspaceRegistrationStore,
 } from '../workspace-registration-store.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { prepareManagedScratchRoot } from '../managed-scratch-workspace.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: vi.fn(),
@@ -64,6 +73,16 @@ function createMockRegistry(
       return runtime && !draining.has(runtime) ? runtime : undefined;
     },
     getManagedByWorkspaceId: (id: string) => byId.get(id),
+    syncRuntimeMetadata: vi.fn((runtime: WorkspaceRuntime) => {
+      const current = byCwd.get(runtime.workspaceCwd);
+      if (!current || current === runtime) return;
+      if (runtime.displayName === undefined) {
+        delete current.displayName;
+      } else {
+        current.displayName = runtime.displayName;
+      }
+      current.registrationIds = [...(runtime.registrationIds ?? [])];
+    }),
     resolveWorkspaceCwd: () => undefined,
     resolveLiveSessionOwner: () => ({ kind: 'not_found' }),
     beginDrain: vi.fn((runtime: WorkspaceRuntime) => {
@@ -72,6 +91,7 @@ function createMockRegistry(
       return true;
     }),
     cancelDrain: vi.fn((runtime: WorkspaceRuntime) => draining.delete(runtime)),
+    commitDrain: vi.fn(),
     completeDrain: vi.fn((runtime: WorkspaceRuntime) => {
       draining.delete(runtime);
       const index = runtimes.indexOf(runtime);
@@ -158,6 +178,279 @@ describe('POST /workspaces', () => {
     expect(res.body.code).toBe('invalid_path');
   });
 
+  it.each([
+    { kind: 'unknown' },
+    { kind: 'scratch', cwd: REAL_DIR },
+    { kind: 'scratch', persist: false },
+    { kind: 'scratch', displayName: 'Scratch' },
+    { kind: 'scratch', extra: true },
+  ])('rejects invalid discriminated requests: %j', async (body) => {
+    const { app } = createApp();
+    const res = await request(app).post('/workspaces').send(body);
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_workspace_request');
+  });
+
+  it('returns 501 when the complete scratch ownership contract is absent', async () => {
+    const { app } = createApp();
+    const res = await request(app)
+      .post('/workspaces')
+      .send({ kind: 'scratch' });
+    expect(res.status).toBe(501);
+    expect(res.body.code).toBe('scratch_not_available');
+  });
+
+  it('creates a trusted ephemeral runtime with managed provenance', async () => {
+    const parent = await mkdtemp(join(REAL_DIR, 'qws-scratch-route-'));
+    try {
+      const root = prepareManagedScratchRoot(join(parent, 'root'), []);
+      const runtimeRemoval = createRemovalController();
+      const factory = vi.fn((cwd: string) =>
+        Promise.resolve(makeRuntime(cwd, { trusted: true })),
+      );
+      const storeAdd = vi.fn();
+      const { app, deps } = createApp({
+        workspaceRegistry: createMockRegistry([makeRuntime('/workspace')]),
+        createWorkspaceRuntime: factory,
+        managedScratchRoot: root,
+        runtimeRemoval,
+        workspaceRegistrationStore: {
+          add: storeAdd,
+        } as unknown as WorkspaceRegistrationStore,
+      });
+
+      const res = await request(app)
+        .post('/workspaces')
+        .send({ kind: 'scratch' });
+
+      expect(res.status).toBe(201);
+      expect(res.body).toMatchObject({
+        primary: false,
+        trusted: true,
+        persisted: false,
+      });
+      expect(factory).toHaveBeenCalledWith(res.body.cwd, {
+        provenance: 'managed-scratch',
+      });
+      expect(deps.workspaceRegistry.add).toHaveBeenCalledOnce();
+      expect(storeAdd).not.toHaveBeenCalled();
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('re-registers a scratch child as existing without restoring managed trust', async () => {
+    const parent = await mkdtemp(join(REAL_DIR, 'qws-scratch-route-'));
+    try {
+      const root = prepareManagedScratchRoot(join(parent, 'root'), []);
+      const retained = join(root.canonicalRoot, 'scratch-retained');
+      await mkdir(retained);
+      const factory = vi.fn((cwd: string, options: { provenance: string }) =>
+        Promise.resolve(
+          makeRuntime(cwd, {
+            trusted: options.provenance === 'managed-scratch',
+          }),
+        ),
+      );
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([makeRuntime('/workspace')]),
+        createWorkspaceRuntime: factory,
+        managedScratchRoot: root,
+        runtimeRemoval: createRemovalController(),
+      });
+
+      const existing = await request(app)
+        .post('/workspaces')
+        .send({ cwd: retained });
+      const sibling = await request(app)
+        .post('/workspaces')
+        .send({ kind: 'scratch' });
+
+      expect(existing.status).toBe(201);
+      expect(existing.body.trusted).toBe(false);
+      expect(sibling.status).toBe(201);
+      expect(sibling.body.trusted).toBe(true);
+      expect(factory).toHaveBeenNthCalledWith(1, retained, {
+        provenance: 'existing',
+      });
+      expect(factory).toHaveBeenNthCalledWith(2, sibling.body.cwd, {
+        provenance: 'managed-scratch',
+      });
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects ordinary registration inside a reserved non-scratch descendant', async () => {
+    const parent = await mkdtemp(join(REAL_DIR, 'qws-scratch-route-'));
+    try {
+      const root = prepareManagedScratchRoot(join(parent, 'root'), []);
+      const reserved = join(root.canonicalRoot, 'project');
+      await mkdir(reserved);
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([makeRuntime('/workspace')]),
+        managedScratchRoot: root,
+      });
+
+      const res = await request(app)
+        .post('/workspaces')
+        .send({ cwd: reserved });
+
+      expect(res.status).toBe(409);
+      expect(res.body.code).toBe('scratch_root_conflict');
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('preserves a created directory when runtime construction fails', async () => {
+    const parent = await mkdtemp(join(REAL_DIR, 'qws-scratch-route-'));
+    try {
+      const root = prepareManagedScratchRoot(join(parent, 'root'), []);
+      const { app } = createApp({
+        workspaceRegistry: createMockRegistry([makeRuntime('/workspace')]),
+        createWorkspaceRuntime: vi
+          .fn()
+          .mockRejectedValue(new Error('construction failed')),
+        managedScratchRoot: root,
+        runtimeRemoval: createRemovalController(),
+      });
+
+      const res = await request(app)
+        .post('/workspaces')
+        .send({ kind: 'scratch' });
+
+      expect(res.status).toBe(500);
+      const [retained] = await readdir(root.canonicalRoot);
+      expect(retained).toMatch(/^scratch-/);
+      expect(writeStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining(
+          `retained directory: ${join(root.canonicalRoot, retained!)}`,
+        ),
+      );
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('reserves capacity before scratch filesystem work can yield', async () => {
+    const parent = await mkdtemp(join(REAL_DIR, 'qws-scratch-route-'));
+    const existingDir = await mkdtemp(join(REAL_DIR, 'qws-existing-route-'));
+    try {
+      const root = prepareManagedScratchRoot(join(parent, 'root'), []);
+      const registry = createMockRegistry(
+        Array.from({ length: 24 }, (_, index) =>
+          makeRuntime(`/workspace-${index}`),
+        ),
+      );
+      let releaseFactory!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        releaseFactory = resolve;
+      });
+      const { app } = createApp({
+        workspaceRegistry: registry,
+        createWorkspaceRuntime: vi.fn(async (cwd: string) => {
+          await blocked;
+          return makeRuntime(cwd);
+        }),
+        managedScratchRoot: root,
+        runtimeRemoval: createRemovalController(),
+      });
+
+      const scratchPromise = request(app)
+        .post('/workspaces')
+        .send({ kind: 'scratch' })
+        .then((response) => response);
+      await vi.waitFor(async () => {
+        expect(await readdir(root.canonicalRoot)).toHaveLength(1);
+      });
+      const existing = await request(app)
+        .post('/workspaces')
+        .send({ cwd: existingDir });
+      releaseFactory();
+
+      expect(existing.status).toBe(409);
+      expect(existing.body.code).toBe('workspace_limit_reached');
+      expect((await scratchPromise).status).toBe(201);
+      expect(registry.listManaged()).toHaveLength(25);
+    } finally {
+      await Promise.all([
+        rm(parent, { recursive: true, force: true }),
+        rm(existingDir, { recursive: true, force: true }),
+      ]);
+    }
+  });
+
+  it('sealing waits for construction and disposes an unregistered runtime once', async () => {
+    const parent = await mkdtemp(join(REAL_DIR, 'qws-scratch-route-'));
+    try {
+      const root = prepareManagedScratchRoot(join(parent, 'root'), []);
+      const runtimeRemoval = createRemovalController();
+      let releaseFactory!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        releaseFactory = resolve;
+      });
+      const runtime = makeRuntime('/placeholder');
+      const factory = vi.fn(async (cwd: string) => {
+        await blocked;
+        return { ...runtime, workspaceCwd: cwd } as WorkspaceRuntime;
+      });
+      const registry = createMockRegistry([makeRuntime('/workspace')]);
+      const { app, handle } = createApp({
+        workspaceRegistry: registry,
+        createWorkspaceRuntime: factory,
+        managedScratchRoot: root,
+        runtimeRemoval,
+      });
+      const responsePromise = request(app)
+        .post('/workspaces')
+        .send({ kind: 'scratch' })
+        .then((response) => response);
+      await vi.waitFor(() => expect(factory).toHaveBeenCalledOnce());
+      let sealed = false;
+      const sealPromise = handle.sealAndWait().then(() => {
+        sealed = true;
+      });
+      await Promise.resolve();
+      expect(sealed).toBe(false);
+      releaseFactory();
+      await sealPromise;
+
+      expect((await responsePromise).status).toBe(503);
+      expect(registry.add).not.toHaveBeenCalled();
+      expect(runtimeRemoval.disposeRuntime).toHaveBeenCalledOnce();
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('disposes a runtime that violates the managed scratch contract', async () => {
+    const parent = await mkdtemp(join(REAL_DIR, 'qws-scratch-route-'));
+    try {
+      const root = prepareManagedScratchRoot(join(parent, 'root'), []);
+      const runtimeRemoval = createRemovalController();
+      const { app, deps } = createApp({
+        workspaceRegistry: createMockRegistry([makeRuntime('/workspace')]),
+        createWorkspaceRuntime: vi.fn((cwd: string) =>
+          Promise.resolve(makeRuntime(cwd, { trusted: false })),
+        ),
+        managedScratchRoot: root,
+        runtimeRemoval,
+      });
+
+      const res = await request(app)
+        .post('/workspaces')
+        .send({ kind: 'scratch' });
+
+      expect(res.status).toBe(500);
+      expect(deps.workspaceRegistry.add).not.toHaveBeenCalled();
+      expect(runtimeRemoval.disposeRuntime).toHaveBeenCalledOnce();
+      expect(await readdir(root.canonicalRoot)).toHaveLength(1);
+    } finally {
+      await rm(parent, { recursive: true, force: true });
+    }
+  });
+
   it('returns 400 for empty cwd', async () => {
     const { app } = createApp();
     const res = await request(app).post('/workspaces').send({ cwd: '   ' });
@@ -191,6 +484,48 @@ describe('POST /workspaces', () => {
     expect(res.body.code).toBe('invalid_path');
   });
 
+  // #7139 wiring: with a container sandbox active, a Windows-shaped cwd is
+  // translated to its bind mount BEFORE the absolute-path guard — the 400
+  // moves from the isAbsolute rejection to the (deeper) existence check,
+  // because the root-level translated mount cannot exist in a test.
+  it.skipIf(process.platform === 'win32')(
+    'translates a Windows-shaped cwd past the absolute-path guard in a sandbox',
+    async () => {
+      vi.stubEnv('SANDBOX', 'qwen-code-sandbox-0');
+      _setSandboxMountExistsForTest((p) => p === '/c/qwen-repro');
+      try {
+        const { app } = createApp();
+        const res = await request(app)
+          .post('/workspaces')
+          .send({ cwd: 'C:\\qwen-repro' });
+        expect(res.status).toBe(400);
+        // Past the guard: the failure is now the realpath existence check,
+        // not the absolute-path rejection.
+        expect(res.body.error).toBe('Path does not exist or is not accessible');
+      } finally {
+        vi.unstubAllEnvs();
+        _setSandboxMountExistsForTest(undefined);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'still rejects a Windows-shaped cwd outside a sandbox',
+    async () => {
+      vi.stubEnv('SANDBOX', '');
+      try {
+        const { app } = createApp();
+        const res = await request(app)
+          .post('/workspaces')
+          .send({ cwd: 'C:\\qwen-repro' });
+        expect(res.status).toBe(400);
+        expect(res.body.error).toBe('`cwd` must be an absolute path');
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
+
   it('returns 400 when path does not exist', async () => {
     const { app } = createApp();
     const res = await request(app)
@@ -210,7 +545,7 @@ describe('POST /workspaces', () => {
 
   it('returns 201 on successful registration', async () => {
     // Use /tmp (exists, is a dir) but ensure it's NOT in the registry.
-    const { app } = createApp({
+    const { app, deps } = createApp({
       workspaceRegistry: createMockRegistry([makeRuntime('/some-other-dir')]),
     });
     const res = await request(app).post('/workspaces').send({ cwd: REAL_DIR });
@@ -222,6 +557,9 @@ describe('POST /workspaces', () => {
       trusted: true,
     });
     expect(res.body).not.toHaveProperty('persisted');
+    expect(deps.createWorkspaceRuntime).toHaveBeenCalledWith(REAL_DIR, {
+      provenance: 'existing',
+    });
   });
 
   it('sets a display name on a process-local registration', async () => {
@@ -448,6 +786,41 @@ describe('POST /workspaces', () => {
     expect(res.status).toBe(500);
     expect(res.body.code).toBe('workspace_registration_store_error');
     expect(runtime.displayName).toBe('Old name');
+  });
+
+  it('validates trust under the topology gate before publishing a runtime', async () => {
+    const registry = createMockRegistry([makeRuntime('/some-other-dir')]);
+    const created = makeRuntime(REAL_DIR, { trusted: true });
+    const validated = makeRuntime(REAL_DIR, { trusted: false });
+    const events: string[] = [];
+    const validateWorkspaceRuntimeForPublication = vi.fn(async (runtime) => {
+      expect(runtime).toBe(created);
+      events.push('validated');
+      return validated;
+    });
+    const runWorkspaceTrustOperation = vi.fn(async (operation) => {
+      expect(registry.getByWorkspaceCwd(REAL_DIR)).toBeUndefined();
+      events.push('gate-entered');
+      const result = await operation();
+      events.push('gate-exited');
+      return result;
+    });
+    const { app } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime: vi.fn().mockResolvedValue(created),
+      validateWorkspaceRuntimeForPublication,
+      runWorkspaceTrustOperation,
+    });
+    const requestTrustReconcile = vi.fn().mockResolvedValue(undefined);
+    app.locals['requestTrustReconcile'] = requestTrustReconcile;
+
+    const res = await request(app).post('/workspaces').send({ cwd: REAL_DIR });
+
+    expect(res.status).toBe(201);
+    expect(res.body.trusted).toBe(false);
+    expect(registry.getByWorkspaceCwd(REAL_DIR)).toBe(validated);
+    expect(events).toEqual(['gate-entered', 'validated', 'gate-exited']);
+    expect(requestTrustReconcile).toHaveBeenCalledOnce();
   });
 
   it('does not double-count a runtime while its addition hook is pending', async () => {
@@ -1114,6 +1487,8 @@ describe('DELETE /workspaces/:workspace', () => {
       runtimeRemoval,
       getAcpHandle: () => acpHandle as never,
     });
+    const requestTrustReconcile = vi.fn().mockResolvedValue(undefined);
+    app.locals['requestTrustReconcile'] = requestTrustReconcile;
 
     const res = await request(app).delete(
       `/workspaces/${encodeURIComponent(runtime.workspaceId)}`,
@@ -1132,6 +1507,7 @@ describe('DELETE /workspaces/:workspace', () => {
     expect(deps.workspaceRegistry.getByWorkspaceId(runtime.workspaceId)).toBe(
       runtime,
     );
+    expect(requestTrustReconcile).toHaveBeenCalledOnce();
   });
 
   it('continues rolling gates back when cancel hooks throw', async () => {
@@ -1261,6 +1637,12 @@ describe('DELETE /workspaces/:workspace', () => {
       runtime,
       'workspace_removed',
     );
+    expect(deps.workspaceRegistry.commitDrain).toHaveBeenCalledWith(runtime);
+    expect(
+      vi.mocked(deps.workspaceRegistry.commitDrain).mock.invocationCallOrder[0],
+    ).toBeLessThan(
+      vi.mocked(runtimeRemoval.disposeRuntime).mock.invocationCallOrder[0]!,
+    );
     expect(runtimeRemoval.completeDrain).toHaveBeenCalledWith(runtime);
     expect(acpHandle.commitWorkspaceRemoval).toHaveBeenCalledWith(
       runtime.workspaceId,
@@ -1324,6 +1706,41 @@ describe('DELETE /workspaces/:workspace', () => {
     expect(
       deps.workspaceRegistry.getManagedByWorkspaceId(runtime.workspaceId),
     ).toBeUndefined();
+  });
+
+  it('continues cleanup when registry drain commit fails after persistence commits', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    const registry = createMockRegistry([runtime]);
+    vi.mocked(registry.commitDrain).mockImplementationOnce(() => {
+      throw new Error('registry commit failed');
+    });
+    const runtimeRemoval = createRemovalController();
+    const { app } = createApp({
+      workspaceRegistry: registry,
+      runtimeRemoval,
+      workspaceRegistrationStore: {
+        removeByIds: vi.fn().mockResolvedValue(1),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app)
+      .delete(`/workspaces/${encodeURIComponent(runtime.workspaceId)}`)
+      .send({ force: true });
+
+    expect(res.status).toBe(200);
+    expect(runtimeRemoval.disposeRuntime).toHaveBeenCalledWith(
+      runtime,
+      'workspace_removed',
+    );
+    expect(runtimeRemoval.completeDrain).toHaveBeenCalledWith(runtime);
+    expect(registry.completeDrain).toHaveBeenCalledWith(runtime);
+    expect(registry.cancelDrain).not.toHaveBeenCalled();
+    expect(
+      registry.getManagedByWorkspaceId(runtime.workspaceId),
+    ).toBeUndefined();
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: failed to commit workspace registry drain: registry commit failed',
+    );
   });
 
   it('accepts a URL-encoded absolute cwd selector', async () => {

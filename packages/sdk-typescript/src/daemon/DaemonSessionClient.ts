@@ -68,10 +68,25 @@ export interface DaemonSessionClientOptions {
    * `Last-Event-ID` resume cursors.
    */
   lastEventId?: number;
+  /**
+   * Epoch token of the event bus that produced `lastEventId` (the
+   * `eventEpoch` field of load/resume responses). Paired with the cursor
+   * on every subscription so a daemon restart is detected as an epoch
+   * mismatch instead of a numeric guess. Absent on older daemons — the
+   * first subscription then learns the epoch from the
+   * `X-Qwen-Event-Epoch` response header.
+   */
+  eventEpoch?: string;
   /** Compacted replay snapshot from daemon load response. */
   replaySnapshot?: DaemonReplaySnapshot;
   /** True when older persisted records precede the replay snapshot. */
   historyHasMore?: boolean;
+  /**
+   * True when the daemon reported the replay snapshot as degraded (the
+   * compaction engine failed at least once for this session). Consumers
+   * should prefer the full transcript over the snapshot when set.
+   */
+  replayDegraded?: boolean;
   /**
    * Local per-session prompt cap. The counter is shared with the parent
    * `DaemonClient`; other session clients using the same parent instance
@@ -108,7 +123,20 @@ export class DaemonSessionClient {
   readonly replaySnapshot: DaemonReplaySnapshot;
   readonly hasActivePrompt: boolean;
   readonly historyHasMore: boolean;
+  /**
+   * True when the load response flagged the replay snapshot as degraded
+   * (`replayDegraded` — compaction failed at least once, so
+   * `replaySnapshot` may lag behind live events). Prefer the full
+   * transcript (see `fullTranscriptAvailable`) when set.
+   */
+  readonly replayDegraded: boolean;
   private lastSeenEventId: number | undefined;
+  /**
+   * Epoch token paired with {@link lastSeenEventId}. Seeded from the
+   * load/resume/create response when available, refreshed from every
+   * subscription's `X-Qwen-Event-Epoch` response header.
+   */
+  private lastSeenEpoch: string | undefined;
   private subscriptionActive = false;
   /** In-flight `reattach()` so concurrent prompts re-register only once. */
   private reattaching?: Promise<void>;
@@ -127,11 +155,13 @@ export class DaemonSessionClient {
     this.state = { ...(opts.state ?? {}) };
     this.hasActivePrompt = opts.hasActivePrompt ?? false;
     this.historyHasMore = opts.historyHasMore ?? false;
+    this.replayDegraded = opts.replayDegraded ?? false;
     this.replaySnapshot = opts.replaySnapshot ?? {
       compactedReplay: [],
       liveJournal: [],
     };
     this.lastSeenEventId = validateLastEventId(opts.lastEventId);
+    this.lastSeenEpoch = opts.eventEpoch;
     this.promptLimit =
       opts.maxPendingPromptsPerSession === undefined
         ? opts.client.maxPendingPromptsPerSession
@@ -183,6 +213,10 @@ export class DaemonSessionClient {
       session,
       hasActivePrompt: session.hasActivePrompt,
       lastEventId,
+      // Newer daemons may stamp the bus epoch on the create/attach
+      // response; older ones don't — the first subscription then learns it
+      // from the `X-Qwen-Event-Epoch` response header.
+      eventEpoch: session.eventEpoch,
     });
   }
 
@@ -203,7 +237,9 @@ export class DaemonSessionClient {
       compactedReplay,
       liveJournal,
       historyHasMore,
+      replayDegraded,
       lastEventId: serverLastEventId,
+      eventEpoch,
       ...session
     } = await client.loadSession(sessionId, req, clientId);
     return new DaemonSessionClient({
@@ -212,11 +248,13 @@ export class DaemonSessionClient {
       hasActivePrompt,
       state,
       lastEventId: serverLastEventId ?? 0,
+      eventEpoch,
       replaySnapshot: {
         compactedReplay: compactedReplay ?? [],
         liveJournal: liveJournal ?? [],
       },
       historyHasMore,
+      replayDegraded,
     });
   }
 
@@ -236,6 +274,7 @@ export class DaemonSessionClient {
       state,
       hasActivePrompt,
       lastEventId: serverLastEventId,
+      eventEpoch,
       ...session
     } = await client.resumeSession(sessionId, req, clientId);
     return new DaemonSessionClient({
@@ -244,6 +283,7 @@ export class DaemonSessionClient {
       hasActivePrompt,
       state,
       lastEventId: serverLastEventId ?? 0,
+      eventEpoch,
     });
   }
 
@@ -265,6 +305,10 @@ export class DaemonSessionClient {
 
   get worktree(): DaemonSession['worktree'] {
     return this.session.worktree;
+  }
+
+  get branch(): DaemonSession['branch'] {
+    return this.session.branch;
   }
 
   get lastEventId(): number | undefined {
@@ -738,10 +782,20 @@ export class DaemonSessionClient {
       const lastEventId =
         subscribeOpts.lastEventId ??
         (resume ? this.lastSeenEventId : undefined);
+      // Same seeding rhythm as the cursor: an explicit caller epoch wins,
+      // otherwise pair the resumed cursor with the epoch it was minted in.
+      const epoch =
+        subscribeOpts.epoch ?? (resume ? this.lastSeenEpoch : undefined);
+      const callerOnEpoch = subscribeOpts.onEpoch;
 
       for await (const event of this.client.subscribeEvents(this.sessionId, {
         ...subscribeOpts,
         lastEventId,
+        ...(epoch !== undefined ? { epoch } : {}),
+        onEpoch: (learned) => {
+          this.lastSeenEpoch = learned;
+          callerOnEpoch?.(learned);
+        },
       })) {
         this._dispatchTurnEvent(event);
         yield event;

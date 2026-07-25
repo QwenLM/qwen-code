@@ -40,7 +40,10 @@ import type { Config, MCPServerConfig } from '../config/config.js';
 import { APPROVAL_MODES } from '../config/config.js';
 import type { HookDefinition, HookEventName } from '../hooks/types.js';
 import type { RuntimeContentGeneratorView } from '../agents/runtime/agent-context.js';
-import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
+import {
+  createRuntimeContentGeneratorView,
+  type AuthOverrides,
+} from '../models/content-generator-config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
 import {
@@ -195,6 +198,7 @@ export class SubagentManager {
 
     // Ensure directory exists
     const dir = path.dirname(filePath);
+    options.assertCanCommit?.();
     await fs.mkdir(dir, { recursive: true });
 
     // Update config with actual file path and level
@@ -207,6 +211,7 @@ export class SubagentManager {
     // Serialize and write the file
     const content = this.serializeSubagent(finalConfig);
 
+    options.assertCanCommit?.();
     try {
       await fs.writeFile(filePath, content, 'utf8');
       // Refresh cache after successful creation
@@ -298,6 +303,7 @@ export class SubagentManager {
     name: string,
     updates: Partial<SubagentConfig>,
     level?: SubagentLevel,
+    options?: { assertCanCommit?: () => void },
   ): Promise<void> {
     const existing = await this.loadSubagent(name, level);
     if (!existing) {
@@ -344,6 +350,7 @@ export class SubagentManager {
     // Write the updated configuration
     const content = this.serializeSubagent(updatedConfig);
 
+    options?.assertCanCommit?.();
     try {
       await fs.writeFile(existing.filePath, content, 'utf8');
       // Refresh cache after successful update
@@ -368,6 +375,7 @@ export class SubagentManager {
     name: string,
     level?: SubagentLevel,
     extensionName?: string,
+    options?: { assertCanCommit?: () => void },
   ): Promise<void> {
     // Check if it's a built-in agent first
     if (BuiltinAgentRegistry.isBuiltinAgent(name)) {
@@ -390,6 +398,9 @@ export class SubagentManager {
       : ['project', 'user'];
     let deleted = false;
 
+    // Assert once before any deletion so a closed generation fails atomically
+    // instead of unlinking some level files and then throwing mid-loop.
+    options?.assertCanCommit?.();
     for (const currentLevel of levelsToCheck) {
       // Skip builtin and session levels for deletion
       if (currentLevel === 'builtin' || currentLevel === 'session') {
@@ -760,6 +771,7 @@ export class SubagentManager {
       hooks?: AgentHooks;
       promptConfigOverrides?: Partial<PromptConfig>;
       modelConfigOverrides?: Partial<ModelConfig>;
+      runtimeAuthOverrides?: AuthOverrides;
       runConfigOverrides?: Partial<RunConfig>;
       toolConfigOverride?: ToolConfig;
     },
@@ -822,6 +834,8 @@ export class SubagentManager {
       const runtimeView = await this.buildRuntimeContentGeneratorView(
         config,
         runtimeContext,
+        modelConfig.model,
+        options?.runtimeAuthOverrides,
       );
 
       const { context: subagentContext, cleanup } =
@@ -1018,22 +1032,30 @@ export class SubagentManager {
   private async buildRuntimeContentGeneratorView(
     config: SubagentConfig,
     base: Config,
+    fallbackModelId?: string,
+    runtimeAuthOverrides?: AuthOverrides,
   ): Promise<RuntimeContentGeneratorView | undefined> {
     const resolvedModel = this.resolveModelOverride(config.model, base);
-    if (!resolvedModel) {
+    const modelId = resolvedModel?.modelId ?? fallbackModelId;
+    if (!modelId) {
       return undefined;
     }
 
     const authType =
-      resolvedModel.authType ?? base.getContentGeneratorConfig().authType;
-    const authOverrides = {
-      authType: authType as string,
-    };
+      resolvedModel?.authType ??
+      runtimeAuthOverrides?.authType ??
+      base.getContentGeneratorConfig().authType;
+    const authOverrides: AuthOverrides = resolvedModel
+      ? { authType: authType as string }
+      : {
+          ...runtimeAuthOverrides,
+          authType: authType as string,
+        };
 
     const view = await createRuntimeContentGeneratorView(
       base,
       base,
-      resolvedModel.modelId,
+      modelId,
       authOverrides,
     );
 
@@ -1091,6 +1113,13 @@ export class SubagentManager {
       (config.tools && config.tools.length > 0) ||
       (config.disallowedTools && config.disallowedTools.length > 0)
     ) {
+      // Unresolved names (e.g. `WebSearch` while the opt-in web_search tool
+      // is unregistered) stay in the list as dead, restrictive entries: an
+      // explicit allow-list must never be widened on resolution failure, so
+      // an agent whose every tool is unavailable runs tool-less (fail
+      // closed) rather than inheriting shell/write it was not configured
+      // for. Deliberate: this supersedes the earlier compatibility fallback
+      // for converted Claude agents.
       const toolNames = config.tools
         ? await this.transformToToolNames(config.tools)
         : ['*'];

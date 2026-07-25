@@ -34,6 +34,7 @@ interface AddWorkspaceDialogProps {
    * surfaces matching subdirectories in a listbox under the input.
    */
   onSuggest?: (prefix: string) => Promise<WorkspacePathSuggestions>;
+  persistenceSupported?: boolean;
 }
 
 const HINT_ID = 'add-workspace-hint';
@@ -51,6 +52,7 @@ export function AddWorkspaceDialog({
   onAdd,
   displayNameEnabled = false,
   onSuggest,
+  persistenceSupported = true,
 }: AddWorkspaceDialogProps) {
   const { t } = useI18n();
   const [path, setPath] = useState('');
@@ -196,11 +198,12 @@ export function AddWorkspaceDialog({
       setSubmitting(true);
       closeList();
       try {
+        const effectivePersist = persistenceSupported ? persist : false;
         const trimmedDisplayName = displayNameEnabled ? displayName.trim() : '';
         if (trimmedDisplayName) {
-          await onAdd(trimmed, persist, trimmedDisplayName);
+          await onAdd(trimmed, effectivePersist, trimmedDisplayName);
         } else {
-          await onAdd(trimmed, persist);
+          await onAdd(trimmed, effectivePersist);
         }
         onClose();
       } catch (err) {
@@ -216,6 +219,7 @@ export function AddWorkspaceDialog({
       displayName,
       displayNameEnabled,
       persist,
+      persistenceSupported,
       onAdd,
       onClose,
       closeList,
@@ -330,22 +334,24 @@ export function AddWorkspaceDialog({
               </FieldDescription>
             </Field>
           )}
-          <Field orientation="horizontal">
-            <FieldContent>
-              <FieldLabel htmlFor="add-workspace-persist">
-                {t('sidebar.addWorkspacePersist')}
-              </FieldLabel>
-              <FieldDescription>
-                {t('sidebar.addWorkspacePersistHint')}
-              </FieldDescription>
-            </FieldContent>
-            <Switch
-              id="add-workspace-persist"
-              checked={persist}
-              onCheckedChange={setPersist}
-              disabled={submitting}
-            />
-          </Field>
+          {persistenceSupported && (
+            <Field orientation="horizontal">
+              <FieldContent>
+                <FieldLabel htmlFor="add-workspace-persist">
+                  {t('sidebar.addWorkspacePersist')}
+                </FieldLabel>
+                <FieldDescription>
+                  {t('sidebar.addWorkspacePersistHint')}
+                </FieldDescription>
+              </FieldContent>
+              <Switch
+                id="add-workspace-persist"
+                checked={persist}
+                onCheckedChange={setPersist}
+                disabled={submitting}
+              />
+            </Field>
+          )}
         </FieldGroup>
         <div className="flex justify-end gap-2">
           <Button

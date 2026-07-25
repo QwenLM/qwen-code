@@ -92,6 +92,17 @@ export function createHealthDemoRoutes(
     }
     let failedWorkspaceId: string | undefined;
     try {
+      if (
+        workspaceRegistry
+          .listEntries()
+          .some((entry) => entry.state === 'blocked')
+      ) {
+        res.status(503).json({
+          status: 'degraded',
+          reason: 'workspace_runtime_blocked',
+        });
+        return;
+      }
       const runtimes = workspaceRegistry.listManaged();
       let sessions = 0;
       let pendingPermissions = 0;

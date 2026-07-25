@@ -74,6 +74,7 @@ export default {
   'Type your message or @path/to/file':
     'Escriviu el vostre missatge o @camí/al/fitxer',
   '? for shortcuts': '? per a dreceres',
+  'Pasting…': 'Enganxant…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Premeu 'i' per al mode INSERCIÓ i 'Esc' per al mode NORMAL.",
   'Cancel operation / Clear input (double press)':
@@ -1505,6 +1506,11 @@ export default {
   reviewed: 'revisades',
   'Code Changes:': 'Canvis de codi:',
   Performance: 'Rendiment',
+  'Generation Metrics': 'Mètriques de generació',
+  'Latest Request': 'Darrera sol·licitud',
+  'Generation Time': 'Temps de generació',
+  'Average TTFT': 'TTFT mitjà',
+  'Session TPS': 'TPS de la sessió',
   'Wall Time:': 'Temps real:',
   'Agent Active:': 'Agent actiu:',
   'API Time:': "Temps de l'API:",
@@ -2098,8 +2104,14 @@ export default {
     'Hi ha una versió nova de Qwen Code disponible! {{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!':
     'Qwen Code {{version}} està actualitzat!',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    "No s'han pogut comprovar les actualitzacions. Comproveu la xarxa o la configuració del registre.",
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    "No s'han pogut comprovar les actualitzacions ({{reason}}). Comproveu la xarxa o la configuració del registre.",
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    "S'ha omès la comprovació d'actualitzacions ({{reason}}) — executeu /update per tornar-ho a provar.",
+  'registry did not respond within {{seconds}}s':
+    'el registre no ha respost en {{seconds}}s',
+  'registry unreachable': 'no es pot accedir al registre',
+  'registry error': 'error del registre',
   'Unable to check for updates: {{reason}}':
     'No es poden comprovar les actualitzacions: {{reason}}',
   'Update successful! The new version will be used on your next run.':
@@ -2375,6 +2387,7 @@ export default {
   'toolDisplayName.CronDelete': 'Suprimeix tasca programada',
   'toolDisplayName.LoopWakeup': 'Desperta el bucle',
   'toolDisplayName.CreateSubSession': 'Crea subsessió',
+  'toolDisplayName.ListAgents': "Llista d'agents",
   'toolDisplayName.TaskCreate': 'Crea tasca',
   'toolDisplayName.TaskUpdate': 'Actualitza tasca',
   'toolDisplayName.TaskList': 'Llista tasques',

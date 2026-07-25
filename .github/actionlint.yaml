@@ -1,5 +1,7 @@
 self-hosted-runner:
   labels:
     - 'ecs-qwen'
+    - 'ecs-update-sg'
+    - 'ecs-update-64c'
 
 config-variables: null

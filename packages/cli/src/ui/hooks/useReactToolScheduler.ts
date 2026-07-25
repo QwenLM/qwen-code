@@ -199,7 +199,6 @@ export function useReactToolScheduler(
     () =>
       new CoreToolScheduler({
         config,
-        chatRecordingService: config.getChatRecordingService(),
         outputUpdateHandler,
         onAllToolCallsComplete: allToolCallsCompleteHandler,
         onToolCallsUpdate: toolCallsUpdateHandler,
@@ -252,15 +251,6 @@ export function useReactToolScheduler(
                 message,
                 message,
               );
-              config
-                .getChatRecordingService()
-                ?.recordToolResult(responseParts, {
-                  callId: toolRequest.callId,
-                  status: 'error',
-                  resultDisplay: message,
-                  error: toolError,
-                  errorType: ToolErrorType.UNHANDLED_EXCEPTION,
-                });
               return {
                 status: 'error',
                 request: toolRequest,

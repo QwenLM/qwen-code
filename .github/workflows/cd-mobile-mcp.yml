@@ -8,6 +8,7 @@ on:
       version:
         description: 'Version to publish (without v prefix, e.g. 0.1.0)'
         required: true
+        default: '0.1.5'
       dry_run:
         description: 'Dry run (build only, no publish)'
         required: false
@@ -56,7 +57,12 @@ jobs:
 
       - name: 'Test'
         working-directory: 'packages/mobile-mcp'
-        run: 'npx playwright test test/coord-norm.test.ts test/mobile-ui-dump.test.ts'
+        run: >-
+          npx playwright test
+          test/coord-norm.test.ts
+          test/mobile-ui-dump.test.ts
+          test/payload-filter.test.ts
+          test/server-payload-filter.test.ts
 
       - name: 'Publish'
         if: '${{ !inputs.dry_run }}'

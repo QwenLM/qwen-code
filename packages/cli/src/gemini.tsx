@@ -18,6 +18,7 @@ import {
   setStartupEventSink,
   createDebugLogger,
   persistSessionUsage,
+  PRIVATE_ACP_CAPABILITY_ENV,
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import dns from 'node:dns';
@@ -180,6 +181,7 @@ Stack trace:
 ${reason.stack}`
         : ''
     }`;
+    debugLogger.error(errorMessage);
     appEvents.emit(AppEvent.LogError, errorMessage);
     if (!unhandledRejectionOccurred) {
       unhandledRejectionOccurred = true;
@@ -285,6 +287,9 @@ export async function main() {
   setupUnhandledRejectionHandler();
   initializeWarningHandler();
 
+  const privateAcpParentCapability = process.env[PRIVATE_ACP_CAPABILITY_ENV];
+  delete process.env[PRIVATE_ACP_CAPABILITY_ENV];
+
   if (process.argv.includes('--bare')) {
     process.env[QWEN_CODE_SIMPLE_ENV_VAR] = '1';
   }
@@ -297,6 +302,11 @@ export async function main() {
   let argv = await parseArguments();
   markAcpStartup('argsParseEnd');
   profileCheckpoint('after_parse_arguments');
+  const isAcpMode = argv.acp || argv.experimentalAcp;
+  const privateAcpChildEnv =
+    isAcpMode && privateAcpParentCapability !== undefined
+      ? { [PRIVATE_ACP_CAPABILITY_ENV]: privateAcpParentCapability }
+      : undefined;
 
   if (
     (argv.acp || argv.experimentalAcp) &&
@@ -546,7 +556,13 @@ export async function main() {
 
       await relaunchOnExitCode(
         () =>
-          start_sandbox(sandboxConfig, memoryArgs, partialConfig, sandboxArgs),
+          start_sandbox(
+            sandboxConfig,
+            memoryArgs,
+            partialConfig,
+            sandboxArgs,
+            privateAcpChildEnv,
+          ),
         {
           onUpdateRelaunch,
         },
@@ -557,6 +573,7 @@ export async function main() {
       // restarted if needed.
       await relaunchAppInChildProcess(memoryArgs, [], {
         afterSpawn: clearCorruptionEnvVars,
+        childEnv: privateAcpChildEnv,
         onUpdateRelaunch,
       });
     }
@@ -924,7 +941,11 @@ export async function main() {
       markAcpStartup('acpImportStart');
       const { runAcpAgent } = await import('./acp-integration/acpAgent.js');
       markAcpStartup('acpImportEnd');
-      await runAcpAgent(config, settings, argv);
+      await runAcpAgent(config, settings, argv, {
+        privateParentCapability: isAcpMode
+          ? privateAcpParentCapability
+          : undefined,
+      });
       // Clean up child processes and force exit, matching other non-interactive modes
       await runExitCleanup();
       process.exit(0);

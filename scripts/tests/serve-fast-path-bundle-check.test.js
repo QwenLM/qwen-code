@@ -469,6 +469,40 @@ describe('ACP import boundary check', () => {
     expect(findAcpImportBoundaryOffenders(metafile)).toEqual([]);
   });
 
+  it('reports a statically imported Google GenAI SDK', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [staticImport('dist/chunks/google-genai.js')],
+      }),
+      'dist/chunks/google-genai.js': output({
+        bytes: 1_196_331,
+        inputs: ['node_modules/@google/genai/dist/node/index.mjs'],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual([
+      expect.objectContaining({
+        label: 'Google GenAI SDK',
+        matchedInput: 'node_modules/@google/genai/dist/node/index.mjs',
+      }),
+    ]);
+  });
+
+  it('allows the Google GenAI SDK behind dynamic imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [dynamicImport('dist/chunks/google-genai.js')],
+      }),
+      'dist/chunks/google-genai.js': output({
+        inputs: ['node_modules/@google/genai/dist/node/index.mjs'],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual([]);
+  });
+
   it('reads a metafile path and returns ACP boundary offenders', () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'acp-import-boundary-'));
     try {

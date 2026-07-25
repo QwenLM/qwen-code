@@ -110,6 +110,18 @@ type TestableAcpBridge = AcpBridge & {
   resolveChannelLoopToolHandler(sessionId: string): ChannelLoopToolHandler;
 };
 
+function requestPermission(sessionId: string, toolCallId: string) {
+  return child.clients[0]!.requestPermission({
+    sessionId,
+    toolCall: {
+      toolCallId,
+      kind: 'shell',
+      title: 'Run command',
+    },
+    options: [{ optionId: 'cancel', name: 'Deny' }],
+  });
+}
+
 describe('AcpBridge', () => {
   beforeEach(() => {
     child.instances.length = 0;
@@ -869,24 +881,8 @@ describe('AcpBridge', () => {
     bridge.on('permissionResolved', permissionResolved);
 
     await bridge.start();
-    const first = child.clients[0]!.requestPermission({
-      sessionId: 'session-1',
-      toolCall: {
-        toolCallId: 'tool-1',
-        kind: 'shell',
-        title: 'Run command',
-      },
-      options: [{ optionId: 'cancel', name: 'Deny' }],
-    });
-    const second = child.clients[0]!.requestPermission({
-      sessionId: 'session-2',
-      toolCall: {
-        toolCallId: 'tool-2',
-        kind: 'shell',
-        title: 'Run command',
-      },
-      options: [{ optionId: 'cancel', name: 'Deny' }],
-    });
+    const first = requestPermission('session-1', 'tool-1');
+    const second = requestPermission('session-2', 'tool-2');
     await Promise.resolve();
 
     const firstEvent = permissionRequest.mock.calls[0]![0];
