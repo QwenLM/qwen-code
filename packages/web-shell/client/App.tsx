@@ -1374,6 +1374,8 @@ export function App({
   const workspaceDisplayNameSupported =
     workspace.capabilities?.features?.includes('workspace_display_name') ===
     true;
+  const gitHubPrsSupported =
+    workspace.capabilities?.features?.includes('workspace_github_prs') === true;
   const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(false);
   const [workspaceMutationBusy, setWorkspaceMutationBusy] = useState(false);
   const workspaceMutationTokenRef = useRef<symbol | null>(null);
@@ -5041,6 +5043,18 @@ export function App({
             setGitDialog({ workspaceCwd: gitDiffWorkspaceCwd, view: 'log' });
             return true;
           }
+          if (cmd === 'prs') {
+            if (!gitDiffWorkspaceCwd) {
+              pushToast('info', t('localCommand.prsNoWorkspace'));
+              return true;
+            }
+            if (!gitHubPrsSupported) {
+              pushToast('info', t('localCommand.prsUnsupported'));
+              return true;
+            }
+            setGitDialog({ workspaceCwd: gitDiffWorkspaceCwd, view: 'prs' });
+            return true;
+          }
           if (cmd === 'tasks') {
             openTasksPanel();
             return true;
@@ -5840,6 +5854,7 @@ export function App({
       openGoals,
       createNewSession,
       gitDiffWorkspaceCwd,
+      gitHubPrsSupported,
       handleBusyGoalClear,
       handleGoalSlashCommand,
       handleThemeChange,

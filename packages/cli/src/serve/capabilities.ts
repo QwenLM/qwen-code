@@ -181,6 +181,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // explicit consent. The route reuses the interactive `/setup-github`
   // release lookup, workflow download, and `.gitignore` update logic.
   workspace_github_setup: { since: 'v1' },
+  // `GET /workspaces/:workspace/github/prs` lists the open pull requests
+  // of the workspace's GitHub remote via the `gh` CLI (read-only). The
+  // tag means the route contract exists; runtime availability of `gh`
+  // and its auth is reported per-request through the
+  // `github_cli_unavailable` / `github_prs_failed` error codes.
+  workspace_github_prs: { since: 'v1' },
   // `POST /workspace/mcp/:server/restart` performs
   // a single-server MCP restart (disconnect + reconnect + rediscover)
   // through the ACP child's `McpClientManager`. Pre-checks the live

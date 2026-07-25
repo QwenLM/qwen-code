@@ -103,6 +103,12 @@ const {
     workspaceByCwd: vi.fn(() => ({
       workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
       workspaceSkills: loadSkillsStatus,
+      workspaceGitHubPullRequests: vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/workspace',
+        available: true,
+        pullRequests: [],
+      }),
     })),
     sessionStatus: vi.fn(() => Promise.resolve({})),
   };
@@ -5411,6 +5417,37 @@ describe('App session callbacks', () => {
     expect(
       container.querySelector('[data-testid="dialog-shell"]'),
     ).not.toBeNull();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('opens the Pull requests dialog for /prs when the daemon supports it', async () => {
+    mockWorkspace.capabilities = {
+      features: ['workspace_github_prs'],
+      workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/prs';
+    await clickSubmit(container);
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('does not open the Pull requests dialog for /prs without the capability', async () => {
+    // Default capabilities carry no features — /prs only shows a toast.
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/prs';
+    await clickSubmit(container);
+    await flush();
+
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
   });
 

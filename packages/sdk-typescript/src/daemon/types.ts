@@ -217,6 +217,43 @@ export interface DaemonGitCommitDetail {
   hiddenCount?: number;
 }
 
+/** Review decision for an open pull request, lowercased from GitHub's enum. */
+export type DaemonGitHubPullRequestReviewDecision =
+  | 'approved'
+  | 'changes_requested'
+  | 'review_required';
+
+/** Aggregated CI rollup state for an open pull request. */
+export type DaemonGitHubPullRequestChecks =
+  | 'passing'
+  | 'failing'
+  | 'pending'
+  | 'none';
+
+/** A single open pull request in the list. */
+export interface DaemonGitHubPullRequest {
+  number: number;
+  title: string;
+  url: string;
+  /** Author login, or empty when the account was deleted. */
+  author: string;
+  headRefName: string;
+  state: 'open' | 'draft';
+  reviewDecision: DaemonGitHubPullRequestReviewDecision | null;
+  checks: DaemonGitHubPullRequestChecks;
+  /** Unix timestamp in seconds. */
+  updatedAt: number;
+}
+
+/** Response from `GET /workspaces/:workspace/github/prs`. */
+export interface DaemonGitHubPullRequestList {
+  v: 1;
+  workspaceCwd: string;
+  /** `false` when the workspace is not a git repository. */
+  available: boolean;
+  pullRequests: DaemonGitHubPullRequest[];
+}
+
 /** Capabilities envelope returned from `GET /capabilities`. */
 export interface DaemonCapabilities {
   v: 1;

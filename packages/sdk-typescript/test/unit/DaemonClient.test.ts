@@ -941,6 +941,36 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('reads workspace-qualified GitHub pull requests over REST', async () => {
+      const list = {
+        v: 1 as const,
+        workspaceCwd: '/work/secondary',
+        available: true,
+        pullRequests: [
+          {
+            number: 42,
+            title: 'Add a thing',
+            url: 'https://github.com/o/r/pull/42',
+            author: 'octocat',
+            headRefName: 'feat/thing',
+            state: 'open' as const,
+            reviewDecision: 'approved' as const,
+            checks: 'passing' as const,
+            updatedAt: 1_800_000_000,
+          },
+        ],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, list));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.workspaceByCwd('/work/secondary').workspaceGitHubPullRequests(),
+      ).resolves.toEqual(list);
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        ['GET', 'http://daemon/workspaces/%2Fwork%2Fsecondary/github/prs'],
+      ]);
+    });
+
     it('lets ACP preheat wait longer than the client default timeout', async () => {
       let resolveResponse: ((value: Response) => void) | undefined;
       const slowFetch = vi.fn(
