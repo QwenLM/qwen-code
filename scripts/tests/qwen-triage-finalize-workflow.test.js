@@ -15,6 +15,10 @@ const workflowText = readFileSync(
   '.github/workflows/qwen-triage-finalize.yml',
   'utf8',
 );
+const triageWorkflowText = readFileSync(
+  '.github/workflows/qwen-triage.yml',
+  'utf8',
+);
 const workflow = parse(workflowText);
 const script = workflow.jobs.finalize.steps[0].run;
 
@@ -139,6 +143,14 @@ describe('qwen-triage-finalize workflow', () => {
     expect(workflowText).toContain(
       "HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'",
     );
+  });
+
+  it('uses the same status marker as the triage workflow', () => {
+    const triageStatusMarker =
+      triageWorkflowText.match(/MARKER='([^']+)'/)?.[1];
+    const finalizeStatusMarker = script.match(/STATUS_MARKER='([^']+)'/)?.[1];
+
+    expect(finalizeStatusMarker).toBe(triageStatusMarker);
   });
 
   it('sanitizes attacker-influenced check names before the table', () => {
