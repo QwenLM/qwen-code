@@ -41,14 +41,14 @@ export function GitDialog({
   gitCwd,
   initialView,
   sessionId,
-  getOrCreateSessionId,
+  resolveSessionForWorkspace,
   onClose,
 }: {
   workspaceCwd: string;
   gitCwd?: string;
   initialView: GitDialogView;
   sessionId?: string;
-  getOrCreateSessionId?: () => Promise<string | undefined>;
+  resolveSessionForWorkspace?: (cwd: string) => Promise<string | undefined>;
   onClose: () => void;
 }) {
   const { t } = useI18n();
@@ -95,8 +95,8 @@ export function GitDialog({
 
     const resolveSession = sessionId
       ? Promise.resolve(sessionId)
-      : getOrCreateSessionId
-        ? getOrCreateSessionId()
+      : resolveSessionForWorkspace
+        ? resolveSessionForWorkspace(workspaceCwd)
         : Promise.resolve(undefined);
 
     resolveSession
@@ -143,7 +143,14 @@ export function GitDialog({
     return () => {
       abort.abort();
     };
-  }, [isCommit, sessionId, getOrCreateSessionId, client, workspaceCwd, gitCwd]);
+  }, [
+    isCommit,
+    sessionId,
+    resolveSessionForWorkspace,
+    client,
+    workspaceCwd,
+    gitCwd,
+  ]);
 
   // Clamp if the PR tab vanishes mid-session.
   const clampedTab = tabViews.includes(
@@ -228,8 +235,8 @@ export function GitDialog({
 
     const resolveSession = sessionId
       ? Promise.resolve(sessionId)
-      : getOrCreateSessionId
-        ? getOrCreateSessionId()
+      : resolveSessionForWorkspace
+        ? resolveSessionForWorkspace(workspaceCwd)
         : Promise.resolve(undefined);
 
     setPrGenerating(true);
@@ -326,7 +333,7 @@ export function GitDialog({
     prFormOpen,
     isCommit,
     sessionId,
-    getOrCreateSessionId,
+    resolveSessionForWorkspace,
     client,
     workspaceCwd,
     gitCwd,

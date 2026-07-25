@@ -6782,9 +6782,7 @@ export function App({
               gitCwd={gitDialog.gitCwd}
               initialView={gitDialog.view}
               sessionId={connection.sessionId}
-              getOrCreateSessionId={() =>
-                resolveSessionForWorkspace(gitDialog.workspaceCwd)
-              }
+              resolveSessionForWorkspace={resolveSessionForWorkspace}
               onClose={() => setGitDialog(undefined)}
             />
           )}
