@@ -7,7 +7,11 @@
 import type { DaemonClient } from '@qwen-code/sdk';
 import type { AuditRecorder } from '../auditLog.js';
 import type { Policy } from './loader.js';
-import { evaluate, type QuotaOracle } from './evaluator.js';
+import {
+  evaluate,
+  type PolicyDecision,
+  type QuotaOracle,
+} from './evaluator.js';
 import type { QuotaStore } from './quotas.js';
 import { selectAllowOnceOptionId } from '../permissionOptions.js';
 import { frameToContext } from './frameContext.js';
@@ -19,6 +23,21 @@ function readString(
 ): string | undefined {
   const v = obj[key];
   return typeof v === 'string' ? v : undefined;
+}
+
+/**
+ * The site-derivable "why" token for a resolved decision (P4). Derived
+ * purely from the decision the enforcer already holds — no trace recompute.
+ * `eval-error` is NOT produced here (that branch has no PolicyDecision); the
+ * catch site sets it literally. Near-miss causes (quota-exhausted, expired,
+ * outside-time-window) make a rule fall through to source:'default', so they
+ * are indistinguishable here from a genuine no-match — they surface only in
+ * the explain trace, never in this token.
+ */
+export function policyDecisionReason(d: PolicyDecision): string {
+  if (d.source === 'default') return 'default';
+  if (d.usedDeferredField) return 'rule-downgraded-deferred';
+  return `rule-${d.action}`;
 }
 
 /**
@@ -38,8 +57,11 @@ function readString(
  *   an unexpected throw there takes the same no-vote path as a `prompt`
  *   decision, rather than escaping this method.
  * - **Audit hygiene:** `policy_decision` detail carries only
- *   `{requestId, action, ruleId?, voted, decisionSource}` — NEVER the tool
- *   args/paths/prompt. `decisionSource` is `'policy'|'default'` (a fixed token).
+ *   `{requestId, action, ruleId?, voted, decisionSource, reason, quotaRemaining?}`
+ *   — NEVER the tool args/paths/prompt. `decisionSource` is `'policy'|'default'`
+ *   (a fixed token); `reason` is the closed-enum "why" token from
+ *   {@link policyDecisionReason} (or the literal `'eval-error'` on the
+ *   eval-error fail-safe path).
  */
 export class PolicyEnforcer {
   constructor(
@@ -127,6 +149,7 @@ export class PolicyEnforcer {
           action: 'prompt',
           voted: false,
           decisionSource: 'default',
+          reason: 'eval-error',
         },
       });
       return false;
@@ -162,6 +185,7 @@ export class PolicyEnforcer {
                 ruleId: d.ruleId,
                 voted: true,
                 decisionSource: d.source,
+                reason: policyDecisionReason(d),
                 ...(quotaRemaining !== undefined ? { quotaRemaining } : {}),
               },
             });
@@ -180,6 +204,7 @@ export class PolicyEnforcer {
           ruleId: d.ruleId,
           voted: false,
           decisionSource: d.source,
+          reason: policyDecisionReason(d),
         },
       });
       return false;
@@ -203,6 +228,7 @@ export class PolicyEnforcer {
                 ruleId: d.ruleId,
                 voted: true,
                 decisionSource: d.source,
+                reason: policyDecisionReason(d),
               },
             });
             return true;
@@ -220,6 +246,7 @@ export class PolicyEnforcer {
           ruleId: d.ruleId,
           voted: false,
           decisionSource: d.source,
+          reason: policyDecisionReason(d),
         },
       });
       return false;
@@ -238,6 +265,7 @@ export class PolicyEnforcer {
         ruleId: d.ruleId,
         voted: false,
         decisionSource: d.source,
+        reason: policyDecisionReason(d),
       },
     });
     return false;

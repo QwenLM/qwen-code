@@ -4,12 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi } from 'vitest';
 import { DaemonClient } from '@qwen-code/sdk';
 import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
 import type { AuditEntry, AuditRecorder } from '../auditLog.js';
 import type { Policy } from './loader.js';
-import { PolicyEnforcer } from './enforcer.js';
+import { PolicyEnforcer, policyDecisionReason } from './enforcer.js';
+import type { PolicyDecision } from './evaluator.js';
+import * as evaluatorMod from './evaluator.js';
 
 /** Fake audit recorder collecting entries; never throws. */
 function fakeAudit(): { entries: AuditEntry[]; recorder: AuditRecorder } {
@@ -95,6 +97,45 @@ afterEach(async () => {
   if (stub) await stub.close();
   stub = undefined;
 });
+
+const dec = (over: Partial<PolicyDecision>): PolicyDecision => ({
+  action: 'allow',
+  source: 'policy',
+  usedDeferredField: false,
+  ...over,
+});
+
+describe('policyDecisionReason', () => {
+  it('maps a matched allow/deny/prompt to rule-<action>', () => {
+    expect(policyDecisionReason(dec({ action: 'allow' }))).toBe('rule-allow');
+    expect(policyDecisionReason(dec({ action: 'deny' }))).toBe('rule-deny');
+    expect(policyDecisionReason(dec({ action: 'prompt' }))).toBe('rule-prompt');
+  });
+  it('maps a no-rule-match default to "default" regardless of action', () => {
+    expect(
+      policyDecisionReason(dec({ source: 'default', action: 'prompt' })),
+    ).toBe('default');
+    expect(
+      policyDecisionReason(dec({ source: 'default', action: 'allow' })),
+    ).toBe('default');
+  });
+  it('maps a matched-but-unevaluable downgrade to rule-downgraded-deferred', () => {
+    expect(
+      policyDecisionReason(dec({ action: 'prompt', usedDeferredField: true })),
+    ).toBe('rule-downgraded-deferred');
+  });
+  it('does not emit near-miss tokens (quota/expired/time-window)', () => {
+    // an exhausted/expired rule falls through to source:'default'
+    expect(policyDecisionReason(dec({ source: 'default' }))).toBe('default');
+  });
+});
+
+const policyDecisionDetail = (audit: {
+  entries: Array<{ action: string; detail?: unknown }>;
+}) =>
+  audit.entries.find((e) => e.action === 'policy_decision')?.detail as
+    | Record<string, unknown>
+    | undefined;
 
 describe('PolicyEnforcer', () => {
   it('allow + options + 200 → votes selected, returns true, audits voted:true', async () => {
@@ -414,5 +455,63 @@ describe('PolicyEnforcer', () => {
       permissionEvent('execute', { command: 'ls' }),
     );
     expect(handled).toBe(false); // no match → falls through to a human
+  });
+
+  it("reason 'rule-deny' on a rule-decided deny", async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const enf = new PolicyEnforcer(daemon, denyExecute, audit.recorder);
+
+    await enf.handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
+    expect(policyDecisionDetail(audit)).toMatchObject({
+      action: 'deny',
+      decisionSource: 'policy',
+      reason: 'rule-deny',
+    });
+  });
+
+  it("reason 'default' on a no-rule-match", async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const enf = new PolicyEnforcer(daemon, emptyPolicy, audit.recorder);
+
+    await enf.handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
+    expect(policyDecisionDetail(audit)).toMatchObject({
+      decisionSource: 'default',
+      reason: 'default',
+    });
+  });
+
+  it("reason 'eval-error' when evaluation throws (fail-safe)", async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const enf = new PolicyEnforcer(daemon, allowExecute, audit.recorder);
+
+    const spy = vi
+      .spyOn(evaluatorMod, 'evaluate')
+      .mockImplementationOnce(() => {
+        throw new Error('boom');
+      });
+
+    await enf.handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
+    expect(policyDecisionDetail(audit)).toMatchObject({
+      action: 'prompt',
+      decisionSource: 'default',
+      reason: 'eval-error',
+    });
+    expect(spy).toHaveBeenCalled();
+    spy.mockRestore();
   });
 });
