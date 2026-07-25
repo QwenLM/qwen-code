@@ -25,6 +25,11 @@ describe('inline math recognition', () => {
     expect(findInlineMathExpressions('$a$$b$')).toEqual([]);
   });
 
+  it('rejects formulas whose closing dollar is escaped', () => {
+    expect(findInlineMathExpressions(String.raw`A $x\$ B`)).toEqual([]);
+    expect(findInlineMathExpressions(String.raw`Total $a b\$ end`)).toEqual([]);
+  });
+
   it('ignores inline code spans and unclosed formulas', () => {
     expect(findInlineMathExpressions('Use `$xy$` then $z$ and $open')).toEqual([
       'z',
