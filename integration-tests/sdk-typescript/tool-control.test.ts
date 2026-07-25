@@ -453,12 +453,27 @@ describe('Tool Control Parameters (E2E)', () => {
       'should block edit operations on specific path patterns with excludeTools',
       async () => {
         await helper.createFile('src/app.ts', 'const app = "original";');
-        await helper.createFile('test/spec.ts', 'describe("test", () => {});');
         await helper.createFile('readme.md', '# Readme');
 
         const fakeServer = await startFakeOpenAIServer(
           ({ requestIndex }) => {
             if (requestIndex === 0) {
+              return {
+                toolCalls: [
+                  fakeToolCall(
+                    'read_file',
+                    { file_path: helper.getPath('src/app.ts') },
+                    'read-src',
+                  ),
+                  fakeToolCall(
+                    'read_file',
+                    { file_path: helper.getPath('readme.md') },
+                    'read-readme',
+                  ),
+                ],
+              };
+            }
+            if (requestIndex === 1) {
               return {
                 toolCalls: [
                   fakeToolCall(
@@ -488,8 +503,7 @@ describe('Tool Control Parameters (E2E)', () => {
         );
 
         const q = query({
-          prompt:
-            'Use the edit tool to modify src/app.ts (add a semicolon), edit test/spec.ts (add a test case), and edit readme.md (add a line).',
+          prompt: 'Use the edit tool to modify src/app.ts and readme.md.',
           options: {
             ...SHARED_TEST_OPTIONS,
             ...fakeModelOptions(fakeServer.baseUrl),
@@ -856,10 +870,6 @@ describe('Tool Control Parameters (E2E)', () => {
     it(
       'should auto-approve specific path patterns with allowedTools',
       async () => {
-        await helper.createFile('config.json', '{"key": "value"}');
-        await helper.createFile('data.txt', 'text data');
-        await helper.createFile('.env', 'SECRET=secret');
-
         const canUseToolCalls: string[] = [];
         const fakeServer = await startFakeOpenAIServer(
           ({ requestIndex }) => {
@@ -867,19 +877,20 @@ describe('Tool Control Parameters (E2E)', () => {
               return {
                 toolCalls: [
                   fakeToolCall(
-                    'read_file',
-                    { file_path: helper.getPath('config.json') },
-                    'read-json',
+                    'write_file',
+                    {
+                      file_path: helper.getPath('config.json'),
+                      content: '{"key": "value"}',
+                    },
+                    'write-json',
                   ),
                   fakeToolCall(
-                    'read_file',
-                    { file_path: helper.getPath('data.txt') },
-                    'read-txt',
-                  ),
-                  fakeToolCall(
-                    'read_file',
-                    { file_path: helper.getPath('.env') },
-                    'read-env',
+                    'write_file',
+                    {
+                      file_path: helper.getPath('.env'),
+                      content: 'SECRET=secret',
+                    },
+                    'write-env',
                   ),
                 ],
               };
@@ -890,19 +901,18 @@ describe('Tool Control Parameters (E2E)', () => {
         );
 
         const q = query({
-          prompt: 'Read config.json, data.txt, and .env files.',
+          prompt: 'Write config.json and .env files.',
           options: {
             ...SHARED_TEST_OPTIONS,
             ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'default',
-            // Auto-approve reading .json and .txt files
-            allowedTools: ['Read(.json)', 'Read(.txt)'],
+            allowedTools: ['Edit(*.json)'],
             canUseTool: async (toolName) => {
               canUseToolCalls.push(toolName);
               return {
                 behavior: 'deny',
-                message: 'Should not be called for allowed patterns',
+                message: 'Non-allowed paths should trigger this',
               };
             },
             debug: false,
@@ -918,30 +928,23 @@ describe('Tool Control Parameters (E2E)', () => {
 
           assertSuccessfulCompletion(messages);
 
-          const readResults = findToolResults(messages, 'read_file');
-
-          // .json and .txt should be auto-approved (no canUseTool)
-          const jsonResult = readResults.find(
-            (r) => r.toolUseId === 'read-json',
+          const writeResults = findToolResults(messages, 'write_file');
+          const jsonResult = writeResults.find(
+            (r) => r.toolUseId === 'write-json',
           );
           expect(jsonResult).toBeDefined();
           expect(jsonResult!.isError).toBe(false);
-          expect(jsonResult!.content).toContain('"key"');
+          expect(await helper.readFile('config.json')).toBe('{"key": "value"}');
 
-          const txtResult = readResults.find(
-            (r) => r.toolUseId === 'read-txt',
-          );
-          expect(txtResult).toBeDefined();
-          expect(txtResult!.isError).toBe(false);
-          expect(txtResult!.content).toContain('text data');
-
-          // .env should trigger canUseTool and be denied
-          const envResult = readResults.find(
-            (r) => r.toolUseId === 'read-env',
+          const envResult = writeResults.find(
+            (r) => r.toolUseId === 'write-env',
           );
           expect(envResult).toBeDefined();
-          expect(envResult!.isError).toBe(true);
-          expect(canUseToolCalls).toContain('read_file');
+          expect(envResult!.content).toContain(
+            '[Operation Cancelled] Reason: Non-allowed paths should trigger this',
+          );
+          expect(helper.fileExists('.env')).toBe(false);
+          expect(canUseToolCalls).toEqual(['write_file']);
         } finally {
           await q.close();
           await fakeServer.close();
@@ -966,18 +969,8 @@ describe('Tool Control Parameters (E2E)', () => {
                   ),
                   fakeToolCall(
                     'run_shell_command',
-                    { command: 'echo build' },
-                    'shell-echo-build',
-                  ),
-                  fakeToolCall(
-                    'run_shell_command',
-                    { command: 'pwd' },
-                    'shell-pwd',
-                  ),
-                  fakeToolCall(
-                    'run_shell_command',
-                    { command: 'whoami' },
-                    'shell-whoami',
+                    { command: 'touch blocked.txt' },
+                    'shell-touch',
                   ),
                 ],
               };
@@ -988,8 +981,7 @@ describe('Tool Control Parameters (E2E)', () => {
         );
 
         const q = query({
-          prompt:
-            'Run "echo test", "echo build", "pwd", and "whoami" commands.',
+          prompt: 'Run "echo test" and "touch blocked.txt" commands.',
           options: {
             ...SHARED_TEST_OPTIONS,
             ...fakeModelOptions(fakeServer.baseUrl),
@@ -1026,26 +1018,15 @@ describe('Tool Control Parameters (E2E)', () => {
           expect(echoTestResult).toBeDefined();
           expect(echoTestResult!.isError).toBe(false);
 
-          const echoBuildResult = shellResults.find(
-            (r) => r.toolUseId === 'shell-echo-build',
+          const touchResult = shellResults.find(
+            (r) => r.toolUseId === 'shell-touch',
           );
-          expect(echoBuildResult).toBeDefined();
-          expect(echoBuildResult!.isError).toBe(false);
-
-          // pwd and whoami should trigger canUseTool and be denied
-          const pwdResult = shellResults.find(
-            (r) => r.toolUseId === 'shell-pwd',
+          expect(touchResult).toBeDefined();
+          expect(touchResult!.content).toContain(
+            '[Operation Cancelled] Reason: Non-allowed tools should trigger this',
           );
-          expect(pwdResult).toBeDefined();
-          expect(pwdResult!.isError).toBe(true);
-
-          const whoamiResult = shellResults.find(
-            (r) => r.toolUseId === 'shell-whoami',
-          );
-          expect(whoamiResult).toBeDefined();
-          expect(whoamiResult!.isError).toBe(true);
-
-          expect(canUseToolCalls).toContain('run_shell_command');
+          expect(helper.fileExists('blocked.txt')).toBe(false);
+          expect(canUseToolCalls).toEqual(['run_shell_command']);
         } finally {
           await q.close();
           await fakeServer.close();

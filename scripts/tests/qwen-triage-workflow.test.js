@@ -184,6 +184,32 @@ describe('qwen-triage tmux workflow', () => {
     expect(run({ RESPONSE: 'null' }).status).not.toBe(0);
   });
 
+  it('verifies fresh bot-authored triage output instead of the status marker', () => {
+    const verifyStep = step('Verify triage output posted');
+
+    expect(verifyStep).toContain('--method GET');
+    expect(verifyStep).toContain('--paginate');
+    expect(verifyStep).toContain('jq -rs');
+    expect(verifyStep).toContain("BOT_LOGIN=\"$(gh api user --jq '.login'");
+    expect(verifyStep).toContain('<!-- qwen-triage stage=1 -->');
+    expect(verifyStep).toContain('<!-- qwen-triage terminal-review -->');
+    expect(verifyStep).toContain('.user.login == $bot');
+    expect(verifyStep).toContain('.body | startswith($marker)');
+    expect(verifyStep).toContain('.state == "CHANGES_REQUESTED"');
+    expect(verifyStep).toContain('.updated_at >= $since');
+    expect(verifyStep).toContain('.submitted_at >= $since');
+    expect(verifyStep).toContain(
+      "STARTED_AT: '${{ steps.resolve.outputs.started_at }}'",
+    );
+    expect(verifyStep).not.toContain('stage=status');
+    expect(prSkill).toContain(
+      'review whose body starts with `<!-- qwen-triage terminal-review -->`',
+    );
+    expect(prSkill).toContain(
+      '(.body | startswith("<!-- qwen-triage terminal-review -->"))',
+    );
+  });
+
   it('notifies the author when a manual triage re-run posts no review', () => {
     const notifyStep = step('Notify silent triage re-run');
 

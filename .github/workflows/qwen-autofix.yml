@@ -1012,16 +1012,18 @@ jobs:
       - name: 'Flake detection'
         id: 'flake'
         if: |-
-          ${{ steps.decision.outputs.go_issue != '' && needs.route.outputs.dry_run != 'true' }}
+          ${{ steps.decision.outputs.go_issue != '' }}
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
+          DRY_RUN: '${{ needs.route.outputs.dry_run }}'
         run: |-
           set -euo pipefail
           IS_FLAKE=false
 
           # Only applies to auto-filed CI failure issues.
-          TITLE="$(gh issue view "${ISSUE}" --repo "${REPO}" --json title --jq '.title')"
+          ISSUE_JSON="$(gh issue view "${ISSUE}" --repo "${REPO}" --json title,body)"
+          TITLE="$(jq -r '.title' <<< "${ISSUE_JSON}")"
           if [[ "${TITLE}" != Main\ CI\ failed:* ]]; then
             echo "Not a CI failure issue; skipping flake detection."
             echo "is_flake=false" >> "${GITHUB_OUTPUT}"
@@ -1029,7 +1031,7 @@ jobs:
           fi
 
           # Extract the failed run ID from the issue body.
-          BODY="$(gh issue view "${ISSUE}" --repo "${REPO}" --json body --jq '.body')"
+          BODY="$(jq -r '.body' <<< "${ISSUE_JSON}")"
           RUN_ID="$(grep -oP 'Run ID: \K[0-9]+' <<< "${BODY}" || true)"
           if [[ -z "${RUN_ID}" ]]; then
             echo "Could not extract run ID from issue body; proceeding normally."
@@ -1037,22 +1039,29 @@ jobs:
             exit 0
           fi
 
-          # Get the workflow name and head SHA from the failed run.
+          # Get authoritative metadata for the failed run.
           RUN_JSON="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}" \
-            --jq '{name: .name, sha: .head_sha, created: .created_at}' 2>/dev/null || true)"
+            --jq '{name: .name, workflow_id: .workflow_id, branch: .head_branch, event: .event, conclusion: .conclusion, created: .created_at}' 2>/dev/null || true)"
           if [[ -z "${RUN_JSON}" ]]; then
             echo "Failed to fetch run ${RUN_ID}; proceeding normally."
             echo "is_flake=false" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
+          if [[ "$(jq -r '.branch' <<< "${RUN_JSON}")" != 'main' ||
+                "$(jq -r '.event' <<< "${RUN_JSON}")" != 'push' ||
+                "$(jq -r '.conclusion' <<< "${RUN_JSON}")" != 'failure' ]]; then
+            echo "Run ${RUN_ID} is not a failed main push; proceeding normally."
+            echo "is_flake=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
           WF_NAME="$(jq -r '.name' <<< "${RUN_JSON}")"
-          FAILED_SHA="$(jq -r '.sha' <<< "${RUN_JSON}")"
+          WF_ID="$(jq -r '.workflow_id' <<< "${RUN_JSON}")"
           FAILED_AT="$(jq -r '.created' <<< "${RUN_JSON}")"
 
           # Check if any subsequent run of the same workflow on main succeeded.
-          LATER_GREEN="$(gh api "repos/${REPO}/actions/runs" \
-            -F branch=main -F event=push -F per_page=10 \
-            --jq "[.workflow_runs[] | select(.name == \"${WF_NAME}\" and .conclusion == \"success\" and .created_at > \"${FAILED_AT}\")] | length" \
+          LATER_GREEN="$(gh api --method GET "repos/${REPO}/actions/workflows/${WF_ID}/runs" \
+            -F branch=main -F event=push -F status=success -F per_page=100 \
+            --jq "[.workflow_runs[] | select(.created_at > \"${FAILED_AT}\")] | length" \
             2>/dev/null || echo "0")"
 
           if [[ "${LATER_GREEN}" -gt 0 ]]; then
@@ -1060,23 +1069,12 @@ jobs:
             echo "✅ Subsequent ${WF_NAME} run(s) on main succeeded — this is a flake."
           fi
 
-          # Also check if the triggering commit only touched unit test files.
-          if [[ "${IS_FLAKE}" != "true" ]]; then
-            COMMIT_FILES="$(gh api "repos/${REPO}/commits/${FAILED_SHA}" \
-              --jq '[.files[].filename] | join("\n")' 2>/dev/null || true)"
-            if [[ -n "${COMMIT_FILES}" ]]; then
-              NON_TEST="$(grep -v -E '(test|spec|__tests__|\.test\.|\.spec\.)' <<< "${COMMIT_FILES}" || true)"
-              if [[ -z "${NON_TEST}" ]]; then
-                IS_FLAKE=true
-                echo "✅ Triggering commit only modified test files — likely a flake."
-              fi
-            fi
-          fi
-
           if [[ "${IS_FLAKE}" == "true" ]]; then
-            gh issue comment "${ISSUE}" --repo "${REPO}" --body "🤖 Closing as a transient CI flake — a subsequent \`${WF_NAME}\` run on \`main\` has already passed. No code fix needed."
-            gh issue close "${ISSUE}" --repo "${REPO}" --reason 'not planned'
-            gh issue edit "${ISSUE}" --repo "${REPO}" --add-label 'autofix/skip' 2>/dev/null || true
+            if [[ "${DRY_RUN}" != 'true' ]]; then
+              gh issue comment "${ISSUE}" --repo "${REPO}" --body "🤖 Closing as a transient CI flake — a subsequent \`${WF_NAME}\` run on \`main\` has already passed. No code fix needed."
+              gh issue close "${ISSUE}" --repo "${REPO}" --reason 'not planned'
+              gh issue edit "${ISSUE}" --repo "${REPO}" --add-label 'autofix/skip' 2>/dev/null || true
+            fi
             echo "is_flake=true" >> "${GITHUB_OUTPUT}"
           else
             echo "is_flake=false" >> "${GITHUB_OUTPUT}"
@@ -1291,7 +1289,7 @@ jobs:
       - name: 'Publish PR'
         id: 'publish'
         if: |-
-          ${{ steps.decision.outputs.go_issue != '' && needs.route.outputs.dry_run != 'true' }}
+          ${{ steps.decision.outputs.go_issue != '' && needs.route.outputs.dry_run != 'true' && steps.flake.outputs.is_flake != 'true' }}
         env:
           # CI_DEV_BOT_PAT opens the PR as the configured autofix bot. This is
           # required: the default GITHUB_TOKEN is

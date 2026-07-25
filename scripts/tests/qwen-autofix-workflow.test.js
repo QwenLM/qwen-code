@@ -88,6 +88,10 @@ const readDecisionStep =
   workflow.match(
     /- name: 'Read decision'[\s\S]*?(?=\n[ ]{6}- name: 'Claim issue')/,
   )?.[0] ?? '';
+const flakeDetectionStep =
+  workflow.match(
+    /- name: 'Flake detection'[\s\S]*?(?=\n[ ]{6}- name: 'Claim issue')/,
+  )?.[0] ?? '';
 const claimIssueStep =
   workflow.match(
     /- name: 'Claim issue'[\s\S]*?(?=\n[ ]{6}- name: 'Develop fix')/,
@@ -3617,6 +3621,32 @@ describe('qwen-autofix workflow', () => {
     expect(readDecisionStep).toContain(
       'no longer has both ${READY_FOR_AGENT_LABEL} and ${AUTOFIX_APPROVED_LABEL}',
     );
+  });
+
+  it('only closes authoritative CI failures after the same workflow recovers', () => {
+    expect(flakeDetectionStep).toContain('--method GET');
+    expect(flakeDetectionStep).toContain('actions/workflows/${WF_ID}/runs');
+    expect(flakeDetectionStep).toContain('-F status=success');
+    for (const field of ['branch', 'event', 'conclusion']) {
+      expect(flakeDetectionStep).toContain(`jq -r '.${field}'`);
+    }
+    expect(flakeDetectionStep).toContain("!= 'main'");
+    expect(flakeDetectionStep).toContain("!= 'push'");
+    expect(flakeDetectionStep).toContain("!= 'failure'");
+    expect(flakeDetectionStep).not.toContain('COMMIT_FILES');
+    expect(flakeDetectionStep).not.toContain('NON_TEST');
+    expect(flakeDetectionStep).toContain(
+      'if [[ "${DRY_RUN}" != \'true\' ]]; then',
+    );
+
+    for (const guardedStep of [
+      claimIssueStep,
+      developFixStep,
+      verificationGateSteps[0],
+      publishPrStep,
+    ]) {
+      expect(guardedStep).toContain("steps.flake.outputs.is_flake != 'true'");
+    }
   });
 
   it('requires re-approval when transient autofix failures withdraw a claim', () => {
