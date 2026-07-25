@@ -94,6 +94,12 @@ confirmation; use the governed profile when that is required.
    qwen --mcp-config /administrator/path/external-context-mcp.json
    ```
 
+   The MCP subprocess honors `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY`
+   through an environment-aware dispatcher. If the provider requires an
+   egress proxy, the launcher must include the administrator-approved proxy
+   variables in that clean environment. Include `localhost`, `127.0.0.1`, and
+   `[::1]` in `NO_PROXY` when using the loopback Generic HTTP provider.
+
 6. Point `QWEN_CODE_SYSTEM_SETTINGS_PATH` at an administrator-controlled copy
    of `examples/managed-settings.json` only inside this managed launcher; do not
    install its automatic allow rule for unrelated Qwen sessions. It disables

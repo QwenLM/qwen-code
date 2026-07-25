@@ -23,6 +23,7 @@
   ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.2",
+    "undici": "^7.28.0",
     "zod": "^3.25.0"
   },
   "devDependencies": {

@@ -4,10 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
 import { ConfigurationError } from './config.js';
 import { runMcp } from './mcp.js';
 
 try {
+  setGlobalDispatcher(new EnvHttpProxyAgent());
   await runMcp();
 } catch (error) {
   const message =
