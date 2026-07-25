@@ -49,9 +49,11 @@ const debugLogger = createDebugLogger('CLIENT');
 import { GeminiChat } from './geminiChat.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
+  buildSystemPromptSuffix,
   getArenaSystemReminder,
   getCoreSystemPrompt,
   getCustomSystemPrompt,
+  getManualPlanExitSystemReminder,
   getPlanModeSystemReminder,
   resolveInteractionMode,
 } from './prompts.js';
@@ -869,22 +871,25 @@ export class GeminiClient {
     const appendSystemPrompt = this.config.getAppendSystemPrompt();
     const gitStatus = this.getCachedGitStatus();
 
-    if (overrideSystemPrompt) {
-      const base = getCustomSystemPrompt(
-        overrideSystemPrompt,
-        userMemory,
-        appendSystemPrompt,
-      );
-      return gitStatus ? base + '\n\n' + gitStatus : base;
-    }
-
-    const base = getCoreSystemPrompt(
-      userMemory,
-      this.config.getModel(),
-      appendSystemPrompt,
-      resolveInteractionMode(this.config),
+    const base = overrideSystemPrompt
+      ? getCustomSystemPrompt(
+          overrideSystemPrompt,
+          userMemory,
+          appendSystemPrompt,
+        )
+      : getCoreSystemPrompt(
+          userMemory,
+          this.config.getModel(),
+          appendSystemPrompt,
+          resolveInteractionMode(this.config),
+        );
+    const withGitStatus = gitStatus ? base + '\n\n' + gitStatus : base;
+    // The auto-memory section is the volatile layer — rewritten in-session on
+    // every memory save. It goes after all stable/context content so a save
+    // invalidates the shortest possible cached prompt prefix.
+    return (
+      withGitStatus + buildSystemPromptSuffix(this.config.getAutoMemoryPrompt())
     );
-    return gitStatus ? base + '\n\n' + gitStatus : base;
   }
 
   async refreshStartupContextReminder(): Promise<void> {
@@ -2452,6 +2457,15 @@ export class GeminiClient {
                 this.config.getSdkMode(),
             ),
           );
+        } else if (this.config.consumePendingManualPlanExitNotice()) {
+          // One-shot counterpart to the reminder above: the model was told
+          // "plan mode is active" on every turn, so a manual exit
+          // (Shift+Tab, /approval-mode, /plan) needs an explicit signal —
+          // the reminder silently disappearing goes unnoticed and the
+          // model keeps calling exit_plan_mode (#7671).
+          systemReminders.push(
+            getManualPlanExitSystemReminder(this.config.getApprovalMode()),
+          );
         }
 
         // add arena system reminder if an arena session is active
@@ -3146,7 +3160,10 @@ export class GeminiClient {
     try {
       const userMemory = this.config.getUserMemory();
       const finalSystemInstruction = generationConfig.systemInstruction
-        ? getCustomSystemPrompt(generationConfig.systemInstruction, userMemory)
+        ? getCustomSystemPrompt(
+            generationConfig.systemInstruction,
+            userMemory,
+          ) + buildSystemPromptSuffix(this.config.getAutoMemoryPrompt())
         : this.getMainSessionSystemInstruction();
 
       const requestConfig: GenerateContentConfig = {

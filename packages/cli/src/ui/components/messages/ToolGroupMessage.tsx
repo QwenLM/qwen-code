@@ -18,6 +18,7 @@ import {
 } from './CompactToolGroupDisplay.js';
 import { InlineParallelAgentsDisplay } from './InlineParallelAgentsDisplay.js';
 import { useConfig } from '../../contexts/ConfigContext.js';
+import { ICON } from '../../constants.js';
 import type { AgentResultDisplay } from '@qwen-code/qwen-code-core';
 
 function isAgentWithPendingConfirmation(
@@ -347,7 +348,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
         {readCount > 0 && (
           <Box paddingLeft={1}>
             <Text dimColor>
-              {'● '}
+              {ICON.CIRCLE_FILLED + ' '}
               Recalled {readCount} {readCount === 1 ? 'memory' : 'memories'}
             </Text>
           </Box>
@@ -355,7 +356,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
         {writeCount > 0 && (
           <Box paddingLeft={1}>
             <Text dimColor>
-              {'● '}
+              {ICON.CIRCLE_FILLED + ' '}
               Wrote {writeCount} {writeCount === 1 ? 'memory' : 'memories'}
             </Text>
           </Box>
@@ -405,7 +406,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   const memoryBadge = hasMemoryBadge ? (
     <Box paddingLeft={1}>
       <Text dimColor>
-        {'● '}
+        {ICON.CIRCLE_FILLED + ' '}
         {[
           (memoryReadCount ?? 0) > 0 &&
             `Recalled ${memoryReadCount} ${memoryReadCount === 1 ? 'memory' : 'memories'}`,
@@ -440,7 +441,10 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   const memoryBadgeHeight = hasMemoryBadge ? 1 : 0;
   const staticHeight =
     /* marginBottom */ 1 + collapsibleSummaryHeight + memoryBadgeHeight;
-  const innerWidth = contentWidth - 2;
+  // ToolConfirmationMessage still has its own padding={1}, so it needs
+  // the -2 reservation. ToolMessage no longer pads itself (paddingX was
+  // removed in the icon-alignment PR), so it gets the full contentWidth.
+  const confirmationInnerWidth = contentWidth - 2;
 
   let countToolCallsWithResults = 0;
   for (const tool of nonCollapsibleTools) {
@@ -486,7 +490,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
               <ToolMessage
                 {...tool}
                 availableTerminalHeight={availableTerminalHeightPerToolMessage}
-                contentWidth={innerWidth}
+                contentWidth={contentWidth}
                 emphasis={
                   isConfirming
                     ? 'high'
@@ -520,7 +524,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                   availableTerminalHeight={
                     availableTerminalHeightPerToolMessage
                   }
-                  contentWidth={innerWidth}
+                  contentWidth={confirmationInnerWidth}
                 />
               )}
           </Box>

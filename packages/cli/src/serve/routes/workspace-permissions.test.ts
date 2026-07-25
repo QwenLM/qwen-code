@@ -419,6 +419,29 @@ describe('workspace permissions routes', () => {
     expect(h.persistSetting).not.toHaveBeenCalled();
   });
 
+  it('POST maps a closed runtime generation to retryable unavailable', async () => {
+    await teardown(h);
+    h = await makeHarness({
+      setWorkspacePermissionRules: vi.fn(async () => {
+        throw Object.assign(new Error('closed'), {
+          code: 'workspace_generation_closed',
+        });
+      }),
+    });
+
+    const res = await request(h.app)
+      .post('/workspace/permissions')
+      .send({
+        scope: 'user',
+        ruleType: 'deny',
+        rules: ['Read(.env)'],
+      });
+
+    expect(res.status).toBe(503);
+    expect(res.headers['retry-after']).toBe('1');
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+  });
+
   it('POST does not persist untrusted workspace rules without a live ACP child', async () => {
     await writeJson(path.join(h.home, 'settings.json'), {
       security: { folderTrust: { enabled: true } },

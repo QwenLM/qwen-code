@@ -57,7 +57,6 @@ import {
   logApiRetry,
   logChatCompression,
 } from '../telemetry/loggers.js';
-import { clearDetailedSpanState } from '../telemetry/detailed-span-attributes.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { type ChatRecordingService } from '../services/chatRecordingService.js';
 import {
@@ -1735,7 +1734,6 @@ export class GeminiChat {
       this.setHistory(newHistory);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
-      clearDetailedSpanState();
       this.lastPromptTokenCount = info.newTokenCount;
       this.lastOutputTokenCount = 0;
       this.telemetryService?.setLastPromptTokenCount(info.newTokenCount);
@@ -1832,7 +1830,6 @@ export class GeminiChat {
       }),
     );
     this.setHistory(newHistory);
-    clearDetailedSpanState();
     this.lastPromptTokenCount = adjustedTokenCount;
     this.telemetryService?.setLastPromptTokenCount(adjustedTokenCount);
     this.consecutiveFailures = 0;
@@ -2297,6 +2294,11 @@ export class GeminiChat {
           : undefined;
         const maxRateLimitRetries =
           cgConfig?.maxRetries ?? RATE_LIMIT_RETRY_OPTIONS.maxRetries;
+        const retryInitialDelayMs =
+          cgConfig?.retryInitialDelayMs ??
+          RATE_LIMIT_RETRY_OPTIONS.initialDelayMs;
+        const retryMaxDelayMs =
+          cgConfig?.retryMaxDelayMs ?? RATE_LIMIT_RETRY_OPTIONS.maxDelayMs;
         const extraRetryErrorCodes = cgConfig?.retryErrorCodes;
 
         // Max output tokens escalation: when no user/env override is set and
@@ -2391,12 +2393,8 @@ export class GeminiChat {
                 rateLimitRetryCount++;
                 const delayMs = getRateLimitRetryDelayMs(rateLimitRetryCount, {
                   ...RATE_LIMIT_RETRY_OPTIONS,
-                  initialDelayMs:
-                    cgConfig?.retryInitialDelayMs ??
-                    RATE_LIMIT_RETRY_OPTIONS.initialDelayMs,
-                  maxDelayMs:
-                    cgConfig?.retryMaxDelayMs ??
-                    RATE_LIMIT_RETRY_OPTIONS.maxDelayMs,
+                  initialDelayMs: retryInitialDelayMs,
+                  maxDelayMs: retryMaxDelayMs,
                   error,
                 });
                 const message = parseAndFormatApiError(

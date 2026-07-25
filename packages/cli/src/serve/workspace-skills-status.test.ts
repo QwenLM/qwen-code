@@ -15,6 +15,11 @@ vi.mock('../utils/stdioHelpers.js', () => ({
 }));
 
 import { SkillManager } from '@qwen-code/qwen-code-core';
+import {
+  ENV_CORRUPTED_PATH,
+  ENV_WAS_RECOVERED,
+  getUserSettingsPath,
+} from '../config/settings.js';
 import { createWorkspaceSkillsStatusProvider } from './workspace-skills-status.js';
 
 describe('createWorkspaceSkillsStatusProvider', () => {
@@ -107,6 +112,75 @@ describe('createWorkspaceSkillsStatusProvider', () => {
         installedPath: '/skills/disabled/SKILL.md',
       },
     ]);
+  });
+
+  it('does not read workspace-level disabled skills when untrusted', async () => {
+    vi.spyOn(SkillManager.prototype, 'listSkills').mockResolvedValueOnce([
+      {
+        name: 'project-skill',
+        description: 'Project skill',
+        body: 'Visible only when trusted',
+        filePath: '/skills/project-skill/SKILL.md',
+        level: 'project',
+      },
+    ]);
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-untrusted-'),
+    );
+    await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
+    await fsp.writeFile(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: { disabled: ['project-skill'] } }),
+    );
+    const provider = createWorkspaceSkillsStatusProvider({
+      workspaceTrusted: false,
+    });
+
+    const status = await provider(workspace);
+
+    expect(status.skills[0]).toMatchObject({
+      name: 'project-skill',
+      status: 'ok',
+    });
+    await fsp.rm(workspace, { recursive: true, force: true });
+  });
+
+  it('does not consume corruption recovery state while reading disabled skills', async () => {
+    vi.spyOn(SkillManager.prototype, 'listSkills').mockResolvedValueOnce([]);
+    const qwenHome = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-settings-'),
+    );
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const previousCorruptedPath = process.env[ENV_CORRUPTED_PATH];
+    const previousWasRecovered = process.env[ENV_WAS_RECOVERED];
+    try {
+      process.env['QWEN_HOME'] = qwenHome;
+      const userSettingsPath = getUserSettingsPath();
+      await fsp.writeFile(userSettingsPath, '{}');
+      process.env[ENV_CORRUPTED_PATH] = `${userSettingsPath}.corrupted`;
+      process.env[ENV_WAS_RECOVERED] = '1';
+
+      await createWorkspaceSkillsStatusProvider()('/ws');
+
+      expect(process.env[ENV_CORRUPTED_PATH]).toBe(
+        `${userSettingsPath}.corrupted`,
+      );
+      expect(process.env[ENV_WAS_RECOVERED]).toBe('1');
+    } finally {
+      if (previousQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousQwenHome;
+      if (previousCorruptedPath === undefined) {
+        delete process.env[ENV_CORRUPTED_PATH];
+      } else {
+        process.env[ENV_CORRUPTED_PATH] = previousCorruptedPath;
+      }
+      if (previousWasRecovered === undefined) {
+        delete process.env[ENV_WAS_RECOVERED];
+      } else {
+        process.env[ENV_WAS_RECOVERED] = previousWasRecovered;
+      }
+      await fsp.rm(qwenHome, { recursive: true, force: true });
+    }
   });
 
   it('reuses one SkillManager per workspace across calls', async () => {

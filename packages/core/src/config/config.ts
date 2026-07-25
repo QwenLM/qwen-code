@@ -1754,6 +1754,14 @@ export class Config {
   private mcpReconcilePromise: Promise<void> | undefined;
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
+  /**
+   * Volatile system-prompt layer: the managed auto-memory section
+   * (instructions + MEMORY.md indexes). Kept separate from `userMemory`
+   * (context files, stable in-session) because it is rewritten on every
+   * memory save — prompt assembly appends it last so a save invalidates
+   * the shortest possible cached prompt prefix.
+   */
+  private autoMemoryPrompt = '';
   private sdkMode: boolean;
   private geminiMdFileCount: number;
   private conditionalRulesRegistry: ConditionalRulesRegistry | undefined;
@@ -1761,6 +1769,7 @@ export class Config {
   private approvalMode: ApprovalMode;
   private prePlanMode?: ApprovalMode;
   private approvalModeRevision = 0;
+  private pendingManualPlanExitNotice = false;
   private autoModeDenialState: AutoModeDenialState = createDenialState();
   private readonly accessibility: AccessibilitySettings;
   private readonly showResponseTokensPerSecond: boolean;
@@ -3065,6 +3074,7 @@ export class Config {
     // Safe mode: skip all context file loading (QWEN.md, AGENTS.md, rules)
     if (this.isSafeMode()) {
       this.setUserMemory('');
+      this.autoMemoryPrompt = '';
       this.setGeminiMdFileCount(0);
       this.conditionalRulesRegistry = new ConditionalRulesRegistry(
         [],
@@ -3197,25 +3207,24 @@ export class Config {
       // there. When empty the prompt builder emits a "MEMORY.md is currently
       // empty" placeholder — the same shape the per-project layer has used
       // since day one — so the cost is one extra index header.
-      this.setUserMemory(
-        this.memoryManager.appendToUserMemory(
-          memoryContent,
-          getAutoMemoryRoot(this.getProjectRoot()),
-          managedAutoMemoryIndex,
-          {
-            memoryDir: getUserAutoMemoryRoot(),
-            indexContent: userAutoMemoryIndex,
-          },
-          teamMemoryEnabled
-            ? {
-                memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
-                indexContent: teamAutoMemoryIndex,
-              }
-            : undefined,
-        ),
+      this.setUserMemory(memoryContent);
+      this.autoMemoryPrompt = this.memoryManager.buildAutoMemoryPrompt(
+        getAutoMemoryRoot(this.getProjectRoot()),
+        managedAutoMemoryIndex,
+        {
+          memoryDir: getUserAutoMemoryRoot(),
+          indexContent: userAutoMemoryIndex,
+        },
+        teamMemoryEnabled
+          ? {
+              memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
+              indexContent: teamAutoMemoryIndex,
+            }
+          : undefined,
       );
     } else {
       this.setUserMemory(memoryContent);
+      this.autoMemoryPrompt = '';
     }
     this.setGeminiMdFileCount(fileCount);
     this.conditionalRulesRegistry = new ConditionalRulesRegistry(
@@ -3256,7 +3265,7 @@ export class Config {
     }
 
     return (
-      `Warning: Loaded QWEN.md/context instructions use about ` +
+      `Warning: Loaded always-on context (QWEN.md context files + auto-memory) uses about ` +
       `${estimatedTokens.toLocaleString()} tokens, more than ` +
       `${Math.round(MEMORY_CONTEXT_WARNING_RATIO * 100)}% of this ` +
       `model's ${contextWindowSize.toLocaleString()} token context window. ` +
@@ -3445,8 +3454,12 @@ export class Config {
    * and should be displayed to the user during startup.
    */
   getWarnings(): string[] {
+    // Both layers are always loaded into the system prompt, so the size
+    // estimate must cover context files and the auto-memory section alike.
     const memoryContextWarning = this.buildMemoryContextWarning(
-      this.getUserMemory(),
+      [this.getUserMemory(), this.autoMemoryPrompt]
+        .filter(Boolean)
+        .join('\n\n'),
     );
     return memoryContextWarning
       ? [...this.warnings, memoryContextWarning]
@@ -5232,6 +5245,15 @@ export class Config {
     return this.userMemory;
   }
 
+  /**
+   * The managed auto-memory section of the system prompt (volatile layer).
+   * Empty when managed memory is unavailable. Callers assembling a system
+   * prompt must append this after all stable/context content.
+   */
+  getAutoMemoryPrompt(): string {
+    return this.autoMemoryPrompt;
+  }
+
   getOutputLanguageFilePath(): string | undefined {
     return this.outputLanguageFilePath;
   }
@@ -5403,10 +5425,18 @@ export class Config {
 
   setApprovalMode(
     mode: ApprovalMode,
-    /** @deprecated Model origin no longer changes plan-exit approval. */
-    options?: { enteredByModel?: boolean },
+    options?: {
+      /** @deprecated Model origin no longer changes plan-exit approval. */
+      enteredByModel?: boolean;
+      /**
+       * Set by ExitPlanModeTool for user/leader-approved plan exits. Every
+       * other PLAN → non-PLAN transition (Shift+Tab, /approval-mode, /plan,
+       * ACP setSessionMode, confirm-and-switch) is a manual exit the model
+       * was never told about, and queues a one-shot system reminder.
+       */
+      fromApprovedPlanExit?: boolean;
+    },
   ): void {
-    void options;
     if (
       !this.isTrustedFolder() &&
       mode !== ApprovalMode.DEFAULT &&
@@ -5435,8 +5465,18 @@ export class Config {
     // succeeded, so callers never observe a partially applied mode change.
     if (mode === ApprovalMode.PLAN && fromMode !== ApprovalMode.PLAN) {
       this.prePlanMode = fromMode;
+      // A stale exit notice must not survive a re-entry: the plan-mode
+      // reminder takes over again on the next turn.
+      this.pendingManualPlanExitNotice = false;
     } else if (mode !== ApprovalMode.PLAN && fromMode === ApprovalMode.PLAN) {
       this.prePlanMode = undefined;
+      if (!options?.fromApprovedPlanExit) {
+        // While in plan mode the model is told "plan mode is active" on
+        // every turn; on a manual exit that reminder just stops appearing,
+        // which models do not reliably notice (#7671). Queue an explicit
+        // one-shot exit notice for the next turn's reminder assembly.
+        this.pendingManualPlanExitNotice = true;
+      }
     }
     // Any deliberate mode change invalidates the AUTO denialTracking signal.
     if (fromMode !== mode) {
@@ -5446,6 +5486,17 @@ export class Config {
     if (fromMode !== mode) {
       this.approvalModeRevision++;
     }
+  }
+
+  /**
+   * One-shot: returns whether a manual (non-approved) plan-mode exit is
+   * pending model notification, and clears the flag. Consumed by the
+   * system-reminder assembly in `GeminiClient` on the next model-bound turn.
+   */
+  consumePendingManualPlanExitNotice(): boolean {
+    const pending = this.pendingManualPlanExitNotice;
+    this.pendingManualPlanExitNotice = false;
+    return pending;
   }
 
   /**

@@ -113,6 +113,15 @@ export class SetupGithubError extends Error {
   }
 }
 
+function isWorkspaceGenerationClosed(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === 'object' &&
+      'code' in error &&
+      error.code === 'workspace_generation_closed',
+  );
+}
+
 const nodeFileOps: SetupGithubFileOps = {
   assertCanWrite(): void {},
 
@@ -256,6 +265,7 @@ export async function setupGithub(
           sizeBytes: write.sizeBytes,
         });
       } catch (error) {
+        if (isWorkspaceGenerationClosed(error)) throw error;
         result.partial = true;
         result.workflows.push({
           sourcePath: workflow.sourcePath,
@@ -272,6 +282,7 @@ export async function setupGithub(
       }
     }
   } catch (error) {
+    if (isWorkspaceGenerationClosed(error)) throw error;
     if (error instanceof SetupGithubError) throw error;
     throw new SetupGithubError(
       'github_workflow_write_failed',
@@ -322,6 +333,7 @@ export async function updateGitignore(
       added: missingEntries,
     };
   } catch (error) {
+    if (isWorkspaceGenerationClosed(error)) throw error;
     debugLogger.debug('Failed to update .gitignore:', error);
     return {
       path: '.gitignore',

@@ -124,6 +124,7 @@ function makeDeps(
 ): DaemonWorkspaceServiceDeps {
   return {
     boundWorkspace: '/workspace',
+    isWorkspaceTrusted: () => true,
     contextFilename: 'QWEN.md',
     persistDisabledTools: vi.fn().mockResolvedValue(undefined),
     persistDisabledSkills: vi.fn().mockResolvedValue({
@@ -255,23 +256,27 @@ describe('createDaemonWorkspaceService', () => {
           { enabled: false, mode: 'tap', language: 'english' },
         );
 
-        expect(persistSettings).toHaveBeenCalledWith('/workspace', [
-          {
-            scope: SettingScope.User,
-            key: 'general.voice.mode',
-            value: 'tap',
-          },
-          {
-            scope: SettingScope.User,
-            key: 'general.voice.language',
-            value: 'english',
-          },
-          {
-            scope: SettingScope.User,
-            key: 'general.voice.enabled',
-            value: false,
-          },
-        ]);
+        expect(persistSettings).toHaveBeenCalledWith(
+          '/workspace',
+          [
+            {
+              scope: SettingScope.User,
+              key: 'general.voice.mode',
+              value: 'tap',
+            },
+            {
+              scope: SettingScope.User,
+              key: 'general.voice.language',
+              value: 'english',
+            },
+            {
+              scope: SettingScope.User,
+              key: 'general.voice.enabled',
+              value: false,
+            },
+          ],
+          undefined,
+        );
         expect(publishWorkspaceEvent).toHaveBeenCalledTimes(3);
         expect(publishWorkspaceEvent).toHaveBeenCalledWith({
           type: 'settings_changed',
@@ -303,23 +308,27 @@ describe('createDaemonWorkspaceService', () => {
           language: 'english',
         });
 
-        expect(persistSettings).toHaveBeenCalledWith('/workspace', [
-          {
-            scope: SettingScope.Workspace,
-            key: 'general.voice.mode',
-            value: 'tap',
-          },
-          {
-            scope: SettingScope.Workspace,
-            key: 'general.voice.language',
-            value: 'english',
-          },
-          {
-            scope: SettingScope.Workspace,
-            key: 'general.voice.enabled',
-            value: false,
-          },
-        ]);
+        expect(persistSettings).toHaveBeenCalledWith(
+          '/workspace',
+          [
+            {
+              scope: SettingScope.Workspace,
+              key: 'general.voice.mode',
+              value: 'tap',
+            },
+            {
+              scope: SettingScope.Workspace,
+              key: 'general.voice.language',
+              value: 'english',
+            },
+            {
+              scope: SettingScope.Workspace,
+              key: 'general.voice.enabled',
+              value: false,
+            },
+          ],
+          undefined,
+        );
       });
     });
 
@@ -1262,6 +1271,7 @@ describe('createDaemonWorkspaceService', () => {
         '/my/workspace',
         'Bash',
         false,
+        undefined,
       );
     });
 
@@ -1308,6 +1318,29 @@ describe('createDaemonWorkspaceService', () => {
       await expect(
         svc.setWorkspaceToolEnabled(makeCtx(), 'Bash', false),
       ).rejects.toThrow('disk full');
+      expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    });
+
+    it('does not publish after persistence closes the runtime generation', async () => {
+      let generationOpen = true;
+      const assertGenerationOpen = () => {
+        if (!generationOpen) throw new Error('generation closed');
+      };
+      const persistDisabledTools = vi.fn(async () => {
+        generationOpen = false;
+      });
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          assertGenerationOpen,
+          persistDisabledTools,
+          publishWorkspaceEvent,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceToolEnabled(makeCtx(), 'Bash', false),
+      ).rejects.toThrow('generation closed');
       expect(publishWorkspaceEvent).not.toHaveBeenCalled();
     });
   });
@@ -1367,6 +1400,7 @@ describe('createDaemonWorkspaceService', () => {
         '/workspace',
         'review',
         false,
+        undefined,
       );
       expect(invalidate).toHaveBeenCalledWith('/workspace');
       expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
@@ -2133,6 +2167,40 @@ describe('createDaemonWorkspaceService', () => {
     });
   });
 
+  describe('reload', () => {
+    it('stops before child reload when the runtime generation closes', async () => {
+      let generationClosed = false;
+      const assertGenerationOpen = vi.fn(() => {
+        if (generationClosed) throw new Error('generation closed');
+      });
+      const reloadDaemonEnv = vi.fn(
+        async (_workspace: string, commitGuard?: () => void) => {
+          commitGuard?.();
+          generationClosed = true;
+          return { updatedKeys: [], removedKeys: [] };
+        },
+      );
+      const invokeWorkspaceCommand = vi.fn();
+      const publishWorkspaceEvent = vi.fn();
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          assertGenerationOpen,
+          reloadDaemonEnv,
+          invokeWorkspaceCommand,
+          publishWorkspaceEvent,
+        }),
+      );
+
+      await expect(svc.reload(makeCtx())).rejects.toThrow('generation closed');
+      expect(reloadDaemonEnv).toHaveBeenCalledWith(
+        '/workspace',
+        assertGenerationOpen,
+      );
+      expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
+      expect(publishWorkspaceEvent).not.toHaveBeenCalled();
+    });
+  });
+
   describe('initWorkspace', () => {
     let tmpDir: string;
 
@@ -2163,6 +2231,30 @@ describe('createDaemonWorkspaceService', () => {
       expect(result.path).toBe(path.join(tmpDir, 'QWEN.md'));
       const stat = await fs.stat(result.path);
       expect(stat.isFile()).toBe(true);
+    });
+
+    it('rechecks the runtime generation before creating the context file', async () => {
+      let checks = 0;
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          boundWorkspace: tmpDir,
+          contextFilename: 'QWEN.md',
+          assertGenerationOpen: () => {
+            checks += 1;
+            if (checks === 2) throw new Error('generation closed');
+          },
+        }),
+      );
+
+      await expect(
+        svc.initWorkspace(makeCtx({ workspaceCwd: tmpDir }), {}),
+      ).rejects.toThrow('generation closed');
+      expect(checks).toBe(2);
+      await expect(fs.stat(path.join(tmpDir, 'QWEN.md'))).rejects.toMatchObject(
+        {
+          code: 'ENOENT',
+        },
+      );
     });
 
     it('publishes workspace_initialized event on create', async () => {

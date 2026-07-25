@@ -1571,7 +1571,7 @@ const SETTINGS_SCHEMA = {
           },
           retryMaxDelayMs: {
             type: 'number',
-            label: 'Retry Maximum Delay',
+            label: 'Retry Max Delay',
             category: 'Generation Configuration',
             requiresRestart: false,
             default: undefined as number | undefined,

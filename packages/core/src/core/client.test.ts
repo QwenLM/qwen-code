@@ -456,6 +456,10 @@ describe('Gemini Client (client.ts)', () => {
   };
   beforeEach(async () => {
     vi.resetAllMocks();
+    // The client concatenates these with the auto-memory suffix, so the
+    // default mock must return a string, not undefined.
+    vi.mocked(getCoreSystemPrompt).mockReturnValue('');
+    vi.mocked(getCustomSystemPrompt).mockReturnValue('');
     sessionStartProfilerMocks.profilers.length = 0;
     sessionStartProfilerMocks.createSessionStartProfiler.mockImplementation(
       () => {
@@ -550,6 +554,7 @@ describe('Gemini Client (client.ts)', () => {
       getVertexAI: vi.fn().mockReturnValue(false),
       getUserAgent: vi.fn().mockReturnValue('test-agent'),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getAppendSystemPrompt: vi.fn().mockReturnValue(undefined),
       getFullContext: vi.fn().mockReturnValue(false),
@@ -566,6 +571,7 @@ describe('Gemini Client (client.ts)', () => {
       getNoBrowser: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(true),
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      consumePendingManualPlanExitNotice: vi.fn().mockReturnValue(false),
       getSdkMode: vi.fn().mockReturnValue(false),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(false),
@@ -1485,6 +1491,27 @@ describe('Gemini Client (client.ts)', () => {
         'test-model',
         PermissionMode.AutoEdit,
       );
+    });
+
+    it('appends the auto-memory section after all stable/context content', async () => {
+      // The auto-memory section is the volatile layer and must be the last
+      // block of the main-session system instruction (after the base prompt
+      // and git status). Guard the append with a non-empty getAutoMemoryPrompt
+      // so a future refactor dropping it fails here instead of silently
+      // shipping a prompt without managed memory.
+      vi.mocked(getCoreSystemPrompt).mockReturnValue('Base instruction');
+      vi.mocked(mockConfig.getAutoMemoryPrompt).mockReturnValue(
+        '# auto memory\nMEMORY_INDEX_MARKER',
+      );
+
+      await client.startChat();
+
+      const systemInstruction = client.getChat()['generationConfig']
+        .systemInstruction as string;
+      expect(systemInstruction).toBe(
+        'Base instruction\n\n---\n\n# auto memory\nMEMORY_INDEX_MARKER',
+      );
+      expect(systemInstruction.endsWith('MEMORY_INDEX_MARKER')).toBe(true);
     });
   });
 
@@ -5964,6 +5991,74 @@ hello
       );
     });
 
+    it('injects a one-shot exit notice after a manual plan-mode exit', async () => {
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(
+        ApprovalMode.DEFAULT,
+      );
+      vi.mocked(
+        mockConfig.consumePendingManualPlanExitNotice,
+      ).mockReturnValueOnce(true);
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Continuing' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'Now implement it' }],
+        new AbortController().signal,
+        'prompt-id-manual-plan-exit',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        expect.arrayContaining([
+          expect.stringContaining(
+            'The user has manually switched out of plan mode',
+          ),
+        ]),
+        expect.any(AbortSignal),
+      );
+    });
+
+    it('does not inject the exit notice when none is pending', async () => {
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(
+        ApprovalMode.DEFAULT,
+      );
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Reply' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'Hello' }],
+        new AbortController().signal,
+        'prompt-id-no-plan-exit-notice',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      const requestArg = mockTurnRunFn.mock.calls.at(-1)![1] as string[];
+      expect(
+        requestArg.some(
+          (part) =>
+            typeof part === 'string' &&
+            part.includes('manually switched out of plan mode'),
+        ),
+      ).toBe(false);
+    });
+
     it('uses the subagent plan reminder when a subagent inherits PLAN mode', async () => {
       vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.PLAN);
       vi.mocked(mockConfig.getSdkMode).mockReturnValue(false);
@@ -10096,6 +10191,38 @@ Other open files:
           contents,
         }),
         'override-prompt-id',
+      );
+    });
+
+    it('appends the auto-memory section to a per-call systemInstruction override', async () => {
+      // The truthy `generationConfig.systemInstruction` branch composes
+      // getCustomSystemPrompt(...) + the volatile auto-memory suffix. Guard it
+      // with a non-empty getAutoMemoryPrompt so a regression that drops the
+      // append — silently stripping managed memory from side queries (session
+      // recap, title/summary, fast-model queries) — fails here.
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+
+      vi.mocked(getCustomSystemPrompt).mockReturnValueOnce(
+        'Custom side-query prompt',
+      );
+      vi.mocked(mockConfig.getAutoMemoryPrompt).mockReturnValue(
+        '# auto memory\nMEMORY_INDEX_MARKER',
+      );
+
+      await client.generateContent(
+        contents,
+        { systemInstruction: 'Custom side-query prompt' },
+        abortSignal,
+        DEFAULT_QWEN_FLASH_MODEL,
+      );
+
+      const request = vi
+        .mocked(mockContentGenerator.generateContent)
+        .mock.calls.at(-1)?.[0];
+      const systemInstruction = request?.config?.systemInstruction as string;
+      expect(systemInstruction).toBe(
+        'Custom side-query prompt\n\n---\n\n# auto memory\nMEMORY_INDEX_MARKER',
       );
     });
 

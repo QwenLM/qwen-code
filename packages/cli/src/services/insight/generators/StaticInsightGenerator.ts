@@ -8,6 +8,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { DataProcessor } from './DataProcessor.js';
 import { TemplateRenderer } from './TemplateRenderer.js';
+import { dayKey } from '../dates.js';
 import type {
   InsightData,
   InsightProgressCallback,
@@ -34,7 +35,7 @@ export class StaticInsightGenerator {
   // Generate timestamped filename with collision detection
   private async generateOutputPath(outputDir: string): Promise<string> {
     const now = new Date();
-    const date = now.toISOString().split('T')[0]; // YYYY-MM-DD
+    const date = dayKey(now); // local YYYY-MM-DD, matching the report's date basis
     const time = now.toTimeString().slice(0, 8).replace(/:/g, ''); // HHMMSS
 
     let outputPath = path.join(outputDir, `insight-${date}.html`);

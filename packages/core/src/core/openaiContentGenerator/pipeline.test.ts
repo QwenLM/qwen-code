@@ -42,6 +42,8 @@ import { setToolCallPreparations } from '../tool-call-preparation.js';
 
 // Mock dependencies
 const mockReportOpenAiRequest = vi.hoisted(() => vi.fn());
+const mockReportOpenAiResponse = vi.hoisted(() => vi.fn());
+const mockReportOpenAiChunk = vi.hoisted(() => vi.fn());
 
 vi.mock('./converter.js', () => ({
   OpenAIContentConverter: {
@@ -57,6 +59,8 @@ vi.mock('../../telemetry/loggers.js', () => ({
 }));
 vi.mock('../../telemetry/gen-ai-request.js', () => ({
   reportOpenAiRequest: mockReportOpenAiRequest,
+  reportOpenAiResponse: mockReportOpenAiResponse,
+  reportOpenAiChunk: mockReportOpenAiChunk,
 }));
 
 describe('ContentGenerationPipeline', () => {
@@ -162,6 +166,8 @@ describe('ContentGenerationPipeline', () => {
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockOpenAIResponse,
       );
+      const telemetryAttempt = {};
+      mockReportOpenAiRequest.mockReturnValueOnce(telemetryAttempt);
 
       // Act
       const result = await pipeline.execute(request, userPromptId);
@@ -190,6 +196,10 @@ describe('ContentGenerationPipeline', () => {
       );
       expect(mockReportOpenAiRequest).toHaveBeenCalledWith(
         vi.mocked(mockClient.chat.completions.create).mock.calls[0]![0],
+      );
+      expect(mockReportOpenAiResponse).toHaveBeenCalledWith(
+        telemetryAttempt,
+        mockOpenAIResponse,
       );
       expect(mockConverter.convertOpenAIResponseToGemini).toHaveBeenCalledWith(
         mockOpenAIResponse,
@@ -2134,6 +2144,8 @@ describe('ContentGenerationPipeline', () => {
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         mockStream,
       );
+      const telemetryAttempt = {};
+      mockReportOpenAiRequest.mockReturnValueOnce(telemetryAttempt);
 
       // Act
       const resultGenerator = await pipeline.executeStream(
@@ -2177,6 +2189,16 @@ describe('ContentGenerationPipeline', () => {
       );
       expect(mockReportOpenAiRequest).toHaveBeenCalledWith(
         vi.mocked(mockClient.chat.completions.create).mock.calls[0]![0],
+      );
+      expect(mockReportOpenAiChunk).toHaveBeenNthCalledWith(
+        1,
+        telemetryAttempt,
+        mockChunk1,
+      );
+      expect(mockReportOpenAiChunk).toHaveBeenNthCalledWith(
+        2,
+        telemetryAttempt,
+        mockChunk2,
       );
     });
 

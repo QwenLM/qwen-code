@@ -4044,7 +4044,7 @@ describe('Server Config (config.ts)', () => {
     expect(config.getPreventSystemSleepEnabled()).toBe(false);
   });
 
-  it('refreshHierarchicalMemory should append managed auto-memory index when present', async () => {
+  it('refreshHierarchicalMemory should build the managed auto-memory prompt when present', async () => {
     const config = new Config(baseParams);
 
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
@@ -4062,9 +4062,14 @@ describe('Server Config (config.ts)', () => {
 
     await config.refreshHierarchicalMemory();
 
+    // Context files stay in userMemory; the volatile auto-memory section is
+    // kept separate so prompt assembly can order stable → context → volatile.
     expect(config.getUserMemory()).toContain('Project rules');
-    expect(config.getUserMemory()).toContain('# auto memory');
-    expect(config.getUserMemory()).toContain('[Project Memory](project.md)');
+    expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toContain(
+      '[Project Memory](project.md)',
+    );
   });
 
   it('refreshHierarchicalMemory seeds the FileReadCache for project and user MEMORY.md indexes', async () => {
@@ -4392,7 +4397,9 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     expect(config.getWarnings()).toContainEqual(
-      expect.stringContaining('Loaded QWEN.md/context instructions'),
+      expect.stringContaining(
+        'Loaded always-on context (QWEN.md context files + auto-memory)',
+      ),
     );
   });
 
@@ -4413,7 +4420,9 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     expect(config.getWarnings()).toContainEqual(
-      expect.stringContaining('Loaded QWEN.md/context instructions'),
+      expect.stringContaining(
+        'Loaded always-on context (QWEN.md context files + auto-memory)',
+      ),
     );
     expect(config.getWarnings()).toContainEqual(
       expect.stringContaining("model's 1,000 token context window"),
@@ -4431,7 +4440,9 @@ describe('Server Config (config.ts)', () => {
     });
 
     expect(config.getWarnings()).toContainEqual(
-      expect.stringContaining('Loaded QWEN.md/context instructions'),
+      expect.stringContaining(
+        'Loaded always-on context (QWEN.md context files + auto-memory)',
+      ),
     );
   });
 
@@ -4472,7 +4483,9 @@ describe('Server Config (config.ts)', () => {
       config
         .getWarnings()
         .some((warning) =>
-          warning.includes('Loaded QWEN.md/context instructions'),
+          warning.includes(
+            'Loaded always-on context (QWEN.md context files + auto-memory)',
+          ),
         ),
     ).toBe(false);
   });
@@ -4912,8 +4925,11 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     expect(config.getUserMemory()).toContain('Project rules');
-    expect(config.getUserMemory()).toContain('# auto memory');
-    expect(config.getUserMemory()).toContain('MEMORY.md is currently empty');
+    expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toContain(
+      'MEMORY.md is currently empty',
+    );
   });
 
   it('refreshHierarchicalMemory should omit managed auto-memory prompt when disabled', async () => {
@@ -4935,6 +4951,7 @@ describe('Server Config (config.ts)', () => {
 
     expect(config.getUserMemory()).toContain('Project rules');
     expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toBe('');
     expect(readAutoMemoryIndexWithStats).not.toHaveBeenCalled();
   });
 
@@ -4959,7 +4976,7 @@ describe('Server Config (config.ts)', () => {
     expect(lastCall?.[1]).toEqual([]);
     expect(readAutoMemoryIndexWithStats).not.toHaveBeenCalled();
     expect(config.getUserMemory()).toContain('Project rules');
-    expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toBe('');
   });
 
   describe('isManagedMemoryAvailable', () => {
@@ -6458,6 +6475,51 @@ describe('setApprovalMode with folder trust', () => {
       expect(config.getApprovalModeRevision()).toBe(initialRevision + 1);
       config.setApprovalMode(ApprovalMode.DEFAULT);
       expect(config.getApprovalModeRevision()).toBe(initialRevision + 2);
+    });
+
+    it('queues a one-shot manual plan-exit notice on a manual exit', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(true);
+      // One-shot: consumed on first read.
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
+    });
+
+    it('does not queue the exit notice for an approved plan exit', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT, {
+        fromApprovedPlanExit: true,
+      });
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
+    });
+
+    it('clears a stale exit notice when plan mode is re-entered', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      config.setApprovalMode(ApprovalMode.PLAN);
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
+    });
+
+    it('does not queue the exit notice for non-plan mode changes', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
     });
 
     it('records prePlanMode=yolo for a Shift+Tab cycle into plan mode', () => {

@@ -5,10 +5,22 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/qwen-triage.yml', 'utf8');
+const prSkill = readFileSync(
+  '.qwen/skills/triage/references/pr-workflow.md',
+  'utf8',
+);
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -305,5 +317,79 @@ describe('qwen-triage tmux workflow', () => {
     expect(
       workflow.indexOf("- name: 'Install tmux runner tools'"),
     ).toBeLessThan(workflow.indexOf("- name: 'Checkout PR merge ref'"));
+  });
+
+  it('escapes injected model names and fails loudly when the signature literal is gone', () => {
+    const injectStep = step('Inject model name into triage signature');
+    const body = injectStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
+    expect(body).toBeTruthy();
+    const script = body.replace(/^ {10}/gm, '');
+    // The workflow step only ever executes on ubuntu runners (GNU sed), but
+    // this suite also runs in the macOS merge-queue job, where BSD sed
+    // requires an extension argument after -i. Shim ONLY on darwin: on GNU
+    // sed a separated '' is parsed as the sed script (not the -i suffix), so
+    // an unconditional rewrite would break the Linux runs that actually
+    // mirror production.
+    const portableScript =
+      process.platform === 'darwin'
+        ? script.replace(/sed -i /g, "sed -i '' ")
+        : script;
+
+    const run = (model, content) => {
+      const dir = mkdtempSync(join(tmpdir(), 'triage-inject-'));
+      try {
+        const target = join(dir, '.qwen/skills/triage/references');
+        mkdirSync(target, { recursive: true });
+        writeFileSync(join(target, 'pr-workflow.md'), content);
+        const proc = spawnSync('bash', ['-c', portableScript], {
+          cwd: dir,
+          env: { ...process.env, OPENAI_MODEL: model },
+          encoding: 'utf8',
+        });
+        return {
+          status: proc.status,
+          out: readFileSync(join(target, 'pr-workflow.md'), 'utf8'),
+          log: `${proc.stdout}${proc.stderr}`,
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    // A model name carrying every sed replacement metacharacter (/ & \) must
+    // land verbatim — the old unescaped sed corrupted the skill text on these.
+    const meta = run('m1/pre&post\\x', 'sig: qwen3.7-max end');
+    expect(meta.status).toBe(0);
+    expect(meta.out).toBe('sig: m1/pre&post\\x end');
+
+    // The signature literal disappearing from the skill must fail the step —
+    // the old silent no-op shipped the wrong model name in every comment.
+    const missing = run('m2', 'sig: some-other-model end');
+    expect(missing.status).not.toBe(0);
+    expect(missing.log).toContain('Signature literal');
+    expect(missing.out).toBe('sig: some-other-model end');
+
+    // No model configured → file untouched, step succeeds.
+    const empty = run('', 'sig: qwen3.7-max end');
+    expect(empty.status).toBe(0);
+    expect(empty.out).toBe('sig: qwen3.7-max end');
+  });
+
+  it('pins the re-run comment-id recipe to startswith and the bot-author filter', () => {
+    // The skill's stage_comment_id() exists because a re-run once PATCHed the
+    // stage=3 comment with stage=1 content (#7693). Its two load-bearing
+    // constraints must not silently regress: `startswith` (a `contains` match
+    // would also hit a comment that merely quotes a marker) and the
+    // bot-author filter (markers are public text; the PAT may be able to
+    // edit other users' comments).
+    const section = prSkill.slice(
+      prSkill.indexOf('**Re-runs:**'),
+      prSkill.indexOf('Never create duplicates'),
+    );
+    expect(section).toContain('stage_comment_id()');
+    expect(section).toContain('select(.user.login == $bot)');
+    expect(section).toContain('startswith($m)');
+    expect(section).not.toContain('contains($m)');
+    expect(section).toContain('re-resolve immediately before EACH patch');
   });
 });
