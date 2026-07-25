@@ -342,6 +342,21 @@ describe('fetch-pr report — audit-window contract', () => {
     expect(report.fetchedAt).not.toBe('2020-01-01T00:00:00.000Z');
   });
 
+  it('prefers a prior auditSince over its fetchedAt (the third-restart case)', async () => {
+    // On a third restart the prior report already carries an auditSince
+    // EARLIER than its own fetchedAt; that earliest opening must win, not the
+    // prior fetchedAt. Seeds both so the auditSince-preference branch runs.
+    producerMocks.readFileSync.mockReturnValue(
+      JSON.stringify({
+        prNumber: '42',
+        auditSince: '2020-01-01T00:00:00.000Z',
+        fetchedAt: '2022-06-01T00:00:00.000Z',
+      }),
+    );
+    const report = await reportFor({});
+    expect(report.auditSince).toBe('2020-01-01T00:00:00.000Z');
+  });
+
   it('does not inherit a window from a DIFFERENT PR left at the same path', async () => {
     producerMocks.readFileSync.mockReturnValue(
       JSON.stringify({
