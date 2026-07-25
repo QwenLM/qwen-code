@@ -763,6 +763,10 @@ Read `.qwen/tmp/qwen-review-{target}-presubmit.json`. Schema:
   downgradeRequestChanges: boolean; // submit COMMENT instead of REQUEST_CHANGES (self-PR only)
   downgradeReasons: string[];       // human-readable; join with '; ' for body
   blockOnExistingComments: boolean; // one or more overlaps — drop those findings
+  findingsFileInvalid: boolean;     // the --new-findings file was unreadable:
+                                    // overlap dedup ran on an empty set (dupes
+                                    // possible) and anchor-risk defaulted to
+                                    // at-risk. Regenerate it and re-run.
   headDrift: {                      // did the PR advance while the review ran?
     reviewedSha: string;            // the fetchedSha this review actually read
     liveHeadSha: string;

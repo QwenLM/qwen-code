@@ -586,6 +586,50 @@ describe('presubmitCommand', () => {
     expect(result.headDrift.anchorsAtRisk).toBe(true);
   });
 
+  it('surfaces a malformed findings file (flag + downgrade) even with no drift', async () => {
+    // No drift this time (heads match), so anchorsAtRisk is not the signal;
+    // the malformed file still silently emptied the overlap set, which must
+    // not pass unreported.
+    ghMock.mockReturnValue('{"author":"contributor","headSha":"abc123"}');
+    ghApiMock.mockReturnValue(null);
+    readFileSyncMock.mockImplementation((path: string) =>
+      String(path).includes('findings') ? 'not json at all {' : '[]',
+    );
+
+    const handler = presubmitCommand.handler;
+    if (!handler) throw new Error('presubmit handler missing');
+    await handler({
+      ...baseArgs,
+      'new-findings': '/tmp/findings.json',
+    } as unknown as Parameters<typeof handler>[0]);
+
+    const [, content] = writeFileSyncMock.mock.calls.find(
+      ([path]) => path === '/tmp/presubmit.json',
+    ) ?? [null, null];
+    const result = JSON.parse(String(content));
+
+    expect(result.findingsFileInvalid).toBe(true);
+    expect(result.downgradeApprove).toBe(true);
+    expect(result.downgradeReasons.join(' ')).toContain(
+      'the --new-findings file was malformed',
+    );
+  });
+
+  it('does not flag findingsFileInvalid when the file is valid or absent', async () => {
+    ghMock.mockReturnValue('{"author":"contributor","headSha":"abc123"}');
+    ghApiMock.mockReturnValue(null);
+    readFileSyncMock.mockReturnValue('[]');
+
+    const handler = presubmitCommand.handler;
+    if (!handler) throw new Error('presubmit handler missing');
+    // Absent findings file.
+    await handler(baseArgs as Parameters<typeof handler>[0]);
+    const [, content] = writeFileSyncMock.mock.calls.find(
+      ([path]) => path === '/tmp/presubmit.json',
+    ) ?? [null, null];
+    expect(JSON.parse(String(content)).findingsFileInvalid).toBe(false);
+  });
+
   it('ignores the running Qwen PR review check when deciding whether CI is still pending', async () => {
     ghApiAllNestedMock.mockImplementation((path: string) =>
       path.endsWith('/check-runs')

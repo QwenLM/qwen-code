@@ -492,6 +492,15 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   const newFindings = newFindingsPath
     ? parseFindingsFile(newFindingsPath)
     : null;
+  // A path was given but did not parse into a usable list. The drift path
+  // already fails safe (findingPaths=null → anchorsAtRisk true), but the SAME
+  // null silently empties `newFindingKeys` below, disabling the existing-
+  // comment overlap check — a run then can't tell "no overlaps" from "the
+  // dedup input was garbage", and may re-post comments a prior run already
+  // made. Surface it (report flag + downgrade reason) instead of degrading in
+  // two directions in silence.
+  const findingsFileInvalid =
+    newFindingsPath !== undefined && newFindings === null;
 
   const { headDrift, downgradeReason: driftReason } = classifyHeadDrift(
     commitSha,
@@ -568,6 +577,12 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
       'PR metadata unavailable — could not verify self-PR status or head drift',
     );
   }
+  if (findingsFileInvalid) {
+    downgradeReasons.push(
+      'the --new-findings file was malformed — overlap dedup was disabled and ' +
+        'anchor-risk defaulted to at-risk; regenerate it and re-run',
+    );
+  }
 
   const result = {
     prNumber,
@@ -601,10 +616,17 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
       headDrift.drifted ||
       // Could not read the PR head at all: neither self-PR nor drift could be
       // checked, so an Approve would rest on unverified state.
-      metaUnavailable,
+      metaUnavailable ||
+      // The findings input the anchor-risk and overlap checks both rely on was
+      // unreadable — the run cannot certify against inputs it could not read.
+      findingsFileInvalid,
     downgradeRequestChanges: isSelfPr,
     downgradeReasons,
     blockOnExistingComments: buckets.overlap.length > 0,
+    // Distinguishes "no overlaps" from "the dedup input was garbage": a true
+    // value means the overlap check ran on an empty set and duplicate comments
+    // are possible, so the skill should regenerate the findings file.
+    findingsFileInvalid,
     headDrift,
   };
 
