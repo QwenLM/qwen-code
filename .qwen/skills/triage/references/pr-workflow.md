@@ -420,11 +420,15 @@ check identity, not from claims in the log body.
 
 #### 2c. Real-Scenario Testing — local invocation ONLY
 
-**Never in unattended CI.** The CI path gets its live-behavior signal from the
-isolated `@qwen-code /tmux` job (containerized, token-free); if the PR touches
-a TUI surface and that signal would matter, say so in the Stage 2 comment so a
-maintainer can trigger it. Everything below applies to local invocation (no
-`GITHUB_EVENT_NAME`) only.
+**Never in unattended CI.** The CI path gets its live-behavior signal from two
+isolated, token-free jobs a maintainer can trigger by comment: `@qwen-code
+/tmux` (drive the TUI as a real user) and `@qwen-code /verify` (deep
+verification — A/B load-bearing proof against the base build, mock-free
+wire-oracle harnesses, targeted gates; see the `verify-pr` skill). When the PR
+touches a TUI surface, or its central claim is behavioral and static review
+plus CI cannot substantiate it (a bug "fixed", a perf win, a wire-format
+change), name the trigger that would close the gap in the Stage 2 comment.
+Everything below applies to local invocation (no `GITHUB_EVENT_NAME`) only.
 
 **Runs in the main working tree, not the worktree** — tmux needs the local build environment.
 

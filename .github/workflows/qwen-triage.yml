@@ -51,6 +51,9 @@ jobs:
     #   - `/tmux` comment / `tmux_pr` dispatch -> gates real-user testing, which
     #     EXECUTES the PR author's code, so it is keyed on the PR author (whose
     #     code runs), not the commenter/dispatcher (see principal resolution).
+    #   - `/verify` comments launch sandboxed deep verification, which also
+    #     EXECUTES the PR author's code, so it is gated on the PR author
+    #     exactly like `/tmux`.
     # The `issues` and `workflow_dispatch`-with-`number` (triage) triggers need
     # no gate: triage is read-only and dispatch already requires write to
     # invoke. But `tmux_pr` dispatch runs the *PR author's* code, not the
@@ -65,7 +68,9 @@ jobs:
         github.event.issue.state == 'open' &&
         (startsWith(github.event.comment.body, '@qwen-code /triage') ||
          github.event.comment.body == '@qwen-code /tmux' ||
-         startsWith(github.event.comment.body, '@qwen-code /tmux '))) ||
+         startsWith(github.event.comment.body, '@qwen-code /tmux ') ||
+         github.event.comment.body == '@qwen-code /verify' ||
+         startsWith(github.event.comment.body, '@qwen-code /verify '))) ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.tmux_pr != ''))
     # Canonical same-repo guard: this job loads CI_BOT_PAT, so fork-triggered
@@ -102,11 +107,12 @@ jobs:
           fi
           case "$EVENT_NAME" in
             issue_comment)
-              # /tmux executes the PR AUTHOR's code, so gate on the author's
-              # permission (whose code runs), not the commenter's. /triage only
-              # reads content, so the commenter's permission gates it.
+              # /tmux and /verify execute the PR AUTHOR's code, so gate on the
+              # author's permission (whose code runs), not the commenter's.
+              # /triage only reads content, so the commenter's permission
+              # gates it.
               case "$COMMENT_BODY" in
-                '@qwen-code /tmux'|'@qwen-code /tmux '*) principal="$ISSUE_AUTHOR" ;;
+                '@qwen-code /tmux'|'@qwen-code /tmux '*|'@qwen-code /verify'|'@qwen-code /verify '*) principal="$ISSUE_AUTHOR" ;;
                 *) principal="$COMMENT_USER" ;;
               esac
               ;;
@@ -1366,3 +1372,804 @@ jobs:
             gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@"$BODY_FILE" >/dev/null
           fi
           echo "Posted tmux result to PR #${PR_NUMBER} (verdict=${VERDICT})." >> "$GITHUB_STEP_SUMMARY"
+
+  # On-demand deep verification: `@qwen-code /verify` on a PR runs a
+  # local-verification-style evidence round against the PR's real build —
+  # A/B load-bearing proof against the base side, mock-free harnesses with
+  # wire oracles, targeted workspace gates — and posts the report back.
+  # EXECUTES untrusted PR code, so it reuses the /tmux isolation contract:
+  # gated on the PR AUTHOR (whose code runs) having write via the authorize
+  # job, runs in a container, NO GitHub token in the agent env, model key
+  # behind a loopback proxy, and the report is published by the separate
+  # PR-code-free publish-verify job below. The report is agent-produced
+  # evidence for a human reviewer — never a review, approval, or CI check
+  # (and its check-runs ride the issue_comment event, which the finalize
+  # workflow's `event == "pull_request"` universe structurally excludes).
+  verify:
+    needs: ['authorize']
+    if: >-
+      always() &&
+      github.repository == 'QwenLM/qwen-code' &&
+      github.event_name == 'issue_comment' &&
+      github.event.issue.pull_request &&
+      github.event.issue.state == 'open' &&
+      (github.event.comment.body == '@qwen-code /verify' ||
+       startsWith(github.event.comment.body, '@qwen-code /verify ')) &&
+      needs.authorize.outputs.should_run == 'true'
+    # One verification per PR at a time, mirroring the tmux job: concurrent
+    # runs would share the same self-hosted workspace and clobber each other.
+    # GitHub evaluates concurrency before the job `if`, but after `needs`, so
+    # keep non-runnable triggers out of the shared per-PR group.
+    concurrency:
+      group: >-
+        ${{
+          (github.event_name == 'issue_comment' &&
+           github.event.issue.pull_request &&
+           github.event.issue.state == 'open' &&
+           (github.event.comment.body == '@qwen-code /verify' ||
+            startsWith(github.event.comment.body, '@qwen-code /verify ')) &&
+           needs.authorize.outputs.should_run == 'true') &&
+          format('{0}-verify-{1}', github.workflow, github.event.issue.number) ||
+          format('{0}-verify-run-{1}', github.workflow, github.run_id)
+        }}
+      cancel-in-progress: false
+    timeout-minutes: 45
+    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
+    # The job checks out and executes PR code. Run the steps in a container so
+    # package scripts/builds cannot persist changes in the self-hosted runner's
+    # host filesystem across workflow runs.
+    container:
+      image: 'node:22-bookworm'
+    permissions:
+      contents: 'read'
+    outputs:
+      pr_number: '${{ steps.pr.outputs.pr_number || github.event.issue.number }}'
+      # steps.run sets the verdict for a real agent run; steps.prepare sets
+      # 'fail' when install/build dies; steps.pr sets 'skipped'/'n/a'. All
+      # empty -> the job broke before deciding (publish reports infra).
+      verdict: '${{ steps.run.outputs.verdict || steps.prepare.outputs.verdict || steps.pr.outputs.verdict }}'
+      failure_phase: '${{ steps.prepare.outputs.failure_phase }}'
+      agent_verdict: '${{ steps.run.outputs.agent_verdict }}'
+      skip_reason: '${{ steps.pr.outputs.skip_reason }}'
+    steps:
+      - name: 'Install PR resolver tools'
+        run: |-
+          set -euo pipefail
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates curl git gnupg jq
+
+          install -d -m 755 /etc/apt/keyrings
+          curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+            | gpg --dearmor -o /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+            > /etc/apt/sources.list.d/github-cli.list
+          apt-get update
+          apt-get install -y --no-install-recommends gh
+
+          gh --version
+
+      - name: 'Resolve PR, acknowledge, and snapshot metadata'
+        id: 'pr'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ github.event.issue.number }}'
+          COMMENT_ID: '${{ github.event.comment.id }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |-
+          set -euo pipefail
+          echo "pr_number=${PR_NUMBER}" >> "$GITHUB_OUTPUT"
+          # Acknowledge immediately: the run takes tens of minutes and the
+          # status comment below only appears once the PR resolves as runnable.
+          gh api \
+            --method POST \
+            "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
+            -f content='eyes' > /dev/null ||
+            echo "Failed to add verify acknowledgement reaction; continuing." >&2
+          # Same mergeability settling loop as the tmux job: refs/pull/N/merge
+          # is only current once GitHub has computed mergeability.
+          for attempt in 1 2 3 4 5; do
+            data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft,mergeable)"
+            mergeable="$(jq -r '.mergeable' <<< "$data")"
+            [ "$mergeable" != "UNKNOWN" ] && break
+            echo "::notice::Mergeability for PR #${PR_NUMBER} not computed yet; retry ${attempt}/5."
+            sleep 3
+          done
+          state="$(jq -r '.state' <<< "$data")"
+          is_draft="$(jq -r '.isDraft' <<< "$data")"
+          # decision drives every step below: skip (not verifiable right now —
+          # unlike /tmux, publish-verify posts the reason, because /verify is
+          # always an explicit request and silence reads as a lost run) |
+          # na (docs-only, nothing to execute) | run.
+          if [ "$state" != "OPEN" ] || [ "$is_draft" = "true" ]; then
+            echo "::notice::Skipping verification: PR #${PR_NUMBER} state=${state} draft=${is_draft}."
+            echo "decision=skip" >> "$GITHUB_OUTPUT"
+            echo "verdict=skipped" >> "$GITHUB_OUTPUT"
+            echo "skip_reason=the PR is not open for verification (state=${state}, draft=${is_draft})" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$mergeable" = "CONFLICTING" ]; then
+            echo "::notice::Skipping verification: PR #${PR_NUMBER} has merge conflicts."
+            echo "decision=skip" >> "$GITHUB_OUTPUT"
+            echo "verdict=skipped" >> "$GITHUB_OUTPUT"
+            echo "skip_reason=the PR has merge conflicts, so refs/pull/${PR_NUMBER}/merge is unavailable — resolve conflicts and re-run" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$mergeable" = "UNKNOWN" ]; then
+            echo "::warning::Mergeability for PR #${PR_NUMBER} still UNKNOWN after retries; skipping verification."
+            echo "decision=skip" >> "$GITHUB_OUTPUT"
+            echo "verdict=skipped" >> "$GITHUB_OUTPUT"
+            echo "skip_reason=GitHub had not computed the PR merge ref after several retries — try again shortly" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Paginate the full file list for the docs-only call: gh pr view
+          # caps its files field, and a capped list must never decide anything.
+          files="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename')"
+          if ! printf '%s\n' "$files" | grep -qvE '\.(md|txt|png|jpg|jpeg|gif|svg)$'; then
+            echo "::notice::PR #${PR_NUMBER} changes docs/assets only; nothing to execute."
+            echo "verdict=n/a" >> "$GITHUB_OUTPUT"
+            echo "decision=na" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Snapshot PR metadata for the token-free agent: the agent env
+          # carries no GitHub credential, so everything it may cite (title,
+          # body, commit messages) is read from this file, and the tree/diff
+          # comes from git parents (see the depth-2 checkout below).
+          mkdir -p "$RUNNER_TEMP/verify-context"
+          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --json number,title,body,author,baseRefName,baseRefOid,headRefOid,commits \
+            > "$RUNNER_TEMP/verify-context/pr.json"
+          # Status comment with the live run link, upserted by marker so
+          # re-runs reuse one comment; publish-verify rewrites the same
+          # comment with the final report. Best-effort.
+          MARKER='<!-- qwen-triage:verify -->'
+          printf -v BODY '%s\n\n%s\n\n%s' \
+            "$MARKER" \
+            "🔬 **Sandboxed verification is running** — [watch live progress]($RUN_URL). The report will replace this comment when the run completes." \
+            "🔬 **沙箱验证正在运行** —— [查看实时进度]($RUN_URL)。运行结束后本评论会被验证报告替换。"
+          EXISTING_ID="$(
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+              --method GET --paginate -F per_page=100 |
+              jq -rs --arg m "$MARKER" \
+                '[.[][] | select(.body | contains($m))] | last | .id // empty'
+          )" || EXISTING_ID=''
+          if [ -n "$EXISTING_ID" ]; then
+            gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
+              -f body="$BODY" >/dev/null ||
+              echo "::warning::Failed to update verify status comment; continuing." >&2
+          else
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+              -f body="$BODY" >/dev/null ||
+              echo "::warning::Failed to post verify status comment; continuing." >&2
+          fi
+          echo "decision=run" >> "$GITHUB_OUTPUT"
+
+      # Install before checkout so PR-controlled .npmrc cannot affect npm.
+      - name: 'Install verify runner tools'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: |-
+          set -euo pipefail
+          apt-get install -y --no-install-recommends util-linux
+
+          npm install -g --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest'
+          qwen --version
+
+      # This container mounts the persistent runner workspace, and a previous
+      # run EXECUTED PR code as the node user with write access to .git —
+      # hooks or config planted then would fire during the checkout below (as
+      # root). Run the same exec-vector sweep as the triage job's cleaner:
+      # keep a known-safe config allowlist, unset everything else, drop hook
+      # files, and clear stale worktrees/results. Never fail the job.
+      - name: 'Clean stale agent state'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: |-
+          set -uo pipefail
+          if [ ! -e .git ]; then
+            echo "no prior workspace; nothing to clean"
+            exit 0
+          fi
+          git config --local --name-only --list 2>/dev/null \
+            | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
+            | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
+          HOOKS_DIR="$(git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
+          find "$HOOKS_DIR" \( -type f -o -type l \) ! -name '*.sample' -delete 2>/dev/null || true
+          rm -rf .qwen/tmp/* 2>/dev/null || true
+          # Stale result dirs from an interrupted run must not leak into this
+          # run's artifact collection.
+          find tmp -maxdepth 2 -type d -name '*-verify-*' -exec rm -rf {} + 2>/dev/null || true
+          git worktree prune -v || true
+          echo "stale agent state cleaned"
+
+      - name: 'Checkout PR merge ref'
+        if: "steps.pr.outputs.decision == 'run'"
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        with:
+          # Untrusted PR code — keep the token out of .git/config.
+          persist-credentials: false
+          ref: 'refs/pull/${{ steps.pr.outputs.pr_number }}/merge'
+          # Depth 2 pulls the merge commit AND both parents — HEAD^1 (base
+          # tip) and HEAD^2 (PR head) — so the token-free agent can diff the
+          # PR and rebuild the base side for A/B entirely from local git.
+          fetch-depth: 2
+
+      # The agent's inputs must never come from the tree under test: a PR
+      # could rewrite the verify skill itself to fabricate a clean report, or
+      # pre-commit a fake `tmp/*-verify-*` artifact dir whose report.md /
+      # verdict.txt the collection glob would pick up alongside (or instead
+      # of) the real one. Replace the checked-out .qwen with the base branch's
+      # version (present locally as the merge commit's first parent) and drop
+      # any planted artifact dirs. Fail closed: if this step breaks, the job
+      # stops before the agent runs.
+      - name: 'Pin agent inputs from base'
+        if: "steps.pr.outputs.decision == 'run'"
+        run: |-
+          set -euo pipefail
+          STAGE_DIR="$(mktemp -d)"
+          git archive 'HEAD^1' -- .qwen | tar -x -C "$STAGE_DIR"
+          rm -rf .qwen
+          mv "$STAGE_DIR/.qwen" .qwen
+          rm -rf "$STAGE_DIR"
+          find tmp -maxdepth 2 -type d -name '*-verify-*' -exec rm -rf {} + 2>/dev/null || true
+          echo "agent inputs pinned from base $(git rev-parse --short 'HEAD^1')"
+
+      - name: 'Install and build PR app'
+        id: 'prepare'
+        if: "steps.pr.outputs.decision == 'run'"
+        env:
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+        run: |-
+          set -euo pipefail
+          unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
+          mkdir -p "$RUNNER_TEMP/verify-results"
+          chown -R node:node "$GITHUB_WORKSPACE"
+          prepare_log="$RUNNER_TEMP/verify-results/prepare.log"
+
+          set +e
+          {
+            printf '%s\n' '$ npm ci --prefer-offline --no-audit --progress=false'
+            runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+              npm ci --prefer-offline --no-audit --progress=false
+            install_status=$?
+            if [ "$install_status" -ne 0 ]; then
+              printf '\n%s\n' "npm ci failed with exit code ${install_status}."
+            else
+              printf '\n%s\n' '$ npm run build'
+              runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+                npm run build
+              build_status=$?
+              if [ "$build_status" -ne 0 ]; then
+                printf '\n%s\n' "npm run build failed with exit code ${build_status}."
+              fi
+            fi
+          } > "$prepare_log" 2>&1
+          set -e
+
+          if [ "${install_status:-0}" -ne 0 ]; then
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            echo "failure_phase=install" >> "$GITHUB_OUTPUT"
+            echo "::error::npm ci failed; reporting a verification fail verdict instead of an infrastructure failure."
+            exit 0
+          fi
+          if [ "${build_status:-0}" -ne 0 ]; then
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            echo "failure_phase=build" >> "$GITHUB_OUTPUT"
+            echo "::error::npm run build failed; reporting a verification fail verdict instead of an infrastructure failure."
+            exit 0
+          fi
+          echo "Install/build completed before verification." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 'Run verification agent'
+        if: "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''"
+        id: 'run'
+        # NOTE: no GitHub token here — this step runs untrusted PR code. The
+        # real model key is kept out of qwen's environment; qwen talks to a
+        # root-owned loopback proxy with a dummy key instead.
+        env:
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+          REVIEW_OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
+          REVIEW_OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_TRIAGE_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          PR_NUMBER: '${{ steps.pr.outputs.pr_number }}'
+          REPOSITORY: '${{ github.repository }}'
+        run: |-
+          set -euo pipefail
+          if ! command -v qwen >/dev/null 2>&1; then
+            echo "::error::qwen CLI not found on runner"
+            exit 1
+          fi
+
+          # Bypass the runner proxy before launching qwen: the proxy cuts the
+          # SSE stream to the model host, and qwen reads HTTP(S)_PROXY directly
+          # without honoring NO_PROXY. Clear proxy env for qwen itself while
+          # restoring it for child gh/git commands the agent may spawn.
+          # shellcheck disable=SC2016
+          configure_qwen_network() {
+            local openai_host proxy_bin
+            if ! command -v node >/dev/null 2>&1; then
+              echo "::error::node is required to parse REVIEW_OPENAI_BASE_URL"
+              exit 1
+            fi
+            openai_host="$(node -e 'console.log(new URL(process.env.REVIEW_OPENAI_BASE_URL).hostname)')"
+            if [ -z "$openai_host" ]; then
+              echo "::error::Could not parse a hostname from REVIEW_OPENAI_BASE_URL"
+              exit 1
+            fi
+            export NO_PROXY="${NO_PROXY:+$NO_PROXY,}${openai_host}"
+            export no_proxy="${no_proxy:+$no_proxy,}${openai_host}"
+
+            export QWEN_CI_HTTPS_PROXY="${HTTPS_PROXY:-}"
+            export QWEN_CI_https_proxy="${https_proxy:-}"
+            export QWEN_CI_HTTP_PROXY="${HTTP_PROXY:-}"
+            export QWEN_CI_http_proxy="${http_proxy:-}"
+            proxy_bin="${RUNNER_TEMP:-/tmp}/qwen-network-bin"
+            mkdir -p "$proxy_bin"
+
+            if command -v gh >/dev/null 2>&1; then
+              local real_gh
+              real_gh="$(command -v gh)"
+              export QWEN_CI_REAL_GH="$real_gh"
+              {
+                printf '%s\n' '#!/usr/bin/env bash'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTPS_PROXY:-}" ] && export HTTPS_PROXY="$QWEN_CI_HTTPS_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_https_proxy:-}" ] && export https_proxy="$QWEN_CI_https_proxy"'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTP_PROXY:-}" ] && export HTTP_PROXY="$QWEN_CI_HTTP_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_http_proxy:-}" ] && export http_proxy="$QWEN_CI_http_proxy"'
+                printf '%s\n' 'exec "$QWEN_CI_REAL_GH" "$@"'
+              } > "$proxy_bin/gh"
+              chmod +x "$proxy_bin/gh"
+            fi
+
+            if command -v git >/dev/null 2>&1; then
+              local real_git
+              real_git="$(command -v git)"
+              export QWEN_CI_REAL_GIT="$real_git"
+              {
+                printf '%s\n' '#!/usr/bin/env bash'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTPS_PROXY:-}" ] && export HTTPS_PROXY="$QWEN_CI_HTTPS_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_https_proxy:-}" ] && export https_proxy="$QWEN_CI_https_proxy"'
+                printf '%s\n' '[ -n "${QWEN_CI_HTTP_PROXY:-}" ] && export HTTP_PROXY="$QWEN_CI_HTTP_PROXY"'
+                printf '%s\n' '[ -n "${QWEN_CI_http_proxy:-}" ] && export http_proxy="$QWEN_CI_http_proxy"'
+                printf '%s\n' 'exec "$QWEN_CI_REAL_GIT" "$@"'
+              } > "$proxy_bin/git"
+              chmod +x "$proxy_bin/git"
+            fi
+
+            export PATH="$proxy_bin:$PATH"
+            unset HTTPS_PROXY https_proxy HTTP_PROXY http_proxy
+            echo "openai_host=${openai_host}"
+            echo "qwen_http_proxy=disabled"
+            if [ -n "${QWEN_CI_HTTPS_PROXY}${QWEN_CI_https_proxy}${QWEN_CI_HTTP_PROXY}${QWEN_CI_http_proxy}" ]; then
+              echo "child_git_github_proxy=restored"
+            else
+              echo "child_git_github_proxy=unset"
+            fi
+          }
+          configure_qwen_network
+
+          unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
+
+          start_openai_proxy() {
+            local proxy_port proxy_script
+            proxy_port=8787
+            proxy_script="${RUNNER_TEMP:-/tmp}/qwen-openai-proxy.js"
+            cat > "$proxy_script" <<'NODE'
+          const http = require('node:http');
+          const { Readable } = require('node:stream');
+
+          const port = Number(process.argv[2]);
+          const baseUrl = process.env.REVIEW_OPENAI_BASE_URL;
+          const apiKey = process.env.REVIEW_OPENAI_API_KEY;
+          if (!baseUrl || !apiKey || !Number.isInteger(port)) {
+            console.error('missing proxy configuration');
+            process.exit(1);
+          }
+
+          const base = new URL(baseUrl);
+          const basePath = base.pathname.replace(/\/+$/, '');
+
+          const server = http.createServer(async (req, res) => {
+            if (req.url === '/__health') {
+              res.writeHead(204);
+              res.end();
+              return;
+            }
+
+            try {
+              const incoming = new URL(req.url || '/', 'http://127.0.0.1');
+              const target = new URL(base.origin);
+              let path = incoming.pathname;
+              if (
+                basePath &&
+                basePath !== '/' &&
+                path !== basePath &&
+                !path.startsWith(`${basePath}/`)
+              ) {
+                path = `${basePath}${path.startsWith('/') ? '' : '/'}${path}`;
+              }
+              target.pathname = path;
+              target.search = incoming.search;
+
+              if (req.method !== 'POST' || !target.pathname.endsWith('/chat/completions')) {
+                res.writeHead(403, { 'content-type': 'text/plain' });
+                res.end('proxy: only POST /chat/completions is allowed\n');
+                return;
+              }
+
+              const headers = new Headers(req.headers);
+              headers.delete('host');
+              headers.delete('content-length');
+              headers.set('authorization', `Bearer ${apiKey}`);
+
+              const init = {
+                method: req.method,
+                headers,
+              };
+              if (req.method !== 'GET' && req.method !== 'HEAD') {
+                init.body = req;
+                init.duplex = 'half';
+              }
+
+              const controller = new AbortController();
+              const timer = setTimeout(() => controller.abort(), 120_000);
+              let upstream;
+              try {
+                upstream = await fetch(target, { ...init, signal: controller.signal });
+              } catch (error) {
+                if (error instanceof Error && error.name === 'AbortError') {
+                  res.writeHead(504, { 'content-type': 'text/plain' });
+                  res.end('proxy error: upstream request timed out\n');
+                  return;
+                }
+                throw error;
+              } finally {
+                clearTimeout(timer);
+              }
+              const responseHeaders = {};
+              upstream.headers.forEach((value, key) => {
+                const lower = key.toLowerCase();
+                if (lower !== 'content-encoding' && lower !== 'content-length') {
+                  responseHeaders[key] = value;
+                }
+              });
+              res.writeHead(upstream.status, responseHeaders);
+              if (upstream.body) {
+                Readable.fromWeb(upstream.body).pipe(res);
+              } else {
+                res.end();
+              }
+            } catch (error) {
+              res.writeHead(502, { 'content-type': 'text/plain' });
+              res.end(`proxy error: ${error instanceof Error ? error.message : String(error)}\n`);
+            }
+          });
+
+          server.listen(port, '127.0.0.1');
+          NODE
+
+            REVIEW_OPENAI_API_KEY="$REVIEW_OPENAI_API_KEY" \
+              REVIEW_OPENAI_BASE_URL="$REVIEW_OPENAI_BASE_URL" \
+              node "$proxy_script" "$proxy_port" &
+            OPENAI_PROXY_PID=$!
+            trap 'kill "$OPENAI_PROXY_PID" 2>/dev/null || true' EXIT
+
+            for _ in 1 2 3 4 5; do
+              if curl -fsS "http://127.0.0.1:${proxy_port}/__health" >/dev/null; then
+                break
+              fi
+              if ! kill -0 "$OPENAI_PROXY_PID" 2>/dev/null; then
+                echo "::error::OpenAI proxy exited before becoming ready"
+                exit 1
+              fi
+              sleep 1
+            done
+            if ! curl -fsS "http://127.0.0.1:${proxy_port}/__health" >/dev/null; then
+              echo "::error::OpenAI proxy did not become ready"
+              exit 1
+            fi
+
+            LOCAL_OPENAI_BASE_URL="$(
+              REVIEW_OPENAI_BASE_URL="$REVIEW_OPENAI_BASE_URL" node -e '
+                const base = new URL(process.env.REVIEW_OPENAI_BASE_URL);
+                const path = base.pathname.replace(/\/+$/, "");
+                console.log("http://127.0.0.1:" + process.argv[1] + (path && path !== "/" ? path : ""));
+              ' "$proxy_port"
+            )"
+            export LOCAL_OPENAI_BASE_URL
+            unset REVIEW_OPENAI_API_KEY
+            echo "openai_proxy=enabled (${LOCAL_OPENAI_BASE_URL})"
+          }
+          start_openai_proxy
+
+          QWEN_CMD=(qwen --auth-type openai --approval-mode yolo)
+          if [ -n "${OPENAI_MODEL:-}" ]; then
+            QWEN_CMD+=(--model "$OPENAI_MODEL")
+          fi
+
+          mkdir -p "$RUNNER_TEMP/verify-results"
+          chown -R node:node "$GITHUB_WORKSPACE" "$RUNNER_TEMP/verify-results" "$RUNNER_TEMP/verify-context"
+          QWEN_ENV=(
+            "HOME=/home/node"
+            "USER=node"
+            "SHELL=/bin/bash"
+            "PATH=$PATH"
+            "TERM=${TERM:-xterm-256color}"
+            "LANG=${LANG:-C.UTF-8}"
+            "CI=${CI:-true}"
+            "GITHUB_WORKSPACE=$GITHUB_WORKSPACE"
+            "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
+            "GITHUB_TOKEN="
+            "GH_TOKEN="
+            "OPENAI_API_KEY=qwen-loopback-proxy"
+            "OPENAI_BASE_URL=$LOCAL_OPENAI_BASE_URL"
+            "QWEN_VERIFY_CONTEXT=$RUNNER_TEMP/verify-context/pr.json"
+            "NO_PROXY=${NO_PROXY:-}"
+            "no_proxy=${no_proxy:-}"
+            "QWEN_CI_HTTPS_PROXY=${QWEN_CI_HTTPS_PROXY:-}"
+            "QWEN_CI_https_proxy=${QWEN_CI_https_proxy:-}"
+            "QWEN_CI_HTTP_PROXY=${QWEN_CI_HTTP_PROXY:-}"
+            "QWEN_CI_http_proxy=${QWEN_CI_http_proxy:-}"
+            "QWEN_CI_REAL_GH=${QWEN_CI_REAL_GH:-}"
+            "QWEN_CI_REAL_GIT=${QWEN_CI_REAL_GIT:-}"
+          )
+          if [ -n "${OPENAI_MODEL:-}" ]; then
+            QWEN_ENV+=("OPENAI_MODEL=$OPENAI_MODEL")
+          fi
+
+          set +e
+          timeout --kill-after=10s 25m runuser -u node -- env -i "${QWEN_ENV[@]}" "${QWEN_CMD[@]}" \
+            --prompt "/verify-pr ${PR_NUMBER} --repo ${REPOSITORY}" \
+            --output-format stream-json \
+            | tee "$RUNNER_TEMP/verify-results/output.jsonl"
+          EXIT_CODE=${PIPESTATUS[0]}
+          set -e
+
+          # Collect the skill's artifacts (report.md, verdict.txt,
+          # assertions.json, harness scripts, raw logs) into the upload dir.
+          find tmp -maxdepth 2 -type d -name '*-verify-*' -exec cp -r {} "$RUNNER_TEMP/verify-results/" \; 2>/dev/null || true
+
+          if [ "$EXIT_CODE" -eq 124 ]; then
+            VERDICT='timeout'
+          elif [ "$EXIT_CODE" -eq 137 ] || [ "$EXIT_CODE" -eq 139 ]; then
+            # Killed by a signal (SIGKILL 137 / SIGSEGV 139): OOM, a crash, or
+            # a timeout that ignored SIGTERM. None of these are a verification
+            # outcome, so keep them distinct from a genuine 'fail'.
+            VERDICT='infra-error'
+            echo "::error::qwen killed by signal (exit $EXIT_CODE) — OOM, crash, or forced timeout, not a verification outcome."
+          elif [ "$EXIT_CODE" -ne 0 ]; then
+            VERDICT='fail'
+          else
+            VERDICT='pass'
+          fi
+          echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+
+          # The skill writes its verdict as one word in verdict.txt. It is
+          # output of a run that executed untrusted PR code, so allowlist it
+          # instead of echoing it into workflow outputs.
+          AGENT_VERDICT=''
+          VERDICT_FILE="$(find tmp -maxdepth 2 -type f -path '*-verify-*/verdict.txt' 2>/dev/null | head -1 || true)"
+          if [ -n "$VERDICT_FILE" ]; then
+            CANDIDATE="$(tr -d '[:space:]' < "$VERDICT_FILE" | head -c 32)"
+            case "$CANDIDATE" in
+              merge-ready|findings|blocked|inconclusive) AGENT_VERDICT="$CANDIDATE" ;;
+              *) echo "::warning::Unrecognized agent verdict in ${VERDICT_FILE}; ignoring." ;;
+            esac
+          fi
+          echo "agent_verdict=$AGENT_VERDICT" >> "$GITHUB_OUTPUT"
+          echo "verify verdict: $VERDICT agent: ${AGENT_VERDICT:-none} (exit $EXIT_CODE)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 'Upload verify results'
+        if: "always() && steps.pr.outputs.decision == 'run'"
+        # Don't let a missing/empty results dir (qwen crashed before writing
+        # any) fail the job and mask the original error.
+        continue-on-error: true
+        uses: 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02' # v4.6.2
+        with:
+          name: 'verify-results-${{ steps.pr.outputs.pr_number }}-${{ github.run_id }}-${{ github.run_attempt }}'
+          path: '${{ runner.temp }}/verify-results/'
+          retention-days: 7
+
+      - name: 'Clean up runner workspace'
+        # Mirror the stale-state cleanup at the start of the job, but at the
+        # end and on every outcome, so the checked-out PR tree's artifacts and
+        # worktrees don't accumulate on the persistent self-hosted runner.
+        if: "always() && steps.pr.outputs.decision == 'run'"
+        run: |-
+          set -uo pipefail
+          [ -e .git ] || exit 0
+          find tmp -maxdepth 2 -type d -name '*-verify-*' -exec rm -rf {} + 2>/dev/null || true
+          rm -rf .qwen/tmp/* 2>/dev/null || true
+          git worktree prune -v || true
+
+  # Post the verification report back to the PR. Runs on a clean GitHub-hosted
+  # runner with the write PAT and never checks out PR code, so the write
+  # credential is isolated from the untrusted-code execution in verify above —
+  # the same split as publish-tmux. Unlike publish-tmux it also reports the
+  # skip/na cases: /verify is always an explicit request, so silence would
+  # read as a lost run.
+  publish-verify:
+    needs: ['verify']
+    if: "always() && needs.verify.result != 'skipped'"
+    runs-on: 'ubuntu-latest'
+    permissions:
+      pull-requests: 'write'
+    steps:
+      - name: 'Download verify results'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v5.0.0
+        with:
+          name: 'verify-results-${{ needs.verify.outputs.pr_number }}-${{ github.run_id }}-${{ github.run_attempt }}'
+          path: 'verify-results'
+        continue-on-error: true
+
+      - name: 'Post verification report comment'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PR_NUMBER: '${{ needs.verify.outputs.pr_number }}'
+          VERDICT: '${{ needs.verify.outputs.verdict }}'
+          AGENT_VERDICT: '${{ needs.verify.outputs.agent_verdict }}'
+          SKIP_REASON: '${{ needs.verify.outputs.skip_reason }}'
+          PREPARE_FAILURE_PHASE: '${{ needs.verify.outputs.failure_phase }}'
+          VERIFY_RESULT: '${{ needs.verify.result }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        # shellcheck disable=SC2016
+        run: |-
+          set -euo pipefail
+          if [ -z "${PR_NUMBER:-}" ]; then
+            echo "::warning::No PR number resolved; cannot post a verification comment."
+            exit 0
+          fi
+          BODY_FILE="${RUNNER_TEMP:-/tmp}/verify-comment.md"
+
+          # Same embedding discipline as publish-tmux: the report is untrusted
+          # PR-run output, so it goes inside <details><pre><code> with &, <, >
+          # HTML-escaped — it renders as literal text and cannot open a tag,
+          # close the details, fire @mentions, or be parsed as markdown.
+          html_escape() {
+            sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+          }
+
+          emit_block() {
+            local summary="$1" file="$2" max="$3" content truncated='' summary_html
+            [ -n "$file" ] && [ -f "$file" ] || return 0
+            summary_html="$(printf '%s' "$summary" | html_escape)"
+            if [ "$(wc -c < "$file")" -gt "$max" ]; then
+              truncated=$'\n\n...truncated -- full report in the run artifacts.'
+            fi
+            if ! content="$(
+              set -o pipefail
+              head -c "$max" "$file" | tr -d '\000' | html_escape
+            )"; then
+              echo "::warning::emit_block failed while rendering $summary; see run artifacts." >&2
+              content='<em>Content could not be rendered; see run artifacts.</em>'
+            elif [ -n "$truncated" ]; then
+              content="${content}${truncated}"
+            fi
+            printf '<details>\n<summary>%s</summary>\n\n<pre><code>\n' "$summary_html"
+            printf '%s\n' "$content"
+            printf '</code></pre>\n\n</details>\n\n'
+          }
+
+          # Fixed bilingual framing shared by every terminal body below.
+          SCOPE_EN='Ran the PR in an isolated, token-free container: A/B against the base build, mock-free harness assertions, targeted gates. **Advisory evidence for human reviewers — not a review, an approval, or a CI check.**'
+          SCOPE_ZH='沙箱验证在隔离、无凭证的容器中执行了该 PR 的代码（与 base 构建 A/B 对照、无 mock harness 断言、定向门禁）。仅作为评审证据，**不构成评审、批准或 CI 检查**。'
+
+          if [ "${VERIFY_RESULT:-}" = "cancelled" ]; then
+            {
+              printf '%s\n\n' '<!-- qwen-triage:verify -->'
+              printf '**Sandboxed verification: cancelled** - [workflow run](%s)\n\n' "$RUN_URL"
+              printf 'The verification job was cancelled before producing a report.\n\n'
+              printf '%s\n' '— _Qwen Code · sandboxed verification_'
+            } > "$BODY_FILE"
+          elif [ "${VERIFY_RESULT:-}" != "success" ] || [ -z "${VERDICT:-}" ]; then
+            {
+              printf '%s\n\n' '<!-- qwen-triage:verify -->'
+              printf '**Sandboxed verification: infrastructure failure** - [workflow run](%s)\n\n' "$RUN_URL"
+              printf 'The verification job did not complete (checkout, runner, or setup error) and produced no report. See the workflow run for details.\n\n'
+              printf '%s\n' '— _Qwen Code · sandboxed verification_'
+            } > "$BODY_FILE"
+          elif [ "${VERDICT:-}" = "skipped" ]; then
+            {
+              printf '%s\n\n' '<!-- qwen-triage:verify -->'
+              printf '**Sandboxed verification: not run** - [workflow run](%s)\n\n' "$RUN_URL"
+              printf 'Skipped because %s.\n\n' "${SKIP_REASON:-the PR was not in a verifiable state}"
+              printf '%s\n' '— _Qwen Code · sandboxed verification_'
+            } > "$BODY_FILE"
+          elif [ "${VERDICT:-}" = "n/a" ]; then
+            {
+              printf '%s\n\n' '<!-- qwen-triage:verify -->'
+              printf '**Sandboxed verification: n/a** - [workflow run](%s)\n\n' "$RUN_URL"
+              printf 'This PR changes documentation/assets only — there is no code to execute, so a sandboxed verification has nothing to verify.\n\n'
+              printf '该 PR 仅改动文档/静态资源，没有可执行的代码，沙箱验证没有验证对象。\n\n'
+              printf '%s\n' '— _Qwen Code · sandboxed verification_'
+            } > "$BODY_FILE"
+          elif [ -n "${PREPARE_FAILURE_PHASE:-}" ]; then
+            PREPARE_LOG="$(find verify-results -name 'prepare.log' 2>/dev/null | head -1 || true)"
+            case "$PREPARE_FAILURE_PHASE" in
+              install) PREPARE_COMMAND='npm ci' ;;
+              build) PREPARE_COMMAND='npm run build' ;;
+              *)
+                PREPARE_COMMAND='install/build'
+                UNKNOWN_PREPARE_PHASE="$(
+                  printf '%s' "$PREPARE_FAILURE_PHASE" | tr -d '\000' | tr '\r\n' '  ' | head -c 200 | html_escape
+                )"
+                echo "::warning::Unrecognized prepare failure phase: ${UNKNOWN_PREPARE_PHASE}"
+                ;;
+            esac
+            {
+              printf '%s\n\n' '<!-- qwen-triage:verify -->'
+              printf '**Sandboxed verification: fail** - [workflow run](%s)\n\n' "$RUN_URL"
+              printf 'The PR could not be built because `%s` failed before any verification started. This is treated as a PR failure verdict rather than an infrastructure failure.\n\n' "$PREPARE_COMMAND"
+              emit_block 'Install/build log' "$PREPARE_LOG" 20000
+              printf '%s\n' '— _Qwen Code · sandboxed verification_'
+            } > "$BODY_FILE"
+          else
+            REPORT="$(find verify-results -name 'report.md' 2>/dev/null | head -1 || true)"
+            ASSERTIONS_FILE="$(find verify-results -name 'assertions.json' 2>/dev/null | head -1 || true)"
+            ASSERT_LINE=''
+            if [ -n "$ASSERTIONS_FILE" ]; then
+              # Numbers only — coerce anything non-numeric to 0 so untrusted
+              # JSON cannot smuggle text into the comment body.
+              ASSERT_LINE="$(
+                jq -r 'if type == "object"
+                       then ([.pass, .fail, .total]
+                             | map(if type == "number" then floor else 0 end)
+                             | "Scripted assertions: \(.[0]) passed · \(.[1]) failed · \(.[2]) total")
+                       else empty end' "$ASSERTIONS_FILE" 2>/dev/null || true
+              )"
+            fi
+            case "${AGENT_VERDICT:-}" in
+              merge-ready) HEADLINE='merge-ready (agent verdict)' ;;
+              findings) HEADLINE='findings reported (agent verdict)' ;;
+              blocked) HEADLINE='blocked (agent verdict)' ;;
+              inconclusive) HEADLINE='inconclusive (agent verdict)' ;;
+              *)
+                case "${VERDICT:-}" in
+                  pass) HEADLINE='completed (no structured verdict)' ;;
+                  fail) HEADLINE='agent run failed' ;;
+                  timeout) HEADLINE='timeout' ;;
+                  infra-error) HEADLINE='infra-error (crash/OOM)' ;;
+                  *) HEADLINE='unknown' ;;
+                esac
+                ;;
+            esac
+            if [ -z "$REPORT" ]; then
+              MISSING_REPORT_NOTE='No report.md was found in the run artifacts, so the report section is omitted — see the workflow run output.'
+              echo "::warning::${MISSING_REPORT_NOTE}"
+            fi
+            {
+              printf '%s\n\n' '<!-- qwen-triage:verify -->'
+              printf '**Sandboxed verification: %s** - [workflow run](%s)\n\n' "$HEADLINE" "$RUN_URL"
+              printf '%s\n\n' "$SCOPE_EN"
+              printf '%s\n\n' "$SCOPE_ZH"
+              if [ -n "$ASSERT_LINE" ]; then
+                printf '%s\n\n' "$ASSERT_LINE"
+              fi
+              if [ -n "${MISSING_REPORT_NOTE:-}" ]; then
+                printf '%s\n\n' "$MISSING_REPORT_NOTE"
+              fi
+              emit_block 'Verification report (report.md)' "$REPORT" 50000
+              printf 'Harness scripts and raw logs are in the workflow run artifacts (7-day retention).\n\n'
+              printf '%s\n' '— _Qwen Code · sandboxed verification_'
+            } > "$BODY_FILE"
+          fi
+
+          # Upsert by marker: replaces the "running" status comment posted by
+          # the verify job's resolve step, or any previous report.
+          if ! EXISTING="$(
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+              --method GET \
+              --paginate \
+              -F per_page=100 \
+              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-triage:verify -->"))] | last | .id // empty'
+          )"; then
+            echo "::warning::Failed to look up existing verify comments; will create a new one."
+            EXISTING=""
+          fi
+          if [ -n "$EXISTING" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING" -F body=@"$BODY_FILE" >/dev/null
+          else
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@"$BODY_FILE" >/dev/null
+          fi
+          echo "Posted verification result to PR #${PR_NUMBER} (verdict=${VERDICT}, agent=${AGENT_VERDICT:-none})." >> "$GITHUB_STEP_SUMMARY"
