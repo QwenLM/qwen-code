@@ -941,6 +941,28 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('appends cwd query parameter to git diff, log, and commit-detail URLs', async () => {
+      const ok = { v: 1 as const, workspaceCwd: '/w', available: true };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, ok));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const ws = client.workspaceByCwd('/work/main');
+      const cwd = '/worktrees/feature-x';
+
+      await ws.workspaceGitDiff(cwd);
+      await ws.workspaceGitDiffFile('src/a.ts', undefined, cwd);
+      await ws.workspaceGitDiffFile('src/a.ts', 'src/old.ts', cwd);
+      await ws.workspaceGitLog(50, 0, cwd);
+      await ws.workspaceGitCommitDetail('abc123', cwd);
+
+      expect(calls.map((c) => c.url)).toEqual([
+        'http://daemon/workspaces/%2Fwork%2Fmain/git/diff?cwd=%2Fworktrees%2Ffeature-x',
+        'http://daemon/workspaces/%2Fwork%2Fmain/git/diff/file?path=src%2Fa.ts&cwd=%2Fworktrees%2Ffeature-x',
+        'http://daemon/workspaces/%2Fwork%2Fmain/git/diff/file?path=src%2Fa.ts&oldPath=src%2Fold.ts&cwd=%2Fworktrees%2Ffeature-x',
+        'http://daemon/workspaces/%2Fwork%2Fmain/git/log?limit=50&skip=0&cwd=%2Fworktrees%2Ffeature-x',
+        'http://daemon/workspaces/%2Fwork%2Fmain/git/log/commit?sha=abc123&cwd=%2Fworktrees%2Ffeature-x',
+      ]);
+    });
+
     it('reads workspace-qualified GitHub pull requests over REST', async () => {
       const list = {
         v: 1 as const,
