@@ -309,9 +309,11 @@ describe('GitLogDialog', () => {
     );
   });
 
-  it('forwards gitCwd to the log list and commit-detail SDK calls', async () => {
+  it('forwards gitCwd to the log list, pagination, and commit-detail SDK calls', async () => {
     const e = entry();
-    workspaceGitLog.mockResolvedValue(logPayload([e]));
+    workspaceGitLog
+      .mockResolvedValueOnce(logPayload([e], true))
+      .mockResolvedValueOnce(logPayload([entry({ subject: 'older' })], false));
     workspaceGitCommitDetail.mockResolvedValue({
       ...e,
       body: 'body',
@@ -335,6 +337,17 @@ describe('GitLogDialog', () => {
     await flush();
 
     expect(workspaceGitLog).toHaveBeenCalledWith(50, 0, '/worktrees/wt');
+
+    const loadMore = Array.from(document.body.querySelectorAll('button')).find(
+      (b) => b.textContent === 'Load more',
+    ) as HTMLButtonElement;
+    expect(loadMore).toBeTruthy();
+    await act(async () => {
+      loadMore.click();
+    });
+    await flush();
+
+    expect(workspaceGitLog).toHaveBeenNthCalledWith(2, 50, 1, '/worktrees/wt');
 
     const row = document.body.querySelector(
       'button[aria-expanded="false"]',
