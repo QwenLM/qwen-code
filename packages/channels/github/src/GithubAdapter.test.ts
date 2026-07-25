@@ -641,6 +641,64 @@ describe('GithubChannel', () => {
       );
       expect(channel.cursor.dispatchedBodies).toContain('owner/repo|issue:999');
     });
+
+    it('skips bot-authored issue body', async () => {
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification({ last_read_at: null })])
+        .mockResolvedValueOnce([]);
+
+      mockOctokit.rest.issues.get.mockResolvedValue({
+        data: {
+          body: '@test-bot self-created issue',
+          created_at: '2026-07-02T08:00:00.000Z',
+          user: { id: 99999, login: 'test-bot' },
+        },
+      });
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+    });
+
+    it('does not suppress first-contact body when mention is from a disallowed sender', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ senderPolicy: 'allowlist', allowedUsers: ['bob'] }),
+        makeBridge(),
+      );
+      mockOctokit.rest.users.getByUsername.mockResolvedValue({
+        data: { id: 10002, login: 'bob' },
+      });
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await channel.connect();
+      channel.disconnect();
+      channel.cursor = { lastProcessedAt: '2026-07-01T00:00:00.000Z' };
+
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification({ last_read_at: null })])
+        .mockResolvedValueOnce([
+          makeComment({
+            body: '@test-bot help',
+            user: { id: 10001, login: 'alice' },
+          }),
+        ]);
+      mockOctokit.rest.issues.get.mockResolvedValue({
+        data: {
+          body: '@test-bot implement this',
+          created_at: '2026-07-02T08:00:00.000Z',
+          user: { id: 10002, login: 'bob' },
+        },
+      });
+
+      await pollOnce();
+
+      const bodyEnvelope = channel.inboundEnvelopes.find((e) =>
+        e.messageId.startsWith('issue-body-'),
+      );
+      expect(bodyEnvelope).toBeDefined();
+      expect(bodyEnvelope!.senderId).toBe('10002');
+    });
   });
 
   describe('error handling', () => {
@@ -671,6 +729,30 @@ describe('GithubChannel', () => {
       expect(
         mockOctokit.rest.activity.markNotificationsAsRead,
       ).toHaveBeenCalledWith(expect.objectContaining({ read: true }));
+    });
+
+    it('posts only one error comment when mention dispatch fails on a new thread', async () => {
+      channel.handleInboundError = new Error('agent down');
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([makeNotification({ last_read_at: null })])
+        .mockResolvedValueOnce([makeComment()]);
+      mockOctokit.rest.issues.get.mockResolvedValue({
+        data: {
+          body: '@test-bot help',
+          created_at: '2026-07-02T08:00:00.000Z',
+          user: { id: 10002, login: 'bob' },
+        },
+      });
+
+      await pollOnce();
+
+      const errorComments =
+        mockOctokit.rest.issues.createComment.mock.calls.filter(
+          (call: Array<{ body?: string }>) =>
+            call[0]?.body?.includes('Failed to process'),
+        );
+      expect(errorComments).toHaveLength(1);
     });
   });
 
@@ -743,6 +825,46 @@ describe('GithubChannel', () => {
       expect((ch as unknown as { pollInterval: number }).pollInterval).toBe(
         60000,
       );
+    });
+  });
+
+  describe('validateCursor', () => {
+    function validate(parsed: unknown) {
+      return (
+        channel as unknown as {
+          validateCursor: (
+            p: unknown,
+          ) => { lastProcessedAt: string; dispatchedBodies?: string[] } | null;
+        }
+      ).validateCursor(parsed);
+    }
+
+    it('normalizes falsy non-array dispatchedBodies to empty array', () => {
+      for (const bad of [false, 0, '', null]) {
+        const result = validate({
+          lastProcessedAt: '2026-07-01T00:00:00.000Z',
+          dispatchedBodies: bad,
+        });
+        expect(result).not.toBeNull();
+        expect(result!.dispatchedBodies).toEqual([]);
+      }
+    });
+
+    it('accepts valid dispatchedBodies array', () => {
+      const result = validate({
+        lastProcessedAt: '2026-07-01T00:00:00.000Z',
+        dispatchedBodies: ['owner/repo|issue:1'],
+      });
+      expect(result).not.toBeNull();
+      expect(result!.dispatchedBodies).toEqual(['owner/repo|issue:1']);
+    });
+
+    it('accepts missing dispatchedBodies', () => {
+      const result = validate({
+        lastProcessedAt: '2026-07-01T00:00:00.000Z',
+      });
+      expect(result).not.toBeNull();
+      expect(result!.dispatchedBodies).toBeUndefined();
     });
   });
 });

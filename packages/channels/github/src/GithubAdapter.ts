@@ -51,7 +51,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const base = super.validateCursor(parsed);
     if (!base || typeof base.lastProcessedAt !== 'string') return null;
     if (Number.isNaN(new Date(base.lastProcessedAt).getTime())) return null;
-    if (base.dispatchedBodies && !Array.isArray(base.dispatchedBodies)) {
+    if (
+      base.dispatchedBodies !== undefined &&
+      !Array.isArray(base.dispatchedBodies)
+    ) {
       base.dispatchedBodies = [];
     }
     return base;
@@ -237,12 +240,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
           try {
             await this.handleInbound(envelope);
-            if (isMentioned) dispatchedMention = true;
+            if (isMentioned && this.gate.isAllowed(envelope.senderId))
+              dispatchedMention = true;
           } catch (err) {
             process.stderr.write(
               `[Channel:${this.name}] handleInbound failed for comment ${comment.id}: ${err}\n`,
             );
             await this.postErrorComment(chatId, issueNumber);
+            dispatchedMention = true;
             break;
           }
         }
@@ -290,6 +295,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       );
 
       const body = issue.body || '';
+
+      if (issue.user?.id === this.botUserId) return;
 
       const isMentioned = this.botUsername
         ? testBotMention(body, this.botUsername)
