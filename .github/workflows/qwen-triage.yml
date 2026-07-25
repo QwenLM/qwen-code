@@ -116,10 +116,17 @@ jobs:
               # drive-by account must not be able to spend that on someone
               # else's PR. /triage only reads content, so the commenter's
               # permission gates it.
+              # Match case-INSENSITIVELY: the job predicates above are
+              # GitHub Actions expressions, whose string comparisons ignore
+              # case, so `@QWEN-CODE /VERIFY` reaches this step. A
+              # case-sensitive `case` would fall through to the `*)` branch
+              # and gate that request on the commenter alone — running the
+              # author's code without ever checking the author.
+              body_lc="$(printf '%s' "$COMMENT_BODY" | tr '[:upper:]' '[:lower:]')"
               # /verify checks the COMMENTER first: when the author check is
               # what fails, we then know the requester is trusted and can be
               # told why nothing ran (see 'Explain denied verify request').
-              case "$COMMENT_BODY" in
+              case "$body_lc" in
                 '@qwen-code /verify'|'@qwen-code /verify '*)
                   IS_VERIFY=true
                   principals="$COMMENT_USER $ISSUE_AUTHOR"
@@ -189,10 +196,16 @@ jobs:
       # Acknowledge the authorized request from this always-hosted job so a
       # /verify commenter gets a receipt even when the sandbox lane is backed
       # up. The verify job itself no longer reacts.
+      # `github.event.issue.pull_request` is required here as well as on the
+      # verify job: /verify on a plain issue would otherwise be acknowledged
+      # with 👀 while the verify job's own PR guard skips it and
+      # publish-verify skips with it — an accepted-looking request that can
+      # never produce a report.
       - name: 'Acknowledge verify request'
         if: >-
           steps.perm.outputs.should_run == 'true' &&
           github.event_name == 'issue_comment' &&
+          github.event.issue.pull_request &&
           (github.event.comment.body == '@qwen-code /verify' ||
            startsWith(github.event.comment.body, '@qwen-code /verify '))
         env:
@@ -214,6 +227,7 @@ jobs:
         if: >-
           steps.perm.outputs.explain_deny == 'true' &&
           github.event_name == 'issue_comment' &&
+          github.event.issue.pull_request &&
           (github.event.comment.body == '@qwen-code /verify' ||
            startsWith(github.event.comment.body, '@qwen-code /verify '))
         env:
@@ -1578,7 +1592,19 @@ jobs:
           # Paginate the full file list for the docs-only call: gh pr view
           # caps its files field, and a capped list must never decide anything.
           files="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --paginate --jq '.[].filename')"
-          if ! printf '%s\n' "$files" | grep -qvE '\.(md|txt|png|jpg|jpeg|gif|svg)$'; then
+          # Behavioral paths first: agent skills and workflow definitions are
+          # markdown/YAML by extension but are executable instructions —
+          # exactly what this lane exists to verify. Only then apply the
+          # inert-extension rule.
+          #
+          # `grep <<<` (no pipeline): with `grep -q` on the RIGHT of a pipe,
+          # grep exits at the first match and the writer takes SIGPIPE, so
+          # under `pipefail` a large file list whose first code file appears
+          # early made the pipeline non-zero and the leading `!` classified a
+          # code PR as docs-only — verification silently skipped.
+          if grep -qE '(^|/)\.qwen/|(^|/)\.github/workflows/|(^|/)scripts/' <<< "$files"; then
+            :
+          elif ! grep -qvE '\.(md|txt|png|jpg|jpeg|gif|svg)$' <<< "$files"; then
             echo "::notice::PR #${PR_NUMBER} changes docs/assets only; nothing to execute."
             echo "verdict=n/a" >> "$GITHUB_OUTPUT"
             echo "decision=na" >> "$GITHUB_OUTPUT"
@@ -1602,32 +1628,49 @@ jobs:
           MARKER='<!-- qwen-triage:verify -->'
           printf -v BODY '%s\n\n%s\n\n%s' \
             "$MARKER" \
-            "🔬 **Sandboxed verification is running** — [watch live progress]($RUN_URL). The report will replace this comment when the run completes." \
-            "🔬 **沙箱验证正在运行** —— [查看实时进度]($RUN_URL)。运行结束后本评论会被验证报告替换。"
-          EXISTING_ID="$(
+            "🔬 **Sandboxed verification is running** — [watch live progress]($RUN_URL). The report will be posted here when the run completes." \
+            "🔬 **沙箱验证正在运行** —— [查看实时进度]($RUN_URL)。运行结束后验证报告会发布在这里。"
+          # Marker lookup, shared with publish-verify: only BOT-OWNED
+          # comments whose body STARTS with the marker count. Any user can
+          # paste the marker into a comment of their own; matching on
+          # `contains` anywhere would make the bot try to PATCH a stranger's
+          # comment (403) and strand the run. `stale` marks a marker comment
+          # that is a previous round's terminal report rather than a live
+          # status.
+          BOT_LOGIN="$(gh api user --jq '.login' 2>/dev/null || echo '')"
+          EXISTING_META="$(
             gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
               --method GET --paginate -F per_page=100 |
-              jq -rs --arg m "$MARKER" \
-                '[.[][] | select(.body | contains($m))] | last | .id // empty'
-          )" || EXISTING_ID=''
+              jq -rs --arg m "$MARKER" --arg bot "$BOT_LOGIN" \
+                '[.[][] | select((.body | startswith($m)) and ($bot == "" or .user.login == $bot))] | last
+                 | if . == null then "" else "\(.id)\t\(.body | contains("Sandboxed verification is running"))" end'
+          )" || EXISTING_META=''
+          EXISTING_ID="${EXISTING_META%%$'\t'*}"
           if [ -n "$EXISTING_ID" ]; then
-            # A previous verify report exists: snapshot it for the agent
-            # BEFORE the status upsert overwrites it, so a re-run can carry
-            # each earlier finding's status (fixed/stands/superseded) instead
-            # of starting blind. Best-effort; the skill treats the file as
-            # untrusted input.
+            # A previous verify report exists: snapshot it for the agent so a
+            # re-run can carry each earlier finding's status
+            # (fixed/stands/superseded) instead of starting blind.
+            # Best-effort; the skill treats the file as untrusted input.
             gh api "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
               --jq '.body' > "$RUNNER_TEMP/verify-context/previous-report.md" 2>/dev/null ||
               rm -f "$RUNNER_TEMP/verify-context/previous-report.md"
-            gh api --method PATCH \
-              "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
-              -f body="$BODY" >/dev/null ||
-              echo "::warning::Failed to update verify status comment; continuing." >&2
-          else
-            gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-              -f body="$BODY" >/dev/null ||
-              echo "::warning::Failed to post verify status comment; continuing." >&2
           fi
+          # Only reuse the marker comment when it is a live status: replacing
+          # a previous round's REPORT with "running" would destroy evidence
+          # that a cancelled or infra-failed re-run then never restores.
+          case "$EXISTING_META" in
+            *$'\t'true)
+              gh api --method PATCH \
+                "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
+                -f body="$BODY" >/dev/null ||
+                echo "::warning::Failed to update verify status comment; continuing." >&2
+              ;;
+            *)
+              gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+                -f body="$BODY" >/dev/null ||
+                echo "::warning::Failed to post verify status comment; continuing." >&2
+              ;;
+          esac
           echo "decision=run" >> "$GITHUB_OUTPUT"
 
       # Install before checkout so PR-controlled .npmrc cannot affect npm.
@@ -1659,11 +1702,31 @@ jobs:
             echo "no prior workspace; nothing to clean"
             exit 0
           fi
+          # Worktree-scoped config FIRST: `extensions.worktreeConfig=true` is
+          # on the allowlist below (it carries no command itself), but it
+          # activates `.git/config.worktree` — a second config file that
+          # `git config --local` neither lists nor unsets, and that CAN carry
+          # core.hooksPath. Verified: a prior run can set
+          # `--worktree core.hooksPath=/`, survive the sweep untouched, and
+          # make the `find "$HOOKS_DIR" ... -delete` below walk / as root.
+          # Delete the file outright, then drop the extension.
+          rm -f "$(git rev-parse --git-path config.worktree 2>/dev/null || echo /nonexistent)" 2>/dev/null || true
+          git config --local --unset-all extensions.worktreeConfig 2>/dev/null || true
           git config --local --name-only --list 2>/dev/null \
             | { grep -ivE '^(core\.(repositoryformatversion|bare|filemode|symlinks|ignorecase|precomposeunicode|logallrefupdates|worktree|hidedotfiles|protecthfs|protectntfs)|remote\.|branch\.|extensions\.|gc\.|pack\.|fetch\.|index\.|safe\.|submodule\.[^.]+\.(url|active|branch))' || true; } \
             | while IFS= read -r key; do git config --local --unset-all "$key" 2>/dev/null || true; done
+          # Belt and braces after the config scrub: only delete inside the
+          # repository's own git dir. A hooks path resolving anywhere else is
+          # reported, never swept — a recursive root-owned delete is far
+          # worse than a stale hook on a runner we are about to re-clean.
+          GIT_DIR_ABS="$(git rev-parse --absolute-git-dir 2>/dev/null || echo '')"
           HOOKS_DIR="$(git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
-          find "$HOOKS_DIR" \( -type f -o -type l \) ! -name '*.sample' -delete 2>/dev/null || true
+          HOOKS_ABS="$(cd "$HOOKS_DIR" 2>/dev/null && pwd -P || echo '')"
+          if [ -n "$GIT_DIR_ABS" ] && [ -n "$HOOKS_ABS" ] && [ "${HOOKS_ABS#"$GIT_DIR_ABS"/}" != "$HOOKS_ABS" ]; then
+            find "$HOOKS_ABS" \( -type f -o -type l \) ! -name '*.sample' -delete 2>/dev/null || true
+          elif [ -n "$HOOKS_ABS" ]; then
+            echo "::warning::hooksPath resolves outside the git dir (${HOOKS_ABS}); not sweeping it."
+          fi
           rm -rf .qwen/tmp/* 2>/dev/null || true
           # Stale result dirs from an interrupted run must not leak into this
           # run's artifact collection.
@@ -1802,6 +1865,18 @@ jobs:
           # still forge its own artifacts — that residual is why the report
           # is advisory and never a review.)
           find tmp -maxdepth 2 -type d -name '*-verify-*' -exec rm -rf {} + 2>/dev/null || true
+          # Same for the upload staging dir: it is flushed before npm ci, but
+          # the lifecycle scripts that ran since could have planted files
+          # there too, and everything in it is uploaded verbatim. Recreate it
+          # empty (prepare.log is re-copied below only if it exists).
+          if [ -f "$RUNNER_TEMP/verify-results/prepare.log" ]; then
+            cp "$RUNNER_TEMP/verify-results/prepare.log" "$RUNNER_TEMP/prepare.log.keep"
+          fi
+          rm -rf "$RUNNER_TEMP/verify-results"
+          mkdir -p "$RUNNER_TEMP/verify-results"
+          if [ -f "$RUNNER_TEMP/prepare.log.keep" ]; then
+            mv "$RUNNER_TEMP/prepare.log.keep" "$RUNNER_TEMP/verify-results/prepare.log"
+          fi
 
           # Bypass the runner proxy before launching qwen: the proxy cuts the
           # SSE stream to the model host, and qwen reads HTTP(S)_PROXY directly
@@ -1874,17 +1949,29 @@ jobs:
           unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
 
           start_openai_proxy() {
-            local proxy_port proxy_script
-            proxy_port=8787
+            local proxy_port proxy_script proxy_nonce port_file
+            # PR lifecycle code ran before this step and could have left a
+            # server listening on a fixed port: the real proxy would then die
+            # with EADDRINUSE while the health probe succeeded against the
+            # squatter, and qwen would take ITS chat completions — the
+            # attacker would author the "verification". Defences: an
+            # EPHEMERAL port reported back through a root-owned file, a
+            # per-run nonce the health endpoint must echo, and a liveness
+            # check on the PID we started.
             proxy_script="${RUNNER_TEMP:-/tmp}/qwen-openai-proxy.js"
+            port_file="${RUNNER_TEMP:-/tmp}/qwen-openai-proxy.port"
+            proxy_nonce="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+            rm -f "$port_file"
             cat > "$proxy_script" <<'NODE'
           const http = require('node:http');
+          const { writeFileSync } = require('node:fs');
           const { Readable } = require('node:stream');
 
-          const port = Number(process.argv[2]);
+          const portFile = process.argv[2];
           const baseUrl = process.env.REVIEW_OPENAI_BASE_URL;
           const apiKey = process.env.REVIEW_OPENAI_API_KEY;
-          if (!baseUrl || !apiKey || !Number.isInteger(port)) {
+          const nonce = process.env.QWEN_PROXY_NONCE;
+          if (!baseUrl || !apiKey || !portFile || !nonce) {
             console.error('missing proxy configuration');
             process.exit(1);
           }
@@ -1894,8 +1981,9 @@ jobs:
 
           const server = http.createServer(async (req, res) => {
             if (req.url === '/__health') {
-              res.writeHead(204);
-              res.end();
+              // Identity, not just liveness: a squatter cannot know the nonce.
+              res.writeHead(200, { 'content-type': 'text/plain' });
+              res.end(nonce);
               return;
             }
 
@@ -1968,27 +2056,42 @@ jobs:
             }
           });
 
-          server.listen(port, '127.0.0.1');
+          // Port 0: let the OS choose, then publish it where only root can write.
+          server.listen(0, '127.0.0.1', () => {
+            writeFileSync(portFile, String(server.address().port));
+          });
           NODE
 
             REVIEW_OPENAI_API_KEY="$REVIEW_OPENAI_API_KEY" \
               REVIEW_OPENAI_BASE_URL="$REVIEW_OPENAI_BASE_URL" \
-              node "$proxy_script" "$proxy_port" &
+              QWEN_PROXY_NONCE="$proxy_nonce" \
+              node "$proxy_script" "$port_file" &
             OPENAI_PROXY_PID=$!
             trap 'kill "$OPENAI_PROXY_PID" 2>/dev/null || true' EXIT
 
-            for _ in 1 2 3 4 5; do
-              if curl -fsS "http://127.0.0.1:${proxy_port}/__health" >/dev/null; then
-                break
-              fi
+            proxy_port=''
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
               if ! kill -0 "$OPENAI_PROXY_PID" 2>/dev/null; then
                 echo "::error::OpenAI proxy exited before becoming ready"
                 exit 1
               fi
+              if [ -z "$proxy_port" ] && [ -s "$port_file" ]; then
+                proxy_port="$(tr -cd '0-9' < "$port_file")"
+              fi
+              if [ -n "$proxy_port" ] &&
+                 [ "$(curl -fsS "http://127.0.0.1:${proxy_port}/__health" 2>/dev/null)" = "$proxy_nonce" ]; then
+                break
+              fi
+              proxy_port=''
               sleep 1
             done
-            if ! curl -fsS "http://127.0.0.1:${proxy_port}/__health" >/dev/null; then
-              echo "::error::OpenAI proxy did not become ready"
+            # All three must hold: the PID we started is alive, the port it
+            # reported, and the nonce echoed back. Anything else means we are
+            # not talking to our own proxy.
+            if [ -z "$proxy_port" ] ||
+               ! kill -0 "$OPENAI_PROXY_PID" 2>/dev/null ||
+               [ "$(curl -fsS "http://127.0.0.1:${proxy_port}/__health" 2>/dev/null)" != "$proxy_nonce" ]; then
+              echo "::error::OpenAI proxy did not become ready (or another process answered on its port)"
               exit 1
             fi
 
@@ -2048,7 +2151,12 @@ jobs:
             --prompt "/verify-pr ${PR_NUMBER} --repo ${REPOSITORY}" \
             --output-format stream-json \
             | tee "$RUNNER_TEMP/verify-results/output.jsonl"
-          EXIT_CODE=${PIPESTATUS[0]}
+          # Snapshot BOTH stages: a full/unwritable results volume fails tee
+          # while qwen exits 0, and reading only [0] would publish `pass` over
+          # a truncated evidence stream.
+          AGENT_STATUS=${PIPESTATUS[0]}
+          TEE_STATUS=${PIPESTATUS[1]}
+          EXIT_CODE=$AGENT_STATUS
           set -e
 
           # Collect the skill's artifacts (report.md, verdict.txt,
@@ -2059,18 +2167,32 @@ jobs:
           # exfiltrate whatever it points at into the artifact. Drop links.
           find "$RUNNER_TEMP/verify-results" -type l -delete 2>/dev/null || true
 
-          if [ "$EXIT_CODE" -eq 124 ]; then
+          # 137 is ambiguous: the watchdog escalating past --kill-after looks
+          # identical to an OOM kill. Use the elapsed budget to tell them
+          # apart instead of labelling every 137 a crash.
+          WATCHDOG_FIRED=false
+          if [ "$EXIT_CODE" -eq 137 ] && [ "$SECONDS" -ge 1500 ]; then
+            WATCHDOG_FIRED=true
+          fi
+          if [ "$EXIT_CODE" -eq 124 ] || [ "$WATCHDOG_FIRED" = true ]; then
+            # 124 = SIGTERM honoured; 137 after the full budget = the same
+            # watchdog escalating. Both are the configured timeout.
             VERDICT='timeout'
           elif [ "$EXIT_CODE" -eq 137 ] || [ "$EXIT_CODE" -eq 139 ]; then
-            # Killed by a signal (SIGKILL 137 / SIGSEGV 139): OOM, a crash, or
-            # a timeout that ignored SIGTERM. None of these are a verification
-            # outcome, so keep them distinct from a genuine 'fail'.
+            # Killed early by a signal: OOM, segfault, or an external kill —
+            # not a verification outcome, and distinct from a genuine 'fail'.
             VERDICT='infra-error'
-            echo "::error::qwen killed by signal (exit $EXIT_CODE) — OOM, crash, or forced timeout, not a verification outcome."
+            echo "::error::qwen killed by signal (exit $EXIT_CODE) before the time budget — OOM, crash, or external kill, not a verification outcome."
           elif [ "$EXIT_CODE" -ne 0 ]; then
             VERDICT='fail'
           else
             VERDICT='pass'
+          fi
+          if [ "${TEE_STATUS:-0}" -ne 0 ] && [ "$VERDICT" = 'pass' ]; then
+            # tee failed (full or unwritable results volume) while qwen exited
+            # 0: the evidence stream may be truncated, so this is not a pass.
+            VERDICT='infra-error'
+            echo "::error::Failed to write the agent output stream (tee exit ${TEE_STATUS}); reporting an infrastructure failure rather than a pass."
           fi
           echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
 
@@ -2080,7 +2202,10 @@ jobs:
           AGENT_VERDICT=''
           VERDICT_FILE="$(find tmp -maxdepth 2 -type f -path '*-verify-*/verdict.txt' 2>/dev/null | sort | head -1 || true)"
           if [ -n "$VERDICT_FILE" ]; then
-            CANDIDATE="$(tr -d '[:space:]' < "$VERDICT_FILE" | head -c 32)"
+            # Bound the read before the pipeline: with `head` closing early on
+            # an oversized file, the producer takes SIGPIPE and `pipefail`
+            # would abort the step instead of ignoring an unusable verdict.
+            CANDIDATE="$(head -c 4096 "$VERDICT_FILE" | tr -d '[:space:]' | cut -c1-32)"
             case "$CANDIDATE" in
               merge-ready|findings|blocked|inconclusive) AGENT_VERDICT="$CANDIDATE" ;;
               *) echo "::warning::Unrecognized agent verdict in ${VERDICT_FILE}; ignoring." ;;
@@ -2126,6 +2251,13 @@ jobs:
   publish-verify:
     needs: ['verify']
     if: "always() && needs.verify.result != 'skipped'"
+    # Same per-PR group as the verify job: the verify job releases its slot
+    # when it ends, so without this a second /verify could snapshot and
+    # replace run A's status while publisher A is still pending, and the two
+    # publishers would then race over one marker comment.
+    concurrency:
+      group: "${{ format('{0}-verify-{1}', github.workflow, github.event.issue.number) }}"
+      cancel-in-progress: false
     runs-on: 'ubuntu-latest'
     permissions:
       pull-requests: 'write'
@@ -2207,8 +2339,12 @@ jobs:
             local dest_dir="verify/pr${PR_NUMBER}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
             local clone_dir="${RUNNER_TEMP:-/tmp}/pr-assets"
             local remote="${VERIFY_ASSETS_REMOTE:-https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git}"
-            total="$(find verify-results -type f -path '*/evidence/*.png' 2>/dev/null | wc -l | tr -d ' ')"
-            [ "$total" -gt 0 ] || return 0
+            # `|| true` on every find: the artifact download is
+            # continue-on-error, so verify-results may not exist at all, and
+            # a bare non-zero find under `pipefail` would abort the step
+            # before the missing-report notice and the final upsert.
+            total="$(find verify-results -type f -path '*/evidence/*.png' 2>/dev/null | wc -l | tr -d ' ' || true)"
+            [ -n "$total" ] && [ "$total" -gt 0 ] || return 0
             # Byte-exact size cap: find's -2M unit rounds file sizes UP to
             # whole MiB first, silently turning a documented 2 MB cap into a
             # 1 MiB one; the c (bytes) unit does not round.
@@ -2285,6 +2421,11 @@ jobs:
           # Fixed bilingual framing shared by every terminal body below.
           SCOPE_EN='Ran the PR in an isolated, token-free container: A/B against the base build, mock-free harness assertions, targeted gates. **Advisory evidence for human reviewers — not a review, an approval, or a CI check.**'
           SCOPE_ZH='沙箱验证在隔离、无凭证的容器中执行了该 PR 的代码（与 base 构建 A/B 对照、无 mock harness 断言、定向门禁）。仅作为评审证据，**不构成评审、批准或 CI 检查**。'
+          # Claiming those phases ran is only honest for a completed run: a
+          # startup failure, timeout, or crash reaches the same publisher
+          # branch, and the partial wording says what actually happened.
+          PARTIAL_EN='The verification run did not complete, so the phases below may be partial or missing entirely. **Advisory evidence for human reviewers — not a review, an approval, or a CI check.**'
+          PARTIAL_ZH='本次验证运行未正常结束，下列内容可能不完整甚至缺失。仅作为评审证据，**不构成评审、批准或 CI 检查**。'
 
           # Weak terminal notices (cancelled / infra / skipped / n-a) carry no
           # new evidence, so they must never overwrite a previous round's real
@@ -2362,21 +2503,38 @@ jobs:
                        else empty end' "$ASSERTIONS_FILE" 2>/dev/null || true
               )"
             fi
-            case "${AGENT_VERDICT:-}" in
-              merge-ready) HEADLINE='merge-ready (agent verdict)' ;;
-              findings) HEADLINE='findings reported (agent verdict)' ;;
-              blocked) HEADLINE='blocked (agent verdict)' ;;
-              inconclusive) HEADLINE='inconclusive (agent verdict)' ;;
-              *)
-                case "${VERDICT:-}" in
-                  pass) HEADLINE='completed (no structured verdict)' ;;
-                  fail) HEADLINE='agent run failed' ;;
-                  timeout) HEADLINE='timeout' ;;
-                  infra-error) HEADLINE='infra-error (crash/OOM)' ;;
-                  *) HEADLINE='unknown' ;;
-                esac
-                ;;
-            esac
+            # The agent's own verdict is only honoured for a run that
+            # actually completed AND left consistent evidence: an early
+            # `merge-ready` file must not headline a run that then timed out,
+            # crashed, or produced no report/assertions. Otherwise the
+            # headline comes from the process outcome.
+            TRUST_AGENT_VERDICT=false
+            if [ "${VERDICT:-}" = 'pass' ] && [ -n "$REPORT" ] && [ -n "$ASSERT_LINE" ]; then
+              ASSERT_FAIL="$(jq -r 'if type == "object" and (.fail | type) == "number" then (.fail | floor) else 1 end' "$ASSERTIONS_FILE" 2>/dev/null || echo 1)"
+              case "${AGENT_VERDICT:-}" in
+                merge-ready) [ "$ASSERT_FAIL" = '0' ] && TRUST_AGENT_VERDICT=true ;;
+                findings|blocked|inconclusive) TRUST_AGENT_VERDICT=true ;;
+              esac
+            fi
+            if [ "$TRUST_AGENT_VERDICT" = true ]; then
+              case "$AGENT_VERDICT" in
+                merge-ready) HEADLINE='merge-ready (agent verdict)' ;;
+                findings) HEADLINE='findings reported (agent verdict)' ;;
+                blocked) HEADLINE='blocked (agent verdict)' ;;
+                inconclusive) HEADLINE='inconclusive (agent verdict)' ;;
+              esac
+            else
+              case "${VERDICT:-}" in
+                pass) HEADLINE='completed (no usable structured verdict)' ;;
+                fail) HEADLINE='agent run failed' ;;
+                timeout) HEADLINE='timeout — partial evidence' ;;
+                infra-error) HEADLINE='infra-error (crash, OOM, or unwritable results)' ;;
+                *) HEADLINE='unknown' ;;
+              esac
+              if [ -n "${AGENT_VERDICT:-}" ]; then
+                echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but the run did not complete cleanly (process verdict '${VERDICT:-}'); reporting the process outcome instead."
+              fi
+            fi
             if [ -z "$REPORT" ]; then
               MISSING_REPORT_NOTE='No report.md was found in the run artifacts, so the report section is omitted — see the workflow run output.'
               echo "::warning::${MISSING_REPORT_NOTE}"
@@ -2384,8 +2542,13 @@ jobs:
             {
               printf '%s\n\n' '<!-- qwen-triage:verify -->'
               printf '**Sandboxed verification: %s** - [workflow run](%s)\n\n' "$HEADLINE" "$RUN_URL"
-              printf '%s\n\n' "$SCOPE_EN"
-              printf '%s\n\n' "$SCOPE_ZH"
+              if [ "${VERDICT:-}" = 'pass' ]; then
+                printf '%s\n\n' "$SCOPE_EN"
+                printf '%s\n\n' "$SCOPE_ZH"
+              else
+                printf '%s\n\n' "$PARTIAL_EN"
+                printf '%s\n\n' "$PARTIAL_ZH"
+              fi
               if [ -n "$ASSERT_LINE" ]; then
                 printf '%s\n\n' "$ASSERT_LINE"
               fi
@@ -2406,22 +2569,31 @@ jobs:
           # report. A WEAK_BODY notice only replaces this run's own "running"
           # status; if the marker comment is a previous round's real report,
           # post fresh so that report survives.
+          # Same ownership discipline as the resolve step: only BOT-OWNED
+          # comments STARTING with the marker are candidates, so a marker
+          # pasted by any user cannot divert the bot into PATCHing (and
+          # failing on) someone else's comment.
           EXISTING='' EXISTING_RUNNING='false'
+          BOT_LOGIN="$(gh api user --jq '.login' 2>/dev/null || echo '')"
           if EXISTING_META="$(
             gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
               --method GET \
               --paginate \
               -F per_page=100 \
-              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-triage:verify -->"))] | last
-                        | if . == null then "" else "\(.id)\t\(.body | contains("Sandboxed verification is running"))" end'
+              | jq -sr --arg bot "$BOT_LOGIN" \
+                '[.[][] | select((.body | startswith("<!-- qwen-triage:verify -->")) and ($bot == "" or .user.login == $bot))] | last
+                 | if . == null then "" else "\(.id)\t\(.body | contains("Sandboxed verification is running"))" end'
           )"; then
             EXISTING="${EXISTING_META%%$'\t'*}"
             case "$EXISTING_META" in *$'\t'true) EXISTING_RUNNING='true' ;; esac
           else
             echo "::warning::Failed to look up existing verify comments; will create a new one."
           fi
+          # A failed PATCH (comment deleted, or ownership changed under us)
+          # must still leave a terminal report on the PR, never silence.
           if [ -n "$EXISTING" ] && { [ "$WEAK_BODY" = false ] || [ "$EXISTING_RUNNING" = 'true' ]; }; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING" -F body=@"$BODY_FILE" >/dev/null
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING" -F body=@"$BODY_FILE" >/dev/null ||
+              gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@"$BODY_FILE" >/dev/null
           else
             gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@"$BODY_FILE" >/dev/null
           fi

@@ -523,3 +523,179 @@ describe('qwen-triage verify workflow', () => {
     expect(mk).toBeGreaterThan(rm);
   });
 });
+
+describe('qwen-triage verify hardening', () => {
+  const verifyJob = job('verify');
+
+  // GitHub Actions expression comparisons are case-insensitive, so
+  // `@QWEN-CODE /VERIFY` satisfies the job predicates and reaches the shell.
+  // A case-sensitive `case` would fall through to commenter-only gating and
+  // run the PR author's code without ever checking the author.
+  it('matches verify/tmux commands case-insensitively in the shell gate', () => {
+    const permStep = step('Check principal write permission');
+    expect(permStep).toContain("tr '[:upper:]' '[:lower:]'");
+    expect(permStep).toMatch(/case "\$body_lc" in/);
+  });
+
+  // /verify on a plain issue would be acknowledged with 👀 while the verify
+  // job's PR guard skips it and publish-verify skips with it — accepted
+  // looking, permanently silent.
+  it('restricts the verify ack and denial notice to pull requests', () => {
+    for (const name of [
+      'Acknowledge verify request',
+      'Explain denied verify request',
+    ]) {
+      const raw = step(name);
+      expect(raw).toContain('github.event.issue.pull_request');
+    }
+  });
+
+  // extensions.worktreeConfig activates .git/config.worktree, which
+  // `git config --local` neither lists nor unsets and which can carry
+  // core.hooksPath — pointing the hook sweep's recursive delete at /.
+  it('neutralizes worktree-scoped git config before resolving hooksPath', () => {
+    const clean = verifyJob.slice(verifyJob.indexOf('Clean stale agent state'));
+    const rmWorktreeCfg = clean.indexOf('--git-path config.worktree');
+    const unsetExt = clean.indexOf('--unset-all extensions.worktreeConfig');
+    const hooks = clean.indexOf('--git-path hooks');
+    expect(rmWorktreeCfg).toBeGreaterThan(-1);
+    expect(unsetExt).toBeGreaterThan(rmWorktreeCfg);
+    expect(hooks).toBeGreaterThan(unsetExt);
+    // And the sweep only deletes inside the repository's own git dir.
+    expect(clean).toContain('rev-parse --absolute-git-dir');
+    expect(clean).toContain('not sweeping it');
+  });
+
+  // A fixed proxy port lets PR lifecycle code squat it: the real proxy dies
+  // with EADDRINUSE while the health probe succeeds against the squatter,
+  // and the agent then takes ITS chat completions.
+  it('binds the model proxy to an ephemeral port and authenticates it', () => {
+    const runStep = step('Run verification agent');
+    expect(runStep).not.toContain('proxy_port=8787');
+    expect(runStep).toContain("server.listen(0, '127.0.0.1'");
+    expect(runStep).toContain('QWEN_PROXY_NONCE');
+    expect(runStep).toContain('!= "$proxy_nonce"');
+    expect(runStep).toContain('kill -0 "$OPENAI_PROXY_PID"');
+  });
+
+  // tee can fail (full/unwritable volume) while qwen exits 0; reading only
+  // PIPESTATUS[0] would publish `pass` over a truncated evidence stream.
+  // And 137 is ambiguous between the watchdog and an OOM kill.
+  it('classifies tee failures and distinguishes watchdog kills from crashes', () => {
+    const runStep = step('Run verification agent');
+    expect(runStep).toContain('TEE_STATUS=${PIPESTATUS[1]}');
+    expect(runStep).toMatch(/TEE_STATUS:-0.*-ne 0/s);
+    expect(runStep).toContain('WATCHDOG_FIRED');
+  });
+
+  // The lifecycle-script command-file guards must be asserted on the verify
+  // job's own commands: a bare step() lookup returns the tmux job's
+  // identically named step, so verify-side regressions would pass silently.
+  it('strips GitHub command files from both verify lifecycle commands', () => {
+    // Bound to the prepare step: the agent step's own `runuser` launches
+    // qwen under `env -i`, which needs no per-variable stripping.
+    const prepare = verifyJob.slice(
+      verifyJob.indexOf('Install and build PR app'),
+      verifyJob.indexOf('Run verification agent'),
+    );
+    const commands = prepare.match(/runuser -u node -- env[\s\S]*?\n/g) ?? [];
+    expect(commands.length).toBe(2);
+    expect(step('Run verification agent')).toContain(
+      'runuser -u node -- env -i',
+    );
+    for (const cmd of commands) {
+      for (const v of [
+        'GITHUB_OUTPUT',
+        'GITHUB_STATE',
+        'GITHUB_ENV',
+        'GITHUB_PATH',
+        'GITHUB_STEP_SUMMARY',
+      ]) {
+        expect(cmd).toContain(`-u ${v}`);
+      }
+    }
+  });
+
+  // The publisher has its own html_escape/emit_block, so the tmux escaping
+  // tests do not cover it. Execute it: hostile content must stay literal,
+  // and the escaped body must land under GitHub's 65,536-char comment cap
+  // (the cap is applied AFTER escaping for exactly this reason).
+  it('escapes and size-caps the verify report body', () => {
+    const publishStep = step('Post verification report comment');
+    const body = publishStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
+    expect(body).toBeTruthy();
+    const script = body.replace(/^ {10}/gm, '');
+    const helpers = script.slice(
+      script.indexOf('html_escape()'),
+      script.indexOf('EVIDENCE_SECTION='),
+    );
+    const dir = mkdtempSync(join(tmpdir(), 'verify-publish-'));
+    try {
+      const hostile = join(dir, 'hostile.md');
+      writeFileSync(
+        hostile,
+        '</code></pre></details>\n@everyone <img src=x onerror=alert(1)>\n& done\n',
+      );
+      const dense = join(dir, 'dense.md');
+      writeFileSync(dense, '<T<U>>&'.repeat(7300));
+      const utf8 = join(dir, 'utf8.md');
+      // One ASCII byte of padding so the 45,000-byte cut lands INSIDE a
+      // 3-byte character rather than on a boundary — otherwise the
+      // multibyte-repair path is never exercised.
+      writeFileSync(utf8, `x${'验证证据链路测试'.repeat(8000)}`);
+
+      const emit = (file) => {
+        const proc = spawnSync(
+          'bash',
+          ['-c', `${helpers}\nemit_block 'Report' "$1" 45000`, '_', file],
+          { encoding: 'utf8', maxBuffer: 10 * 1024 * 1024 },
+        );
+        expect(proc.status).toBe(0);
+        return proc.stdout;
+      };
+
+      const escaped = emit(hostile);
+      expect(escaped).toContain('&lt;/code&gt;&lt;/pre&gt;&lt;/details&gt;');
+      expect(escaped).toContain('&amp; done');
+      expect(escaped).not.toContain('<img');
+      // Only the wrapper's own tags may remain.
+      expect(escaped.match(/<(?!\/?(details|summary|pre|code)\b)[a-z]/g)).toBe(
+        null,
+      );
+
+      const capped = emit(dense);
+      expect(Buffer.byteLength(capped)).toBeLessThan(65536);
+      expect(capped).toContain('truncated');
+
+      const cut = emit(utf8);
+      // A byte cut through a multibyte character must not ship broken UTF-8.
+      expect(Buffer.from(cut, 'utf8').toString('utf8')).toBe(cut);
+      expect(cut).not.toContain('�');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // npm lifecycle scripts run after the pre-install flush, so the upload
+  // staging dir is swept again before the agent starts; the prepare log is
+  // the one artifact that must survive that sweep.
+  it('re-flushes the upload staging dir after PR lifecycle scripts', () => {
+    const runStep = step('Run verification agent');
+    const rm = runStep.indexOf('rm -rf "$RUNNER_TEMP/verify-results"');
+    const mk = runStep.indexOf('mkdir -p "$RUNNER_TEMP/verify-results"');
+    const proxy = runStep.indexOf('start_openai_proxy');
+    expect(rm).toBeGreaterThan(-1);
+    expect(mk).toBeGreaterThan(rm);
+    expect(proxy).toBeGreaterThan(mk);
+    expect(runStep).toContain('prepare.log.keep');
+  });
+
+  // An early merge-ready file must not headline a run that timed out,
+  // crashed, or produced no report/assertions.
+  it('only honors the agent verdict for a clean, evidenced run', () => {
+    const publishStep = step('Post verification report comment');
+    expect(publishStep).toContain('TRUST_AGENT_VERDICT');
+    expect(publishStep).toMatch(/VERDICT:-\}" = 'pass' \] && \[ -n "\$REPORT"/);
+    expect(publishStep).toContain('PARTIAL_EN');
+  });
+});
