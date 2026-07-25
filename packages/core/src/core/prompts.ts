@@ -540,6 +540,27 @@ function buildSystemPromptSuffix(text?: string): string {
 }
 
 /**
+ * Priority framing for the context-files layer.
+ *
+ * Context files used to be appended after a bare `---`, which reads as
+ * supplementary background rather than instruction: nothing told the model that
+ * these rules outrank the defaults in the base prompt. A specific default (for
+ * example the Explore subagent guidance under `## Using Your Tools`) could
+ * therefore win over an explicit user rule forbidding it.
+ */
+const CONTEXT_FILES_PRECEDENCE_NOTICE =
+  "The following instructions come from the user's context files (QWEN.md / " +
+  'AGENTS.md). Where they conflict with the default guidance above, they take ' +
+  'precedence. Check them before choosing a tool or spawning a subagent.';
+
+function buildContextFilesSuffix(text?: string): string {
+  const trimmed = text?.trim();
+  return trimmed
+    ? `\n\n---\n\n${CONTEXT_FILES_PRECEDENCE_NOTICE}\n\n${trimmed}`
+    : '';
+}
+
+/**
  * System prompt segments, one slot per segment, ordered stable → context →
  * volatile. Callers only classify content into slots; `assembleSystemPrompt`
  * is the single place that knows the order, so a segment cannot be appended
@@ -575,7 +596,7 @@ export interface SystemPromptLayers {
 export function assembleSystemPrompt(layers: SystemPromptLayers): string {
   return (
     layers.base +
-    buildSystemPromptSuffix(layers.contextFiles) +
+    buildContextFilesSuffix(layers.contextFiles) +
     buildSystemPromptSuffix(layers.appendPrompt) +
     (layers.gitStatus ? `\n\n${layers.gitStatus}` : '') +
     buildSystemPromptSuffix(layers.autoMemory)

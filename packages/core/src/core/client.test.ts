@@ -14000,7 +14000,7 @@ Other open files:
       // Exact shape: base + contextFiles + autoMemory, in that order, with no
       // appendPrompt or gitStatus segment between them.
       expect(systemInstruction).toBe(
-        'Side query base\n\n---\n\nCONTEXT_FILES_MARKER\n\n---\n\nAUTO_MEMORY_MARKER',
+        "Side query base\n\n---\n\nThe following instructions come from the user's context files (QWEN.md / AGENTS.md). Where they conflict with the default guidance above, they take precedence. Check them before choosing a tool or spawning a subagent.\n\nCONTEXT_FILES_MARKER\n\n---\n\nAUTO_MEMORY_MARKER",
       );
     });
 
@@ -14032,7 +14032,7 @@ Other open files:
         expect.objectContaining({
           config: expect.objectContaining({
             systemInstruction:
-              'Override prompt with memory\n\n---\n\nSaved memory',
+              "Override prompt with memory\n\n---\n\nThe following instructions come from the user's context files (QWEN.md / AGENTS.md). Where they conflict with the default guidance above, they take precedence. Check them before choosing a tool or spawning a subagent.\n\nSaved memory",
           }),
         }),
         'test-session-id',
@@ -14163,7 +14163,7 @@ Other open files:
         expect.objectContaining({
           config: expect.objectContaining({
             systemInstruction:
-              'Override prompt with memory and append\n\n---\n\nSaved memory\n\n---\n\nFocus on findings only.',
+              "Override prompt with memory and append\n\n---\n\nThe following instructions come from the user's context files (QWEN.md / AGENTS.md). Where they conflict with the default guidance above, they take precedence. Check them before choosing a tool or spawning a subagent.\n\nSaved memory\n\n---\n\nFocus on findings only.",
           }),
         }),
         'test-session-id',
