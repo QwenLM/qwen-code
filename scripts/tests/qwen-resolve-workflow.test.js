@@ -4,7 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -39,11 +48,111 @@ function step(section, name) {
   return match?.[0] ?? '';
 }
 
+function reviewGhWrapper(runStep) {
+  const start = runStep.indexOf('cat > "$proxy_bin/gh" <<\'QWEN_GH_WRAPPER\'');
+  const bodyStart = runStep.indexOf('\n', start) + 1;
+  const end = runStep.indexOf('\n          QWEN_GH_WRAPPER', bodyStart);
+  return runStep.slice(bodyStart, end).replace(/^ {10}/gm, '');
+}
+
+function runReviewGhWrapper(
+  runStep,
+  args,
+  prState,
+  currentHead,
+  expectedHead = 'head-a',
+) {
+  const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-review-gh-'));
+  try {
+    const wrapperPath = path.join(tempDir, 'gh');
+    const realGhPath = path.join(tempDir, 'real-gh');
+    const ghLogPath = path.join(tempDir, 'gh.log');
+    writeFileSync(wrapperPath, reviewGhWrapper(runStep));
+    writeFileSync(
+      realGhPath,
+      [
+        '#!/usr/bin/env bash',
+        'set -euo pipefail',
+        'if [ "${1:-}" = "pr" ] && [ "${2:-}" = "view" ]; then',
+        '  printf "%s\\t%s\\n" "${FAKE_PR_STATE:-OPEN}" "${FAKE_HEAD_SHA:-head-a}"',
+        '  exit 0',
+        'fi',
+        'printf "%s\\n" "$*" >> "${FAKE_GH_LOG:?}"',
+      ].join('\n'),
+    );
+    writeFileSync(ghLogPath, '');
+    chmodSync(wrapperPath, 0o755);
+    chmodSync(realGhPath, 0o755);
+
+    const result = spawnSync(wrapperPath, args, {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        FAKE_GH_LOG: ghLogPath,
+        FAKE_HEAD_SHA: currentHead,
+        FAKE_PR_STATE: prState,
+        QWEN_CI_REAL_GH: realGhPath,
+        QWEN_CI_REVIEW_EXPECTED_HEAD_SHA: expectedHead,
+        QWEN_CI_REVIEW_PR_NUMBER: '123',
+        QWEN_CI_REVIEW_REPO: 'owner/repo',
+      },
+    });
+
+    return {
+      ...result,
+      ghLog: readFileSync(ghLogPath, 'utf8'),
+    };
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+}
+
 describe('qwen resolve workflow', () => {
   const workflow = readFileSync(
     path.join(repoRoot, '.github/workflows/qwen-code-pr-review.yml'),
     'utf8',
   );
+
+  it('serialises /resolve against the autofix conflict path on the same PR head', () => {
+    // Both jobs merge the base branch and push to the PR's head. They live in
+    // different workflows, so a per-workflow concurrency name guards each only
+    // against itself. Observed on #7355: /resolve pushed at 03:51, the autofix
+    // leg pushed at 04:05 and was rejected `fetch first`, throwing away a full
+    // agent run. GitHub concurrency groups are repository-scoped, so an
+    // IDENTICAL prefix in both files is what makes them mutually exclusive.
+    const autofix = readFileSync(
+      path.join(repoRoot, '.github/workflows/qwen-autofix.yml'),
+      'utf8',
+    );
+    const groupOf = (text, jobName) =>
+      job(text, jobName).match(
+        /\n {4}concurrency:\n {6}group: '([a-z-]+?)-\$\{\{/,
+      )?.[1];
+
+    const resolveLock = groupOf(workflow, 'resolve-pr');
+    const autofixLock = groupOf(autofix, 'review-address');
+    expect(resolveLock).toBeTruthy();
+    // The invariant: renaming one side alone silently re-opens the race, and
+    // nothing else in the suite would notice.
+    expect(autofixLock).toBe(resolveLock);
+
+    // Each side must still key the group on the PR number — a shared prefix
+    // with a per-run suffix would serialise nothing.
+    expect(job(workflow, 'resolve-pr')).toContain(
+      `group: '${resolveLock}-\${{ github.event.issue.number || github.event.inputs.pr_number }}'`,
+    );
+    expect(job(autofix, 'review-address')).toContain(
+      `group: '${autofixLock}-\${{ matrix.target.pr }}'`,
+    );
+    // Queue, never cancel: the loser of the race must run after the winner and
+    // re-check, not be discarded (or discard the winner's in-flight work).
+    for (const [text, name] of [
+      [workflow, 'resolve-pr'],
+      [autofix, 'review-address'],
+    ]) {
+      expect(job(text, name)).toContain('cancel-in-progress: false');
+    }
+  });
 
   it('uses the existing PR command workflow', () => {
     expect(
@@ -62,6 +171,32 @@ describe('qwen resolve workflow', () => {
     expect(workflow).not.toContain('authorize-resolve:');
     expect(workflow).toContain(
       "github.event.comment.body == '@qwen-code /resolve'",
+    );
+  });
+
+  it('cancels in-flight lifecycle reviews when the PR closes', () => {
+    const concurrencyStart = workflow.indexOf('\nconcurrency:');
+    const concurrency = workflow.slice(
+      concurrencyStart,
+      workflow.indexOf('\njobs:', concurrencyStart),
+    );
+
+    expect(workflow).toContain("- 'closed'");
+    expect(concurrency).toContain("github.event.action == 'closed'");
+    expect(concurrency).toContain(
+      "format('qwen-pr-review-pr-{0}', github.event.pull_request.number)",
+    );
+  });
+
+  it('keeps synchronize cancellation expression simple for workflow-level concurrency', () => {
+    const concurrencyStart = workflow.indexOf('\nconcurrency:');
+    const concurrency = workflow.slice(
+      concurrencyStart,
+      workflow.indexOf('\njobs:', concurrencyStart),
+    );
+
+    expect(concurrency).toContain(
+      "cancel-in-progress: \"${{ github.event_name == 'pull_request_target' && (github.event.action == 'synchronize' || github.event.action == 'closed') }}\"",
     );
   });
 
@@ -106,6 +241,88 @@ describe('qwen resolve workflow', () => {
     expect(resolveJob).not.toContain("- name: 'Refresh dependencies'");
   });
 
+  it('asks the resolution report for what the diff cannot show', () => {
+    // Measured before this contract existed: every substantive /resolve
+    // summary was a file-by-file inventory that hit the byte cap exactly and
+    // stopped mid-word (#2993, #4256, #6206 all ended at 2100 bytes total).
+    // The inventory duplicates the diff; what only the resolver knows is the
+    // root cause, whether the merge was semantic, and what it could not check.
+    const prompt = step(resolveJob, 'Resolve conflicts');
+    expect(prompt).toContain('Keep the summary under 4000 bytes');
+    expect(prompt).toContain(
+      'A file-by-file inventory is the first thing to cut',
+    );
+    expect(prompt).toContain('**Root cause.**');
+    expect(prompt).toContain('**Textual or semantic.**');
+    expect(prompt).toContain('**What is load-bearing.**');
+    expect(prompt).toContain('**What you could not verify.**');
+    // /resolve runs no tests AND may not edit non-conflicted files, so a merge
+    // that breaks an untouched test can only be reported, never fixed here.
+    expect(prompt).toContain('NON-conflicted test');
+    // Project convention for anything posted as a PR comment.
+    expect(prompt).toContain('<summary>中文说明</summary>');
+  });
+
+  it('truncates an over-long report visibly, on a character boundary', () => {
+    const helper = resolveJob.match(
+      /(SUMMARY_MAX_BYTES=\d+\n[\s\S]*?append_safe_file\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    expect(helper).toBeTruthy();
+    // The instructed limit must sit BELOW the enforced one, or a report that
+    // obeys the prompt still gets cut.
+    const cap = Number(helper.match(/SUMMARY_MAX_BYTES=(\d+)/)[1]);
+    expect(cap).toBeGreaterThan(4000);
+
+    const run = (body) => {
+      const dir = mkdtempSync(path.join(tmpdir(), 'resolve-summary-'));
+      writeFileSync(path.join(dir, 'address-summary.md'), body);
+      const out = spawnSync(
+        'bash',
+        [
+          '-c',
+          `${helper.replace(/^ {10}/gm, '')}\nappend_safe_file "$WORKDIR/address-summary.md"`,
+        ],
+        {
+          env: {
+            ...process.env,
+            WORKDIR: dir,
+            RUN_URL: 'https://github.com/test/repo/actions/runs/1',
+          },
+        },
+      );
+      rmSync(dir, { recursive: true, force: true });
+      expect(out.status).toBe(0);
+      return out.stdout;
+    };
+
+    // A report inside the budget is passed through whole and unannotated.
+    const short = new TextDecoder().decode(
+      run('# Merge report\n\nRoot cause: #7351 touched the same chain.\n'),
+    );
+    expect(short).toContain('Root cause: #7351 touched the same chain.');
+    expect(short).not.toContain('truncated at');
+
+    // An over-long one is cut AND says so — the silent stop is the bug.
+    const long = new TextDecoder().decode(run(`${'x'.repeat(cap + 500)}\n`));
+    expect(long).toContain(`truncated at ${cap} bytes`);
+    expect(long).toContain('attached to this [workflow run](');
+
+    // The cut lands on a byte boundary, so a multi-byte character straddling
+    // it must be dropped rather than emitted as a broken tail. One leading
+    // ASCII byte offsets the 3-byte characters so the cap falls INSIDE one —
+    // without the offset the cut would land cleanly and prove nothing.
+    const wideBuf = run(`x${'中'.repeat(Math.ceil(cap / 3) + 2)}`);
+    // Fatal-decode the raw bytes bash emitted: a split multi-byte character
+    // would throw here. Re-encoding a JS string first (TextEncoder) can never
+    // produce invalid UTF-8, so that round-trip would make this assertion inert.
+    expect(() =>
+      new TextDecoder('utf-8', { fatal: true }).decode(wideBuf),
+    ).not.toThrow();
+    const wide = new TextDecoder().decode(wideBuf);
+    expect(wide).not.toContain('�');
+    expect(wide).toContain(`truncated at ${cap} bytes`);
+  });
+
   it('uses resolve naming for run artifacts', () => {
     expect(workflow).toContain('qwen-resolve-');
     expect(workflow).toContain('/tmp/qwen-resolve');
@@ -129,15 +346,15 @@ describe('qwen resolve workflow', () => {
     const contextStep = step(reviewJob, 'Resolve PR context');
     const runStep = step(reviewJob, 'Run review');
 
-    expect(reviewJob).toContain('timeout-minutes: 200');
-    expect(contextStep).toContain('DEFAULT_TIMEOUT_MINUTES=120');
+    expect(reviewJob).toContain('timeout-minutes: 260');
+    expect(contextStep).toContain('DEFAULT_TIMEOUT_MINUTES=180');
     expect(contextStep).toContain('case "$token" in');
     expect(contextStep).toContain('--timeout=*)');
     expect(contextStep).toContain('TIMEOUT_MINUTES="${token#--timeout=}"');
     expect(contextStep).toContain('timeout=*)');
     expect(contextStep).toContain('TIMEOUT_MINUTES="${token#timeout=}"');
     expect(runStep).toContain('if [ "${#TIMEOUT_MINUTES}" -gt 3 ]; then');
-    expect(runStep).toContain('timeout_minutes must not exceed 180 minutes');
+    expect(runStep).toContain('timeout_minutes must not exceed 240 minutes');
     expect(runStep).toContain('QWEN_TIMEOUT="$TIMEOUT_MINUTES"');
     expect(runStep).not.toContain('QWEN_TIMEOUT=$((TIMEOUT_MINUTES - 5))');
   });
@@ -147,19 +364,132 @@ describe('qwen resolve workflow', () => {
     const fallbackStep = step(reviewJob, 'Post fallback comment on failure');
 
     expect(runStep).toContain('failure_kind=$kind');
+    expect(runStep).toContain("OUTCOME='timeout'");
     expect(runStep).toContain(
-      'fail "Qwen review timed out after ${QWEN_TIMEOUT} minutes." 1 "timeout"',
+      'REASON="Qwen review timed out after ${attempt_timeout} seconds (of the ${QWEN_TIMEOUT}-minute budget)."',
     );
     expect(runStep).toContain('[ "$qwen_status" -eq 137 ]');
     expect(fallbackStep).toContain('FAILURE_KIND:');
     expect(fallbackStep).toContain('TIMEOUT_MINUTES:');
-    expect(fallbackStep).toContain('@qwen-code /review --timeout=180');
+    expect(fallbackStep).toContain('@qwen-code /review --timeout=240');
     expect(fallbackStep).toContain(
-      'This run already used the maximum 180 minute timeout.',
+      'This run already used the maximum 240 minute timeout.',
     );
     expect(fallbackStep).toContain('**Qwen Code review timed out.**');
     expect(fallbackStep).not.toContain(
       '_Qwen Code review did not complete successfully:',
+    );
+  });
+
+  it('skips stale automatic review runs before invoking qwen', () => {
+    const runStep = step(reviewJob, 'Run review');
+    const staleHeadCheck = runStep.slice(
+      runStep.indexOf(
+        'if [ "${{ github.event_name }}" = "pull_request_target" ]; then',
+      ),
+      runStep.indexOf('PROMPT="/review ${REVIEW_URL}"'),
+    );
+
+    expect(staleHeadCheck).toContain(
+      'EVENT_HEAD_SHA="${{ github.event.pull_request.head.sha }}"',
+    );
+    expect(runStep).toContain(
+      'PR_DATA="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state,headRefOid --jq \'[.state, .headRefOid] | @tsv\')"',
+    );
+    expect(runStep).toContain(
+      'IFS=$\'\\t\' read -r PR_STATE CURRENT_HEAD_SHA <<< "$PR_DATA"',
+    );
+    expect(staleHeadCheck).toContain(
+      'Skipping stale review run: event head ${EVENT_HEAD_SHA} is no longer current',
+    );
+    expect(staleHeadCheck).toContain('exit 0');
+  });
+
+  it('guards PR review publication against closed or stale PRs', () => {
+    const runStep = step(reviewJob, 'Run review');
+    const fallbackStep = step(reviewJob, 'Post fallback comment on failure');
+
+    expect(runStep).toContain('guard_pr_write()');
+    expect(runStep).toContain(
+      'Blocked PR write: PR #${pr_number} is ${state}.',
+    );
+    expect(runStep).toContain(
+      'Blocked PR write: PR #${pr_number} moved from ${expected_head} to ${current_head}.',
+    );
+    expect(runStep).toContain('repos/*/pulls/*/reviews');
+    expect(runStep).toContain('repos/*/pulls/*/comments');
+    expect(runStep).toContain('repos/*/issues/*/comments');
+    expect(runStep).toContain('repos/*/issues/comments/*');
+    expect(runStep).toContain('QWEN_CI_REVIEW_REPO="$REPO"');
+    expect(runStep).toContain('QWEN_CI_REVIEW_PR_NUMBER="$PR_NUMBER"');
+    expect(runStep).toContain(
+      'QWEN_CI_REVIEW_EXPECTED_HEAD_SHA="$EXPECTED_HEAD_SHA"',
+    );
+    expect(runStep).toContain(
+      'echo "expected_head_sha=$EXPECTED_HEAD_SHA" >> "$GITHUB_OUTPUT"',
+    );
+    expect(fallbackStep).toContain('EXPECTED_HEAD_SHA:');
+    expect(fallbackStep).toContain(
+      'Skipping fallback comment: PR #${PR_NUMBER} is ${pr_state}.',
+    );
+    expect(fallbackStep).toContain(
+      'Skipping fallback comment: PR #${PR_NUMBER} moved from ${EXPECTED_HEAD_SHA} to ${current_head}.',
+    );
+  });
+
+  it('blocks wrapped gh review writes when the PR is closed or stale', () => {
+    const runStep = step(reviewJob, 'Run review');
+    const closedReview = runReviewGhWrapper(
+      runStep,
+      ['api', 'repos/owner/repo/pulls/123/reviews', '--input', 'review.json'],
+      'CLOSED',
+      'head-a',
+    );
+    expect(closedReview.status).toBe(90);
+    expect(closedReview.stderr).toContain(
+      'Blocked PR write: PR #123 is CLOSED',
+    );
+    expect(closedReview.ghLog).toBe('');
+
+    const staleSummary = runReviewGhWrapper(
+      runStep,
+      [
+        'api',
+        'repos/owner/repo/issues/comments/456',
+        '--method',
+        'PATCH',
+        '--input',
+        'summary.json',
+      ],
+      'OPEN',
+      'head-b',
+    );
+    expect(staleSummary.status).toBe(90);
+    expect(staleSummary.stderr).toContain(
+      'Blocked PR write: PR #123 moved from head-a to head-b',
+    );
+    expect(staleSummary.ghLog).toBe('');
+  });
+
+  it('allows wrapped gh review writes when the PR is still current', () => {
+    const runStep = step(reviewJob, 'Run review');
+    const currentSummary = runReviewGhWrapper(
+      runStep,
+      [
+        'api',
+        'repos/owner/repo/issues/123/comments',
+        '--method',
+        'POST',
+        '--input',
+        'summary.json',
+      ],
+      'OPEN',
+      'head-a',
+    );
+
+    expect(currentSummary.status).toBe(0);
+    expect(currentSummary.ghLog).toContain(
+      'api repos/owner/repo/issues/123/comments --method POST --input summary.json',
     );
   });
 
@@ -177,6 +507,56 @@ describe('qwen resolve workflow', () => {
       ? workflow.slice(resolveJobStart)
       : workflow.slice(resolveJobStart, resolveJobStart + 1 + nextJob);
   const reviewJob = job(workflow, 'review-pr');
+  const delayAutomaticReviewJob = job(workflow, 'delay-automatic-review');
+  const authorizeJob = job(workflow, 'authorize');
+  const precheckJob = job(workflow, 'precheck-pr');
+
+  it('keeps closed PR events from running precheck or authorize jobs', () => {
+    expect(precheckJob).toContain("github.event.action != 'closed'");
+    expect(authorizeJob).toContain("github.event.action != 'closed'");
+  });
+
+  it('keeps automatic review jobs cancellable by concurrency', () => {
+    for (const lifecycleJob of [
+      authorizeJob,
+      delayAutomaticReviewJob,
+      reviewJob,
+    ]) {
+      expect(lifecycleJob).toContain('!cancelled() &&');
+      expect(lifecycleJob).not.toContain('\n      always() &&');
+    }
+  });
+
+  it('does not require fork PR authors to have write permission for automatic review', () => {
+    const authorizeStep = step(
+      authorizeJob,
+      'Check principal write permission',
+    );
+
+    expect(authorizeJob).toContain(
+      "needs.precheck-pr.outputs.decision == 'allow_triage'",
+    );
+    expect(authorizeStep).toMatch(
+      /if \[ "\$PR_ACTION" = "review_requested" \]; then\s+principal="\$SENDER"/,
+    );
+    const reviewRequestedBranch = authorizeStep.slice(
+      authorizeStep.indexOf('if [ "$PR_ACTION" = "review_requested" ]; then'),
+      authorizeStep.indexOf('else'),
+    );
+    expect(reviewRequestedBranch).toContain('principal="$SENDER"');
+    expect(reviewRequestedBranch).not.toContain(
+      'echo "should_review=true" >> "$GITHUB_OUTPUT"',
+    );
+    expect(reviewRequestedBranch).not.toContain('exit 0');
+    expect(authorizeStep).toContain('pull_request_target)');
+    expect(authorizeStep).toContain(
+      'Automatic PR review allowed for PR #${PR_NUMBER} after same-repo/precheck gate.',
+    );
+    expect(authorizeStep).toContain(
+      'echo "should_review=true" >> "$GITHUB_OUTPUT"',
+    );
+    expect(authorizeStep).not.toContain('principal="$PR_AUTHOR"');
+  });
 
   it('keeps the authorization and scope guards on resolve-pr', () => {
     // /resolve must require write+ permission before any credentialed push.

@@ -68,7 +68,7 @@ cd /path/to/your/project
 qwen serve --channel my-plugin-test
 ```
 
-`qwen serve --channel` requires the channel's configured `cwd` to resolve to the daemon workspace.
+`qwen serve --channel` requires the channel's configured `cwd` to resolve to one registered, trusted daemon workspace. In a multi-workspace daemon, named channels are grouped into one worker per owning workspace; `--channel all` still selects only the primary workspace's channels.
 
 ### 6. Send a message
 
@@ -116,5 +116,9 @@ Existing TypeScript plugins that explicitly type the adapter constructor or fact
 - **Attachments** — populate `envelope.attachments` with images/files and `handleInbound()` routes them to the agent (images as vision input, files as paths in the prompt)
 - **Streaming hooks** — override `onResponseChunk()` for progressive display (e.g., editing a message in-place)
 - Access control (allowlist, pairing, open), session routing, slash commands, crash recovery
+
+## Lifecycle status
+
+The mock plugin protocol exposes streamed chunks and final outbound messages only. It does not model typing indicators, reactions, card updates, or any other status surface, so prompt and task lifecycle status are intentionally no-op for this example channel.
 
 Full guide: [Channel Plugin Developer Guide](../../../docs/developers/channel-plugins.md)

@@ -11,6 +11,8 @@ import type { Suggestion } from '../components/SuggestionsDisplay.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
 import { matchMcpServerPrefix, buildMcpResourceRef } from './mcpResourceRef.js';
 import { getExtensionSuggestions } from './extension-mention-ref.js';
+import { getSessionSuggestions } from './session-completion.js';
+import { buildMcpServerRef } from '../../utils/mcp-server-mention.js';
 import { t } from '../../i18n/index.js';
 
 /**
@@ -140,23 +142,38 @@ function getGlobalMcpResourceSuggestions(
 }
 
 /**
- * `@<partial>` MCP server discovery. BEFORE any `<server>:` has been typed,
- * surface configured MCP servers that (a) expose at least one resource and
- * (b) whose name starts (case-insensitively) with the partial, so a user who
- * doesn't know a resource URI can drill in without first memorizing the exact
- * server name.
- *
- * Returns `[]` (never `null`): these are PREPENDED to the filesystem results
- * rather than replacing them, so typing `@<partial>` never hides files. The
- * bare `@` trigger (empty partial) is intentionally left as a files-only view
- * — both to keep the common case unchanged and because every name
- * `.startsWith('')`, so an empty partial would otherwise match every server.
- *
- * Each suggestion expands to `@<server>:` and is flagged `isDirectory` so
- * `handleAutocomplete` appends no trailing space, letting completion re-trigger
- * straight into that server's resource list (the `getMcpResourceSuggestions`
- * path above).
+ * `@mcp:<partial>` mention suggestions. Bare `@` stays files-only; otherwise
+ * these are prepended beside file/resource matches without replacing them.
  */
+function getMcpServerMentionSuggestions(
+  config: Config | undefined,
+  pattern: string,
+): Suggestion[] {
+  if (!config) return [];
+  if (config.isTrustedFolder?.() === false) return [];
+  const mcpServers = config.getMcpServers?.() || {};
+  const query = pattern.startsWith('mcp:')
+    ? pattern.slice('mcp:'.length).toLowerCase()
+    : pattern.toLowerCase();
+  return Object.keys(mcpServers)
+    .filter((name) => name.toLowerCase().includes(query))
+    .sort((a, b) => {
+      const aLower = a.toLowerCase();
+      const bLower = b.toLowerCase();
+      const aPrefix = aLower.startsWith(query) ? 0 : 1;
+      const bPrefix = bLower.startsWith(query) ? 0 : 1;
+      if (aPrefix !== bPrefix) return aPrefix - bPrefix;
+      return aLower.localeCompare(bLower);
+    })
+    .map((name) => ({
+      label: buildMcpServerRef(name),
+      value: buildMcpServerRef(name),
+      description: t('MCP server'),
+      isDirectory: false,
+    }))
+    .slice(0, MAX_SUGGESTIONS_TO_SHOW);
+}
+
 function getMcpServerSuggestions(
   config: Config | undefined,
   pattern: string,
@@ -411,6 +428,10 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
       // drill in without knowing a URI) AND resources matched globally by
       // URI/name across all servers. Both computed synchronously and prepended
       // below.
+      const mcpServerMentionSuggestions = getMcpServerMentionSuggestions(
+        config,
+        state.pattern,
+      );
       const serverSuggestions = getMcpServerSuggestions(config, state.pattern);
       const globalResourceSuggestions = getGlobalMcpResourceSuggestions(
         config,
@@ -418,18 +439,36 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
       );
       const mcpSuggestions = [
         ...extensionSuggestions,
+        ...mcpServerMentionSuggestions,
         ...serverSuggestions,
         ...globalResourceSuggestions,
-      ];
+      ].map((s) => ({ ...s, category: s.category ?? ('mcp' as const) }));
+
+      // Prior-session suggestions (current project). Kicked off CONCURRENTLY so
+      // the disk listing never delays the file-search loading timer below;
+      // awaited only when assembling the final payload. A listing failure
+      // yields [] so it never blocks file/MCP/extension completion.
+      // Merge order invariant: sessions are always appended LAST in every
+      // SEARCH_SUCCESS dispatch path (mcp → file → session).
+      const sessionPromise = getSessionSuggestions(cwd, state.pattern);
 
       if (!fileSearch.current) {
-        // File index not ready yet; still surface any MCP matches so they
+        // File index not ready yet; still surface non-file matches so they
         // don't have to wait on the crawler.
-        if (mcpSuggestions.length > 0) {
+        const sessionSuggestions = await sessionPromise.catch(
+          () => [] as Suggestion[],
+        );
+        // The disk listing awaited above opens a window in which a newer
+        // keystroke may have superseded this search; drop a stale result.
+        if (cancelled) {
+          return;
+        }
+        const scoped = [...mcpSuggestions, ...sessionSuggestions];
+        if (scoped.length > 0) {
           if (slowSearchTimer.current) {
             clearTimeout(slowSearchTimer.current);
           }
-          dispatch({ type: 'SEARCH_SUCCESS', payload: mcpSuggestions });
+          dispatch({ type: 'SEARCH_SUCCESS', payload: scoped });
         }
         return;
       }
@@ -466,17 +505,35 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
           label: p,
           value: escapePath(p),
           isDirectory: p.endsWith('/'),
+          category: 'file' as const,
         }));
+        const sessionSuggestions = await sessionPromise.catch(
+          () => [] as Suggestion[],
+        );
+        if (controller.signal.aborted || cancelled) {
+          return;
+        }
         dispatch({
           type: 'SEARCH_SUCCESS',
-          payload: [...mcpSuggestions, ...fileSuggestions],
+          payload: [
+            ...mcpSuggestions,
+            ...fileSuggestions,
+            ...sessionSuggestions,
+          ],
         });
       } catch (error) {
         if (!(error instanceof Error && error.name === 'AbortError')) {
-          // A file-search failure shouldn't swallow MCP matches we already
+          // A file-search failure shouldn't swallow non-file matches we already
           // have; show those rather than dropping to an error state.
-          if (mcpSuggestions.length > 0) {
-            dispatch({ type: 'SEARCH_SUCCESS', payload: mcpSuggestions });
+          const sessionSuggestions = await sessionPromise.catch(
+            () => [] as Suggestion[],
+          );
+          if (cancelled) {
+            return;
+          }
+          const scoped = [...mcpSuggestions, ...sessionSuggestions];
+          if (scoped.length > 0) {
+            dispatch({ type: 'SEARCH_SUCCESS', payload: scoped });
           } else {
             dispatch({ type: 'ERROR' });
           }

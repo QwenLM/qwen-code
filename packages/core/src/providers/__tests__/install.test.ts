@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { AuthType } from '../../core/contentGenerator.js';
 import type { ModelProvidersConfig } from '../../models/types.js';
 import {
@@ -41,6 +41,12 @@ describe('applyProviderInstallPlan', () => {
     vi.clearAllMocks();
     delete process.env['TEST_API_KEY'];
     delete process.env['BRAND_NEW_KEY'];
+    delete process.env['SHADOW_KEY'];
+    delete process.env['EMPTY_SHADOW_KEY'];
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
   });
 
   it('refuses an install plan that sets a reserved env var (NODE_OPTIONS)', async () => {
@@ -199,6 +205,49 @@ describe('applyProviderInstallPlan', () => {
       'sk-test',
     );
     expect(refreshAuth).not.toHaveBeenCalled();
+  });
+
+  it('prints a shadowing warning when an env key changes', async () => {
+    process.env['SHADOW_KEY'] = 'old-value';
+    const adapter = createAdapter();
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const plan: ProviderInstallPlan = {
+      providerId: 'test-provider',
+      authType: AuthType.USE_OPENAI,
+      env: { SHADOW_KEY: 'new-value' },
+    };
+
+    await applyProviderInstallPlan(plan, { settings: adapter });
+
+    expect(consoleError).toHaveBeenCalledWith(
+      expect.stringContaining('SHADOW_KEY is also set'),
+    );
+    expect(process.env['SHADOW_KEY']).toBe('new-value');
+  });
+
+  it('does not print a shadowing warning for same or empty env values', async () => {
+    process.env['SHADOW_KEY'] = 'same-value';
+    process.env['EMPTY_SHADOW_KEY'] = '';
+    const adapter = createAdapter();
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const plan: ProviderInstallPlan = {
+      providerId: 'test-provider',
+      authType: AuthType.USE_OPENAI,
+      env: {
+        SHADOW_KEY: 'same-value',
+        EMPTY_SHADOW_KEY: 'filled-value',
+      },
+    };
+
+    await applyProviderInstallPlan(plan, { settings: adapter });
+
+    expect(consoleError).not.toHaveBeenCalled();
+    expect(process.env['SHADOW_KEY']).toBe('same-value');
+    expect(process.env['EMPTY_SHADOW_KEY']).toBe('filled-value');
   });
 
   it('uses patch ownsModel for merge filtering', async () => {

@@ -6,6 +6,10 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SkillCommandLoader } from './SkillCommandLoader.js';
+import { skillArgsPath } from './skill-args-file.js';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { CommandKind, type CommandContext } from '../ui/commands/types.js';
 import {
   buildSkillLlmContent,
@@ -200,27 +204,35 @@ describe('SkillCommandLoader', () => {
   });
 
   it('should append raw invocation when args are provided', async () => {
-    const skill = makeSkill();
-    mockSkillManager.listSkills.mockImplementation(
-      ({ level }: { level: string }) =>
-        Promise.resolve(level === 'user' ? [skill] : []),
-    );
+    // The args file is written relative to the process's directory; without a
+    // temp cwd this suite would write into the real repository.
+    const dir = mkdtempSync(join(tmpdir(), 'skill-cmd-args-'));
+    const cwd = process.cwd();
+    process.chdir(dir);
+    try {
+      const skill = makeSkill();
+      mockSkillManager.listSkills.mockResolvedValue([skill]);
 
-    const loader = new SkillCommandLoader(mockConfig);
-    const commands = await loader.loadCommands(signal);
-    const result = await commands[0].action!(
-      { invocation: { raw: '/my-skill foo', args: 'foo' } } as never,
-      'foo',
-    );
+      const loader = new SkillCommandLoader(mockConfig);
+      const commands = await loader.loadCommands(signal);
+      const result = (await commands[0].action!(
+        { invocation: { raw: '/my-skill hello', args: 'hello' } } as never,
+        'hello',
+      )) as { type: string; content: Array<{ text: string }> };
 
-    expect(result).toEqual({
-      type: 'submit_prompt',
-      content: [
-        {
-          text: `${makeSkillPrompt('Skill body content.')}\n\n/my-skill foo`,
-        },
-      ],
-    });
+      expect(result.type).toBe('submit_prompt');
+      const text = result.content[0].text;
+      expect(text).toContain('/my-skill hello');
+
+      // The arguments are written down for the skill to read, not transcribed
+      // by the model. See BundledSkillLoader's tests for why.
+      const path = skillArgsPath('my-skill');
+      expect(readFileSync(path, 'utf8')).toBe('hello');
+      expect(text).toContain('<skill-args>hello</skill-args>');
+    } finally {
+      process.chdir(cwd);
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('should return empty array when listSkills throws', async () => {

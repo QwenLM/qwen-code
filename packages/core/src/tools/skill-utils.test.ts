@@ -4,9 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi } from 'vitest';
-import { applySkillAllowedTools } from './skill-utils.js';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import {
+  applySkillAllowedTools,
+  collectAvailableSkillEntries,
+  clearCollectedSkillEntriesCache,
+} from './skill-utils.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
+import type { SkillManager } from '../skills/skill-manager.js';
+import type { Config } from '../config/config.js';
 
 function mockPermissionManager(): {
   pm: PermissionManager;
@@ -59,5 +65,85 @@ describe('applySkillAllowedTools', () => {
     expect(addSessionAllowRule).toHaveBeenCalledTimes(2);
     expect(addSessionAllowRule).toHaveBeenNthCalledWith(1, 'Bash(unbalanced');
     expect(addSessionAllowRule).toHaveBeenNthCalledWith(2, 'Read');
+  });
+});
+
+describe('collectAvailableSkillEntries memoize cache', () => {
+  function mockSkillManager(): SkillManager {
+    return {
+      listSkills: vi.fn().mockResolvedValue([]),
+      isSkillActive: vi.fn().mockReturnValue(false),
+    } as unknown as SkillManager;
+  }
+
+  function mockConfig(): Config {
+    return {
+      getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
+      getModelInvocableCommandsProvider: vi.fn().mockReturnValue(null),
+    } as unknown as Config;
+  }
+
+  afterEach(() => {
+    clearCollectedSkillEntriesCache();
+    vi.useRealTimers();
+  });
+
+  it('returns the same promise on cache hit within TTL', async () => {
+    vi.useFakeTimers();
+    const sm = mockSkillManager();
+    const cfg = mockConfig();
+
+    const r1 = collectAvailableSkillEntries(sm, cfg);
+    const r2 = collectAvailableSkillEntries(sm, cfg);
+
+    // The underlying scan should run only once.
+    expect(sm.listSkills).toHaveBeenCalledTimes(1);
+    // Both calls resolve to the exact same result object.
+    const [v1, v2] = await Promise.all([r1, r2]);
+    expect(v1).toBe(v2);
+  });
+
+  it('rescans after TTL expires', async () => {
+    vi.useFakeTimers();
+    const sm = mockSkillManager();
+    const cfg = mockConfig();
+
+    await collectAvailableSkillEntries(sm, cfg);
+    vi.advanceTimersByTime(2001);
+    await collectAvailableSkillEntries(sm, cfg);
+
+    expect(sm.listSkills).toHaveBeenCalledTimes(2);
+  });
+
+  it('evicts cache entry on rejection so next caller retries', async () => {
+    vi.useFakeTimers();
+    const sm = mockSkillManager();
+    const cfg = mockConfig();
+
+    (sm.listSkills as ReturnType<typeof vi.fn>)
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValueOnce([]);
+
+    const p1 = collectAvailableSkillEntries(sm, cfg);
+    await expect(p1).rejects.toThrow('boom');
+
+    // Flush microtask queue so the .catch() eviction handler runs.
+    await vi.runAllTimersAsync();
+
+    const p2 = collectAvailableSkillEntries(sm, cfg);
+    await expect(p2).resolves.toBeDefined();
+    expect(sm.listSkills).toHaveBeenCalledTimes(2);
+  });
+
+  it('clearCollectedSkillEntriesCache evicts the entry', async () => {
+    vi.useFakeTimers();
+    const sm = mockSkillManager();
+    const cfg = mockConfig();
+
+    await collectAvailableSkillEntries(sm, cfg);
+    clearCollectedSkillEntriesCache(sm);
+    await collectAvailableSkillEntries(sm, cfg);
+
+    expect(sm.listSkills).toHaveBeenCalledTimes(2);
   });
 });

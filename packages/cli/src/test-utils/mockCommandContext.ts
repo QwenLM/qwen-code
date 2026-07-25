@@ -39,6 +39,7 @@ export const createMockCommandContext = (
       settings: {
         merged: {},
         setValue: vi.fn(),
+        isTrusted: true,
       } as unknown as LoadedSettings,
       logger: {
         log: vi.fn(),

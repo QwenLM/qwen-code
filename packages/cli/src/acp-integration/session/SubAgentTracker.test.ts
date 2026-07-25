@@ -545,6 +545,37 @@ describe('SubAgentTracker', () => {
       });
     });
 
+    it('cancels outcomes that were not offered to the ACP host', async () => {
+      requestPermissionSpy.mockResolvedValue({
+        outcome: {
+          outcome: 'selected',
+          optionId: ToolConfirmationOutcome.ProceedAlwaysProject,
+        },
+      });
+      tracker.setup(eventEmitter, abortController.signal);
+      const respondSpy = vi.fn().mockResolvedValue(undefined);
+      eventEmitter.emit(
+        AgentEventType.TOOL_WAITING_APPROVAL,
+        createApprovalEvent({
+          name: 'shell',
+          callId: 'call-exact-shell',
+          confirmationDetails: {
+            type: 'exec',
+            title: 'Confirm shell',
+            command: "python -c 'print(1)'",
+            rootCommand: 'python',
+            hideAlwaysAllow: true,
+            warnings: ['Exact one-off approval required'],
+          } as AgentApprovalRequestEvent['confirmationDetails'],
+          respond: respondSpy,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(respondSpy).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+      });
+    });
+
     it('notifies when nested ask_user_question is cancelled', async () => {
       requestPermissionSpy.mockResolvedValue({
         outcome: { outcome: 'cancelled' },

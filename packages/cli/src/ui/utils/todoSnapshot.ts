@@ -28,6 +28,9 @@ type SnapshotSearchResult = TodoSnapshotSearchResult | undefined;
 const MIN_HISTORY_ITEMS_AFTER_TODO_BEFORE_STICKY = 2;
 export const STICKY_TODO_MAX_VISIBLE_ITEMS = 5;
 const STICKY_TODO_ROWS_PER_VISIBLE_ITEM = 5;
+const STICKY_TODO_VP_ROWS_PER_VISIBLE_ITEM = 12;
+const STICKY_TODO_VP_MIN_VISIBLE_ITEMS = 2;
+const STICKY_TODO_VP_MAX_VISIBLE_ITEMS = 4;
 
 const STICKY_TODO_STATUS_PRIORITY: Record<TodoItem['status'], number> = {
   in_progress: 0,
@@ -203,4 +206,34 @@ export function getStickyTodoMaxVisibleItems(terminalHeight: number): number {
   return clampStickyTodoVisibleItems(
     terminalHeight / STICKY_TODO_ROWS_PER_VISIBLE_ITEM,
   );
+}
+
+// VP mode uses a tighter per-item row budget (12 rows/item vs 5) so the
+// panel leaves more room for the conversation. Clamped to [2, 4] so very
+// short terminals still show a useful panel and very tall ones don't
+// over-allocate.
+function getStickyTodoVpCap(terminalHeight: number): number {
+  if (!Number.isFinite(terminalHeight) || terminalHeight <= 0) {
+    return STICKY_TODO_VP_MIN_VISIBLE_ITEMS;
+  }
+  return Math.max(
+    STICKY_TODO_VP_MIN_VISIBLE_ITEMS,
+    Math.min(
+      STICKY_TODO_VP_MAX_VISIBLE_ITEMS,
+      Math.floor(terminalHeight / STICKY_TODO_VP_ROWS_PER_VISIBLE_ITEM),
+    ),
+  );
+}
+
+// Single source of truth for the sticky-todo cap across render + layout-key
+// sites. VP mode uses a height-aware tighter cap; other modes use the
+// height-derived default.
+export function getStickyTodoMaxVisibleItemsForMode(
+  terminalHeight: number,
+  useTerminalBuffer: boolean,
+): number {
+  const base = getStickyTodoMaxVisibleItems(terminalHeight);
+  return useTerminalBuffer
+    ? Math.min(getStickyTodoVpCap(terminalHeight), base)
+    : base;
 }

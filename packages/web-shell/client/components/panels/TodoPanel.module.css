@@ -45,6 +45,41 @@
   color: var(--muted-foreground);
 }
 
+.statusSegmentWrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.separator {
+  flex: 0 0 auto;
+  color: color-mix(in srgb, var(--muted-foreground) 72%, transparent);
+}
+
+.statusSegment,
+.statusSegmentButton {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statusSegmentButton {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+
+.statusSegmentButton:hover,
+.statusSegmentButton:focus-visible {
+  color: var(--foreground);
+  outline: none;
+}
+
 .fullText {
   display: inline;
 }
@@ -118,6 +153,15 @@
   font-size: 13px;
 }
 
+.loadingIcon {
+  width: 12px;
+  height: 12px;
+  border: 2px solid color-mix(in srgb, var(--agent-blue-500) 24%, transparent);
+  border-top-color: var(--agent-blue-500);
+  border-radius: 50%;
+  animation: todoPanelSpin 0.8s linear infinite;
+}
+
 .content {
   min-width: 0;
   overflow: hidden;
@@ -131,13 +175,33 @@
   color: var(--muted-foreground);
 }
 
+.completed .content {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(
+    in srgb,
+    var(--muted-foreground) 72%,
+    transparent
+  );
+}
+
 .inProgress .icon,
 .inProgress .content {
   color: var(--foreground);
-  font-weight: 600;
 }
 
 .pending .icon,
 .pending .content {
   color: var(--muted-foreground);
+}
+
+@keyframes todoPanelSpin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loadingIcon {
+    animation: none;
+  }
 }

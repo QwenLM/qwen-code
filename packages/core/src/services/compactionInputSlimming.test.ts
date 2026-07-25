@@ -248,6 +248,21 @@ describe('compactionInputSlimming', () => {
       };
       expect(estimatePartChars(call, 1600)).toBe(JSON.stringify(call).length);
     });
+
+    it('counts model-facing function response errors', () => {
+      const error = 'x'.repeat(10_000);
+      expect(
+        estimatePartChars(
+          {
+            functionResponse: {
+              name: 'shell',
+              response: { error },
+            },
+          },
+          1600,
+        ),
+      ).toBe(error.length + 64);
+    });
   });
 
   describe('estimateContentChars', () => {
@@ -315,6 +330,29 @@ describe('compactionInputSlimming', () => {
       expect(result.stats.documentsStripped).toBe(1);
       expect(result.slimmedHistory[0]!.parts![0]).toEqual({
         text: '[document: application/pdf]',
+      });
+    });
+
+    it('preserves media supported by the target modalities', () => {
+      const history: Content[] = [
+        {
+          role: 'user',
+          parts: [
+            { inlineData: { mimeType: 'image/png', data: 'IMAGE' } },
+            { inlineData: { mimeType: 'application/pdf', data: 'PDF' } },
+          ],
+        },
+      ];
+
+      const result = slimCompactionInput(history, { pdf: true });
+
+      expect(result.slimmedHistory[0]!.parts).toEqual([
+        { text: '[image: image/png]' },
+        { inlineData: { mimeType: 'application/pdf', data: 'PDF' } },
+      ]);
+      expect(result.stats).toEqual({
+        imagesStripped: 1,
+        documentsStripped: 0,
       });
     });
 

@@ -17,8 +17,13 @@ vi.stubGlobal(
   },
 );
 
-const { fetchAccessToken, fetchGatewayUrl, getApiBase, sendQQMessage } =
-  await import('./api.js');
+const {
+  fetchAccessToken,
+  fetchGatewayUrl,
+  getApiBase,
+  sendQQMessage,
+  validateGatewayUrl,
+} = await import('./api.js');
 
 function mockResponse(ok: boolean, status: number, body: unknown): Response {
   return {
@@ -26,7 +31,12 @@ function mockResponse(ok: boolean, status: number, body: unknown): Response {
     status,
     text: async () => (typeof body === 'string' ? body : JSON.stringify(body)),
     json: async () => (typeof body === 'string' ? JSON.parse(body) : body),
-  } as Response;
+    // body?.cancel() is a no-op in tests — fetchAccessToken now calls
+    // resp.body?.cancel() in the error path to drain Undici connections.
+    body: {
+      cancel: async () => undefined,
+    },
+  } as unknown as Response;
 }
 
 describe('getApiBase', () => {
@@ -107,11 +117,13 @@ describe('fetchAccessToken', () => {
     expect(result).toEqual({ accessToken: 'tok-no-exp', expiresIn: 7200 });
   });
 
-  it('throws on HTTP error', async () => {
-    mockFetch.mockResolvedValue(mockResponse(false, 401, 'unauthorized'));
+  it('throws on HTTP error with exact status-only message (no body leak)', async () => {
+    mockFetch.mockResolvedValue(mockResponse(false, 401, 'unauthorized-body'));
 
+    // Exact regex: the message must NOT contain the response body — a
+    // regression that reintroduces `: ${body}` would fail this assertion.
     await expect(fetchAccessToken('bad', 'bad')).rejects.toThrow(
-      'QQ Bot token request failed (HTTP 401)',
+      /^QQ Bot token request failed \(HTTP 401\)$/,
     );
   });
 
@@ -187,6 +199,119 @@ describe('fetchGatewayUrl', () => {
 
     await expect(fetchGatewayUrl('tok', false)).rejects.toThrow(
       'QQ Bot gateway response missing WebSocket URL',
+    );
+  });
+});
+
+describe('validateGatewayUrl', () => {
+  it('rejects https URLs', () => {
+    expect(() => validateGatewayUrl('https://gateway.qq.com/ws')).toThrow(
+      'wss://',
+    );
+  });
+
+  it('rejects http URLs', () => {
+    expect(() => validateGatewayUrl('http://gateway.qq.com/ws')).toThrow(
+      'wss://',
+    );
+  });
+
+  it('rejects ws URLs', () => {
+    expect(() => validateGatewayUrl('ws://gateway.qq.com/ws')).toThrow(
+      'wss://',
+    );
+  });
+
+  it('accepts valid wss URL on *.qq.com', () => {
+    const url = 'wss://api.sgroup.qq.com/ws';
+    expect(validateGatewayUrl(url)).toBe(url);
+  });
+
+  it('accepts sandbox wss URL on *.qq.com', () => {
+    const url = 'wss://sandbox.api.sgroup.qq.com/ws';
+    expect(validateGatewayUrl(url)).toBe(url);
+  });
+
+  it('rejects *.tencentcs.com (attacker-controlled Tencent Cloud API Gateway)', () => {
+    const url = 'wss://service-apigw.tencentcs.com/ws';
+    expect(() => validateGatewayUrl(url)).toThrow('unexpected hostname');
+  });
+
+  it('rejects *.tencent.com (broad suffix)', () => {
+    const url = 'wss://malicious.tencent.com/ws';
+    expect(() => validateGatewayUrl(url)).toThrow('unexpected hostname');
+  });
+
+  it('rejects unknown hostname', () => {
+    const url = 'wss://evil.example.com/ws';
+    expect(() => validateGatewayUrl(url)).toThrow('unexpected hostname');
+  });
+
+  it('rejects invalid URLs', () => {
+    expect(() => validateGatewayUrl('not a valid url')).toThrow(
+      'not a valid URL',
+    );
+  });
+
+  it('strips userinfo from valid wss URL with embedded credentials', () => {
+    const url = 'wss://user:password@gateway.qq.com/ws';
+    const result = validateGatewayUrl(url);
+    expect(result).toBe('wss://gateway.qq.com/ws');
+    expect(result).not.toContain('user');
+    expect(result).not.toContain('password');
+  });
+});
+
+describe('fetchGatewayUrl + validateGatewayUrl integration', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('rejects when API returns a non-wss URL (http://)', async () => {
+    mockFetch.mockResolvedValue(
+      mockResponse(true, 200, { url: 'http://gateway.qq.com/ws' }),
+    );
+
+    await expect(fetchGatewayUrl('tok', false)).rejects.toThrow('wss://');
+  });
+
+  it('rejects when API returns a non-wss URL (ws://)', async () => {
+    mockFetch.mockResolvedValue(
+      mockResponse(true, 200, { url: 'ws://gateway.qq.com/ws' }),
+    );
+
+    await expect(fetchGatewayUrl('tok', false)).rejects.toThrow('wss://');
+  });
+
+  it('rejects when API returns a *.tencentcs.com wss:// URL', async () => {
+    mockFetch.mockResolvedValue(
+      mockResponse(true, 200, {
+        url: 'wss://bot-123.apigw.tencentcs.com/ws',
+      }),
+    );
+
+    await expect(fetchGatewayUrl('tok', false)).rejects.toThrow(
+      'unexpected hostname',
+    );
+  });
+
+  it('rejects when API returns an invalid URL', async () => {
+    mockFetch.mockResolvedValue(
+      mockResponse(true, 200, { url: 'not a valid url' }),
+    );
+
+    await expect(fetchGatewayUrl('tok', false)).rejects.toThrow(
+      'not a valid URL',
+    );
+  });
+
+  it('accepts when API returns a valid wss:// URL', async () => {
+    mockFetch.mockResolvedValue(
+      mockResponse(true, 200, { url: 'wss://api.sgroup.qq.com/ws' }),
+    );
+
+    await expect(fetchGatewayUrl('tok', false)).resolves.toBe(
+      'wss://api.sgroup.qq.com/ws',
     );
   });
 });

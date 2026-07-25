@@ -64,7 +64,7 @@ describe('useMouseEvents', () => {
     resume: ReturnType<typeof vi.fn>;
     pause: ReturnType<typeof vi.fn>;
   };
-  let stdout: { write: ReturnType<typeof vi.fn> };
+  let stdout: { write: ReturnType<typeof vi.fn>; isTTY: boolean };
 
   beforeEach(() => {
     stdin = Object.assign(new EventEmitter(), {
@@ -73,7 +73,7 @@ describe('useMouseEvents', () => {
       resume: vi.fn(),
       pause: vi.fn(),
     });
-    stdout = { write: vi.fn() };
+    stdout = { write: vi.fn(), isTTY: true };
     mockedUseStdin.mockReturnValue({
       stdin,
       setRawMode: vi.fn(),
@@ -204,6 +204,21 @@ describe('useMouseEvents', () => {
         { wrapper: vpWrapper(false) },
       );
       expect(stdout.write).toHaveBeenCalledWith(ENABLE_MOUSE);
+    });
+  });
+
+  describe('non-TTY stdout', () => {
+    it('does NOT enable mouse mode when stdout is not a TTY (piped/redirected)', () => {
+      // Mirrors `qwen | tee log`: stdin is still a raw-mode-capable TTY, but
+      // stdout is piped. Even an active bypassVpGate surface (the transcript's
+      // focused ScrollableList) must not emit SGR mouse escapes into the
+      // captured output.
+      stdout.isTTY = false;
+      renderHook(
+        () => useMouseEvents(() => {}, { isActive: true, bypassVpGate: true }),
+        { wrapper: vpWrapper(false) },
+      );
+      expect(stdout.write).not.toHaveBeenCalledWith(ENABLE_MOUSE);
     });
   });
 });

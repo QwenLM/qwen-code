@@ -55,6 +55,19 @@ describe('modelConfigUtils', () => {
       expect(getAuthTypeFromEnv()).toBe(AuthType.USE_OPENAI);
     });
 
+    it('uses an injected env instead of process.env when provided', () => {
+      process.env['OPENAI_API_KEY'] = 'process-key';
+      process.env['OPENAI_MODEL'] = 'process-model';
+      process.env['OPENAI_BASE_URL'] = 'https://process.example';
+
+      expect(
+        getAuthTypeFromEnv({
+          GEMINI_API_KEY: 'runtime-key',
+          GEMINI_MODEL: 'runtime-model',
+        }),
+      ).toBe(AuthType.USE_GEMINI);
+    });
+
     it('should return USE_OPENAI when the model is given via QWEN_MODEL', () => {
       // QWEN_MODEL is a valid USE_OPENAI model var (see AUTH_ENV_MODEL_VARS),
       // so a config that sets it instead of OPENAI_MODEL must still resolve.
@@ -618,7 +631,7 @@ describe('modelConfigUtils', () => {
           },
         });
 
-        resolveCliGenerationConfig({
+        const result = resolveCliGenerationConfig({
           argv: {},
           settings,
           selectedAuthType: AuthType.USE_OPENAI,
@@ -630,6 +643,7 @@ describe('modelConfigUtils', () => {
         expect(vi.mocked(resolveModelConfig)).toHaveBeenCalledWith(
           expect.objectContaining({ modelProvider: ideaLab }),
         );
+        expect(result.registryBaseUrl).toBe(ideaLab.baseUrl);
       });
 
       it('falls back to the first id match when no baseUrl is persisted (backward compat)', () => {

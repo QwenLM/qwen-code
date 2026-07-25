@@ -13,7 +13,7 @@ import os from 'node:os';
 import type { IPty } from '@lydell/node-pty';
 import { getCachedEncodingForBuffer } from '../utils/systemEncoding.js';
 import { isBinary } from '../utils/textUtils.js';
-import { getShellConfiguration } from '../utils/shell-utils.js';
+import { getShellConfiguration, type ShellType } from '../utils/shell-utils.js';
 import pkg from '@xterm/headless';
 import {
   serializeTerminalToObject,
@@ -21,9 +21,11 @@ import {
   type AnsiOutput,
 } from '../utils/terminalSerializer.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
+import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getShellPagerEnv } from '../utils/shell-pager-env.js';
 const { Terminal } = pkg;
 
 const debugLogger = createDebugLogger('SHELL_EXECUTION');
@@ -100,15 +102,32 @@ export function getShellAbortReasonKind(
 }
 
 /**
- * On Windows with PowerShell, prefix the command with a statement that forces
- * UTF-8 output encoding so that CJK and other non-ASCII characters are emitted
- * as UTF-8 regardless of the system codepage.
+ * On Windows, prefix the command with a statement that forces UTF-8 output
+ * encoding so that non-ASCII characters are emitted as UTF-8 regardless of
+ * the system codepage.
+ *
+ * - PowerShell: uses `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;`
+ * - cmd.exe: uses `{SystemRoot}\System32\chcp.com 65001 >nul 2>nul &`
  */
-function applyPowerShellUtf8Prefix(command: string, shell: string): string {
-  if (os.platform() === 'win32' && shell === 'powershell') {
-    return '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' + command;
+const CHCP = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\chcp.com`;
+
+function applyUtf8Prefix(command: string, shell: ShellType): string {
+  if (os.platform() !== 'win32') return command;
+  switch (shell) {
+    case 'powershell':
+      return (
+        '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' + command
+      );
+    case 'cmd':
+      // Resolved at module-load time (defense-in-depth, matches WINDOWS_TASKKILL pattern, see #5873)
+      return `${CHCP} 65001 >nul 2>nul & ${command}`;
+    case 'bash':
+      return command;
+    default: {
+      const _exhaustive: never = shell;
+      return _exhaustive;
+    }
   }
-  return command;
 }
 
 /**
@@ -176,6 +195,22 @@ export interface ShellExecutionHandle {
   pid: number | undefined;
   /** A promise that resolves with the complete execution result. */
   result: Promise<ShellExecutionResult>;
+}
+
+function createPreSpawnAbortedHandle(): ShellExecutionHandle {
+  return {
+    pid: undefined,
+    result: Promise.resolve({
+      rawOutput: Buffer.alloc(0),
+      output: '',
+      exitCode: null,
+      signal: null,
+      error: null,
+      aborted: true,
+      pid: undefined,
+      executionMethod: 'none',
+    }),
+  };
 }
 
 export interface ShellExecutionConfig {
@@ -360,6 +395,8 @@ const replayTerminalOutput = async (
     rows,
     scrollback: 10000,
     convertEol: true,
+    // This headless terminal only captures output, so suppress parser diagnostics.
+    logLevel: 'off',
   });
 
   try {
@@ -640,8 +677,37 @@ export class ShellExecutionService {
     shellExecutionConfig: ShellExecutionConfig,
     options: ShellExecuteOptions = {},
   ): Promise<ShellExecutionHandle> {
+    if (abortSignal.aborted) {
+      return createPreSpawnAbortedHandle();
+    }
+
     if (shouldUseNodePty) {
-      const ptyInfo = await getPty();
+      let removeAbortListener: (() => void) | undefined;
+      const ptyResult = Promise.resolve(getPty()).then(
+        (value) => ({ kind: 'resolved' as const, value }),
+        (error: unknown) => ({ kind: 'rejected' as const, error }),
+      );
+      const aborted = new Promise<{ kind: 'aborted' }>((resolve) => {
+        const onAbort = () => resolve({ kind: 'aborted' });
+        abortSignal.addEventListener('abort', onAbort, { once: true });
+        removeAbortListener = () =>
+          abortSignal.removeEventListener('abort', onAbort);
+        if (abortSignal.aborted) onAbort();
+      });
+      const ptyOutcome = await Promise.race([ptyResult, aborted]);
+      removeAbortListener?.();
+
+      if (ptyOutcome.kind === 'aborted') {
+        return createPreSpawnAbortedHandle();
+      }
+      if (ptyOutcome.kind === 'rejected') {
+        throw ptyOutcome.error;
+      }
+      if (abortSignal.aborted) {
+        return createPreSpawnAbortedHandle();
+      }
+
+      const ptyInfo = ptyOutcome.value;
       if (ptyInfo) {
         try {
           return this.executeWithPty(
@@ -666,6 +732,7 @@ export class ShellExecutionService {
       abortSignal,
       options.streamStdout ?? false,
       getMaxBufferedOutputBytes(shellExecutionConfig),
+      shellExecutionConfig.pager,
       options.postPromote,
     );
   }
@@ -677,12 +744,13 @@ export class ShellExecutionService {
     abortSignal: AbortSignal,
     streamStdout: boolean,
     maxBufferedOutputBytes: number,
+    pager: string | undefined,
     postPromote?: ShellPostPromoteHandlers,
   ): ShellExecutionHandle {
     try {
       const isWindows = os.platform() === 'win32';
       const { executable, argsPrefix, shell } = getShellConfiguration();
-      commandToExecute = applyPowerShellUtf8Prefix(commandToExecute, shell);
+      commandToExecute = applyUtf8Prefix(commandToExecute, shell);
       const shellArgs = [...argsPrefix, commandToExecute];
 
       // Note: CodeQL flags this as js/shell-command-injection-from-environment.
@@ -699,10 +767,13 @@ export class ShellExecutionService {
         detached: !isWindows,
         windowsHide: isWindows,
         env: {
-          ...normalizePathEnvForWindows(process.env),
+          ...normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
-          PAGER: 'cat',
+          ...getShellPagerEnv(pager, {
+            includeGitPager: false,
+            platform: os.platform(),
+          }),
           ...getShellContextEnvVars(),
         },
       });
@@ -1376,7 +1447,7 @@ export class ShellExecutionService {
       const cols = shellExecutionConfig.terminalWidth ?? 80;
       const rows = shellExecutionConfig.terminalHeight ?? 30;
       const { executable, argsPrefix, shell } = getShellConfiguration();
-      commandToExecute = applyPowerShellUtf8Prefix(commandToExecute, shell);
+      commandToExecute = applyUtf8Prefix(commandToExecute, shell);
 
       // On Windows with cmd.exe, pass args as a single string instead of
       // an array. node-pty's argsToCommandLine re-quotes array elements
@@ -1399,11 +1470,13 @@ export class ShellExecutionService {
         cols,
         rows,
         env: {
-          ...normalizePathEnvForWindows(process.env),
+          ...normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
-          PAGER: shellExecutionConfig.pager ?? 'cat',
-          GIT_PAGER: shellExecutionConfig.pager ?? 'cat',
+          ...getShellPagerEnv(shellExecutionConfig.pager, {
+            includeGitPager: true,
+            platform: os.platform(),
+          }),
           ...getShellContextEnvVars(),
         },
         handleFlowControl: true,
@@ -1415,6 +1488,8 @@ export class ShellExecutionService {
           cols,
           rows,
           scrollback: MAX_LIVE_TERMINAL_SCROLLBACK_LINES,
+          // This headless terminal only captures output, so suppress parser diagnostics.
+          logLevel: 'off',
         });
         headlessTerminal.scrollToTop();
 

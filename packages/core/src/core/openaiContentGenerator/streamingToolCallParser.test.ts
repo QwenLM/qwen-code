@@ -281,6 +281,40 @@ describe('StreamingToolCallParser', () => {
   });
 
   describe('Tool call metadata handling', () => {
+    it('tracks real nameless calls but ignores phantom chunks', () => {
+      parser.addChunk(0, '');
+      expect(parser.hasNamelessToolCall()).toBe(false);
+
+      parser.addChunk(0, '', 'call_1');
+      expect(parser.hasNamelessToolCall()).toBe(true);
+
+      parser.resetIndex(0);
+      parser.addChunk(0, '{"path":"a.ts"}');
+      expect(parser.hasNamelessToolCall()).toBe(true);
+    });
+
+    it.each([
+      { index: 1, id: undefined },
+      { index: 2, id: 'call_2' },
+    ])(
+      'accepts and deduplicates a name after complete arguments at index $index',
+      ({ index, id }) => {
+        parser.addChunk(index, '{"path":"a.ts"}', id);
+        parser.addChunk(index, '', id, 'read_file');
+        parser.addChunk(index, '', id, 'read_file');
+
+        expect(parser.hasNamelessToolCall()).toBe(false);
+        expect(parser.getCompletedToolCalls()).toEqual([
+          {
+            id,
+            name: 'read_file',
+            args: { path: 'a.ts' },
+            index,
+          },
+        ]);
+      },
+    );
+
     it('should store and retrieve tool call metadata', () => {
       parser.addChunk(0, '{"param": "value"}', 'call_123', 'my_function');
 
@@ -391,11 +425,124 @@ describe('StreamingToolCallParser', () => {
       expect(completed).toHaveLength(0);
     });
 
-    it('should not return tool calls with empty buffer', () => {
-      parser.addChunk(0, '', 'call_1', 'function1'); // Empty buffer
+    it('should return no-argument tool calls with empty args when buffer is empty', () => {
+      // For tools without parameters, some providers stream
+      // `arguments: ""` (or omit the field) and never send an argument
+      // fragment. The call must survive with empty args, matching the
+      // non-streaming path.
+      parser.addChunk(0, '', 'call_1', 'function1');
 
       const completed = parser.getCompletedToolCalls();
-      expect(completed).toHaveLength(0);
+      expect(completed).toEqual([
+        { id: 'call_1', name: 'function1', args: {}, index: 0 },
+      ]);
+    });
+
+    it('should return empty args for whitespace-only argument buffers', () => {
+      parser.addChunk(0, '   ', 'call_1', 'function1');
+
+      const completed = parser.getCompletedToolCalls();
+      expect(completed).toHaveLength(1);
+      expect(completed[0].args).toEqual({});
+    });
+
+    it('should not overwrite a completed no-argument tool call when a new call reuses its index', () => {
+      // First tool call: no arguments, provider never sends a fragment
+      parser.addChunk(0, '', 'call_1', 'no_arg_function');
+
+      // Second tool call arrives at the same index with a different ID
+      parser.addChunk(0, '{"param": "value"}', 'call_2', 'function2');
+
+      // Both calls must survive: the second is relocated to a new index
+      const completed = parser.getCompletedToolCalls();
+      expect(completed).toEqual([
+        { id: 'call_1', name: 'no_arg_function', args: {}, index: 0 },
+        {
+          id: 'call_2',
+          name: 'function2',
+          args: { param: 'value' },
+          index: 1,
+        },
+      ]);
+    });
+
+    it('should route ID-less argument fragments to a call whose opener streamed empty arguments', () => {
+      // Canonical OpenAI-compatible streaming shape: the opener carries
+      // id + name + `arguments: ""`, then argument fragments follow at the
+      // same index without an ID. Mid-stream, an empty buffer with name
+      // metadata must therefore stay continuable at its own index — it is
+      // indistinguishable from a completed no-argument call until stream end.
+      parser.addChunk(0, '', 'call_1', 'function1');
+      parser.addChunk(0, '{"x":');
+      parser.addChunk(0, '1}');
+
+      const completed = parser.getCompletedToolCalls();
+      expect(completed).toEqual([
+        { id: 'call_1', name: 'function1', args: { x: 1 }, index: 0 },
+      ]);
+    });
+
+    it('should emit empty args for a no-argument call polluted by a stray fragment at its index', () => {
+      // If a misbehaving provider reuses a completed no-argument call's
+      // index for another call's ID-less fragment, the fragment cannot be
+      // re-routed (see canonical-shape test above). The damage must stay
+      // bounded: the polluted buffer repairs to a non-object value, which
+      // collapses to {} at emit time.
+      parser.addChunk(0, '{"key":', 'call_1', 'function1');
+      parser.addChunk(1, '', 'call_2', 'no_arg_function');
+      parser.addChunk(1, '"value"}');
+
+      const completed = parser.getCompletedToolCalls();
+      const noArg = completed.find((c) => c.id === 'call_2');
+      expect(noArg?.args).toEqual({});
+    });
+
+    it('should collapse null argument buffers to empty args', () => {
+      parser.addChunk(0, 'null', 'call_1', 'function1');
+
+      const completed = parser.getCompletedToolCalls();
+      expect(completed[0].args).toEqual({});
+    });
+
+    it('should collapse array argument buffers to empty args', () => {
+      parser.addChunk(0, '[1,2,3]', 'call_1', 'function1');
+
+      const completed = parser.getCompletedToolCalls();
+      expect(completed[0].args).toEqual({});
+    });
+
+    it('should scan past occupied no-argument slots when relocating a colliding call', () => {
+      parser.addChunk(0, '', 'call_a', 'no_arg_a');
+      parser.addChunk(1, '', 'call_b', 'no_arg_b');
+      // Collision at index 0 must relocate past both occupied no-arg slots
+      parser.addChunk(0, '{"x": 1}', 'call_c', 'fn_c');
+
+      const completed = parser.getCompletedToolCalls();
+      expect(completed).toEqual([
+        { id: 'call_a', name: 'no_arg_a', args: {}, index: 0 },
+        { id: 'call_b', name: 'no_arg_b', args: {}, index: 1 },
+        { id: 'call_c', name: 'fn_c', args: { x: 1 }, index: 2 },
+      ]);
+    });
+
+    it('should not route continuation chunks to a completed no-argument tool call', () => {
+      // Incomplete tool call accumulating arguments at index 0
+      parser.addChunk(0, '{"key":', 'call_1', 'function1');
+      // Completed no-argument tool call at the higher index 1
+      parser.addChunk(1, '', 'call_2', 'no_arg_function');
+      // Completed tool call at index 2
+      parser.addChunk(2, '{"x": 1}', 'call_3', 'function3');
+
+      // Continuation chunk without an ID arriving at a completed index must
+      // be routed to the incomplete call_1, not to the no-argument call_2
+      parser.addChunk(2, '"value"}');
+
+      const completed = parser.getCompletedToolCalls();
+      expect(completed).toEqual([
+        { id: 'call_1', name: 'function1', args: { key: 'value' }, index: 0 },
+        { id: 'call_2', name: 'no_arg_function', args: {}, index: 1 },
+        { id: 'call_3', name: 'function3', args: { x: 1 }, index: 2 },
+      ]);
     });
   });
 
@@ -568,6 +715,38 @@ describe('StreamingToolCallParser', () => {
       expect(parser.getBuffer(0)).toBe('{"param1": "value1"}');
     });
 
+    it('should ignore replayed openers for a completed no-argument tool call', () => {
+      parser.addChunk(0, '', 'call_1', 'list_sessions');
+      // Provider replays the same ID's opener with a different name; the
+      // surviving call must not be mutated
+      parser.addChunk(0, '', 'call_1', 'different_function');
+
+      const completed = parser.getCompletedToolCalls();
+      expect(completed).toHaveLength(1);
+      expect(completed[0].name).toBe('list_sessions');
+      expect(completed[0].args).toEqual({});
+    });
+
+    it('should append ID-bearing argument fragments after an empty opener', () => {
+      // Some providers repeat the tool call ID on argument fragments. A
+      // known-ID chunk carrying argument content is a continuation, not a
+      // replay, and must not be swallowed by the replay guard.
+      parser.addChunk(0, '', 'call_1', 'function1');
+      parser.addChunk(0, '{"text":"hello', 'call_1');
+      parser.addChunk(0, ' ', 'call_1');
+      const result = parser.addChunk(0, 'world"}', 'call_1');
+
+      expect(result.complete).toBe(true);
+      expect(parser.getCompletedToolCalls()).toEqual([
+        {
+          id: 'call_1',
+          name: 'function1',
+          args: { text: 'hello world' },
+          index: 0,
+        },
+      ]);
+    });
+
     it('should ignore metadata-only replay chunks after a tool call ID completes', () => {
       parser.addChunk(0, '{"file_path": "a.ts"}', 'call_1', 'read_file');
 
@@ -586,6 +765,27 @@ describe('StreamingToolCallParser', () => {
           index: 0,
         },
       ]);
+    });
+
+    it('should normalize a tool call name before storing it', () => {
+      parser.addChunk(0, '{}', 'call_1', ' read_file ');
+
+      expect(parser.getCompletedToolCalls()).toEqual([
+        {
+          id: 'call_1',
+          name: 'read_file',
+          args: {},
+          index: 0,
+        },
+      ]);
+    });
+
+    it('should preserve the first non-empty name for a tool call ID', () => {
+      parser.addChunk(0, '{"file_path":', 'call_1', 'read_file');
+      parser.addChunk(0, '"a.ts"}', 'call_1', 'shell');
+
+      expect(parser.getCompletedToolCalls()[0]?.name).toBe('read_file');
+      expect(parser.hasConflictingToolCallIdentity()).toBe(true);
     });
 
     it('should detect index collision and find new index', () => {
@@ -610,6 +810,15 @@ describe('StreamingToolCallParser', () => {
       expect(call2).toBeDefined();
       expect(call1?.args).toEqual({ param1: 'value1' });
       expect(call2?.args).toEqual({ param2: 'value2' });
+      expect(parser.hasConflictingToolCallIdentity()).toBe(false);
+    });
+
+    it('should reject unsafe provider indices', () => {
+      const result = parser.addChunk(Number.MAX_SAFE_INTEGER + 1, '   ');
+
+      expect(result.error?.message).toContain('Invalid tool call index');
+      expect(parser.hasInvalidToolCallIndex()).toBe(true);
+      expect(parser.hasConflictingToolCallIdentity()).toBe(true);
     });
 
     it('should handle continuation chunks without ID correctly', () => {
@@ -765,6 +974,44 @@ describe('StreamingToolCallParser', () => {
   });
 
   describe('Complex collision scenarios', () => {
+    it('does not append continuation fragments to a completed remapped slot', () => {
+      parser.addChunk(0, '{"first":true}', 'call_1', 'function1');
+      const remapped = parser.addChunk(
+        0,
+        '{"second":true}',
+        undefined,
+        'function2',
+      );
+
+      expect(remapped.actualIndex).toBe(1);
+      expect(remapped.complete).toBe(true);
+
+      const continuation = parser.addChunk(0, '{"third":true}');
+
+      expect(continuation.actualIndex).not.toBe(remapped.actualIndex);
+      expect(parser.getBuffer(remapped.actualIndex!)).toBe('{"second":true}');
+    });
+
+    it('associates a late stable ID with its completed remapped slot', () => {
+      parser.addChunk(0, '{"first":true}', 'call_1', 'function1');
+      const remapped = parser.addChunk(
+        0,
+        '{"second":true}',
+        undefined,
+        'function2',
+      );
+
+      const identified = parser.addChunk(0, '', 'call_2');
+
+      expect(identified.actualIndex).toBe(remapped.actualIndex);
+      expect(parser.getCompletedToolCalls()).toContainEqual({
+        id: 'call_2',
+        name: 'function2',
+        args: { second: true },
+        index: remapped.actualIndex,
+      });
+    });
+
     it('should handle rapid tool call switching at same index', () => {
       // Rapid switching between different tool calls at index 0
       parser.addChunk(0, '{"step1":', 'call_1', 'function1');
@@ -876,6 +1123,21 @@ describe('StreamingToolCallParser', () => {
       );
       expect(parser.hasIncompleteToolCalls()).toBe(true);
       expect(parser.getState(0).depth).toBe(1);
+    });
+  });
+
+  describe('hasInvalidToolCallArguments', () => {
+    it.each([
+      ['', false],
+      ['   ', true],
+      ['{"path":"a.ts"}', false],
+      ['{bad}', true],
+      ['null', true],
+      ['[]', true],
+      ['42', true],
+    ])('validates %s', (toolArguments, invalid) => {
+      parser.addChunk(0, toolArguments, 'call_1', 'read_file');
+      expect(parser.hasInvalidToolCallArguments()).toBe(invalid);
     });
   });
 });

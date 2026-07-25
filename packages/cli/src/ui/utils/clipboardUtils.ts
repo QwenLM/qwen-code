@@ -65,8 +65,7 @@ let cachedWlPasteImageTypes: string[] | null = null;
 
 // Cache for @teddyzhu/clipboard module (macOS/Windows fallback)
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-let cachedClipboardModule: any = null;
-let clipboardLoadAttempted = false;
+let clipboardModulePromise: Promise<any | null> | null = null;
 
 /**
  * Get and cache the @teddyzhu/clipboard module.
@@ -74,19 +73,16 @@ let clipboardLoadAttempted = false;
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function getClipboardModule(): Promise<any | null> {
-  if (clipboardLoadAttempted) return cachedClipboardModule;
-  clipboardLoadAttempted = true;
-
-  try {
+  if (!clipboardModulePromise) {
     const modName = '@teddyzhu/clipboard';
-    cachedClipboardModule = await import(modName);
-    return cachedClipboardModule;
-  } catch (_e) {
-    debugLogger.error(
-      'Failed to load @teddyzhu/clipboard native module. Clipboard image features will be unavailable.',
-    );
-    return null;
+    clipboardModulePromise = import(modName).catch(() => {
+      debugLogger.error(
+        'Failed to load @teddyzhu/clipboard native module. Clipboard image features will be unavailable.',
+      );
+      return null;
+    });
   }
+  return clipboardModulePromise;
 }
 
 /**
@@ -301,9 +297,12 @@ async function checkClipboardForImage(
 /**
  * Checks if the system clipboard contains an image.
  * Uses platform-native tools (wl-paste/xclip) on Linux.
+ * @param onUnavailable Called when the macOS/Windows native module cannot load.
  * @returns true if clipboard contains an image
  */
-export async function clipboardHasImage(): Promise<boolean> {
+export async function clipboardHasImage(
+  onUnavailable?: () => void,
+): Promise<boolean> {
   cachedWlPasteImageTypes = null; // Fresh check each time
   if (process.platform === 'linux') {
     try {
@@ -328,7 +327,10 @@ export async function clipboardHasImage(): Promise<boolean> {
 
   try {
     const mod = await getClipboardModule();
-    if (!mod) return false;
+    if (!mod) {
+      onUnavailable?.();
+      return false;
+    }
     const clipboard = new mod.ClipboardManager();
     return clipboard.hasFormat('image');
   } catch (error) {

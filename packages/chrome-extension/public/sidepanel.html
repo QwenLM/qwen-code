@@ -6,41 +6,43 @@
     <title>Qwen Code</title>
     <style>
       /* Terminal-console onboarding. The product is a CLI daemon, so the screen
-         is a small console: the command is the hero, typed at a prompt. Warm
-         charcoal + electric-lime accent, light/dark aware. No web fonts / no
-         inline JS — the extension CSP allows neither. */
+         is a small console: the command is the hero, typed at a prompt. Neutral
+         graphite + Qwen purple, with status green reserved for live state. No
+         web fonts / no inline JS — the extension CSP allows neither. */
       :root {
-        --bg: #16140f;
-        --bg-grid: #221e16;
-        --panel: #1c190f;
-        --panel-bar: #221d12;
-        --border: #34301f;
-        --text: #f3efe2;
-        --muted: #a39a82;
-        --faint: #6f6850;
-        --accent: #c8f24e;
-        --accent-soft: rgba(200, 242, 78, 0.14);
-        --shadow: 0 18px 40px -18px rgba(0, 0, 0, 0.7);
-        --dot-r: #e0795a;
-        --dot-y: #e0b94e;
-        --dot-g: #8bbf5a;
+        --bg: #111217;
+        --bg-grid: #252836;
+        --panel: #171923;
+        --panel-bar: #1d202b;
+        --border: #323545;
+        --text: #f4f4f6;
+        --muted: #a7acba;
+        --faint: #73798a;
+        --accent: #7c5cff;
+        --accent-soft: rgba(124, 92, 255, 0.16);
+        --status: #b8ff4d;
+        --shadow: 0 18px 40px -18px rgba(0, 0, 0, 0.76);
+        --dot-r: #f47763;
+        --dot-y: #f0c44e;
+        --dot-g: #83d96b;
       }
       @media (prefers-color-scheme: light) {
         :root {
-          --bg: #f6f3ea;
-          --bg-grid: #ece6d6;
-          --panel: #fffdf6;
-          --panel-bar: #f3eee0;
-          --border: #e2dac6;
-          --text: #211e15;
-          --muted: #6c6450;
-          --faint: #a79e85;
-          --accent: #5f7d12;
-          --accent-soft: rgba(95, 125, 18, 0.12);
-          --shadow: 0 16px 34px -20px rgba(60, 50, 20, 0.35);
-          --dot-r: #d0664a;
-          --dot-y: #cf9f33;
-          --dot-g: #6fa53f;
+          --bg: #f7f7fb;
+          --bg-grid: #e5e7f0;
+          --panel: #ffffff;
+          --panel-bar: #f1f3f8;
+          --border: #d9dce8;
+          --text: #171923;
+          --muted: #5e6575;
+          --faint: #8b92a3;
+          --accent: #6046e8;
+          --accent-soft: rgba(96, 70, 232, 0.12);
+          --status: #5c9f18;
+          --shadow: 0 16px 34px -20px rgba(31, 35, 52, 0.28);
+          --dot-r: #d86752;
+          --dot-y: #d4a835;
+          --dot-g: #62a948;
         }
       }
 
@@ -285,14 +287,14 @@
         width: 8px;
         height: 8px;
         border-radius: 50%;
-        background: var(--accent);
+        background: var(--status);
       }
       .status__pulse::after {
         content: '';
         position: absolute;
         inset: 0;
         border-radius: 50%;
-        background: var(--accent);
+        background: var(--status);
         animation: ping 1.8s cubic-bezier(0, 0, 0.2, 1) infinite;
       }
 
@@ -363,7 +365,8 @@
           <h1 id="welcome-title">Start qwen serve</h1>
           <p id="welcome-desc">
             No local qwen&nbsp;serve daemon is reachable. Run this in a terminal
-            and leave it running — this panel connects on its own.
+            and leave it running — this panel connects on its own. Browser
+            automation tools require QWEN_CDP_MCP_COMMAND.
           </p>
         </section>
 

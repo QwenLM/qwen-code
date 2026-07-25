@@ -37,9 +37,27 @@ impl Tool for GetConfigTool {
         // sees its own override layered over the global; the anonymous session
         // (absent `_session_id`) sees the raw global — today's behavior.
         let session_id = args.opt_str("_session_id");
-        let (capture_mode, max_image_dimension) = {
+        let snapshot = super::with_driver_config_commit_lock(|| {
             let cfg = self.state.config.read().unwrap();
-            self.state.session_config.effective(session_id.as_deref(), &cfg)
+            let (max_image_dimension, capture_scope) = self
+                .state
+                .session_config
+                .effective_config(session_id.as_deref(), &cfg);
+            let (pip_enabled, pip_geometry) = pip_preview::read_pip_keys_from_file();
+            Ok((
+                max_image_dimension,
+                capture_scope,
+                pip_enabled,
+                pip_geometry,
+            ))
+        });
+        let (max_image_dimension, capture_scope, pip_enabled, pip_geometry) = match snapshot {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                return ToolResult::error(format!(
+                    "failed to read cua-driver configuration: {error}"
+                ));
+            }
         };
         // Report the CALLING session's own cursor enabled-state, not a
         // nondeterministic HashMap.first(). Resolve the same key the click /
@@ -51,17 +69,14 @@ impl Tool for GetConfigTool {
             .or_else(|| self.state.cursor_registry.get("default"))
             .map(|s| s.config.enabled)
             .unwrap_or(true);
-        // PiP values aren't in DriverConfig — they're file-only since the
-        // backend is initialised once at startup. Read fresh so the
-        // response reflects whatever set_config (or a direct JSON edit)
-        // last wrote.
-        let (pip_enabled, pip_geometry) = pip_preview::read_pip_keys_from_file();
         ToolResult::text("cua-driver-rs configuration")
             .with_structured(serde_json::json!({
                 "version": env!("CARGO_PKG_VERSION"),
                 "platform": "macos",
-                "capture_mode": capture_mode,
+                // capture_mode is per-call; capture_scope is the effective
+                // session value that gates get_desktop_state.
                 "max_image_dimension": max_image_dimension,
+                "capture_scope": capture_scope,
                 "agent_cursor": {
                     "enabled": cursor_enabled,
                 },

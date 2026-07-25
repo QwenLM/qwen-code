@@ -80,6 +80,10 @@ async function buildCleanMemorySystemPrompt(
       memoryDir: getUserAutoMemoryRoot(),
       indexContent: userIndex,
     },
+    /* teamSection */ undefined,
+    // The remember agent needs the full protocol (type definitions, scope routing,
+    // exclusion rules) to write correct memories — do not remove.
+    { forceFullProtocol: true },
   );
 }
 
@@ -154,14 +158,21 @@ export async function runManagedRememberByAgent(params: {
   }
 
   const memoryPrompt = await buildCleanMemorySystemPrompt(params.projectRoot);
-  const baseConfig =
-    params.contextMode === 'clean'
-      ? (() => {
-          const cleanConfig = Object.create(params.config) as Config;
-          cleanConfig.getUserMemory = () => '';
-          return cleanConfig;
-        })()
-      : params.config;
+  // The remember agent's system prompt already embeds the full managed
+  // auto-memory protocol and MEMORY.md indexes (buildCleanMemorySystemPrompt
+  // with forceFullProtocol). AgentCore.buildChatSystemPrompt would otherwise
+  // append config.getAutoMemoryPrompt() a second time, duplicating the entire
+  // section — and in clean mode re-injecting parent-session memory into the
+  // intended blank-slate agent. Zero it out for every mode so the section is
+  // present exactly once, via the remember system prompt above.
+  const baseConfig = (() => {
+    const derived = Object.create(params.config) as Config;
+    derived.getAutoMemoryPrompt = () => '';
+    if (params.contextMode === 'clean') {
+      derived.getUserMemory = () => '';
+    }
+    return derived;
+  })();
   const hiddenConfig = createHiddenRememberConfig(baseConfig, {
     disableHooks: params.contextMode === 'clean',
   });
@@ -169,6 +180,7 @@ export async function runManagedRememberByAgent(params: {
     hiddenConfig,
     params.projectRoot,
     {
+      bypassBaseAskForScopedPaths: true,
       restrictReadsToMemoryPaths: true,
     },
   );
@@ -180,7 +192,7 @@ export async function runManagedRememberByAgent(params: {
     }),
     systemPrompt: buildRememberSystemPrompt(memoryPrompt),
     maxTurns: 6,
-    maxTimeMinutes: 5,
+    maxTimeMinutes: params.config.getMemoryAgentTimeoutMinutes() ?? 5,
     extraHistory: params.contextMode === 'clean' ? [] : undefined,
     preserveEmptyExtraHistory: params.contextMode === 'clean',
     tools: [

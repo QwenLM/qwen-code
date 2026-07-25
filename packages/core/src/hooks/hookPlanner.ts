@@ -8,8 +8,13 @@ import type { HookRegistry, HookRegistryEntry } from './hookRegistry.js';
 import type { HookExecutionPlan } from './types.js';
 import { getHookKey, HookEventName } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { getAliasSetForTool } from '../utils/tool-utils.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
+
+export function getToolMatcherTargets(toolName: string): string[] {
+  return [...getAliasSetForTool(toolName)];
+}
 
 type HookMatcherTargetKind =
   | 'toolName'
@@ -69,6 +74,7 @@ export function getHookMatcherTarget(
 
     case HookEventName.UserPromptSubmit:
     case HookEventName.Stop:
+    case HookEventName.MessageDisplay:
     case HookEventName.PostToolBatch:
     case HookEventName.TodoCreated:
     case HookEventName.TodoCompleted:
@@ -240,16 +246,33 @@ export class HookPlanner {
    * Match tool name against matcher pattern
    */
   private matchesToolName(matcher: string, toolName: string): boolean {
+    const targets = getToolMatcherTargets(toolName);
+
+    if (
+      matcher.includes('|') &&
+      !matcher.startsWith('^') &&
+      !matcher.startsWith('(')
+    ) {
+      const alternatives = matcher.split('|').map((entry) => entry.trim());
+      if (alternatives.some((entry) => targets.includes(entry))) {
+        return true;
+      }
+    }
+
+    if (targets.includes(matcher)) {
+      return true;
+    }
+
     try {
-      // Attempt to treat the matcher as a regular expression.
+      // Regex matchers apply to the runtime id only. Alias expansion is exact
+      // so display names do not create new substring matches.
       const regex = new RegExp(matcher);
       return regex.test(toolName);
     } catch (error) {
-      // If it's not a valid regex, treat it as a literal string for an exact match.
       debugLogger.warn(
-        `Invalid regex in hook matcher "${matcher}" for tool "${toolName}", falling back to exact match: ${error}`,
+        `Invalid regex in hook matcher "${matcher}" for tool "${toolName}", no alias match and invalid regex: ${error}`,
       );
-      return matcher === toolName;
+      return false;
     }
   }
 

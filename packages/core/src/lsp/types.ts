@@ -254,6 +254,26 @@ export interface LspServerStatusInfo {
   error?: string;
 }
 
+export type LspServerSkipReason = 'server_trust_required';
+
+export interface LspSkippedServer {
+  name: string;
+  reason: LspServerSkipReason;
+}
+
+export interface LspReconcileResult {
+  added: string[];
+  removed: string[];
+  restarted: string[];
+  unchanged: string[];
+  failed: string[];
+}
+
+export interface LspServiceReinitializeResult {
+  reconcile: LspReconcileResult;
+  skipped: LspSkippedServer[];
+}
+
 export interface LspClient {
   /**
    * Get the status of all configured LSP servers.
@@ -376,6 +396,11 @@ export interface LspClient {
    * Get a point-in-time snapshot of LSP server connection status.
    */
   getStatusSnapshot?(): LspStatusSnapshot;
+
+  /**
+   * Re-read LSP configuration and reconcile live server connections.
+   */
+  reinitialize?(): Promise<LspServiceReinitializeResult>;
 }
 
 // ============================================================================
@@ -586,6 +611,10 @@ export interface LspServerHandle {
   processDiagnostics?: LspProcessDiagnostics;
   /** Lock to prevent concurrent startup attempts */
   startingPromise?: Promise<void>;
+  /** Cancels an in-flight startup attempt */
+  startupAbortController?: AbortController;
+  /** Whether the owned process exited unexpectedly during the current startup */
+  processExitedUnexpectedly?: boolean;
 }
 
 /**

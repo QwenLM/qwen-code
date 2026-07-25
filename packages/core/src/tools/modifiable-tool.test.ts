@@ -21,14 +21,14 @@ import * as path from 'node:path';
 
 // Mock dependencies
 const mockOpenDiff = vi.hoisted(() => vi.fn());
-const mockCreatePatch = vi.hoisted(() => vi.fn());
+const mockCreatePatchSmart = vi.hoisted(() => vi.fn());
 
 vi.mock('../utils/editor.js', () => ({
   openDiff: mockOpenDiff,
 }));
 
-vi.mock('diff', () => ({
-  createPatch: mockCreatePatch,
+vi.mock('./diffOptions.js', () => ({
+  createPatchSmart: mockCreatePatchSmart,
 }));
 
 interface TestParams {
@@ -79,7 +79,7 @@ describe('modifyWithEditor', () => {
       await fsp.writeFile(newPath, modifiedContent, 'utf8');
     });
 
-    mockCreatePatch.mockReturnValue('mock diff content');
+    mockCreatePatchSmart.mockReturnValue('mock diff content');
   });
 
   afterEach(async () => {
@@ -116,16 +116,12 @@ describe('modifyWithEditor', () => {
         mockParams,
       );
 
-      expect(mockCreatePatch).toHaveBeenCalledWith(
+      expect(mockCreatePatchSmart).toHaveBeenCalledWith(
         path.basename(mockParams.filePath),
         currentContent,
         modifiedContent,
         'Current',
         'Proposed',
-        expect.objectContaining({
-          context: 3,
-          ignoreWhitespace: true,
-        }),
       );
 
       // Check that temp files are deleted.
@@ -191,16 +187,12 @@ describe('modifyWithEditor', () => {
       vi.fn(),
     );
 
-    expect(mockCreatePatch).toHaveBeenCalledWith(
+    expect(mockCreatePatchSmart).toHaveBeenCalledWith(
       path.basename(mockParams.filePath),
       '',
       modifiedContent,
       'Current',
       'Proposed',
-      expect.objectContaining({
-        context: 3,
-        ignoreWhitespace: true,
-      }),
     );
 
     expect(result.updatedParams).toBeDefined();
@@ -220,16 +212,12 @@ describe('modifyWithEditor', () => {
       vi.fn(),
     );
 
-    expect(mockCreatePatch).toHaveBeenCalledWith(
+    expect(mockCreatePatchSmart).toHaveBeenCalledWith(
       path.basename(mockParams.filePath),
       currentContent,
       '',
       'Current',
       'Proposed',
-      expect.objectContaining({
-        context: 3,
-        ignoreWhitespace: true,
-      }),
     );
 
     expect(result.updatedParams).toBeDefined();

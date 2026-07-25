@@ -17,6 +17,13 @@ import {
   sendFsError,
   workspaceRelative,
 } from './workspace-file-read.js';
+import {
+  getWorkspaceRouteContext,
+  requireTrustedWorkspaceRuntime,
+  resolveWorkspaceRuntimeFromParam,
+  setWorkspaceRouteContext,
+} from '../workspace-route-runtime.js';
+import type { WorkspaceRegistry } from '../workspace-registry.js';
 
 interface RegisterDeps {
   bridge: AcpSessionBridge;
@@ -29,6 +36,8 @@ function getFsFactory(
   req: Request,
   res: Response,
 ): WorkspaceFileSystemFactory | null {
+  const context = getWorkspaceRouteContext(req);
+  if (context) return context.runtime.routeFileSystemFactory;
   const factory = (req.app.locals as { fsFactory?: WorkspaceFileSystemFactory })
     .fsFactory;
   if (!factory) {
@@ -41,6 +50,16 @@ function getFsFactory(
     return null;
   }
   return factory;
+}
+
+function routeName(req: Request, legacyRoute: string): string {
+  const context = getWorkspaceRouteContext(req);
+  if (!context) return legacyRoute;
+  return `${context.routePrefix}${legacyRoute.slice('POST '.length)}`;
+}
+
+function getBridge(req: Request, deps: RegisterDeps): AcpSessionBridge {
+  return getWorkspaceRouteContext(req)?.runtime.bridge ?? deps.bridge;
 }
 
 function sendParseError(res: Response, _route: string, error: string): null {
@@ -144,9 +163,11 @@ function resolveOriginatorClientId(
   clientId: string | undefined,
   deps: RegisterDeps,
   res: Response,
+  req?: Request,
 ): string | undefined | null {
   if (clientId === undefined) return undefined;
-  if (!deps.bridge.knownClientIds().has(clientId)) {
+  const bridge = req ? getBridge(req, deps) : deps.bridge;
+  if (!bridge.knownClientIds().has(clientId)) {
     applyReadHeaders(res);
     res.status(400).json({
       error: `Client id "${clientId}" is not registered for this workspace`,
@@ -163,7 +184,7 @@ async function handlePostFileWrite(
   res: Response,
   deps: RegisterDeps,
 ): Promise<void> {
-  const ROUTE = 'POST /file/write';
+  const ROUTE = routeName(req, 'POST /file/write');
   const factory = getFsFactory(req, res);
   if (!factory) return;
   const body = deps.safeBody(req);
@@ -193,7 +214,12 @@ async function handlePostFileWrite(
   if (lineEnding === null) return;
   const clientId = deps.parseClientId(req, res);
   if (clientId === null) return;
-  const originatorClientId = resolveOriginatorClientId(clientId, deps, res);
+  const originatorClientId = resolveOriginatorClientId(
+    clientId,
+    deps,
+    res,
+    req,
+  );
   if (originatorClientId === null) return;
   const fs = factory.forRequest({
     originatorClientId,
@@ -231,7 +257,7 @@ async function handlePostFileEdit(
   res: Response,
   deps: RegisterDeps,
 ): Promise<void> {
-  const ROUTE = 'POST /file/edit';
+  const ROUTE = routeName(req, 'POST /file/edit');
   const factory = getFsFactory(req, res);
   if (!factory) return;
   const body = deps.safeBody(req);
@@ -251,7 +277,12 @@ async function handlePostFileEdit(
   if (expectedHash === null) return;
   const clientId = deps.parseClientId(req, res);
   if (clientId === null) return;
-  const originatorClientId = resolveOriginatorClientId(clientId, deps, res);
+  const originatorClientId = resolveOriginatorClientId(
+    clientId,
+    deps,
+    res,
+    req,
+  );
   if (originatorClientId === null) return;
   const fs = factory.forRequest({
     originatorClientId,
@@ -288,5 +319,41 @@ export function registerWorkspaceFileWriteRoutes(
   );
   app.post('/file/edit', deps.mutate({ strict: true }), (req, res) =>
     handlePostFileEdit(req, res, deps),
+  );
+}
+
+export function registerWorkspaceQualifiedFileWriteRoutes(
+  app: Application,
+  deps: RegisterDeps & { workspaceRegistry: WorkspaceRegistry },
+): void {
+  const resolve = (req: Request, res: Response): boolean => {
+    const runtime = resolveWorkspaceRuntimeFromParam(
+      deps.workspaceRegistry,
+      req,
+      res,
+    );
+    if (!runtime) return false;
+    if (!requireTrustedWorkspaceRuntime(runtime, res)) return false;
+    setWorkspaceRouteContext(req, {
+      runtime,
+      routePrefix: 'POST /workspaces/:workspace',
+    });
+    return true;
+  };
+  app.post(
+    '/workspaces/:workspace/file/write',
+    deps.mutate({ strict: true }),
+    (req, res) => {
+      if (!resolve(req, res)) return;
+      void handlePostFileWrite(req, res, deps);
+    },
+  );
+  app.post(
+    '/workspaces/:workspace/file/edit',
+    deps.mutate({ strict: true }),
+    (req, res) => {
+      if (!resolve(req, res)) return;
+      void handlePostFileEdit(req, res, deps);
+    },
   );
 }

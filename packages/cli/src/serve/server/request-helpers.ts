@@ -4,10 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as path from 'node:path';
+import {
+  MAX_WORKSPACE_PATH_LENGTH,
+  translateAndCheckAbsoluteWorkspacePath,
+} from '@qwen-code/acp-bridge/workspacePaths';
 import type { Request, Response } from 'express';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
-import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { WorkspaceRequestContext } from '../workspace-service/index.js';
 
@@ -66,10 +68,38 @@ const PROTOTYPE_POLLUTION_KEYS: ReadonlySet<string> = new Set([
 export const CLIENT_ID_HEADER = 'x-qwen-client-id';
 export const MAX_CLIENT_ID_LENGTH = 128;
 export const MAX_TOOL_NAME_LENGTH = 256;
+export const MAX_SKILL_NAME_LENGTH = 256;
 export const MAX_SERVER_NAME_LENGTH = 256;
 export const CLIENT_ID_RE = /^[A-Za-z0-9._:-]+$/;
 const INVALID_PERMISSION_OUTCOME_ERROR =
   '`outcome` must be `{ outcome: "cancelled" }` or `{ outcome: "selected", optionId: string }`';
+
+export interface DeferredRuntimeRequestTiming {
+  startedAt: Date;
+  path: 'started_on_request' | 'joined';
+  waitMs?: number;
+}
+
+const deferredRuntimeTimingKey: unique symbol = Symbol(
+  'deferredRuntimeRequestTiming',
+);
+
+type DeferredRuntimeTimedRequest = Request & {
+  [deferredRuntimeTimingKey]?: DeferredRuntimeRequestTiming;
+};
+
+export function setDeferredRuntimeRequestTiming(
+  req: Request,
+  timing: DeferredRuntimeRequestTiming,
+): void {
+  (req as DeferredRuntimeTimedRequest)[deferredRuntimeTimingKey] = timing;
+}
+
+export function getDeferredRuntimeRequestTiming(
+  req: Request,
+): DeferredRuntimeRequestTiming | undefined {
+  return (req as DeferredRuntimeTimedRequest)[deferredRuntimeTimingKey];
+}
 
 type PermissionVoteResponse = Parameters<
   AcpSessionBridge['respondToPermission']
@@ -115,8 +145,12 @@ export function parseOptionalWorkspaceCwd(
     });
     return undefined;
   }
-  const cwd = hasCwd ? (body['cwd'] as string) : boundWorkspace;
-  if (!path.isAbsolute(cwd)) {
+  // #7139: the shared helper maps a Windows-shaped cwd to its container
+  // bind mount before the absolute-path check.
+  const cwd = translateAndCheckAbsoluteWorkspacePath(
+    hasCwd ? (body['cwd'] as string) : boundWorkspace,
+  );
+  if (cwd === null) {
     res
       .status(400)
       .json({ error: '`cwd` must be an absolute path when provided' });
@@ -220,7 +254,7 @@ export function validateMcpRuntimeServerName(
 
 /**
  * Workspace-level mutation routes validate the parsed `X-Qwen-Client-Id`
- * against `bridge.knownClientIds()` so the `originatorClientId` stamped
+ * against the supplied bridge set so the `originatorClientId` stamped
  * onto fan-out events is grounded in a known identity. Returns the
  * validated client id (or `undefined` when no header was supplied),
  * `null` when a 400 has already been emitted.
@@ -228,11 +262,12 @@ export function validateMcpRuntimeServerName(
 export function parseAndValidateWorkspaceClientId(
   req: Request,
   res: Response,
-  bridge: AcpSessionBridge,
+  bridge: AcpSessionBridge | readonly AcpSessionBridge[],
 ): string | undefined | null {
   const raw = parseClientIdHeader(req, res);
   if (raw === null || raw === undefined) return raw;
-  if (!bridge.knownClientIds().has(raw)) {
+  const bridges = Array.isArray(bridge) ? bridge : [bridge];
+  if (!bridges.some((candidate) => candidate.knownClientIds().has(raw))) {
     res.status(400).json({
       error: `Client id "${raw}" is not registered for this workspace`,
       code: 'invalid_client_id',

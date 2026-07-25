@@ -62,6 +62,14 @@ Set artifact.autoOpen=false in settings.json, or QWEN_ARTIFACT_NO_AUTO_OPEN=1, t
 
 const debugLogger = createDebugLogger('artifact');
 
+function cancelledArtifactResult(): ToolResult {
+  const message = 'Artifact publishing was cancelled.';
+  return {
+    llmContent: message,
+    returnDisplay: message,
+  };
+}
+
 class ArtifactToolInvocation extends BaseToolInvocation<
   ArtifactToolParams,
   ToolResult
@@ -130,11 +138,26 @@ class ArtifactToolInvocation extends BaseToolInvocation<
     // Read the fragment the model wrote.
     let fragment: string;
     try {
-      const { content } = await this.config
+      const { content, _meta } = await this.config
         .getFileSystemService()
-        .readTextFile({ path: file_path });
+        .readTextFile({
+          path: file_path,
+          maxOutputBytes: MAX_ARTIFACT_BYTES,
+          signal,
+        });
+      if (_meta?.truncatedByBytes === true) {
+        const message = `Artifact is too large (source exceeds the ${MAX_ARTIFACT_BYTES} byte limit). Trim the content or split it across multiple artifacts.`;
+        return {
+          llmContent: message,
+          returnDisplay: message,
+          error: { message, type: ToolErrorType.FILE_TOO_LARGE },
+        };
+      }
       fragment = content;
     } catch (err) {
+      if (signal.aborted || isAbortError(err)) {
+        return cancelledArtifactResult();
+      }
       const notFound = isNodeError(err) && err.code === 'ENOENT';
       const message = notFound
         ? `Artifact source file not found: ${file_path}. Write the page content to this file first.`
@@ -178,6 +201,7 @@ class ArtifactToolInvocation extends BaseToolInvocation<
     }
 
     // Publish (idempotent per source path → stable URL).
+    let managedId: string;
     let url: string;
     let filePath: string | undefined;
     try {
@@ -185,17 +209,14 @@ class ArtifactToolInvocation extends BaseToolInvocation<
         { id: artifactIdFromPath(file_path), title, html },
         signal,
       );
+      managedId = published.id;
       url = published.url;
       filePath = published.filePath;
     } catch (err) {
       // A user-initiated cancel (Esc / aborted signal) is not a failure —
       // surface it as a cancellation rather than a publish error.
       if (signal.aborted || isAbortError(err)) {
-        const message = 'Artifact publishing was cancelled.';
-        return {
-          llmContent: message,
-          returnDisplay: message,
-        };
+        return cancelledArtifactResult();
       }
       const message = `Failed to publish artifact: ${getErrorMessage(err)}`;
       return {
@@ -225,6 +246,17 @@ class ArtifactToolInvocation extends BaseToolInvocation<
       llmContent,
       returnDisplay: `Published artifact **${title}**\n\n${url}`,
       resultFilePaths: filePath ? [filePath] : undefined,
+      artifacts: [
+        {
+          kind: 'html',
+          storage: 'published',
+          title,
+          url,
+          managedId,
+          mimeType: 'text/html',
+          sizeBytes: bytes,
+        },
+      ],
     };
   }
 }

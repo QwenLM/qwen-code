@@ -17,7 +17,11 @@ import OpenAI from 'openai';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
-import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
+import {
+  DEFAULT_TIMEOUT,
+  DEFAULT_MAX_RETRIES,
+  DISABLED_REQUEST_TIMEOUT_MS,
+} from '../constants.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import type { OpenAIRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 
@@ -171,6 +175,18 @@ describe('DefaultOpenAICompatibleProvider', () => {
       );
     });
 
+    it('should disable the timeout when configured to 0', () => {
+      mockContentGeneratorConfig.timeout = 0;
+
+      provider.buildClient();
+
+      expect(OpenAI).toHaveBeenCalledWith(
+        expect.objectContaining({
+          timeout: DISABLED_REQUEST_TIMEOUT_MS,
+        }),
+      );
+    });
+
     it('should include custom headers from buildHeaders', () => {
       provider.buildClient();
 
@@ -218,6 +234,20 @@ describe('DefaultOpenAICompatibleProvider', () => {
       );
 
       expect(result.max_tokens).toBe(16384);
+    });
+
+    it('should set the 128K output default for Claude Opus 4.8', () => {
+      const requestWithoutMaxTokens: OpenAI.Chat.ChatCompletionCreateParams = {
+        model: 'vertex/claude-opus-4-8',
+        messages: [{ role: 'user', content: 'Hello' }],
+      };
+
+      const result = provider.buildRequest(
+        requestWithoutMaxTokens,
+        'prompt-id',
+      );
+
+      expect(result.max_tokens).toBe(128_000);
     });
 
     it('should ignore malformed QWEN_CODE_MAX_OUTPUT_TOKENS values', () => {

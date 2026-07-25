@@ -55,7 +55,6 @@ vi.mock('@agentclientprotocol/sdk', () => ({
       return mockConnectionState.promise;
     },
   })),
-  ndJsonStream: vi.fn().mockReturnValue({}),
   RequestError: class RequestError extends Error {
     static authRequired = vi
       .fn()
@@ -73,6 +72,10 @@ vi.mock('@agentclientprotocol/sdk', () => ({
       });
   },
   PROTOCOL_VERSION: '1.0.0',
+}));
+
+vi.mock('@qwen-code/acp-bridge/ndJsonStream', () => ({
+  ndJsonStream: vi.fn().mockReturnValue({}),
 }));
 
 vi.mock('node:stream', async (importOriginal) => {
@@ -98,14 +101,27 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     warn: vi.fn(),
     info: vi.fn(),
   }),
+  registerAcpEventLoopLagGauge: vi.fn(),
+  startEventLoopLagMonitor: vi.fn(() => ({
+    snapshot: vi.fn(() => ({
+      meanMs: 0,
+      p50Ms: 0,
+      p99Ms: 0,
+      maxMs: 0,
+    })),
+    dispose: vi.fn(),
+  })),
   APPROVAL_MODE_INFO: {},
   APPROVAL_MODES: [],
   DEFAULT_STOP_HOOK_BLOCK_CAP: 8,
+  DEFAULT_MAX_SUBAGENT_DEPTH: 5,
+  DEFAULT_MAX_TOOL_CALLS_PER_TURN: 100,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: 1024 * 1024,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT: 100 * 1024 * 1024,
   DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD: 500_000,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES: 1000,
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD: 25_000,
+  PRIVATE_ACP_CAPABILITY_ENV: 'QWEN_CODE_PRIVATE_ACP_CAPABILITY',
   ApprovalMode: {
     DEFAULT: 'default',
     AUTO_EDIT: 'auto-edit',
@@ -133,6 +149,9 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     _args: args,
   })),
   SessionService: vi.fn(),
+  Storage: {
+    getRuntimeBaseDir: vi.fn(() => '/tmp/qwen-runtime-test'),
+  },
   SESSION_TITLE_MAX_LENGTH: 200,
   DEFAULT_TOOL_OUTPUT_BATCH_BUDGET: 200_000,
   tokenLimit: vi.fn(),
@@ -218,15 +237,19 @@ vi.mock('../config/settings.js', () => ({
   SettingScope: {},
   loadSettings: vi.fn(),
 }));
+// Passthrough: the real cache would serve the first mockReturnValue to every
+// later same-cwd call, breaking tests that re-point loadSettings per call.
+vi.mock('../config/settings-cache.js', async () => {
+  const settings = await import('../config/settings.js');
+  return {
+    loadSettingsCached: (cwd: string) => settings.loadSettings(cwd),
+  };
+});
 vi.mock('../config/config.js', () => ({
   loadCliConfig: vi.fn(),
   buildDisabledSkillNamesProvider: vi.fn(() => () => new Set<string>()),
 }));
 vi.mock('./session/Session.js', () => ({ Session: vi.fn() }));
-vi.mock('../utils/acpModelUtils.js', () => ({
-  formatAcpModelId: vi.fn(),
-}));
-
 // ---------------------------------------------------------------------------
 // Imports
 // ---------------------------------------------------------------------------
@@ -309,6 +332,8 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
+      loadPausedBackgroundAgents: vi.fn().mockResolvedValue(undefined),
+      consumePendingRecoveredAgentsNotice: vi.fn().mockReturnValue(null),
       getSessionService: vi.fn().mockReturnValue(mockSessionService),
       getWorkspaceContext: vi.fn().mockReturnValue({
         getDirectories: vi.fn().mockReturnValue([]),
@@ -400,6 +425,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
         installRewriter: vi.fn(),
+        installGoalTerminalObserver: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
         pendingWorktreeNotice: null as string | null,

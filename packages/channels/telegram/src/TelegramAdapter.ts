@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Bot } from 'grammy';
@@ -8,12 +9,16 @@ import {
   telegramFormat,
   splitHtmlForTelegram,
 } from 'telegram-markdown-formatter';
-import { ChannelBase } from '@qwen-code/channel-base';
+import {
+  ChannelBase,
+  isTerminalTaskLifecycleType,
+} from '@qwen-code/channel-base';
 import type {
-  ChannelConfig,
-  ChannelBaseOptions,
-  Envelope,
   ChannelAgentBridge,
+  ChannelBaseOptions,
+  ChannelConfig,
+  ChannelTaskLifecycleEvent,
+  Envelope,
   SessionTarget,
 } from '@qwen-code/channel-base';
 
@@ -40,6 +45,9 @@ export class TelegramChannel extends ChannelBase {
   private botUsername: string = '';
   private hasConnectedOnce = false;
   private signalHandlersRegistered = false;
+  private readonly inboundRoute = new AsyncLocalStorage<{
+    threadId?: string;
+  }>();
 
   constructor(
     name: string,
@@ -275,28 +283,96 @@ export class TelegramChannel extends ChannelBase {
 
   /** Per-chat typing interval — repeats every 4s since Telegram expires it after 5s. */
   private typingIntervals = new Map<string, ReturnType<typeof setInterval>>();
+  private activeTypingSessions = new Map<string, Set<string>>();
 
-  protected override onPromptStart(chatId: string): void {
-    // Clear any stale interval (shouldn't happen, but safe)
-    const existing = this.typingIntervals.get(chatId);
-    if (existing) clearInterval(existing);
-
-    const sendTyping = () =>
-      this.bot.api.sendChatAction(chatId, 'typing').catch(() => {});
-    sendTyping();
-    this.typingIntervals.set(chatId, setInterval(sendTyping, 4000));
-  }
-
-  protected override onPromptEnd(chatId: string): void {
-    const interval = this.typingIntervals.get(chatId);
-    if (interval) {
-      clearInterval(interval);
-      this.typingIntervals.delete(chatId);
+  private sendTyping(chatId: string): void {
+    try {
+      void this.bot.api.sendChatAction(chatId, 'typing').catch(() => {});
+    } catch {
+      // Best-effort typing indicator.
     }
   }
 
+  private startTyping(chatId: string, sessionId = chatId): void {
+    const sessions = this.activeTypingSessions.get(chatId) ?? new Set();
+    sessions.add(sessionId);
+    this.activeTypingSessions.set(chatId, sessions);
+    if (this.typingIntervals.has(chatId)) return;
+    this.sendTyping(chatId);
+    this.typingIntervals.set(
+      chatId,
+      setInterval(() => this.sendTyping(chatId), 4000),
+    );
+  }
+
+  private stopTyping(chatId: string, sessionId = chatId): void {
+    const sessions = this.activeTypingSessions.get(chatId);
+    if (sessions) {
+      sessions.delete(sessionId);
+      if (sessions.size > 0) return;
+      this.activeTypingSessions.delete(chatId);
+    }
+    const interval = this.typingIntervals.get(chatId);
+    if (!interval) return;
+    clearInterval(interval);
+    this.typingIntervals.delete(chatId);
+  }
+
+  protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
+    if (event.type === 'started') {
+      this.startTyping(event.chatId, event.sessionId);
+      return;
+    }
+    if (isTerminalTaskLifecycleType(event.type)) {
+      this.stopTyping(event.chatId, event.sessionId);
+    }
+  }
+
+  protected override onPromptStart(chatId: string, sessionId?: string): void {
+    this.startTyping(chatId, sessionId);
+  }
+
+  protected override onPromptEnd(chatId: string, sessionId?: string): void {
+    this.stopTyping(chatId, sessionId);
+  }
+
+  override onSessionDied(sessionId: string): void {
+    for (const [chatId, sessions] of this.activeTypingSessions) {
+      if (sessions.has(sessionId)) {
+        this.stopTyping(chatId, sessionId);
+      }
+    }
+    super.onSessionDied(sessionId);
+  }
+
+  override async handleInbound(envelope: Envelope): Promise<void> {
+    const route =
+      envelope.threadId === undefined ? {} : { threadId: envelope.threadId };
+    await this.inboundRoute.run(route, () => super.handleInbound(envelope));
+  }
+
   async sendMessage(chatId: string, text: string): Promise<void> {
-    await this.sendTelegramMessage(chatId, text);
+    await this.sendTelegramMessage(
+      chatId,
+      text,
+      this.inboundRoute.getStore()?.threadId,
+    );
+  }
+
+  protected override async sendResponseMessage(
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ): Promise<void> {
+    const inboundRoute = this.inboundRoute.getStore();
+    const target = this.router.getTarget(sessionId);
+    const threadId =
+      inboundRoute !== undefined
+        ? inboundRoute.threadId
+        : target?.channelName === this.name && target.chatId === chatId
+          ? target.threadId
+          : undefined;
+    await this.sendTelegramMessage(chatId, text, threadId);
   }
 
   protected override async pushProactive(
@@ -338,13 +414,14 @@ export class TelegramChannel extends ChannelBase {
       clearInterval(interval);
     }
     this.typingIntervals.clear();
+    this.activeTypingSessions.clear();
     this.bot.stop();
   }
 
   private buildEnvelope(
     msg: {
       from: { id: number; first_name: string; last_name?: string };
-      chat: { id: number; type: string };
+      chat: { id: number; type: string; title?: string };
       message_thread_id?: number;
       reply_to_message?: { from?: { id: number }; text?: string };
     },
@@ -389,6 +466,7 @@ export class TelegramChannel extends ChannelBase {
         msg.from.first_name +
         (msg.from.last_name ? ` ${msg.from.last_name}` : ''),
       chatId: String(msg.chat.id),
+      ...(isGroup && msg.chat.title ? { chatName: msg.chat.title } : {}),
       threadId:
         typeof msg.message_thread_id === 'number'
           ? String(msg.message_thread_id)

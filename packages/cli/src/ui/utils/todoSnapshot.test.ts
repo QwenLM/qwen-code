@@ -10,6 +10,7 @@ import { ToolCallStatus } from '../types.js';
 import {
   STICKY_TODO_MAX_VISIBLE_ITEMS,
   getStickyTodoMaxVisibleItems,
+  getStickyTodoMaxVisibleItemsForMode,
   getStickyTodos,
   getStickyTodosLayoutKey,
   getStickyTodosRenderKey,
@@ -375,5 +376,33 @@ describe('sticky todo layout helpers', () => {
       STICKY_TODO_MAX_VISIBLE_ITEMS,
     );
     expect(getStickyTodoMaxVisibleItems(0)).toBe(STICKY_TODO_MAX_VISIBLE_ITEMS);
+  });
+
+  describe('getStickyTodoMaxVisibleItemsForMode', () => {
+    it('uses a height-aware VP cap that grows with terminal height', () => {
+      // VP cap = clamp(floor(h/12), 2, 4), then min(vpCap, base).
+      // h=80: vpCap=4, base=5 → 4
+      expect(getStickyTodoMaxVisibleItemsForMode(80, true)).toBe(4);
+      // h=40: vpCap=3, base=5 → 3
+      expect(getStickyTodoMaxVisibleItemsForMode(40, true)).toBe(3);
+      // h=24: vpCap=2, base=4 → 2
+      expect(getStickyTodoMaxVisibleItemsForMode(24, true)).toBe(2);
+    });
+
+    it('floors the VP cap at 2 on short terminals', () => {
+      // h=15: vpCap=clamp(1,2,4)=2, base=3 → min(2,3)=2
+      expect(getStickyTodoMaxVisibleItemsForMode(15, true)).toBe(2);
+    });
+
+    it('uses height-derived count in non-VP mode', () => {
+      expect(getStickyTodoMaxVisibleItemsForMode(80, false)).toBe(
+        getStickyTodoMaxVisibleItems(80),
+      );
+    });
+
+    it('respects height-derived floor when VP cap exceeds it', () => {
+      // Very short terminal: base is 1, vpCap is 2, so min(2,1)=1.
+      expect(getStickyTodoMaxVisibleItemsForMode(8, true)).toBe(1);
+    });
   });
 });

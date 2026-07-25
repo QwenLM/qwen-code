@@ -22,6 +22,7 @@ import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import { defaultModalities } from '../core/modalityDefaults.js';
+import { knownTokenLimit } from '../core/tokenLimits.js';
 import {
   resolveField,
   resolveOptionalField,
@@ -36,7 +37,6 @@ import {
   type ConfigSources,
   type ConfigLayer,
 } from '../utils/configResolver.js';
-import { parsePositiveIntegerEnv } from '../utils/env.js';
 import {
   AUTH_ENV_MAPPINGS,
   DEFAULT_MODELS,
@@ -123,14 +123,17 @@ function applyTimeoutEnvOverride(
   const raw = env['QWEN_CODE_API_TIMEOUT_MS'];
   if (raw === undefined) return;
 
-  const parsed = parsePositiveIntegerEnv(raw, 0);
-  if (parsed > 0) {
-    generationConfig.timeout = parsed;
-    sources['timeout'] = {
-      kind: 'env',
-      envKey: 'QWEN_CODE_API_TIMEOUT_MS',
-    };
-  }
+  const trimmed = raw.trim();
+  // Accept a non-negative integer; `0` disables the request timeout downstream
+  // (see resolveRequestTimeout). Malformed values are ignored (keep default).
+  if (!/^\d+$/.test(trimmed)) return;
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed)) return;
+  generationConfig.timeout = parsed;
+  sources['timeout'] = {
+    kind: 'env',
+    envKey: 'QWEN_CODE_API_TIMEOUT_MS',
+  };
 }
 
 /**
@@ -395,6 +398,19 @@ function resolveGenerationConfig(
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (result as any)[field] = settingsConfig[field];
       sources[field] = settingsSource(`model.generationConfig.${field}`);
+    }
+  }
+
+  // contextWindowSize fallback: auto-detect from model when neither
+  // modelProvider nor settings supplied it. Only known models are stamped —
+  // unknown models keep `undefined` so downstream `?? DEFAULT_TOKEN_LIMIT`
+  // consumers apply the generic default without a misleading
+  // 'auto-detected' source label.
+  if (result.contextWindowSize === undefined && modelId) {
+    const knownLimit = knownTokenLimit(modelId, 'input');
+    if (knownLimit !== undefined) {
+      result.contextWindowSize = knownLimit;
+      sources['contextWindowSize'] = computedSource('auto-detected from model');
     }
   }
 

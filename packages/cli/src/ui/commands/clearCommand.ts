@@ -47,14 +47,14 @@ export const clearCommand: SlashCommand = {
         const content =
           "Stop the current session's running background tasks before starting a new session.";
         context.ui.setDebugMessage(content);
-        if (context.executionMode !== 'interactive') {
-          return {
-            type: 'message' as const,
-            messageType: 'error' as const,
-            content,
-          };
-        }
-        return;
+        // Return the error in every mode. Interactive mode used to bail
+        // with only the transient debug line above, so a blocked /clear
+        // looked like the command silently did nothing (issue #5949).
+        return {
+          type: 'message' as const,
+          messageType: 'error' as const,
+          content,
+        };
       }
 
       // Fire SessionEnd event (non-blocking to avoid UI lag)

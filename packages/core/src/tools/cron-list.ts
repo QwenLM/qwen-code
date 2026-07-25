@@ -11,6 +11,7 @@ import type { DurableCronTask } from '../services/cronTasksFile.js';
 import {
   CRON_TASKS_DISPLAY_PATH,
   readCronTasks,
+  taskHasLegacyCondition,
 } from '../services/cronTasksFile.js';
 
 export type CronListParams = Record<string, never>;
@@ -22,6 +23,12 @@ interface ListedJob {
   recurring: boolean;
   durable: boolean;
   fireAtMs?: number;
+  /** Optional display name (durable tasks created via the management UI). */
+  name?: string;
+  /** Absent (session-only jobs) or true = active; false = kept on disk but
+   * skipped by the scheduler. Surfaced so the agent can tell a disabled task
+   * apart from an active one. */
+  enabled?: boolean;
 }
 
 function truncatePrompt(prompt: string): string {
@@ -77,6 +84,11 @@ class CronListInvocation extends BaseToolInvocation<
         prompt: task.prompt,
         recurring: task.recurring,
         durable: true,
+        ...(task.name ? { name: task.name } : {}),
+        // A legacy guarded task (removed isolated mode + precondition) can never
+        // fire — the scheduler skips it — so report it disabled here too rather
+        // than as an enabled task that silently never runs.
+        enabled: task.enabled !== false && !taskHasLegacyCondition(task),
       })),
       ...scheduler
         .list()
@@ -99,19 +111,23 @@ class CronListInvocation extends BaseToolInvocation<
     const llmLines = jobs.map((job) => {
       const type = job.recurring ? 'recurring' : 'one-shot';
       const durability = job.durable ? 'durable' : 'session-only';
+      // A disabled durable task stays on disk but never fires — mark it so the
+      // agent doesn't assume it is active.
+      const status = job.enabled === false ? ', disabled' : '';
       const schedule =
         job.cron === '@wakeup'
           ? displaySchedule(job.cron, job.fireAtMs)
           : job.cron;
       const prompt =
         job.cron === '@wakeup' ? truncatePrompt(job.prompt) : job.prompt;
-      return `${job.id} — ${schedule} (${type}) [${durability}]: ${prompt}`;
+      const label = job.name ? `${job.name}: ` : '';
+      return `${job.id} — ${schedule} (${type}) [${durability}${status}]: ${label}${prompt}`;
     });
     const llmContent = llmLines.join('\n');
 
     const displayLines = jobs.map(
       (job) =>
-        `${job.id} ${displaySchedule(job.cron, job.fireAtMs)} [${job.durable ? 'durable' : 'session-only'}]`,
+        `${job.id} ${displaySchedule(job.cron, job.fireAtMs)} [${job.durable ? 'durable' : 'session-only'}${job.enabled === false ? ', disabled' : ''}]${job.name ? `: ${job.name}` : ''}`,
     );
     const returnDisplay = displayLines.join('\n');
 

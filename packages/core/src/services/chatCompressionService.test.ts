@@ -172,7 +172,7 @@ describe('ChatCompressionService', () => {
     ]);
     vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(600);
     vi.mocked(tokenLimit).mockReturnValue(1000);
-    // Threshold is 0.7 * 1000 = 700. 600 < 700, so NOOP.
+    // Default 0.85; window 1000 is degenerate → auto = 0.85 * 1000 = 850. 600 < 850, so NOOP.
 
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
@@ -519,14 +519,14 @@ describe('ChatCompressionService', () => {
     ];
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
     vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-      100_000,
+      110_000,
     );
     // The deprecated field is no longer in ChatCompressionSettings; cast so
     // we can simulate a leftover value coming from a stale settings.json.
     vi.mocked(mockConfig.getChatCompression).mockReturnValue({
       contextPercentageThreshold: 0,
     } as unknown as ReturnType<typeof mockConfig.getChatCompression>);
-    // 128K window → auto ≈ 95K; originalTokenCount 100K crosses.
+    // 128K window → auto = 0.85 × 128K ≈ 108.8K; originalTokenCount 110K crosses.
     vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
       model: 'gemini-pro',
       contextWindowSize: 128_000,
@@ -569,13 +569,13 @@ describe('ChatCompressionService', () => {
       { role: 'model', parts: [{ text: 'msg4' }] },
     ];
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
-    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(900);
     // Mock contextWindowSize instead of tokenLimit
     vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
       model: 'gemini-pro',
       contextWindowSize: 1000,
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
-    // newTokenCount = 800 - (1600 - 1000) + 50 = 800 - 600 + 50 = 250 <= 800 (success)
+    // newTokenCount = 900 - (1600 - 1000) + 50 = 900 - 600 + 50 = 350 <= 900 (success)
     const mockGenerateContent = vi.fn().mockResolvedValue({
       text: 'Summary',
       usage: {
@@ -598,7 +598,7 @@ describe('ChatCompressionService', () => {
     });
 
     expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
-    expect(result.info.newTokenCount).toBe(250); // 800 - (1600 - 1000) + 50
+    expect(result.info.newTokenCount).toBe(350); // 900 - (1600 - 1000) + 50
     expect(result.newHistory).not.toBeNull();
     // postProcessSummary appends the resume trailer to the summary body,
     // so it's "Summary\n\n<trailer>" rather than a strict equality.
@@ -645,7 +645,7 @@ describe('ChatCompressionService', () => {
       model: 'gemini-pro',
       contextWindowSize: 1000,
     } as unknown as ReturnType<typeof mockConfig.getContentGeneratorConfig>);
-    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(900);
 
     const mockGenerateContent = vi.fn().mockResolvedValue({
       text: 'Summary',
@@ -1247,7 +1247,7 @@ describe('ChatCompressionService', () => {
       { role: 'model', parts: [{ text: 'msg4' }] },
     ];
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
-    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(800);
+    vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(900);
     vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
       model: 'gemini-pro',
       contextWindowSize: 1000,
@@ -1343,7 +1343,7 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        800,
+        900,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
@@ -1428,7 +1428,7 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        800,
+        900,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
@@ -1475,7 +1475,7 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        800,
+        900,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
@@ -1522,7 +1522,7 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        800,
+        900,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
@@ -1622,7 +1622,7 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        800,
+        900,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
@@ -1707,7 +1707,7 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        800,
+        900,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
@@ -1754,7 +1754,7 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        800,
+        900,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
@@ -1805,7 +1805,7 @@ describe('ChatCompressionService', () => {
       ];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
-        800,
+        900,
       );
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         model: 'gemini-pro',
@@ -2069,54 +2069,63 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
 });
 
 describe('computeThresholds', () => {
-  it('32K window — proportional fallback for all tiers, hard = auto + HARD_BUFFER', () => {
+  it('32K window — degenerate ceiling, proportional floor governs auto', () => {
+    // effectiveWindow 12K, ceiling = 12K - 13K = -1K (≤ 0) → auto falls back to
+    // the proportional floor (0.85 * 32K).
     const t = computeThresholds(32_000);
-    expect(t.warn).toBe(19_200); // 0.6 * 32K
-    expect(t.auto).toBe(22_400); // 0.7 * 32K
-    expect(t.hard).toBe(25_400); // auto + HARD_BUFFER = 22.4K + 3K
+    expect(t.warn).toBe(7_200); // auto - WARN_BUFFER = 27.2K - 20K
+    expect(t.auto).toBe(27_200); // proportional floor: 0.85 * 32K
+    expect(t.hard).toBe(30_200); // auto + HARD_BUFFER = 27.2K + 3K
     expect(t.effectiveWindow).toBe(12_000);
   });
 
-  it('60K window — hard no longer equals auto (issue #4945)', () => {
+  it('60K window — ceiling governs auto; hard stays above auto (issue #4945)', () => {
+    // ceiling = ew(40K) - 13K = 27K < proportional(51K) → auto = ceiling.
     const t = computeThresholds(60_000);
-    expect(t.warn).toBe(36_000); // 0.6 * 60K
-    expect(t.auto).toBe(42_000); // 0.7 * 60K (pct wins: 42K vs ew-13K=27K)
-    expect(t.hard).toBe(45_000); // auto + HARD_BUFFER = 42K + 3K
+    expect(t.warn).toBe(7_000); // auto - WARN_BUFFER = 27K - 20K
+    expect(t.auto).toBe(27_000); // min(0.85*60K=51K, ew-13K=27K)
+    expect(t.hard).toBe(37_000); // ew - HARD_BUFFER = 40K - 3K
     expect(t.hard).toBeGreaterThan(t.auto);
     expect(t.effectiveWindow).toBe(40_000);
   });
 
-  it('128K window — mixed (warn=pct, auto/hard=abs)', () => {
+  it('128K window — ceiling governs auto (leaves room to compress)', () => {
+    // ceiling = ew(108K) - 13K = 95K < proportional(108.8K) → auto = ceiling.
+    // auto + SUMMARY_RESERVE = 95K + 20K = 115K ≤ 128K, so the summary fits.
     const t = computeThresholds(128_000);
-    expect(t.warn).toBe(76_800); // 0.6 * 128K (pct wins: 76.8K vs auto-20K=75K)
-    expect(t.auto).toBe(95_000); // abs: effectiveWindow-13K = 108-13 = 95K (abs wins: 95K vs 0.7*128K=89.6K)
-    expect(t.hard).toBe(105_000); // abs: effectiveWindow-3K = 108-3 = 105K
+    expect(t.warn).toBe(75_000); // auto - WARN_BUFFER = 95K - 20K
+    expect(t.auto).toBe(95_000); // min(0.85*128K=108.8K, ew-13K=95K)
+    expect(t.hard).toBe(105_000); // ew - HARD_BUFFER = 108K - 3K
     expect(t.effectiveWindow).toBe(108_000);
   });
 
-  it('200K window — absolute takes over all tiers', () => {
+  it('200K window — ceiling governs auto (167K), just below proportional', () => {
+    // ceiling = ew(180K) - 13K = 167K < proportional(170K) → auto = 167K.
     const t = computeThresholds(200_000);
-    expect(t.warn).toBe(147_000); // abs: auto-20K (abs wins: 147K vs 0.6*200K=120K)
-    expect(t.auto).toBe(167_000); // abs: effectiveWindow-13K = 180-13 = 167K
-    expect(t.hard).toBe(177_000); // abs: effectiveWindow-3K = 180-3 = 177K
+    expect(t.warn).toBe(147_000); // auto - WARN_BUFFER = 167K - 20K
+    expect(t.auto).toBe(167_000); // min(0.85*200K=170K, ew-13K=167K)
+    expect(t.hard).toBe(177_000); // ew - HARD_BUFFER = 180K - 3K
   });
 
-  it('1M window — fully absolute', () => {
+  it('1M window — proportional governs auto (85%), never crowds the ceiling', () => {
+    // proportional(850K) < ceiling(967K) → auto = 850K, not ~97% of the window.
     const t = computeThresholds(1_000_000);
-    expect(t.warn).toBe(947_000);
-    expect(t.auto).toBe(967_000);
-    expect(t.hard).toBe(977_000);
+    expect(t.warn).toBe(830_000); // auto - WARN_BUFFER = 850K - 20K
+    expect(t.auto).toBe(850_000); // min(0.85*1M=850K, ew-13K=967K)
+    expect(t.hard).toBe(977_000); // ew - HARD_BUFFER = 980K - 3K
   });
 
   it('extreme small window (10K) does not crash; returns sane values', () => {
     const t = computeThresholds(10_000);
-    expect(t.warn).toBeGreaterThan(0);
     expect(t.auto).toBeGreaterThan(0);
+    expect(t.warn).toBeGreaterThanOrEqual(0);
     expect(t.warn).toBeLessThanOrEqual(t.auto);
     expect(t.auto).toBeLessThanOrEqual(t.hard);
-    // window < SUMMARY_RESERVE: effectiveWindow is clamped to 0, not negative.
-    // auto/warn/hard remain positive because each is `Math.max(proportional, absolute)`
-    // and the proportional branch dominates whenever the absolute branch goes ≤ 0.
+    // window < SUMMARY_RESERVE: effectiveWindow clamps to 0 and the ceiling is
+    // negative, so auto falls back to the proportional floor (0.85 * 10K = 8.5K);
+    // warn = max(0, 8.5K - 20K) = 0.
+    expect(t.auto).toBe(8_500);
+    expect(t.warn).toBe(0);
     expect(t.effectiveWindow).toBe(0);
   });
 
@@ -2141,28 +2150,31 @@ describe('computeThresholds', () => {
   describe('custom pct parameter', () => {
     it('uses DEFAULT_PCT when pct is not provided', () => {
       const defaultResult = computeThresholds(32_000);
-      const explicitDefault = computeThresholds(32_000, 0.7);
+      const explicitDefault = computeThresholds(32_000, 0.85);
       expect(explicitDefault).toEqual(defaultResult);
     });
 
-    it('custom pct=0.5 lowers proportional auto threshold for small windows', () => {
+    it('custom pct=0.5 lowers the proportional floor on a degenerate window', () => {
+      // 32K: ceiling ≤ 0 → auto = proportional floor = 0.5 * 32K.
       const t = computeThresholds(32_000, 0.5);
       expect(t.auto).toBe(16_000); // 0.5 * 32K
-      expect(t.warn).toBe(12_800); // (0.5 - 0.1) * 32K
+      expect(t.warn).toBe(0); // max(0, 16K - 20K)
     });
 
-    it('custom pct=0.9 raises proportional auto threshold for small windows', () => {
+    it('custom pct=0.9 raises the proportional floor on a degenerate window', () => {
       const t = computeThresholds(32_000, 0.9);
       expect(t.auto).toBe(28_800); // 0.9 * 32K
-      expect(t.warn).toBe(25_600); // (0.9 - 0.1) * 32K
+      expect(t.warn).toBe(8_800); // 28.8K - 20K
     });
 
-    it('custom pct does not affect absolute-branch-dominated large windows', () => {
+    it('custom pct DOES pull auto earlier on large windows (ceiling semantics)', () => {
+      // Under min-semantics the proportional term governs large windows, so a
+      // lower pct compacts earlier — matching claude-code's Math.min override.
       const defaultResult = computeThresholds(1_000_000);
       const customPct = computeThresholds(1_000_000, 0.5);
-      // For 1M window, absolute branch dominates regardless of pct
-      expect(customPct.auto).toBe(defaultResult.auto);
-      expect(customPct.hard).toBe(defaultResult.hard);
+      expect(defaultResult.auto).toBe(850_000); // 0.85 * 1M
+      expect(customPct.auto).toBe(500_000); // 0.5 * 1M < ceiling(967K)
+      expect(customPct.auto).toBeLessThan(defaultResult.auto);
     });
 
     it('custom pct preserves warn <= auto < hard invariant', () => {
@@ -2175,11 +2187,11 @@ describe('computeThresholds', () => {
       }
     });
 
-    it('pct=0 produces auto=0 for small windows (proportional branch is 0)', () => {
+    it('pct=0 produces auto=0 for small windows (proportional floor is 0)', () => {
       const t = computeThresholds(32_000, 0);
-      // 0 * 32000 = 0, absolute branch is negative → auto = 0
+      // 0 * 32000 = 0; ceiling is negative → auto = proportional floor = 0.
       expect(t.auto).toBe(0);
-      // warn = max((0 - 0.1) * 32000, absWarn) = -3200
+      // warn = max(0, 0 - WARN_BUFFER) = 0
       expect(t.warn).toBeLessThanOrEqual(t.auto);
       // hard is clamped to max(rawHard, auto + HARD_BUFFER)
       expect(t.hard).toBeGreaterThan(t.auto);
@@ -2193,10 +2205,12 @@ describe('computeThresholds', () => {
       expect(t.hard).toBeLessThanOrEqual(t.auto);
     });
 
-    it('pct=1 with large window: auto and hard both equal window', () => {
+    it('pct=1 on a large window: ceiling still caps auto below the window', () => {
+      // Even at pct=1 the absolute ceiling governs, so auto never reaches the
+      // full window — the key protection of the min-semantics.
       const t = computeThresholds(200_000, 1);
-      expect(t.auto).toBe(200_000);
-      expect(t.hard).toBe(200_000);
+      expect(t.auto).toBe(167_000); // min(200K, ew-13K=167K)
+      expect(t.hard).toBe(177_000); // ew - 3K
       expect(t.warn).toBeLessThanOrEqual(t.auto);
     });
 
@@ -2288,6 +2302,133 @@ describe('ChatCompressionService.compress — claude-code-style full-history com
     // Full 4 history entries + 1 trailing scratchpad prompt = 5 contents.
     expect(calledWith.contents).toHaveLength(5);
     expect(calledWith.contents[0].parts[0].text).toContain('first request');
+  });
+
+  it('includes a pending tool result in the summary side-query', async () => {
+    const runSideQuerySpy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({
+        text: 'TEST SUMMARY',
+        usage: {
+          promptTokenCount: 170_000,
+          candidatesTokenCount: 500,
+          totalTokenCount: 170_500,
+        },
+      } as never);
+
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'inspect the repository' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'tool-call-1',
+              name: 'read_file',
+              args: { file_path: 'README.md' },
+            },
+          },
+        ],
+      },
+    ];
+
+    const result = await new ChatCompressionService().compress(
+      makeFakeChat(history),
+      {
+        promptId: 'p',
+        force: true,
+        model: 'qwen-vl',
+        config: makeFakeConfig(),
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+        trigger: 'auto',
+        pendingUserMessage: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'tool-call-1',
+                name: 'read_file',
+                response: { output: 'README contents' },
+              },
+            },
+          ],
+        },
+      },
+    );
+
+    const calledWith = runSideQuerySpy.mock.calls[0]![1] as {
+      contents: Array<{
+        parts: Array<{
+          functionResponse?: { id?: string };
+          text?: string;
+        }>;
+      }>;
+    };
+    expect(calledWith.contents).toHaveLength(4);
+    expect(calledWith.contents[2].parts[0].functionResponse?.id).toBe(
+      'tool-call-1',
+    );
+    expect(
+      result.newHistory
+        ?.at(-1)
+        ?.parts?.some((part) => part.functionCall?.id === 'tool-call-1'),
+    ).toBe(true);
+  });
+
+  it('does not subtract pending tool result tokens from original history', async () => {
+    vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: 'TEST SUMMARY',
+      usage: {
+        promptTokenCount: 220_000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 220_500,
+      },
+    } as never);
+
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'inspect the repository' }] },
+      {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: 'tool-call-1',
+              name: 'read_file',
+              args: { file_path: 'README.md' },
+            },
+          },
+        ],
+      },
+    ];
+
+    const result = await new ChatCompressionService().compress(
+      makeFakeChat(history),
+      {
+        promptId: 'p',
+        force: true,
+        model: 'qwen-vl',
+        config: makeFakeConfig(),
+        consecutiveFailures: 0,
+        originalTokenCount: 180_000,
+        trigger: 'auto',
+        pendingUserMessage: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'tool-call-1',
+                name: 'read_file',
+                response: { output: 'x'.repeat(160_000) },
+              },
+            },
+          ],
+        },
+      },
+    );
+
+    expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+    expect(result.info.newTokenCount).toBeGreaterThan(0);
   });
 
   it('produces newHistory composed via composePostCompactHistory', async () => {
@@ -2382,7 +2523,7 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
     expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
   });
 
-  it('on a 200K window with originalTokenCount=168K, falls through cheap-gate (above auto=167K)', async () => {
+  it('on a 200K window with originalTokenCount=171K, falls through cheap-gate (above auto=167K)', async () => {
     const spy = vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
       text: '<state_snapshot>summary</state_snapshot>',
       usage: {
@@ -2398,10 +2539,10 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
       model: 'qwen-test',
       config: makeFakeConfig({ contextWindowSize: 200_000 }),
       consecutiveFailures: 0,
-      originalTokenCount: 168_000,
+      originalTokenCount: 171_000,
     });
 
-    // 168K > 167K (computeThresholds(200K).auto), cheap-gate lets through
+    // 171K > 167K (computeThresholds(200K).auto = min(0.85 × 200K, ew − 13K)), cheap-gate lets through
     expect(spy).toHaveBeenCalled();
     expect(result.info.compressionStatus).not.toBe(CompressionStatus.NOOP);
   });
@@ -2414,7 +2555,8 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
     const config = makeFakeConfig({ contextWindowSize: 32_000 });
     vi.mocked(config.getAutoCompactThreshold).mockReturnValue(0.5);
 
-    // computeThresholds(32000, 0.5).auto = max(0.5*32000, 12000-13000) = 16000
+    // computeThresholds(32000, 0.5).auto = 16000 (degenerate window: ceiling
+    // ≤ 0, so auto falls back to the proportional floor 0.5 × 32K)
     // 20K > 16K → falls through cheap-gate
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
@@ -2435,9 +2577,9 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
       .mockResolvedValue({ text: 's', usage: {} } as never);
 
     const config = makeFakeConfig({ contextWindowSize: 32_000 });
-    // getAutoCompactThreshold returns undefined → default 0.7
-    // computeThresholds(32000).auto = max(0.7*32000, 12000-13000) = 22400
-    // 20K < 22.4K → NOOP
+    // getAutoCompactThreshold returns undefined → default 0.85
+    // computeThresholds(32000).auto = 27200 (degenerate → 0.85 × 32K)
+    // 20K < 27.2K → NOOP
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
@@ -2452,7 +2594,7 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
   });
 });
 
-describe('ChatCompressionService.compress cheap-gate respects reservedOutputTokens', () => {
+describe('ChatCompressionService.compress cheap-gate runs against the full window', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
@@ -2489,7 +2631,7 @@ describe('ChatCompressionService.compress cheap-gate respects reservedOutputToke
     } as unknown as Config;
   }
 
-  it('without reservedOutputTokens, 131K window NOOPs at 90K (auto ≈ 98K)', async () => {
+  it('131K window NOOPs at 90K (auto = min(0.85 × 131072, ew − 13K) ≈ 98K)', async () => {
     const spy = vi
       .spyOn(sideQueryModule, 'runSideQuery')
       .mockResolvedValue({ text: 's', usage: {} } as never);
@@ -2507,17 +2649,13 @@ describe('ChatCompressionService.compress cheap-gate respects reservedOutputToke
     expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
   });
 
-  it('with 64K reservedOutputTokens, 131K window triggers compression at 60K input', async () => {
-    // Without reservation: computeThresholds(131072).auto ≈ 98K → 60K < 98K → NOOP
-    // With 64K reservation: computeThresholds(131072 - 64000 = 67072).auto ≈ 47K → 60K > 47K → triggers
-    const spy = vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
-      text: '<state_snapshot>summary</state_snapshot>',
-      usage: {
-        promptTokenCount: 1000,
-        candidatesTokenCount: 500,
-        totalTokenCount: 1500,
-      },
-    } as never);
+  it('does NOT fire early at 60K on a 131K window (no output reservation subtracted)', async () => {
+    // Under the retired #5957 reservation, 64K was subtracted from the
+    // window and 60K would have triggered (auto ≈ 47K). With full-window
+    // gating, auto ≈ 98K and 60K stays NOOP.
+    const spy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({ text: 's', usage: {} } as never);
 
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
@@ -2526,19 +2664,17 @@ describe('ChatCompressionService.compress cheap-gate respects reservedOutputToke
       config: makeFakeConfig({ contextWindowSize: 131_072 }),
       consecutiveFailures: 0,
       originalTokenCount: 60_000,
-      reservedOutputTokens: 64_000,
     });
 
-    expect(spy).toHaveBeenCalled();
-    expect(result.info.compressionStatus).not.toBe(CompressionStatus.NOOP);
+    expect(spy).not.toHaveBeenCalled();
+    expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
   });
 
-  it('without reservedOutputTokens, behavior is unchanged (backward compat)', async () => {
+  it('200K window NOOPs at 160K (auto = min(0.85 × 200K, ew − 13K) = 167K)', async () => {
     const spy = vi
       .spyOn(sideQueryModule, 'runSideQuery')
       .mockResolvedValue({ text: 's', usage: {} } as never);
 
-    // computeThresholds(200_000).auto ≈ 167K; 160K < 167K → NOOP
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
@@ -2546,14 +2682,15 @@ describe('ChatCompressionService.compress cheap-gate respects reservedOutputToke
       config: makeFakeConfig({ contextWindowSize: 200_000 }),
       consecutiveFailures: 0,
       originalTokenCount: 160_000,
-      // reservedOutputTokens is not provided
     });
 
     expect(spy).not.toHaveBeenCalled();
     expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
   });
 
-  it('reservedOutputTokens >= contextWindowSize clamps to zero (no crash)', async () => {
+  it('triggers above the full-window threshold (120K on a 131K window)', async () => {
+    // auto = min(0.85 × 131072 ≈ 111.4K, 131072 − 33K ≈ 98K) = 98K;
+    // 120K crosses it.
     const spy = vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
       text: '<state_snapshot>summary</state_snapshot>',
       usage: {
@@ -2563,16 +2700,13 @@ describe('ChatCompressionService.compress cheap-gate respects reservedOutputToke
       },
     } as never);
 
-    // reservedOutputTokens == contextWindowSize → effective window = 0
-    // computeThresholds(0).auto ≈ 0 → any tokens > 0 triggers compression
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
       model: 'qwen-test',
       config: makeFakeConfig({ contextWindowSize: 131_072 }),
       consecutiveFailures: 0,
-      originalTokenCount: 1000,
-      reservedOutputTokens: 131_072,
+      originalTokenCount: 120_000,
     });
 
     expect(spy).toHaveBeenCalled();

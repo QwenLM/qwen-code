@@ -55,6 +55,11 @@ export type {
 } from '@qwen-code/acp-bridge';
 
 export type {
+  BridgeFreshSessionAdmission,
+  BridgeFreshSessionAdmissionContext,
+  BridgeFreshSessionReservation,
+  BridgeSessionLifecycle,
+  BridgeSessionLifecycleEvent,
   BridgeOptions,
   DaemonStatusProvider,
 } from '@qwen-code/acp-bridge/bridgeOptions';
@@ -67,6 +72,11 @@ export type {
   BridgeRestoreSessionRequest,
   BridgeSessionState,
   BridgeRestoredSession,
+  BridgeSessionTranscriptPage,
+  BridgeSessionTranscriptPageRequest,
+  BridgeGenerationModelSource,
+  BridgeGenerationStreamEvent,
+  BridgeWorkspaceGenerationStreamEvent,
   BridgeSessionSummary,
   SessionMetadataUpdate,
   BridgeClientRequestContext,
@@ -75,9 +85,15 @@ export type {
   BridgeWorkspaceMemoryRememberContextMode,
   BridgeWorkspaceMemoryRememberRequest,
   BridgeWorkspaceMemoryRememberResult,
+  BridgeAutoMemoryTopic,
+  BridgeWorkspaceMemoryForgetRequest,
+  BridgeWorkspaceMemoryForgetMatch,
+  BridgeWorkspaceMemoryForgetResult,
+  BridgeWorkspaceMemoryDreamResult,
   BridgeDaemonStatusLimits,
   BridgeDaemonSessionDiagnostic,
   BridgeDaemonStatusSnapshot,
+  BridgeShutdownOptions,
   AcpSessionBridge,
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -88,11 +104,13 @@ export {
   SessionNotFoundError,
   RestoreInProgressError,
   SessionArchivedError,
+  SessionNotArchivedError,
   SessionConflictError,
   SessionArchivingError,
   InvalidSessionScopeError,
   SessionLimitExceededError,
   PromptQueueFullError,
+  PromptDeadlineExceededError,
   WorkspaceMismatchError,
   InvalidClientIdError,
   InvalidPermissionOptionError,
@@ -104,7 +122,9 @@ export {
   McpServerNotFoundError,
   McpServerRestartFailedError,
   SessionBusyError,
+  WorkspaceDrainingError,
   InvalidRewindTargetError,
+  TotalSessionLimitExceededError,
   NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE,
   // Multi-client permission coordination errors.
   CancelSentinelCollisionError,
@@ -118,3 +138,8 @@ export {
   MAX_WORKSPACE_PATH_LENGTH,
   canonicalizeWorkspace,
 } from '@qwen-code/acp-bridge/workspacePaths';
+
+export {
+  SessionArtifactAuthorizationError,
+  SessionArtifactValidationError,
+} from '@qwen-code/acp-bridge/sessionArtifacts';

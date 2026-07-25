@@ -3,12 +3,18 @@ import { TelegramChannel } from './TelegramAdapter.js';
 import type {
   ChannelAgentBridge,
   ChannelConfig,
+  ChannelTaskLifecycleEvent,
   Envelope,
 } from '@qwen-code/channel-base';
 
+type LifecycleBase = Omit<
+  Extract<ChannelTaskLifecycleEvent, { type: 'started' }>,
+  'type'
+>;
+
 type TestTelegramMessage = {
   from: { id: number; first_name: string; last_name?: string };
-  chat: { id: number; type: string };
+  chat: { id: number; type: string; title?: string };
   message_thread_id?: number;
   reply_to_message?: { from?: { id: number }; text?: string };
 };
@@ -16,8 +22,12 @@ type TestTelegramMessage = {
 type TestTelegramEntity = { type: string; offset: number; length: number };
 
 class TestTelegramChannel extends TelegramChannel {
-  startTyping(chatId: string): void {
+  beginTyping(chatId: string): void {
     this.onPromptStart(chatId);
+  }
+
+  emitLifecycle(event: ChannelTaskLifecycleEvent): void {
+    this.onTaskLifecycle(event);
   }
 
   buildTestEnvelope(
@@ -45,6 +55,29 @@ class TestTelegramChannel extends TelegramChannel {
       text,
     );
   }
+
+  sendTestResponse(chatId: string, text: string, sessionId: string) {
+    return this.sendResponseMessage(chatId, text, sessionId);
+  }
+
+  sendTestResponseFromThread(
+    threadId: string | undefined,
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ) {
+    const inboundRoute = (
+      this as unknown as {
+        inboundRoute: {
+          run<T>(store: { threadId?: string }, callback: () => T): T;
+        };
+      }
+    ).inboundRoute;
+    const route = threadId === undefined ? {} : { threadId };
+    return inboundRoute.run(route, () =>
+      this.sendResponseMessage(chatId, text, sessionId),
+    );
+  }
 }
 
 const config: ChannelConfig = {
@@ -55,6 +88,7 @@ const config: ChannelConfig = {
   sessionScope: 'user',
   cwd: process.cwd(),
   groupPolicy: 'disabled',
+  dmPolicy: 'open',
   groups: {},
 };
 
@@ -135,8 +169,8 @@ describe('TelegramChannel', () => {
     const channel = createChannel();
     const bot = installFakeBot(channel);
 
-    channel.startTyping('chat-1');
-    channel.startTyping('chat-2');
+    channel.beginTyping('chat-1');
+    channel.beginTyping('chat-2');
     expect(bot.api.sendChatAction).toHaveBeenCalledTimes(2);
 
     channel.disconnect();
@@ -146,6 +180,133 @@ describe('TelegramChannel', () => {
 
     vi.advanceTimersByTime(4000);
     expect(bot.api.sendChatAction).toHaveBeenCalledTimes(2);
+  });
+
+  it('maps lifecycle start and terminal events to typing', () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+
+    const baseEvent = {
+      channelName: 'telegram',
+      chatId: 'chat-1',
+      sessionId: 'session-1',
+      messageId: 'message-1',
+      identity: { id: 'channel:telegram', displayName: 'telegram' },
+      memoryScope: { namespace: 'channel:telegram', mode: 'metadata-only' },
+    } satisfies LifecycleBase;
+
+    channel.emitLifecycle({ ...baseEvent, type: 'started' });
+    channel.emitLifecycle({ ...baseEvent, type: 'started' });
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(4000);
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(2);
+
+    channel.emitLifecycle({ ...baseEvent, type: 'completed' });
+    channel.emitLifecycle({
+      ...baseEvent,
+      type: 'failed',
+      error: 'boom',
+      phase: 'agent',
+    });
+
+    vi.advanceTimersByTime(4000);
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps typing active until every session in the chat reaches terminal state', () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+
+    const baseEvent = {
+      channelName: 'telegram',
+      chatId: 'chat-1',
+      messageId: 'message-1',
+      identity: { id: 'channel:telegram', displayName: 'telegram' },
+      memoryScope: { namespace: 'channel:telegram', mode: 'metadata-only' },
+    } satisfies Omit<LifecycleBase, 'sessionId'>;
+
+    channel.emitLifecycle({
+      ...baseEvent,
+      sessionId: 'session-1',
+      type: 'started',
+    });
+    channel.emitLifecycle({
+      ...baseEvent,
+      sessionId: 'session-2',
+      type: 'started',
+    });
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(4000);
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(2);
+
+    channel.emitLifecycle({
+      ...baseEvent,
+      sessionId: 'session-1',
+      type: 'completed',
+    });
+
+    vi.advanceTimersByTime(4000);
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(3);
+
+    channel.emitLifecycle({
+      ...baseEvent,
+      sessionId: 'session-2',
+      type: 'cancelled',
+      reason: 'cancel_command',
+    });
+
+    vi.advanceTimersByTime(4000);
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(3);
+  });
+
+  it('clears typing when a session dies without a terminal event', () => {
+    const handleSessionDied = vi.fn();
+    const channel = createChannel({}, { handleSessionDied });
+    const bot = installFakeBot(channel);
+
+    channel.emitLifecycle({
+      channelName: 'telegram',
+      chatId: 'chat-1',
+      sessionId: 'session-1',
+      messageId: 'message-1',
+      identity: { id: 'channel:telegram', displayName: 'telegram' },
+      memoryScope: { namespace: 'channel:telegram', mode: 'metadata-only' },
+      type: 'started',
+    });
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(1);
+
+    channel.onSessionDied('session-1');
+
+    expect(handleSessionDied).toHaveBeenCalledWith('session-1');
+
+    vi.advanceTimersByTime(4000);
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(1);
+  });
+
+  it('treats typing status API failures as best-effort', () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+    bot.api.sendChatAction.mockImplementation(() => {
+      throw new Error('telegram unavailable');
+    });
+
+    expect(() => channel.beginTyping('chat-1')).not.toThrow();
+    expect(() =>
+      channel.emitLifecycle({
+        channelName: 'telegram',
+        chatId: 'chat-2',
+        sessionId: 'session-2',
+        messageId: 'message-2',
+        identity: { id: 'channel:telegram', displayName: 'telegram' },
+        memoryScope: { namespace: 'channel:telegram', mode: 'metadata-only' },
+        type: 'started',
+      }),
+    ).not.toThrow();
+
+    vi.advanceTimersByTime(4000);
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(4);
   });
 
   it('registers the Telegram command menu before polling starts', async () => {
@@ -199,6 +360,89 @@ describe('TelegramChannel', () => {
     );
   });
 
+  it('sends command replies back to the Telegram forum topic', async () => {
+    const channel = createChannel({
+      groupPolicy: 'open',
+      groups: { '*': { requireMention: false } },
+    });
+    const bot = installFakeBot(channel);
+
+    await channel.handleInbound(
+      envelope({
+        chatId: '2',
+        threadId: '42',
+        text: '/start',
+        isGroup: true,
+      }),
+    );
+
+    expect(bot.api.sendMessage).toHaveBeenCalledWith(
+      '2',
+      expect.stringContaining('Qwen Code Telegram bot'),
+      { parse_mode: 'HTML', message_thread_id: 42 },
+    );
+  });
+
+  it('sends agent responses back to their routed Telegram forum topic', async () => {
+    const router = {
+      getTarget: vi.fn().mockReturnValue({
+        channelName: 'telegram',
+        senderId: 'user-1',
+        chatId: '2',
+        threadId: '42',
+      }),
+    };
+    const channel = createChannel({}, router);
+    const bot = installFakeBot(channel);
+
+    await channel.sendTestResponse('2', 'topic response', 'session-1');
+
+    expect(router.getTarget).toHaveBeenCalledWith('session-1');
+    expect(bot.api.sendMessage).toHaveBeenCalledWith('2', expect.any(String), {
+      parse_mode: 'HTML',
+      message_thread_id: 42,
+    });
+  });
+
+  it('prefers the current inbound topic over a stale session route', async () => {
+    const router = {
+      getTarget: vi.fn().mockReturnValue({
+        channelName: 'telegram',
+        senderId: 'user-1',
+        chatId: '2',
+        threadId: '42',
+      }),
+    };
+    const channel = createChannel({}, router);
+    const bot = installFakeBot(channel);
+
+    await channel.sendTestResponseFromThread(
+      '43',
+      '2',
+      'new topic response',
+      'session-1',
+    );
+    await channel.sendTestResponseFromThread(
+      undefined,
+      '2',
+      'general response',
+      'session-1',
+    );
+
+    expect(bot.api.sendMessage).toHaveBeenNthCalledWith(
+      1,
+      '2',
+      expect.any(String),
+      { parse_mode: 'HTML', message_thread_id: 43 },
+    );
+    expect(bot.api.sendMessage).toHaveBeenNthCalledWith(
+      2,
+      '2',
+      expect.any(String),
+      { parse_mode: 'HTML' },
+    );
+  });
+
   it('only treats addressed Telegram bot commands as mentions in groups', () => {
     const channel = createChannel();
     installFakeBot(channel);
@@ -247,6 +491,36 @@ describe('TelegramChannel', () => {
     );
 
     expect(topicMessage.threadId).toBe('42');
+  });
+
+  it('preserves group and supergroup display names in envelopes', () => {
+    const channel = createChannel();
+
+    const groupMessage = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 2, type: 'group', title: 'Project Group' },
+      },
+      'group message',
+    );
+    const supergroupMessage = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 3, type: 'supergroup', title: 'Project Supergroup' },
+      },
+      'supergroup message',
+    );
+    const privateMessage = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private', title: 'Ignored Title' },
+      },
+      'direct message',
+    );
+
+    expect(groupMessage.chatName).toBe('Project Group');
+    expect(supergroupMessage.chatName).toBe('Project Supergroup');
+    expect(privateMessage.chatName).toBeUndefined();
   });
 
   it('sends proactive messages back to the Telegram forum topic', async () => {

@@ -1,8 +1,6 @@
 .view {
-  margin-top: 6px;
-  border-radius: 4px;
+  margin: 0;
   overflow: hidden;
-  border: 1px solid var(--border);
   font-size: 12px;
 }
 

@@ -28,8 +28,8 @@ use windows::Win32::Graphics::Dwm::{
     DwmGetWindowAttribute, DWMWA_CLOAKED, DWMWA_EXTENDED_FRAME_BOUNDS,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindow, GetWindowRect, GetWindowTextLengthW, GetWindowTextW,
-    GetWindowThreadProcessId, IsIconic, IsWindowVisible, GW_OWNER,
+    EnumChildWindows, EnumWindows, GetClassNameW, GetWindow, GetWindowRect, GetWindowTextLengthW,
+    GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, GW_OWNER,
 };
 
 #[derive(Debug, Clone)]
@@ -222,6 +222,114 @@ fn get_window_bounds(hwnd: HWND) -> (i32, i32, i32, i32) {
         }
         (rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top)
     }
+}
+
+fn window_class_name(hwnd: HWND) -> String {
+    let mut buf = [0u16; 256];
+    let n = unsafe { GetClassNameW(hwnd, &mut buf) };
+    if n <= 0 {
+        String::new()
+    } else {
+        String::from_utf16_lossy(&buf[..n as usize])
+    }
+}
+
+/// Resolve a packaged-app (UWP) process id to the `ApplicationFrameWindow`
+/// that actually hosts it.
+///
+/// `IApplicationActivationManager::ActivateApplication` returns the real
+/// packaged-app pid, but a UWP app's top-level window is owned by
+/// `ApplicationFrameHost.exe`, not the app process. The app's own
+/// `CoreWindow` is reparented inside the frame as a child. Consequently
+/// `list_windows(Some(app_pid))` is empty — the frame's
+/// `GetWindowThreadProcessId` reports the AFH pid, not `app_pid`.
+///
+/// We walk every visible top-level `ApplicationFrameWindow`, enumerate its
+/// children, and return the first frame that owns a child whose pid equals
+/// `app_pid`.
+///
+/// Returns `None` if no hosting frame is found (callers should retry) or if
+/// `app_pid` is 0 (brokered activations that report no pid).
+pub fn resolve_uwp_host_window(app_pid: u32) -> Option<WindowInfo> {
+    if app_pid == 0 {
+        return None;
+    }
+
+    struct FrameScan {
+        target_app_pid: u32,
+        matched_frame: Option<HWND>,
+    }
+
+    unsafe extern "system" fn frame_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let scan = &mut *(lparam.0 as *mut FrameScan);
+
+        if IsWindowVisible(hwnd).0 == 0 || IsIconic(hwnd).0 != 0 {
+            return TRUE;
+        }
+        if window_class_name(hwnd) != "ApplicationFrameWindow" {
+            return TRUE;
+        }
+
+        struct ChildScan {
+            target_app_pid: u32,
+            found: bool,
+        }
+        unsafe extern "system" fn child_cb(child: HWND, lparam: LPARAM) -> BOOL {
+            let cs = &mut *(lparam.0 as *mut ChildScan);
+            let mut child_pid: u32 = 0;
+            GetWindowThreadProcessId(child, Some(&mut child_pid));
+            if child_pid == cs.target_app_pid {
+                cs.found = true;
+                return windows::Win32::Foundation::FALSE;
+            }
+            TRUE
+        }
+
+        let mut child_scan = ChildScan {
+            target_app_pid: scan.target_app_pid,
+            found: false,
+        };
+        let _ = EnumChildWindows(
+            hwnd,
+            Some(child_cb),
+            LPARAM(&mut child_scan as *mut ChildScan as isize),
+        );
+
+        if child_scan.found {
+            scan.matched_frame = Some(hwnd);
+            return windows::Win32::Foundation::FALSE;
+        }
+        TRUE
+    }
+
+    let mut scan = FrameScan {
+        target_app_pid: app_pid,
+        matched_frame: None,
+    };
+    unsafe {
+        let _ = EnumWindows(
+            Some(frame_cb),
+            LPARAM(&mut scan as *mut FrameScan as isize),
+        );
+    }
+
+    let frame = scan.matched_frame?;
+
+    let mut afh_pid: u32 = 0;
+    unsafe { GetWindowThreadProcessId(frame, Some(&mut afh_pid)) };
+
+    let title = window_title(frame);
+    let (x, y, w, h) = get_window_bounds(frame);
+
+    Some(WindowInfo {
+        hwnd: frame.0 as u64,
+        pid: afh_pid,
+        title,
+        x,
+        y,
+        width: w,
+        height: h,
+    })
 }
 
 #[cfg(test)]

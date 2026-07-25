@@ -22,6 +22,7 @@ import {
   createDefaultAutoMemoryMetadata,
   ensureAutoMemoryScaffold,
   readAutoMemoryIndex,
+  readAutoMemoryIndexWithStats,
 } from './store.js';
 import { Storage } from '../config/storage.js';
 import { sanitizeCwd } from '../utils/paths.js';
@@ -119,6 +120,33 @@ describe('auto-memory storage scaffold', () => {
         'memory',
       ),
     );
+  });
+
+  it('gives a linked git worktree its own memory root, separate from the main checkout', async () => {
+    delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+    const runtimeDir = path.join(tempDir, 'runtime-output');
+    Storage.setRuntimeBaseDir(runtimeDir);
+    clearAutoMemoryRootCache();
+
+    const main = path.join(tempDir, 'main-repo');
+    const worktree = path.join(tempDir, 'wt');
+    const worktreeGitDir = path.join(main, '.git', 'worktrees', 'wt');
+    await fs.mkdir(worktreeGitDir, { recursive: true });
+    await fs.mkdir(worktree, { recursive: true });
+    await fs.writeFile(
+      path.join(worktree, '.git'),
+      `gitdir: ${worktreeGitDir}`,
+    );
+    await fs.writeFile(path.join(worktreeGitDir, 'commondir'), '../..');
+    await fs.writeFile(
+      path.join(worktreeGitDir, 'gitdir'),
+      path.join(worktree, '.git'),
+    );
+
+    expect(getAutoMemoryRoot(worktree)).toBe(
+      path.join(runtimeDir, 'projects', sanitizeCwd(worktree), 'memory'),
+    );
+    expect(getAutoMemoryRoot(worktree)).not.toBe(getAutoMemoryRoot(main));
   });
 
   it('uses QWEN_RUNTIME_DIR for managed auto-memory', () => {
@@ -264,5 +292,25 @@ describe('auto-memory storage scaffold', () => {
   it('reads the managed auto-memory index after scaffold creation', async () => {
     await ensureAutoMemoryScaffold(projectRoot);
     await expect(readAutoMemoryIndex(projectRoot)).resolves.toBe('');
+  });
+
+  it('returns content and stats for an existing auto-memory index', async () => {
+    await ensureAutoMemoryScaffold(projectRoot);
+    const indexContent = '# Existing Index\n\n- keep me\n';
+    await fs.writeFile(
+      getAutoMemoryIndexPath(projectRoot),
+      indexContent,
+      'utf-8',
+    );
+
+    const result = await readAutoMemoryIndexWithStats(projectRoot);
+
+    expect(result?.content).toBe(indexContent);
+    expect(result?.stats.size).toBe(Buffer.byteLength(indexContent));
+    expect(result?.stats.mtimeMs).toBeGreaterThan(0);
+  });
+
+  it('returns null when reading auto-memory index with stats before creation', async () => {
+    await expect(readAutoMemoryIndexWithStats(projectRoot)).resolves.toBeNull();
   });
 });

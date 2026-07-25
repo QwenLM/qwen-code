@@ -22,6 +22,7 @@ import {
   getArenaSystemReminder,
   getMCPServerStatus,
   getPlanModeSystemReminder,
+  isShellProgressData,
 } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import type {
@@ -272,9 +273,10 @@ function isMcpToolProgressData(
 
 /**
  * Creates a generic output update handler for tools with canUpdateOutput=true.
- * This handler forwards MCP progress data (McpToolProgressData) as tool_progress
- * stream events via the adapter. Progress events are only emitted when the adapter
- * supports partial messages (i.e., includePartialMessages is true).
+ * This handler forwards MCP progress data (McpToolProgressData) and shell
+ * liveness heartbeats (ShellProgressData) as tool_progress stream events via
+ * the adapter. Progress events are only emitted when the adapter supports
+ * partial messages (i.e., includePartialMessages is true).
  *
  * @param request - Tool call request info
  * @param adapter - The adapter instance for emitting messages
@@ -290,7 +292,7 @@ export function createToolProgressHandler(
     _callId: string,
     output: ToolResultDisplay,
   ) => {
-    if (isMcpToolProgressData(output)) {
+    if (isMcpToolProgressData(output) || isShellProgressData(output)) {
       adapter.emitToolProgress(request, output);
     }
   };
@@ -592,39 +594,11 @@ export function functionResponsePartsToString(parts: Part[]): string {
   return parts
     .map((part) => {
       if ('functionResponse' in part) {
-        const content = part.functionResponse?.response?.['output'] ?? '';
+        const response = part.functionResponse?.response;
+        const content = response?.['output'] ?? response?.['error'] ?? '';
         return content;
       }
       return JSON.stringify(part);
     })
     .join('');
-}
-
-/**
- * Extracts content from a tool call response for inclusion in tool_result blocks.
- * Uses functionResponsePartsToString to properly handle functionResponse parts,
- * which correctly extracts output content from functionResponse objects rather
- * than simply concatenating text or JSON.stringify.
- *
- * @param response - Tool call response information
- * @returns String content for the tool_result block, or undefined if no content available
- */
-export function toolResultContent(
-  response: ToolCallResponseInfo,
-): string | undefined {
-  if (
-    typeof response.resultDisplay === 'string' &&
-    response.resultDisplay.trim().length > 0
-  ) {
-    return response.resultDisplay;
-  }
-  if (response.responseParts && response.responseParts.length > 0) {
-    // Always use functionResponsePartsToString to properly handle
-    // functionResponse parts that contain output content
-    return functionResponsePartsToString(response.responseParts);
-  }
-  if (response.error) {
-    return response.error.message;
-  }
-  return undefined;
 }

@@ -17,8 +17,13 @@ import type {
   Tool,
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
-import { createUserContent, FinishReason } from '@google/genai';
-import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
+import { createUserContent, FinishReason } from './genai-compat.js';
+import { enforceFunctionResponseBudget } from '../utils/tool-response-finalizer.js';
+import {
+  retryWithBackoff,
+  isUnattendedMode,
+  type HeartbeatInfo,
+} from '../utils/retry.js';
 import { getErrorStatus, isAbortError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
@@ -28,16 +33,22 @@ import {
   isRateLimitError,
   type RetryInfo,
 } from '../utils/rateLimit.js';
-import { classifyRetryError } from '../utils/retryErrorClassification.js';
-import type { Config } from '../config/config.js';
 import {
+  classifyRetryError,
+  isFallbackEligible,
+} from '../utils/retryErrorClassification.js';
+import type { Config } from '../config/config.js';
+import type { ContentGenerator, InputModalities } from './contentGenerator.js';
+import {
+  clampOutputTokensToWindow,
+  defaultOutputCeiling,
   DEFAULT_TOKEN_LIMIT,
-  ESCALATED_MAX_TOKENS,
+  OUTPUT_TOKEN_CEILING,
   parsePositiveIntegerEnvValue,
-  tokenLimit,
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { isManagedMemoryPath } from '../memory/paths.js';
 import { STRUCTURED_OUTPUT_REDACTED_ARGS } from '../tools/syntheticOutput.js';
 import type { StructuredError } from './turn.js';
 import {
@@ -46,7 +57,6 @@ import {
   logApiRetry,
   logChatCompression,
 } from '../telemetry/loggers.js';
-import { clearDetailedSpanState } from '../telemetry/detailed-span-attributes.js';
 import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { type ChatRecordingService } from '../services/chatRecordingService.js';
 import {
@@ -56,7 +66,17 @@ import {
   type CompactTrigger,
 } from '../services/chatCompressionService.js';
 import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
-import { resolveSlimmingConfig } from '../services/compactionInputSlimming.js';
+import {
+  resolveCompactionTuning,
+  resolveSlimmingConfig,
+  slimCompactionInput,
+} from '../services/compactionInputSlimming.js';
+import {
+  InMemoryImagePayloadStore,
+  buildReattachParts,
+  countAllInlineImages,
+  replaceImagePayloadsInPlace,
+} from '../services/image-payload-references.js';
 import {
   estimateContentTokens,
   estimatePromptTokens,
@@ -75,16 +95,41 @@ import {
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
 import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
-import { isSystemReminderContent } from '../utils/environmentContext.js';
+import {
+  getStartupContextLength,
+  isSystemReminderContent,
+} from '../utils/environmentContext.js';
 import type { SessionStartSource } from '../hooks/types.js';
 import { getCustomSystemPrompt } from './prompts.js';
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
 import {
   collectToolCallIdsFromHistory,
   normalizeModelToolCallIds,
+  reserveModelToolCallId,
 } from './toolCallIdUtils.js';
+import {
+  getToolCallPreparations,
+  setToolCallPreparations,
+} from './tool-call-preparation.js';
+import { InvalidStreamError } from './invalid-stream-error.js';
+
+export { InvalidStreamError };
 
 const debugLogger = createDebugLogger('QWEN_CODE_CHAT');
+// Gemini can emit this filler after tool results; filtering and validation
+// must stay in sync.
+const GEMINI_EMPTY_CONTENT_PLACEHOLDER = '(empty content)';
+
+function isToolCallPreparationOnly(response: GenerateContentResponse): boolean {
+  if (getToolCallPreparations(response).length === 0) return false;
+
+  const hasCandidateOutput = response.candidates?.some(
+    (candidate) =>
+      Boolean(candidate.finishReason) ||
+      (candidate.content?.parts?.length ?? 0) > 0,
+  );
+  return !hasCandidateOutput && !response.usageMetadata;
+}
 
 function syncFunctionCallsField(
   response: GenerateContentResponse,
@@ -239,6 +284,23 @@ export enum StreamEventType {
    * agent UI, subagent loop) can surface it without each call site running
    * its own compaction step. */
   COMPRESSED = 'compressed',
+  /** Emitted when the primary model (or a prior fallback) exhausted its retry
+   * budget on a capacity/availability error and the system is switching to the
+   * next fallback model. The UI should discard partial content and display a
+   * notification about the model switch. */
+  MODEL_FALLBACK = 'model_fallback',
+}
+
+/** Information about a model fallback transition. */
+export interface ModelFallbackInfo {
+  /** The model that exhausted its retry budget. */
+  fromModel: string;
+  /** The model the system is switching to. */
+  toModel: string;
+  /** HTTP status code that triggered the fallback (e.g. 429, 503, 529). */
+  statusCode?: number;
+  /** 1-based index of the fallback in the configured fallback chain. */
+  fallbackIndex: number;
 }
 
 export type StreamEvent =
@@ -253,17 +315,8 @@ export type StreamEvent =
       /** Set when the retry raised the automatic max output token limit. */
       maxOutputTokensEscalated?: number;
     }
-  | { type: StreamEventType.COMPRESSED; info: ChatCompressionInfo };
-
-/**
- * Options for retrying due to invalid content from the model.
- */
-interface ContentRetryOptions {
-  /** Total number of attempts to make (1 initial + N retries). */
-  maxAttempts: number;
-  /** The base delay in milliseconds for linear backoff. */
-  initialDelayMs: number;
-}
+  | { type: StreamEventType.COMPRESSED; info: ChatCompressionInfo }
+  | { type: StreamEventType.MODEL_FALLBACK; info: ModelFallbackInfo };
 
 interface TryCompressOptions {
   originalTokenCountOverride?: number;
@@ -293,26 +346,15 @@ interface TryCompressOptions {
    * on the user's stated concern.
    */
   customInstructions?: string;
-  /**
-   * Output tokens reserved by the model (e.g. max_tokens / escalated limit).
-   * Threaded to the compression service so the cheap-gate computes
-   * thresholds against the real available input budget.
-   */
-  reservedOutputTokens?: number;
 }
 
-const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
-  maxAttempts: 2, // 1 initial call + 1 retry
-  initialDelayMs: 500,
-};
-
-// Some providers occasionally return transient stream anomalies: either an
-// empty stream (usage metadata only, no candidates), a stream that finishes
-// normally but contains no usable text, or a stream cut off without a finish
-// reason. All are retried with an independent budget (similar to rate-limit
-// retries) so they do not consume each other's retry budgets.
+// Model-output validation errors (protocol tag leaks, malformed tool calls)
+// and transient stream anomalies (empty streams, no usable text, missing
+// finish reason) use an independent retry budget so they do not consume each
+// other's or HTTP retries' budgets.
 const INVALID_STREAM_RETRY_CONFIG = {
-  maxRetries: 2,
+  transientMaxRetries: 4,
+  protocolTagLeakMaxRetries: 2,
   initialDelayMs: 2000,
 };
 
@@ -320,6 +362,18 @@ const TRANSPORT_STREAM_RETRY_CONFIG = {
   maxRetries: 2,
   initialDelayMs: 1000,
 };
+
+/**
+ * Pad added to the first-send prompt estimate when sizing the output clamp
+ * (`lastPromptTokenCount === 0` — fresh session, --continue restore, or
+ * subagent inheritance). The char/4 history walk misses the system prompt,
+ * tool definitions, and skill content — estimatePromptTokens documents this
+ * as "typically ~15-20K of under-estimate" — and an under-counted prompt is
+ * the one way `prompt + max_tokens` can overflow the window (issue #5950).
+ * Sized to the documented worst case; costs nothing on large windows (the
+ * output ceiling binds long before the pad matters).
+ */
+const FIRST_SEND_CLAMP_OVERHEAD_PAD = 20_000;
 
 /**
  * Max recovery attempts when the escalated response is also truncated.
@@ -995,17 +1049,68 @@ function stripThoughtPartsFromContent(content: Content): Content | null {
   };
 }
 
-/**
- * Custom error to signal that a stream completed with invalid content,
- * which should trigger a retry.
- */
-export class InvalidStreamError extends Error {
-  readonly type: 'NO_FINISH_REASON' | 'NO_RESPONSE_TEXT';
+const PROTOCOL_TAG_PREFIXES = [
+  '<analysis',
+  '</analysis',
+  '<summary',
+  '</summary',
+] as const;
 
-  constructor(message: string, type: 'NO_FINISH_REASON' | 'NO_RESPONSE_TEXT') {
-    super(message);
-    this.name = 'InvalidStreamError';
-    this.type = type;
+class LeadingProtocolTagLeakDetector {
+  private state: 'detecting' | 'clean' | 'leaked' = 'detecting';
+  private buffer = '';
+
+  accept(text: string): string {
+    if (this.state === 'clean') return text;
+    if (this.state === 'leaked') return '';
+
+    this.buffer += text;
+    const candidate = this.buffer.trimStart().toLowerCase();
+    if (!candidate) return '';
+    if (PROTOCOL_TAG_PREFIXES.some((prefix) => prefix.startsWith(candidate))) {
+      return '';
+    }
+
+    for (const prefix of PROTOCOL_TAG_PREFIXES) {
+      if (
+        candidate.startsWith(prefix) &&
+        /[\s/>]/.test(candidate[prefix.length] ?? '')
+      ) {
+        this.state = 'leaked';
+        this.buffer = '';
+        return '';
+      }
+    }
+
+    this.state = 'clean';
+    const output = this.buffer;
+    this.buffer = '';
+    return output;
+  }
+
+  finish(): string {
+    if (this.state !== 'detecting') return '';
+    const candidate = this.buffer.trimStart().toLowerCase();
+    if (
+      candidate &&
+      PROTOCOL_TAG_PREFIXES.some((prefix) => prefix.startsWith(candidate))
+    ) {
+      this.state = 'leaked';
+      this.buffer = '';
+      return '';
+    }
+    this.state = 'clean';
+    const output = this.buffer;
+    this.buffer = '';
+    return output;
+  }
+
+  get leaked(): boolean {
+    return this.state === 'leaked';
+  }
+
+  get blockingOutput(): boolean {
+    return this.state !== 'clean';
   }
 }
 
@@ -1429,6 +1534,8 @@ export class GeminiChat {
     | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
     | null = null;
 
+  private readonly imagePayloadStore = new InMemoryImagePayloadStore();
+
   /**
    * Monotonically counts user-content pushes that survived into history.
    * Incremented when `sendMessageStream` pushes the user content and decremented
@@ -1448,6 +1555,21 @@ export class GeminiChat {
   private clearPendingPartialState(): void {
     this.pendingPartialAssistantTurnIndex = null;
     this.pendingPartialAssistantRecord = null;
+  }
+
+  private popPendingPartialAssistantTurn(): void {
+    const idx = this.pendingPartialAssistantTurnIndex;
+    if (idx === null) return;
+    if (this.history.length > idx && this.history[idx]?.role === 'model') {
+      this.history.splice(idx, 1);
+    } else {
+      debugLogger.warn(
+        `[PARTIAL_POP] Splice skipped: idx=${idx}, ` +
+          `historyLength=${this.history.length}, ` +
+          `roleAtIdx=${this.history[idx]?.role ?? 'undefined'}`,
+      );
+    }
+    this.clearPendingPartialState();
   }
 
   /**
@@ -1491,8 +1613,48 @@ export class GeminiChat {
    * Public history readers still use {@link getHistory}, which returns a
    * defensive deep copy for caller mutation safety.
    */
-  private getRequestHistory(): Content[] {
-    return extractCuratedHistory(this.history).map(copyContentContainer);
+  private getRequestHistory(currentUserContent?: Content): Content[] {
+    const curatedHistory = extractCuratedHistory(this.history);
+    const { maxRecentImages, imagePayloadThreshold } = resolveCompactionTuning(
+      this.config.getChatCompression(),
+    );
+    if (countAllInlineImages(curatedHistory) >= imagePayloadThreshold) {
+      const skipEntry = currentUserContent
+        ? curatedHistory.find(
+            (c) =>
+              c === currentUserContent ||
+              (c.role === 'user' &&
+                currentUserContent.parts?.some((p) => c.parts?.includes(p))),
+          )
+        : undefined;
+      const replaced = replaceImagePayloadsInPlace(
+        curatedHistory,
+        this.imagePayloadStore,
+        skipEntry,
+      );
+      const requestHistory = curatedHistory.map(copyContentContainer);
+      const reattachParts = buildReattachParts(replaced, maxRecentImages);
+      if (reattachParts.length > 0) {
+        const last = requestHistory.at(-1);
+        if (last?.role === 'user') {
+          last.parts = [...(last.parts ?? []), ...reattachParts];
+        } else {
+          requestHistory.push({ role: 'user', parts: reattachParts });
+        }
+      }
+      return requestHistory;
+    }
+    return curatedHistory.map(copyContentContainer);
+  }
+
+  private getRequestHistoryForRoute(
+    currentUserContent: Content | undefined,
+    supportedModalities: InputModalities,
+  ): Content[] {
+    return slimCompactionInput(
+      this.getRequestHistory(currentUserContent),
+      supportedModalities,
+    ).slimmedHistory;
   }
 
   /**
@@ -1559,7 +1721,6 @@ export class GeminiChat {
       precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
       trigger: options?.trigger,
       customInstructions: options?.customInstructions,
-      reservedOutputTokens: options?.reservedOutputTokens,
       signal,
     });
 
@@ -1573,7 +1734,6 @@ export class GeminiChat {
       this.setHistory(newHistory);
       debugLogger.debug('[FILE_READ_CACHE] clear after auto tryCompress');
       this.config.getFileReadCache().clear();
-      clearDetailedSpanState();
       this.lastPromptTokenCount = info.newTokenCount;
       this.lastOutputTokenCount = 0;
       this.telemetryService?.setLastPromptTokenCount(info.newTokenCount);
@@ -1613,13 +1773,19 @@ export class GeminiChat {
     // apples to apples. The API-authoritative lastPromptTokenCount is
     // then adjusted by the estimated delta — never replaced wholesale.
     const beforeEstimate = estimateContentTokens(this.history);
+    const projectRoot = this.config.getProjectRoot();
+    const targetDir = this.config.getTargetDir?.() ?? projectRoot;
 
     // Step 1: force microcompaction (clear old tool results + media)
     const mcResult = microcompactHistory(
       this.history,
       null,
       this.config.getClearContextOnIdle(),
-      { force: true },
+      {
+        force: true,
+        preserveReadFileResult: (filePath) =>
+          isManagedMemoryPath(filePath, projectRoot, targetDir),
+      },
     );
     const mcMeta = mcResult.meta;
 
@@ -1664,7 +1830,6 @@ export class GeminiChat {
       }),
     );
     this.setHistory(newHistory);
-    clearDetailedSpanState();
     this.lastPromptTokenCount = adjustedTokenCount;
     this.telemetryService?.setLastPromptTokenCount(adjustedTokenCount);
     this.consecutiveFailures = 0;
@@ -1733,6 +1898,19 @@ export class GeminiChat {
     params: SendMessageParameters,
     prompt_id: string,
   ): Promise<AsyncGenerator<StreamEvent>> {
+    const fullTurnRoute = model.endsWith('\0');
+    const exactRoute = fullTurnRoute
+      ? await this.config
+          .getBaseLlmClient()
+          .resolveForModel(model.slice(0, -1), { failClosed: true })
+      : undefined;
+    if (exactRoute) {
+      model = exactRoute.model;
+    }
+    const requestModalities =
+      exactRoute?.contentGeneratorConfig.modalities ??
+      this.config.getEffectiveInputModalities();
+
     await this.sendPromise;
 
     let streamDoneResolver: () => void;
@@ -1755,31 +1933,38 @@ export class GeminiChat {
     let requestContents: Content[];
     let userContentAdded = false;
 
-    // Compute the output budget the model can actually use. Declared at
-    // function level so the reactive-compression path inside the generator
-    // closure can also access it.
+    // Determine the ceiling for this turn's output request. The clamp below
+    // (see clampOutputTokensToWindow) sizes the actual max_tokens to the room
+    // left in the window, so output can never overflow the context limit and
+    // compaction thresholds run against the FULL window — no output
+    // reservation is subtracted (this replaces the #5957/#6266 reservation
+    // machinery; see the max-tokens-window-clamp design doc).
     //
-    // The subagent path sets params.config.maxOutputTokens explicitly; the
-    // interactive path leaves it undefined but will escalate to
-    // max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output')) on MAX_TOKENS.
-    // Pre-reserving that space prevents the dead zone between the adjusted
-    // auto threshold and an unadjusted hard threshold (issue #5950).
-    const cgConfigForThresholds = this.config.getContentGeneratorConfig();
-    const parsedEnvMaxTokensForThreshold = parsePositiveIntegerEnvValue(
+    // The ceiling is the explicit user/subagent value when one is set
+    // (params.config.maxOutputTokens from subagents, samplingParams.max_tokens
+    // or QWEN_CODE_MAX_OUTPUT_TOKENS from user config), else
+    // defaultOutputCeiling(model) (the model's output limit clipped to
+    // OUTPUT_TOKEN_CEILING).
+    const cgConfigForThresholds =
+      exactRoute?.contentGeneratorConfig ??
+      this.config.getContentGeneratorConfig();
+    const parsedEnvMaxTokensForClamp = parsePositiveIntegerEnvValue(
       process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
     );
-    const hasUserMaxTokensOverrideForThreshold =
-      (cgConfigForThresholds?.samplingParams?.max_tokens !== undefined &&
-        cgConfigForThresholds?.samplingParams?.max_tokens !== null) ||
-      parsedEnvMaxTokensForThreshold !== undefined;
-    const effectiveReservedOutput: number =
+    const explicitOutputCeiling: number | undefined =
       params.config?.maxOutputTokens ??
-      (hasUserMaxTokensOverrideForThreshold
-        ? (cgConfigForThresholds?.samplingParams?.max_tokens ??
-          parsedEnvMaxTokensForThreshold ??
-          0)
-        : Math.max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output')));
+      cgConfigForThresholds?.samplingParams?.max_tokens ??
+      parsedEnvMaxTokensForClamp;
+    const outputCeiling: number =
+      explicitOutputCeiling ?? defaultOutputCeiling(model);
+    // Declared at function level so the MAX_TOKENS escalation path inside
+    // the generator closure can re-clamp against the same window and prompt
+    // estimate.
+    const contextWindowForClamp =
+      cgConfigForThresholds?.contextWindowSize ?? DEFAULT_TOKEN_LIMIT;
+    let promptTokensForClamp = 0;
 
+    let currentUserContent: Content | undefined;
     try {
       // The send-lock above is held but the generator's `finally` (which
       // resolves it) has not run yet. Any setup error before returning the
@@ -1789,7 +1974,30 @@ export class GeminiChat {
       // the upcoming prompt — closes the "first send after inherited history"
       // gap where `lastPromptTokenCount === 0` and the gate would otherwise
       // see only the stale prior-turn count (0).
-      const userContent = createUserContent(params.message);
+      let userContent = createUserContent(params.message);
+      const toolOutputBudget = this.config.getToolOutputBatchBudget?.();
+      if (
+        toolOutputBudget !== undefined &&
+        Number.isFinite(toolOutputBudget) &&
+        userContent.parts
+      ) {
+        const [guarded] = enforceFunctionResponseBudget(
+          [
+            {
+              callId: 'send-boundary',
+              toolName: 'tool-response-batch',
+              responseParts: userContent.parts,
+            },
+          ],
+          toolOutputBudget,
+        );
+        if (guarded.responseParts !== userContent.parts) {
+          debugLogger.warn(
+            `Tool response send guard reduced an unfinalized batch to ${toolOutputBudget} characters.`,
+          );
+          userContent = { ...userContent, parts: guarded.responseParts };
+        }
+      }
 
       // Hard-tier rescue: when the estimated prompt size is at or above the
       // hard threshold (effectiveWindow - HARD_BUFFER), force compaction in
@@ -1808,14 +2016,10 @@ export class GeminiChat {
       // force=true already bypasses that breaker, while hard-rescue itself is
       // bounded by hardRescueFailureCount so persistent pre-send rescue
       // failures fall through to reactive overflow after a few strikes.
-      const rawContextLimit =
-        cgConfigForThresholds?.contextWindowSize ?? DEFAULT_TOKEN_LIMIT;
-      const contextLimit = Math.max(
-        0,
-        rawContextLimit - effectiveReservedOutput,
-      );
+      // Thresholds gate on the full window: the output clamp guarantees the
+      // response fits, so nothing needs to be pre-reserved for it.
       const { hard } = computeThresholds(
-        contextLimit,
+        contextWindowForClamp,
         this.config.getAutoCompactThreshold(),
       );
       const imageTokenEstimate = resolveSlimmingConfig(
@@ -1842,7 +2046,9 @@ export class GeminiChat {
       );
       const isHardTier = effectiveTokens >= hard;
       const shouldForceFromHard =
-        isHardTier && this.hardRescueFailureCount < MAX_CONSECUTIVE_FAILURES;
+        !exactRoute &&
+        isHardTier &&
+        this.hardRescueFailureCount < MAX_CONSECUTIVE_FAILURES;
       const historyBeforeHardRescue = shouldForceFromHard
         ? this.getHistoryShallow()
         : undefined;
@@ -1853,13 +2059,13 @@ export class GeminiChat {
         debugLogger.warn(
           `[compaction] hard-tier rescue triggered: prompt_id=${prompt_id}, effectiveTokens=${effectiveTokens}, hard=${hard}, hardRescueAttempt=${this.hardRescueFailureCount + 1}, consecutiveFailures=${this.consecutiveFailures}.`,
         );
-      } else if (isHardTier) {
+      } else if (isHardTier && !exactRoute) {
         debugLogger.warn(
           `[compaction] hard-tier rescue skipped after ${this.hardRescueFailureCount} failed attempts; relying on reactive overflow recovery. prompt_id=${prompt_id}, effectiveTokens=${effectiveTokens}, hard=${hard}.`,
         );
       }
 
-      if (isHardTier && !shouldForceFromHard) {
+      if (exactRoute || (isHardTier && !shouldForceFromHard)) {
         compressionInfo = {
           originalTokenCount: effectiveTokens,
           newTokenCount: effectiveTokens,
@@ -1881,7 +2087,6 @@ export class GeminiChat {
             // classified correctly while the pending user message preserves
             // any active tool-call / response pairing.
             trigger: shouldForceFromHard ? 'auto' : undefined,
-            reservedOutputTokens: effectiveReservedOutput,
           },
         );
       }
@@ -1953,6 +2158,7 @@ export class GeminiChat {
 
       // Add user content to history ONCE before any attempts.
       this.history.push(userContent);
+      currentUserContent = userContent;
       userContentAdded = true;
       // Record that the user content landed (see `userContentPushCount`). The
       // setup-error path below decrements this if it rolls the push back.
@@ -1984,7 +2190,54 @@ export class GeminiChat {
               .join(', '),
         );
       }
-      requestContents = this.getRequestHistory();
+      requestContents = this.getRequestHistoryForRoute(
+        currentUserContent,
+        requestModalities,
+      );
+
+      // Window-clamp the output request AFTER compression has settled the
+      // history: max_tokens = min(ceiling, window − prompt − margin), floored
+      // at MIN_CLAMPED_OUTPUT_TOKENS. Computed here in the send path — not in
+      // the shared provider code — so the API-authoritative
+      // lastPromptTokenCount is in scope and side queries (which set their
+      // own maxOutputTokens via getBaseLlmClient()) stay exempt by
+      // construction. This makes `prompt + max_tokens ≤ window` an invariant
+      // on every main-turn request (issue #5950).
+      //
+      // When lastPromptTokenCount > 0 (steady state, or refreshed to
+      // newTokenCount by a compression), re-estimate from the counts — cheap,
+      // no history walk. When it is still 0 (first send, compression NOOPed),
+      // reuse the pre-push gate estimate: userContent is already in history
+      // here, so a fresh history walk would double-count it. That fallback
+      // estimate misses the system prompt, tool definitions, and skill
+      // content (see estimatePromptTokens — "typically ~15-20K of
+      // under-estimate"), and an under-count is the ONE way
+      // `prompt + max_tokens` can still overflow the window, so pad it by
+      // the documented worst case. The pad only trims output on the very
+      // first send of small-window sessions; from the second send on the
+      // API-authoritative count takes over.
+      promptTokensForClamp =
+        this.lastPromptTokenCount > 0
+          ? estimatePromptTokens(
+              [],
+              userContent,
+              this.lastPromptTokenCount,
+              this.lastOutputTokenCount,
+              imageTokenEstimate,
+            )
+          : effectiveTokens + FIRST_SEND_CLAMP_OVERHEAD_PAD;
+      const clampedMaxOutputTokens = clampOutputTokensToWindow(
+        outputCeiling,
+        contextWindowForClamp,
+        promptTokensForClamp,
+      );
+      params = {
+        ...params,
+        config: {
+          ...params.config,
+          maxOutputTokens: clampedMaxOutputTokens,
+        },
+      };
     } catch (error) {
       if (userContentAdded) {
         this.history.pop();
@@ -2019,15 +2272,33 @@ export class GeminiChat {
 
         let lastError: unknown = new Error('Request failed after all retries.');
         let rateLimitRetryCount = 0;
-        let invalidStreamRetryCount = 0;
+        let transientInvalidStreamRetryCount = 0;
+        let protocolTagLeakRetryCount = 0;
+        const totalInvalidStreamRetryCount = () =>
+          transientInvalidStreamRetryCount + protocolTagLeakRetryCount;
         let transportStreamRetryCount = 0;
         let reactiveCompressionAttempted = false;
         let suppressNextRetryEvent = false;
+        let streamYieldedAnyChunk = false;
 
         // Read per-config overrides; fall back to built-in defaults.
-        const cgConfig = self.config.getContentGeneratorConfig();
+        const cgConfig =
+          exactRoute?.contentGeneratorConfig ??
+          self.config.getContentGeneratorConfig();
+        const requestOverrides = exactRoute
+          ? {
+              contentGenerator: exactRoute.contentGenerator,
+              retryAuthType: exactRoute.retryAuthType,
+              retryErrorCodes: exactRoute.retryErrorCodes,
+            }
+          : undefined;
         const maxRateLimitRetries =
           cgConfig?.maxRetries ?? RATE_LIMIT_RETRY_OPTIONS.maxRetries;
+        const retryInitialDelayMs =
+          cgConfig?.retryInitialDelayMs ??
+          RATE_LIMIT_RETRY_OPTIONS.initialDelayMs;
+        const retryMaxDelayMs =
+          cgConfig?.retryMaxDelayMs ?? RATE_LIMIT_RETRY_OPTIONS.maxDelayMs;
         const extraRetryErrorCodes = cgConfig?.retryErrorCodes;
 
         // Max output tokens escalation: when no user/env override is set and
@@ -2040,22 +2311,28 @@ export class GeminiChat {
           (cgConfig?.samplingParams?.max_tokens !== undefined &&
             cgConfig?.samplingParams?.max_tokens !== null) ||
           parsedEnvMaxTokens !== undefined;
+        // params.config.maxOutputTokens is set by the first-send clamp; the
+        // outputCeiling fallback is defensive and should not fire in practice.
+        const effectiveInitialMaxOutputTokens =
+          params.config?.maxOutputTokens ?? outputCeiling;
+        const escalatedLimit = clampOutputTokensToWindow(
+          OUTPUT_TOKEN_CEILING,
+          contextWindowForClamp,
+          promptTokensForClamp,
+        );
+        const shouldEscalateMaxOutputTokens =
+          effectiveInitialMaxOutputTokens < escalatedLimit;
 
         let lastFinishReason: string | undefined;
 
-        for (
-          let attempt = 0;
-          attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts;
-          attempt++
-        ) {
+        for (;;) {
           let streamYieldedChunk = false;
           try {
             if (suppressNextRetryEvent) {
               suppressNextRetryEvent = false;
             } else if (
-              attempt > 0 ||
               rateLimitRetryCount > 0 ||
-              invalidStreamRetryCount > 0 ||
+              totalInvalidStreamRetryCount() > 0 ||
               transportStreamRetryCount > 0
             ) {
               yield { type: StreamEventType.RETRY };
@@ -2066,11 +2343,15 @@ export class GeminiChat {
               requestContents,
               params,
               prompt_id,
+              requestOverrides,
             );
 
             lastFinishReason = undefined;
             for await (const chunk of stream) {
-              streamYieldedChunk = true;
+              if (!isToolCallPreparationOnly(chunk)) {
+                streamYieldedChunk = true;
+                streamYieldedAnyChunk = true;
+              }
               const fr = chunk.candidates?.[0]?.finishReason;
               if (fr) lastFinishReason = fr;
               yield { type: StreamEventType.CHUNK, value: chunk };
@@ -2080,54 +2361,6 @@ export class GeminiChat {
             break;
           } catch (error) {
             lastError = error;
-
-            // If `processStreamResponse` persisted a partial assistant turn
-            // (mid-stream error after a `functionCall` was already
-            // yielded), every retry-and-continue path below must drop
-            // that turn first; otherwise the retry's response lands as
-            // a second consecutive model turn with an orphan tool_use
-            // (the wedge — see the canonical note above
-            // `ORPHAN_TOOL_USE_REPAIR_REASON`). Paths that `break`
-            // (unretryable) keep the partial.
-            const popPartialIfPushed = () => {
-              const idx = self.pendingPartialAssistantTurnIndex;
-              if (idx === null) return;
-              if (
-                self.history.length > idx &&
-                self.history[idx]?.role === 'model'
-              ) {
-                self.history.splice(idx, 1);
-              } else {
-                // Marker was set but the entry it pointed at is gone or
-                // is no longer a `model` turn. Today this can't happen:
-                // every history-mutation path (clearHistory, addHistory,
-                // setHistory, truncateHistory, stripThoughtsFromHistory,
-                // stripOrphanedUserEntriesFromHistory) calls
-                // clearPendingPartialState() in lockstep, so the marker
-                // is null whenever the index basis is invalidated.
-                // Logging the mismatch makes the invariant observable —
-                // without this, a future caller that mutates history
-                // without resetting the marker would silently leave a
-                // stale partial in `this.history` (popPartialIfPushed
-                // skipping the splice) AND the field-level invariant
-                // that "marker non-null ⇒ a real partial sits at idx"
-                // would be quietly violated. With the warn, anyone
-                // investigating a stale-partial wedge sees a log line
-                // pointing straight at the offending caller.
-                debugLogger.warn(
-                  `[PARTIAL_POP] Splice skipped: idx=${idx}, ` +
-                    `historyLength=${self.history.length}, ` +
-                    `roleAtIdx=${self.history[idx]?.role ?? 'undefined'}`,
-                );
-              }
-              // Drop both markers in lockstep — the deferred chat-
-              // recording record must be discarded alongside the
-              // in-memory splice so the JSONL transcript also drops the
-              // failed attempt. See the field-level comment on
-              // `pendingPartialAssistantRecord` for the failure mode
-              // this prevents.
-              self.clearPendingPartialState();
-            };
 
             // Handle rate-limit / throttling errors returned as stream content.
             // These arrive as StreamContentError with finish_reason="error_finish"
@@ -2156,10 +2389,12 @@ export class GeminiChat {
                 // Discard any partial assistant turn from the failed attempt
                 // before scheduling the retry, so a stale partial does not leak
                 // into history or the JSONL transcript.
-                popPartialIfPushed();
+                self.popPendingPartialAssistantTurn();
                 rateLimitRetryCount++;
                 const delayMs = getRateLimitRetryDelayMs(rateLimitRetryCount, {
                   ...RATE_LIMIT_RETRY_OPTIONS,
+                  initialDelayMs: retryInitialDelayMs,
+                  maxDelayMs: retryMaxDelayMs,
                   error,
                 });
                 const message = parseAndFormatApiError(
@@ -2187,8 +2422,6 @@ export class GeminiChat {
                     skipDelay: skip,
                   },
                 };
-                // Don't count rate-limit retries against the content retry limit
-                attempt--;
                 await delayPromise;
                 continue;
               }
@@ -2216,7 +2449,7 @@ export class GeminiChat {
               transportStreamRetryCount <
                 TRANSPORT_STREAM_RETRY_CONFIG.maxRetries
             ) {
-              popPartialIfPushed();
+              self.popPendingPartialAssistantTurn();
               transportStreamRetryCount++;
               const delayMs =
                 TRANSPORT_STREAM_RETRY_CONFIG.initialDelayMs *
@@ -2232,8 +2465,6 @@ export class GeminiChat {
               });
               yield { type: StreamEventType.RETRY };
               suppressNextRetryEvent = true;
-              // Don't count transport retries against the content retry limit.
-              attempt--;
               await delay(delayMs, params.config?.abortSignal).promise;
               continue;
             }
@@ -2255,12 +2486,12 @@ export class GeminiChat {
 
             const contextOverflow = getContextLengthExceededInfo(error);
             if (contextOverflow.isExceeded) {
-              if (!reactiveCompressionAttempted) {
+              if (!exactRoute && !reactiveCompressionAttempted) {
                 reactiveCompressionAttempted = true;
                 const reactiveOriginalTokenCount =
                   contextOverflow.actualTokens ??
                   contextOverflow.limitTokens ??
-                  self.config.getContentGeneratorConfig()?.contextWindowSize ??
+                  cgConfig?.contextWindowSize ??
                   DEFAULT_TOKEN_LIMIT;
                 debugLogger.warn(
                   'Context length exceeded; attempting reactive compression.',
@@ -2274,7 +2505,6 @@ export class GeminiChat {
                     {
                       originalTokenCountOverride: reactiveOriginalTokenCount,
                       trigger: 'auto',
-                      reservedOutputTokens: effectiveReservedOutput,
                     },
                   );
 
@@ -2286,8 +2516,12 @@ export class GeminiChat {
                     // cleared the marker. Kept for uniformity with the
                     // other retry branches in case a future in-place
                     // tryCompress stops resetting it.
-                    popPartialIfPushed();
-                    requestContents = self.getRequestHistory();
+                    self.popPendingPartialAssistantTurn();
+
+                    requestContents = self.getRequestHistoryForRoute(
+                      currentUserContent,
+                      requestModalities,
+                    );
                     debugLogger.info(
                       `Reactive compression succeeded: ` +
                         `${reactiveInfo.originalTokenCount} -> ` +
@@ -2299,9 +2533,6 @@ export class GeminiChat {
                     };
                     yield { type: StreamEventType.RETRY };
                     suppressNextRetryEvent = true;
-                    // Do not count reactive compression against the content
-                    // validation retry budget.
-                    attempt--;
                     continue;
                   }
 
@@ -2349,150 +2580,251 @@ export class GeminiChat {
               break;
             }
 
-            // Transient stream anomalies (NO_FINISH_REASON / NO_RESPONSE_TEXT):
-            // independent retry budget, similar to rate-limit handling.
-            // Does NOT consume the content retry budget.
-            const isTransientStreamError = error instanceof InvalidStreamError;
             if (
-              isTransientStreamError &&
-              invalidStreamRetryCount < INVALID_STREAM_RETRY_CONFIG.maxRetries
+              error instanceof InvalidStreamError &&
+              error.type === 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS' &&
+              !maxTokensEscalated &&
+              !hasUserMaxTokensOverride &&
+              shouldEscalateMaxOutputTokens
             ) {
-              popPartialIfPushed();
-              invalidStreamRetryCount++;
+              lastError = null;
+              lastFinishReason = FinishReason.MAX_TOKENS;
+              break;
+            }
+
+            // Invalid stream responses use INVALID_STREAM_RETRY_CONFIG, which
+            // is independent from HTTP retries handled by retryWithBackoff.
+            const isInvalidStreamError = error instanceof InvalidStreamError;
+            const maxInvalidStreamRetries =
+              isInvalidStreamError && error.type === 'PROTOCOL_TAG_LEAK'
+                ? INVALID_STREAM_RETRY_CONFIG.protocolTagLeakMaxRetries
+                : INVALID_STREAM_RETRY_CONFIG.transientMaxRetries;
+            const invalidStreamRetryCount =
+              isInvalidStreamError && error.type === 'PROTOCOL_TAG_LEAK'
+                ? protocolTagLeakRetryCount
+                : transientInvalidStreamRetryCount;
+            if (
+              isInvalidStreamError &&
+              invalidStreamRetryCount < maxInvalidStreamRetries
+            ) {
+              self.popPendingPartialAssistantTurn();
+              const nextInvalidStreamRetryCount = invalidStreamRetryCount + 1;
+              if (error.type === 'PROTOCOL_TAG_LEAK') {
+                protocolTagLeakRetryCount = nextInvalidStreamRetryCount;
+              } else {
+                transientInvalidStreamRetryCount = nextInvalidStreamRetryCount;
+              }
               const delayMs =
                 INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
-                invalidStreamRetryCount;
+                nextInvalidStreamRetryCount;
               debugLogger.warn(
                 `Invalid stream [${(error as InvalidStreamError).type}] ` +
-                  `(retry ${invalidStreamRetryCount}/${INVALID_STREAM_RETRY_CONFIG.maxRetries}). ` +
+                  `(retry ${nextInvalidStreamRetryCount}/${maxInvalidStreamRetries}). ` +
                   `Waiting ${delayMs / 1000}s before retrying...`,
               );
               logContentRetry(
                 self.config,
                 new ContentRetryEvent(
-                  invalidStreamRetryCount - 1,
+                  nextInvalidStreamRetryCount - 1,
                   (error as InvalidStreamError).type,
                   delayMs,
                   model,
                 ),
               );
               yield { type: StreamEventType.RETRY };
-              // Don't count transient retries against content retry limit.
-              attempt--;
               await delay(delayMs, params.config?.abortSignal).promise;
               continue;
-            }
-            // Transient budget exhausted — stop immediately.
-            if (isTransientStreamError) {
-              break;
-            }
-
-            // Currently unreachable for `InvalidStreamError`. The
-            // `isContentError` predicate is identical to
-            // `isTransientStreamError` (`error instanceof InvalidStreamError`),
-            // and the transient branch above already either continued or
-            // broke for that class. The branch is preserved as
-            // defense-in-depth: a future error class that should consume
-            // its own content-retry budget but NOT the transient one
-            // could be threaded through here without re-deriving the
-            // popPartialIfPushed sequence. No reachable test path until
-            // the predicates diverge.
-            const isContentError = error instanceof InvalidStreamError;
-            if (isContentError) {
-              if (attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts - 1) {
-                popPartialIfPushed();
-                logContentRetry(
-                  self.config,
-                  new ContentRetryEvent(
-                    attempt,
-                    (error as InvalidStreamError).type,
-                    INVALID_CONTENT_RETRY_OPTIONS.initialDelayMs,
-                    model,
-                  ),
-                );
-                await delay(
-                  INVALID_CONTENT_RETRY_OPTIONS.initialDelayMs * (attempt + 1),
-                  params.config?.abortSignal,
-                ).promise;
-                continue;
-              }
             }
             break;
           }
         }
 
-        // Max output tokens escalation: if the retry loop succeeded but hit
-        // MAX_TOKENS, retry once at the model's full output limit. This ensures
-        // models with large output limits (e.g., 128K for Claude Opus, GPT-5)
-        // are fully utilized, while using ESCALATED_MAX_TOKENS (64K) as a floor
-        // for unknown models.
-        // Placed outside the retry loop so that any errors from the
-        // escalated stream propagate directly (not caught by retry logic).
-        const requestedMaxOutputTokens = params.config?.maxOutputTokens;
-        const escalatedLimit = Math.max(
-          ESCALATED_MAX_TOKENS,
-          tokenLimit(model, 'output'),
-        );
-        const shouldEscalateMaxOutputTokens =
-          requestedMaxOutputTokens === undefined ||
-          requestedMaxOutputTokens < escalatedLimit;
+        // Max output tokens handling: if the retry loop succeeded but hit
+        // MAX_TOKENS, retry once at an escalated output limit only when that
+        // would raise the effective initial limit. The escalation target is
+        // OUTPUT_TOKEN_CEILING, routed through the same window clamp as the
+        // initial request so the retry itself cannot overflow the window.
+        // When the initial limit is already at the ceiling (for example the
+        // clamp was binding), skip the no-op escalation call but still run
+        // continuation recovery on the partial response. These follow-up
+        // streams still need the same InvalidStreamError retry guard as the
+        // main send loop; otherwise a leaked protocol-tag turn would bypass
+        // the primary rollback/retry path entirely.
+        const rollbackRecoveryAttempt = () => {
+          // Pop the partial `model[fc]` FIRST (if processStreamResponse
+          // pushed one before re-throwing), THEN the recovery user turn.
+          // Reversed order would strand `OUTPUT_RECOVERY_MESSAGE` as a real
+          // user turn. Index-checked pop mirrors `popPartialIfPushed`
+          // above — see the design note above
+          // `ORPHAN_TOOL_USE_REPAIR_REASON` for the wedge mechanism and
+          // the partial-push marker lifecycle.
+          const expectedIdx = self.pendingPartialAssistantTurnIndex;
+          const lastIdx = self.history.length - 1;
+          if (
+            expectedIdx !== null &&
+            self.history.length > 0 &&
+            self.history[lastIdx]?.role === 'model'
+          ) {
+            if (expectedIdx !== lastIdx) {
+              debugLogger.warn(
+                `[RECOVERY_POP] Marker/last-index mismatch: ` +
+                  `marker=${expectedIdx}, lastIdx=${lastIdx}, ` +
+                  `historyLength=${self.history.length}. Popping ` +
+                  `last entry as best-effort rollback — investigate ` +
+                  `any history mutation between processStreamResponse's ` +
+                  `partial push and this catch.`,
+              );
+            }
+            self.history.pop();
+            self.clearPendingPartialState();
+          }
+          if (
+            self.history.length > 0 &&
+            self.history[self.history.length - 1].role === 'user'
+          ) {
+            self.history.pop();
+          }
+        };
+        type InvalidStreamRetryEvent =
+          | Extract<StreamEvent, { type: StreamEventType.CHUNK }>
+          | Extract<StreamEvent, { type: StreamEventType.RETRY }>;
+        const streamWithInvalidStreamRetries = async function* (
+          buildAttempt: () => {
+            requestContents: Content[];
+            params: SendMessageParameters;
+            rollback: () => void;
+          },
+          retryEvent: Extract<StreamEvent, { type: StreamEventType.RETRY }> = {
+            type: StreamEventType.RETRY,
+          },
+        ): AsyncGenerator<InvalidStreamRetryEvent> {
+          let transientRetryCount = 0;
+          let protocolTagLeakRetryCount = 0;
+          for (;;) {
+            const attemptState = buildAttempt();
+            try {
+              const stream = await self.makeApiCallAndProcessStream(
+                model,
+                attemptState.requestContents,
+                attemptState.params,
+                prompt_id,
+                requestOverrides,
+              );
+              for await (const chunk of stream) {
+                yield { type: StreamEventType.CHUNK, value: chunk };
+              }
+              return;
+            } catch (error) {
+              attemptState.rollback();
+              if (!(error instanceof InvalidStreamError)) throw error;
 
+              const maxContinuationRetries =
+                error.type === 'PROTOCOL_TAG_LEAK'
+                  ? INVALID_STREAM_RETRY_CONFIG.protocolTagLeakMaxRetries
+                  : INVALID_STREAM_RETRY_CONFIG.transientMaxRetries;
+              const continuationRetryCount =
+                error.type === 'PROTOCOL_TAG_LEAK'
+                  ? protocolTagLeakRetryCount
+                  : transientRetryCount;
+              if (continuationRetryCount >= maxContinuationRetries) {
+                throw error;
+              }
+
+              const nextContinuationRetryCount = continuationRetryCount + 1;
+              if (error.type === 'PROTOCOL_TAG_LEAK') {
+                protocolTagLeakRetryCount = nextContinuationRetryCount;
+              } else {
+                transientRetryCount = nextContinuationRetryCount;
+              }
+              const delayMs =
+                INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
+                nextContinuationRetryCount;
+              debugLogger.warn(
+                `Invalid stream [${error.type}] during output continuation ` +
+                  `(retry ${nextContinuationRetryCount}/${maxContinuationRetries}). ` +
+                  `Waiting ${delayMs / 1000}s before retrying...`,
+              );
+              logContentRetry(
+                self.config,
+                new ContentRetryEvent(
+                  nextContinuationRetryCount - 1,
+                  error.type,
+                  delayMs,
+                  model,
+                ),
+              );
+              yield retryEvent;
+              await delay(delayMs, attemptState.params.config?.abortSignal)
+                .promise;
+            }
+          }
+        };
         if (
           lastError === null &&
           lastFinishReason === FinishReason.MAX_TOKENS &&
           !maxTokensEscalated &&
-          !hasUserMaxTokensOverride &&
-          shouldEscalateMaxOutputTokens
+          !hasUserMaxTokensOverride
         ) {
           maxTokensEscalated = true;
-          const startingLimitLabel =
-            requestedMaxOutputTokens === undefined
-              ? 'default max_tokens'
-              : `${requestedMaxOutputTokens} tokens`;
-          debugLogger.info(
-            `Output truncated at ${startingLimitLabel}. Escalating to ${escalatedLimit} tokens.`,
-          );
-          // Remove partial model response from history
-          // (processStreamResponse already pushed it)
-          if (
-            self.history.length > 0 &&
-            self.history[self.history.length - 1].role === 'model'
-          ) {
-            self.history.pop();
-          }
-          // Signal UI to discard partial output
-          yield {
-            type: StreamEventType.RETRY,
-            maxOutputTokensEscalated: escalatedLimit,
-          };
-          // Retry with escalated max_tokens
-          const escalatedParams: SendMessageParameters = {
-            ...params,
-            config: {
-              ...params.config,
-              maxOutputTokens: escalatedLimit,
-            },
-          };
-          let escalatedFinishReason: string | undefined;
-          const escalatedStream = await self.makeApiCallAndProcessStream(
-            model,
-            requestContents,
-            escalatedParams,
-            prompt_id,
-          );
-          for await (const chunk of escalatedStream) {
-            const fr = chunk.candidates?.[0]?.finishReason;
-            if (fr) escalatedFinishReason = fr;
-            yield { type: StreamEventType.CHUNK, value: chunk };
+          let recoveryFinishReason: string | undefined = lastFinishReason;
+          let recoveryParams: SendMessageParameters = params;
+
+          if (shouldEscalateMaxOutputTokens) {
+            debugLogger.info(
+              `Output truncated at ${effectiveInitialMaxOutputTokens} tokens. ` +
+                `Escalating to ${escalatedLimit} tokens.`,
+            );
+            // Remove partial model response from history
+            // (processStreamResponse already pushed it)
+            if (
+              self.history.length > 0 &&
+              self.history[self.history.length - 1].role === 'model'
+            ) {
+              self.history.pop();
+            }
+            // Signal UI to discard partial output
+            yield {
+              type: StreamEventType.RETRY,
+              maxOutputTokensEscalated: escalatedLimit,
+            };
+            // Retry with escalated max_tokens
+            const escalatedParams: SendMessageParameters = {
+              ...params,
+              config: {
+                ...params.config,
+                maxOutputTokens: escalatedLimit,
+              },
+            };
+            recoveryParams = escalatedParams;
+            recoveryFinishReason = undefined;
+            for await (const event of streamWithInvalidStreamRetries(() => ({
+              requestContents,
+              params: escalatedParams,
+              rollback: () => self.popPendingPartialAssistantTurn(),
+            }))) {
+              if (event.type === StreamEventType.RETRY) {
+                yield event;
+                continue;
+              }
+              const fr = event.value.candidates?.[0]?.finishReason;
+              if (fr) recoveryFinishReason = fr;
+              yield event;
+            }
+          } else {
+            debugLogger.info(
+              `Output truncated at ${effectiveInitialMaxOutputTokens} tokens; ` +
+                `skipping no-op escalation to ${escalatedLimit} tokens and running recovery.`,
+            );
           }
 
-          // Recovery: if the escalated response is also truncated, keep the
-          // partial response in history and inject a recovery message so the
-          // model can continue from where it left off.
+          // Recovery: if the escalated response (or, when escalation is a
+          // no-op, the initial response) is still truncated, keep the partial
+          // response in history and inject a recovery message so the model can
+          // continue from where it left off.
           let recoveryCount = 0;
           let successfulRecoveries = 0;
           while (
-            escalatedFinishReason === FinishReason.MAX_TOKENS &&
+            recoveryFinishReason === FinishReason.MAX_TOKENS &&
             recoveryCount < MAX_OUTPUT_RECOVERY_ATTEMPTS
           ) {
             // Skip recovery when the truncated turn already contains a
@@ -2514,74 +2846,113 @@ export class GeminiChat {
 
             recoveryCount++;
             debugLogger.info(
-              `Output still truncated after escalation. ` +
+              `Output still truncated after max_tokens handling. ` +
                 `Recovery attempt ${recoveryCount}/${MAX_OUTPUT_RECOVERY_ATTEMPTS}.`,
             );
             // The partial model response is already in history
             // (pushed by processStreamResponse). Push a recovery user
             // message so the model sees its partial output and continues.
-            self.history.push(
-              createUserContent([
-                { text: buildOutputRecoveryMessage(lastEntry) },
-              ]),
-            );
+            const recoveryUserContent = createUserContent([
+              { text: buildOutputRecoveryMessage(lastEntry) },
+            ]);
             // Signal UI/turn to clear pending (incomplete) tool calls.
             // isContinuation tells the UI to keep the text buffer so the
             // model's continuation appends to the previous partial output.
             yield { type: StreamEventType.RETRY, isContinuation: true };
-            // Re-send with the updated history (includes partial + recovery)
-            const recoveryContents = self.getRequestHistory();
-            escalatedFinishReason = undefined;
-            try {
-              const recoveryStream = await self.makeApiCallAndProcessStream(
-                model,
+            recoveryFinishReason = undefined;
+
+            // Re-clamp maxOutputTokens for THIS iteration: the prompt has
+            // grown by the previous partial response, so the value clamped
+            // before the first send would overflow the window if reused
+            // (prompt + stale max_tokens > window). Two independent
+            // estimates, take the max:
+            // - Count-based: lastPromptTokenCount/lastOutputTokenCount are
+            //   refreshed from each response's usage metadata — authoritative
+            //   when fresh, but a session-level value: a response that OMITS
+            //   usage mid-recovery leaves it frozen while history keeps
+            //   growing (inconsistent usage reporting from self-hosted
+            //   backends is an anticipated failure class here).
+            // - Fresh walk of the actual outgoing contents, padded like the
+            //   first send: structurally reflects in-turn growth no matter
+            //   what usage was reported, while the pad covers the
+            //   system/tool overhead a history walk cannot see.
+            // The max is conservative in the safe direction only: near the
+            // margin the two roughly agree (walk + pad ≈ authoritative
+            // count), and whichever went stale or blind is overruled.
+            const recoveryImageTokenEstimate = resolveSlimmingConfig(
+              self.config.getChatCompression(),
+            ).imageTokenEstimate;
+            const countBasedRecoveryEstimate =
+              self.lastPromptTokenCount > 0
+                ? estimatePromptTokens(
+                    [],
+                    recoveryUserContent,
+                    self.lastPromptTokenCount,
+                    self.lastOutputTokenCount,
+                    recoveryImageTokenEstimate,
+                  )
+                : 0;
+            self.history.push(recoveryUserContent);
+            const recoveryContents = self.getRequestHistoryForRoute(
+              currentUserContent,
+              requestModalities,
+            );
+            self.history.pop();
+            const walkRecoveryEstimate =
+              estimateContentTokens(
                 recoveryContents,
-                escalatedParams,
-                prompt_id,
-              );
-              for await (const chunk of recoveryStream) {
-                const fr = chunk.candidates?.[0]?.finishReason;
-                if (fr) escalatedFinishReason = fr;
-                yield { type: StreamEventType.CHUNK, value: chunk };
+                recoveryImageTokenEstimate,
+              ) + FIRST_SEND_CLAMP_OVERHEAD_PAD;
+            const recoveryPromptEstimate = Math.max(
+              countBasedRecoveryEstimate,
+              walkRecoveryEstimate,
+            );
+            // recoveryParams is always `params` or `escalatedParams`, both of
+            // which have maxOutputTokens set; the `?? outputCeiling` is a
+            // defensive fallback that never fires in practice.
+            const recoveryCeiling =
+              recoveryParams.config?.maxOutputTokens ?? outputCeiling;
+            const iterationParams: SendMessageParameters = {
+              ...recoveryParams,
+              config: {
+                ...recoveryParams.config,
+                maxOutputTokens: clampOutputTokensToWindow(
+                  recoveryCeiling,
+                  contextWindowForClamp,
+                  recoveryPromptEstimate,
+                ),
+              },
+            };
+
+            try {
+              for await (const event of streamWithInvalidStreamRetries(
+                () => {
+                  self.history.push(recoveryUserContent);
+                  return {
+                    requestContents: self.getRequestHistoryForRoute(
+                      currentUserContent,
+                      requestModalities,
+                    ),
+                    params: iterationParams,
+                    rollback: rollbackRecoveryAttempt,
+                  };
+                },
+                { type: StreamEventType.RETRY, isContinuation: true },
+              )) {
+                if (event.type === StreamEventType.RETRY) {
+                  yield event;
+                  continue;
+                }
+                const fr = event.value.candidates?.[0]?.finishReason;
+                if (fr) recoveryFinishReason = fr;
+                yield event;
               }
               // Iteration fully succeeded: both the user recovery turn and
               // the model continuation turn are now in history and can be
               // coalesced back into the preceding model entry after the loop.
               successfulRecoveries++;
             } catch (recoveryError) {
-              // Pop the partial `model[fc]` FIRST (if processStreamResponse
-              // pushed one before re-throwing), THEN the recovery user
-              // turn. Reversed order would strand `OUTPUT_RECOVERY_MESSAGE`
-              // as a real user turn. Index-checked pop mirrors
-              // `popPartialIfPushed` above — see the design note above
-              // `ORPHAN_TOOL_USE_REPAIR_REASON` for the wedge mechanism
-              // and the partial-push marker lifecycle.
-              const expectedIdx = self.pendingPartialAssistantTurnIndex;
-              const lastIdx = self.history.length - 1;
-              if (
-                expectedIdx !== null &&
-                self.history.length > 0 &&
-                self.history[lastIdx]?.role === 'model'
-              ) {
-                if (expectedIdx !== lastIdx) {
-                  debugLogger.warn(
-                    `[RECOVERY_POP] Marker/last-index mismatch: ` +
-                      `marker=${expectedIdx}, lastIdx=${lastIdx}, ` +
-                      `historyLength=${self.history.length}. Popping ` +
-                      `last entry as best-effort rollback — investigate ` +
-                      `any history mutation between processStreamResponse's ` +
-                      `partial push and this catch.`,
-                  );
-                }
-                self.history.pop();
-                self.clearPendingPartialState();
-              }
-              if (
-                self.history.length > 0 &&
-                self.history[self.history.length - 1].role === 'user'
-              ) {
-                self.history.pop();
-              }
+              rollbackRecoveryAttempt();
               debugLogger.warn(
                 `Recovery attempt ${recoveryCount} failed: ${recoveryError}`,
               );
@@ -2617,7 +2988,7 @@ export class GeminiChat {
 
         if (lastError) {
           if (lastError instanceof InvalidStreamError) {
-            const totalAttempts = invalidStreamRetryCount + 1;
+            const totalAttempts = totalInvalidStreamRetryCount() + 1;
             logContentRetryFailure(
               self.config,
               new ContentRetryFailureEvent(
@@ -2627,7 +2998,237 @@ export class GeminiChat {
               ),
             );
           }
-          throw lastError;
+
+          // === Model fallback chain ===
+          // When the primary model's retries exhaust on a capacity/availability
+          // error, try configured fallback models in sequence. Each fallback
+          // model gets its own fresh retry budget.
+          //
+          // Constraints:
+          // - Do NOT trigger fallback when persistent mode is active
+          //   (QWEN_CODE_UNATTENDED_RETRY) — persistent mode retries the primary
+          //   model indefinitely by design.
+          // - Maximum 3 fallback transitions (capped by config normalization).
+          // - Fallback is only for capacity/availability errors (429/503/529),
+          //   not for auth/billing/client errors.
+          const fallbackModels = exactRoute
+            ? []
+            : self.config.getModelFallbacks();
+
+          if (
+            fallbackModels.length > 0 &&
+            !isUnattendedMode() &&
+            !streamYieldedAnyChunk
+          ) {
+            let currentErrorClassification = classifyRetryError(lastError, {
+              authType: cgConfig?.authType,
+              extraRetryErrorCodes,
+            });
+
+            if (isFallbackEligible(currentErrorClassification)) {
+              let fallbackSucceeded = false;
+              let fallbackIndex = 0;
+              let currentModel = model;
+              let currentResolvedModel = cgConfig?.model ?? model;
+              let fallbackStreamYieldedAnyChunk = false;
+
+              for (const fallbackModelId of fallbackModels) {
+                // Skip fallback models that match the current/primary model
+                if (
+                  fallbackModelId === model ||
+                  fallbackModelId === currentModel
+                ) {
+                  debugLogger.warn(
+                    `[FALLBACK] Skipping fallback model "${fallbackModelId}": ` +
+                      `same as current model.`,
+                  );
+                  continue;
+                }
+
+                // Resolve the fallback model's content generator
+                let fallbackGenerator: ContentGenerator;
+                let fallbackRetryAuthType: string | undefined;
+                let fallbackRetryErrorCodes: readonly number[] | undefined;
+                let resolvedFallbackModel: string;
+                let fallbackModalities: InputModalities | undefined;
+                try {
+                  const resolved = await self.config
+                    .getBaseLlmClient()
+                    .resolveForModel(fallbackModelId, { failClosed: true });
+                  fallbackGenerator = resolved.contentGenerator;
+                  fallbackRetryAuthType = resolved.retryAuthType;
+                  fallbackRetryErrorCodes = resolved.retryErrorCodes;
+                  resolvedFallbackModel = resolved.model;
+                  fallbackModalities =
+                    resolved.contentGeneratorConfig?.modalities;
+                } catch (resolveError) {
+                  if (isAbortError(resolveError)) throw resolveError;
+                  const resolveErrorMessage =
+                    resolveError instanceof Error
+                      ? resolveError.message
+                      : String(resolveError);
+                  debugLogger.warn(
+                    `[FALLBACK] Failed to resolve fallback model ` +
+                      `"${fallbackModelId}": ` +
+                      `${resolveErrorMessage}. ` +
+                      `Trying next fallback.`,
+                  );
+                  continue;
+                }
+
+                if (resolvedFallbackModel === currentResolvedModel) {
+                  debugLogger.warn(
+                    `[FALLBACK] Skipping fallback model "${fallbackModelId}": ` +
+                      `resolved model "${resolvedFallbackModel}" matches ` +
+                      `the current model.`,
+                  );
+                  continue;
+                }
+                fallbackIndex++;
+
+                debugLogger.warn(
+                  `[FALLBACK] Model "${currentModel}" exhausted retries ` +
+                    `(reason: ${currentErrorClassification.reason}, ` +
+                    `status: ${currentErrorClassification.statusCode ?? 'unknown'}). ` +
+                    `Switching to fallback model "${fallbackModelId}" ` +
+                    `(${fallbackIndex}/${fallbackModels.length}).`,
+                );
+
+                // Emit fallback event so the UI can notify the user
+                yield {
+                  type: StreamEventType.MODEL_FALLBACK,
+                  info: {
+                    fromModel: currentModel,
+                    toModel: resolvedFallbackModel,
+                    statusCode: currentErrorClassification.statusCode,
+                    fallbackIndex,
+                  },
+                };
+
+                // Remove the partial assistant turn from history before the
+                // fallback model starts producing its own response.
+                self.popPendingPartialAssistantTurn();
+
+                // Run the fallback model through the existing API-call wiring.
+                let currentFallbackYieldedAnyChunk = false;
+                try {
+                  const fallbackRequestContents =
+                    self.getRequestHistoryForRoute(
+                      currentUserContent,
+                      fallbackModalities ?? {},
+                    );
+                  for await (const event of self.makeFallbackStream(
+                    resolvedFallbackModel,
+                    fallbackRequestContents,
+                    params,
+                    prompt_id,
+                    fallbackGenerator,
+                    fallbackRetryAuthType,
+                    fallbackRetryErrorCodes,
+                  )) {
+                    const emittedUserVisibleOutput =
+                      event.type !== StreamEventType.CHUNK ||
+                      !isToolCallPreparationOnly(event.value);
+                    if (emittedUserVisibleOutput) {
+                      currentFallbackYieldedAnyChunk = true;
+                      fallbackStreamYieldedAnyChunk = true;
+                    }
+                    yield event;
+                  }
+
+                  // Fallback succeeded
+                  lastError = null;
+                  fallbackSucceeded = true;
+                  debugLogger.info(
+                    `[FALLBACK] Successfully completed request with ` +
+                      `fallback model "${resolvedFallbackModel}".`,
+                  );
+                  return;
+                } catch (fallbackError) {
+                  if (isAbortError(fallbackError)) throw fallbackError;
+                  lastError = fallbackError;
+
+                  if (currentFallbackYieldedAnyChunk) {
+                    self.popPendingPartialAssistantTurn();
+                    debugLogger.warn(
+                      `[FALLBACK] Fallback model "${resolvedFallbackModel}" ` +
+                        `failed after emitting output. Popped the partial ` +
+                        `assistant turn and stopped the fallback chain to ` +
+                        `avoid duplicating user-visible output.`,
+                    );
+                    break;
+                  }
+
+                  // Classify the fallback error to decide whether to continue
+                  // to the next fallback or give up
+                  const fallbackClassification = classifyRetryError(
+                    fallbackError,
+                    {
+                      authType: fallbackRetryAuthType,
+                      extraRetryErrorCodes: fallbackRetryErrorCodes,
+                    },
+                  );
+
+                  const canTryNextFallback = isFallbackEligible(
+                    fallbackClassification,
+                  );
+                  debugLogger.warn(
+                    `[FALLBACK] Fallback model "${resolvedFallbackModel}" also ` +
+                      `failed (reason: ${fallbackClassification.reason}, ` +
+                      `status: ${fallbackClassification.statusCode ?? 'unknown'}). ` +
+                      `${canTryNextFallback ? 'Checking remaining fallbacks.' : 'Stopping fallback chain.'}`,
+                  );
+
+                  currentModel = resolvedFallbackModel;
+                  currentResolvedModel = resolvedFallbackModel;
+                  currentErrorClassification = fallbackClassification;
+
+                  // Only continue to next fallback if this error is also
+                  // fallback-eligible. Auth/client errors should fail immediately.
+                  if (!canTryNextFallback) {
+                    debugLogger.warn(
+                      `[FALLBACK] Error from "${resolvedFallbackModel}" is not ` +
+                        `fallback-eligible (${fallbackClassification.reason}). ` +
+                        `Stopping fallback chain.`,
+                    );
+                    break;
+                  }
+                }
+              }
+
+              if (!fallbackSucceeded) {
+                if (!fallbackStreamYieldedAnyChunk) {
+                  self.popPendingPartialAssistantTurn();
+                }
+                debugLogger.warn(
+                  '[FALLBACK] Fallback chain exhausted without success. ' +
+                    'Throwing last error.',
+                );
+              }
+            } else {
+              debugLogger.warn(
+                '[FALLBACK] Fallback chain skipped: primary error is not ' +
+                  'fallback-eligible ' +
+                  `(reason: ${currentErrorClassification.reason}, ` +
+                  `diagnosis: ${currentErrorClassification.diagnosis}, ` +
+                  `status: ${currentErrorClassification.statusCode ?? 'unknown'}, ` +
+                  `error: ${lastError instanceof Error ? lastError.message : String(lastError)}).`,
+              );
+            }
+          } else if (
+            fallbackModels.length > 0 &&
+            !isUnattendedMode() &&
+            streamYieldedAnyChunk
+          ) {
+            debugLogger.warn(
+              '[FALLBACK] Fallback chain skipped because the primary model ' +
+                'already emitted user-visible output.',
+            );
+          }
+
+          if (lastError) {
+            throw lastError;
+          }
         }
       } finally {
         sleepInhibitorHandle.release();
@@ -2658,14 +3259,30 @@ export class GeminiChat {
     })();
   }
 
+  /**
+   * Makes an API call with retry logic and returns the processed stream.
+   *
+   * When called without `overrides`, uses the session's primary content
+   * generator and provider config (the common path for the main model).
+   * Pass `overrides` to run against a different content generator — used
+   * by the fallback chain to call alternative models without duplicating
+   * the retry wiring.
+   */
   private async makeApiCallAndProcessStream(
     model: string,
     requestContents: Content[],
     params: SendMessageParameters,
     prompt_id: string,
+    overrides?: {
+      contentGenerator: ContentGenerator;
+      retryAuthType?: string;
+      retryErrorCodes?: readonly number[];
+    },
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
+    const generator =
+      overrides?.contentGenerator ?? this.config.getContentGenerator();
     const apiCall = () =>
-      this.config.getContentGenerator().generateContentStream(
+      generator.generateContentStream(
         {
           model,
           contents: requestContents,
@@ -2674,7 +3291,12 @@ export class GeminiChat {
         prompt_id,
       );
     const cgConfig = this.config.getContentGeneratorConfig();
-    const extraRetryErrorCodes = cgConfig?.retryErrorCodes;
+    const authType = overrides?.retryAuthType ?? cgConfig?.authType;
+    const extraRetryErrorCodes =
+      overrides?.retryErrorCodes ?? cgConfig?.retryErrorCodes;
+    // Fallback models never enter persistent retry mode — persistent mode
+    // is the caller's explicit opt-in for the primary model only.
+    const persistentMode = overrides ? false : isUnattendedMode();
     const streamResponse = await retryWithBackoff(apiCall, {
       shouldRetryOnError: (error: unknown) => {
         if (error instanceof Error) {
@@ -2694,15 +3316,19 @@ export class GeminiChat {
 
         return false;
       },
-      authType: cgConfig?.authType,
+      authType,
       extraRetryErrorCodes,
-      persistentMode: isUnattendedMode(),
+      persistentMode,
       signal: params.config?.abortSignal,
-      heartbeatFn: (info) => {
-        process.stderr.write(
-          `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
-        );
-      },
+      ...(persistentMode
+        ? {
+            heartbeatFn: (info: HeartbeatInfo) => {
+              process.stderr.write(
+                `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+              );
+            },
+          }
+        : {}),
       onRetry: (info) => {
         logApiRetry(
           this.config,
@@ -2720,6 +3346,28 @@ export class GeminiChat {
     });
 
     return this.processStreamResponse(model, streamResponse);
+  }
+
+  private async *makeFallbackStream(
+    model: string,
+    requestContents: Content[],
+    params: SendMessageParameters,
+    prompt_id: string,
+    contentGenerator: ContentGenerator,
+    retryAuthType?: string,
+    retryErrorCodes?: readonly number[],
+  ): AsyncGenerator<StreamEvent> {
+    const stream = await this.makeApiCallAndProcessStream(
+      model,
+      requestContents,
+      params,
+      prompt_id,
+      { contentGenerator, retryAuthType, retryErrorCodes },
+    );
+
+    for await (const chunk of stream) {
+      yield { type: StreamEventType.CHUNK, value: chunk };
+    }
   }
 
   /**
@@ -2776,6 +3424,11 @@ export class GeminiChat {
       ? extractCuratedHistory(this.history)
       : this.history;
     return history.map(copyContentContainer);
+  }
+
+  getHistoryForForkWindow(): Content[] {
+    const history = this.history.slice(getStartupContextLength(this.history));
+    return extractCuratedHistory(history).map(copyContentContainer);
   }
 
   /**
@@ -3041,6 +3694,7 @@ export class GeminiChat {
     const allModelParts: Part[] = [];
     const usedToolCallIds = collectToolCallIdsFromHistory(this.history);
     const rawToolCallIdsInCurrentTurn = new Set<string>();
+    const reservedToolCallIds = new Map<string, string>();
     let usageMetadata: GenerateContentResponseUsageMetadata | undefined;
     let coercedUsage:
       | {
@@ -3054,6 +3708,13 @@ export class GeminiChat {
 
     let hasToolCall = false;
     let hasFinishReason = false;
+    const protocolTagDetector = new LeadingProtocolTagLeakDetector();
+    let protocolTextWasSuppressed = false;
+    const currentUserTurn = this.history[this.history.length - 1];
+    const isToolResultContinuation =
+      currentUserTurn?.role === 'user' &&
+      currentUserTurn.parts?.some((part) => part.functionResponse) === true;
+    let deferredFinishReason: FinishReason | undefined;
     // Captured if the upstream stream throws mid-iteration (typical on weak
     // networks: SSE drops between `content_block_stop` of a tool_use and the
     // terminal `message_stop`). We still build / record / push a partial
@@ -3064,6 +3725,21 @@ export class GeminiChat {
 
     try {
       for await (const chunk of streamResponse) {
+        const preparations = getToolCallPreparations(chunk);
+        if (preparations.length > 0) {
+          setToolCallPreparations(
+            chunk,
+            preparations.map((preparation) => ({
+              ...preparation,
+              callId: reserveModelToolCallId(
+                preparation.callId,
+                usedToolCallIds,
+                reservedToolCallIds,
+              ),
+            })),
+          );
+        }
+
         // Use ||= to avoid later usage-only chunks (no candidates) overwriting
         // a finishReason that was already seen in an earlier chunk.
         hasFinishReason ||=
@@ -3071,12 +3747,35 @@ export class GeminiChat {
           false;
 
         if (isValidResponse(chunk)) {
-          const content = chunk.candidates?.[0]?.content;
+          const candidate = chunk.candidates?.[0];
+          const content = candidate?.content;
           if (content?.parts) {
+            content.parts = content.parts.flatMap((part) => {
+              if (
+                isToolResultContinuation &&
+                !part.thought &&
+                part.text?.trim() === GEMINI_EMPTY_CONTENT_PLACEHOLDER
+              ) {
+                return [];
+              }
+              if (typeof part.text !== 'string' || part.thought) return [part];
+              const text = protocolTagDetector.accept(part.text);
+              if (text) return [{ ...part, text }];
+              protocolTextWasSuppressed ||= part.text.length > 0;
+              const { text: _text, ...rest } = part;
+              return Object.values(rest).some((value) => value !== undefined)
+                ? [rest]
+                : [];
+            });
+            if (candidate?.finishReason) {
+              const text = protocolTagDetector.finish();
+              if (text) content.parts.push({ text });
+            }
             content.parts = normalizeModelToolCallIds(
               content.parts,
               usedToolCallIds,
               rawToolCallIdsInCurrentTurn,
+              reservedToolCallIds,
             );
             syncFunctionCallsField(chunk, content.parts);
 
@@ -3162,7 +3861,20 @@ export class GeminiChat {
           }
         }
 
-        yield chunk; // Yield every chunk to the UI immediately.
+        if (isToolResultContinuation) {
+          // Do not let consumers commit Finished before post-stream validation
+          // can reject a semantically empty continuation.
+          for (const candidate of chunk.candidates ?? []) {
+            if (candidate.finishReason) {
+              deferredFinishReason ??= candidate.finishReason;
+              delete candidate.finishReason;
+            }
+          }
+        }
+
+        if (!protocolTextWasSuppressed || !protocolTagDetector.blockingOutput) {
+          yield chunk;
+        }
       }
     } catch (e) {
       streamError = e;
@@ -3210,6 +3922,48 @@ export class GeminiChat {
       .map((part) => part.text)
       .join('')
       .trim();
+
+    if (streamError === null && protocolTagDetector.leaked) {
+      throw new InvalidStreamError(
+        'Model response started with leaked protocol tags.',
+        'PROTOCOL_TAG_LEAK',
+      );
+    }
+
+    // Stream validation logic: A stream is considered successful if:
+    // 1. There's a tool call (tool calls can end without explicit finish reasons), OR
+    // 2. There's a finish reason AND we have non-empty response text or thought text
+    //
+    // Thought-only responses remain valid for ordinary user turns. After a tool
+    // result, they do not advance the agent without text or another tool call.
+    const hasAnyContent = contentText || thoughtText;
+    const lacksVisibleToolResultProgress =
+      isToolResultContinuation &&
+      (!contentText || contentText === GEMINI_EMPTY_CONTENT_PLACEHOLDER);
+    if (
+      streamError === null &&
+      !hasToolCall &&
+      (!hasFinishReason || !hasAnyContent || lacksVisibleToolResultProgress)
+    ) {
+      if (!hasFinishReason) {
+        throw new InvalidStreamError(
+          'Model stream ended without a finish reason.',
+          'NO_FINISH_REASON',
+        );
+      }
+      if (lacksVisibleToolResultProgress) {
+        throw new InvalidStreamError(
+          'Model stream ended after a tool result without visible progress.',
+          deferredFinishReason === FinishReason.MAX_TOKENS
+            ? 'NO_TOOL_RESULT_PROGRESS_MAX_TOKENS'
+            : 'NO_TOOL_RESULT_PROGRESS',
+        );
+      }
+      throw new InvalidStreamError(
+        'Model stream ended with empty response text.',
+        'NO_RESPONSE_TEXT',
+      );
+    }
 
     // Record assistant turn with raw Content and metadata. Gate matches
     // the in-memory `this.history.push` decision below so chat-recording
@@ -3329,31 +4083,6 @@ export class GeminiChat {
       throw streamError;
     }
 
-    // Stream validation logic: A stream is considered successful if:
-    // 1. There's a tool call (tool calls can end without explicit finish reasons), OR
-    // 2. There's a finish reason AND we have non-empty response text or thought text
-    //
-    // We throw an error only when there's no tool call AND:
-    // - No finish reason, OR
-    // - Empty response text (e.g., no actual content and no thoughts)
-    //
-    // Note: Thoughts-only responses are valid for models that use thinking modes
-    // These models may send only reasoning content without explicit text output.
-    const hasAnyContent = contentText || thoughtText;
-    if (!hasToolCall && (!hasFinishReason || !hasAnyContent)) {
-      if (!hasFinishReason) {
-        throw new InvalidStreamError(
-          'Model stream ended without a finish reason.',
-          'NO_FINISH_REASON',
-        );
-      } else {
-        throw new InvalidStreamError(
-          'Model stream ended with empty response text.',
-          'NO_RESPONSE_TEXT',
-        );
-      }
-    }
-
     this.history.push({
       role: 'model',
       parts: [
@@ -3361,6 +4090,12 @@ export class GeminiChat {
         ...consolidatedHistoryParts,
       ],
     });
+    if (deferredFinishReason) {
+      yield {
+        candidates: [{ finishReason: deferredFinishReason }],
+        usageMetadata,
+      } as GenerateContentResponse;
+    }
   }
 
   /**

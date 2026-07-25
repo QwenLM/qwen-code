@@ -7,12 +7,16 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { ChannelBase } from '@qwen-code/channel-base';
+import {
+  ChannelBase,
+  isTerminalTaskLifecycleType,
+} from '@qwen-code/channel-base';
 import type {
   ChannelConfig,
   ChannelBaseOptions,
   Envelope,
   ChannelAgentBridge,
+  ChannelTaskLifecycleEvent,
 } from '@qwen-code/channel-base';
 import { loadAccount, DEFAULT_BASE_URL } from './accounts.js';
 import { startPollLoop, getContextToken } from './monitor.js';
@@ -32,6 +36,7 @@ function escapeRegex(s: string): string {
 
 export class WeixinChannel extends ChannelBase {
   private abortController: AbortController | null = null;
+  private activeTypingChats = new Set<string>();
   private baseUrl: string;
   private token: string = '';
 
@@ -129,11 +134,21 @@ export class WeixinChannel extends ChannelBase {
   }
 
   protected override onPromptStart(chatId: string): void {
-    this.setTyping(chatId, true).catch(() => {});
+    this.startTyping(chatId);
   }
 
   protected override onPromptEnd(chatId: string): void {
-    this.setTyping(chatId, false).catch(() => {});
+    this.stopTyping(chatId);
+  }
+
+  protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
+    if (event.type === 'started') {
+      this.startTyping(event.chatId);
+      return;
+    }
+    if (isTerminalTaskLifecycleType(event.type)) {
+      this.stopTyping(event.chatId);
+    }
   }
 
   private async handleInboundWithMedia(
@@ -277,9 +292,35 @@ export class WeixinChannel extends ChannelBase {
       this.abortController.abort();
       this.abortController = null;
     }
+    this.activeTypingChats.clear();
   }
 
-  private async setTyping(userId: string, typing: boolean): Promise<void> {
+  private startTyping(chatId: string): void {
+    if (this.activeTypingChats.has(chatId)) return;
+    this.activeTypingChats.add(chatId);
+    const controller = this.abortController;
+    void this.setTyping(chatId, true).then((started) => {
+      // Disconnect (or reconnect) raced the request — don't fire a
+      // post-disconnect setTyping(false).
+      if (controller !== this.abortController || controller?.signal.aborted) {
+        return;
+      }
+      if (!started) {
+        this.activeTypingChats.delete(chatId);
+        return;
+      }
+      if (!this.activeTypingChats.has(chatId)) {
+        void this.setTyping(chatId, false);
+      }
+    });
+  }
+
+  private stopTyping(chatId: string): void {
+    if (!this.activeTypingChats.delete(chatId)) return;
+    void this.setTyping(chatId, false);
+  }
+
+  private async setTyping(userId: string, typing: boolean): Promise<boolean> {
     try {
       let ticket = typingTickets.get(userId);
       if (!ticket) {
@@ -295,15 +336,17 @@ export class WeixinChannel extends ChannelBase {
           typingTickets.set(userId, ticket);
         }
       }
-      if (!ticket) return;
+      if (!ticket) return false;
 
       await sendTyping(this.baseUrl, this.token, {
         ilink_user_id: userId,
         typing_ticket: ticket,
         status: typing ? TypingStatus.TYPING : TypingStatus.CANCEL,
       });
+      return true;
     } catch {
       // Typing is best-effort — don't fail the message flow
+      return false;
     }
   }
 }

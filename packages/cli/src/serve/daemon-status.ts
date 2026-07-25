@@ -5,9 +5,14 @@
  */
 
 import type { ServeProtocolVersions } from './capabilities.js';
-import type { AcpHttpHandle } from './acp-http/index.js';
+import type { AcpHttpHandle, AcpHttpSnapshot } from './acp-http/index.js';
 import type { DeviceFlowRegistry } from './auth/device-flow.js';
-import type { DaemonLogger } from './daemon-logger.js';
+import type {
+  DaemonLogger,
+  DaemonLogHealth,
+  DaemonLogIssue,
+  DaemonLogMode,
+} from './daemon-logger.js';
 import type {
   AcpSessionBridge,
   BridgeDaemonStatusSnapshot,
@@ -16,10 +21,19 @@ import { isLoopbackBind } from './loopback-binds.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { ServeOptions } from './types.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+import type { ChannelWorkerGroupSnapshot } from './channel-worker-group.js';
+import type { DaemonMetricsBucket } from './daemon-metrics-ring.js';
 import type {
   DaemonWorkspaceService,
   WorkspaceRequestContext,
 } from './workspace-service/index.js';
+import type { TotalSessionAdmissionSnapshot } from './total-session-admission.js';
+import type { WorkspaceRegistry } from './workspace-registry.js';
+
+// Re-export so downstream consumers (server.ts, routes, the SDK type mirror)
+// import the bucket shape from the status module alongside the rest of the
+// response contract, matching how DaemonPerfSnapshot is sourced.
+export type { DaemonMetricsBucket };
 
 const DEFAULT_LISTENER_MAX_CONNECTIONS = 256;
 const SECTION_TIMEOUT_MS = 1_000;
@@ -55,6 +69,7 @@ export interface DaemonStartupSnapshot {
 export interface DaemonStatusIssue {
   code:
     | 'session_capacity_high'
+    | 'total_session_capacity_high'
     | 'connection_capacity_high'
     | 'pending_permissions'
     | 'acp_channel_down'
@@ -66,7 +81,8 @@ export interface DaemonStatusIssue {
     | 'channel_worker_exited'
     | 'channel_worker_partial_connect'
     | 'daemon_runtime_starting'
-    | 'daemon_runtime_failed';
+    | 'daemon_runtime_failed'
+    | 'daemon_log_degraded';
   severity: IssueSeverity;
   message: string;
   section?: string;
@@ -81,6 +97,7 @@ export interface BuildDaemonStatusOptions {
   opts: ServeOptions;
   boundWorkspace: string;
   bridge: AcpSessionBridge;
+  workspaceRegistry?: WorkspaceRegistry;
   workspace: DaemonWorkspaceService;
   daemonLog?: DaemonLogger;
   qwenCodeVersion?: string;
@@ -94,6 +111,10 @@ export interface BuildDaemonStatusOptions {
   sessionShellCommandEnabled: boolean;
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
+  getChannelWorkerSnapshots?: () => ChannelWorkerGroupSnapshot[];
+  getPerfSnapshot?: () => DaemonPerfSnapshot;
+  getMetricsSeries?: () => DaemonMetricsBucket[];
+  getTotalSessionAdmissionSnapshot?: () => TotalSessionAdmissionSnapshot;
 }
 
 interface DaemonStatusSection<T> {
@@ -111,14 +132,18 @@ type WorkspaceStatusSection = DaemonStatusSection<unknown>;
 
 interface FullDaemonStatus {
   sessions: BridgeDaemonStatusSnapshot['sessions'];
-  acpConnections: NonNullable<
-    ReturnType<AcpHttpHandle['registry']['getSnapshot']>
-  >['connections'];
+  acpConnections: AcpHttpSnapshot['connections'];
   workspace: Record<string, WorkspaceStatusSection>;
   auth: {
     supportedDeviceFlowProviders: string[];
     pendingDeviceFlowCount: number;
   };
+}
+
+interface WorkspaceBridgeStatusSnapshot {
+  workspaceCwd: string;
+  snapshot: BridgeDaemonStatusSnapshot;
+  lastActivity: number | null;
 }
 
 interface DaemonStatusSecurity {
@@ -132,9 +157,13 @@ interface DaemonStatusSecurity {
 
 interface DaemonStatusLimits {
   maxSessions: number | null;
+  maxTotalSessions: number | null;
   maxPendingPromptsPerSession: number | null;
   listenerMaxConnections: number | null;
   eventRingSize: number;
+  compactedReplayMaxBytes: number;
+  maxJournalEvents: number;
+  maxJournalBytes: number;
   promptDeadlineMs: number | null;
   writerIdleTimeoutMs: number | null;
   channelIdleTimeoutMs: number;
@@ -145,13 +174,19 @@ interface DaemonStatusLimits {
 interface DaemonStatusRuntime {
   loading?: boolean;
   error?: string;
-  sessions: { active: number };
+  sessions: { active: number; admissionInFlight?: number };
   permissions: {
     pending: number;
     policy: string;
   };
   channel: { live: boolean };
   channelWorker: ChannelWorkerSnapshot;
+  /**
+   * Per-workspace channel workers on a multi-workspace daemon. Additive to
+   * `channelWorker` (which stays as the primary workspace snapshot). Absent on
+   * single-workspace daemons.
+   */
+  channelWorkers?: ChannelWorkerGroupSnapshot[];
   transport: {
     restSseActive: number;
     acp: {
@@ -168,7 +203,47 @@ interface DaemonStatusRuntime {
     enabled: boolean;
     rejectedSinceStart: Record<RateLimitTier, number>;
   };
+  perf?: DaemonPerfSnapshot;
+  /**
+   * Rolling per-interval activity series backing the Daemon Status charts
+   * (requests, latency, tokens, memory over time). Optional/additive to v=1:
+   * absent when the daemon predates it or the sampler has not sealed a bucket
+   * yet. Ordered oldest→newest.
+   */
+  metrics?: { series: DaemonMetricsBucket[] };
+  activity: {
+    activePrompts: number;
+    pendingPrompts: number;
+    queuedPrompts: number;
+    lastActivityAt: string | null;
+    idleSinceMs: number | null;
+  };
   process: NodeJS.MemoryUsage;
+}
+
+export interface DaemonPipeStatsSnapshot {
+  count: number;
+  totalBytes: number;
+  maxBytes: number;
+}
+
+export interface DaemonPerfSnapshot {
+  eventLoop: {
+    meanMs: number;
+    p50Ms: number;
+    p99Ms: number;
+    maxMs: number;
+  };
+  promptQueueWait: {
+    count: number;
+    meanMs: number;
+    maxMs: number;
+    lastMs: number | null;
+  };
+  pipe: {
+    inbound: DaemonPipeStatsSnapshot;
+    outbound: DaemonPipeStatsSnapshot;
+  };
 }
 
 export interface DaemonStatusResponse {
@@ -182,9 +257,22 @@ export interface DaemonStatusResponse {
     uptimeMs: number;
     mode: ServeOptions['mode'];
     workspaceCwd: string;
+    runId?: string;
+    logMode?: DaemonLogMode;
+    logHealth?: DaemonLogHealth;
+    logIssues?: readonly DaemonLogIssue[];
+    logDroppedRecords?: number;
+    logDroppedBytes?: number;
   };
   security: DaemonStatusSecurity;
   limits: DaemonStatusLimits;
+  workspaces?: Array<{
+    id: string;
+    cwd: string;
+    displayName?: string;
+    primary: boolean;
+    trusted: boolean;
+  }>;
   capabilities: {
     protocolVersions: ServeProtocolVersions;
     features: string[];
@@ -217,28 +305,121 @@ export async function buildDaemonStatusResponse(
   detail: DaemonStatusDetail,
   input: BuildDaemonStatusOptions,
 ): Promise<DaemonStatusResponse> {
+  const daemonLogStatus = input.daemonLog?.getStatus();
   const bridgeSnapshot = input.bridge.getDaemonStatusSnapshot();
+  const lastActivity = input.bridge.lastActivityAt ?? null;
+  const workspaceRuntimes = input.workspaceRegistry?.list();
+  const workspaceSnapshots: WorkspaceBridgeStatusSnapshot[] =
+    workspaceRuntimes?.map((runtime) => ({
+      workspaceCwd: runtime.workspaceCwd,
+      snapshot:
+        runtime.bridge === input.bridge
+          ? bridgeSnapshot
+          : runtime.bridge.getDaemonStatusSnapshot(),
+      lastActivity:
+        runtime.bridge === input.bridge
+          ? lastActivity
+          : (runtime.bridge.lastActivityAt ?? null),
+    })) ?? [
+      {
+        workspaceCwd: input.boundWorkspace,
+        snapshot: bridgeSnapshot,
+        lastActivity,
+      },
+    ];
+  const aggregatedSessionCount = workspaceSnapshots.reduce(
+    (sum, item) => sum + item.snapshot.sessionCount,
+    0,
+  );
+  const aggregatedPendingPermissionCount = workspaceSnapshots.reduce(
+    (sum, item) => sum + item.snapshot.pendingPermissionCount,
+    0,
+  );
+  const aggregatedChannelLive = workspaceSnapshots.some(
+    (item) => item.snapshot.channelLive,
+  );
+  const aggregatedLastActivity = workspaceSnapshots.reduce<number | null>(
+    (latest, item) =>
+      item.lastActivity !== null &&
+      (latest === null || item.lastActivity > latest)
+        ? item.lastActivity
+        : latest,
+    null,
+  );
   const acpSnapshot = input.acpHandle?.registry.getSnapshot();
+  // Aggregate across all mounts (primary + trusted secondaries) so the transport
+  // summary matches the metrics sampler; the connection cap below stays
+  // primary-scoped because it is the uniform per-mount cap.
+  const acpAggregate = input.acpHandle?.getSnapshot();
   const rateLimitHits = input.rateLimiter?.getHitCounts() ?? zeroRateHits();
+  let pendingPrompts = 0;
+  let derivedQueuedPrompts = 0;
+  const derivedQueuedPromptsByWorkspace: number[] = [];
+  for (const [index, { snapshot }] of workspaceSnapshots.entries()) {
+    let derivedQueuedPromptsForWorkspace = 0;
+    for (const session of snapshot.sessions) {
+      pendingPrompts += session.pendingPromptCount;
+      const sessionQueuedPrompts = Math.max(
+        0,
+        session.pendingPromptCount - (session.hasActivePrompt ? 1 : 0),
+      );
+      derivedQueuedPrompts += sessionQueuedPrompts;
+      derivedQueuedPromptsForWorkspace += sessionQueuedPrompts;
+    }
+    derivedQueuedPromptsByWorkspace[index] = derivedQueuedPromptsForWorkspace;
+  }
+  const queuedPrompts =
+    workspaceRuntimes?.reduce(
+      (sum, runtime, index) =>
+        sum +
+        (runtime.bridge.pendingPromptTotal ??
+          derivedQueuedPromptsByWorkspace[index] ??
+          0),
+      0,
+    ) ??
+    input.bridge.pendingPromptTotal ??
+    derivedQueuedPrompts;
   const channelWorker = input.getChannelWorkerSnapshot?.() ?? {
     enabled: false,
     state: 'disabled',
     channels: [],
   };
+  // Per-workspace worker list is multi-workspace only; single-workspace status
+  // keeps the byte-identical `channelWorker` shape.
+  const channelWorkers =
+    (workspaceRuntimes?.length ?? 1) > 1
+      ? input.getChannelWorkerSnapshots?.()
+      : undefined;
+  const totalAdmissionSnapshot = input.getTotalSessionAdmissionSnapshot?.();
   const issues: DaemonStatusIssue[] = [];
   let full: FullDaemonStatus | undefined;
 
   pushRuntimeIssues(
     issues,
-    bridgeSnapshot,
     acpSnapshot,
+    acpAggregate,
     rateLimitHits,
     input,
     channelWorker,
+    channelWorkers,
+    totalAdmissionSnapshot,
+    workspaceSnapshots,
   );
+  if (daemonLogStatus?.health === 'degraded') {
+    issues.push({
+      code: 'daemon_log_degraded',
+      severity: 'warning',
+      message:
+        'Daemon file logging is degraded; inspect full status for details.',
+    });
+  }
 
   if (detail === 'full') {
-    full = await buildFullStatus(input, bridgeSnapshot, acpSnapshot);
+    full = await buildFullStatus(
+      input,
+      acpAggregate,
+      workspaceSnapshots.flatMap((item) => item.snapshot.sessions),
+    );
     pushFullIssues(issues, full);
   }
 
@@ -260,8 +441,22 @@ export async function buildDaemonStatusResponse(
       ...(input.daemonLog?.getDaemonId()
         ? { daemonId: input.daemonLog.getDaemonId() }
         : {}),
+      ...(daemonLogStatus
+        ? {
+            runId: daemonLogStatus.runId,
+            logMode: daemonLogStatus.mode,
+            logHealth: daemonLogStatus.health,
+          }
+        : {}),
       ...(detail === 'full' && input.daemonLog?.getLogPath()
         ? { logPath: input.daemonLog.getLogPath() }
+        : {}),
+      ...(detail === 'full' && daemonLogStatus
+        ? {
+            logIssues: daemonLogStatus.issues,
+            logDroppedRecords: daemonLogStatus.droppedRecords,
+            logDroppedBytes: daemonLogStatus.droppedBytes,
+          }
         : {}),
     },
     security: {
@@ -276,43 +471,91 @@ export async function buildDaemonStatusResponse(
     },
     limits: {
       maxSessions: bridgeSnapshot.limits.maxSessions,
+      maxTotalSessions: positiveFiniteOrNull(input.opts.maxTotalSessions),
       maxPendingPromptsPerSession:
         bridgeSnapshot.limits.maxPendingPromptsPerSession,
       listenerMaxConnections: listenerMaxConnections(input.opts.maxConnections),
       eventRingSize: bridgeSnapshot.limits.eventRingSize,
+      compactedReplayMaxBytes: bridgeSnapshot.limits.compactedReplayMaxBytes,
+      maxJournalEvents: bridgeSnapshot.limits.maxJournalEvents,
+      maxJournalBytes: bridgeSnapshot.limits.maxJournalBytes,
       promptDeadlineMs: positiveFiniteOrNull(input.opts.promptDeadlineMs),
       writerIdleTimeoutMs: positiveFiniteOrNull(input.opts.writerIdleTimeoutMs),
       channelIdleTimeoutMs: bridgeSnapshot.limits.channelIdleTimeoutMs,
       sessionIdleTimeoutMs: bridgeSnapshot.limits.sessionIdleTimeoutMs,
       acpConnectionCap: acpSnapshot?.connectionCap ?? null,
     },
+    ...(workspaceRuntimes && workspaceRuntimes.length > 1
+      ? {
+          workspaces: workspaceRuntimes.map((runtime) => ({
+            id: runtime.workspaceId,
+            cwd: runtime.workspaceCwd,
+            ...(runtime.displayName !== undefined
+              ? { displayName: runtime.displayName }
+              : {}),
+            primary: runtime.primary,
+            trusted: runtime.trusted,
+          })),
+        }
+      : {}),
     capabilities: {
       protocolVersions: input.protocolVersions,
       features: [...input.features],
     },
     runtime: {
-      sessions: { active: bridgeSnapshot.sessionCount },
+      sessions: {
+        active: aggregatedSessionCount,
+        ...(totalAdmissionSnapshot
+          ? { admissionInFlight: totalAdmissionSnapshot.inFlight }
+          : {}),
+      },
       permissions: {
-        pending: bridgeSnapshot.pendingPermissionCount,
+        pending: aggregatedPendingPermissionCount,
         policy: bridgeSnapshot.permissionPolicy,
       },
-      channel: { live: bridgeSnapshot.channelLive },
+      channel: { live: aggregatedChannelLive },
       channelWorker,
+      ...(channelWorkers && channelWorkers.length > 0
+        ? { channelWorkers }
+        : {}),
       transport: {
         restSseActive: input.getRestSseActive(),
         acp: {
           enabled: acpSnapshot !== undefined,
-          connections: acpSnapshot?.connectionCount ?? 0,
-          connectionStreams: acpSnapshot?.connectionStreams ?? 0,
-          sessionStreams: acpSnapshot?.sessionStreams ?? 0,
-          sseStreams: acpSnapshot?.sseStreams ?? 0,
-          wsStreams: acpSnapshot?.wsStreams ?? 0,
-          pendingClientRequests: acpSnapshot?.pendingClientRequests ?? 0,
+          connections: acpAggregate?.connectionCount ?? 0,
+          connectionStreams: acpAggregate?.connectionStreams ?? 0,
+          sessionStreams: acpAggregate?.sessionStreams ?? 0,
+          sseStreams: acpAggregate?.sseStreams ?? 0,
+          wsStreams: acpAggregate?.wsStreams ?? 0,
+          pendingClientRequests: acpAggregate?.pendingClientRequests ?? 0,
         },
       },
       rateLimit: {
         enabled: input.opts.rateLimit === true,
         rejectedSinceStart: rateLimitHits,
+      },
+      ...(input.getPerfSnapshot ? { perf: input.getPerfSnapshot() } : {}),
+      ...(input.getMetricsSeries
+        ? { metrics: { series: input.getMetricsSeries() } }
+        : {}),
+      activity: {
+        activePrompts:
+          workspaceRuntimes?.reduce(
+            (sum, runtime) => sum + (runtime.bridge.activePromptCount ?? 0),
+            0,
+          ) ??
+          input.bridge.activePromptCount ??
+          0,
+        pendingPrompts,
+        queuedPrompts,
+        lastActivityAt:
+          aggregatedLastActivity !== null
+            ? new Date(aggregatedLastActivity).toISOString()
+            : null,
+        idleSinceMs:
+          aggregatedLastActivity !== null
+            ? Date.now() - aggregatedLastActivity
+            : null,
       },
       process: process.memoryUsage(),
     },
@@ -344,8 +587,8 @@ function cloneStartup(startup: DaemonStartupSnapshot): DaemonStartupSnapshot {
 
 async function buildFullStatus(
   input: BuildDaemonStatusOptions,
-  bridgeSnapshot: BridgeDaemonStatusSnapshot,
-  acpSnapshot: ReturnType<AcpHttpHandle['registry']['getSnapshot']> | undefined,
+  acpSnapshot: AcpHttpSnapshot | undefined,
+  sessions: BridgeDaemonStatusSnapshot['sessions'],
 ): Promise<FullDaemonStatus> {
   const ctx: WorkspaceRequestContext = {
     route: 'GET /daemon/status',
@@ -380,7 +623,7 @@ async function buildFullStatus(
     ]);
 
   return {
-    sessions: bridgeSnapshot.sessions,
+    sessions,
     acpConnections: acpSnapshot?.connections ?? [],
     workspace: {
       mcp,
@@ -447,52 +690,95 @@ async function withTimeout<T>(
 
 function pushRuntimeIssues(
   issues: DaemonStatusIssue[],
-  bridgeSnapshot: BridgeDaemonStatusSnapshot,
   acpSnapshot: ReturnType<AcpHttpHandle['registry']['getSnapshot']> | undefined,
+  acpAggregate: AcpHttpSnapshot | undefined,
   rateLimitHits: Record<RateLimitTier, number>,
   input: BuildDaemonStatusOptions,
   channelWorker: ChannelWorkerSnapshot,
+  channelWorkers: readonly ChannelWorkerGroupSnapshot[] | undefined,
+  totalAdmissionSnapshot: TotalSessionAdmissionSnapshot | undefined,
+  workspaceSnapshots: readonly WorkspaceBridgeStatusSnapshot[],
 ): void {
-  if (
-    bridgeSnapshot.limits.maxSessions !== null &&
-    bridgeSnapshot.limits.maxSessions > 0 &&
-    bridgeSnapshot.sessionCount / bridgeSnapshot.limits.maxSessions >=
-      CAPACITY_WARNING_RATIO
-  ) {
-    issues.push({
-      code: 'session_capacity_high',
-      severity: 'warning',
-      message: `Active sessions are at ${bridgeSnapshot.sessionCount}/${bridgeSnapshot.limits.maxSessions}.`,
-    });
+  for (const { workspaceCwd, snapshot } of workspaceSnapshots) {
+    if (
+      snapshot.limits.maxSessions !== null &&
+      snapshot.limits.maxSessions > 0 &&
+      snapshot.sessionCount / snapshot.limits.maxSessions >=
+        CAPACITY_WARNING_RATIO
+    ) {
+      issues.push({
+        code: 'session_capacity_high',
+        severity: 'warning',
+        message:
+          workspaceSnapshots.length > 1
+            ? `Workspace ${workspaceCwd} active sessions are at ${snapshot.sessionCount}/${snapshot.limits.maxSessions}.`
+            : `Active sessions are at ${snapshot.sessionCount}/${snapshot.limits.maxSessions}.`,
+      });
+    }
+  }
+
+  const maxTotalSessions = positiveFiniteOrNull(input.opts.maxTotalSessions);
+  if (maxTotalSessions !== null) {
+    const fallbackLiveCount = workspaceSnapshots.reduce(
+      (sum, item) => sum + item.snapshot.sessionCount,
+      0,
+    );
+    const totalActive =
+      (totalAdmissionSnapshot?.liveCount ?? fallbackLiveCount) +
+      (totalAdmissionSnapshot?.inFlight ?? 0);
+    if (totalActive / maxTotalSessions >= CAPACITY_WARNING_RATIO) {
+      issues.push({
+        code: 'total_session_capacity_high',
+        severity: 'warning',
+        message: `Total active and in-flight sessions are at ${totalActive}/${maxTotalSessions}.`,
+      });
+    }
   }
 
   if (
     acpSnapshot !== undefined &&
     acpSnapshot.connectionCap !== null &&
-    acpSnapshot.connectionCap > 0 &&
-    acpSnapshot.connectionCount / acpSnapshot.connectionCap >=
-      CAPACITY_WARNING_RATIO
+    acpSnapshot.connectionCap > 0
   ) {
-    issues.push({
-      code: 'connection_capacity_high',
-      severity: 'warning',
-      message: `ACP connections are at ${acpSnapshot.connectionCount}/${acpSnapshot.connectionCap}.`,
-    });
+    // Per-mount cap is uniform (opts.maxConnections); warn on the busiest mount
+    // so a saturated secondary workspace is visible, not just the primary's.
+    const cap = acpSnapshot.connectionCap;
+    const busiest = (acpAggregate?.mounts ?? []).reduce(
+      (max, m) => Math.max(max, m.connectionCount),
+      acpSnapshot.connectionCount,
+    );
+    if (busiest / cap >= CAPACITY_WARNING_RATIO) {
+      issues.push({
+        code: 'connection_capacity_high',
+        severity: 'warning',
+        message: `ACP connections are at ${busiest}/${cap} on the busiest workspace mount.`,
+      });
+    }
   }
 
-  if (bridgeSnapshot.pendingPermissionCount > 0) {
+  const pendingPermissionCount = workspaceSnapshots.reduce(
+    (sum, item) => sum + item.snapshot.pendingPermissionCount,
+    0,
+  );
+  if (pendingPermissionCount > 0) {
     issues.push({
       code: 'pending_permissions',
       severity: 'warning',
-      message: `${bridgeSnapshot.pendingPermissionCount} permission request(s) are pending.`,
+      message: `${pendingPermissionCount} permission request(s) are pending.`,
     });
   }
 
-  if (bridgeSnapshot.sessionCount > 0 && !bridgeSnapshot.channelLive) {
+  const downWorkspaces = workspaceSnapshots.filter(
+    (item) => item.snapshot.sessionCount > 0 && !item.snapshot.channelLive,
+  );
+  if (downWorkspaces.length > 0) {
     issues.push({
       code: 'acp_channel_down',
       severity: 'error',
-      message: 'Active sessions exist but the ACP channel is not live.',
+      message:
+        downWorkspaces.length === 1
+          ? `Active sessions exist but the ACP channel is not live for ${downWorkspaces[0]!.workspaceCwd}.`
+          : `Active sessions exist but the ACP channel is not live for ${downWorkspaces.length} workspace(s).`,
     });
   }
 
@@ -504,6 +790,25 @@ function pushRuntimeIssues(
     });
   }
 
+  const groupedWorkers =
+    channelWorkers && channelWorkers.length > 0 ? channelWorkers : undefined;
+  const workers = groupedWorkers ?? [channelWorker];
+  for (const worker of workers) {
+    pushChannelWorkerIssues(issues, worker, groupedWorkers !== undefined);
+  }
+}
+
+function pushChannelWorkerIssues(
+  issues: DaemonStatusIssue[],
+  channelWorker: ChannelWorkerSnapshot | ChannelWorkerGroupSnapshot,
+  grouped: boolean,
+): void {
+  const workspace =
+    'workspaceCwd' in channelWorker
+      ? ` for workspace ${channelWorker.workspaceCwd}`
+      : '';
+  const section = grouped ? 'runtime.channelWorkers' : 'runtime.channelWorker';
+
   if (
     channelWorker.enabled &&
     (channelWorker.state === 'exited' || channelWorker.state === 'failed')
@@ -514,15 +819,35 @@ function pushRuntimeIssues(
         ? `code=${channelWorker.exitCode ?? 'null'}`
         : undefined,
       channelWorker.signal ? `signal=${channelWorker.signal}` : undefined,
+      channelWorker.restartCount !== undefined
+        ? `restarts=${channelWorker.restartCount}`
+        : undefined,
+      channelWorker.lastExitAt
+        ? `lastExitAt=${channelWorker.lastExitAt}`
+        : undefined,
+      channelWorker.lastRestartAt
+        ? `lastRestartAt=${channelWorker.lastRestartAt}`
+        : undefined,
+      channelWorker.nextRestartAt
+        ? `nextRestartAt=${channelWorker.nextRestartAt}`
+        : undefined,
+      channelWorker.lastHeartbeatAt
+        ? `lastHeartbeatAt=${channelWorker.lastHeartbeatAt}`
+        : undefined,
+      channelWorker.staleHeartbeatAt
+        ? `staleHeartbeatAt=${channelWorker.staleHeartbeatAt}`
+        : undefined,
     ].filter(Boolean);
     const details =
       detailParts.length > 0 ? ` (${detailParts.join(', ')})` : '';
     const error = channelWorker.error ? `: ${channelWorker.error}` : '';
+    const isPermanentFailure =
+      channelWorker.state === 'failed' && !channelWorker.nextRestartAt;
     issues.push({
       code: 'channel_worker_exited',
-      severity: 'warning',
-      message: `Channel worker is ${channelWorker.state}${details}${error}.`,
-      section: 'runtime.channelWorker',
+      severity: isPermanentFailure ? 'error' : 'warning',
+      message: `Channel worker${workspace} is ${channelWorker.state}${details}${error}.`,
+      section,
     });
   }
 
@@ -540,9 +865,9 @@ function pushRuntimeIssues(
         code: 'channel_worker_partial_connect',
         severity: 'warning',
         message:
-          `Channel worker connected ${channelWorker.channels.length}/${channelWorker.requestedChannels.length} channel(s). ` +
+          `Channel worker${workspace} connected ${channelWorker.channels.length}/${channelWorker.requestedChannels.length} channel(s). ` +
           `Failed: ${failed.join(', ')}.`,
-        section: 'runtime.channelWorker',
+        section,
       });
     }
   }
@@ -627,7 +952,33 @@ function summarizeStatusData(data: unknown): SectionSummary {
     }
   }
 
+  summarizeMcpServers(data, summary);
+
   return summary;
+}
+
+function summarizeMcpServers(
+  data: StatusRecord,
+  summary: SectionSummary,
+): void {
+  const servers = data['servers'];
+  if (!Array.isArray(servers)) return;
+  let connected = 0;
+  let errored = 0;
+  let disabled = 0;
+  for (const server of servers) {
+    if (!isRecord(server)) continue;
+    if (server['disabled'] === true) {
+      disabled++;
+    } else if (server['status'] === 'error') {
+      errored++;
+    } else if (server['mcpStatus'] === 'connected') {
+      connected++;
+    }
+  }
+  summary['serversConnected'] = connected;
+  summary['serversErrored'] = errored;
+  summary['serversDisabled'] = disabled;
 }
 
 function collectStatuses(data: unknown): string[] {

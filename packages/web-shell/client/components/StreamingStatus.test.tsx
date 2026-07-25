@@ -35,7 +35,10 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function render(customization: WebShellCustomization = {}): HTMLElement {
+function render(
+  customization: WebShellCustomization = {},
+  props: { showPhrase?: boolean } = {},
+): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -43,7 +46,7 @@ function render(customization: WebShellCustomization = {}): HTMLElement {
     root.render(
       <I18nProvider language="en">
         <WebShellCustomizationProvider value={customization}>
-          <StreamingStatus />
+          <StreamingStatus {...props} />
         </WebShellCustomizationProvider>
       </I18nProvider>,
     );
@@ -88,6 +91,26 @@ describe('StreamingStatus loading phrases', () => {
     expect(container.firstElementChild?.querySelectorAll('span').length).toBe(
       2,
     );
+  });
+
+  it('hides the phrase but keeps the dynamic status when showPhrase is false', () => {
+    pinPhraseSelection();
+    // A resolver that would otherwise supply a phrase must still be suppressed.
+    const container = render(
+      { loadingPhrases: () => ['should not appear'] },
+      {
+        showPhrase: false,
+      },
+    );
+    // The witty phrase (the "废话文学") is gone: no label span.
+    expect(labelText(container)).toBeUndefined();
+    expect(container.textContent).not.toContain('should not appear');
+    // But the dynamic status stays: spinner + meta (elapsed time + cancel hint).
+    const spans = container.firstElementChild?.querySelectorAll('span') ?? [];
+    expect(spans.length).toBe(2);
+    expect(spans[0]?.textContent).not.toBe(''); // spinner frame
+    expect(container.textContent).toContain('esc to cancel'); // meta/cancel hint
+    expect(container.textContent).toMatch(/\ds/); // elapsed time, e.g. "0s"
   });
 
   it('falls back to the built-in defaults when the resolver returns undefined', () => {

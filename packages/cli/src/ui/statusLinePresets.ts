@@ -5,6 +5,7 @@
  */
 
 import nodePath from 'node:path';
+import type { ReasoningEffort } from '@qwen-code/qwen-code-core';
 import { StreamingState } from './types.js';
 
 export const STATUS_LINE_PRESET_ITEM_IDS = [
@@ -46,7 +47,7 @@ export interface StatusLinePresetConfig {
 export type StatusLinePresetReasoning =
   | false
   | {
-      effort?: 'low' | 'medium' | 'high' | 'max';
+      effort?: ReasoningEffort;
     }
   | undefined;
 

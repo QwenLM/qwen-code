@@ -9,6 +9,7 @@ import { EnterPlanModeTool } from './enterPlanMode.js';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
+import { getPlanModeSystemReminder } from '../core/prompts.js';
 
 describe('EnterPlanModeTool', () => {
   let tool: EnterPlanModeTool;
@@ -31,6 +32,7 @@ describe('EnterPlanModeTool', () => {
       isInteractive: vi.fn(() => true),
       getExperimentalZedIntegration: vi.fn(() => false),
       getInputFormat: vi.fn(() => undefined),
+      getSdkMode: vi.fn(() => false),
     } as unknown as Config;
 
     tool = new EnterPlanModeTool(mockConfig);
@@ -67,10 +69,19 @@ describe('EnterPlanModeTool', () => {
       expect(tool.shouldDefer).toBe(false);
     });
 
-    it('should have empty-object schema', () => {
+    it('should exempt the complete reminder from output truncation', () => {
+      expect(tool.maxOutputChars).toBe(Number.POSITIVE_INFINITY);
+    });
+
+    it('should expose only the userRequested flag in its schema', () => {
       expect(tool.schema.parametersJsonSchema).toEqual({
         type: 'object',
-        properties: {},
+        properties: {
+          userRequested: {
+            type: 'boolean',
+            description: expect.stringContaining('ONLY when the user'),
+          },
+        },
         additionalProperties: false,
         $schema: 'http://json-schema.org/draft-07/schema#',
       });
@@ -93,11 +104,10 @@ describe('EnterPlanModeTool', () => {
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
-        { enteredByModel: true },
       );
       expect(approvalMode).toBe(ApprovalMode.PLAN);
       expect(savedPrePlanMode).toBe(ApprovalMode.DEFAULT);
-      expect(result.llmContent).toContain('Plan mode is now active');
+      expect(result.llmContent).toBe(getPlanModeSystemReminder(false));
     });
 
     it('should switch from AUTO_EDIT to PLAN', async () => {
@@ -107,7 +117,6 @@ describe('EnterPlanModeTool', () => {
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
-        { enteredByModel: true },
       );
       expect(savedPrePlanMode).toBe(ApprovalMode.AUTO_EDIT);
     });
@@ -119,21 +128,103 @@ describe('EnterPlanModeTool', () => {
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
-        { enteredByModel: true },
       );
       expect(savedPrePlanMode).toBe(ApprovalMode.AUTO);
     });
 
-    it('should switch from YOLO to PLAN', async () => {
+    it('should not switch from YOLO to PLAN when the entry is unsolicited', async () => {
+      // Regression: #5970. A YOLO user opted into low-friction execution;
+      // silently switching to read-only Plan mode surprised them and then
+      // blocked reads/writes they expected to proceed. A model-initiated
+      // enter_plan_mode from YOLO must keep the current mode instead.
       approvalMode = ApprovalMode.YOLO;
       const invocation = tool.build({});
-      await invocation.execute(new AbortController().signal);
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
+      expect(approvalMode).toBe(ApprovalMode.YOLO);
+      expect(savedPrePlanMode).toBeUndefined();
+      expect(result.llmContent).toContain('YOLO');
+      expect(result.llmContent).not.toContain('Plan mode is now active');
+      // The model must be told how to honour an explicit user request.
+      expect(result.llmContent).toContain('userRequested: true');
+    });
+
+    it('should not switch from YOLO to PLAN when userRequested is explicitly false', async () => {
+      approvalMode = ApprovalMode.YOLO;
+      const invocation = tool.build({ userRequested: false });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
+      expect(approvalMode).toBe(ApprovalMode.YOLO);
+      expect(result.llmContent).toContain('YOLO');
+      expect(result.llmContent).not.toContain('Plan mode is now active');
+      expect(result.returnDisplay).toContain('Stayed in YOLO');
+    });
+
+    it('should treat userRequested as inert outside YOLO (DEFAULT enters PLAN normally)', async () => {
+      // Defensive: the flag only gates the YOLO no-op. If it ever gained
+      // significance in other modes, this pins the expected behavior.
+      approvalMode = ApprovalMode.DEFAULT;
+      const invocation = tool.build({ userRequested: true });
+      const result = await invocation.execute(new AbortController().signal);
 
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.PLAN,
-        { enteredByModel: true },
       );
+      expect(approvalMode).toBe(ApprovalMode.PLAN);
+      expect(savedPrePlanMode).toBe(ApprovalMode.DEFAULT);
+      expect(result.llmContent).toBe(getPlanModeSystemReminder(false));
+    });
+
+    it('should switch from YOLO to PLAN when the user explicitly requested it', async () => {
+      // The tool description instructs the model to call this only after the
+      // user asks, and `/plan` is interactive-only — so this tool is the only
+      // door into plan mode for headless/ACP sessions. A blanket YOLO guard
+      // would make an explicit user request unreachable there.
+      approvalMode = ApprovalMode.YOLO;
+      const invocation = tool.build({ userRequested: true });
+      const result = await invocation.execute(new AbortController().signal);
+
+      // Preserve the YOLO mode so an approved plan exit can restore it.
+      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
+        ApprovalMode.PLAN,
+      );
+      expect(approvalMode).toBe(ApprovalMode.PLAN);
       expect(savedPrePlanMode).toBe(ApprovalMode.YOLO);
+      expect(result.llmContent).toBe(getPlanModeSystemReminder(false));
+    });
+
+    it('should honour a user-requested YOLO entry in an ACP session', async () => {
+      // Headless + ACP: no `/plan`, no Shift+Tab. This tool is the only path.
+      approvalMode = ApprovalMode.YOLO;
+      (mockConfig.isInteractive as ReturnType<typeof vi.fn>).mockReturnValue(
+        false,
+      );
+      (
+        mockConfig.getExperimentalZedIntegration as ReturnType<typeof vi.fn>
+      ).mockReturnValue(true);
+
+      const invocation = tool.build({ userRequested: true });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
+        ApprovalMode.PLAN,
+      );
+      expect(approvalMode).toBe(ApprovalMode.PLAN);
+      expect(result.llmContent).toBe(getPlanModeSystemReminder(false));
+    });
+
+    it('should return plan-only guidance in SDK mode', async () => {
+      (mockConfig.getSdkMode as ReturnType<typeof vi.fn>).mockReturnValue(true);
+      const invocation = tool.build({});
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).toBe(getPlanModeSystemReminder(true));
+      expect(result.llmContent).toContain('Present your plan directly');
+      expect(result.llmContent).not.toContain(
+        'by calling the exit_plan_mode tool',
+      );
     });
 
     it('should be idempotent: already in PLAN does not call setApprovalMode', async () => {
@@ -144,7 +235,7 @@ describe('EnterPlanModeTool', () => {
 
       expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
       expect(savedPrePlanMode).toBe(ApprovalMode.AUTO);
-      expect(result.llmContent).toContain('Plan mode is now active');
+      expect(result.llmContent).toBe(getPlanModeSystemReminder(false));
     });
 
     it('should return error when setApprovalMode throws', async () => {

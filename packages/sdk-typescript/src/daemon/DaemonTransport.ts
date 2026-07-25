@@ -28,6 +28,20 @@ export interface DaemonTransportFetchOptions {
 export interface DaemonTransportSubscribeOptions {
   /** Resume from after this event id (`Last-Event-ID` for REST/SSE). */
   lastEventId?: number;
+  /**
+   * Epoch token of the bus that produced {@link lastEventId}. Sent as the
+   * `X-Qwen-Event-Epoch` request header alongside `Last-Event-ID`; a daemon
+   * whose bus epoch differs forces a `state_resync_required` (reason
+   * `epoch_reset`, detail `epoch_mismatch`) instead of resuming from a
+   * stale cursor. Ignored when {@link lastEventId} is absent.
+   */
+  epoch?: string;
+  /**
+   * Invoked with the daemon's current epoch token when the transport learns
+   * it from the `X-Qwen-Event-Epoch` response header. Callers persist it and
+   * hand it back via {@link epoch} on reconnect.
+   */
+  onEpoch?: (epoch: string) => void;
   /** Per-subscriber backlog cap (SSE `?maxQueued=N`). */
   maxQueued?: number;
   /** Aborts the subscription cleanly. */
@@ -53,6 +67,9 @@ export type DaemonTransportType = 'rest' | 'acp-http' | 'acp-ws';
  * `DaemonClient` needs no control-flow changes.
  */
 export interface DaemonTransport {
+  /** Native HTTP fetch used by REST-only daemon endpoints. */
+  readonly restFetch?: typeof globalThis.fetch;
+
   /**
    * Issue an HTTP-shaped request. REST transports delegate to the
    * underlying `fetch`; ACP transports translate the URL + body into

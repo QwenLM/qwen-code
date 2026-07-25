@@ -5,20 +5,6 @@
  */
 
 /**
- * Sentinel passed as `AbortController.abort(reason)` when a prompt
- * exceeds its server-configured wallclock. Exported so tests can
- * match on the class identity.
- */
-export class PromptDeadlineExceededError extends Error {
-  readonly deadlineMs: number;
-  constructor(deadlineMs: number) {
-    super(`prompt exceeded the ${deadlineMs}ms deadline`);
-    this.name = 'PromptDeadlineExceededError';
-    this.deadlineMs = deadlineMs;
-  }
-}
-
-/**
  * Resolve the effective per-prompt wallclock from the server flag +
  * an optional request body override. Returns `undefined` when no
  * deadline applies. The request override may SHORTEN the deadline but

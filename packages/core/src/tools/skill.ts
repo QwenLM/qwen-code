@@ -36,6 +36,7 @@ import {
   buildSkillLlmContent,
   applySkillAllowedTools,
   collectAvailableSkillEntries,
+  clearCollectedSkillEntriesCache,
 } from './skill-utils.js';
 
 /**
@@ -170,6 +171,10 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
    */
   async refreshSkills(): Promise<void> {
     try {
+      // Invalidate the memoization cache so this refresh picks up any
+      // skill-set mutations (file edits, conditional activations, config
+      // toggles) that occurred since the last collection.
+      clearCollectedSkillEntriesCache(this.skillManager);
       const collected = await collectAvailableSkillEntries(
         this.skillManager,
         this.config,
@@ -246,6 +251,7 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
       params,
       (name: string) => this.loadedSkillNames.add(name),
       this.config.getModelInvocableCommandsExecutor(),
+      (name: string) => this.loadedSkillNames.has(name),
     );
   }
 
@@ -307,6 +313,7 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
           args?: string,
         ) => Promise<ModelInvocableCommandExecutorResult | null>)
       | null = null,
+    private readonly isSkillLoaded: (name: string) => boolean = () => false,
   ) {
     super(params);
   }
@@ -479,6 +486,22 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
         this.config,
         new SkillLaunchEvent(this.params.skill, true, this.promptId),
       );
+
+      // Prevent re-invoking an already-loaded skill from appending
+      // duplicate instructions to context. The first invocation
+      // returns the full skill body; subsequent invocations return a
+      // short confirmation so the model knows the skill is active
+      // without wasting context tokens. Check BEFORE calling
+      // onSkillLoaded, which adds the name to the loaded set.
+      if (this.isSkillLoaded(this.params.skill)) {
+        this.onSkillLoaded(this.params.skill);
+        const msg = `Skill "${this.params.skill}" is already loaded in context.`;
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+        };
+      }
+
       this.onSkillLoaded(this.params.skill);
 
       // Auto-approve the skill's declared allowedTools for the rest of the session.

@@ -1,22 +1,734 @@
-diff --git a/node_modules/ink/package.json b/node_modules/ink/package.json
---- a/node_modules/ink/package.json
-+++ b/node_modules/ink/package.json
-@@ -11,8 +11,16 @@
- 	},
- 	"type": "module",
- 	"exports": {
--		"types": "./build/index.d.ts",
--		"default": "./build/index.js"
-+		".": {
-+			"types": "./build/index.d.ts",
-+			"default": "./build/index.js"
-+		},
-+		"./dom": {
-+			"default": "./build/dom.js"
-+		},
-+		"./components/CursorContext": {
-+			"default": "./build/components/CursorContext.js"
-+		}
- 	},
- 	"engines": {
- 		"node": ">=22"
+diff --git a/node_modules/ink/build/components/Text.d.ts b/node_modules/ink/build/components/Text.d.ts
+index 1d7bf6b..29401a6 100644
+--- a/node_modules/ink/build/components/Text.d.ts
++++ b/node_modules/ink/build/components/Text.d.ts
+@@ -47,9 +47,13 @@ export type Props = {
+     This property tells Ink to wrap or truncate text if its width is larger than the container. If `wrap` is passed (the default), Ink will wrap text and split it into multiple lines. If `hard` is passed, Ink will fill each line to the full column width, breaking words as necessary. If `truncate-*` is passed, Ink will truncate text instead, resulting in one line of text with the rest cut off.
+     */
+     readonly wrap?: Styles['textWrap'];
++    readonly selectable?: boolean;
++    readonly selectionFlow?: string;
++    readonly selectionBreakAfter?: 'soft' | 'hard';
++    readonly selectionJoiner?: string;
+     readonly children?: ReactNode;
+ };
+ /**
+ This component can display text and change its style to make it bold, underlined, italic, or strikethrough.
+ */
+-export default function Text({ color, backgroundColor, dimColor, bold, italic, underline, strikethrough, inverse, wrap, children, 'aria-label': ariaLabel, 'aria-hidden': ariaHidden, }: Props): React.JSX.Element | null;
++export default function Text({ color, backgroundColor, dimColor, bold, italic, underline, strikethrough, inverse, wrap, selectable, selectionFlow, selectionBreakAfter, selectionJoiner, children, 'aria-label': ariaLabel, 'aria-hidden': ariaHidden, }: Props): React.JSX.Element | null;
+diff --git a/node_modules/ink/build/components/Text.js b/node_modules/ink/build/components/Text.js
+index 2e4b9ff..1ec2ae6 100644
+--- a/node_modules/ink/build/components/Text.js
++++ b/node_modules/ink/build/components/Text.js
+@@ -6,7 +6,7 @@ import { backgroundContext } from './BackgroundContext.js';
+ /**
+ This component can display text and change its style to make it bold, underlined, italic, or strikethrough.
+ */
+-export default function Text({ color, backgroundColor, dimColor = false, bold = false, italic = false, underline = false, strikethrough = false, inverse = false, wrap = 'wrap', children, 'aria-label': ariaLabel, 'aria-hidden': ariaHidden = false, }) {
++export default function Text({ color, backgroundColor, dimColor = false, bold = false, italic = false, underline = false, strikethrough = false, inverse = false, wrap = 'wrap', selectable = true, selectionFlow, selectionBreakAfter, selectionJoiner = '', children, 'aria-label': ariaLabel, 'aria-hidden': ariaHidden = false, }) {
+     const { isScreenReaderEnabled } = useContext(accessibilityContext);
+     const inheritedBackgroundColor = useContext(backgroundContext);
+     const childrenOrAriaLabel = isScreenReaderEnabled && ariaLabel ? ariaLabel : children;
+@@ -45,6 +45,6 @@ export default function Text({ color, backgroundColor, dimColor = false, bold =
+     if (isScreenReaderEnabled && ariaHidden) {
+         return null;
+     }
+-    return (React.createElement("ink-text", { style: { flexGrow: 0, flexShrink: 1, flexDirection: 'row', textWrap: wrap }, internal_transform: transform }, childrenOrAriaLabel));
++    return (React.createElement("ink-text", { style: { flexGrow: 0, flexShrink: 1, flexDirection: 'row', textWrap: wrap }, internal_transform: transform, selectable: selectable, selectionFlow: selectionFlow, selectionBreakAfter: selectionBreakAfter, selectionJoiner: selectionJoiner }, childrenOrAriaLabel));
+ }
+ //# sourceMappingURL=Text.js.map
+diff --git a/node_modules/ink/build/frame-controller.d.ts b/node_modules/ink/build/frame-controller.d.ts
+new file mode 100644
+index 0000000..c294036
+--- /dev/null
++++ b/node_modules/ink/build/frame-controller.d.ts
+@@ -0,0 +1,36 @@
++/// <reference types="node" />
++export type ScreenSelection = {
++    sx: number;
++    sy: number;
++    ex: number;
++    ey: number;
++};
++export type FrameCell = {
++    type: 'char';
++    value: string;
++    fullWidth: boolean;
++    styles: unknown[];
++    selectable: boolean;
++    flowId: number | null;
++};
++export type FrameBoundary = {
++    kind: 'soft' | 'hard';
++    joiner: string;
++    selectable: boolean;
++    flowId: number;
++};
++export type ReadonlyFrame = {
++    width: number;
++    height: number;
++    cells: ReadonlyArray<ReadonlyArray<FrameCell>>;
++    boundaries: ReadonlyArray<ReadonlyArray<FrameBoundary | null>>;
++};
++export type FrameController = {
++    getFrame(): ReadonlyFrame | null;
++    getSelection(): ScreenSelection | null;
++    setSelection(selection: ScreenSelection | null): void;
++    subscribe(listener: (frame: ReadonlyFrame) => void): () => void;
++    publishFrame(frame: ReadonlyFrame): void;
++};
++export declare const createFrameController: (requestRender: () => void) => FrameController;
++export declare const getFrameController: (stdout: NodeJS.WriteStream) => FrameController | undefined;
+diff --git a/node_modules/ink/build/frame-controller.js b/node_modules/ink/build/frame-controller.js
+new file mode 100644
+index 0000000..745a4ba
+--- /dev/null
++++ b/node_modules/ink/build/frame-controller.js
+@@ -0,0 +1,45 @@
++import instances from './instances.js';
++const sameSelection = (a, b) => {
++    if (a === b) {
++        return true;
++    }
++    if (!a || !b) {
++        return false;
++    }
++    return a.sx === b.sx && a.sy === b.sy && a.ex === b.ex && a.ey === b.ey;
++};
++// Creates the bidirectional bridge between the application and the renderer:
++// the app reads the latest composited frame (getFrame) and pushes a selection
++// (setSelection) that the renderer highlights before serialization. setSelection
++// deduplicates and schedules exactly one repaint through Ink's own throttle via
++// the requestRender callback, so it never mutates already-committed frame state.
++export const createFrameController = (requestRender) => {
++    let currentSelection = null;
++    let lastFrame = null;
++    const listeners = new Set();
++    return {
++        getFrame: () => lastFrame,
++        getSelection: () => currentSelection,
++        setSelection(selection) {
++            if (sameSelection(currentSelection, selection)) {
++                return;
++            }
++            currentSelection = selection;
++            requestRender();
++        },
++        subscribe(listener) {
++            listeners.add(listener);
++            return () => {
++                listeners.delete(listener);
++            };
++        },
++        publishFrame(frame) {
++            lastFrame = frame;
++            for (const listener of listeners) {
++                listener(frame);
++            }
++        },
++    };
++};
++export const getFrameController = (stdout) => instances.get(stdout)?.frameController;
++//# sourceMappingURL=frame-controller.js.map
+diff --git a/node_modules/ink/build/index.d.ts b/node_modules/ink/build/index.d.ts
+index f3e7349..cce56fe 100644
+--- a/node_modules/ink/build/index.d.ts
++++ b/node_modules/ink/build/index.d.ts
+@@ -39,3 +39,5 @@ export { default as measureElement } from './measure-element.js';
+ export type { DOMElement } from './dom.js';
+ export { kittyFlags, kittyModifiers } from './kitty-keyboard.js';
+ export type { KittyKeyboardOptions, KittyFlagName } from './kitty-keyboard.js';
++export { getFrameController } from './frame-controller.js';
++export type { FrameController, ReadonlyFrame, ScreenSelection, FrameCell, FrameBoundary, } from './frame-controller.js';
+diff --git a/node_modules/ink/build/index.js b/node_modules/ink/build/index.js
+index cc849f0..25d6b33 100644
+--- a/node_modules/ink/build/index.js
++++ b/node_modules/ink/build/index.js
+@@ -21,4 +21,5 @@ export { default as useWindowSize } from './hooks/use-window-size.js';
+ export { default as useBoxMetrics } from './hooks/use-box-metrics.js';
+ export { default as measureElement } from './measure-element.js';
+ export { kittyFlags, kittyModifiers } from './kitty-keyboard.js';
++export { getFrameController } from './frame-controller.js';
+ //# sourceMappingURL=index.js.map
+\ No newline at end of file
+diff --git a/node_modules/ink/build/ink.js b/node_modules/ink/build/ink.js
+index ef659f3..c3fad13 100644
+--- a/node_modules/ink/build/ink.js
++++ b/node_modules/ink/build/ink.js
+@@ -17,6 +17,7 @@ import { hideCursorEscape, showCursorEscape } from './cursor-helpers.js';
+ import logUpdate from './log-update.js';
+ import { bsu, esu, shouldSynchronize } from './write-synchronized.js';
+ import instances from './instances.js';
++import { createFrameController } from './frame-controller.js';
+ import App from './components/App.js';
+ import { accessibilityContext as AccessibilityContext } from './components/AccessibilityContext.js';
+ import { resolveFlags, } from './kitty-keyboard.js';
+@@ -160,6 +161,7 @@ export default class Ink {
+     kittyProtocolEnabled = false;
+     cancelKittyDetection;
+     nextRenderCommit;
++    frameController;
+     constructor(options) {
+         autoBind(this);
+         this.options = options;
+@@ -196,6 +198,12 @@ export default class Ink {
+             this.throttledOnRender = throttled;
+         }
+         this.rootNode.onImmediateRender = this.onRender;
++        // Bridge for application-level text selection: setSelection schedules a
++        // throttled repaint via the same path as a normal render, and each frame
++        // publishes its composited cells (see onRender).
++        this.frameController = createFrameController(() => {
++            this.rootNode.onRender?.();
++        });
+         this.rootNode.onStaticChange = this.handleStaticChange;
+         this.log = logUpdate.create(options.stdout, {
+             incremental: options.incrementalRendering,
+@@ -317,7 +325,16 @@ export default class Ink {
+             this.nextRenderCommit = undefined;
+         }
+         const startTime = performance.now();
+-        const { output, outputHeight, staticOutput } = render(this.rootNode, this.isScreenReaderEnabled);
++        const selection = this.frameController?.getSelection() ?? null;
++        const { output, outputHeight, staticOutput, cells, boundaries } = render(this.rootNode, this.isScreenReaderEnabled, selection);
++        if (cells && this.frameController) {
++            this.frameController.publishFrame({
++                width: cells.reduce((width, row) => Math.max(width, row.length), 0),
++                height: cells.length,
++                cells,
++                boundaries: boundaries ?? [],
++            });
++        }
+         this.options.onRender?.({ renderTime: performance.now() - startTime });
+         // If <Static> output isn't empty, it means new children have been added to it
+         const hasStaticOutput = staticOutput && staticOutput !== '\n';
+@@ -642,6 +659,7 @@ export default class Ink {
+         this.alternateScreen = this.resolveAlternateScreenOption(enabled, this.interactive);
+         if (this.alternateScreen) {
+             this.writeBestEffort(this.options.stdout, ansiEscapes.enterAlternativeScreen);
++            this.writeBestEffort(this.options.stdout, ansiEscapes.clearTerminal);
+             this.writeBestEffort(this.options.stdout, hideCursorEscape);
+         }
+     }
+diff --git a/node_modules/ink/build/output.d.ts b/node_modules/ink/build/output.d.ts
+index 0f4523f..a3ef634 100644
+--- a/node_modules/ink/build/output.d.ts
++++ b/node_modules/ink/build/output.d.ts
+@@ -1,4 +1,6 @@
+ import { type OutputTransformer } from './render-node-to-output.js';
++import { type ScreenSelection, type FrameCell, type FrameBoundary } from './frame-controller.js';
++import { type TextBoundary } from './wrap-text.js';
+ /**
+ "Virtual" output class
+ 
+@@ -24,12 +26,21 @@ export default class Output {
+     constructor(options: Options);
+     write(x: number, y: number, text: string, options: {
+         transformers: OutputTransformer[];
++        selectable?: boolean;
++        semantic?: {
++            flowId: number;
++            selectable: boolean;
++            selectableRows: boolean[];
++            boundaries: Array<TextBoundary | null>;
++        };
+     }): void;
+     clip(clip: Clip): void;
+     unclip(): void;
+-    get(): {
++    get(selection?: ScreenSelection | null): {
+         output: string;
+         height: number;
++        cells: FrameCell[][];
++        boundaries: Array<Array<FrameBoundary | null>>;
+     };
+ }
+ export {};
+diff --git a/node_modules/ink/build/output.js b/node_modules/ink/build/output.js
+index c763b77..ac81f2e 100644
+--- a/node_modules/ink/build/output.js
++++ b/node_modules/ink/build/output.js
+@@ -1,6 +1,26 @@
+ import sliceAnsi from 'slice-ansi';
+ import stringWidth from 'string-width';
+ import { styledCharsFromTokens, styledCharsToString, tokenize, } from '@alcalzone/ansi-tokenize';
++// Background applied to selected cells. Appended after a cell's existing styles
++// so the foreground is preserved and this background wins at the terminal.
++const SELECTION_BG = { code: '\x1b[48;5;240m', endCode: '\x1b[49m' };
++// Linear reading-order selection: whole rows between the first and last, partial
++// on the first/last row. Coordinates are screen cells in the composited frame.
++const isCellSelected = (x, y, sel) => {
++    if (y < sel.sy || y > sel.ey) {
++        return false;
++    }
++    if (sel.sy === sel.ey) {
++        return x >= sel.sx && x <= sel.ex;
++    }
++    if (y === sel.sy) {
++        return x >= sel.sx;
++    }
++    if (y === sel.ey) {
++        return x <= sel.ex;
++    }
++    return true;
++};
+ class OutputCaches {
+     widths = new Map();
+     blockWidths = new Map();
+@@ -45,7 +65,7 @@ export default class Output {
+         this.height = height;
+     }
+     write(x, y, text, options) {
+-        const { transformers } = options;
++        const { transformers, selectable, semantic } = options;
+         if (!text) {
+             return;
+         }
+@@ -55,6 +75,8 @@ export default class Output {
+             y,
+             text,
+             transformers,
++            selectable,
++            semantic,
+         });
+     }
+     clip(clip) {
+@@ -68,7 +90,7 @@ export default class Output {
+             type: 'unclip',
+         });
+     }
+-    get() {
++    get(selection) {
+         // Initialize output array with a specific set of rows, so that margin/padding at the bottom is preserved
+         const output = [];
+         for (let y = 0; y < this.height; y++) {
+@@ -79,10 +101,13 @@ export default class Output {
+                     value: ' ',
+                     fullWidth: false,
+                     styles: [],
++                    selectable: false,
++                    flowId: null,
+                 });
+             }
+             output.push(row);
+         }
++        const boundaries = output.map(() => Array.from({ length: this.width }, () => null));
+         const clips = [];
+         for (const operation of this.operations) {
+             if (operation.type === 'clip') {
+@@ -92,9 +117,10 @@ export default class Output {
+                 clips.pop();
+             }
+             if (operation.type === 'write') {
+-                const { text, transformers } = operation;
++                const { text, transformers, selectable, semantic } = operation;
+                 let { x, y } = operation;
+                 let lines = text.split('\n');
++                let firstLineIndex = 0;
+                 const clip = clips.at(-1);
+                 if (clip) {
+                     const clipHorizontally = typeof clip?.x1 === 'number' && typeof clip?.x2 === 'number';
+@@ -129,6 +155,7 @@ export default class Output {
+                         const height = lines.length;
+                         const to = y + height > clip.y2 ? clip.y2 - y : height;
+                         lines = lines.slice(from, to);
++                        firstLineIndex = from;
+                         if (y < clip.y1) {
+                             y = clip.y1;
+                         }
+@@ -144,8 +171,34 @@ export default class Output {
+                     for (const transformer of transformers) {
+                         line = transformer(line, index);
+                     }
++                    const boundaryRow = boundaries[y + offsetY];
++                    if (boundaryRow) {
++                        const boundaryWidth = semantic
++                            ? Math.max(1, this.caches.getStringWidth(line))
++                            : this.caches.getStringWidth(line);
++                        const boundaryOrigin = x;
++                        const startX = Math.max(0, boundaryOrigin, clip?.x1 ?? 0);
++                        const endX = Math.min(this.width, boundaryOrigin + boundaryWidth, clip?.x2 ?? this.width);
++                        const sourceBoundary = semantic?.boundaries[firstLineIndex + index] ?? null;
++                        const boundary = sourceBoundary && semantic
++                            ? {
++                                ...sourceBoundary,
++                                flowId: semantic.flowId,
++                                selectable: semantic.selectable,
++                            }
++                            : null;
++                        for (let boundaryX = startX; boundaryX < endX; boundaryX++) {
++                            if (boundaryX < boundaryRow.length) {
++                                boundaryRow[boundaryX] = boundary;
++                            }
++                        }
++                    }
+                     const characters = this.caches.getStyledChars(line);
+                     let offsetX = x;
++                    const rowSelectable = semantic
++                        ? semantic.selectable &&
++                            (semantic.selectableRows[firstLineIndex + index] ?? true)
++                        : selectable ?? true;
+                     // Nothing to write (e.g. line was clipped away).
+                     if (characters.length === 0) {
+                         offsetY++;
+@@ -156,6 +209,8 @@ export default class Output {
+                         value: ' ',
+                         fullWidth: false,
+                         styles: [],
++                        selectable: false,
++                        flowId: null,
+                     };
+                     // Wide characters (e.g. CJK) occupy two cells: a leading
+                     // cell with the character and a trailing placeholder with
+@@ -169,7 +224,11 @@ export default class Output {
+                         currentLine[offsetX - 1] = spaceCell;
+                     }
+                     for (const character of characters) {
+-                        currentLine[offsetX] = character;
++                        currentLine[offsetX] = {
++                            ...character,
++                            selectable: rowSelectable,
++                            flowId: semantic?.flowId ?? null,
++                        };
+                         // Determine printed width using string-width to align with measurement
+                         const characterWidth = Math.max(1, this.caches.getStringWidth(character.value));
+                         // For multi-column characters, clear following cells to avoid stray spaces/artifacts
+@@ -180,6 +239,8 @@ export default class Output {
+                                     value: '',
+                                     fullWidth: false,
+                                     styles: character.styles,
++                                    selectable: rowSelectable,
++                                    flowId: semantic?.flowId ?? null,
+                                 };
+                             }
+                         }
+@@ -192,6 +253,30 @@ export default class Output {
+                 }
+             }
+         }
++        // Apply the selection highlight before serialization. Selected slots are
++        // replaced with new cell objects (never mutated in place) because cells
++        // reference StyledChar objects cached and shared across identical lines,
++        // so mutating one would leak the highlight onto other on-screen text.
++        if (selection) {
++            for (let y = 0; y < output.length; y++) {
++                const row = output[y];
++                if (!row) {
++                    continue;
++                }
++                for (let x = 0; x < row.length; x++) {
++                    if (!isCellSelected(x, y, selection)) {
++                        continue;
++                    }
++                    const cell = row[x];
++                    if (cell) {
++                        row[x] = {
++                            ...cell,
++                            styles: [...(cell.styles ?? []), SELECTION_BG],
++                        };
++                    }
++                }
++            }
++        }
+         const generatedOutput = output
+             .map(line => {
+             // See https://github.com/vadimdemedes/ink/pull/564#issuecomment-1637022742
+@@ -202,6 +287,8 @@ export default class Output {
+         return {
+             output: generatedOutput,
+             height: output.length,
++            cells: output,
++            boundaries,
+         };
+     }
+ }
+diff --git a/node_modules/ink/build/render-background.js b/node_modules/ink/build/render-background.js
+index db5c807..bb54771 100644
+--- a/node_modules/ink/build/render-background.js
++++ b/node_modules/ink/build/render-background.js
+@@ -18,7 +18,10 @@ const renderBackground = (x, y, node, output) => {
+     // Create background fill for each row
+     const backgroundLine = colorize(' '.repeat(contentWidth), node.style.backgroundColor, 'background');
+     for (let row = 0; row < contentHeight; row++) {
+-        output.write(x + leftBorderWidth, y + topBorderHeight + row, backgroundLine, { transformers: [] });
++        output.write(x + leftBorderWidth, y + topBorderHeight + row, backgroundLine, {
++            transformers: [],
++            selectable: false,
++        });
+     }
+ };
+ export default renderBackground;
+diff --git a/node_modules/ink/build/render-node-to-output.d.ts b/node_modules/ink/build/render-node-to-output.d.ts
+index 127c620..6d5a005 100644
+--- a/node_modules/ink/build/render-node-to-output.d.ts
++++ b/node_modules/ink/build/render-node-to-output.d.ts
+@@ -10,5 +10,9 @@ declare const renderNodeToOutput: (node: DOMElement, output: Output, options: {
+     offsetY?: number;
+     transformers?: OutputTransformer[];
+     skipStaticElements: boolean;
++    flowIds: Map<unknown, number>;
++    nextFlowId: {
++        value: number;
++    };
+ }) => void;
+ export default renderNodeToOutput;
+diff --git a/node_modules/ink/build/render-node-to-output.js b/node_modules/ink/build/render-node-to-output.js
+index f00a278..07a98d0 100644
+--- a/node_modules/ink/build/render-node-to-output.js
++++ b/node_modules/ink/build/render-node-to-output.js
+@@ -1,7 +1,6 @@
+-import widestLine from 'widest-line';
+-import indentString from 'indent-string';
+ import Yoga from 'yoga-layout';
+-import wrapText from './wrap-text.js';
++import widestLine from 'widest-line';
++import { wrapTextWithMetadata } from './wrap-text.js';
+ import getMaxWidth from './get-max-width.js';
+ import squashTextNodes from './squash-text-nodes.js';
+ import renderBorder from './render-border.js';
+@@ -12,14 +11,15 @@ import renderBackground from './render-background.js';
+ // and use it as offset for the rest of the nodes
+ // Only first node is taken into account, because other text nodes can't have margin or padding,
+ // so their coordinates will be relative to the first node anyway
+-const applyPaddingToText = (node, text) => {
++const getTextOffset = (node) => {
+     const yogaNode = node.childNodes[0]?.yogaNode;
+     if (yogaNode) {
+-        const offsetX = yogaNode.getComputedLeft();
+-        const offsetY = yogaNode.getComputedTop();
+-        text = '\n'.repeat(offsetY) + indentString(text, offsetX);
++        return {
++            x: yogaNode.getComputedLeft(),
++            y: yogaNode.getComputedTop(),
++        };
+     }
+-    return text;
++    return { x: 0, y: 0 };
+ };
+ export const renderNodeToScreenReaderOutput = (node, options = {}) => {
+     if (options.skipStaticElements && node.internal_static) {
+@@ -69,7 +69,7 @@ export const renderNodeToScreenReaderOutput = (node, options = {}) => {
+ };
+ // After nodes are laid out, render each to output object, which later gets rendered to terminal
+ const renderNodeToOutput = (node, output, options) => {
+-    const { offsetX = 0, offsetY = 0, transformers = [], skipStaticElements, } = options;
++    const { offsetX = 0, offsetY = 0, transformers = [], skipStaticElements, flowIds, nextFlowId, } = options;
+     if (skipStaticElements && node.internal_static) {
+         return;
+     }
+@@ -88,16 +88,54 @@ const renderNodeToOutput = (node, output, options) => {
+             newTransformers = [node.internal_transform, ...transformers];
+         }
+         if (node.nodeName === 'ink-text') {
+-            let text = squashTextNodes(node);
+-            if (text.length > 0) {
+-                const currentWidth = widestLine(text);
++            const sourceText = squashTextNodes(node);
++            if (sourceText.length > 0) {
+                 const maxWidth = getMaxWidth(yogaNode);
+-                if (currentWidth > maxWidth) {
+-                    const textWrap = node.style.textWrap ?? 'wrap';
+-                    text = wrapText(text, maxWidth, textWrap);
++                const textWrap = node.style.textWrap ?? 'wrap';
++                const wrapped = wrapTextWithMetadata(sourceText, maxWidth, textWrap, widestLine(sourceText) > maxWidth);
++                const flowKey = node.attributes.selectionFlow ?? node;
++                let flowId = flowIds.get(flowKey);
++                if (flowId === undefined) {
++                    flowId = nextFlowId.value++;
++                    flowIds.set(flowKey, flowId);
++                }
++                const boundaries = [...wrapped.boundaries];
++                const breakAfter = node.attributes.selectionBreakAfter;
++                boundaries.push(breakAfter === 'soft' || breakAfter === 'hard'
++                    ? {
++                        kind: breakAfter,
++                        joiner: typeof node.attributes.selectionJoiner === 'string'
++                            ? node.attributes.selectionJoiner
++                            : breakAfter === 'hard'
++                                ? '\n'
++                                : '',
++                    }
++                    : null);
++                const textOffset = getTextOffset(node);
++                if (textOffset.x > 0) {
++                    const padding = wrapped.text
++                        .split('\n')
++                        .map(line => line.length > 0 ? ' '.repeat(textOffset.x) : '')
++                        .join('\n');
++                    output.write(x, y + textOffset.y, padding, {
++                        transformers: newTransformers,
++                        semantic: {
++                            flowId,
++                            selectable: false,
++                            selectableRows: wrapped.selectableRows.map(() => false),
++                            boundaries: wrapped.boundaries.map(() => null),
++                        },
++                    });
+                 }
+-                text = applyPaddingToText(node, text);
+-                output.write(x, y, text, { transformers: newTransformers });
++                output.write(x + textOffset.x, y + textOffset.y, wrapped.text, {
++                    transformers: newTransformers,
++                    semantic: {
++                        flowId,
++                        selectable: node.attributes.selectable !== false,
++                        selectableRows: wrapped.selectableRows,
++                        boundaries,
++                    },
++                });
+             }
+             return;
+         }
+@@ -135,6 +173,8 @@ const renderNodeToOutput = (node, output, options) => {
+                     offsetY: y,
+                     transformers: newTransformers,
+                     skipStaticElements,
++                    flowIds,
++                    nextFlowId,
+                 });
+             }
+             if (clipped) {
+diff --git a/node_modules/ink/build/renderer.d.ts b/node_modules/ink/build/renderer.d.ts
+index 8c35aea..26e3196 100644
+--- a/node_modules/ink/build/renderer.d.ts
++++ b/node_modules/ink/build/renderer.d.ts
+@@ -1,8 +1,11 @@
+ import { type DOMElement } from './dom.js';
++import { type ScreenSelection, type FrameCell, type FrameBoundary } from './frame-controller.js';
+ type Result = {
+     output: string;
+     outputHeight: number;
+     staticOutput: string;
++    cells?: FrameCell[][];
++    boundaries?: Array<Array<FrameBoundary | null>>;
+ };
+-declare const renderer: (node: DOMElement, isScreenReaderEnabled: boolean) => Result;
++declare const renderer: (node: DOMElement, isScreenReaderEnabled: boolean, selection?: ScreenSelection | null) => Result;
+ export default renderer;
+diff --git a/node_modules/ink/build/renderer.js b/node_modules/ink/build/renderer.js
+index bf23246..81d72e9 100644
+--- a/node_modules/ink/build/renderer.js
++++ b/node_modules/ink/build/renderer.js
+@@ -1,6 +1,6 @@
+ import renderNodeToOutput, { renderNodeToScreenReaderOutput, } from './render-node-to-output.js';
+ import Output from './output.js';
+-const renderer = (node, isScreenReaderEnabled) => {
++const renderer = (node, isScreenReaderEnabled, selection) => {
+     if (node.yogaNode) {
+         if (isScreenReaderEnabled) {
+             const output = renderNodeToScreenReaderOutput(node, {
+@@ -23,8 +23,12 @@ const renderer = (node, isScreenReaderEnabled) => {
+             width: node.yogaNode.getComputedWidth(),
+             height: node.yogaNode.getComputedHeight(),
+         });
++        const flowIds = new Map();
++        const nextFlowId = { value: 1 };
+         renderNodeToOutput(node, output, {
+             skipStaticElements: true,
++            flowIds,
++            nextFlowId,
+         });
+         let staticOutput;
+         if (node.staticNode?.yogaNode) {
+@@ -34,15 +38,19 @@ const renderer = (node, isScreenReaderEnabled) => {
+             });
+             renderNodeToOutput(node.staticNode, staticOutput, {
+                 skipStaticElements: false,
++                flowIds,
++                nextFlowId,
+             });
+         }
+-        const { output: generatedOutput, height: outputHeight } = output.get();
++        const { output: generatedOutput, height: outputHeight, cells, boundaries, } = output.get(selection);
+         return {
+             output: generatedOutput,
+             outputHeight,
+             // Newline at the end is needed, because static output doesn't have one, so
+             // interactive output will override last line of static output
+             staticOutput: staticOutput ? `${staticOutput.get().output}\n` : '',
++            cells,
++            boundaries,
+         };
+     }
+     return {
+diff --git a/node_modules/ink/build/wrap-text.d.ts b/node_modules/ink/build/wrap-text.d.ts
+index 935cfb8..3dddced 100644
+--- a/node_modules/ink/build/wrap-text.d.ts
++++ b/node_modules/ink/build/wrap-text.d.ts
+@@ -1,3 +1,12 @@
+ import { type Styles } from './styles.js';
+ declare const wrapText: (text: string, maxWidth: number, wrapType: Styles["textWrap"]) => string;
++export type TextBoundary = {
++    kind: 'soft' | 'hard';
++    joiner: string;
++};
++export declare const wrapTextWithMetadata: (text: string, maxWidth: number, wrapType: Styles["textWrap"], shouldWrap?: boolean) => {
++    text: string;
++    boundaries: TextBoundary[];
++    selectableRows: boolean[];
++};
+ export default wrapText;
+diff --git a/node_modules/ink/build/wrap-text.js b/node_modules/ink/build/wrap-text.js
+index 51f696c..d96d438 100644
+--- a/node_modules/ink/build/wrap-text.js
++++ b/node_modules/ink/build/wrap-text.js
+@@ -1,5 +1,6 @@
+ import wrapAnsi from 'wrap-ansi';
+ import cliTruncate from 'cli-truncate';
++import stripAnsi from 'strip-ansi';
+ const cache = {};
+ const wrapText = (text, maxWidth, wrapType) => {
+     const cacheKey = text + String(maxWidth) + String(wrapType);
+@@ -34,5 +35,51 @@ const wrapText = (text, maxWidth, wrapType) => {
+     cache[cacheKey] = wrappedText;
+     return wrappedText;
+ };
++export const wrapTextWithMetadata = (text, maxWidth, wrapType, shouldWrap = true) => {
++    const sourceLines = text.replaceAll('\r\n', '\n').split('\n');
++    const lines = [];
++    const boundaries = [];
++    const selectableRows = [];
++    for (const [sourceLineIndex, sourceLine] of sourceLines.entries()) {
++        const wrappedLines = (shouldWrap
++            ? wrapText(sourceLine, maxWidth, wrapType)
++            : sourceLine).split('\n');
++        const visibleSource = stripAnsi(sourceLine);
++        let sourceOffset = 0;
++        for (const [wrappedLineIndex, wrappedLine] of wrappedLines.entries()) {
++            const visibleLine = stripAnsi(wrappedLine);
++            const separatorRow = sourceOffset > 0 &&
++                visibleLine.length > 0 &&
++                /^\s+$/u.test(visibleLine) &&
++                /\S/u.test(visibleSource.slice(sourceOffset));
++            const sourceSeparator = separatorRow
++                ? (/^\s+/u.exec(visibleSource.slice(sourceOffset))?.[0] ?? '').slice(0, visibleLine.length)
++                : '';
++            const lineOffset = separatorRow
++                ? sourceOffset
++                : visibleSource.indexOf(visibleLine, sourceOffset);
++            const resolvedOffset = lineOffset === -1 ? sourceOffset : lineOffset;
++            if (lines.length > 0) {
++                boundaries.push({
++                    kind: wrappedLineIndex === 0 ? 'hard' : 'soft',
++                    joiner: wrappedLineIndex === 0
++                        ? '\n'
++                        : separatorRow
++                            ? sourceSeparator
++                            : visibleSource.slice(sourceOffset, resolvedOffset),
++                });
++            }
++            lines.push(wrappedLine);
++            selectableRows.push(!separatorRow);
++            sourceOffset = separatorRow
++                ? sourceOffset + sourceSeparator.length
++                : resolvedOffset + visibleLine.length;
++        }
++        if (sourceLineIndex < sourceLines.length - 1 && wrappedLines.length === 0) {
++            lines.push('');
++        }
++    }
++    return { text: lines.join('\n'), boundaries, selectableRows };
++};
+ export default wrapText;
+ //# sourceMappingURL=wrap-text.js.map

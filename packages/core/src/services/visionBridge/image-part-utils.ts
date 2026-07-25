@@ -5,15 +5,7 @@
  */
 
 import type { Part, PartListUnion } from '@google/genai';
-
-/**
- * Conservative cap on a single image part's base64 length (in MB) before the
- * vision bridge refuses it, so the bridge never makes a side call a provider
- * would reject for size. Measured on the base64 string, which overstates the
- * decoded bytes by ~33%, keeping this comfortably under the repo's ~10MB
- * decoded inline-media ceiling.
- */
-const MAX_IMAGE_BASE64_MB = 9.9;
+import { VISION_BRIDGE_MAX_IMAGE_BASE64_BYTES } from './vision-bridge-constants.js';
 
 /**
  * Normalize a {@link PartListUnion} into a flat array of {@link Part} objects.
@@ -159,7 +151,7 @@ export function isUsableImagePart(part: Part): boolean {
   if (typeof data !== 'string' || data.length === 0) {
     return false;
   }
-  return data.length / (1024 * 1024) <= MAX_IMAGE_BASE64_MB;
+  return data.length <= VISION_BRIDGE_MAX_IMAGE_BASE64_BYTES;
 }
 
 /**

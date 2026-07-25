@@ -16,6 +16,7 @@ import type { ToolResult } from './tools.js';
 import { partToString } from '../utils/partUtils.js';
 import {
   collectAvailableSkillEntries,
+  clearCollectedSkillEntriesCache,
   renderAvailableSkillsBlock,
 } from './skill-utils.js';
 
@@ -82,6 +83,9 @@ describe('SkillTool', () => {
     mockAddSessionAllowRule = vi.fn();
     vi.mocked(recordSkillInvocation).mockClear();
 
+    // Clear skill-entries cache so fake timers don't cause stale hits.
+    clearCollectedSkillEntriesCache();
+
     // Create mock config
     config = {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
@@ -138,6 +142,7 @@ describe('SkillTool', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.clearAllMocks();
+    clearCollectedSkillEntriesCache(mockSkillManager);
   });
 
   // The skill listing moved out of the tool description into a system-reminder
@@ -912,6 +917,118 @@ describe('SkillTool', () => {
           skill_name: 'code-review',
           success: false,
           prompt_id: 'prompt-on-throw',
+        }),
+      );
+    });
+
+    it('returns full content on first invocation and short message on re-invocation', async () => {
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+        mockRuntimeConfig,
+      );
+
+      const invocation1 = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      const result1 = await invocation1.execute();
+      const llmText1 = partToString(result1.llmContent);
+      expect(llmText1).toContain('Review code for quality and best practices.');
+      expect(llmText1).toContain('Base directory for this skill:');
+      expect(result1.returnDisplay).toBe(
+        'Specialized skill for reviewing code quality',
+      );
+
+      const invocation2 = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      const result2 = await invocation2.execute();
+      const llmText2 = partToString(result2.llmContent);
+      expect(llmText2).toBe(
+        'Skill "code-review" is already loaded in context.',
+      );
+      expect(result2.returnDisplay).toBe(
+        'Skill "code-review" is already loaded in context.',
+      );
+    });
+
+    it('still allows loading a different skill after one is already loaded', async () => {
+      vi.mocked(mockSkillManager.loadSkillForRuntime)
+        .mockResolvedValueOnce(mockSkills[0])
+        .mockResolvedValueOnce(mockSkills[1]);
+
+      const inv1 = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      await inv1.execute();
+
+      const inv2 = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'testing' });
+      const result2 = await inv2.execute();
+      const llmText2 = partToString(result2.llmContent);
+      expect(llmText2).toContain('Help write comprehensive tests.');
+    });
+
+    it('does not skip dedup for skills that failed to load on first attempt', async () => {
+      vi.mocked(mockSkillManager.loadSkillForRuntime)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(mockRuntimeConfig);
+
+      const inv1 = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      await inv1.execute();
+
+      const inv2 = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      const result2 = await inv2.execute();
+      const llmText2 = partToString(result2.llmContent);
+      expect(llmText2).toContain('Review code for quality and best practices.');
+    });
+
+    it('clearLoadedSkills resets dedup state so the next invocation returns full content', async () => {
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+        mockRuntimeConfig,
+      );
+
+      const inv1 = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      await inv1.execute();
+
+      skillTool.clearLoadedSkills();
+
+      const inv2 = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      const result2 = await inv2.execute();
+      const llmText2 = partToString(result2.llmContent);
+      expect(llmText2).toContain('Review code for quality and best practices.');
+    });
+
+    it('re-invocation still logs telemetry and calls onSkillLoaded', async () => {
+      vi.mocked(mockSkillManager.loadSkillForRuntime).mockResolvedValue(
+        mockRuntimeConfig,
+      );
+
+      const inv1 = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      await inv1.execute();
+
+      vi.mocked(logSkillLaunch).mockClear();
+      vi.mocked(recordSkillInvocation).mockClear();
+
+      const inv2 = (
+        skillTool as SkillToolWithProtectedMethods
+      ).createInvocation({ skill: 'code-review' });
+      await inv2.execute();
+
+      expect(logSkillLaunch).toHaveBeenCalledWith(
+        config,
+        expect.objectContaining({
+          skill_name: 'code-review',
+          success: true,
         }),
       );
     });

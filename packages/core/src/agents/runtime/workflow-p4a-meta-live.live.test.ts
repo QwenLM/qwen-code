@@ -7,7 +7,8 @@
 /**
  * P4a real-LLM E2E — drives WorkflowOrchestrator with a dispatch that hits
  * qwen3-coder-plus via DashScope. Skipped by default; runs only when
- * `DASHSCOPE_API_KEY` is set in the environment.
+ * `QWEN_CODE_RUN_LIVE_TESTS=1` and `DASHSCOPE_API_KEY` are set in the
+ * environment.
  *
  * Verifies end-to-end:
  *  - extractAndStripMeta correctly parses `export const meta = {...}` from a
@@ -37,6 +38,7 @@ import {
 import type { WorkflowAgentOpts } from './workflow-sandbox.js';
 
 const apiKey = process.env['DASHSCOPE_API_KEY'];
+const runLiveTests = process.env['QWEN_CODE_RUN_LIVE_TESTS'] === '1';
 const baseUrl =
   process.env['DASHSCOPE_BASE_URL'] ||
   'https://dashscope.aliyuncs.com/compatible-mode/v1';
@@ -100,7 +102,7 @@ function formatDisplay(outcome: {
   return JSON.stringify(payload, null, 2);
 }
 
-const describeOrSkip = apiKey ? describe : describe.skip;
+const describeOrSkip = runLiveTests && apiKey ? describe : describe.skip;
 
 describeOrSkip('P4a real-LLM E2E (DashScope qwen3-coder-plus)', () => {
   it('A: meta declaration parsed + agent call returns real LLM text', async () => {

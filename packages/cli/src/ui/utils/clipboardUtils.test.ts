@@ -8,24 +8,35 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
 
 // Use vi.hoisted to define mock functions before vi.mock is hoisted
-const { mockSpawn, mockExecSync } = vi.hoisted(() => ({
+const { mockSpawn, mockExecSync, clipboardMockState } = vi.hoisted(() => ({
   mockSpawn: vi.fn(),
   mockExecSync: vi.fn(),
+  clipboardMockState: { failLoad: false, loadDelayMs: 0 },
 }));
 
 // Mock @teddyzhu/clipboard
-vi.mock('@teddyzhu/clipboard', () => ({
-  default: {
+vi.mock('@teddyzhu/clipboard', async () => {
+  if (clipboardMockState.loadDelayMs > 0) {
+    await new Promise((resolve) =>
+      setTimeout(resolve, clipboardMockState.loadDelayMs),
+    );
+  }
+  if (clipboardMockState.failLoad) {
+    throw new Error('native clipboard module missing');
+  }
+  return {
+    default: {
+      ClipboardManager: vi.fn().mockImplementation(() => ({
+        hasFormat: vi.fn().mockReturnValue(false),
+        getImageData: vi.fn().mockReturnValue({ data: null }),
+      })),
+    },
     ClipboardManager: vi.fn().mockImplementation(() => ({
       hasFormat: vi.fn().mockReturnValue(false),
       getImageData: vi.fn().mockReturnValue({ data: null }),
     })),
-  },
-  ClipboardManager: vi.fn().mockImplementation(() => ({
-    hasFormat: vi.fn().mockReturnValue(false),
-    getImageData: vi.fn().mockReturnValue({ data: null }),
-  })),
-}));
+  };
+});
 
 // Mock node:child_process
 vi.mock('node:child_process', () => ({
@@ -153,6 +164,8 @@ describe('clipboardUtils', () => {
       );
     await realFs.rm('/tmp/test', { recursive: true, force: true });
 
+    clipboardMockState.failLoad = false;
+    clipboardMockState.loadDelayMs = 0;
     vi.resetModules();
     vi.clearAllMocks();
 
@@ -525,6 +538,42 @@ describe('clipboardUtils', () => {
   });
 
   describe('macOS/Windows fallback', () => {
+    it('notifies after a cached native module load failure', async () => {
+      clipboardMockState.failLoad = true;
+      vi.resetModules();
+      const mod = await import('./clipboardUtils.js');
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+        writable: true,
+      });
+
+      await expect(mod.clipboardHasImage()).resolves.toBe(false);
+      const onUnavailable = vi.fn();
+      await expect(mod.clipboardHasImage(onUnavailable)).resolves.toBe(false);
+      expect(onUnavailable).toHaveBeenCalledOnce();
+    });
+
+    it('shares an in-flight native module load without false errors', async () => {
+      clipboardMockState.loadDelayMs = 20;
+      vi.resetModules();
+      const mod = await import('./clipboardUtils.js');
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+        writable: true,
+      });
+      const onUnavailable = vi.fn();
+
+      await expect(
+        Promise.all([
+          mod.clipboardHasImage(onUnavailable),
+          mod.clipboardHasImage(onUnavailable),
+        ]),
+      ).resolves.toEqual([false, false]);
+      expect(onUnavailable).not.toHaveBeenCalled();
+    });
+
     it('should return false on non-linux platform when @teddyzhu/clipboard fails', async () => {
       const originalPlatform = process.platform;
       Object.defineProperty(process, 'platform', {

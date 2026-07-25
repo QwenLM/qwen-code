@@ -43,24 +43,10 @@ async function getDependencyLicense(depName, depVersion, resolvedKey) {
     repositoryUrl = depPackageJson.repository?.url || repositoryUrl;
 
     const packageDir = path.dirname(depPackageJsonPath);
-    const licenseFileCandidates = [
+    const licenseFile = await findLicenseFile(
+      packageDir,
       depPackageJson.licenseFile,
-      'LICENSE',
-      'LICENSE.md',
-      'LICENSE.txt',
-      'LICENSE-MIT.txt',
-      'license.md',
-      'license',
-    ].filter(Boolean);
-
-    let licenseFile;
-    for (const candidate of licenseFileCandidates) {
-      const potentialFile = path.join(packageDir, candidate);
-      if (await fs.stat(potentialFile).catch(() => false)) {
-        licenseFile = potentialFile;
-        break;
-      }
-    }
+    );
 
     if (licenseFile) {
       try {
@@ -85,6 +71,50 @@ async function getDependencyLicense(depName, depVersion, resolvedKey) {
     repository: repositoryUrl,
     license: licenseContent,
   };
+}
+
+/**
+ * Resolve a dependency's license file case-insensitively. The default macOS
+ * filesystem is case-insensitive while Linux (CI) is case-sensitive, so a
+ * fixed-case candidate list finds a `License` file on macOS but misses it on
+ * Linux, making the generated notices platform-dependent. Scan the directory
+ * and compare lowercased names so the result is identical on both.
+ *
+ * @param {string} packageDir - Directory containing the dependency's package.json
+ * @param {string} [licenseFileHint] - License file name declared in package.json, if any
+ * @returns {Promise<string | undefined>} Absolute path to the license file, or undefined
+ */
+export async function findLicenseFile(packageDir, licenseFileHint) {
+  const candidates = [
+    licenseFileHint,
+    'LICENSE',
+    'LICENSE.md',
+    'LICENSE.txt',
+    'LICENSE-MIT.txt',
+    'LICENSE-MIT',
+    'LICENCE.md',
+    'license.md',
+    'license',
+  ]
+    .filter(Boolean)
+    .map((candidate) => candidate.toLowerCase());
+
+  const dirEntries = await fs.readdir(packageDir).catch(() => []);
+  const entriesByLowerName = new Map();
+  for (const entry of dirEntries) {
+    const lower = entry.toLowerCase();
+    if (!entriesByLowerName.has(lower)) {
+      entriesByLowerName.set(lower, entry);
+    }
+  }
+
+  for (const candidate of candidates) {
+    const match = entriesByLowerName.get(candidate);
+    if (match) {
+      return path.join(packageDir, match);
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -221,6 +251,11 @@ async function main() {
       noticeText += `${dep.license}\n\n`;
     }
 
+    // Normalize line endings to LF. Third-party license files may use CRLF,
+    // which would otherwise be embedded verbatim and produce spurious diffs
+    // (the file is declared `eol=lf` in .gitattributes).
+    noticeText = noticeText.replace(/\r\n/g, '\n');
+
     await fs.writeFile(noticeFilePath, noticeText);
     console.log(`NOTICES.txt generated at ${noticeFilePath}`);
     console.log(`Total dependencies: ${dependencyEntries.length}`);
@@ -230,4 +265,11 @@ async function main() {
   }
 }
 
-main().catch(console.error);
+// Only run when executed directly (e.g. `npm run generate:notices`), not when
+// imported by tests.
+if (
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
+  main().catch(console.error);
+}

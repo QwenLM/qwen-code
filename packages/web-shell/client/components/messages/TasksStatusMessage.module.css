@@ -67,6 +67,14 @@
   white-space: nowrap;
 }
 
+.treeMarker {
+  color: var(--muted-foreground);
+}
+
+.orphanNote {
+  color: var(--muted-foreground);
+}
+
 .status {
   flex: 0 0 auto;
   font-size: 12px;
@@ -190,14 +198,20 @@
 }
 
 .embeddedPanel .inlineDetail {
-  padding: 0;
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 8px 12px;
+  margin: 5px 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .embeddedPanel .detail {
-  margin: 8px;
-  border-radius: 6px;
-  background: var(--background);
-  padding: 8px;
+  margin: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 0;
 }
 
 .embeddedPanel .nameCell {

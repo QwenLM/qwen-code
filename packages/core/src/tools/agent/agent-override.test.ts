@@ -43,6 +43,10 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     model: 'test-model',
     usageStatisticsEnabled: false,
     bareMode: true,
+    // Pin a DEFAULT baseline: these tests exercise override isolation and the
+    // DEFAULT→AUTO rule strip/restore transitions, so they must not depend on
+    // the constructor's default approval mode (which is now AUTO).
+    approvalMode: ApprovalMode.DEFAULT,
   };
 
   async function createParentWithRegistry(): Promise<Config> {
@@ -213,15 +217,13 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     );
   });
 
-  it('isolates child plan state from a parent that is already in plan mode', async () => {
+  it('isolates child approval-mode revisions from a parent in plan mode', async () => {
     const parent = await createParentWithRegistry();
     vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
     parent.setApprovalMode(ApprovalMode.YOLO);
-    parent.setApprovalMode(ApprovalMode.PLAN, { enteredByModel: true });
-
-    const parentGateState = parent.getPlanGateState();
+    parent.setApprovalMode(ApprovalMode.PLAN);
+    const parentRevision = parent.getApprovalModeRevision();
     expect(parent.getPrePlanMode()).toBe(ApprovalMode.YOLO);
-    expect(parentGateState?.enteredByModel).toBe(true);
 
     const { config: child } = await createApprovalModeOverride(
       parent,
@@ -229,21 +231,15 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     );
 
     expect(child.getPrePlanMode()).toBe(ApprovalMode.YOLO);
-    const childGateState = child.getPlanGateState();
-    expect(childGateState).not.toBe(parentGateState);
-    expect(childGateState?.lastFindings).not.toBe(
-      parentGateState?.lastFindings,
-    );
+    expect(child.getApprovalModeRevision()).toBe(0);
 
     child.setApprovalMode(ApprovalMode.DEFAULT);
     child.setApprovalMode(ApprovalMode.PLAN);
 
     expect(child.getApprovalMode()).toBe(ApprovalMode.PLAN);
-    expect(child.getPlanGateState()?.entryId).toBe(
-      (parentGateState?.entryId ?? 0) + 1,
-    );
+    expect(child.getApprovalModeRevision()).toBe(2);
     expect(parent.getApprovalMode()).toBe(ApprovalMode.PLAN);
-    expect(parent.getPlanGateState()).toBe(parentGateState);
+    expect(parent.getApprovalModeRevision()).toBe(parentRevision);
   });
 
   it('starts child AUTO denial state independent from the parent', async () => {
@@ -473,6 +469,7 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
           model: 'agent-model',
           maxSessionTurns: 7,
           maxToolCalls: 11,
+          maxSubagentDepth: 2,
         },
       },
     );
@@ -483,11 +480,24 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     expect(child.getModel()).toBe('agent-model');
     expect(child.getMaxSessionTurns()).toBe(7);
     expect(child.getMaxToolCalls()).toBe(11);
+    // Launch-time nesting cap survives resume even when the resuming
+    // session's own cap differs (codex review).
+    expect(child.getMaxSubagentDepth()).toBe(2);
 
     await child.getToolRegistry().warmAll();
     expect(child.getToolRegistry().getAllToolNames()).not.toContain(
       ToolNames.WRITE_FILE,
     );
+  });
+
+  it('rejects fractional maxSessionTurns from persisted launch flags', async () => {
+    const parent = await createParentWithRegistry();
+
+    await expect(
+      createApprovalModeOverride(parent, ApprovalMode.DEFAULT, {
+        persistedCliFlags: { maxSessionTurns: 0.5 },
+      }),
+    ).rejects.toThrow(/maxSessionTurns: must be an integer/);
   });
 
   describe('TOOL_REGISTRY_REBUILT marker propagation', () => {

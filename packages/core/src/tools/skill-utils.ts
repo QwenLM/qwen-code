@@ -55,14 +55,77 @@ export interface CollectedAvailableSkills {
 }
 
 /**
+ * Short-lived memo cache for `collectAvailableSkillEntries`. Keyed by
+ * `SkillManager` instance so independent managers (e.g. in tests) don't
+ * share results. Each entry stores the in-flight or resolved promise and a
+ * monotonic timestamp; entries older than `COLLECT_CACHE_TTL_MS` are
+ * discarded on the next call.
+ */
+interface CachedCollect {
+  promise: Promise<CollectedAvailableSkills>;
+  ts: number;
+}
+
+let collectCache = new WeakMap<SkillManager, CachedCollect>();
+
+/** Cache lifetime in milliseconds. */
+const COLLECT_CACHE_TTL_MS = 2_000;
+
+/**
+ * Evict any cached result for the given manager, or reset the entire cache
+ * when called without an argument. Exported for tests and explicit
+ * invalidation hooks.
+ */
+export function clearCollectedSkillEntriesCache(
+  skillManager?: SkillManager,
+): void {
+  if (skillManager) {
+    collectCache.delete(skillManager);
+  } else {
+    // Replace the WeakMap entirely to clear all entries.
+    collectCache = new WeakMap();
+  }
+}
+
+/**
  * Collects the model-facing skill set — active file-based skills + model-invocable
  * commands — applying the same filtering/dedup rules `SkillTool.refreshSkills`
  * used to apply inline. Stateful/async (reads `SkillManager` + `Config`). The
  * returned validation fields and the `entries` list are always consistent, so
  * the Skill tool, the startup snapshot, and activation reminders share identical
  * bytes from one source.
+ *
+ * Results are memoized for up to 2 s per `SkillManager` instance so that
+ * near-simultaneous startup callers (SkillTool, drainSkillAndCommandReminders,
+ * buildAvailableSkillsReminder, coreToolScheduler) share a single scan.
  */
 export async function collectAvailableSkillEntries(
+  skillManager: SkillManager,
+  config: Config,
+): Promise<CollectedAvailableSkills> {
+  const cached = collectCache.get(skillManager);
+  if (cached && Date.now() - cached.ts < COLLECT_CACHE_TTL_MS) {
+    return cached.promise;
+  }
+
+  const promise = collectAvailableSkillEntriesUncached(skillManager, config);
+  collectCache.set(skillManager, { promise, ts: Date.now() });
+
+  // If the underlying scan fails, evict the cache so the next caller retries
+  // instead of getting a cached rejection.
+  promise.catch(() => {
+    const entry = collectCache.get(skillManager);
+    if (entry?.promise === promise) {
+      collectCache.delete(skillManager);
+    }
+  });
+
+  return promise;
+}
+
+/** Uncached implementation — see `collectAvailableSkillEntries` for the
+ * memoized public API. */
+async function collectAvailableSkillEntriesUncached(
   skillManager: SkillManager,
   config: Config,
 ): Promise<CollectedAvailableSkills> {

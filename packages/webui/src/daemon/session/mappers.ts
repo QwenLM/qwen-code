@@ -10,7 +10,9 @@ import type {
   DaemonEvent,
   DaemonSessionContextStatus,
   DaemonSessionSupportedCommandsStatus,
+  DaemonWorkspaceGitStatus,
   DaemonWorkspaceProvidersStatus,
+  DaemonWorkspaceSkillsStatus,
 } from '@qwen-code/sdk/daemon';
 import type {
   DaemonCommandInfo,
@@ -25,12 +27,14 @@ export function mapProviderStatus(
 ): {
   models: DaemonModelInfo[];
   currentModel?: string;
+  currentMode?: string;
   contextWindow?: number;
 } {
   if (!status) return { models: [] };
   const seen = new Set<string>();
   const models: DaemonModelInfo[] = [];
   let currentModel = preferredCurrentModel ?? status.current?.modelId;
+  const currentMode = status.approvalMode;
   let contextWindow: number | undefined;
 
   for (const provider of status.providers) {
@@ -68,7 +72,7 @@ export function mapProviderStatus(
     }
   }
 
-  return { models, currentModel, contextWindow };
+  return { models, currentModel, currentMode, contextWindow };
 }
 
 export function mapSessionContextModels(
@@ -159,6 +163,47 @@ export function mapSupportedCommands(
   };
 }
 
+/**
+ * Maps the session-less `/workspace/skills` status into slash-command entries.
+ *
+ * Session creation is deferred until the first prompt, so before any session
+ * exists the only way to populate skill-backed slash commands (e.g. `/review`)
+ * is this workspace-level status, which the daemon answers from `Config`'s
+ * SkillManager without a live session. The shape mirrors the skills portion of
+ * {@link mapSupportedCommands} so the deferred bootstrap and the post-attach
+ * snapshot stay consistent — except workspace status carries real descriptions
+ * and argument hints, which we surface here.
+ */
+export function mapWorkspaceSkills(
+  status: DaemonWorkspaceSkillsStatus | undefined,
+): {
+  commands: DaemonCommandInfo[];
+  skills: string[];
+} {
+  if (!status) return { commands: [], skills: [] };
+
+  const availableSkills = status.skills.filter(
+    (skill) => skill.status === 'ok',
+  );
+
+  const commands = availableSkills.map((skill) => ({
+    name: skill.name,
+    description: skill.description || '',
+    ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
+    raw: {
+      name: skill.name,
+      description: skill.description || '',
+      input: skill.argumentHint ? { hint: skill.argumentHint } : null,
+      _meta: { source: 'skill' },
+    } satisfies DaemonAvailableCommand,
+  }));
+
+  return {
+    commands,
+    skills: availableSkills.map((skill) => skill.name),
+  };
+}
+
 export function mergeCommands(
   ...groups: DaemonCommandInfo[][]
 ): DaemonCommandInfo[] {
@@ -198,9 +243,14 @@ export function updateConnectionFromDaemonEvent(
     }
     if (getString(update, 'sessionUpdate') === 'available_commands_update') {
       const { commands, skills } = mapAvailableCommandsUpdate(update);
+      // An available_commands_update is the daemon's authoritative snapshot of
+      // the current slash commands, so assign it directly (matching `skills`)
+      // rather than keeping the previous list when it is empty — otherwise a
+      // command list that shrank to empty would leave stale entries
+      // autocompleting.
       setConnection((current) => ({
         ...current,
-        commands: commands.length > 0 ? commands : current.commands,
+        commands,
         skills,
       }));
     }
@@ -208,6 +258,30 @@ export function updateConnectionFromDaemonEvent(
   }
 
   switch (event.type) {
+    case 'git_branch_changed': {
+      const data = getRecord(event.data);
+      const workspaceCwd = getString(data, 'workspaceCwd');
+      const branch = getString(data, 'branch');
+      setConnection((current) =>
+        workspaceCwd && workspaceCwd !== current.workspaceCwd
+          ? current
+          : { ...current, gitBranch: branch },
+      );
+      break;
+    }
+    case 'git_status_changed': {
+      const data = getRecord(event.data);
+      const workspaceCwd = getString(data, 'workspaceCwd');
+      setConnection((current) =>
+        workspaceCwd && workspaceCwd !== current.workspaceCwd
+          ? current
+          : {
+              ...current,
+              gitStatus: data as unknown as DaemonWorkspaceGitStatus,
+            },
+      );
+      break;
+    }
     case 'session_metadata_updated': {
       const data = getRecord(event.data);
       if (Object.prototype.hasOwnProperty.call(data ?? {}, 'displayName')) {

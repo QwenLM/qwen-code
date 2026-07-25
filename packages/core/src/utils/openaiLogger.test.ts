@@ -344,6 +344,45 @@ describe('OpenAILogger', () => {
       expect(logContent.response).toBeNull();
     });
 
+    it('should log request id from OpenAI API errors', async () => {
+      const logger = new OpenAILogger(testTempDir);
+      await logger.initialize();
+
+      const error = Object.assign(new Error('Server error'), {
+        requestID: 'req-server-123',
+      });
+
+      const logPath = await logger.logInteraction(
+        { model: 'gpt-4' },
+        undefined,
+        error,
+      );
+      const logContent = JSON.parse(await fs.readFile(logPath, 'utf-8'));
+
+      expect(logContent.error).toMatchObject({
+        message: 'Server error',
+        requestId: 'req-server-123',
+      });
+    });
+
+    it('should log request id from provider error payloads', async () => {
+      const logger = new OpenAILogger(testTempDir);
+      await logger.initialize();
+
+      const error = new Error(
+        'event:error\n:HTTP_STATUS/429\ndata:{"request_id":"req-provider-456","code":"Throttling.AllocationQuota","message":"Allocated quota exceeded"}',
+      );
+
+      const logPath = await logger.logInteraction(
+        { model: 'qwen-plus' },
+        undefined,
+        error,
+      );
+      const logContent = JSON.parse(await fs.readFile(logPath, 'utf-8'));
+
+      expect(logContent.error.requestId).toBe('req-provider-456');
+    });
+
     it('should use custom directory when provided', async () => {
       const customDir = path.join(testTempDir, 'custom-logs');
       const logger = new OpenAILogger(customDir);

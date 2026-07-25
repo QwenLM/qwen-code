@@ -5,7 +5,7 @@
  *
  * `/cdp` endpoint glue for the Plan C "CDP tunnel" (issue #5626).
  *
- * Per puppeteer connection (chrome-devtools-mcp) this wires:
+ * Per CDP client connection this wires:
  *
  *   puppeteer  --raw CDP-->  CdpBrowserEmulator  --forwardToTab-->  CdpReverseLink
  *                                                                        |

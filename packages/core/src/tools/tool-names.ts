@@ -31,6 +31,8 @@ export const ToolNames = {
   EXIT_PLAN_MODE: 'exit_plan_mode',
   ENTER_PLAN_MODE: 'enter_plan_mode',
   WEB_FETCH: 'web_fetch',
+  WEB_SEARCH: 'web_search',
+  IMAGE_GEN: 'image_gen',
   LS: 'list_directory',
   LSP: 'lsp',
   ASK_USER_QUESTION: 'ask_user_question',
@@ -38,12 +40,15 @@ export const ToolNames = {
   CRON_LIST: 'cron_list',
   CRON_DELETE: 'cron_delete',
   LOOP_WAKEUP: 'loop_wakeup',
+  CREATE_SUB_SESSION: 'create_sub_session',
+  LIST_AGENTS: 'list_agents',
   TASK_STOP: 'task_stop',
   TASK_CREATE: 'task_create',
   TASK_UPDATE: 'task_update',
   TASK_LIST: 'task_list',
   TEAM_CREATE: 'team_create',
   TEAM_DELETE: 'team_delete',
+  TEAM_PLAN_APPROVAL: 'team_plan_approval',
   SEND_MESSAGE: 'send_message',
   STRUCTURED_OUTPUT: 'structured_output',
   MONITOR: 'monitor',
@@ -60,6 +65,7 @@ export const ToolNames = {
   // `get_app_state` / `perform_secondary_action` that no longer exist.
   WORKFLOW: 'workflow',
   ARTIFACT: 'artifact',
+  RECORD_ARTIFACT: 'record_artifact',
 } as const;
 
 /**
@@ -81,6 +87,8 @@ export const ToolDisplayNames = {
   EXIT_PLAN_MODE: 'ExitPlanMode',
   ENTER_PLAN_MODE: 'EnterPlanMode',
   WEB_FETCH: 'WebFetch',
+  WEB_SEARCH: 'WebSearch',
+  IMAGE_GEN: 'ImageGen',
   LS: 'ListFiles',
   LSP: 'Lsp',
   ASK_USER_QUESTION: 'AskUserQuestion',
@@ -88,12 +96,15 @@ export const ToolDisplayNames = {
   CRON_LIST: 'CronList',
   CRON_DELETE: 'CronDelete',
   LOOP_WAKEUP: 'LoopWakeup',
+  CREATE_SUB_SESSION: 'CreateSubSession',
+  LIST_AGENTS: 'ListAgents',
   TASK_STOP: 'TaskStop',
   TASK_CREATE: 'TaskCreate',
   TASK_UPDATE: 'TaskUpdate',
   TASK_LIST: 'TaskList',
   TEAM_CREATE: 'TeamCreate',
   TEAM_DELETE: 'TeamDelete',
+  TEAM_PLAN_APPROVAL: 'TeamPlanApproval',
   SEND_MESSAGE: 'SendMessage',
   STRUCTURED_OUTPUT: 'StructuredOutput',
   MONITOR: 'Monitor',
@@ -105,6 +116,7 @@ export const ToolDisplayNames = {
   // computer_use__* display names are not enumerated here (see ToolNames).
   WORKFLOW: 'Workflow',
   ARTIFACT: 'Artifact',
+  RECORD_ARTIFACT: 'RecordArtifact',
 } as const;
 
 // Migration from old tool names to new tool names

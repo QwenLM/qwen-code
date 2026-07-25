@@ -11,8 +11,10 @@ import path from 'node:path';
 import {
   SAFE_TOOL_ALLOWLIST,
   applyAutoModeDecision,
+  decorateClassifierUnavailableConfirmation,
   evaluateAutoMode,
   formatClassifierBlockMessage,
+  formatClassifierUnavailableFallbackMessage,
   getAutoModePermissionDeniedReason,
   isAutoModeProtectedWritePath,
   isInSafeToolAllowlist,
@@ -1141,7 +1143,7 @@ describe('applyAutoModeDecision — blocked reason mapping', () => {
     });
   });
 
-  it('maps classifier infrastructure failures to classifier_unavailable', () => {
+  it('routes classifier infrastructure failures to manual approval', () => {
     const setAutoModeDenialState = vi.fn();
     const result = applyAutoModeDecision(
       {
@@ -1157,8 +1159,9 @@ describe('applyAutoModeDecision — blocked reason mapping', () => {
     );
 
     expect(result).toMatchObject({
-      kind: 'blocked',
+      kind: 'fallback',
       reason: 'classifier_unavailable',
+      message: expect.stringContaining('Switching to Default Mode'),
     });
     expect(setAutoModeDenialState).toHaveBeenCalledWith({
       consecutiveBlock: 0,
@@ -1234,29 +1237,47 @@ describe('formatClassifierBlockMessage', () => {
       'Blocked by auto mode policy: Irreversible filesystem destruction\nDo not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. If that action is required, stop and ask the user for explicit approval. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.',
     );
   });
+});
 
-  it('renders an unavailable message with cause when reason is present', () => {
+describe('classifier unavailable confirmation', () => {
+  const baseDecision = {
+    via: 'classifier' as const,
+    shouldBlock: true,
+    stage: 'thinking' as const,
+    durationMs: 100,
+    unavailable: true,
+  };
+
+  it('renders a manual fallback message with the cause and recommendation', () => {
     expect(
-      formatClassifierBlockMessage({
+      formatClassifierUnavailableFallbackMessage({
         ...baseDecision,
         reason: 'Conversation transcript exceeds classifier context window',
-        unavailable: true,
       }),
     ).toBe(
-      'Auto mode classifier unavailable (Conversation transcript exceeds classifier context window); action blocked for safety\nDo not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. If that action is required, stop and ask the user for explicit approval. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.',
+      "Auto Mode couldn't classify this action (Conversation transcript exceeds classifier context window). Review it manually. Switching to Default Mode is recommended if you want to continue without the classifier.",
     );
   });
 
-  it('falls back to a bare unavailable message when reason is empty', () => {
-    expect(
-      formatClassifierBlockMessage({
-        ...baseDecision,
-        reason: '',
-        unavailable: true,
-      }),
-    ).toBe(
-      'Auto mode classifier unavailable; action blocked for safety\nDo not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. If that action is required, stop and ask the user for explicit approval. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.',
+  it('decorates the confirmation and suppresses persistent approval', () => {
+    const confirmation = decorateClassifierUnavailableConfirmation(
+      {
+        type: 'exec',
+        title: 'Run command',
+        command: 'touch marker',
+        rootCommand: 'touch',
+        onConfirm: vi.fn(),
+      },
+      'Classifier unavailable.',
     );
+
+    expect(confirmation).toMatchObject({
+      hideAlwaysAllow: true,
+      autoModeFallback: {
+        reason: 'classifier_unavailable',
+        message: 'Classifier unavailable.',
+      },
+    });
   });
 });
 
@@ -1285,6 +1306,17 @@ describe('PermissionDenied hook gating', () => {
       shouldFirePermissionDeniedForAutoMode(
         { ...classifierBlock, shouldBlock: false },
         { kind: 'approved' },
+      ),
+    ).toBe(false);
+
+    expect(
+      shouldFirePermissionDeniedForAutoMode(
+        { ...classifierBlock, unavailable: true },
+        {
+          kind: 'fallback',
+          reason: 'classifier_unavailable',
+          message: 'Classifier unavailable.',
+        },
       ),
     ).toBe(false);
 

@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { Text } from 'ink';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderWithProviders } from '../../../test-utils/render.js';
 import {
@@ -93,5 +94,41 @@ describe('DescriptiveRadioButtonSelect', () => {
       onHighlight: mockOnHighlight,
     });
     expect(lastFrame()).toMatchSnapshot();
+  });
+
+  it('does not render empty description rows', () => {
+    const { lastFrame } = renderComponent({
+      items: [
+        {
+          title: 'Foo Title',
+          description: '',
+          value: 'foo',
+          key: 'foo',
+        },
+        {
+          title: 'Bar Title',
+          description: '   ',
+          value: 'bar',
+          key: 'bar',
+        },
+      ],
+    });
+
+    expect(lastFrame()).toBe('› Foo Title\n  Bar Title');
+  });
+
+  it('renders a non-string (ReactNode) description', () => {
+    const { lastFrame } = renderComponent({
+      items: [
+        {
+          title: 'Foo Title',
+          description: <Text>Custom node description</Text>,
+          value: 'foo',
+          key: 'foo',
+        },
+      ],
+    });
+
+    expect(lastFrame()).toBe('› Foo Title\n  Custom node description');
   });
 });

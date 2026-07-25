@@ -63,7 +63,7 @@ export class McpPromptLoader implements ICommandLoader {
                   return {
                     type: 'message',
                     messageType: 'info',
-                    content: `Prompt "${prompt.name}" has no arguments.`,
+                    content: `Prompt "${prompt.name}" has no declared arguments. Any text you provide will be forwarded as-is (e.g., /${prompt.name} some text sends { input: "some text" }).`,
                   };
                 }
 
@@ -273,7 +273,16 @@ export class McpPromptLoader implements ICommandLoader {
       positionalArgs.push((match[1] ?? match[2]).replace(/\\(.)/g, '$1'));
     }
 
-    if (!promptArgs) {
+    if (!promptArgs || promptArgs.length === 0) {
+      Object.assign(promptInputs, argValues);
+      // Forward positional text as a default "input" argument when the prompt
+      // declares no arguments, matching Claude Code's behavior. This key is a
+      // client-side convention, not part of the MCP spec. A user-provided
+      // --input named arg takes precedence over positional text.
+      const positionalInput = positionalArgs.join(' ');
+      if (positionalInput && !Object.hasOwn(argValues, 'input')) {
+        promptInputs['input'] = positionalInput;
+      }
       return promptInputs;
     }
     for (const arg of promptArgs) {
@@ -282,29 +291,36 @@ export class McpPromptLoader implements ICommandLoader {
       }
     }
 
-    const unfilledArgs = promptArgs.filter(
+    // Include all args not filled by named args — both required and optional —
+    // so positional input maps to optional params too (#7314).
+    // Sort required-first so positional args fill required params before
+    // optional ones regardless of declaration order.
+    const unfilledArgs = promptArgs
+      .filter((arg) => !Object.hasOwn(promptInputs, arg.name))
+      .sort((a, b) => (a.required === b.required ? 0 : a.required ? -1 : 1));
+
+    if (unfilledArgs.length === 1 && positionalArgs.length > 0) {
+      // If we have only one unfilled arg, we don't require quotes we just
+      // join all the given positional arguments together as if they were quoted.
+      promptInputs[unfilledArgs[0].name] = positionalArgs.join(' ');
+    } else if (positionalArgs.length > 0) {
+      for (
+        let i = 0;
+        i < unfilledArgs.length && i < positionalArgs.length;
+        i++
+      ) {
+        promptInputs[unfilledArgs[i].name] = positionalArgs[i];
+      }
+    }
+
+    const missingRequired = promptArgs.filter(
       (arg) => arg.required && !Object.hasOwn(promptInputs, arg.name),
     );
-
-    if (unfilledArgs.length === 1) {
-      // If we have only one unfilled arg, we don't require quotes we just
-      // join all the given arguments together as if they were quoted.
-      promptInputs[unfilledArgs[0].name] = positionalArgs.join(' ');
-    } else {
-      const missingArgs: string[] = [];
-      for (let i = 0; i < unfilledArgs.length; i++) {
-        if (positionalArgs.length > i) {
-          promptInputs[unfilledArgs[i].name] = positionalArgs[i];
-        } else {
-          missingArgs.push(unfilledArgs[i].name);
-        }
-      }
-      if (missingArgs.length > 0) {
-        const missingArgNames = missingArgs
-          .map((name) => `--${name}`)
-          .join(', ');
-        return new Error(`Missing required argument(s): ${missingArgNames}`);
-      }
+    if (missingRequired.length > 0) {
+      const missingArgNames = missingRequired
+        .map((arg) => `--${arg.name}`)
+        .join(', ');
+      return new Error(`Missing required argument(s): ${missingArgNames}`);
     }
 
     return promptInputs;

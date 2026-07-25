@@ -484,4 +484,58 @@ describe('SleepInhibitor', () => {
 
     handle.release();
   });
+
+  describe('exitedWhileActiveLogged dedup latch', () => {
+    it('logs exit-while-active exactly once per active run', async () => {
+      const { children, inhibitor, logger } = createHarness('linux');
+
+      const first = inhibitor.acquire('work');
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      children[0]!.emit('exit', 1, null);
+
+      expect(logger.debug).toHaveBeenCalledWith(
+        'Sleep inhibitor exited while active: code=1 signal=null',
+      );
+
+      const second = inhibitor.acquire('more work');
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      children[1]!.emit('exit', 1, null);
+
+      // The latch prevents logging the exit message a second time.
+      expect(
+        logger.debug.mock.calls.filter((call) =>
+          String(call[0]).includes('Sleep inhibitor exited while active:'),
+        ),
+      ).toHaveLength(1);
+
+      first.release();
+      second.release();
+    });
+
+    it('resets the latch after all handles are released', async () => {
+      const { children, inhibitor, logger } = createHarness('linux');
+
+      const first = inhibitor.acquire('work');
+      await vi.waitFor(() => expect(children).toHaveLength(1));
+      children[0]!.emit('exit', 1, null);
+
+      expect(logger.debug).toHaveBeenCalledWith(
+        'Sleep inhibitor exited while active: code=1 signal=null',
+      );
+
+      // Release all handles → activeCount drops to 0 → latch resets.
+      first.release();
+      logger.debug.mockClear();
+
+      const second = inhibitor.acquire('new work');
+      await vi.waitFor(() => expect(children).toHaveLength(2));
+      children[1]!.emit('exit', 2, null);
+
+      expect(logger.debug).toHaveBeenCalledWith(
+        'Sleep inhibitor exited while active: code=2 signal=null',
+      );
+
+      second.release();
+    });
+  });
 });

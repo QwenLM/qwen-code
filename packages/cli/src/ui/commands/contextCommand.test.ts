@@ -6,6 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Config } from '@qwen-code/qwen-code-core';
+import { t } from '../../i18n/index.js';
 import {
   collectContextData,
   formatContextUsageText,
@@ -43,13 +44,18 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
     getToolRegistry: vi.fn().mockReturnValue({
       getAllTools: vi.fn().mockReturnValue([]),
       getFunctionDeclarations: vi.fn().mockReturnValue([]),
+      isDeferredAndHidden: vi.fn().mockReturnValue(false),
     }),
+    getVisibleTools: vi.fn().mockReturnValue(new Set()),
     getUserMemory: vi.fn().mockReturnValue(''),
+    getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
     getSkillManager: vi.fn().mockReturnValue({
       listSkills: vi.fn().mockResolvedValue([]),
     }),
     getChatCompression: vi.fn().mockReturnValue(undefined),
     getAutoCompactThreshold: vi.fn(),
+    getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
+    isInteractive: vi.fn().mockReturnValue(true),
   } as unknown as Config;
 }
 
@@ -69,13 +75,18 @@ describe('collectContextData (contextCommand)', () => {
       getToolRegistry: vi.fn().mockReturnValue({
         getAllTools: vi.fn().mockReturnValue([]),
         getFunctionDeclarations: getFunctionDeclarationsSpy,
+        isDeferredAndHidden: vi.fn().mockReturnValue(false),
       }),
+      getVisibleTools: vi.fn().mockReturnValue(new Set()),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
       }),
       getChatCompression: vi.fn().mockReturnValue(undefined),
       getAutoCompactThreshold: vi.fn(),
+      getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
   });
 
@@ -111,7 +122,7 @@ describe('collectContextData (contextCommand)', () => {
 
     expect(getLastPromptTokenCount).toHaveBeenCalled();
     expect(data.totalTokens).toBe(50_000);
-    // 50K < warn(147K); if the 999K global had leaked through it would be `hard`.
+    // 50K < warn(150K); if the 999K global had leaked through it would be `hard`.
     expect(data.breakdown.currentTier).toBe('safe');
   });
 
@@ -135,11 +146,11 @@ describe('collectContextData (contextCommand)', () => {
   });
 
   it('excludes deferred-but-not-revealed tools from the per-tool breakdown (#4508)', async () => {
-    // Regression: /context used to surface every deferred tool (MCP tools,
-    // plus low-frequency built-ins like web_fetch / monitor / cron_*) even
-    // when ToolSearch had not loaded any of them, inflating the displayed
-    // token count for the common default-on case.
-    const isDeferredToolRevealed = vi.fn().mockReturnValue(false);
+    const isDeferredAndHidden = vi
+      .fn()
+      .mockImplementation(
+        (name: string) => name === 'web_fetch' || name === 'mcp__server__tool',
+      );
     const hiddenBuiltin = {
       name: 'web_fetch',
       schema: { name: 'web_fetch', description: 'large schema' },
@@ -160,22 +171,89 @@ describe('collectContextData (contextCommand)', () => {
       getToolRegistry: vi.fn().mockReturnValue({
         getAllTools: vi.fn().mockReturnValue([hiddenBuiltin, hiddenMcp]),
         getFunctionDeclarations: vi.fn().mockReturnValue([]),
-        isDeferredToolRevealed,
+        isDeferredAndHidden,
       }),
+      getVisibleTools: vi.fn().mockReturnValue(new Set()),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
       getSkillManager: vi.fn().mockReturnValue({
         listSkills: vi.fn().mockResolvedValue([]),
       }),
       getChatCompression: vi.fn().mockReturnValue(undefined),
       getAutoCompactThreshold: vi.fn(),
+      getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(true),
     } as unknown as Config;
 
     const data = await collectContextData(config, true);
 
     expect(data.builtinTools).toHaveLength(0);
     expect(data.mcpTools).toHaveLength(0);
-    expect(isDeferredToolRevealed).toHaveBeenCalledWith('web_fetch');
-    expect(isDeferredToolRevealed).toHaveBeenCalledWith('mcp__server__tool');
+    expect(isDeferredAndHidden).toHaveBeenCalledWith('web_fetch');
+    expect(isDeferredAndHidden).toHaveBeenCalledWith('mcp__server__tool');
+  });
+
+  it('includes visibleTools in per-tool breakdown when deferred and not revealed (#6372)', async () => {
+    const visibleTool = {
+      name: 'web_fetch',
+      schema: { name: 'web_fetch', description: 'visible tool schema' },
+      shouldDefer: true,
+      alwaysLoad: false,
+    };
+    const hiddenDeferred = {
+      name: 'monitor',
+      schema: { name: 'monitor', description: 'hidden tool schema' },
+      shouldDefer: true,
+      alwaysLoad: false,
+    };
+    const config = {
+      getModel: vi.fn().mockReturnValue('test-model'),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({
+        contextWindowSize: 32_000,
+      }),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getAllTools: vi.fn().mockReturnValue([visibleTool, hiddenDeferred]),
+        getFunctionDeclarations: vi.fn().mockReturnValue([visibleTool.schema]),
+        isDeferredAndHidden: vi
+          .fn()
+          .mockImplementation((name: string) => name === 'monitor'),
+      }),
+      getVisibleTools: vi.fn().mockReturnValue(new Set(['web_fetch'])),
+      getUserMemory: vi.fn().mockReturnValue(''),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue(''),
+      getSkillManager: vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([]),
+      }),
+      getChatCompression: vi.fn().mockReturnValue(undefined),
+      getAutoCompactThreshold: vi.fn(),
+      getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
+      isInteractive: vi.fn().mockReturnValue(true),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.builtinTools).toHaveLength(1);
+    expect(data.builtinTools[0].name).toBe('web_fetch');
+  });
+
+  it('lists the auto-memory section as a separate memory entry (#7651)', async () => {
+    // The managed auto-memory section is no longer part of getUserMemory(); its
+    // tokens are surfaced via getAutoMemoryPrompt(). Exercise the non-empty
+    // branch so a regression that drops the "auto memory" row from /context
+    // fails here instead of silently under-counting the memory breakdown.
+    const config = {
+      ...makeMockConfig(),
+      getUserMemory: vi.fn().mockReturnValue(''),
+      getAutoMemoryPrompt: vi
+        .fn()
+        .mockReturnValue('# auto memory\nMEMORY_INDEX_MARKER'),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    expect(data.memoryFiles).toHaveLength(1);
+    expect(data.memoryFiles[0].path).toBe(t('auto memory'));
+    expect(data.memoryFiles[0].tokens).toBeGreaterThan(0);
   });
 });
 
@@ -189,8 +267,8 @@ describe('/context shows three-tier thresholds', () => {
     // 200K window. computeThresholds(200K) = {
     //   warn: 147,000, auto: 167,000, hard: 177,000, effectiveWindow: 180,000
     // }
-    // lastPromptTokenCount = 150K → between warn and auto → tier = warn.
-    mockGetLastPromptTokenCount.mockReturnValue(150_000);
+    // lastPromptTokenCount = 160K → between warn and auto → tier = warn.
+    mockGetLastPromptTokenCount.mockReturnValue(160_000);
     const data = await collectContextData(makeMockConfig(200_000), false);
     const text = formatContextUsageText(data);
 
@@ -225,7 +303,7 @@ describe('/context shows three-tier thresholds', () => {
 
   it('classifies usage between auto and hard as the auto tier', async () => {
     // 200K window — between 167K (auto) and 177K (hard) → tier = auto.
-    mockGetLastPromptTokenCount.mockReturnValue(170_000);
+    mockGetLastPromptTokenCount.mockReturnValue(173_000);
     const data = await collectContextData(makeMockConfig(200_000), false);
     expect(data.breakdown.currentTier).toBe('auto');
     const text = formatContextUsageText(data);
@@ -253,7 +331,8 @@ describe('/context shows three-tier thresholds', () => {
 
   it('propagates custom autoCompactThreshold through to /context thresholds', async () => {
     // config.getAutoCompactThreshold() returns 0.5 → computeThresholds(32000, 0.5)
-    // = { warn: 16,000, auto: 16,000, hard: 19,000, effectiveWindow: 12,000 }
+    // = { warn: 0, auto: 16,000, hard: 19,000, effectiveWindow: 12,000 }
+    // (32K ceiling degenerates, so auto = proportional floor = 0.5 * 32K)
     const config = makeMockConfig(32_000);
     vi.mocked(config.getAutoCompactThreshold).mockReturnValue(0.5);
     const data = await collectContextData(config, false);

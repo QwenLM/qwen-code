@@ -53,7 +53,7 @@ describe('UrlValidator', () => {
     it('should allow public URLs', () => {
       const validator = new UrlValidator([]);
       expect(validator.isBlocked('https://api.example.com/hook')).toBe(false);
-      expect(validator.isBlocked('https://webhook.site/test')).toBe(false);
+      expect(validator.isBlocked('https://hooks.example.com/test')).toBe(false);
     });
 
     it('should block invalid URLs', () => {
@@ -85,10 +85,10 @@ describe('UrlValidator', () => {
     it('should match multiple patterns', () => {
       const validator = new UrlValidator([
         'https://api\\.example\\.com/*',
-        'https://webhook\\.site/*',
+        'https://hooks\\.example\\.com/*',
       ]);
       expect(validator.isAllowed('https://api.example.com/hook')).toBe(true);
-      expect(validator.isAllowed('https://webhook.site/test')).toBe(true);
+      expect(validator.isAllowed('https://hooks.example.com/test')).toBe(true);
       expect(validator.isAllowed('https://other.com/hook')).toBe(false);
     });
 

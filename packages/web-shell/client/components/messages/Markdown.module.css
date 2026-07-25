@@ -199,8 +199,7 @@
   align-items: center;
   justify-content: space-between;
   padding: 0 12px;
-  background: var(--subtle-bg);
-  border-bottom: 0.5px solid var(--border);
+  background: var(--secondary);
 }
 
 .codeBlockLang {
@@ -229,6 +228,11 @@
   color: var(--foreground);
 }
 
+.codeBlockCopy:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .codeBlockContent {
   max-width: 100%;
   max-height: none;
@@ -238,6 +242,7 @@
   font-size: 13px;
   line-height: 1.5;
   background: var(--secondary);
+  margin-top: 0;
 }
 
 .codeBlockContent pre {
@@ -285,7 +290,7 @@
 }
 
 .mermaidBlock :global(svg) {
-  max-width: 100%;
+  max-width: none;
   height: auto;
 }
 
@@ -307,6 +312,18 @@
 .mermaidActions {
   display: flex;
   gap: 4px;
+}
+
+.mermaidZoomWrapper {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 8px 0;
+  cursor: grab;
+  user-select: none;
+}
+
+.mermaidDragging {
+  cursor: grabbing;
 }
 
 .content :global(.katex-display) {

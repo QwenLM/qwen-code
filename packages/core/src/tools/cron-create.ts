@@ -11,6 +11,34 @@ import { parseCron, nextFireTime } from '../utils/cronParser.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
 import { CRON_TASKS_DISPLAY_PATH } from '../services/cronTasksFile.js';
 
+/** "1 day" / "7 days" / "0.5 days". Callers handle the Infinity case. */
+function formatDays(days: number): string {
+  return days === 1 ? '1 day' : `${days} days`;
+}
+
+/**
+ * Expiry paragraph for the tool description. The max age comes from config
+ * (settings / QWEN_CODE_CRON_MAX_AGE_DAYS) at construction time —
+ * changing it requires a restart, so baking it into the static
+ * description is safe. Infinity (setting 0) disables expiry.
+ */
+function recurringExpiryBlurb(maxAgeDays: number): string {
+  if (!Number.isFinite(maxAgeDays)) {
+    return (
+      'Recurring tasks never auto-expire in this configuration — they keep ' +
+      'firing until deleted with CronDelete. Tell the user the job runs ' +
+      'until cancelled when scheduling recurring jobs.'
+    );
+  }
+  const span = formatDays(maxAgeDays);
+  return (
+    `Recurring tasks auto-expire after ${span} — they fire one final time, ` +
+    'then are deleted. This bounds how long a forgotten schedule keeps ' +
+    `firing. Tell the user about the ${span} limit when scheduling ` +
+    'recurring jobs.'
+  );
+}
+
 export interface CronCreateParams {
   cron: string;
   prompt: string;
@@ -69,9 +97,13 @@ class CronCreateInvocation extends BaseToolInvocation<
       const where = durable
         ? `Persisted to ${CRON_TASKS_DISPLAY_PATH}`
         : 'Session-only (not written to disk, dies when Qwen Code exits)';
+      const maxAgeDays = this.config.getCronRecurringMaxAgeDays();
+      const expiry = Number.isFinite(maxAgeDays)
+        ? `Auto-expires after ${formatDays(maxAgeDays)}. Use CronDelete to cancel sooner.`
+        : 'Never auto-expires. Use CronDelete to cancel.';
       const llmContent = recurring
         ? `Scheduled recurring job ${job.id} (${job.cronExpr}). ${where}. ` +
-          'Auto-expires after 7 days. Use CronDelete to cancel sooner.'
+          expiry
         : `Scheduled one-shot task ${job.id} (${job.cronExpr}). ${where}. ` +
           'It will fire once then auto-delete.';
 
@@ -94,6 +126,9 @@ export class CronCreateTool extends BaseDeclarativeTool<
   static readonly Name = ToolNames.CRON_CREATE;
 
   constructor(private config: Config) {
+    // Resolved once: each call re-reads/re-parses the env var and an
+    // invalid value would warn on every call site below.
+    const maxAgeDays = config.getCronRecurringMaxAgeDays();
     super(
       CronCreateTool.Name,
       ToolDisplayNames.CRON_CREATE,
@@ -120,7 +155,7 @@ export class CronCreateTool extends BaseDeclarativeTool<
         'Most "remind me in 5 minutes" requests should stay session-only.\n\n' +
         '## Runtime behavior\n\n' +
         'Jobs only fire while the REPL is idle (not mid-query). The scheduler adds a small deterministic jitter on top of whatever you pick: recurring tasks fire up to 10% of their period late (max 15 min); one-shot tasks landing on :00 or :30 fire up to 90 s early. Picking an off-minute is still the bigger lever.\n\n' +
-        'Recurring tasks auto-expire after 7 days — they fire one final time, then are deleted. This bounds how long a forgotten schedule keeps firing. Tell the user about the 7-day limit when scheduling recurring jobs.\n\n' +
+        `${recurringExpiryBlurb(maxAgeDays)}\n\n` +
         'Returns a job ID you can pass to CronDelete.',
       Kind.Other,
       {
@@ -138,7 +173,12 @@ export class CronCreateTool extends BaseDeclarativeTool<
           recurring: {
             type: 'boolean',
             description:
-              'true (default) = fire on every cron match until deleted or auto-expired after 7 days. false = fire once at the next match, then auto-delete. Use false for "remind me at X" one-shot requests with pinned minute/hour/dom/month.',
+              `true (default) = fire on every cron match until deleted${
+                Number.isFinite(maxAgeDays)
+                  ? ` or auto-expired after ${formatDays(maxAgeDays)}`
+                  : ''
+              }. ` +
+              'false = fire once at the next match, then auto-delete. Use false for "remind me at X" one-shot requests with pinned minute/hour/dom/month.',
           },
           durable: {
             type: 'boolean',

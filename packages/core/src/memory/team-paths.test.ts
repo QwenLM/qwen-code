@@ -10,9 +10,12 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
   clearAutoMemoryRootCache,
+  getAutoMemoryRoot,
   getTeamAutoMemoryIndexPath,
   getTeamAutoMemoryRoot,
+  getUserAutoMemoryRoot,
   isAnyAutoMemPath,
+  isManagedMemoryPath,
   isTeamAutoMemPath,
   TEAM_AUTO_MEMORY_DIRNAME,
 } from './paths.js';
@@ -91,6 +94,54 @@ describe('team auto-memory paths', () => {
     );
     expect(isTeamAutoMemPath(teamFile, projectRoot)).toBe(true);
     expect(isAnyAutoMemPath(teamFile, projectRoot)).toBe(false);
+  });
+
+  it('classifies all managed roots for read retention and rejects symlink escapes', () => {
+    const previousBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    const memoryBaseDir = path.join(projectRoot, '.runtime');
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = memoryBaseDir;
+    clearAutoMemoryRootCache();
+    try {
+      const projectMemory = path.join(
+        getAutoMemoryRoot(projectRoot),
+        'project',
+        'context.md',
+      );
+      const userMemory = path.join(
+        getUserAutoMemoryRoot(),
+        'feedback',
+        'testing.md',
+      );
+      const teamMemory = path.join(
+        getTeamAutoMemoryRoot(projectRoot),
+        'reference',
+        'architecture.md',
+      );
+      expect(isManagedMemoryPath(projectMemory, projectRoot)).toBe(true);
+      expect(isManagedMemoryPath(userMemory, projectRoot)).toBe(true);
+      expect(isManagedMemoryPath(teamMemory, projectRoot)).toBe(true);
+      expect(
+        isManagedMemoryPath(
+          path.join(projectRoot, 'src', 'main.ts'),
+          projectRoot,
+        ),
+      ).toBe(false);
+
+      const projectMemoryRoot = getAutoMemoryRoot(projectRoot);
+      const outside = path.join(projectRoot, 'outside.md');
+      const escaped = path.join(projectMemoryRoot, 'escaped.md');
+      fs.mkdirSync(projectMemoryRoot, { recursive: true });
+      fs.writeFileSync(outside, 'outside');
+      fs.symlinkSync(outside, escaped);
+      expect(isManagedMemoryPath(escaped, projectRoot)).toBe(false);
+    } finally {
+      if (previousBaseDir === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = previousBaseDir;
+      }
+      clearAutoMemoryRootCache();
+    }
   });
 
   it('recognizes a first-ever write before the team-memory dir exists', () => {

@@ -117,9 +117,11 @@ To avoid every session hitting the API at the same wall-clock moment, the schedu
 
 The offset is derived from the task ID, so the same task always gets the same offset. If exact timing matters, pick a minute that is not `:00` or `:30`, for example `3 9 * * *` instead of `0 9 * * *`, and the one-shot jitter will not apply.
 
-### Three-day expiry
+### Recurring-task expiry
 
-Recurring tasks automatically expire 3 days after creation. The task fires one final time, then deletes itself. This bounds how long a forgotten loop can run. If you need a recurring task to last longer, cancel and recreate it before it expires.
+Recurring tasks automatically expire 7 days after creation by default. The task fires one final time, then deletes itself. This bounds how long a forgotten loop can run.
+
+To change the limit, set `experimental.cronRecurringMaxAgeDays` in your [settings](../configuration/settings.md), or set the `QWEN_CODE_CRON_MAX_AGE_DAYS` environment variable (the environment variable wins — convenient for cloud or container deployments where editing `settings.json` is impractical). A value of `0` disables expiry entirely, so tasks run until you delete them — useful for long-running daemon deployments that host daily reports, digests, or ongoing monitoring. The configured limit also applies to durable tasks restored from disk after a restart.
 
 One-shot tasks do not expire on a timer — they simply delete themselves after firing once.
 

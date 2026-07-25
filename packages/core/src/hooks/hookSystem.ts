@@ -90,6 +90,11 @@ export class HookSystem {
     debugLogger.debug('Hook system initialized successfully');
   }
 
+  async reload(): Promise<void> {
+    await this.hookRegistry.reloadConfiguredHooks();
+    debugLogger.debug('Hook system reloaded successfully');
+  }
+
   /**
    * Set the messages provider for automatic conversation history passing
    * to function hooks during execution
@@ -211,6 +216,23 @@ export class HookSystem {
       stopHookActive,
       lastAssistantMessage,
       contextUsage,
+      signal,
+    );
+  }
+
+  /**
+   * Fire a MessageDisplay event - called repeatedly as the assistant's reply streams
+   */
+  async fireMessageDisplayEvent(
+    messageId: string,
+    displayedText: string,
+    isFinal: boolean,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    return this.hookEventHandler.fireMessageDisplayEvent(
+      messageId,
+      displayedText,
+      isFinal,
       signal,
     );
   }

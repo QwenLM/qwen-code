@@ -31,7 +31,9 @@ import type { Config } from '../config/config.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
+  getLeaderOnlyToolUnavailableMessage,
   getSubagentPlanToolUnavailableMessage,
+  isLeaderOnlyToolUnavailableInSubagent,
   isPlanLifecycleToolUnavailableInSubagent,
 } from '../agents/runtime/subagent-plan-tool-policy.js';
 
@@ -246,12 +248,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
     const registry = this.config.getToolRegistry();
     return registry
       .getAllTools()
-      .filter(
-        (t) =>
-          t.shouldDefer &&
-          !t.alwaysLoad &&
-          !registry.isDeferredToolRevealed(t.name),
-      );
+      .filter((t) => registry.isDeferredAndHidden(t.name));
   }
 
   private async loadAndReturnSchemas(
@@ -289,7 +286,10 @@ class ToolSearchInvocation extends BaseToolInvocation<
         missing.push(requested);
         continue;
       }
-      if (isPlanLifecycleToolUnavailableInSubagent(canonical)) {
+      if (
+        isPlanLifecycleToolUnavailableInSubagent(canonical) ||
+        isLeaderOnlyToolUnavailableInSubagent(canonical)
+      ) {
         blocked.push(canonical);
         continue;
       }
@@ -327,7 +327,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
       // list) and pulling them through setTools() would risk a spurious
       // "GeminiClient not initialised" failure for what is just a
       // schema-inspection call.
-      const isLoadable = tool.shouldDefer && !tool.alwaysLoad;
+      const isLoadable = registry.isDeferredAndHidden(canonical);
       if (isLoadable) {
         const wasRevealed = registry.isDeferredToolRevealed(canonical);
         registry.revealDeferredTool(canonical);
@@ -370,22 +370,6 @@ class ToolSearchInvocation extends BaseToolInvocation<
           process.stderr.write(
             `[ToolSearch] setTools() failed while revealing deferred tools: ${setToolsError}\n`,
           );
-        }
-
-        if (!setToolsError) {
-          try {
-            await geminiClient.refreshStartupContextReminder();
-          } catch (err) {
-            const refreshError =
-              err instanceof Error ? err.message : String(err);
-            debugLogger.warn(
-              'refreshStartupContextReminder() failed after revealing deferred tools:',
-              err,
-            );
-            process.stderr.write(
-              `[ToolSearch] refreshStartupContextReminder() failed after revealing deferred tools: ${refreshError}\n`,
-            );
-          }
         }
       }
 
@@ -438,7 +422,9 @@ class ToolSearchInvocation extends BaseToolInvocation<
     let blockedErrorMessage: string | undefined;
     if (blocked.length > 0) {
       const blockedMessages = blocked.map((name) =>
-        getSubagentPlanToolUnavailableMessage(name),
+        isLeaderOnlyToolUnavailableInSubagent(name)
+          ? getLeaderOnlyToolUnavailableMessage(name)
+          : getSubagentPlanToolUnavailableMessage(name),
       );
       blockedErrorMessage = blockedMessages.join('\n');
       const header = llmContent ? '\n\n' : '';

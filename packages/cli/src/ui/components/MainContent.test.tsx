@@ -15,21 +15,31 @@ import {
   type UIActions,
 } from '../contexts/UIActionsContext.js';
 import { AppContext } from '../contexts/AppContext.js';
-import { CompactModeProvider } from '../contexts/CompactModeContext.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
-import { ToolCallStatus } from '../types.js';
+import { ToolCallStatus, StreamingState } from '../types.js';
+
+// Global compact mode was removed (#5666); type-based tool rendering no longer
+// consumes a compact-mode context.
 
 const staticPropsSpy = vi.fn();
 const staticItemsSpy = vi.fn();
 const historyItemDisplayPropsSpy = vi.fn();
 const appHeaderSpy = vi.fn();
 const scrollableListPropsSpy = vi.fn();
+// Records every <Box> render's props so tests can assert layout props
+// (e.g. the pending-region maxHeight backstop) without coupling to ink's
+// Yoga internals.
+const boxPropsSpy = vi.fn();
 
 vi.mock('ink', async () => {
   const actual = await vi.importActual<typeof import('ink')>('ink');
 
   return {
     ...actual,
+    Box: (props: React.ComponentProps<typeof actual.Box>) => {
+      boxPropsSpy(props);
+      return <actual.Box {...props} />;
+    },
     Static: ({
       children,
       items,
@@ -85,6 +95,10 @@ vi.mock('./Notifications.js', () => ({
 
 vi.mock('./DebugModeNotification.js', () => ({
   DebugModeNotification: () => <Text>DEBUG_NOTIFICATION</Text>,
+}));
+
+vi.mock('../selection/use-text-selection.js', () => ({
+  TextSelectionController: () => null,
 }));
 
 vi.mock('./shared/ScrollableList.js', async () => {
@@ -241,15 +255,13 @@ const createUIActions = (): UIActions =>
 const renderMainContent = (uiState: UIState) =>
   render(
     <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-      <CompactModeProvider value={{ compactMode: false, compactInline: false }}>
-        <UIActionsContext.Provider value={createUIActions()}>
-          <UIStateContext.Provider value={uiState}>
-            <OverflowProvider>
-              <MainContent />
-            </OverflowProvider>
-          </UIStateContext.Provider>
-        </UIActionsContext.Provider>
-      </CompactModeProvider>
+      <UIActionsContext.Provider value={createUIActions()}>
+        <UIStateContext.Provider value={uiState}>
+          <OverflowProvider>
+            <MainContent />
+          </OverflowProvider>
+        </UIStateContext.Provider>
+      </UIActionsContext.Provider>
     </AppContext.Provider>,
   );
 
@@ -280,22 +292,18 @@ describe('<MainContent />', () => {
 
     rerender(
       <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-        <CompactModeProvider
-          value={{ compactMode: false, compactInline: false }}
-        >
-          <UIActionsContext.Provider value={createUIActions()}>
-            <UIStateContext.Provider
-              value={createUIState({
-                currentModel: 'gpt-5.4',
-                historyRemountKey: 7,
-              })}
-            >
-              <OverflowProvider>
-                <MainContent />
-              </OverflowProvider>
-            </UIStateContext.Provider>
-          </UIActionsContext.Provider>
-        </CompactModeProvider>
+        <UIActionsContext.Provider value={createUIActions()}>
+          <UIStateContext.Provider
+            value={createUIState({
+              currentModel: 'gpt-5.4',
+              historyRemountKey: 7,
+            })}
+          >
+            <OverflowProvider>
+              <MainContent />
+            </OverflowProvider>
+          </UIStateContext.Provider>
+        </UIActionsContext.Provider>
       </AppContext.Provider>,
     );
 
@@ -352,6 +360,52 @@ describe('<MainContent />', () => {
         'mermaid',
       ),
     ).toBe(1);
+  });
+
+  it('does not reset source copy numbering on a mid-turn steer item', () => {
+    historyItemDisplayPropsSpy.mockClear();
+
+    const mathBlock = ['$$', '\\alpha', '$$'].join('\n');
+
+    renderMainContent(
+      createUIState({
+        history: [
+          { id: 1, type: 'gemini_content', text: mathBlock },
+          // Steer injection: typed 'user' but not a real turn boundary.
+          { id: 2, type: 'user', text: 'steer', sentToModel: false },
+          { id: 3, type: 'gemini_content', text: mathBlock },
+        ],
+      }),
+    );
+
+    const calls = historyItemDisplayPropsSpy.mock.calls.map((c) => c[0]);
+    const item3 = calls.find((c) => c?.item?.id === 3);
+    expect(item3).toBeDefined();
+    // The steer must NOT reset the counter: item 3's math block continues
+    // numbering from item 1 (offset 1) rather than restarting at 0.
+    expect(item3.sourceCopyIndexOffsets?.mathBlockCount).toBe(1);
+  });
+
+  it('still resets source copy numbering on a real user turn', () => {
+    historyItemDisplayPropsSpy.mockClear();
+
+    const mathBlock = ['$$', '\\alpha', '$$'].join('\n');
+
+    renderMainContent(
+      createUIState({
+        history: [
+          { id: 1, type: 'gemini_content', text: mathBlock },
+          { id: 2, type: 'user', text: 'real prompt', sentToModel: true },
+          { id: 3, type: 'gemini_content', text: mathBlock },
+        ],
+      }),
+    );
+
+    const calls = historyItemDisplayPropsSpy.mock.calls.map((c) => c[0]);
+    const item3 = calls.find((c) => c?.item?.id === 3);
+    expect(item3).toBeDefined();
+    // A real user turn resets the counter: item 3 starts fresh (offset 0).
+    expect(item3.sourceCopyIndexOffsets?.mathBlockCount).toBe(0);
   });
 
   it('passes the full history to Static in one render when below the progressive replay threshold', () => {
@@ -432,25 +486,21 @@ describe('<MainContent />', () => {
     staticItemsSpy.mockClear();
     rerender(
       <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-        <CompactModeProvider
-          value={{ compactMode: false, compactInline: false }}
-        >
-          <UIActionsContext.Provider value={createUIActions()}>
-            <UIStateContext.Provider
-              value={createUIState({
-                history: [
-                  ...history,
-                  { type: 'user' as const, id: 100, text: 'new msg' },
-                ],
-                historyRemountKey: 1,
-              })}
-            >
-              <OverflowProvider>
-                <MainContent />
-              </OverflowProvider>
-            </UIStateContext.Provider>
-          </UIActionsContext.Provider>
-        </CompactModeProvider>
+        <UIActionsContext.Provider value={createUIActions()}>
+          <UIStateContext.Provider
+            value={createUIState({
+              history: [
+                ...history,
+                { type: 'user' as const, id: 100, text: 'new msg' },
+              ],
+              historyRemountKey: 1,
+            })}
+          >
+            <OverflowProvider>
+              <MainContent />
+            </OverflowProvider>
+          </UIStateContext.Provider>
+        </UIActionsContext.Provider>
       </AppContext.Provider>,
     );
 
@@ -492,19 +542,15 @@ describe('<MainContent />', () => {
     // meant to avoid.
     rerender(
       <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-        <CompactModeProvider
-          value={{ compactMode: false, compactInline: false }}
-        >
-          <UIActionsContext.Provider value={createUIActions()}>
-            <UIStateContext.Provider
-              value={createUIState({ history, historyRemountKey: 2 })}
-            >
-              <OverflowProvider>
-                <MainContent />
-              </OverflowProvider>
-            </UIStateContext.Provider>
-          </UIActionsContext.Provider>
-        </CompactModeProvider>
+        <UIActionsContext.Provider value={createUIActions()}>
+          <UIStateContext.Provider
+            value={createUIState({ history, historyRemountKey: 2 })}
+          >
+            <OverflowProvider>
+              <MainContent />
+            </OverflowProvider>
+          </UIStateContext.Provider>
+        </UIActionsContext.Provider>
       </AppContext.Provider>,
     );
 
@@ -596,23 +642,19 @@ describe('<MainContent />', () => {
     // someone correctly drives the reset off the model dimension instead.
     rerender(
       <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-        <CompactModeProvider
-          value={{ compactMode: false, compactInline: false }}
-        >
-          <UIActionsContext.Provider value={createUIActions()}>
-            <UIStateContext.Provider
-              value={createUIState({
-                history,
-                historyRemountKey: 1,
-                currentModel: 'model-b',
-              })}
-            >
-              <OverflowProvider>
-                <MainContent />
-              </OverflowProvider>
-            </UIStateContext.Provider>
-          </UIActionsContext.Provider>
-        </CompactModeProvider>
+        <UIActionsContext.Provider value={createUIActions()}>
+          <UIStateContext.Provider
+            value={createUIState({
+              history,
+              historyRemountKey: 1,
+              currentModel: 'model-b',
+            })}
+          >
+            <OverflowProvider>
+              <MainContent />
+            </OverflowProvider>
+          </UIStateContext.Provider>
+        </UIActionsContext.Provider>
       </AppContext.Provider>,
     );
 
@@ -663,17 +705,13 @@ describe('<MainContent />', () => {
       // Render with compactMode=true and useTerminalBuffer=false (default Static path).
       render(
         <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-          <CompactModeProvider
-            value={{ compactMode: true, compactInline: false }}
-          >
-            <UIActionsContext.Provider value={createUIActions()}>
-              <UIStateContext.Provider value={createUIState({ history })}>
-                <OverflowProvider>
-                  <MainContent />
-                </OverflowProvider>
-              </UIStateContext.Provider>
-            </UIActionsContext.Provider>
-          </CompactModeProvider>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider value={createUIState({ history })}>
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
         </AppContext.Provider>,
       );
 
@@ -734,17 +772,13 @@ describe('<MainContent />', () => {
 
       render(
         <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-          <CompactModeProvider
-            value={{ compactMode: true, compactInline: false }}
-          >
-            <UIActionsContext.Provider value={createUIActions()}>
-              <UIStateContext.Provider value={createUIState({ history })}>
-                <OverflowProvider>
-                  <MainContent />
-                </OverflowProvider>
-              </UIStateContext.Provider>
-            </UIActionsContext.Provider>
-          </CompactModeProvider>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider value={createUIState({ history })}>
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
         </AppContext.Provider>,
       );
 
@@ -875,25 +909,21 @@ describe('<MainContent />', () => {
       // Flip activePtyId; identical re-render except this one streaming-state field.
       rerender(
         <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-          <CompactModeProvider
-            value={{ compactMode: false, compactInline: false }}
-          >
-            <UIActionsContext.Provider value={createUIActions()}>
-              <UIStateContext.Provider
-                value={createUIState({
-                  useTerminalBuffer: true,
-                  activePtyId: 1,
-                  history: stableHistory,
-                  pendingHistoryItems: stablePending,
-                  slashCommands: stableSlashCommands,
-                })}
-              >
-                <OverflowProvider>
-                  <MainContent />
-                </OverflowProvider>
-              </UIStateContext.Provider>
-            </UIActionsContext.Provider>
-          </CompactModeProvider>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider
+              value={createUIState({
+                useTerminalBuffer: true,
+                activePtyId: 1,
+                history: stableHistory,
+                pendingHistoryItems: stablePending,
+                slashCommands: stableSlashCommands,
+              })}
+            >
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
         </AppContext.Provider>,
       );
 
@@ -905,5 +935,63 @@ describe('<MainContent />', () => {
       // The ref-based read keeps identity stable.
       expect(secondRenderItem).toBe(firstRenderItem);
     });
+  });
+
+  // #6809: the pending-region maxHeight backstop must stay ON while streaming
+  // (Responding) so streaming tables don't yank the viewport to the top
+  // (#6421), but drop in show-more mode once streaming has settled to a static
+  // confirmation (WaitingForConfirmation) so a tall diff renders every row.
+  it('gates the pending-region maxHeight backstop on streamingState (#6809)', () => {
+    const wrapperProps = () =>
+      boxPropsSpy.mock.calls
+        .map((c) => c[0])
+        .filter(
+          (p: { flexShrink?: number; overflow?: string }) =>
+            p.flexShrink === 0 && p.overflow === 'hidden',
+        );
+
+    boxPropsSpy.mockClear();
+    renderMainContent(
+      createUIState({
+        pendingHistoryItems: [{ type: 'gemini_content', text: 'x' }],
+        availableTerminalHeight: 5,
+        constrainHeight: false,
+        streamingState: StreamingState.Responding,
+      }),
+    );
+    expect(
+      wrapperProps().some((p: { maxHeight?: number }) => p.maxHeight === 5),
+    ).toBe(true);
+
+    boxPropsSpy.mockClear();
+    renderMainContent(
+      createUIState({
+        pendingHistoryItems: [{ type: 'gemini_content', text: 'x' }],
+        availableTerminalHeight: 5,
+        constrainHeight: false,
+        streamingState: StreamingState.WaitingForConfirmation,
+      }),
+    );
+    expect(
+      wrapperProps().some(
+        (p: { maxHeight?: number }) => p.maxHeight === undefined,
+      ),
+    ).toBe(true);
+
+    // Constrained mode (#6421): constrainHeight alone must engage the
+    // backstop even when not streaming, so streaming tables don't yank
+    // the viewport to the top.
+    boxPropsSpy.mockClear();
+    renderMainContent(
+      createUIState({
+        pendingHistoryItems: [{ type: 'gemini_content', text: 'x' }],
+        availableTerminalHeight: 5,
+        constrainHeight: true,
+        streamingState: StreamingState.Idle,
+      }),
+    );
+    expect(
+      wrapperProps().some((p: { maxHeight?: number }) => p.maxHeight === 5),
+    ).toBe(true);
   });
 });

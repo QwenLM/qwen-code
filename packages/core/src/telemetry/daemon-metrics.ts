@@ -18,6 +18,7 @@ const DAEMON_PROMPT_QUEUE_WAIT = `${SERVICE_NAME}.daemon.prompt.queue_wait`;
 const DAEMON_PROMPT_DURATION = `${SERVICE_NAME}.daemon.prompt.duration`;
 const DAEMON_BRIDGE_ERROR_COUNT = `${SERVICE_NAME}.daemon.bridge.error.count`;
 const DAEMON_CANCEL_COUNT = `${SERVICE_NAME}.daemon.cancel.count`;
+const DAEMON_PIPE_MESSAGE_BYTES = `${SERVICE_NAME}.daemon.pipe.message_bytes`;
 const DAEMON_SSE_ACTIVE = `${SERVICE_NAME}.daemon.sse.active`;
 const DAEMON_PROCESS_HEAP_USED = `${SERVICE_NAME}.daemon.process.heap_used`;
 
@@ -53,6 +54,7 @@ let promptQueueWaitHistogram: Histogram | undefined;
 let promptDurationHistogram: Histogram | undefined;
 let bridgeErrorCounter: Counter | undefined;
 let cancelCounter: Counter | undefined;
+let pipeMessageBytesHistogram: Histogram | undefined;
 
 function normalizeErrorType(err: unknown): string {
   const name = err instanceof Error ? err.name : typeof err;
@@ -125,6 +127,18 @@ export function initializeDaemonMetrics(): void {
     valueType: ValueType.INT,
   });
 
+  pipeMessageBytesHistogram = meter.createHistogram(DAEMON_PIPE_MESSAGE_BYTES, {
+    description: 'Daemon ACP child pipe message payload size in bytes.',
+    unit: 'By',
+    valueType: ValueType.INT,
+    advice: {
+      explicitBucketBoundaries: [
+        256, 1024, 4096, 16_384, 65_536, 262_144, 1_048_576, 4_194_304,
+        16_777_216,
+      ],
+    },
+  });
+
   initialized = true;
 }
 
@@ -190,11 +204,15 @@ export function recordDaemonHttpRequest(
   durationMs: number,
   route: string,
   statusCode: number,
+  deferredRuntimePath?: 'started_on_request' | 'joined',
 ): void {
   if (!initialized) return;
   const statusClass = `${Math.floor(statusCode / 100)}xx`;
   httpRequestCounter?.add(1, { route, status_class: statusClass });
-  httpRequestDurationHistogram?.record(durationMs, { route });
+  httpRequestDurationHistogram?.record(durationMs, {
+    route,
+    runtime_path: deferredRuntimePath ?? 'none',
+  });
 }
 
 export function recordDaemonSessionLifecycle(
@@ -233,4 +251,14 @@ export function recordDaemonBridgeError(err: unknown): void {
 export function recordDaemonCancel(): void {
   if (!initialized) return;
   cancelCounter?.add(1);
+}
+
+export type DaemonPipeDirection = 'inbound' | 'outbound';
+
+export function recordDaemonPipeMessage(
+  direction: DaemonPipeDirection,
+  bytes: number,
+): void {
+  if (!initialized) return;
+  pipeMessageBytesHistogram?.record(bytes, { direction });
 }

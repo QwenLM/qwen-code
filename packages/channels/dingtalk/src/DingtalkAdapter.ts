@@ -7,16 +7,23 @@ import { DWClient, TOPIC_ROBOT, EventAck } from 'dingtalk-stream-sdk-nodejs';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import {
   ChannelBase,
+  isTerminalTaskLifecycleType,
   sanitizeLogText,
   sanitizeSenderName,
 } from '@qwen-code/channel-base';
 import { normalizeDingTalkMarkdown, extractTitle } from './markdown.js';
 import { downloadMedia } from './media.js';
+import {
+  DingtalkConnectionManager,
+  type DingtalkManagedSocket,
+} from './DingtalkConnectionManager.js';
 import type {
   ChannelConfig,
   ChannelBaseOptions,
   Envelope,
   ChannelAgentBridge,
+  ChannelTaskLifecycleEvent,
+  SessionTarget,
 } from '@qwen-code/channel-base';
 
 /**
@@ -43,17 +50,24 @@ interface DingTalkRepliedMsg {
   };
 }
 
+interface DingTalkAtUser {
+  dingtalkId?: string;
+  staffId?: string;
+}
+
 interface DingTalkMessageData {
   msgId?: string;
   msgtype?: string;
   conversationType?: string;
   conversationId?: string;
+  conversationTitle?: string;
   sessionWebhook?: string;
   senderId?: string;
   senderStaffId?: string;
   senderNick?: string;
   chatbotUserId?: string;
   isInAtList?: boolean;
+  atUsers?: DingTalkAtUser[];
   text?: {
     content?: string;
     isReplyMsg?: boolean;
@@ -80,6 +94,72 @@ const ACK_REACTION_NAME = '👀';
 const ACK_EMOTION_ID = '2659900';
 const ACK_EMOTION_BG_ID = 'im_bg_1';
 const EMOTION_API = 'https://api.dingtalk.com/v1.0/robot/emotion';
+const EMOTION_MAX_ATTEMPTS = 3;
+const EMOTION_RETRY_BASE_DELAY_MS = 250;
+const GROUP_MSG_API = 'https://api.dingtalk.com/v1.0/robot/groupMessages/send';
+const DIRECT_MSG_API =
+  'https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend';
+const PROACTIVE_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text} markdown template key
+const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
+const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
+const TEXT_MESSAGE_LIMIT = 3800;
+const mentionTarget = Symbol('mentionTarget');
+
+type MentionTargetEnvelope = Envelope & {
+  [mentionTarget]?: string;
+};
+
+function withNonBotMentionContext(
+  data: DingTalkMessageData,
+  text: string,
+): string {
+  if (!Array.isArray(data.atUsers) || typeof data.chatbotUserId !== 'string') {
+    return text;
+  }
+
+  const mentions = new Set<string>();
+  for (const user of data.atUsers) {
+    if (!user) continue;
+    const dingtalkId =
+      typeof user.dingtalkId === 'string' ? user.dingtalkId : undefined;
+    // DingTalk Stream always sets dingtalkId for the bot entry; staffId-only bot entries are not expected.
+    if (dingtalkId === data.chatbotUserId) continue;
+    const staffId = typeof user.staffId === 'string' ? user.staffId : undefined;
+    const stableId = dingtalkId || staffId;
+    if (stableId) mentions.add(stableId);
+  }
+
+  if (mentions.size === 0) return text;
+  const memberLabel = mentions.size === 1 ? 'member' : 'members';
+  const context = `[Mentioned ${mentions.size} other group ${memberLabel}]`;
+  return text ? `${context}\n${text}` : context;
+}
+
+interface DingTalkTokenResponse {
+  errcode?: number;
+  errmsg?: string;
+  access_token?: string;
+  expires_in?: number;
+}
+
+interface DingTalkDirectMessageResponse {
+  flowControlledStaffIdList?: string[];
+  invalidStaffIdList?: string[];
+}
+
+function splitTextChunks(text: string, firstChunkLimit: number): string[] {
+  if (!text) return [text];
+
+  const chunks: string[] = [];
+  let offset = 0;
+  let chunkLimit = firstChunkLimit;
+  while (offset < text.length) {
+    chunks.push(text.slice(offset, offset + chunkLimit));
+    offset += chunkLimit;
+    chunkLimit = TEXT_MESSAGE_LIMIT;
+  }
+  return chunks;
+}
 
 type DingTalkClientInternals = DWClient & {
   debug: boolean;
@@ -89,12 +169,40 @@ type DingTalkClientInternals = DWClient & {
   onCallback(message: DWClientDownStream): void;
 };
 
+type DingtalkChannelConfig = ChannelConfig & {
+  useConnectionManager?: unknown;
+};
+
 export class DingtalkChannel extends ChannelBase {
   private client: DWClient;
+  private readonly atSender: boolean;
+  private connectionManager?: DingtalkConnectionManager<DWClient>;
   private seenMessages: Map<string, number> = new Map();
+  private mentionTargets = new Map<string, string>();
+  private sessionMentionTargets = new Map<string, string>();
+  private textReplySessions = new Set<string>();
+  private bufferedMentionTargets = new Set<string>();
+  private bufferedMentionTargetsBySession = new Map<string, Set<string>>();
   private dedupTimer?: ReturnType<typeof setInterval>;
   /** Map conversationId → latest sessionWebhook URL for sending replies. */
   private webhooks: Map<string, string> = new Map();
+  private activeReactionKeys = new Set<string>();
+  /** sessionId → reaction keys, so a dead session's reactions can be recalled. */
+  private sessionReactionKeys = new Map<
+    string,
+    Map<string, { messageId: string; chatId: string }>
+  >();
+  /**
+   * Real inbound message ids (insertion-ordered, size-capped). Unlike the
+   * TTL-swept seenMessages dedup map, entries survive long queue waits, so a
+   * turn that starts minutes after its message arrived still gets a reaction.
+   */
+  private inboundMessageIds = new Set<string>();
+  /**
+   * Token cache for proactive sends. The stream SDK only refreshes its token
+   * on (re)connect, so a long-lived socket serves a stale one after ~2h.
+   */
+  private proactiveToken?: { token: string; expiresAt: number };
 
   constructor(
     name: string,
@@ -104,21 +212,60 @@ export class DingtalkChannel extends ChannelBase {
   ) {
     super(name, config, bridge, options);
 
+    this.atSender =
+      (config as unknown as Record<string, unknown>)['atSender'] === true;
+
     if (!config.clientId || !config.clientSecret) {
       throw new Error(
         `Channel "${name}" requires clientId and clientSecret for DingTalk.`,
       );
     }
 
-    this.client = new DWClient({
-      clientId: config.clientId,
-      clientSecret: config.clientSecret,
-    });
-    this.installStructuredDownstreamHandler();
+    const rawUseConnectionManager = (config as DingtalkChannelConfig)
+      .useConnectionManager;
+    if (
+      rawUseConnectionManager !== undefined &&
+      typeof rawUseConnectionManager !== 'boolean'
+    ) {
+      throw new Error(
+        `Channel "${name}" useConnectionManager must be a boolean.`,
+      );
+    }
+    const useConnectionManager = rawUseConnectionManager ?? true;
+
+    this.client = this.createClient(useConnectionManager);
+    if (useConnectionManager) {
+      this.connectionManager = new DingtalkConnectionManager({
+        initialClient: this.client,
+        createClient: () => this.createClient(true),
+        getSocket: (client) =>
+          (client as unknown as { socket?: DingtalkManagedSocket }).socket,
+        onClientChanged: (client) => {
+          this.client = client;
+        },
+        log: (message) => {
+          process.stderr.write(
+            `[DingTalk:${this.name}] ${sanitizeLogText(message, 200)}\n`,
+          );
+        },
+      });
+    }
   }
 
-  private installStructuredDownstreamHandler(): void {
-    const client = this.client as DingTalkClientInternals;
+  private createClient(useConnectionManager: boolean): DWClient {
+    const client = new DWClient({
+      clientId: this.config.clientId!,
+      clientSecret: this.config.clientSecret!,
+      keepAlive: !useConnectionManager,
+    });
+    client.config.autoReconnect = !useConnectionManager;
+    this.installStructuredDownstreamHandler(client);
+    this.registerMessageHandler(client);
+    return client;
+  }
+
+  private installStructuredDownstreamHandler(streamClient: DWClient): void {
+    const client = streamClient as DingTalkClientInternals;
     client.debug = false;
     // Keep raw SDK downstream frames off stdout; this switch mirrors the SDK
     // dispatch table and should be checked when upgrading the DingTalk SDK.
@@ -127,7 +274,18 @@ export class DingtalkChannel extends ChannelBase {
     };
   }
 
+  private registerMessageHandler(client: DWClient): void {
+    client.registerCallbackListener(TOPIC_ROBOT, (msg: DWClientDownStream) => {
+      client.send(msg.headers.messageId, {
+        status: EventAck.SUCCESS,
+        message: 'ok',
+      });
+      this.onMessage(msg);
+    });
+  }
+
   private onDownStream(raw: unknown, client: DingTalkClientInternals): void {
+    this.connectionManager?.noteActivity(client);
     const decoded = this.decodeDownStream(raw);
     let msg: DWClientDownStream;
     try {
@@ -177,6 +335,9 @@ export class DingtalkChannel extends ChannelBase {
     switch (type) {
       case 'SYSTEM':
         this.callDownStreamHandler(client, 'onSystem', normalizedMsg);
+        if (topic === 'disconnect') {
+          this.connectionManager?.requestReconnect(client, 'SYSTEM disconnect');
+        }
         break;
       case 'EVENT':
         this.callDownStreamHandler(client, 'onEvent', normalizedMsg);
@@ -231,19 +392,11 @@ export class DingtalkChannel extends ChannelBase {
   }
 
   async connect(): Promise<void> {
-    this.client.registerCallbackListener(
-      TOPIC_ROBOT,
-      (msg: DWClientDownStream) => {
-        // ACK immediately so DingTalk doesn't retry
-        this.client.send(msg.headers.messageId, {
-          status: EventAck.SUCCESS,
-          message: 'ok',
-        });
-        this.onMessage(msg);
-      },
-    );
-
-    await this.client.connect();
+    if (this.connectionManager) {
+      await this.connectionManager.start();
+    } else {
+      await this.client.connect();
+    }
 
     // Periodically clean up dedup map
     this.dedupTimer = setInterval(() => {
@@ -270,7 +423,7 @@ export class DingtalkChannel extends ChannelBase {
     return isGroup && !conversationId;
   }
 
-  async sendMessage(chatId: string, text: string): Promise<void> {
+  private async sendReply(chatId: string, text: string): Promise<void> {
     // chatId is a conversationId — resolve to the latest sessionWebhook
     const webhook = this.webhooks.get(chatId);
     if (!webhook) {
@@ -308,6 +461,250 @@ export class DingtalkChannel extends ChannelBase {
     }
   }
 
+  private async sendTextReply(
+    chatId: string,
+    text: string,
+    atUserId?: string,
+  ): Promise<void> {
+    const webhook = this.webhooks.get(chatId);
+    if (!webhook) return;
+
+    const mentionPrefix = atUserId ? `@${atUserId}\n\n` : '';
+    const chunks = splitTextChunks(
+      text,
+      TEXT_MESSAGE_LIMIT - mentionPrefix.length,
+    );
+    for (let i = 0; i < chunks.length; i++) {
+      const isMention = i === 0 && atUserId !== undefined;
+      const resp = await fetch(webhook, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          msgtype: 'text',
+          text: {
+            content: isMention ? `${mentionPrefix}${chunks[i]!}` : chunks[i]!,
+          },
+          ...(isMention ? { at: { atUserIds: [atUserId] } } : {}),
+        }),
+      });
+
+      if (isMention && process.env['QWEN_CHANNEL_DEBUG_MENTIONS'] === '1') {
+        const payload = (await resp
+          .clone()
+          .json()
+          .catch(() => undefined)) as unknown;
+        const response =
+          payload && typeof payload === 'object'
+            ? (payload as Record<string, unknown>)
+            : {};
+        const value = response['errcode'] ?? response['code'];
+        const code =
+          typeof value === 'number' || typeof value === 'string'
+            ? String(value)
+            : 'unknown';
+        process.stderr.write(
+          `[DingTalk:${this.name}] mention delivery status=${resp.status} code=${code}\n`,
+        );
+      }
+
+      if (!resp.ok) {
+        const detail = await resp.text().catch(() => '');
+        process.stderr.write(
+          `[DingTalk:${this.name}] sendTextReply failed: HTTP ${resp.status} ${detail}\n`,
+        );
+      }
+    }
+  }
+
+  async sendMessage(chatId: string, text: string): Promise<void> {
+    await this.sendReply(chatId, text);
+  }
+
+  override supportsProactiveSend(): boolean {
+    return true;
+  }
+
+  // Regular proactive paths accept only group targets; webhook tasks may use
+  // DMs through the one-to-one API.
+  protected override supportsProactiveTarget(target: SessionTarget): boolean {
+    return (
+      target.isGroup === true &&
+      target.threadId === undefined &&
+      this.isStableTargetId(target.chatId)
+    );
+  }
+
+  protected override supportsProactiveDeliveryTarget(
+    target: SessionTarget,
+  ): boolean {
+    return (
+      typeof target.isGroup === 'boolean' &&
+      target.threadId === undefined &&
+      this.isStableTargetId(target.chatId)
+    );
+  }
+
+  protected override supportsProactiveWebhookTarget(
+    target: SessionTarget,
+  ): boolean {
+    return (
+      typeof target.isGroup === 'boolean' &&
+      target.threadId === undefined &&
+      this.isStableTargetId(target.chatId)
+    );
+  }
+
+  /**
+   * Single-shot cold send: a failed chunk aborts the remainder (already-sent
+   * chunks are not recalled) and the error surfaces in the loop's lastError.
+   */
+  protected override async pushProactive(
+    target: SessionTarget,
+    text: string,
+  ): Promise<void> {
+    if (!text.trim()) return;
+
+    const chunks = normalizeDingTalkMarkdown(text);
+    const title = extractTitle(text);
+
+    for (let i = 0; i < chunks.length; i++) {
+      await this.sendProactiveChunk(
+        target,
+        i === 0 ? title : `${title} (cont.)`,
+        chunks[i]!,
+        `chunk ${i + 1}/${chunks.length}`,
+      );
+    }
+  }
+
+  private async getProactiveToken(): Promise<string> {
+    const cached = this.proactiveToken;
+    if (cached && Date.now() < cached.expiresAt) return cached.token;
+
+    const url = `${TOKEN_API}?appkey=${encodeURIComponent(
+      this.config.clientId!,
+    )}&appsecret=${encodeURIComponent(this.config.clientSecret!)}`;
+    let data: DingTalkTokenResponse;
+    try {
+      const resp = await fetch(url, {
+        signal: AbortSignal.timeout(PROACTIVE_FETCH_TIMEOUT_MS),
+      });
+      data = (await resp.json()) as DingTalkTokenResponse;
+    } catch {
+      process.stderr.write(
+        `[DingTalk:${this.name}] access token fetch failed.\n`,
+      );
+      throw new Error('DingTalk access token fetch failed');
+    }
+    if (!data.access_token) {
+      const errmsg = sanitizeLogText(String(data.errmsg ?? ''), 200);
+      process.stderr.write(
+        `[DingTalk:${this.name}] access token request failed: gettoken errcode=${data.errcode} ${errmsg}\n`,
+      );
+      throw new Error(
+        `DingTalk access token request failed: gettoken errcode=${data.errcode}${errmsg ? ` ${errmsg}` : ''}`,
+      );
+    }
+    this.proactiveToken = {
+      token: data.access_token,
+      // Refresh a minute early so a fire mid-expiry doesn't race the TTL.
+      expiresAt:
+        Date.now() + Math.max(60, (data.expires_in ?? 7200) - 60) * 1000,
+    };
+    return data.access_token;
+  }
+
+  private async sendProactiveChunk(
+    target: SessionTarget,
+    title: string,
+    text: string,
+    chunkLabel: string,
+  ): Promise<void> {
+    const targetKind = target.isGroup === true ? 'group' : 'dm';
+    for (let attempt = 0; ; attempt++) {
+      const token = await this.getProactiveToken();
+      let resp: Response;
+      try {
+        const targetBody =
+          target.isGroup === true
+            ? { openConversationId: target.chatId }
+            : { userIds: [target.chatId] };
+        resp = await fetch(
+          target.isGroup === true ? GROUP_MSG_API : DIRECT_MSG_API,
+          {
+            method: 'POST',
+            headers: {
+              'x-acs-dingtalk-access-token': token,
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({
+              robotCode: this.config.clientId!,
+              ...targetBody,
+              msgKey: PROACTIVE_MSG_KEY,
+              msgParam: JSON.stringify({ title, text }),
+            }),
+            signal: AbortSignal.timeout(PROACTIVE_FETCH_TIMEOUT_MS),
+          },
+        );
+      } catch (err) {
+        const cause = (err as { cause?: unknown }).cause;
+        process.stderr.write(
+          `[DingTalk:${this.name}] proactive send error (${targetKind}, ${chunkLabel}): ${err}${cause ? ` (${cause})` : ''}\n`,
+        );
+        throw new Error(
+          `DingTalk proactive send failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      if (resp.status === 401 && attempt === 0) {
+        // Stale or revoked token — refresh once and retry this chunk.
+        this.proactiveToken = undefined;
+        await resp.body?.cancel();
+        continue;
+      }
+      if (!resp.ok) {
+        const detail = sanitizeLogText(await resp.text().catch(() => ''), 300);
+        process.stderr.write(
+          `[DingTalk:${this.name}] proactive send failed (${targetKind}, ${chunkLabel}): HTTP ${resp.status} ${detail}\n`,
+        );
+        throw new Error(
+          `DingTalk proactive send failed: HTTP ${resp.status}${detail ? ` ${detail}` : ''}`,
+        );
+      }
+      if (target.isGroup === false) {
+        let data: DingTalkDirectMessageResponse;
+        try {
+          data = (await resp.json()) as DingTalkDirectMessageResponse;
+        } catch {
+          process.stderr.write(
+            `[DingTalk:${this.name}] proactive send failed (${targetKind}, ${chunkLabel}): invalid JSON response\n`,
+          );
+          throw new Error(
+            'DingTalk proactive send failed: invalid JSON response',
+          );
+        }
+        if (data.invalidStaffIdList?.includes(target.chatId)) {
+          process.stderr.write(
+            `[DingTalk:${this.name}] proactive send failed (${targetKind}, ${chunkLabel}): invalid direct recipient\n`,
+          );
+          throw new Error(
+            'DingTalk proactive send failed: invalid direct recipient',
+          );
+        }
+        if (data.flowControlledStaffIdList?.includes(target.chatId)) {
+          process.stderr.write(
+            `[DingTalk:${this.name}] proactive send failed (${targetKind}, ${chunkLabel}): direct recipient rate limited\n`,
+          );
+          throw new Error(
+            'DingTalk proactive send failed: direct recipient rate limited',
+          );
+        }
+        return;
+      }
+      await resp.body?.cancel();
+      return;
+    }
+  }
+
   private getAccessToken(): string | undefined {
     return this.client.getConfig().access_token;
   }
@@ -317,38 +714,50 @@ export class DingtalkChannel extends ChannelBase {
     msgId: string,
     conversationId: string,
   ): Promise<void> {
-    const token = this.getAccessToken();
-    if (!token) return;
-
     const robotCode = this.config.clientId;
     if (!robotCode || !msgId || !conversationId) return;
-
     try {
-      const resp = await fetch(`${EMOTION_API}/${endpoint}`, {
-        method: 'POST',
-        headers: {
-          'x-acs-dingtalk-access-token': token,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          robotCode,
-          openMsgId: msgId,
-          openConversationId: conversationId,
-          emotionType: 2,
-          emotionName: ACK_REACTION_NAME,
-          textEmotion: {
-            emotionId: ACK_EMOTION_ID,
-            emotionName: ACK_REACTION_NAME,
-            text: ACK_REACTION_NAME,
-            backgroundId: ACK_EMOTION_BG_ID,
+      const token = this.config.clientSecret
+        ? await this.getProactiveToken()
+        : this.getAccessToken();
+      if (!token) return;
+      for (let attempt = 0; attempt < EMOTION_MAX_ATTEMPTS; attempt++) {
+        const resp = await fetch(`${EMOTION_API}/${endpoint}`, {
+          method: 'POST',
+          headers: {
+            'x-acs-dingtalk-access-token': token,
+            'Content-Type': 'application/json',
           },
-        }),
-      });
-      if (!resp.ok) {
-        const detail = await resp.text().catch(() => '');
+          body: JSON.stringify({
+            robotCode,
+            openMsgId: msgId,
+            openConversationId: conversationId,
+            emotionType: 2,
+            emotionName: ACK_REACTION_NAME,
+            textEmotion: {
+              emotionId: ACK_EMOTION_ID,
+              emotionName: ACK_REACTION_NAME,
+              text: ACK_REACTION_NAME,
+              backgroundId: ACK_EMOTION_BG_ID,
+            },
+          }),
+        });
+        if (resp.ok) return;
+
+        const isTransient = resp.status === 429 || resp.status >= 500;
+        if (isTransient && attempt < EMOTION_MAX_ATTEMPTS - 1) {
+          await resp.body?.cancel();
+          await new Promise((resolve) =>
+            setTimeout(resolve, EMOTION_RETRY_BASE_DELAY_MS * 2 ** attempt),
+          );
+          continue;
+        }
+
+        const detail = sanitizeLogText(await resp.text().catch(() => ''), 500);
         process.stderr.write(
-          `[DingTalk:${this.name}] emotion/${endpoint} failed: ${resp.status} ${detail}\n`,
+          `[DingTalk:${this.name}] emotion/${endpoint} failed after ${attempt + 1}/${EMOTION_MAX_ATTEMPTS} attempts: ${resp.status} ${detail}\n`,
         );
+        return;
       }
     } catch {
       // best-effort, don't break message flow
@@ -373,35 +782,250 @@ export class DingtalkChannel extends ChannelBase {
     if (this.dedupTimer) {
       clearInterval(this.dedupTimer);
     }
-    this.client.disconnect();
+    this.activeReactionKeys.clear();
+    this.sessionReactionKeys.clear();
+    if (this.connectionManager) {
+      this.connectionManager.stop();
+    } else {
+      this.client.disconnect();
+    }
     process.stderr.write(`[DingTalk:${this.name}] Disconnected.\n`);
   }
 
-  /**
-   * The chatId passed to onPromptStart/onPromptEnd is `conversationId ||
-   * sessionWebhook` (see message handler below). Reactions require a real
-   * conversation ID — skip the webhook-URL fallback case.
-   */
-  private isConversationId(chatId: string): boolean {
+  /** Stable API targets are conversation or user IDs, never webhook URLs. */
+  private isStableTargetId(chatId: string): boolean {
     return !!chatId && !/^https?:\/\//i.test(chatId);
+  }
+
+  private reactionKey(messageId: string, conversationId: string): string {
+    return `${conversationId}:${messageId}`;
+  }
+
+  private rememberInboundMessageId(msgId: string): void {
+    this.inboundMessageIds.delete(msgId);
+    this.inboundMessageIds.add(msgId);
+    if (this.inboundMessageIds.size > 1000) {
+      const oldest = this.inboundMessageIds.values().next().value;
+      if (oldest !== undefined) this.inboundMessageIds.delete(oldest);
+    }
+  }
+
+  private logReactionFailure(action: string, err: unknown): void {
+    process.stderr.write(
+      `[DingTalk:${this.name}] ${action} failed: ${err instanceof Error ? err.message : err}\n`,
+    );
+  }
+
+  private startReaction(
+    chatId: string,
+    messageId?: string,
+    sessionId?: string,
+  ): void {
+    if (!messageId || !this.isStableTargetId(chatId)) return;
+    // Loop lifecycle events carry the internal job id as messageId; the
+    // emotion API only accepts ids of real inbound messages, so skip anything
+    // we never saw arrive.
+    if (!this.inboundMessageIds.has(messageId)) return;
+    const key = this.reactionKey(messageId, chatId);
+    if (this.activeReactionKeys.has(key)) return;
+    this.activeReactionKeys.add(key);
+    if (sessionId) {
+      let keys = this.sessionReactionKeys.get(sessionId);
+      if (!keys) {
+        keys = new Map();
+        this.sessionReactionKeys.set(sessionId, keys);
+      }
+      keys.set(key, { messageId, chatId });
+    }
+    this.attachReaction(messageId, chatId)
+      .then(() => {
+        if (!this.activeReactionKeys.has(key)) {
+          void this.recallReaction(messageId, chatId).catch((err) => {
+            this.logReactionFailure('late reaction recall', err);
+          });
+        }
+      })
+      .catch((err) => {
+        this.activeReactionKeys.delete(key);
+        this.logReactionFailure('reaction attach', err);
+      });
+  }
+
+  private stopReaction(
+    chatId: string,
+    messageId?: string,
+    sessionId?: string,
+  ): void {
+    if (!messageId || !this.isStableTargetId(chatId)) return;
+    const key = this.reactionKey(messageId, chatId);
+    if (sessionId) {
+      const keys = this.sessionReactionKeys.get(sessionId);
+      if (keys) {
+        keys.delete(key);
+        if (keys.size === 0) this.sessionReactionKeys.delete(sessionId);
+      }
+    }
+    if (!this.activeReactionKeys.delete(key)) return;
+    this.recallReaction(messageId, chatId).catch((err) => {
+      this.logReactionFailure('reaction recall', err);
+    });
+  }
+
+  /** Recall reactions left behind when a session dies without terminal lifecycle events. */
+  override onSessionDied(sessionId: string): void {
+    const bufferedTargets = this.bufferedMentionTargetsBySession.get(sessionId);
+    if (bufferedTargets) {
+      this.bufferedMentionTargetsBySession.delete(sessionId);
+      for (const messageId of bufferedTargets) {
+        this.bufferedMentionTargets.delete(messageId);
+        this.mentionTargets.delete(messageId);
+      }
+    }
+    this.sessionMentionTargets.delete(sessionId);
+    this.textReplySessions.delete(sessionId);
+    const keys = this.sessionReactionKeys.get(sessionId);
+    if (keys) {
+      this.sessionReactionKeys.delete(sessionId);
+      for (const [key, { messageId, chatId }] of keys) {
+        if (this.activeReactionKeys.delete(key)) {
+          void this.recallReaction(messageId, chatId).catch((err) => {
+            this.logReactionFailure('session-death reaction recall', err);
+          });
+        }
+      }
+    }
+    super.onSessionDied(sessionId);
+  }
+
+  protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
+    if (event.type === 'started') {
+      this.startReaction(event.chatId, event.messageId, event.sessionId);
+      return;
+    }
+    if (isTerminalTaskLifecycleType(event.type)) {
+      if (event.messageId) this.mentionTargets.delete(event.messageId);
+      this.stopReaction(event.chatId, event.messageId, event.sessionId);
+    }
+  }
+
+  protected override onPromptBufferDropped(
+    _chatId: string,
+    sessionId: string,
+    messageIds: string[],
+  ): void {
+    for (const messageId of messageIds) {
+      this.bufferedMentionTargets.delete(messageId);
+      this.mentionTargets.delete(messageId);
+      this.untrackBufferedMentionTarget(sessionId, messageId);
+    }
+  }
+
+  protected override onPromptBufferDrained(
+    _chatId: string,
+    sessionId: string,
+    messageIds: string[],
+  ): void {
+    for (const messageId of messageIds) {
+      this.bufferedMentionTargets.delete(messageId);
+      this.untrackBufferedMentionTarget(sessionId, messageId);
+    }
+    for (const messageId of messageIds.slice(0, -1)) {
+      this.mentionTargets.delete(messageId);
+    }
+  }
+
+  protected override onPromptBuffered(
+    _chatId: string,
+    sessionId: string,
+    messageId?: string,
+  ): void {
+    if (messageId && this.mentionTargets.has(messageId)) {
+      this.bufferedMentionTargets.add(messageId);
+      let targets = this.bufferedMentionTargetsBySession.get(sessionId);
+      if (!targets) {
+        targets = new Set();
+        this.bufferedMentionTargetsBySession.set(sessionId, targets);
+      }
+      targets.add(messageId);
+    }
   }
 
   protected override onPromptStart(
     chatId: string,
-    _sessionId: string,
+    sessionId: string,
     messageId?: string,
   ): void {
-    if (!messageId || !this.isConversationId(chatId)) return;
-    this.attachReaction(messageId, chatId).catch(() => {});
+    if (messageId) {
+      this.bufferedMentionTargets.delete(messageId);
+      this.untrackBufferedMentionTarget(sessionId, messageId);
+      const atUserId = this.mentionTargets.get(messageId);
+      this.mentionTargets.delete(messageId);
+      if (this.atSender && atUserId) {
+        this.sessionMentionTargets.set(sessionId, atUserId);
+        this.textReplySessions.add(sessionId);
+      }
+    }
+    this.startReaction(chatId, messageId, sessionId);
+  }
+
+  override async handleInbound(envelope: Envelope): Promise<void> {
+    if (!(await this.preflightInbound(envelope))) return;
+
+    const messageId = envelope.messageId;
+    const atUserId = (envelope as MentionTargetEnvelope)[mentionTarget];
+    if (this.atSender && messageId && atUserId) {
+      this.mentionTargets.set(messageId, atUserId);
+    }
+
+    await this.processInbound(envelope);
+  }
+
+  protected override async processInbound(envelope: Envelope): Promise<void> {
+    const messageId = envelope.messageId;
+    try {
+      await super.processInbound(envelope);
+    } finally {
+      if (messageId && !this.bufferedMentionTargets.has(messageId)) {
+        this.mentionTargets.delete(messageId);
+      }
+    }
+  }
+
+  private untrackBufferedMentionTarget(
+    sessionId: string,
+    messageId: string,
+  ): void {
+    const targets = this.bufferedMentionTargetsBySession.get(sessionId);
+    if (!targets) return;
+    targets.delete(messageId);
+    if (targets.size === 0)
+      this.bufferedMentionTargetsBySession.delete(sessionId);
   }
 
   protected override onPromptEnd(
     chatId: string,
-    _sessionId: string,
+    sessionId: string,
     messageId?: string,
   ): void {
-    if (!messageId || !this.isConversationId(chatId)) return;
-    this.recallReaction(messageId, chatId).catch(() => {});
+    this.sessionMentionTargets.delete(sessionId);
+    this.textReplySessions.delete(sessionId);
+    this.stopReaction(chatId, messageId, sessionId);
+  }
+
+  protected override async sendResponseMessage(
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ): Promise<void> {
+    const atUserId = this.atSender
+      ? this.sessionMentionTargets.get(sessionId)
+      : undefined;
+    if (atUserId) this.sessionMentionTargets.delete(sessionId);
+    if (this.textReplySessions.has(sessionId)) {
+      await this.sendTextReply(chatId, text, atUserId);
+      return;
+    }
+    await this.sendReply(chatId, text);
   }
 
   /**
@@ -570,11 +1194,19 @@ export class DingtalkChannel extends ChannelBase {
     mediaType: 'image' | 'file' | 'audio' | 'video',
     fileName?: string,
   ): Promise<void> {
-    const token = this.getAccessToken();
-    const robotCode = this.config.clientId;
-    if (!token || !robotCode) {
+    let token: string;
+    try {
+      token = await this.getProactiveToken();
+    } catch {
       process.stderr.write(
-        `[DingTalk:${this.name}] Cannot download media: missing token or robotCode.\n`,
+        `[DingTalk:${this.name}] Cannot download media: access token refresh failed.\n`,
+      );
+      return;
+    }
+    const robotCode = this.config.clientId;
+    if (!robotCode) {
+      process.stderr.write(
+        `[DingTalk:${this.name}] Cannot download media: missing robotCode.\n`,
       );
       return;
     }
@@ -630,6 +1262,7 @@ export class DingtalkChannel extends ChannelBase {
         typeof downstream.data === 'string'
           ? JSON.parse(downstream.data)
           : (downstream.data as DingTalkMessageData);
+      this.logDebugPayload('DingTalk', data);
       const dataMsgId = typeof data.msgId === 'string' ? data.msgId : undefined;
       const headerMsgId =
         typeof downstream.headers.messageId === 'string'
@@ -643,6 +1276,7 @@ export class DingtalkChannel extends ChannelBase {
       }
       if (msgId) {
         this.seenMessages.set(msgId, Date.now());
+        this.rememberInboundMessageId(msgId);
       }
 
       const isGroup = data.conversationType === '2';
@@ -653,6 +1287,10 @@ export class DingtalkChannel extends ChannelBase {
       const conversationId =
         typeof data.conversationId === 'string'
           ? data.conversationId
+          : undefined;
+      const conversationTitle =
+        typeof data.conversationTitle === 'string'
+          ? data.conversationTitle
           : undefined;
       const isMentioned = Boolean(data.isInAtList);
       const senderNick =
@@ -711,9 +1349,11 @@ export class DingtalkChannel extends ChannelBase {
       const content = this.extractContent(data);
       let cleanText = content.text;
 
-      // Strip first @mention (the bot) from text, keep other @mentions intact
+      // Strip first @mention (the bot) from text, keep other @mentions intact.
+      // Anchor to start-of-string so @ symbols inside URLs or emails
+      // (e.g. git@host:path) are not accidentally stripped (#7402).
       if (isMentioned) {
-        cleanText = cleanText.replace(/@\S+/, '').trim();
+        cleanText = cleanText.replace(/^\s*@[^\s\p{Cf}]+/u, '').trim();
       }
 
       // Extract quoted message context
@@ -724,7 +1364,10 @@ export class DingtalkChannel extends ChannelBase {
       // After stripping the bot @mention, cleanText may legitimately be empty
       // (user pinged the bot with no other text). Don't fall back to the
       // original text in that case — it would re-introduce the @mention.
-      const envelopeText = isMentioned ? cleanText : cleanText || content.text;
+      const messageText = isMentioned ? cleanText : cleanText || content.text;
+      const envelopeText = isGroup
+        ? withNonBotMentionContext(data, messageText)
+        : messageText;
       const senderId = senderStaffId || senderIdValue || '';
       const senderName = senderNick || senderId || 'Unknown';
 
@@ -733,6 +1376,9 @@ export class DingtalkChannel extends ChannelBase {
         senderId,
         senderName,
         chatId,
+        ...(isGroup && conversationTitle
+          ? { chatName: conversationTitle }
+          : {}),
         text: envelopeText,
         isGroup,
         isMentioned,
@@ -743,6 +1389,10 @@ export class DingtalkChannel extends ChannelBase {
       // Reactions are resolved later via the chatId passed to
       // onPromptStart/onPromptEnd — no extra bookkeeping needed.
       envelope.messageId = msgId;
+
+      if (this.atSender && isGroup && senderStaffId) {
+        (envelope as MentionTargetEnvelope)[mentionTarget] = senderStaffId;
+      }
 
       const processMessage = async () => {
         // Download media if present (first downloadCode only for images)

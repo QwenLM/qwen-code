@@ -3,6 +3,7 @@ import type {
   ActiveGoal,
   SubagentConfig,
   McpToolProgressData,
+  ShellProgressData,
 } from '@qwen-code/qwen-code-core';
 
 /**
@@ -134,6 +135,7 @@ export interface CLISystemMessage {
   subtype: string;
   uuid: string;
   session_id: string;
+  parent_tool_use_id?: string | null;
   data?: unknown;
   cwd?: string;
   tools?: string[];
@@ -244,7 +246,7 @@ export interface MessageStopStreamEvent {
 export interface ToolProgressStreamEvent {
   type: 'tool_progress';
   tool_use_id: string;
-  content: McpToolProgressData;
+  content: McpToolProgressData | ShellProgressData;
 }
 
 export interface ActiveGoalStreamEvent {
@@ -388,6 +390,11 @@ export interface CLIControlInitializeRequest {
    */
   mcpServers?: Record<string, CLIMcpServerConfig>;
   agents?: SubagentConfig[];
+  /**
+   * Initial reasoning effort tier: 'low' | 'medium' | 'high' | 'xhigh' | 'max'.
+   * Applied at session start via config.setReasoningEffort().
+   */
+  effort?: string;
 }
 
 export interface CLIControlSetPermissionModeRequest {
@@ -418,6 +425,20 @@ export interface CLIControlSetModelRequest {
   model: string;
 }
 
+export interface CLIControlSetEffortRequest {
+  subtype: 'set_effort';
+  effort: string;
+}
+
+export interface CLIControlGetAvailableModelsRequest {
+  subtype: 'get_available_models';
+}
+
+export interface CLIControlGetUsageInfoRequest {
+  subtype: 'get_usage_info';
+  range?: 'today' | 'week' | 'month' | 'all';
+}
+
 export interface CLIControlMcpStatusRequest {
   subtype: 'mcp_server_status';
 }
@@ -440,9 +461,12 @@ export type ControlRequestPayload =
   | CLIHookCallbackRequest
   | CLIControlMcpMessageRequest
   | CLIControlSetModelRequest
+  | CLIControlSetEffortRequest
   | CLIControlMcpStatusRequest
   | CLIControlSupportedCommandsRequest
-  | CLIControlGetContextUsageRequest;
+  | CLIControlGetContextUsageRequest
+  | CLIControlGetAvailableModelsRequest
+  | CLIControlGetUsageInfoRequest;
 
 export interface CLIControlRequest {
   type: 'control_request';

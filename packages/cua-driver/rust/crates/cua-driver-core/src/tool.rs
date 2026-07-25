@@ -201,6 +201,7 @@ pub fn default_capabilities_for(tool_name: &str) -> Vec<String> {
             "screen.capture.region",
         ],
         "get_screen_size" => &["screen.dimensions"],
+        "get_desktop_state" => &["screen.capture", "screen.dimensions"],
         "get_cursor_position" => &["screen.cursor.position"],
 
         // ── accessibility / window state ─────────────────────────────
@@ -422,7 +423,9 @@ impl ToolRegistry {
             let pid = args.opt_i64("pid").unwrap_or(0);
             let window_id = args.opt_u64("window_id").unwrap_or(0);
             let (w, h) = crate::coord_norm::get_size(pid, window_id).unwrap_or((0, 0));
-            crate::coord_norm::denormalize_args(resolved_name, &mut args, w, h);
+            if let Err(msg) = crate::coord_norm::denormalize_args(resolved_name, &mut args, w, h) {
+                return ToolResult::error(msg);
+            }
         }
 
         let mut result = match self.tools.get(resolved_name) {
@@ -430,11 +433,11 @@ impl ToolRegistry {
             None => return ToolResult::error(format!("Unknown tool: {name}")),
         };
 
-        // ── coord_norm output hook: cache the size basis, then pixels → 0–1000.
-        // ingest must precede normalize_result (which rewrites the dims to 1000).
+        // ── coord_norm output hook: cache the size basis for subsequent calls.
         if self.normalized {
             crate::coord_norm::ingest_window_size(resolved_name, &args, &result);
             crate::coord_norm::ingest_screen_size(resolved_name, &result);
+            crate::coord_norm::ingest_zoom_size(resolved_name, &args, &result);
             crate::coord_norm::normalize_result(resolved_name, &mut result);
         }
 
@@ -690,7 +693,8 @@ mod capability_tests {
         // keyboard
         "type_text", "type_text_chars", "press_key", "hotkey", "set_value",
         // screen
-        "zoom", "get_screen_size", "get_cursor_position",
+        "zoom", "get_screen_size", "get_desktop_state",
+        "get_cursor_position",
         // accessibility
         "get_accessibility_tree", "get_window_state",
         // app / window

@@ -94,6 +94,7 @@ export async function planManagedAutoMemoryDreamByAgent(
   config: Config,
   projectRoot: string,
   abortSignal?: AbortSignal,
+  options: { suppressChatRecording?: boolean } = {},
 ): Promise<ForkedAgentResult> {
   const memoryRoot = getAutoMemoryRoot(projectRoot);
   const transcriptDir = getTranscriptDir(projectRoot);
@@ -107,7 +108,7 @@ export async function planManagedAutoMemoryDreamByAgent(
     taskPrompt: buildConsolidationTaskPrompt(memoryRoot, transcriptDir),
     systemPrompt: DREAM_AGENT_SYSTEM_PROMPT,
     maxTurns: MAX_TURNS,
-    maxTimeMinutes: MAX_TIME_MINUTES,
+    maxTimeMinutes: config.getMemoryAgentTimeoutMinutes() ?? MAX_TIME_MINUTES,
     tools: [
       ToolNames.READ_FILE,
       ToolNames.GREP,
@@ -118,6 +119,7 @@ export async function planManagedAutoMemoryDreamByAgent(
       ToolNames.EDIT,
     ],
     abortSignal,
+    suppressChatRecording: options.suppressChatRecording,
   });
 
   if (result.status === 'failed') {

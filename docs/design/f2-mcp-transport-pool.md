@@ -1,5 +1,13 @@
 # F2: Shared MCP Transport Pool — Design v2.2
 
+> **Historical decision record.** The original `1 daemon = 1 workspace`
+> premise is superseded by multi-workspace runtimes. The implemented pool still
+> has the same isolation boundary, but that boundary is now one
+> `WorkspaceRuntime`: sessions share within a runtime and never across
+> runtimes. See
+> [`daemon-multi-workspace-hardening.md`](./daemon-multi-workspace-hardening.md)
+> for the current ownership contract.
+>
 > Targets `daemon_mode_b_main` (per #4175 branching strategy). Replaces #4175 Wave 5 PR 23.
 > **Single-PR delivery** per maintainer's feature-cohesive batch guidance (2026-05-19).
 > Author: doudouOUC. Date: 2026-05-20. Revised: 2026-05-20 (v2.2 — implementation review fold-ins).
@@ -145,7 +153,7 @@ PR #4336 shipped F2 as 6 atomic commits + 6 fix commits over ~4 hours. Wenshao r
 
 **Non-goals (F2 scope)**
 
-- Cross-workspace pooling (1 daemon = 1 workspace invariant from PR #4113 stands)
+- Cross-workspace-runtime pooling (each runtime owns an independent pool)
 - Cross-daemon pooling (out of scope — multi-process orchestrator territory)
 - OAuth routing rework (F3 with `PermissionMediator`)
 - Pool persistence across daemon restart (in-memory only)
@@ -1160,7 +1168,7 @@ Per maintainer's feature-cohesive batch guidance (#4175 branching strategy 2026-
 | 1        | `refactor(core): split McpClient.discover into pure tool/prompt list and unify connect paths` | Add `discoverAndReturn()`; extract shared `establishConnection()` used by both `McpClient.connect()` and `connectToMcpServer()` factory; legacy `discover()` becomes thin wrapper that registers (preserves standalone qwen behavior). Zero observable behavior change.                                                                                                                                                | `mcp-client.ts`, `mcp-client.test.ts`                                                                                    |
 | 2        | `feat(core): McpTransportPool + SessionMcpView`                                               | Pool core: `fingerprint`, refcount, `spawnInFlight` dedupe, `sessionToEntries` reverse index, drain state machine, snapshot replay on attach, generation guard, tool+prompt dual fan-out, per-session trust copy. Mock McpClient for unit tests. No production wiring.                                                                                                                                                 | new `mcp-transport-pool.ts`, `mcp-pool-key.ts`, `mcp-pool-entry.ts`, `session-mcp-view.ts`, `mcp-pool-events.ts` + tests |
 | 3        | `feat(core): cross-platform descendant pid sweep + pool health monitor`                       | `listDescendantPids` (Unix `pgrep -P` recursive, Windows PowerShell CIM); unified health monitor inside `PoolEntry` (interval check + failure count + reconnect backoff per §6.6); subprocess-spawn integration tests gated on `QWEN_INTEGRATION === '1'`.                                                                                                                                                             | new `pid-descendants.ts` + tests; `mcp-pool-entry.ts`                                                                    |
-| 4        | `feat(serve): wire McpTransportPool into QwenAgent daemon mode`                               | `Config.setMcpTransportPool` + `getMcpTransportPool`; `ToolRegistry` threads pool into `McpClientManager`; `McpClientManager` optional `pool?` ctor param; `acpAgent.QwenAgent` constructs pool at init; `newSessionConfig` injection; `killSession` calls `pool.releaseSession`; SDK MCP + HTTP/SSE bypass via `createUnpooledConnection`; CLI flags `--mcp-pool-transports`, `--mcp-pool-drain-ms`, `--no-mcp-pool`. | `config.ts`, `tool-registry.ts`, `mcp-client-manager.ts`, `acpAgent.ts`, `run-qwen-serve.ts`                               |
+| 4        | `feat(serve): wire McpTransportPool into QwenAgent daemon mode`                               | `Config.setMcpTransportPool` + `getMcpTransportPool`; `ToolRegistry` threads pool into `McpClientManager`; `McpClientManager` optional `pool?` ctor param; `acpAgent.QwenAgent` constructs pool at init; `newSessionConfig` injection; `killSession` calls `pool.releaseSession`; SDK MCP + HTTP/SSE bypass via `createUnpooledConnection`; CLI flags `--mcp-pool-transports`, `--mcp-pool-drain-ms`, `--no-mcp-pool`. | `config.ts`, `tool-registry.ts`, `mcp-client-manager.ts`, `acpAgent.ts`, `run-qwen-serve.ts`                             |
 | 5        | `feat(serve): pool-aware status + restart routes`                                             | `QwenAgent.getMcpPoolAccounting` extMethod; `httpAcpBridge.buildWorkspaceMcpStatus` pool-first + bootstrap-session fallback; `restartMcpServer` accepts `?entryIndex=` and returns `RestartResult[]`; `entryCount` + `entrySummary[].entryIndex` on cell; capability tags `mcp_workspace_pool` + `mcp_pool_restart`.                                                                                                   | `httpAcpBridge.ts`, `capabilities.ts`, SDK types                                                                         |
 | 6        | `feat(serve): graduate MCP budget guardrails to workspace scope`                              | Move `tryReserveSlot`/`releaseSlotName`/hysteresis state machine from `McpClientManager` to pool; remove per-session `setMcpBudgetEventCallback` wiring in `acpAgent.newSessionConfig`; `QwenAgent.broadcastBudgetEvent` fan-out; snapshot cell `scope: 'workspace'`; SDK `scope?` additive field; `isWorkspaceScopedBudgetEvent` helper; inline doc updates.                                                          | `mcp-transport-pool.ts`, `mcp-client-manager.ts`, `acpAgent.ts`, `httpAcpBridge.ts`, SDK                                 |
 

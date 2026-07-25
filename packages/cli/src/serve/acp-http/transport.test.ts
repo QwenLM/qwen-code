@@ -16,7 +16,14 @@ import type {
   BridgeSessionSummary,
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
-import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import type {
+  BridgeEvent,
+  SessionReplaySnapshot,
+} from '@qwen-code/acp-bridge/eventBus';
+import {
+  SessionArtifactAuthorizationError,
+  SessionArtifactValidationError,
+} from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
   CancelSentinelCollisionError,
   InvalidClientIdError,
@@ -24,11 +31,13 @@ import {
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
+  SessionLimitExceededError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
+  TotalSessionLimitExceededError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
-  RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG,
+  SessionOrganizationService,
   SessionService,
   Storage,
 } from '@qwen-code/qwen-code-core';
@@ -53,16 +62,18 @@ import {
   WorkspaceSettingsPartialPersistError,
   type DaemonWorkspaceService,
 } from '../workspace-service/types.js';
-import {
-  buildChromeDevToolsMcpRuntimeConfigFromPackage,
-  type AcpHttpHandle,
-  mountAcpHttp,
-} from './index.js';
+import { type AcpHttpHandle, mountAcpHttp } from './index.js';
 import { CdpTunnelRegistry } from '../cdp-tunnel/cdp-tunnel-registry.js';
 import {
   mountWorkspaceMemoryRememberRoutes,
   WorkspaceRememberTaskLane,
 } from '../workspace-remember.js';
+import {
+  createSingleWorkspaceRegistry,
+  createWorkspaceGenerationGuard,
+  type WorkspaceGenerationGuard,
+  type WorkspaceRuntime,
+} from '../workspace-registry.js';
 import {
   MAX_TRUST_REASON_LENGTH,
   MAX_VOICE_MODEL_LENGTH,
@@ -88,70 +99,6 @@ vi.mock('../../services/setup-github.js', async () => {
     ...actual,
     setupGithub: setupGithubMocks.setupGithub,
   };
-});
-
-describe('buildChromeDevToolsMcpRuntimeConfigFromPackage', () => {
-  const pkgJsonPath = path.join('/tmp/chrome-devtools-mcp', 'package.json');
-
-  it.each([undefined, 0, -1, 1.5] as const)(
-    'rejects invalid localPort=%s',
-    (localPort) => {
-      expect(
-        buildChromeDevToolsMcpRuntimeConfigFromPackage(
-          localPort,
-          pkgJsonPath,
-          'bin/cli.js',
-        ),
-      ).toBeUndefined();
-    },
-  );
-
-  it('rejects missing and escaping bin paths', () => {
-    expect(
-      buildChromeDevToolsMcpRuntimeConfigFromPackage(4170, pkgJsonPath, {}),
-    ).toBeUndefined();
-    expect(
-      buildChromeDevToolsMcpRuntimeConfigFromPackage(
-        4170,
-        pkgJsonPath,
-        '../evil.js',
-      ),
-    ).toBeUndefined();
-  });
-
-  it('builds the stdio config for a package-local bin', () => {
-    expect(
-      buildChromeDevToolsMcpRuntimeConfigFromPackage(4170, pkgJsonPath, {
-        cli: 'bin/cli.js',
-      }),
-    ).toEqual({
-      command: process.execPath,
-      args: [
-        path.join('/tmp/chrome-devtools-mcp', 'bin/cli.js'),
-        '--wsEndpoint',
-        'ws://127.0.0.1:4170/cdp',
-      ],
-      alwaysLoadTools: true,
-      [RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG]: true,
-    });
-  });
-
-  it('uses the listening host for a specific non-wildcard bind', () => {
-    expect(
-      buildChromeDevToolsMcpRuntimeConfigFromPackage(
-        4170,
-        pkgJsonPath,
-        { cli: 'bin/cli.js' },
-        '192.168.1.20',
-      ),
-    ).toMatchObject({
-      args: [
-        path.join('/tmp/chrome-devtools-mcp', 'bin/cli.js'),
-        '--wsEndpoint',
-        'ws://192.168.1.20:4170/cdp',
-      ],
-    });
-  });
 });
 
 /**
@@ -227,6 +174,15 @@ class FakeBridge {
   /** `attached` value loadSession returns (false = spawned-from-disk). */
   loadAttached = true;
   spawnClientId: string | undefined = 'client-1';
+  loadRequests: Array<{
+    sessionId: string;
+    historyReplay?: string;
+    clientId?: string;
+  }> = [];
+  replaySnapshot: SessionReplaySnapshot | undefined;
+  loadState: Record<string, unknown> = { replayed: true };
+  loadPartial: true | undefined;
+  loadReplayError: string | undefined;
 
   closedSessions: string[] = [];
 
@@ -242,11 +198,19 @@ class FakeBridge {
   }
   async killSession(sessionId: string) {
     this.killed.push(sessionId);
+    return true;
   }
 
   loadShouldThrow = false;
+  loadError: unknown;
 
-  async loadSession(req: { sessionId: string }) {
+  async loadSession(req: {
+    sessionId: string;
+    historyReplay?: string;
+    clientId?: string;
+  }) {
+    this.loadRequests.push(req);
+    if (this.loadError !== undefined) throw this.loadError;
     if (this.loadShouldThrow) throw new Error('load failed');
     if (this.gate) await this.gate;
     return {
@@ -254,8 +218,14 @@ class FakeBridge {
       workspaceCwd: '/ws',
       attached: this.loadAttached,
       clientId: 'client-load',
-      state: { replayed: true },
+      state: this.loadState,
+      ...(this.loadPartial ? { partial: this.loadPartial } : {}),
+      ...(this.loadReplayError ? { replayError: this.loadReplayError } : {}),
     };
+  }
+
+  getSessionReplaySnapshot(_sessionId: string) {
+    return this.replaySnapshot;
   }
 
   async resumeSession(req: { sessionId: string }) {
@@ -270,17 +240,25 @@ class FakeBridge {
 
   subscribeThrows = false;
   /** Records every subscribeEvents call so tests can assert the resume cursor. */
-  subscribeCalls: Array<{ sessionId: string; lastEventId?: number }> = [];
+  subscribeCalls: Array<{
+    sessionId: string;
+    lastEventId?: number;
+    epoch?: string;
+  }> = [];
   /** Parallel to `subscribeCalls`: each subscription's abort signal, so a test
    * can detect when a closed stream's pump has actually stopped server-side. */
   subscribeSignals: Array<AbortSignal | undefined> = [];
 
   subscribeEvents(
     sessionId: string,
-    opts?: { signal?: AbortSignal; lastEventId?: number },
+    opts?: { signal?: AbortSignal; lastEventId?: number; epoch?: string },
   ) {
     if (this.subscribeThrows) throw new Error('subscribe failed');
-    this.subscribeCalls.push({ sessionId, lastEventId: opts?.lastEventId });
+    this.subscribeCalls.push({
+      sessionId,
+      lastEventId: opts?.lastEventId,
+      epoch: opts?.epoch,
+    });
     this.subscribeSignals.push(opts?.signal);
     const q = pushQueue(opts?.signal);
     this.queues.set(sessionId, q);
@@ -305,6 +283,15 @@ class FakeBridge {
   sessionLastEventId: number | undefined = undefined;
   getSessionLastEventId(_sessionId: string): number | undefined {
     return this.sessionLastEventId;
+  }
+
+  /**
+   * Bus epoch token advertised on the SSE response header and paired with
+   * resume cursors (DAEMON-001). Configurable per test.
+   */
+  sessionEventEpoch = 'fake-epoch';
+  getSessionEventEpoch(_sessionId: string): string {
+    return this.sessionEventEpoch;
   }
 
   respondToSessionPermission() {
@@ -357,6 +344,17 @@ class FakeBridge {
 
   listWorkspaceSessions() {
     return this.workspaceSessions;
+  }
+
+  getSessionSummary(sessionId: string) {
+    const summary = this.workspaceSessions.find(
+      (candidate) => candidate.sessionId === sessionId,
+    );
+    if (summary) return summary;
+    if (sessionId === 'sess-1') {
+      return { sessionId, workspaceCwd: '/ws' };
+    }
+    throw new Error(`Session not found: ${sessionId}`);
   }
 
   detached: Array<{ sessionId: string; clientId?: string }> = [];
@@ -425,6 +423,58 @@ class FakeBridge {
       servers: [{ name: 'typescript', status: 'READY', languages: ['ts'] }],
     };
   }
+  lastAddedArtifact:
+    | {
+        sessionId: string;
+        artifact: Parameters<HttpAcpBridge['addSessionArtifact']>[1];
+        context: Parameters<HttpAcpBridge['addSessionArtifact']>[2];
+      }
+    | undefined;
+  lastArtifactListSessionId: string | undefined;
+  lastArtifactListContext:
+    | Parameters<HttpAcpBridge['getSessionArtifacts']>[1]
+    | undefined;
+  lastRemovedArtifact:
+    | {
+        sessionId: string;
+        artifactId: string;
+        context: Parameters<HttpAcpBridge['removeSessionArtifact']>[2];
+      }
+    | undefined;
+  async getSessionArtifacts(
+    sessionId: string,
+    context: Parameters<HttpAcpBridge['getSessionArtifacts']>[1],
+  ) {
+    this.lastArtifactListSessionId = sessionId;
+    this.lastArtifactListContext = context;
+    return {
+      v: 1,
+      sessionId,
+      artifacts: [],
+      generatedAt: new Date().toISOString(),
+      limits: { maxArtifacts: 200 },
+    };
+  }
+  async addSessionArtifact(
+    sessionId: string,
+    artifact: Parameters<HttpAcpBridge['addSessionArtifact']>[1],
+    context: Parameters<HttpAcpBridge['addSessionArtifact']>[2],
+  ) {
+    this.lastAddedArtifact = { sessionId, artifact, context };
+    return { v: 1, sessionId, changes: [] };
+  }
+  async removeSessionArtifact(
+    sessionId: string,
+    artifactId: string,
+    context: Parameters<HttpAcpBridge['removeSessionArtifact']>[2],
+  ) {
+    this.lastRemovedArtifact = { sessionId, artifactId, context };
+    return {
+      v: 1,
+      sessionId,
+      changes: [{ action: 'removed' as const, artifactId, reason: 'explicit' }],
+    };
+  }
   async getWorkspaceToolsStatus() {
     return { v: 1, tools: [] };
   }
@@ -476,6 +526,17 @@ class FakeBridge {
   }
   async runWorkspaceMemoryRemember() {
     return { summary: 'remembered', filesTouched: [], touchedScopes: [] };
+  }
+  async runWorkspaceMemoryForget() {
+    return {
+      summary: 'forgot',
+      removedEntries: [],
+      touchedTopics: [],
+      touchedScopes: [],
+    };
+  }
+  async runWorkspaceMemoryDream() {
+    return { summary: 'dreamed', touchedTopics: [], dedupedEntries: 0 };
   }
   async isWorkspaceMemoryRememberAvailable() {
     return true;
@@ -847,6 +908,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     nextBridge?: FakeBridge;
     fsFactory?: WorkspaceFileSystemFactory;
     boundWorkspace?: string;
+    daemonEnv?: Readonly<NodeJS.ProcessEnv>;
+    primaryTrusted?: boolean;
+    generationGuard?: WorkspaceGenerationGuard;
   }): Promise<void> {
     server.closeAllConnections?.();
     await new Promise<void>((r) => server.close(() => r()));
@@ -854,10 +918,29 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const boundWorkspace = opts.boundWorkspace ?? '/ws';
     const app = express();
     app.use(express.json());
+    const workspaceRegistry = opts.generationGuard
+      ? createSingleWorkspaceRegistry({
+          workspaceId: 'primary',
+          workspaceCwd: boundWorkspace,
+          primary: true,
+          trusted: opts.primaryTrusted ?? true,
+          env: { mode: 'parent-process', overlayKeys: [] },
+          bridge: bridge as unknown as WorkspaceRuntime['bridge'],
+          workspaceService: fakeWorkspace,
+          routeFileSystemFactory: (opts.fsFactory ??
+            {}) as WorkspaceFileSystemFactory,
+          clientMcpSenderRegistry:
+            {} as WorkspaceRuntime['clientMcpSenderRegistry'],
+          generationGuard: opts.generationGuard,
+        })
+      : undefined;
     mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
       boundWorkspace,
       workspace: fakeWorkspace,
       enabled: true,
+      daemonEnv: opts.daemonEnv,
+      isPrimaryWorkspaceTrusted: () => opts.primaryTrusted ?? true,
+      workspaceRegistry,
       fsFactory: opts.fsFactory,
       sessionShellCommandEnabled: opts.sessionShellCommandEnabled,
       workspaceRememberLane: new WorkspaceRememberTaskLane(
@@ -955,6 +1038,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   async function writeStoredSession(
     sessionId: string,
     state: 'active' | 'archived' = 'active',
+    parentSessionId?: string,
+    sourceType?: string,
+    sourceId?: string,
   ): Promise<void> {
     const chatsDir = path.join(
       new Storage('/ws').getProjectDir(),
@@ -962,9 +1048,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ...(state === 'archived' ? ['archive'] : []),
     );
     await fs.mkdir(chatsDir, { recursive: true });
-    await fs.writeFile(
-      path.join(chatsDir, `${sessionId}.jsonl`),
-      `${JSON.stringify({
+    const lines = [
+      JSON.stringify({
         uuid: `${sessionId}-user-1`,
         parentUuid: null,
         sessionId,
@@ -972,7 +1057,45 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         type: 'user',
         message: { role: 'user', parts: [{ text: 'hello' }] },
         cwd: '/ws',
-      })}\n`,
+      }),
+    ];
+    if (parentSessionId !== undefined) {
+      // Mirror ChatRecordingService.recordParentSession: one `parent_session`
+      // system record near the head of the transcript that SessionService
+      // rehydrates into the summary's parentSessionId.
+      lines.push(
+        JSON.stringify({
+          uuid: `${sessionId}-parent-1`,
+          parentUuid: `${sessionId}-user-1`,
+          sessionId,
+          timestamp: '2026-06-30T00:00:00.000Z',
+          type: 'system',
+          subtype: 'parent_session',
+          systemPayload: { parentSessionId },
+          cwd: '/ws',
+        }),
+      );
+    }
+    if (sourceType !== undefined) {
+      lines.push(
+        JSON.stringify({
+          uuid: `${sessionId}-source-1`,
+          parentUuid: `${sessionId}-user-1`,
+          sessionId,
+          timestamp: '2026-06-30T00:00:00.000Z',
+          type: 'system',
+          subtype: 'session_source',
+          systemPayload: {
+            sourceType,
+            ...(sourceId !== undefined ? { sourceId } : {}),
+          },
+          cwd: '/ws',
+        }),
+      );
+    }
+    await fs.writeFile(
+      path.join(chatsDir, `${sessionId}.jsonl`),
+      `${lines.join('\n')}\n`,
       'utf8',
     );
   }
@@ -997,6 +1120,20 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(result.agentCapabilities._meta.qwen.methods).not.toContain(
       '_qwen/session/shell',
     );
+  });
+
+  it('initialize advertises image capability at _meta.imageCapability', async () => {
+    const { body } = await initializeRaw();
+    const result = body['result'] as {
+      agentCapabilities: {
+        _meta: { imageCapability: Record<string, unknown> };
+      };
+    };
+    expect(result.agentCapabilities._meta.imageCapability).toEqual({
+      autoHandlesWrongModel: true,
+      maxBytes: 10380902,
+      maxImagesPerTurn: 4,
+    });
   });
 
   it('initialize advertises _qwen/workspace/permissions methods', async () => {
@@ -1029,6 +1166,30 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     );
   });
 
+  it('initialize advertises session organization methods', async () => {
+    const { body } = await initializeRaw();
+    const result = body['result'] as {
+      agentCapabilities: {
+        _meta: { qwen: { methods: string[] } };
+      };
+    };
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/session/update_organization',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/session_groups/list',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/session_groups/create',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/session_groups/update',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/session_groups/delete',
+    );
+  });
+
   it('initialize advertises _qwen/workspace/setup-github', async () => {
     const { body } = await initializeRaw();
     const result = body['result'] as {
@@ -1054,6 +1215,18 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(result.agentCapabilities._meta.qwen.methods).toContain(
       '_qwen/workspace/memory/remember/get',
     );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/memory/forget',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/memory/forget/get',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/memory/dream',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/memory/dream/get',
+    );
   });
 
   it('initialize advertises _qwen/session/shell when enabled', async () => {
@@ -1066,6 +1239,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     };
     expect(result.agentCapabilities._meta.qwen.methods).toContain(
       '_qwen/session/shell',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).not.toContain(
+      '_qwen/session/rewind',
     );
   });
 
@@ -1100,6 +1276,80 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     }>;
     expect(frame.id).toBe(2);
     expect(frame.result.sessionId).toBe('sess-1');
+  });
+
+  it('maps workspace session admission failures to retryable RPC error data', async () => {
+    bridge.spawnOrAttach = async () => {
+      throw new SessionLimitExceededError(20);
+    };
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'session/new',
+      params: { cwd: '/ws' },
+    });
+    expect(ack.status).toBe(202);
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: {
+        code: number;
+        data: {
+          errorKind: string;
+          limit: number;
+          scope: string;
+          retryable: boolean;
+        };
+      };
+    }>;
+    expect(frame.id).toBe(3);
+    expect(frame.error.code).toBe(-32603);
+    expect(frame.error.data).toMatchObject({
+      errorKind: 'session_limit_exceeded',
+      limit: 20,
+      scope: 'workspace',
+      retryable: true,
+    });
+  });
+
+  it('maps total session admission failures to retryable RPC error data', async () => {
+    bridge.spawnOrAttach = async () => {
+      throw new TotalSessionLimitExceededError(10);
+    };
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'session/new',
+      params: { cwd: '/ws' },
+    });
+    expect(ack.status).toBe(202);
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: {
+        code: number;
+        data: {
+          errorKind: string;
+          limit: number;
+          scope: string;
+          retryable: boolean;
+        };
+      };
+    }>;
+    expect(frame.id).toBe(3);
+    expect(frame.error.code).toBe(-32603);
+    expect(frame.error.data).toMatchObject({
+      errorKind: 'session_limit_exceeded',
+      limit: 10,
+      scope: 'total',
+      retryable: true,
+    });
   });
 
   it('prompt streams session/update then the final result', async () => {
@@ -1211,6 +1461,50 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       lastEventId: undefined,
     });
     await fresh.body?.cancel().catch(() => {});
+  });
+
+  it('GET X-Qwen-Event-Epoch flows to subscribeEvents; invalid values degrade to "not provided"', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+
+    // Reconnect carrying cursor + epoch → subscribeEvents gets both.
+    const resumed = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': '42',
+        'x-qwen-event-epoch': 'epoch-abc',
+      },
+    });
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'sess-1',
+      lastEventId: 42,
+      epoch: 'epoch-abc',
+    });
+    // The stream advertises the CURRENT bus epoch back to the client so it
+    // can pair future cursors with it (DAEMON-001).
+    expect(resumed.headers.get('x-qwen-event-epoch')).toBe('fake-epoch');
+    await resumed.body?.cancel().catch(() => {});
+
+    // An out-of-charset token is rejected (logged) → treated as absent.
+    const bad = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': '42',
+        'x-qwen-event-epoch': 'not a valid token!',
+      },
+    });
+    await waitUntil(() => bridge.subscribeCalls.length >= 2);
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'sess-1',
+      lastEventId: 42,
+      epoch: undefined,
+    });
+    await bad.body?.cancel().catch(() => {});
   });
 
   it('real close-then-reconnect order keeps ownership (no 403) + prompt alive, resumes via Last-Event-ID', async () => {
@@ -3006,6 +3300,421 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     await sess.body?.cancel(); // release the long-lived SSE socket
   });
 
+  it('session/load reports partial replay status under qwen _meta', async () => {
+    bridge.loadState = {
+      replayed: true,
+      _meta: { qwen: { existing: 'kept' }, other: { value: 1 } },
+    };
+    bridge.loadPartial = true;
+    bridge.loadReplayError = 'replay boom';
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'session/load',
+      params: { sessionId: 'loaded-1' },
+    });
+    const [frame] = (await got) as Array<{
+      id: number;
+      result: {
+        replayed: boolean;
+        partial?: boolean;
+        replayError?: string;
+        _meta?: {
+          qwen?: {
+            existing?: string;
+            sessionLoadReplay?: {
+              partial?: boolean;
+              replayError?: string;
+            };
+          };
+          other?: { value?: number };
+        };
+      };
+    }>;
+    expect(frame.id).toBe(20);
+    expect(frame.result).not.toHaveProperty('partial');
+    expect(frame.result).not.toHaveProperty('replayError');
+    expect(frame.result._meta).toEqual({
+      qwen: {
+        existing: 'kept',
+        sessionLoadReplay: {
+          partial: true,
+          replayError: 'replay boom',
+        },
+      },
+      other: { value: 1 },
+    });
+  });
+
+  it('session/load uses response-mode and replays the snapshot on initial session stream attach', async () => {
+    bridge.replaySnapshot = {
+      lastEventId: 3,
+      compactedTurns: [
+        {
+          v: 1,
+          id: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'loaded-1',
+            update: { sessionUpdate: 'user_message_chunk' },
+          },
+        } as BridgeEvent,
+        {
+          v: 1,
+          id: 2,
+          type: 'model_switched',
+          data: { modelId: 'qwen3' },
+        } as BridgeEvent,
+      ],
+      liveJournal: [
+        {
+          v: 1,
+          id: 3,
+          type: 'session_update',
+          data: {
+            sessionId: 'loaded-1',
+            update: { sessionUpdate: 'agent_message_chunk' },
+          },
+        } as BridgeEvent,
+      ],
+    };
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const loadReply = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'session/load',
+      params: { sessionId: 'loaded-1' },
+    });
+    const [reply] = (await loadReply) as Array<{
+      id: number;
+      result: { replayed: boolean; compactedReplay?: unknown };
+    }>;
+    expect(reply).toMatchObject({
+      id: 20,
+      result: { replayed: true },
+    });
+    expect(reply.result).not.toHaveProperty('compactedReplay');
+    expect(bridge.loadRequests).toHaveLength(1);
+    expect(bridge.loadRequests[0]).toMatchObject({
+      sessionId: 'loaded-1',
+      clientId: clientIdForConnection(connId),
+      historyReplay: 'response',
+    });
+
+    const sess = await openStream(connId, 'loaded-1');
+    const framesPromise = takeFrames(sess, 4, 1000);
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    expect(bridge.subscribeCalls[0]).toEqual({
+      sessionId: 'loaded-1',
+      lastEventId: 3,
+    });
+    bridge.queues.get('loaded-1')!.push({
+      type: 'replay_complete',
+      data: { replayedCount: 0 },
+    });
+
+    const frames = (await framesPromise) as Array<{
+      method: string;
+      params: {
+        update?: { sessionUpdate?: string };
+        kind?: string;
+      };
+    }>;
+    expect(frames).toHaveLength(4);
+    expect(frames[0]).toMatchObject({
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'user_message_chunk' } },
+    });
+    expect(frames[1]).toMatchObject({
+      method: '_qwen/notify',
+      params: { kind: 'model_switched', data: { modelId: 'qwen3' } },
+    });
+    expect(frames[2]).toMatchObject({
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'agent_message_chunk' } },
+    });
+    expect(frames[3]).toMatchObject({
+      method: '_qwen/notify',
+      params: { kind: 'replay_complete' },
+    });
+  });
+
+  it('emits the stderr breadcrumb only when the initial replay snapshot is degraded', async () => {
+    const makeSnapshot = (
+      sessionId: string,
+      degraded: boolean,
+    ): SessionReplaySnapshot => ({
+      lastEventId: 1,
+      compactedTurns: [
+        {
+          v: 1,
+          id: 1,
+          type: 'session_update',
+          data: {
+            sessionId,
+            update: { sessionUpdate: 'user_message_chunk' },
+          },
+        } as BridgeEvent,
+      ],
+      liveJournal: [],
+      ...(degraded ? { degraded: true } : {}),
+    });
+    const degradedLine = (calls: unknown[][]) =>
+      calls.some(
+        ([line]) =>
+          typeof line === 'string' && line.includes('DEGRADED snapshot'),
+      );
+
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    // One reply frame per session/load; await each BEFORE opening the
+    // session stream — the GET must not race conn.ownSession() or the
+    // handler 403s and subscribeEvents never fires.
+    const replies = frameReader(connStream);
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Healthy snapshot: no operator breadcrumb.
+    bridge.replaySnapshot = makeSnapshot('deg-0', false);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 30,
+      method: 'session/load',
+      params: { sessionId: 'deg-0' },
+    });
+    await replies.next();
+    stdioMocks.writeStderrLine.mockClear();
+    await openStream(connId, 'deg-0');
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    expect(degradedLine(stdioMocks.writeStderrLine.mock.calls)).toBe(false);
+
+    // Degraded snapshot (DAEMON-008): breadcrumb names the session.
+    bridge.replaySnapshot = makeSnapshot('deg-1', true);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 31,
+      method: 'session/load',
+      params: { sessionId: 'deg-1' },
+    });
+    await replies.next();
+    stdioMocks.writeStderrLine.mockClear();
+    await openStream(connId, 'deg-1');
+    await waitUntil(() => bridge.subscribeCalls.length >= 2);
+    expect(degradedLine(stdioMocks.writeStderrLine.mock.calls)).toBe(true);
+    expect(
+      stdioMocks.writeStderrLine.mock.calls.some(
+        ([line]) => typeof line === 'string' && line.includes('deg-1'),
+      ),
+    ).toBe(true);
+    replies.close();
+  });
+
+  it('defers prompt replies until initial load replay completes', async () => {
+    bridge.replaySnapshot = {
+      lastEventId: 1,
+      compactedTurns: [],
+      liveJournal: [
+        {
+          v: 1,
+          id: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'loaded-1',
+            update: { sessionUpdate: 'agent_message_chunk' },
+          },
+        } as BridgeEvent,
+      ],
+    };
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const loadReply = takeFrames(connStream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'session/load',
+      params: { sessionId: 'loaded-1' },
+    });
+    await loadReply;
+
+    const sess = await openStream(connId, 'loaded-1');
+    const framesPromise = takeFrames(sess, 3, 1000);
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 21,
+      method: 'session/prompt',
+      params: {
+        sessionId: 'loaded-1',
+        prompt: [{ type: 'text', text: 'hi' }],
+      },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    bridge.queues.get('loaded-1')!.push({
+      type: 'replay_complete',
+      data: { replayedCount: 0 },
+    });
+
+    const frames = (await framesPromise) as Array<{
+      id?: number;
+      method?: string;
+      params?: { kind?: string; update?: { sessionUpdate?: string } };
+      result?: { stopReason?: string };
+    }>;
+    expect(frames[0]).toMatchObject({
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'agent_message_chunk' } },
+    });
+    expect(frames[1]).toMatchObject({
+      method: '_qwen/notify',
+      params: { kind: 'replay_complete' },
+    });
+    expect(frames[2]).toMatchObject({
+      id: 21,
+      result: { stopReason: 'end_turn' },
+    });
+  });
+
+  it('continues initial load replay from Last-Event-ID after reconnect', async () => {
+    bridge.replaySnapshot = {
+      lastEventId: 2,
+      compactedTurns: [],
+      liveJournal: [
+        {
+          v: 1,
+          id: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'loaded-1',
+            update: { sessionUpdate: 'user_message_chunk' },
+          },
+        } as BridgeEvent,
+        {
+          v: 1,
+          id: 2,
+          type: 'session_update',
+          data: {
+            sessionId: 'loaded-1',
+            update: { sessionUpdate: 'agent_message_chunk' },
+          },
+        } as BridgeEvent,
+      ],
+    };
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const loadReply = takeFrames(connStream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'session/load',
+      params: { sessionId: 'loaded-1' },
+    });
+    await loadReply;
+
+    const firstStream = await openStream(connId, 'loaded-1');
+    const [firstFrame] = (await takeFrames(firstStream, 1, 1000)) as Array<{
+      method: string;
+      params: { update?: { sessionUpdate?: string } };
+    }>;
+    expect(firstFrame).toMatchObject({
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'user_message_chunk' } },
+    });
+    const subscribeCountBeforeReconnect = bridge.subscribeCalls.length;
+
+    const resumed = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'loaded-1',
+        'last-event-id': '1',
+      },
+    });
+    const framesPromise = takeFrames(resumed, 2, 1000);
+    await waitUntil(
+      () => bridge.subscribeCalls.length > subscribeCountBeforeReconnect,
+    );
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'loaded-1',
+      lastEventId: 2,
+    });
+    bridge.queues.get('loaded-1')!.push({
+      type: 'replay_complete',
+      data: { replayedCount: 0 },
+    });
+
+    const frames = (await framesPromise) as Array<{
+      method: string;
+      params: { kind?: string; update?: { sessionUpdate?: string } };
+    }>;
+    expect(frames[0]).toMatchObject({
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'agent_message_chunk' } },
+    });
+    expect(frames[1]).toMatchObject({
+      method: '_qwen/notify',
+      params: { kind: 'replay_complete' },
+    });
+  });
+
+  it('does not rewind initial replay subscription behind Last-Event-ID', async () => {
+    bridge.replaySnapshot = {
+      lastEventId: 2,
+      compactedTurns: [],
+      liveJournal: [
+        {
+          v: 1,
+          id: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'loaded-1',
+            update: { sessionUpdate: 'user_message_chunk' },
+          },
+        } as BridgeEvent,
+        {
+          v: 1,
+          id: 2,
+          type: 'session_update',
+          data: {
+            sessionId: 'loaded-1',
+            update: { sessionUpdate: 'agent_message_chunk' },
+          },
+        } as BridgeEvent,
+      ],
+    };
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const loadReply = takeFrames(connStream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'session/load',
+      params: { sessionId: 'loaded-1' },
+    });
+    await loadReply;
+
+    const resumed = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'loaded-1',
+        'last-event-id': '5',
+      },
+    });
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'loaded-1',
+      lastEventId: 5,
+    });
+    await resumed.body?.cancel();
+  });
+
   it('session/resume owns the session + replies state', async () => {
     const connId = await initialize();
     const connStream = await openStream(connId);
@@ -3111,6 +3820,46 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
+  it('session/load preserves sanitized session writer RPC errors', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440322';
+      await writeStoredSession(sessionId);
+      bridge.loadError = Object.assign(new Error('private lock details'), {
+        code: -32020,
+        data: { errorKind: 'session_writer_conflict' },
+      });
+
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const got = takeFrames(connStream, 1);
+      await new Promise((r) => setTimeout(r, 50));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 213,
+        method: 'session/load',
+        params: { sessionId },
+      });
+
+      const [frame] = (await got) as Array<{
+        id: number;
+        error: {
+          code: number;
+          message: string;
+          data?: { errorKind?: string };
+        };
+      }>;
+      expect(frame).toEqual({
+        id: 213,
+        error: {
+          code: -32020,
+          message: 'This session is already open in another Qwen process.',
+          data: { errorKind: 'session_writer_conflict' },
+        },
+        jsonrpc: '2.0',
+      });
+    });
+  });
+
   it('session/load holds archive gate while restore is in flight', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440124';
@@ -3168,6 +3917,61 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       reader.close();
     });
   });
+
+  it.each(['session/load', 'session/resume'] as const)(
+    '%s re-seeds the persisted parent lineage into the bridge restore call',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440130';
+        const parentId = '550e8400-e29b-41d4-a716-446655440131';
+        // A restored sub-session carries its parent only on disk; the bridge
+        // creates the live entry without it, so the dispatcher must recover it
+        // from the transcript and pass it to load/resume.
+        await writeStoredSession(sessionId, 'active', parentId);
+
+        let loadParent: unknown = 'unset';
+        let resumeParent: unknown = 'unset';
+        bridge.loadSession = async (req) => {
+          loadParent = (req as { parentSessionId?: string }).parentSessionId;
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: '/ws',
+            attached: true,
+            clientId: 'client-load',
+            state: { replayed: true },
+          };
+        };
+        bridge.resumeSession = async (req) => {
+          resumeParent = (req as { parentSessionId?: string }).parentSessionId;
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: '/ws',
+            attached: true,
+            clientId: 'client-resume',
+            state: { resumed: true },
+          };
+        };
+
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 214,
+          method,
+          params: { sessionId },
+        });
+        expect(await reader.next()).toMatchObject({ id: 214 });
+        reader.close();
+
+        if (method === 'session/load') {
+          expect(loadParent).toBe(parentId);
+        } else {
+          expect(resumeParent).toBe(parentId);
+        }
+      });
+    },
+  );
 
   it('session/prompt holds archive gate while prompt is in flight', async () => {
     await withRuntimeDir(async () => {
@@ -3942,6 +4746,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
 
   it('session/close runs local cleanup even if the bridge close throws', async () => {
     bridge.closeShouldThrow = true;
+    bridge.getSessionSummary = () => {
+      throw new Error('session already gone');
+    };
     const connId = await initialize();
     await newSession(connId); // creates + owns sess-1
     await new Promise((r) => setTimeout(r, 30));
@@ -3956,6 +4763,35 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     // Local teardown ran in `finally` despite the throw → session unowned now.
     const after = await openStream(connId, 'sess-1');
     expect(after.status).toBe(403);
+  });
+
+  it('session/close can be retried when the bridge reports a live refusal', async () => {
+    bridge.closeError = new Error('close drain refused');
+    const connId = await initialize();
+    await newSession(connId);
+
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 146,
+      method: 'session/close',
+      params: { sessionId: 'sess-1' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const stillOwned = await openStream(connId, 'sess-1');
+    expect(stillOwned.status).toBe(200);
+
+    bridge.closeError = undefined;
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 147,
+      method: 'session/close',
+      params: { sessionId: 'sess-1' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(bridge.closedSessions).toEqual(['sess-1', 'sess-1']);
+    const closed = await openStream(connId, 'sess-1');
+    expect(closed.status).toBe(403);
+    await stillOwned.body?.cancel().catch(() => {});
   });
 
   it('connection cap → 503 on initialize', async () => {
@@ -4043,7 +4879,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     for (const f of frames) expect(f.error?.code).toBe(-32602);
   });
 
-  it('session/new orphan: DELETE before spawn resolves → bridge.killSession', async () => {
+  it('session/new orphan: DELETE before spawn resolves removes the persisted session', async () => {
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
     let release: () => void = () => {};
     bridge.gate = new Promise<void>((r) => (release = r));
     const connId = await initialize();
@@ -4061,6 +4900,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     release(); // spawn resolves AFTER destroy
     await new Promise((r) => setTimeout(r, 40));
     expect(bridge.killed).toContain('sess-1');
+    expect(removeSession).toHaveBeenCalledWith('sess-1');
+    removeSession.mockRestore();
   });
 
   it('session/load orphan (attached:false) → killSession, not detach', async () => {
@@ -4647,7 +5488,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   });
 
   it('dispatches _qwen/workspace/setup-github', async () => {
-    await restartServer({ fsFactory: makeFileFsFactory({}) });
+    await restartServer({
+      fsFactory: makeFileFsFactory({}),
+      daemonEnv: { HTTPS_PROXY: 'http://runtime-proxy.example:8080' },
+    });
     const connId = await initialize();
     const connStream = await openStream(connId);
     const got = takeFrames(connStream, 1);
@@ -4672,6 +5516,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect.objectContaining({
         cwd: '/ws',
         workspaceRoot: '/ws',
+        proxy: 'http://runtime-proxy.example:8080',
         abortSignal: expect.any(AbortSignal),
         fileOps: expect.any(Object),
       }),
@@ -5521,6 +6366,394 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
+    it('_qwen/session/artifacts returns the session artifact snapshot', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 58,
+        method: '_qwen/session/artifacts',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: {
+          v: 1,
+          sessionId: 'sess-1',
+          artifacts: [],
+          limits: { maxArtifacts: 200 },
+        },
+      });
+      expect(bridge.lastArtifactListSessionId).toBe('sess-1');
+      expect(bridge.lastArtifactListContext).toEqual({
+        clientId: 'client-1',
+        fromLoopback: true,
+      });
+    });
+
+    it('_qwen/session/artifacts/add forwards only public artifact fields', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 58,
+        method: '_qwen/session/artifacts/add',
+        params: {
+          sessionId: 'sess-1',
+          title: 'Lineage',
+          kind: 'link',
+          storage: 'external_url',
+          url: 'https://example.test/lineage',
+          metadata: { table: 'fact_orders' },
+          retention: 'ephemeral',
+          clientRetained: false,
+          source: 'tool',
+          trustedPublisher: true,
+          clientId: 'forged-client',
+          toolName: 'forged-tool',
+          hookEventName: 'forged-hook',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: { v: 1, sessionId: 'sess-1', changes: [] },
+      });
+      expect(bridge.lastAddedArtifact?.sessionId).toBe('sess-1');
+      expect(bridge.lastAddedArtifact?.artifact).toMatchObject({
+        title: 'Lineage',
+        kind: 'link',
+        storage: 'external_url',
+        url: 'https://example.test/lineage',
+        metadata: { table: 'fact_orders' },
+        retention: 'ephemeral',
+        clientRetained: false,
+      });
+      const artifact = bridge.lastAddedArtifact?.artifact as
+        | Record<string, unknown>
+        | undefined;
+      expect(artifact).not.toHaveProperty('sessionId');
+      expect(artifact).not.toHaveProperty('source');
+      expect(artifact).not.toHaveProperty('trustedPublisher');
+      expect(artifact).not.toHaveProperty('clientId');
+      expect(artifact).not.toHaveProperty('toolName');
+      expect(artifact).not.toHaveProperty('hookEventName');
+      expect(bridge.lastAddedArtifact?.context).toEqual({
+        clientId: 'client-1',
+        fromLoopback: true,
+      });
+    });
+
+    it('_qwen/session/artifacts/add maps artifact validation errors to invalid params', async () => {
+      bridge.addSessionArtifact = async () => {
+        throw new SessionArtifactValidationError(
+          'url must use http or https',
+          'url',
+        );
+      };
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 59,
+        method: '_qwen/session/artifacts/add',
+        params: {
+          sessionId: 'sess-1',
+          title: 'Bad URL',
+          url: 'file:///tmp/report.html',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          code: -32602,
+          data: { errorKind: 'artifact_validation_failed', field: 'url' },
+        },
+      });
+    });
+
+    it('_qwen/session/artifacts/remove forwards artifact id', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 59,
+        method: '_qwen/session/artifacts/remove',
+        params: {
+          sessionId: 'sess-1',
+          artifactId: 'artifact-1',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: {
+          v: 1,
+          sessionId: 'sess-1',
+          changes: [
+            {
+              action: 'removed',
+              artifactId: 'artifact-1',
+              reason: 'explicit',
+            },
+          ],
+        },
+      });
+      expect(bridge.lastRemovedArtifact).toMatchObject({
+        sessionId: 'sess-1',
+        artifactId: 'artifact-1',
+        context: {
+          clientId: 'client-1',
+          fromLoopback: true,
+        },
+      });
+    });
+
+    it('_qwen/session/artifacts/remove rejects missing artifact id', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 60,
+        method: '_qwen/session/artifacts/remove',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          code: -32602,
+          message: '`artifactId` is required',
+        },
+      });
+      expect(bridge.lastRemovedArtifact).toBeUndefined();
+    });
+
+    it('_qwen/session/artifacts/remove maps artifact authorization errors', async () => {
+      bridge.removeSessionArtifact = async () => {
+        throw new SessionArtifactAuthorizationError(
+          'sess-1',
+          'artifact-1',
+          'client-owner',
+          'client-other',
+        );
+      };
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 61,
+        method: '_qwen/session/artifacts/remove',
+        params: { sessionId: 'sess-1', artifactId: 'artifact-1' },
+      });
+
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          code: -32600,
+          message: 'artifact artifact-1 is owned by a different client',
+          data: {
+            errorKind: 'artifact_forbidden',
+            sessionId: 'sess-1',
+            artifactId: 'artifact-1',
+          },
+        },
+      });
+    });
+
+    it('_qwen/session/artifacts/add holds the archive gate while mutating', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440131';
+        await writeStoredSession(sessionId);
+        let addStarted!: () => void;
+        let releaseAdd!: () => void;
+        const addStartedPromise = new Promise<void>((resolve) => {
+          addStarted = resolve;
+        });
+        const addReleasedPromise = new Promise<void>((resolve) => {
+          releaseAdd = resolve;
+        });
+        bridge.addSessionArtifact = async (sessionId, artifact, context) => {
+          bridge.lastAddedArtifact = { sessionId, artifact, context };
+          addStarted();
+          await addReleasedPromise;
+          return { v: 1, sessionId, changes: [] };
+        };
+
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 99,
+          method: 'session/load',
+          params: { sessionId },
+        });
+        expect(await reader.next()).toMatchObject({ id: 99 });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 60,
+          method: '_qwen/session/artifacts/add',
+          params: {
+            sessionId,
+            title: 'Lineage',
+            url: 'https://example.test/lineage',
+          },
+        });
+        await addStartedPromise;
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 61,
+          method: '_qwen/sessions/archive',
+          params: { sessionIds: [sessionId] },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 61,
+          error: {
+            code: -32603,
+            data: { errorKind: 'session_archiving', sessionId },
+          },
+        });
+
+        releaseAdd();
+        expect(await reader.next()).toMatchObject({
+          id: 60,
+          result: { v: 1, sessionId, changes: [] },
+        });
+        reader.close();
+      });
+    });
+
+    it('_qwen/session/artifacts/remove holds the archive gate while mutating', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440132';
+        await writeStoredSession(sessionId);
+        let removeStarted!: () => void;
+        let releaseRemove!: () => void;
+        const removeStartedPromise = new Promise<void>((resolve) => {
+          removeStarted = resolve;
+        });
+        const removeReleasedPromise = new Promise<void>((resolve) => {
+          releaseRemove = resolve;
+        });
+        bridge.removeSessionArtifact = async (
+          sessionId,
+          artifactId,
+          context,
+        ) => {
+          bridge.lastRemovedArtifact = {
+            sessionId,
+            artifactId,
+            context,
+          };
+          removeStarted();
+          await removeReleasedPromise;
+          return {
+            v: 1,
+            sessionId,
+            changes: [{ action: 'removed', artifactId, reason: 'explicit' }],
+          };
+        };
+
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 99,
+          method: 'session/load',
+          params: { sessionId },
+        });
+        expect(await reader.next()).toMatchObject({ id: 99 });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 62,
+          method: '_qwen/session/artifacts/remove',
+          params: { sessionId, artifactId: 'artifact-1' },
+        });
+        await removeStartedPromise;
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 63,
+          method: '_qwen/sessions/archive',
+          params: { sessionIds: [sessionId] },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 63,
+          error: {
+            code: -32603,
+            data: { errorKind: 'session_archiving', sessionId },
+          },
+        });
+
+        releaseRemove();
+        expect(await reader.next()).toMatchObject({
+          id: 62,
+          result: {
+            v: 1,
+            sessionId,
+            changes: [
+              {
+                action: 'removed',
+                artifactId: 'artifact-1',
+                reason: 'explicit',
+              },
+            ],
+          },
+        });
+        reader.close();
+      });
+    });
+
     it('session methods reject unowned session', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
@@ -5537,6 +6770,195 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   });
 
   describe('workspace methods', () => {
+    it('maps a closed runtime generation to a retryable RPC error', async () => {
+      const generationGuard = createWorkspaceGenerationGuard();
+      await restartServer({ generationGuard });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      generationGuard.close();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 592,
+        method: '_qwen/workspace/mcp',
+        params: {},
+      });
+
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        id: 592,
+        error: {
+          code: -32603,
+          data: {
+            errorKind: 'workspace_runtime_unavailable',
+            httpStatus: 503,
+            retryable: true,
+          },
+        },
+      });
+    });
+
+    it('rejects trusted-only methods after primary trust is revoked', async () => {
+      await restartServer({ primaryTrusted: false });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 59,
+        method: '_qwen/workspace/memory/write',
+        params: { content: 'blocked' },
+      });
+
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        error: {
+          data: {
+            errorKind: 'untrusted_workspace',
+            httpStatus: 403,
+          },
+        },
+      });
+    });
+
+    it.each([
+      [
+        '_qwen/workspace/session_groups/create',
+        { workspaceCwd: '/ws', name: 'Blocked', color: 'blue' },
+      ],
+      [
+        '_qwen/workspace/session_groups/update',
+        { workspaceCwd: '/ws', groupId: 'blocked', name: 'Blocked' },
+      ],
+      [
+        '_qwen/workspace/session_groups/delete',
+        { workspaceCwd: '/ws', groupId: 'blocked' },
+      ],
+    ])(
+      'rejects untrusted session group mutation %s',
+      async (method, params) => {
+        await restartServer({ primaryTrusted: false });
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 590,
+          method,
+          params,
+        });
+
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({
+          id: 590,
+          error: {
+            data: {
+              errorKind: 'untrusted_workspace',
+              httpStatus: 403,
+            },
+          },
+        });
+      },
+    );
+
+    it('rejects a sensitive response when its runtime generation closes in flight', async () => {
+      const generationGuard = createWorkspaceGenerationGuard();
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      let releaseRead!: () => void;
+      const readReleased = new Promise<void>((resolve) => {
+        releaseRead = resolve;
+      });
+      const statusSpy = vi
+        .spyOn(fakeWorkspace, 'getWorkspaceMcpStatus')
+        .mockImplementationOnce(async () => {
+          markStarted();
+          await readReleased;
+          return {
+            v: 1,
+            workspaceCwd: '/ws',
+            initialized: false,
+            servers: [],
+          };
+        });
+      await restartServer({ generationGuard });
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const reader = frameReader(stream);
+
+      const posting = post(connId, {
+        jsonrpc: '2.0',
+        id: 591,
+        method: '_qwen/workspace/mcp',
+        params: {},
+      });
+      await started;
+      generationGuard.close();
+      releaseRead();
+      await posting;
+
+      expect(await reader.next()).toMatchObject({
+        id: 591,
+        error: {
+          data: {
+            errorKind: 'workspace_runtime_unavailable',
+            httpStatus: 503,
+          },
+        },
+      });
+      reader.close();
+      statusSpy.mockRestore();
+    });
+
+    it('rejects a session group mutation when its generation closes in flight', async () => {
+      const generationGuard = createWorkspaceGenerationGuard();
+      const createSpy = vi
+        .spyOn(SessionOrganizationService.prototype, 'createGroup')
+        .mockImplementationOnce(async ({ name, color }) => {
+          generationGuard.close();
+          return {
+            id: 'stale-group',
+            name,
+            color,
+            order: 0,
+            createdAt: '2026-07-24T00:00:00.000Z',
+            updatedAt: '2026-07-24T00:00:00.000Z',
+          };
+        });
+      try {
+        await restartServer({ generationGuard });
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 593,
+          method: '_qwen/workspace/session_groups/create',
+          params: {
+            workspaceCwd: '/ws',
+            name: 'Stale',
+            color: 'blue',
+          },
+        });
+
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({
+          id: 593,
+          error: {
+            data: {
+              errorKind: 'workspace_runtime_unavailable',
+              httpStatus: 503,
+              retryable: true,
+            },
+          },
+        });
+      } finally {
+        createSpy.mockRestore();
+      }
+    });
+
     it('_qwen/workspace/tools returns tools', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
@@ -5550,6 +6972,434 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       const frames = await takeFrames(await streamRes, 1);
       expect(frames[0]).toMatchObject({ result: { v: 1, tools: [] } });
     });
+
+    it('session organization methods persist groups and organized list state', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440010';
+        await writeStoredSession(sessionId);
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        const reader = frameReader(await streamRes);
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 70,
+          method: '_qwen/workspace/session_groups/create',
+          params: {
+            workspaceCwd: '/ws',
+            name: 'Frontend',
+            color: '#12ABEF',
+          },
+        });
+        const createFrame = (await reader.next()) as {
+          result: { group: { id: string; name: string; color: string } };
+        };
+        const group = createFrame.result.group;
+        expect(group).toMatchObject({
+          name: 'Frontend',
+          color: '#12abef',
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 71,
+          method: '_qwen/session/update_organization',
+          params: {
+            sessionId,
+            isPinned: true,
+            groupId: group.id,
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: {
+            sessionId,
+            isPinned: true,
+            groupId: group.id,
+          },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 72,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            view: 'organized',
+            group: group.id,
+            _meta: { size: 20 },
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: {
+            sessions: [
+              {
+                sessionId,
+                isPinned: true,
+                groupId: group.id,
+              },
+            ],
+          },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 73,
+          method: '_qwen/workspace/session_groups/delete',
+          params: { workspaceCwd: '/ws', groupId: group.id },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: { deleted: true },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 74,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            view: 'organized',
+            group: 'ungrouped',
+            _meta: { size: 20 },
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: {
+            sessions: [
+              {
+                sessionId,
+                isPinned: true,
+                groupId: null,
+              },
+            ],
+          },
+        });
+        reader.close();
+      });
+    });
+
+    it('_qwen/session/update_organization assigns a color echoed by session/list', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440011';
+        await writeStoredSession(sessionId);
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        const reader = frameReader(await streamRes);
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 80,
+          method: '_qwen/session/update_organization',
+          params: { sessionId, color: 'purple' },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: { sessionId, color: 'purple', groupId: null },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 81,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            view: 'organized',
+            group: 'all',
+            _meta: { size: 20 },
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: {
+            sessions: [{ sessionId, color: 'purple', groupId: null }],
+          },
+        });
+        reader.close();
+      });
+    });
+
+    it('session/list organized default source includes legacy sessions', async () => {
+      await withRuntimeDir(async () => {
+        const legacyId = '550e8400-e29b-41d4-a716-446655440014';
+        const defaultId = '550e8400-e29b-41d4-a716-446655440015';
+        const scheduledId = '550e8400-e29b-41d4-a716-446655440016';
+        await writeStoredSession(legacyId);
+        await writeStoredSession(defaultId, 'active', undefined, 'default');
+        await writeStoredSession(
+          scheduledId,
+          'active',
+          undefined,
+          'scheduled_task',
+          'task-1',
+        );
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        const reader = frameReader(await streamRes);
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 87,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            view: 'organized',
+            group: 'all',
+            sourceType: 'default',
+            _meta: { size: 20 },
+          },
+        });
+        const frame = (await reader.next()) as {
+          result: { sessions: Array<{ sessionId: string }> };
+        };
+        expect(
+          frame.result.sessions.map((session) => session.sessionId),
+        ).toEqual(expect.arrayContaining([legacyId, defaultId]));
+        expect(
+          frame.result.sessions.map((session) => session.sessionId),
+        ).not.toContain(scheduledId);
+        reader.close();
+      });
+    });
+
+    it('session/list group=ungrouped excludes color-tagged sessions', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440012';
+        await writeStoredSession(sessionId);
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        const reader = frameReader(await streamRes);
+
+        // Tag the session with a color and no named group.
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 82,
+          method: '_qwen/session/update_organization',
+          params: { sessionId, color: 'red' },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: { sessionId, color: 'red', groupId: null },
+        });
+
+        // A color tag is its own sidebar bucket, so the session is not
+        // "ungrouped" even though it belongs to no named group. The server
+        // filter must agree with that taxonomy for REST/ACP consumers.
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 83,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            view: 'organized',
+            group: 'ungrouped',
+            _meta: { size: 20 },
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: { sessions: [] },
+        });
+        reader.close();
+      });
+    });
+
+    it('session/list group=<id> excludes sessions that also carry a color tag', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440013';
+        await writeStoredSession(sessionId);
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        const reader = frameReader(await streamRes);
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 84,
+          method: '_qwen/workspace/session_groups/create',
+          params: { workspaceCwd: '/ws', name: 'Frontend', color: 'blue' },
+        });
+        const createFrame = (await reader.next()) as {
+          result: { group: { id: string } };
+        };
+        const groupId = createFrame.result.group.id;
+
+        // An SDK/API consumer can set both groupId and color in one update —
+        // the core store keeps both. The sidebar gives color precedence, so the
+        // named-group filter must not surface this session under the group.
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 85,
+          method: '_qwen/session/update_organization',
+          params: { sessionId, groupId, color: 'red' },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: { sessionId, groupId, color: 'red' },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 86,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            view: 'organized',
+            group: groupId,
+            _meta: { size: 20 },
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: { sessions: [] },
+        });
+        reader.close();
+      });
+    });
+
+    it('session/list rejects group filter without organized view', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 75,
+        method: 'session/list',
+        params: {
+          workspaceCwd: '/ws',
+          group: 'pinned',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        id: 75,
+        error: {
+          code: -32602,
+          message: '`group` requires `view` to be "organized"',
+        },
+      });
+    });
+
+    it('session/list rejects an empty parentSessionId', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 76,
+        method: 'session/list',
+        params: {
+          workspaceCwd: '/ws',
+          parentSessionId: '',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        id: 76,
+        error: {
+          code: -32602,
+          message: '`parentSessionId` must be a non-empty string',
+        },
+      });
+    });
+
+    it('session/list rejects parentSessionId with the organized view', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 77,
+        method: 'session/list',
+        params: {
+          workspaceCwd: '/ws',
+          view: 'organized',
+          parentSessionId: 'parent-1',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        id: 77,
+        error: {
+          code: -32602,
+          message: '`parentSessionId` is not supported with `view` "organized"',
+        },
+      });
+    });
+
+    it('session/list?parentSessionId returns only that parent’s children, each tagged with parentSessionId', async () => {
+      await withRuntimeDir(async () => {
+        const parentId = '550e8400-e29b-41d4-a716-446655440020';
+        const otherParentId = '550e8400-e29b-41d4-a716-446655440021';
+        const childOfParent = '550e8400-e29b-41d4-a716-446655440022';
+        const childOfOther = '550e8400-e29b-41d4-a716-446655440023';
+        await writeStoredSession(parentId);
+        await writeStoredSession(childOfParent, 'active', parentId);
+        await writeStoredSession(childOfOther, 'active', otherParentId);
+
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 78,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            parentSessionId: parentId,
+            _meta: { size: 20 },
+          },
+        });
+        const frames = (await takeFrames(await streamRes, 1)) as Array<{
+          id: number;
+          result: {
+            sessions: Array<{ sessionId: string; parentSessionId?: string }>;
+          };
+        }>;
+        expect(frames[0].id).toBe(78);
+        const sessions = frames[0].result.sessions;
+        // Only the child of the requested parent surfaces — not the parent
+        // itself and not the sibling under a different parent.
+        expect(sessions.map((s) => s.sessionId)).toEqual([childOfParent]);
+        expect(sessions[0]!.parentSessionId).toBe(parentId);
+      });
+    });
+
+    it.each([
+      {
+        params: { isPinned: true },
+        message: '`sessionId` is required',
+      },
+      {
+        params: { sessionId: 'session-1', isPinned: 'yes' },
+        message: '`isPinned` must be a boolean',
+      },
+      {
+        params: { sessionId: 'session-1', groupId: 1 },
+        message: '`groupId` must be a string or null',
+      },
+      {
+        params: { sessionId: 'session-1', color: 'pink' },
+        message: '`color` must be a supported color or null',
+      },
+    ])(
+      '_qwen/session/update_organization rejects invalid params: $message',
+      async ({ params, message }) => {
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 76,
+          method: '_qwen/session/update_organization',
+          params,
+        });
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({
+          id: 76,
+          error: {
+            code: -32602,
+            message,
+          },
+        });
+      },
+    );
 
     it('_qwen/workspace/mcp/tools rejects missing serverName', async () => {
       const connId = await initialize();
@@ -6004,6 +7854,101 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       }
     });
 
+    it('_qwen/workspace/memory/forget queues and polls hidden tasks', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      const reader = frameReader(await streamRes);
+      try {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 82,
+          method: '_qwen/workspace/memory/forget',
+          params: { query: 'old preference' },
+        });
+        const queued = (await reader.next()) as {
+          result: { taskId: string; status: string };
+        };
+        expect(queued.result).toMatchObject({
+          status: 'queued',
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 83,
+          method: '_qwen/workspace/memory/forget/get',
+          params: { taskId: queued.result.taskId },
+        });
+        const completed = (await reader.next()) as {
+          result: { status: string; result: { summary: string } };
+        };
+        expect(completed.result).toMatchObject({
+          status: 'completed',
+          result: { summary: 'forgot' },
+        });
+      } finally {
+        reader.close();
+      }
+    });
+
+    it('_qwen/workspace/memory/forget rejects oversized queries', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      const reader = frameReader(await streamRes);
+      try {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 85,
+          method: '_qwen/workspace/memory/forget',
+          params: { query: 'x'.repeat(64 * 1024 + 1) },
+        });
+        const frame = (await reader.next()) as {
+          error: { code: number; message: string };
+        };
+        expect(frame.error.code).toBe(-32602);
+        expect(frame.error.message).toContain('`query` exceeds');
+      } finally {
+        reader.close();
+      }
+    });
+
+    it('_qwen/workspace/memory/dream queues and polls hidden tasks', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      const reader = frameReader(await streamRes);
+      try {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 84,
+          method: '_qwen/workspace/memory/dream',
+          params: {},
+        });
+        const queued = (await reader.next()) as {
+          result: { taskId: string; status: string };
+        };
+        expect(queued.result).toMatchObject({
+          status: 'queued',
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 85,
+          method: '_qwen/workspace/memory/dream/get',
+          params: { taskId: queued.result.taskId },
+        });
+        const completed = (await reader.next()) as {
+          result: { status: string; result: { summary: string } };
+        };
+        expect(completed.result).toMatchObject({
+          status: 'completed',
+          result: { summary: 'dreamed' },
+        });
+      } finally {
+        reader.close();
+      }
+    });
+
     it('shares remember task state between REST and ACP transports', async () => {
       const connId = await initialize();
       const clientId = clientIdForConnection(connId);
@@ -6376,6 +8321,55 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(frames[0]).toMatchObject({ error: { code: -32602 } });
     });
 
+    it.each([
+      {
+        method: '_qwen/file/write',
+        params: { path: 'test.txt', content: 'new content' },
+      },
+      {
+        method: '_qwen/file/edit',
+        params: { path: 'test.txt', oldText: 'old', newText: 'new' },
+      },
+    ])(
+      '$method rejects success when its runtime generation closes in flight',
+      async ({ method, params }) => {
+        const generationGuard = createWorkspaceGenerationGuard();
+        const closeGeneration = async () => {
+          generationGuard.close();
+          return { writtenBytes: 3 };
+        };
+        await restartServer({
+          generationGuard,
+          fsFactory: makeFileFsFactory({
+            writeTextOverwrite: closeGeneration,
+            edit: closeGeneration,
+          }),
+        });
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 95,
+          method,
+          params,
+        });
+
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({
+          id: 95,
+          error: {
+            data: {
+              errorKind: 'workspace_runtime_unavailable',
+              httpStatus: 503,
+              retryable: true,
+            },
+          },
+        });
+      },
+    );
+
     it('_qwen/file/glob rejects missing pattern', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
@@ -6467,6 +8461,15 @@ describe('ACP WebSocket transport security', () => {
   let server: Server;
   let port: number;
   let bridge: FakeBridge;
+  let previousCdpMcpCommand: string | undefined;
+
+  beforeEach(() => {
+    previousCdpMcpCommand = process.env['QWEN_CDP_MCP_COMMAND'];
+  });
+
+  async function yieldImmediate(): Promise<void> {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
 
   function startServer(
     opts: {
@@ -6474,6 +8477,7 @@ describe('ACP WebSocket transport security', () => {
       allowedOrigins?: { allowAny: boolean; origins: Set<string> };
       checkRate?: (key: string, tier: string) => boolean;
       cdpTunnelOverWs?: boolean;
+      daemonEnv?: Readonly<NodeJS.ProcessEnv>;
     } = {},
   ) {
     return new Promise<void>((resolve) => {
@@ -6484,6 +8488,7 @@ describe('ACP WebSocket transport security', () => {
         boundWorkspace: '/ws',
         workspace: fakeWorkspace,
         enabled: true,
+        daemonEnv: opts.daemonEnv,
         token: opts.token,
         allowedOrigins: opts.allowedOrigins,
         workspaceRememberLane: new WorkspaceRememberTaskLane(
@@ -6510,7 +8515,16 @@ describe('ACP WebSocket transport security', () => {
   afterEach(async () => {
     server?.closeAllConnections?.();
     await new Promise<void>((r) => server?.close(() => r()) ?? r());
+    if (previousCdpMcpCommand === undefined) {
+      delete process.env['QWEN_CDP_MCP_COMMAND'];
+    } else {
+      process.env['QWEN_CDP_MCP_COMMAND'] = previousCdpMcpCommand;
+    }
   });
+
+  function enableCdpMcpCommand() {
+    process.env['QWEN_CDP_MCP_COMMAND'] = process.execPath;
+  }
 
   function wsConnect(
     opts: { headers?: Record<string, string> } = {},
@@ -6607,7 +8621,43 @@ describe('ACP WebSocket transport security', () => {
     expect(result.code).toBe(101);
   });
 
+  it('does not register chrome-devtools MCP without an explicit CDP MCP command', async () => {
+    delete process.env['QWEN_CDP_MCP_COMMAND'];
+    stdioMocks.writeStderrLine.mockClear();
+    await startServer({ cdpTunnelOverWs: true });
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+
+    await yieldImmediate();
+    expect(bridge.runtimeMcpAdds).toHaveLength(0);
+    expect(bridge.runtimeMcpRemoves).toHaveLength(0);
+    expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: set QWEN_CDP_MCP_COMMAND to enable browser automation MCP (no adapter is bundled)',
+    );
+
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+  });
+
+  it('treats a whitespace-only CDP MCP command as unset', async () => {
+    process.env['QWEN_CDP_MCP_COMMAND'] = '   ';
+    stdioMocks.writeStderrLine.mockClear();
+    await startServer({ cdpTunnelOverWs: true });
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+
+    await yieldImmediate();
+    expect(bridge.runtimeMcpAdds).toHaveLength(0);
+    expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: set QWEN_CDP_MCP_COMMAND to enable browser automation MCP (no adapter is bundled)',
+    );
+
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+  });
+
   it('dynamically registers chrome-devtools MCP for an active CDP bridge', async () => {
+    enableCdpMcpCommand();
     await startServer({ cdpTunnelOverWs: true });
     const ws = await wsConnect();
     await initializeCdpBridge(ws);
@@ -6620,7 +8670,6 @@ describe('ACP WebSocket transport security', () => {
     expect(bridge.runtimeMcpAdds[0]?.config).toMatchObject({
       command: process.execPath,
       args: expect.arrayContaining([
-        expect.stringContaining('chrome-devtools-mcp'),
         '--wsEndpoint',
         `ws://127.0.0.1:${port}/cdp`,
       ]),
@@ -6635,7 +8684,26 @@ describe('ACP WebSocket transport security', () => {
     });
   });
 
+  it('passes a custom CDP MCP command through to the runtime config', async () => {
+    process.env['QWEN_CDP_MCP_COMMAND'] = '/opt/process/cdp-adapter';
+    await startServer({
+      cdpTunnelOverWs: true,
+      daemonEnv: { QWEN_CDP_MCP_COMMAND: '/opt/custom/cdp-adapter' },
+    });
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(1));
+    expect(bridge.runtimeMcpAdds[0]?.config).toMatchObject({
+      command: '/opt/custom/cdp-adapter',
+    });
+
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+  });
+
   it('keeps chrome-devtools MCP registered while a replacement CDP bridge is active', async () => {
+    enableCdpMcpCommand();
     await startServer({ cdpTunnelOverWs: true });
     const first = await wsConnect();
     await initializeCdpBridge(first, 1);
@@ -6659,6 +8727,7 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('removes chrome-devtools MCP when settings already define it', async () => {
+    enableCdpMcpCommand();
     stdioMocks.writeStderrLine.mockClear();
     await startServer({ cdpTunnelOverWs: true });
     bridge.runtimeMcpAddResult = { shadowedSettings: true };
@@ -6678,6 +8747,7 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('retries chrome-devtools MCP registration after a skipped result', async () => {
+    enableCdpMcpCommand();
     stdioMocks.writeStderrLine.mockClear();
     await startServer({ cdpTunnelOverWs: true });
     bridge.runtimeMcpAddResult = {
@@ -6707,6 +8777,7 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('removes chrome-devtools MCP if the CDP bridge disconnects during registration', async () => {
+    enableCdpMcpCommand();
     await startServer({ cdpTunnelOverWs: true });
     let releaseAdd: (() => void) | undefined;
     bridge.runtimeMcpBeforeAddResolve = () =>
@@ -6729,6 +8800,7 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('retries chrome-devtools MCP registration after add failure', async () => {
+    enableCdpMcpCommand();
     stdioMocks.writeStderrLine.mockClear();
     await startServer({ cdpTunnelOverWs: true });
     bridge.runtimeMcpAddError = new Error('add failed');
@@ -6754,6 +8826,7 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('retries chrome-devtools MCP registration while the ACP channel is unavailable', async () => {
+    enableCdpMcpCommand();
     stdioMocks.writeStderrLine.mockClear();
     await startServer({ cdpTunnelOverWs: true });
     bridge.runtimeMcpAddError = Object.assign(new Error('no channel'), {
@@ -6781,6 +8854,7 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('stops retrying chrome-devtools MCP registration after ACP channel retry exhaustion', async () => {
+    enableCdpMcpCommand();
     stdioMocks.writeStderrLine.mockClear();
     await startServer({ cdpTunnelOverWs: true });
     bridge.runtimeMcpAddError = Object.assign(new Error('no channel'), {
@@ -6805,6 +8879,7 @@ describe('ACP WebSocket transport security', () => {
   }, 10_000);
 
   it('skips chrome-devtools MCP registration when /cdp requires auth', async () => {
+    enableCdpMcpCommand();
     stdioMocks.writeStderrLine.mockClear();
     await startServer({
       cdpTunnelOverWs: true,

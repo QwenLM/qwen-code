@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Application } from 'express';
+import type { Application, Request, RequestHandler, Response } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import {
@@ -12,25 +12,64 @@ import {
   MAX_SERVER_NAME_LENGTH,
 } from '../server/request-helpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
+import {
+  requireTrustedWorkspaceRuntime,
+  resolveWorkspaceRuntimeFromParam,
+} from '../workspace-route-runtime.js';
+import type {
+  WorkspaceRegistry,
+  WorkspaceRuntime,
+} from '../workspace-registry.js';
+
+const MAX_ACP_PREHEAT_TIMEOUT_MS = 60_000;
 
 interface RegisterWorkspaceStatusRoutesDeps {
   boundWorkspace: string;
   bridge: AcpSessionBridge;
   workspace: DaemonWorkspaceService;
+  mutate: (opts?: { strict?: boolean }) => RequestHandler;
   sendBridgeError: SendBridgeError;
+  captureGenerationAssertion?: () => (() => void) | undefined;
+}
+
+async function runInCapturedGeneration<T>(
+  capture: (() => (() => void) | undefined) | undefined,
+  task: () => Promise<T>,
+): Promise<T> {
+  const assertGenerationOpen = capture?.();
+  assertGenerationOpen?.();
+  const result = await task();
+  assertGenerationOpen?.();
+  return result;
+}
+
+async function runInRuntimeGeneration<T>(
+  runtime: WorkspaceRuntime,
+  task: () => Promise<T>,
+): Promise<T> {
+  runtime.generationGuard?.assertOpen();
+  const result = await task();
+  runtime.generationGuard?.assertOpen();
+  return result;
 }
 
 export function registerWorkspaceStatusRoutes(
   app: Application,
   deps: RegisterWorkspaceStatusRoutesDeps,
 ): void {
-  const { boundWorkspace, bridge, workspace, sendBridgeError } = deps;
+  const { boundWorkspace, bridge, workspace, mutate, sendBridgeError } = deps;
   const buildWorkspaceCtx = createBuildWorkspaceCtx(boundWorkspace);
 
   app.get('/workspace/mcp', async (_req, res) => {
     try {
       const ctx = buildWorkspaceCtx('GET /workspace/mcp');
-      res.status(200).json(await workspace.getWorkspaceMcpStatus(ctx));
+      res
+        .status(200)
+        .json(
+          await runInCapturedGeneration(deps.captureGenerationAssertion, () =>
+            workspace.getWorkspaceMcpStatus(ctx),
+          ),
+        );
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/mcp' });
     }
@@ -53,7 +92,13 @@ export function registerWorkspaceStatusRoutes(
       return;
     }
     try {
-      res.status(200).json(await bridge.getWorkspaceMcpToolsStatus(serverName));
+      res
+        .status(200)
+        .json(
+          await runInCapturedGeneration(deps.captureGenerationAssertion, () =>
+            bridge.getWorkspaceMcpToolsStatus(serverName),
+          ),
+        );
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/mcp/:server/tools' });
     }
@@ -78,7 +123,11 @@ export function registerWorkspaceStatusRoutes(
     try {
       res
         .status(200)
-        .json(await bridge.getWorkspaceMcpResourcesStatus(serverName));
+        .json(
+          await runInCapturedGeneration(deps.captureGenerationAssertion, () =>
+            bridge.getWorkspaceMcpResourcesStatus(serverName),
+          ),
+        );
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'GET /workspace/mcp/:server/resources',
@@ -89,15 +138,76 @@ export function registerWorkspaceStatusRoutes(
   app.get('/workspace/skills', async (_req, res) => {
     try {
       const ctx = buildWorkspaceCtx('GET /workspace/skills');
-      res.status(200).json(await workspace.getWorkspaceSkillsStatus(ctx));
+      res
+        .status(200)
+        .json(
+          await runInCapturedGeneration(deps.captureGenerationAssertion, () =>
+            workspace.getWorkspaceSkillsStatus(ctx),
+          ),
+        );
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/skills' });
     }
   });
 
+  app.post('/workspace/acp/preheat', mutate(), async (req, res) => {
+    try {
+      const ctx = buildWorkspaceCtx('POST /workspace/acp/preheat');
+      const timeoutMsRaw = req.query['timeoutMs'];
+      const timeoutMs =
+        typeof timeoutMsRaw === 'string' && timeoutMsRaw.trim()
+          ? Number(timeoutMsRaw)
+          : undefined;
+      if (
+        timeoutMsRaw !== undefined &&
+        (timeoutMs === undefined ||
+          !Number.isFinite(timeoutMs) ||
+          !Number.isInteger(timeoutMs) ||
+          timeoutMs <= 0 ||
+          timeoutMs > MAX_ACP_PREHEAT_TIMEOUT_MS)
+      ) {
+        res.status(400).json({
+          error: '`timeoutMs` must be a positive integer no greater than 60000',
+          code: 'invalid_timeout',
+        });
+        return;
+      }
+      res.status(200).json(
+        await runInCapturedGeneration(deps.captureGenerationAssertion, () =>
+          workspace.preheatAcpChild(ctx, {
+            ...(timeoutMs !== undefined ? { timeoutMs } : {}),
+          }),
+        ),
+      );
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'POST /workspace/acp/preheat' });
+    }
+  });
+
+  app.get('/workspace/acp/status', async (_req, res) => {
+    try {
+      const ctx = buildWorkspaceCtx('GET /workspace/acp/status');
+      res
+        .status(200)
+        .json(
+          await runInCapturedGeneration(deps.captureGenerationAssertion, () =>
+            workspace.getWorkspaceAcpStatus(ctx),
+          ),
+        );
+    } catch (err) {
+      sendBridgeError(res, err, { route: 'GET /workspace/acp/status' });
+    }
+  });
+
   app.get('/workspace/tools', async (_req, res) => {
     try {
-      res.status(200).json(await bridge.getWorkspaceToolsStatus());
+      res
+        .status(200)
+        .json(
+          await runInCapturedGeneration(deps.captureGenerationAssertion, () =>
+            bridge.getWorkspaceToolsStatus(),
+          ),
+        );
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/tools' });
     }
@@ -106,9 +216,169 @@ export function registerWorkspaceStatusRoutes(
   app.get('/workspace/providers', async (_req, res) => {
     try {
       const ctx = buildWorkspaceCtx('GET /workspace/providers');
-      res.status(200).json(await workspace.getWorkspaceProvidersStatus(ctx));
+      res
+        .status(200)
+        .json(
+          await runInCapturedGeneration(deps.captureGenerationAssertion, () =>
+            workspace.getWorkspaceProvidersStatus(ctx),
+          ),
+        );
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/providers' });
+    }
+  });
+}
+
+function resolveTrustedRuntime(
+  registry: WorkspaceRegistry,
+  req: Request,
+  res: Response,
+): WorkspaceRuntime | null {
+  const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
+  if (!runtime) return null;
+  return requireTrustedWorkspaceRuntime(runtime, res) ? runtime : null;
+}
+
+export function registerWorkspaceQualifiedStatusRoutes(
+  app: Application,
+  deps: Pick<RegisterWorkspaceStatusRoutesDeps, 'sendBridgeError'> & {
+    workspaceRegistry: WorkspaceRegistry;
+  },
+): void {
+  const { workspaceRegistry, sendBridgeError } = deps;
+
+  app.get('/workspaces/:workspace/mcp', async (req, res) => {
+    const runtime = resolveTrustedRuntime(workspaceRegistry, req, res);
+    if (!runtime) return;
+    const route = 'GET /workspaces/:workspace/mcp';
+    const ctx = createBuildWorkspaceCtx(runtime.workspaceCwd)(route);
+    try {
+      res
+        .status(200)
+        .json(
+          await runInRuntimeGeneration(runtime, () =>
+            runtime.workspaceService.getWorkspaceMcpStatus(ctx),
+          ),
+        );
+    } catch (err) {
+      sendBridgeError(res, err, { route });
+    }
+  });
+
+  app.get('/workspaces/:workspace/mcp/:server/tools', async (req, res) => {
+    const runtime = resolveTrustedRuntime(workspaceRegistry, req, res);
+    if (!runtime) return;
+    const serverName = req.params['server'];
+    if (!serverName || typeof serverName !== 'string') {
+      res.status(400).json({
+        error: 'Server name path parameter is required',
+        code: 'invalid_server_name',
+      });
+      return;
+    }
+    if (serverName.length > MAX_SERVER_NAME_LENGTH) {
+      res.status(400).json({
+        error: `Server name exceeds ${MAX_SERVER_NAME_LENGTH}-character limit`,
+        code: 'invalid_server_name',
+      });
+      return;
+    }
+    const route = 'GET /workspaces/:workspace/mcp/:server/tools';
+    try {
+      res
+        .status(200)
+        .json(
+          await runInRuntimeGeneration(runtime, () =>
+            runtime.bridge.getWorkspaceMcpToolsStatus(serverName),
+          ),
+        );
+    } catch (err) {
+      sendBridgeError(res, err, { route });
+    }
+  });
+
+  app.get('/workspaces/:workspace/mcp/:server/resources', async (req, res) => {
+    const runtime = resolveTrustedRuntime(workspaceRegistry, req, res);
+    if (!runtime) return;
+    const serverName = req.params['server'];
+    if (!serverName || typeof serverName !== 'string') {
+      res.status(400).json({
+        error: 'Server name path parameter is required',
+        code: 'invalid_server_name',
+      });
+      return;
+    }
+    if (serverName.length > MAX_SERVER_NAME_LENGTH) {
+      res.status(400).json({
+        error: `Server name exceeds ${MAX_SERVER_NAME_LENGTH}-character limit`,
+        code: 'invalid_server_name',
+      });
+      return;
+    }
+    const route = 'GET /workspaces/:workspace/mcp/:server/resources';
+    try {
+      res
+        .status(200)
+        .json(
+          await runInRuntimeGeneration(runtime, () =>
+            runtime.bridge.getWorkspaceMcpResourcesStatus(serverName),
+          ),
+        );
+    } catch (err) {
+      sendBridgeError(res, err, { route });
+    }
+  });
+
+  app.get('/workspaces/:workspace/skills', async (req, res) => {
+    const runtime = resolveTrustedRuntime(workspaceRegistry, req, res);
+    if (!runtime) return;
+    const route = 'GET /workspaces/:workspace/skills';
+    const ctx = createBuildWorkspaceCtx(runtime.workspaceCwd)(route);
+    try {
+      res
+        .status(200)
+        .json(
+          await runInRuntimeGeneration(runtime, () =>
+            runtime.workspaceService.getWorkspaceSkillsStatus(ctx),
+          ),
+        );
+    } catch (err) {
+      sendBridgeError(res, err, { route });
+    }
+  });
+
+  app.get('/workspaces/:workspace/tools', async (req, res) => {
+    const runtime = resolveTrustedRuntime(workspaceRegistry, req, res);
+    if (!runtime) return;
+    const route = 'GET /workspaces/:workspace/tools';
+    try {
+      res
+        .status(200)
+        .json(
+          await runInRuntimeGeneration(runtime, () =>
+            runtime.bridge.getWorkspaceToolsStatus(),
+          ),
+        );
+    } catch (err) {
+      sendBridgeError(res, err, { route });
+    }
+  });
+
+  app.get('/workspaces/:workspace/providers', async (req, res) => {
+    const runtime = resolveTrustedRuntime(workspaceRegistry, req, res);
+    if (!runtime) return;
+    const route = 'GET /workspaces/:workspace/providers';
+    const ctx = createBuildWorkspaceCtx(runtime.workspaceCwd)(route);
+    try {
+      res
+        .status(200)
+        .json(
+          await runInRuntimeGeneration(runtime, () =>
+            runtime.workspaceService.getWorkspaceProvidersStatus(ctx),
+          ),
+        );
+    } catch (err) {
+      sendBridgeError(res, err, { route });
     }
   });
 }
@@ -131,7 +401,13 @@ export function registerWorkspaceDiagnosticStatusRoutes(
   app.get('/workspace/env', async (_req, res) => {
     try {
       const ctx = buildWorkspaceCtx('GET /workspace/env');
-      res.status(200).json(await workspace.getWorkspaceEnvStatus(ctx));
+      res
+        .status(200)
+        .json(
+          await runInCapturedGeneration(deps.captureGenerationAssertion, () =>
+            workspace.getWorkspaceEnvStatus(ctx),
+          ),
+        );
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/env' });
     }
@@ -140,7 +416,13 @@ export function registerWorkspaceDiagnosticStatusRoutes(
   app.get('/workspace/preflight', async (_req, res) => {
     try {
       const ctx = buildWorkspaceCtx('GET /workspace/preflight');
-      res.status(200).json(await workspace.getWorkspacePreflightStatus(ctx));
+      res
+        .status(200)
+        .json(
+          await runInCapturedGeneration(deps.captureGenerationAssertion, () =>
+            workspace.getWorkspacePreflightStatus(ctx),
+          ),
+        );
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/preflight' });
     }
@@ -150,9 +432,63 @@ export function registerWorkspaceDiagnosticStatusRoutes(
   app.get('/workspace/hooks', async (_req, res) => {
     try {
       const ctx = buildWorkspaceCtx('GET /workspace/hooks');
-      res.status(200).json(await workspace.getWorkspaceHooksStatus(ctx));
+      res
+        .status(200)
+        .json(
+          await runInCapturedGeneration(deps.captureGenerationAssertion, () =>
+            workspace.getWorkspaceHooksStatus(ctx),
+          ),
+        );
     } catch (err) {
       sendBridgeError(res, err, { route: 'GET /workspace/hooks' });
     }
   });
+}
+
+export function registerWorkspaceQualifiedDiagnosticStatusRoutes(
+  app: Application,
+  deps: Pick<RegisterWorkspaceStatusRoutesDeps, 'sendBridgeError'> & {
+    workspaceRegistry: WorkspaceRegistry;
+  },
+): void {
+  const { workspaceRegistry, sendBridgeError } = deps;
+  for (const [pathSuffix, methodName] of [
+    ['env', 'getWorkspaceEnvStatus'],
+    ['preflight', 'getWorkspacePreflightStatus'],
+    ['hooks', 'getWorkspaceHooksStatus'],
+  ] as const) {
+    app.get(`/workspaces/:workspace/${pathSuffix}`, async (req, res) => {
+      const runtime = resolveTrustedRuntime(workspaceRegistry, req, res);
+      if (!runtime) return;
+      const route = `GET /workspaces/:workspace/${pathSuffix}`;
+      const ctx = createBuildWorkspaceCtx(runtime.workspaceCwd)(route);
+      try {
+        let result;
+        switch (methodName) {
+          case 'getWorkspaceEnvStatus':
+            result = await runInRuntimeGeneration(runtime, () =>
+              runtime.workspaceService.getWorkspaceEnvStatus(ctx),
+            );
+            break;
+          case 'getWorkspacePreflightStatus':
+            result = await runInRuntimeGeneration(runtime, () =>
+              runtime.workspaceService.getWorkspacePreflightStatus(ctx),
+            );
+            break;
+          case 'getWorkspaceHooksStatus':
+            result = await runInRuntimeGeneration(runtime, () =>
+              runtime.workspaceService.getWorkspaceHooksStatus(ctx),
+            );
+            break;
+          default:
+            throw new Error(
+              `Unsupported workspace status method: ${methodName}`,
+            );
+        }
+        res.status(200).json(result);
+      } catch (err) {
+        sendBridgeError(res, err, { route });
+      }
+    });
+  }
 }

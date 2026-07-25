@@ -5,6 +5,11 @@ export default defineConfig({
   test: {
     include: ['src/**/*.test.ts'],
     globals: true,
+    server: {
+      deps: {
+        inline: ['@qwen-code/channel-base'],
+      },
+    },
   },
   resolve: {
     alias: {

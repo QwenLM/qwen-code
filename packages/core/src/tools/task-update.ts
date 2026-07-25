@@ -24,6 +24,11 @@ import {
   resolveActiveTeamName,
 } from '../agents/team/identity.js';
 import {
+  getPlanRequiredTeammatePreApprovalMessage,
+  isPlanRequiredTeammatePreApprovalAllowedTool,
+  isPlanRequiredTeammateAwaitingApproval,
+} from '../agents/runtime/subagent-plan-tool-policy.js';
+import {
   updateTask,
   deleteTask,
   assertValidTaskId,
@@ -166,6 +171,26 @@ class TaskUpdateInvocation extends BaseToolInvocation<
   }
 
   async execute(): Promise<ToolResult> {
+    const awaitingPlanApproval = isPlanRequiredTeammateAwaitingApproval(
+      this.config,
+    );
+    if (
+      awaitingPlanApproval &&
+      !isPlanRequiredTeammatePreApprovalAllowedTool(
+        ToolNames.TASK_UPDATE,
+        this.params,
+      )
+    ) {
+      const msg = getPlanRequiredTeammatePreApprovalMessage(
+        ToolNames.TASK_UPDATE,
+      );
+      return {
+        llmContent: msg,
+        returnDisplay: msg,
+        error: { message: msg },
+      };
+    }
+
     const teamName = resolveActiveTeamName(
       this.config.getTeamContext()?.teamName,
     );
@@ -202,6 +227,20 @@ class TaskUpdateInvocation extends BaseToolInvocation<
         returnDisplay: msg,
         error: { message: msg },
       };
+    }
+
+    if (awaitingPlanApproval) {
+      const existing = await getTask(teamName, taskId);
+      if (existing && (existing.status !== 'pending' || existing.owner)) {
+        const msg =
+          'task_update can only claim an unowned pending task while this ' +
+          'plan-required teammate is waiting for leader approval.';
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
     }
 
     // Ownership guard for non-leader callers is now enforced inside

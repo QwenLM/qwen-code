@@ -14,13 +14,18 @@ import {
   type Mock,
 } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { useAutoAcceptIndicator } from './useAutoAcceptIndicator.js';
+import {
+  emitAutoModeEntryNotices,
+  useAutoAcceptIndicator,
+} from './useAutoAcceptIndicator.js';
 
 import { Config, ApprovalMode } from '@qwen-code/qwen-code-core';
 import type { Config as ActualConfigType } from '@qwen-code/qwen-code-core';
 import type { Key } from './useKeypress.js';
 import { useKeypress } from './useKeypress.js';
 import { MessageType } from '../types.js';
+import { setLanguage, setLanguageAsync } from '../../i18n/index.js';
+import { SettingScope, type LoadedSettings } from '../../config/settings.js';
 
 vi.mock('./useKeypress.js');
 
@@ -54,6 +59,13 @@ interface MockConfigInstanceShape {
 }
 
 type UseKeypressHandler = (key: Key) => void;
+
+function createMockSettings(autoModeAcknowledged: boolean): LoadedSettings {
+  return {
+    merged: { ui: { autoModeAcknowledged } },
+    setValue: vi.fn(),
+  } as unknown as LoadedSettings;
+}
 
 describe('useAutoAcceptIndicator', () => {
   let mockConfigInstance: MockConfigInstanceShape;
@@ -492,6 +504,126 @@ describe('useAutoAcceptIndicator', () => {
       2,
       ApprovalMode.AUTO,
     );
+  });
+
+  it('should emit the localizable AUTO mode entry notice', async () => {
+    await setLanguageAsync('en');
+    const mockAddItem = vi.fn();
+
+    emitAutoModeEntryNotices({
+      config: mockConfigInstance as unknown as ActualConfigType,
+      addItem: mockAddItem,
+    });
+
+    expect(mockAddItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.INFO,
+        text:
+          'Auto mode enabled.\n' +
+          '   An LLM classifier evaluates each tool call — safe actions auto-approve,\n' +
+          '   risky ones are blocked. Exit: Shift+Tab or /approval-mode default.',
+      },
+      expect.any(Number),
+    );
+  });
+
+  it('should fall back to readable English when the entry notice key is not loaded', async () => {
+    const stderrWrite = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    setLanguage('ca');
+    try {
+      const mockAddItem = vi.fn();
+
+      emitAutoModeEntryNotices({
+        config: mockConfigInstance as unknown as ActualConfigType,
+        addItem: mockAddItem,
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text:
+            'Auto mode enabled.\n' +
+            '   An LLM classifier evaluates each tool call — safe actions auto-approve,\n' +
+            '   risky ones are blocked. Exit: Shift+Tab or /approval-mode default.',
+        },
+        expect.any(Number),
+      );
+    } finally {
+      stderrWrite.mockRestore();
+      await setLanguageAsync('en');
+    }
+  });
+
+  it('should persist acknowledgement after emitting the AUTO mode entry notice', async () => {
+    await setLanguageAsync('en');
+    const mockAddItem = vi.fn();
+    const mockSettings = createMockSettings(false);
+
+    emitAutoModeEntryNotices({
+      config: mockConfigInstance as unknown as ActualConfigType,
+      settings: mockSettings,
+      addItem: mockAddItem,
+    });
+
+    expect(mockAddItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: MessageType.INFO,
+        text: expect.stringContaining('Auto mode enabled.'),
+      }),
+      expect.any(Number),
+    );
+    expect(mockSettings.setValue).toHaveBeenCalledWith(
+      SettingScope.User,
+      'ui.autoModeAcknowledged',
+      true,
+    );
+  });
+
+  it('should skip the AUTO mode entry notice after acknowledgement', async () => {
+    await setLanguageAsync('en');
+    const mockAddItem = vi.fn();
+    const mockSettings = createMockSettings(true);
+
+    emitAutoModeEntryNotices({
+      config: mockConfigInstance as unknown as ActualConfigType,
+      settings: mockSettings,
+      addItem: mockAddItem,
+    });
+
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: expect.stringContaining('Auto mode enabled.'),
+      }),
+      expect.any(Number),
+    );
+    expect(mockSettings.setValue).not.toHaveBeenCalled();
+  });
+
+  it('should emit the AUTO mode entry notice with the active locale', async () => {
+    await setLanguageAsync('zh');
+    try {
+      const mockAddItem = vi.fn();
+
+      emitAutoModeEntryNotices({
+        config: mockConfigInstance as unknown as ActualConfigType,
+        addItem: mockAddItem,
+      });
+
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.INFO,
+          text:
+            '已启用自动模式。\n' +
+            '   LLM 分类器会评估每次工具调用 — 安全操作将自动批准，\n' +
+            '   有风险的操作将被阻止。退出：Shift+Tab 或 /approval-mode default。',
+        },
+        expect.any(Number),
+      );
+    } finally {
+      await setLanguageAsync('en');
+    }
   });
 
   it('should not cycle approval mode on Windows when shouldBlockTab returns true', () => {

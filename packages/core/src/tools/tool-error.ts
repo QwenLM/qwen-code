@@ -14,6 +14,8 @@ export enum ToolErrorType {
   UNHANDLED_EXCEPTION = 'unhandled_exception',
   TOOL_NOT_REGISTERED = 'tool_not_registered',
   EXECUTION_FAILED = 'execution_failed',
+  // A tool call exceeded the per-tool execution timeout and was aborted.
+  EXECUTION_TIMEOUT = 'execution_timeout',
   // Try to execute a tool that is excluded due to the approval mode
   EXECUTION_DENIED = 'execution_denied',
 
@@ -118,6 +120,12 @@ export enum ToolErrorType {
   WEB_FETCH_NO_URL_IN_PROMPT = 'web_fetch_no_url_in_prompt',
   WEB_FETCH_FALLBACK_FAILED = 'web_fetch_fallback_failed',
   WEB_FETCH_PROCESSING_ERROR = 'web_fetch_processing_error',
+
+  // WebSearch-specific Errors
+  WEB_SEARCH_RATE_LIMITED = 'web_search_rate_limited',
+  WEB_SEARCH_BACKEND_FAILED = 'web_search_backend_failed',
+  WEB_SEARCH_NO_RESULTS = 'web_search_no_results',
+  WEB_SEARCH_NO_SEARCH_PERFORMED = 'web_search_no_search_performed',
 
   // Truncation Errors
   OUTPUT_TRUNCATED = 'output_truncated',

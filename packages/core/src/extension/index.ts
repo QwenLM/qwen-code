@@ -9,3 +9,4 @@ export * from './extensionPreferences.js';
 export * from './npm.js';
 export * from './claude-converter.js';
 export * from './redaction.js';
+export * from './extension-store.js';

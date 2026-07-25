@@ -13,6 +13,7 @@ import {
   useLayoutEffect,
 } from 'react';
 import {
+  runOutsideAgentContext,
   type Config,
   type EditorType,
   type GeminiClient,
@@ -24,10 +25,10 @@ import {
   type ServerGeminiStreamEvent as GeminiEvent,
   type ThoughtSummary,
   type ToolCallRequestInfo,
+  type ToolCallResponseInfo,
   type GeminiErrorEventValue,
-  type StopFailureErrorType,
   type ActiveGoal,
-  type VisionBridgeResult,
+  type SteerInput,
   GeminiEventType as ServerGeminiEventType,
   SendMessageType,
   createDebugLogger,
@@ -53,7 +54,11 @@ import {
   getUnsupportedImageFormatWarning,
   runVisionBridge,
   shouldRunVisionBridge,
+  formatVisionBridgeNotice,
+  formatFullTurnVisionNotice,
+  getFullTurnVisionModelSelector,
   hasImageParts,
+  clampInlineMediaPart,
   splitImageParts,
   generateToolUseSummary,
   getActiveGoal,
@@ -64,6 +69,8 @@ import {
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
   AutonomousLoopTickResolver,
+  refreshMemoryAfterManagedWrite,
+  finalizeToolResponses,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -80,14 +87,20 @@ import {
   isBtwCommand,
   isSlashCommand,
 } from '../utils/commandUtils.js';
+import { findLastUserItemIndex } from '../utils/historyUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import {
   handleAtCommand,
   resolveAtCommandQuery,
 } from './atCommandProcessor.js';
-import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
+import {
+  findLastSafeSplitPoint,
+  splitFencedMarkdown,
+  getEnclosingFenceInfo,
+} from '../utils/markdownUtilities.js';
+import { fitPendingSlice } from '../utils/pending-rendered-height.js';
 import { useStateAndRef } from './useStateAndRef.js';
-import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
+import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
 import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import {
@@ -106,7 +119,11 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
 import { recordGoalStatusItem } from '../utils/restoreGoal.js';
+import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import process from 'node:process';
+import { GOAL_COMMAND_RE } from './useMessageQueue.js';
+import { classifyApiError } from '../../utils/classify-api-error.js';
+import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
@@ -145,46 +162,17 @@ const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE =
 interface PendingDuplicateToolResponses {
   executableCallIds: Set<string>;
   promptId: string | undefined;
-  responseParts: Part[];
+  callOrder: string[];
+  duplicateResponses: Array<{
+    request: ToolCallRequestInfo;
+    response: ToolCallResponseInfo;
+  }>;
 }
 
-/**
- * Build the user-facing notice shown when the vision bridge runs. On success it
- * states which model was used, how many images were converted (and omitted),
- * and discloses the data egress (and endpoint, since auto-select can route to a
- * different host than the primary model). On failure it surfaces the reason.
- *
- * The transcription itself is not shown: it is fed to the primary model and
- * surfaced in its answer, so repeating it here only duplicated the description.
- *
- * @param result The structured result returned by the vision bridge.
- * @returns A notice string for the message history.
- */
-function formatVisionBridgeNotice(result: VisionBridgeResult): string {
-  const modelName = result.modelId ?? 'vision model';
-  const target = result.modelEndpoint
-    ? `${modelName} (${result.modelEndpoint})`
-    : modelName;
-  const egressNote = result.egressOccurred
-    ? ` Your image and prompt/context were sent to ${target}.`
-    : '';
-  // No leading glyph here: the renderer supplies the gutter prefix (◎ for the
-  // dim notice, ✕ for the error variant). Baking one in too produced a doubled
-  // marker (e.g. `● ◎ …`).
-  if (result.status === 'failed') {
-    const reason = result.egressOccurred
-      ? 'the vision model request failed'
-      : 'the vision bridge could not run';
-    return `Vision bridge (${modelName}) failed: ${reason}.${egressNote} The image was not interpreted.`;
-  }
-  if (result.status === 'skipped') {
-    return `Vision bridge cancelled.${egressNote}`;
-  }
-  // On success the image was always sent, so disclose egress unconditionally.
-  const omitted =
-    result.omittedCount > 0 ? ` (${result.omittedCount} image(s) omitted)` : '';
-  const header = `Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt/context were sent to that model.`;
-  return header;
+interface ResolvedSteerMessages {
+  parts: Part[];
+  accept: () => void;
+  restoreMessages: string[];
 }
 
 /**
@@ -263,43 +251,6 @@ function extractToolResultText(parts: Part[] | Part | undefined): unknown {
 }
 
 /**
- * Classify API error to StopFailureErrorType
- * @internal Exported for testing purposes
- */
-export function classifyApiError(error: {
-  message: string;
-  status?: number;
-}): StopFailureErrorType {
-  const status = error.status;
-  const message = error.message?.toLowerCase() ?? '';
-
-  if (status === 429 || message.includes('rate limit')) {
-    return 'rate_limit';
-  }
-  if (status === 401 || message.includes('unauthorized')) {
-    return 'authentication_failed';
-  }
-  if (
-    status === 402 ||
-    status === 403 ||
-    message.includes('billing') ||
-    message.includes('quota')
-  ) {
-    return 'billing_error';
-  }
-  if (status === 400 || message.includes('invalid')) {
-    return 'invalid_request';
-  }
-  if (status !== undefined && status >= 500) {
-    return 'server_error';
-  }
-  if (message.includes('max_tokens') || message.includes('token limit')) {
-    return 'max_output_tokens';
-  }
-  return 'unknown';
-}
-
-/**
  * Checks if image parts have supported formats and returns unsupported ones
  */
 function checkImageFormatsSupport(parts: PartListUnion): {
@@ -367,6 +318,15 @@ const EDIT_TOOL_NAMES = new Set([
 ]);
 const STREAM_UPDATE_THROTTLE_MS = 60;
 const STREAM_PENDING_ITEM_MAX_CHARS = 16_384;
+// Rows kept in reserve below the commit budget so the incremental commit fires
+// BEFORE MarkdownDisplay's safety-net clip (which reserves 2). Keeping the
+// pending item's rendered height under the safety budget stops that clip from
+// engaging and hiding a table (or slicing the tail) in step with the commit
+// cycle.
+const STREAM_PENDING_COMMIT_RESERVE_ROWS = 5;
+// Conservative estimate of the rows the composer/footer occupy, used to derive
+// a content-area height from terminalHeight before the live value is known.
+const STREAM_PENDING_COMPOSER_RESERVE_ROWS = 12;
 const LOADING_THOUGHT_DESCRIPTION_MAX_CHARS = 4_096;
 
 type BufferedStreamEvent =
@@ -387,6 +347,24 @@ function clampLoadingThoughtDescription(description: string): string {
   }
 
   return description.slice(0, LOADING_THOUGHT_DESCRIPTION_MAX_CHARS);
+}
+
+/**
+ * Character index just after the `keptLines`-th source line of `text`, or -1 if
+ * there are not that many lines. Converts a fitPendingSlice line count into a
+ * commit boundary; callers pass it through `findLastSafeSplitPoint` so the cut
+ * never lands inside a fenced code block.
+ */
+function charIndexAfterLine(text: string, keptLines: number): number {
+  if (keptLines <= 0) return -1;
+  let count = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\n') {
+      count++;
+      if (count === keptLines) return i + 1;
+    }
+  }
+  return -1;
 }
 
 /**
@@ -445,6 +423,15 @@ export const useGeminiStream = (
   terminalHeight: number,
   midTurnDrainRef?: React.RefObject<(() => string[]) | null>,
   logger?: Logger | null,
+  // Live content-area height (terminal minus composer/header). Used to bound the
+  // pending item's rendered height so it commits to <Static> before it can grow
+  // tall enough to trigger the scroll-to-top redraw. A ref (not a value) because
+  // it is computed after this hook is called in AppContainer.
+  availableTerminalHeightRef?: React.RefObject<number>,
+  // Live terminal width, paired with the height ref so the commit loop reads
+  // both dimensions consistently across a mid-stream resize.
+  terminalWidthRef?: React.RefObject<number>,
+  midTurnRestoreRef?: React.RefObject<((messages: string[]) => void) | null>,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -548,7 +535,10 @@ export const useGeminiStream = (
   >([]);
   const immediateDuplicateToolResponsesRef = useRef<{
     promptId: string | undefined;
-    responseParts: Part[];
+    responses: Array<{
+      request: ToolCallRequestInfo;
+      response: ToolCallResponseInfo;
+    }>;
   } | null>(null);
   // --- Real-time token display ---
   // Accumulates output character count across the whole turn (not per API call).
@@ -762,9 +752,7 @@ export const useGeminiStream = (
       config.getApprovalMode() === ApprovalMode.YOLO &&
       streamingState === StreamingState.Idle
     ) {
-      const lastUserMessageIndex = history.findLastIndex(
-        (item: HistoryItem) => item.type === MessageType.USER,
-      );
+      const lastUserMessageIndex = findLastUserItemIndex(history);
 
       const turnCount =
         lastUserMessageIndex === -1 ? 0 : history.length - lastUserMessageIndex;
@@ -900,15 +888,50 @@ export const useGeminiStream = (
       timestamp: number,
       signal: AbortSignal,
     ): Promise<{ parts: PartListUnion | null; shouldProceed: boolean }> => {
-      if (
-        parts === null ||
-        !hasImageParts(parts) ||
-        !shouldRunVisionBridge(config)
-      ) {
+      if (parts === null || !hasImageParts(parts)) {
         return { parts, shouldProceed: true };
+      }
+      if (modelOverrideRef.current?.endsWith('\0')) {
+        return { parts, shouldProceed: true };
+      }
+      if (inlineModelOverrideActiveRef.current) {
+        return { parts, shouldProceed: true };
+      }
+      if (!shouldRunVisionBridge(config)) {
+        return { parts, shouldProceed: true };
+      }
+      if (signal.aborted) {
+        return { parts: null, shouldProceed: false };
       }
 
       debugLogger.debug('vision bridge: gate matched, running conversion');
+      const fullTurnModel = config.getDefaultVisionBridgeModel();
+      if (fullTurnModel?.agentCapable) {
+        const fullTurnParts = (Array.isArray(parts) ? parts : [parts]).map(
+          (part) =>
+            typeof part === 'string'
+              ? { text: part }
+              : clampInlineMediaPart(part),
+        );
+        if (!hasImageParts(fullTurnParts)) {
+          return { parts: fullTurnParts, shouldProceed: true };
+        }
+        applyModelOverride(
+          modelOverrideRef,
+          inlineModelOverrideActiveRef,
+          getFullTurnVisionModelSelector(fullTurnModel),
+          false,
+        );
+        addItem(
+          {
+            type: MessageType.VISION_NOTICE,
+            text: formatFullTurnVisionNotice(fullTurnModel),
+          },
+          timestamp,
+        );
+        return { parts: fullTurnParts, shouldProceed: true };
+      }
+
       const bridgeResult = await runVisionBridge({ config, parts, signal });
       debugLogger.debug(
         `vision bridge: status=${bridgeResult.status} applied=${bridgeResult.applied} model=${bridgeResult.modelId ?? '(none)'}`,
@@ -1053,6 +1076,16 @@ export const useGeminiStream = (
                 }
               }
 
+              const bridgeResult = await applyVisionBridgeIfNeeded(
+                localQueryToSendToGemini,
+                userMessageTimestamp,
+                abortSignal,
+              );
+              if (!bridgeResult.shouldProceed) {
+                return { queryToSend: null, shouldProceed: false };
+              }
+              localQueryToSendToGemini = bridgeResult.parts;
+
               return {
                 queryToSend: localQueryToSendToGemini,
                 shouldProceed: true,
@@ -1099,6 +1132,18 @@ export const useGeminiStream = (
             id: insertedId,
             text: trimmedQuery,
           };
+
+          // Yield via macrotask to let Ink/React flush the user message
+          // render before continuing with @-command processing and API
+          // call. React 19.2.4 (Ink 7.0.3) schedules renders via
+          // MessageChannel.postMessage (a macrotask), so a microtask yield
+          // (await Promise.resolve()) does NOT give React a chance to
+          // render — the continuation runs first. setImmediate fires in
+          // the check phase after I/O events (where MessageChannel
+          // delivers its postMessage), guaranteeing React renders first
+          // without the ~1ms timer overhead of setTimeout(0).
+          // Only needed for non-Cron submissions since Cron skips addItem().
+          await new Promise((r) => setImmediate(r));
         }
 
         // Handle @-commands (which might involve tool calls)
@@ -1214,8 +1259,126 @@ export const useGeminiStream = (
         // multiple times per-second (as streaming occurs). Prior to this change you'd
         // see heavy flickering of the terminal. This ensures that larger messages get
         // broken up so that there are more "statically" rendered.
-        const beforeText = newGeminiMessageBuffer.substring(0, safeSplitPoint);
-        const afterText = newGeminiMessageBuffer.substring(safeSplitPoint);
+        // Repair fences when the split lands inside a code block so the tail
+        // does not render as prose (see splitFencedMarkdown).
+        const { before: beforeText, after: afterText } = splitFencedMarkdown(
+          newGeminiMessageBuffer,
+          safeSplitPoint,
+        );
+        commitItem(
+          {
+            type: nextPendingType,
+            text: beforeText,
+          },
+          userMessageTimestamp,
+        );
+        nextPendingType = 'gemini_content';
+        newGeminiMessageBuffer = afterText;
+      }
+      // Rendered-height-aware incremental commit. Commit whole chunks to
+      // <Static> so the pending (live) item's ESTIMATED rendered height stays
+      // within the viewport budget. Uses the SAME accounting as
+      // MarkdownDisplay's safety-net slice (fitPendingSlice — tables counted as
+      // blocks, wide/CJK lines wrapped) so the two agree and the clip never
+      // engages / flickers in step with the commit cycle.
+      //
+      //  - `while`, not `if`: a single throttled update can append many lines, so
+      //    keep committing until the remainder fits.
+      //  - Commit ONLY at a blank-line block boundary so a table / list / code
+      //    block is never cut into a headerless continuation (which would render
+      //    as raw "| ... |" text). A table that is still streaming (no trailing
+      //    blank line yet) stays pending — bounded in view by MarkdownDisplay's
+      //    clamp — until it is complete, then commits whole.
+      //  - `findLastSafeSplitPoint`: also never cut inside a fenced code block.
+      //  - Conservative fallback when the content-area height is not yet known
+      //    (ref is 0 before the first render populates it): derive from
+      //    terminalHeight so a short terminal does not use an over-large budget.
+      const viewportRows =
+        (availableTerminalHeightRef?.current ?? 0) > 0
+          ? availableTerminalHeightRef!.current
+          : Math.max(4, terminalHeight - STREAM_PENDING_COMPOSER_RESERVE_ROWS);
+      // Read width from the same live ref as the height so a mid-stream resize
+      // is handled consistently; fall back to the render-time width.
+      const commitWidth =
+        (terminalWidthRef?.current ?? 0) > 0
+          ? terminalWidthRef!.current
+          : terminalWidth;
+      const commitRowBudget = Math.max(
+        4,
+        viewportRows - STREAM_PENDING_COMMIT_RESERVE_ROWS,
+      );
+      const tableClampRows = Math.max(2, viewportRows - 3);
+      while (true) {
+        const bufferLines = newGeminiMessageBuffer.split('\n');
+        const { keptLines, clipped } = fitPendingSlice(
+          bufferLines,
+          commitWidth,
+          commitRowBudget,
+          tableClampRows,
+        );
+        if (!clipped) break;
+        // Back up to the last blank line at or before the kept prefix — the only
+        // place it is safe to end a committed chunk without orphaning a block.
+        // Start AT keptLines (not keptLines - 1): when a single block is taller
+        // than the budget, fitPendingSlice charges the whole block and returns
+        // kept = the block's trailing blank line, so the boundary sits exactly at
+        // keptLines. Searching from keptLines - 1 misses it, finds no earlier
+        // blank (the block has none, and the blank before it was already
+        // committed), and stalls — every later block then appends past keptLines,
+        // so nothing ever commits until the stream finalizes and dumps it all at
+        // once. Committing an over-tall completed block to <Static> is fine; only
+        // the live pending frame must stay within the viewport.
+        let boundaryLine = -1;
+        for (let k = Math.min(keptLines, bufferLines.length - 1); k >= 0; k--) {
+          if (bufferLines[k]!.trim() === '') {
+            boundaryLine = k;
+            break;
+          }
+        }
+        let target: number;
+        if (boundaryLine < 0) {
+          // No blank-line boundary at/before the kept prefix. A fenced code
+          // block taller than the viewport never provides one mid-block, so the
+          // whole block would stay pending — frozen on its head — and only land
+          // in scrollback when it finally closes (the "stall then dump" seen on
+          // a 100-line code block). Hard-splitting inside a fence is now safe
+          // (splitFencedMarkdown closes/re-opens the fence and continues the
+          // gutter), so commit the budget-fit prefix and keep streaming. Restrict
+          // this to code blocks: other tall blocks (tables/lists) must stay whole
+          // and are still kept pending.
+          const capIndex = charIndexAfterLine(
+            newGeminiMessageBuffer,
+            keptLines,
+          );
+          const fenceInfo =
+            capIndex > 0
+              ? getEnclosingFenceInfo(newGeminiMessageBuffer, capIndex)
+              : null;
+          // Only hard-split a real code block. Other tall blocks (tables/lists)
+          // must stay whole, and mermaid needs its whole source to render a
+          // diagram — splitting it mid-block would break the render — so both
+          // stay pending until they complete.
+          if (!fenceInfo || fenceInfo.lang?.toLowerCase() === 'mermaid') {
+            break; // no safe boundary yet → keep pending
+          }
+          target = capIndex;
+        } else {
+          target = charIndexAfterLine(newGeminiMessageBuffer, boundaryLine + 1);
+          if (target <= 0) break;
+        }
+        const splitPoint = findLastSafeSplitPoint(
+          newGeminiMessageBuffer,
+          target,
+        );
+        if (splitPoint <= 0 || splitPoint >= newGeminiMessageBuffer.length) {
+          break;
+        }
+        // Repair fences when the split lands inside a code block so the tail
+        // does not render as prose (see splitFencedMarkdown).
+        const { before: beforeText, after: afterText } = splitFencedMarkdown(
+          newGeminiMessageBuffer,
+          splitPoint,
+        );
         commitItem(
           {
             type: nextPendingType,
@@ -1241,7 +1404,15 @@ export const useGeminiStream = (
       });
       return newGeminiMessageBuffer;
     },
-    [commitItem, pendingHistoryItemRef, setPendingHistoryItem],
+    [
+      commitItem,
+      pendingHistoryItemRef,
+      setPendingHistoryItem,
+      terminalWidth,
+      terminalHeight,
+      availableTerminalHeightRef,
+      terminalWidthRef,
+    ],
   );
 
   const mergeThought = useCallback(
@@ -1355,8 +1526,12 @@ export const useGeminiStream = (
           splitPoint > 0 && splitPoint < newThoughtBuffer.length
             ? splitPoint
             : STREAM_PENDING_ITEM_MAX_CHARS;
-        const beforeText = newThoughtBuffer.substring(0, safeSplitPoint);
-        const afterText = newThoughtBuffer.substring(safeSplitPoint);
+        // Repair fences when the split lands inside a code block so the tail
+        // does not render as prose (see splitFencedMarkdown).
+        const { before: beforeText, after: afterText } = splitFencedMarkdown(
+          newThoughtBuffer,
+          safeSplitPoint,
+        );
         addItem(
           buildThoughtItem(pendingThoughtType, beforeText),
           userMessageTimestamp,
@@ -1717,6 +1892,9 @@ export const useGeminiStream = (
           kind: 'checking',
           condition: activeGoal.condition,
           iterations: activeGoal.iterations,
+          // Carried so a transcript truncated past its `set` card can still
+          // restore the goal's original start time.
+          setAt: activeGoal.setAt,
           lastReason:
             activeGoal.lastReason ?? value.reasons[value.reasons.length - 1],
         };
@@ -1905,7 +2083,7 @@ export const useGeminiStream = (
               flushBufferedStreamEvents();
               toolCallRequests.length = 0;
               handleUserCancelledEvent(userMessageTimestamp);
-              break;
+              return StreamProcessingStatus.UserCancelled;
             case ServerGeminiEventType.Error:
               flushBufferedStreamEvents();
               handleErrorEvent(event.value, userMessageTimestamp);
@@ -1995,6 +2173,33 @@ export const useGeminiStream = (
                 clearRetryCountdown();
               }
               break;
+            case ServerGeminiEventType.ModelFallback: {
+              // The primary model (or a prior fallback) exhausted its retry
+              // budget on a capacity/availability error and the system is
+              // switching to the next fallback model. Discard partial content
+              // from the failed attempt and show a notification.
+              discardBufferedStreamEvents();
+              if (pendingHistoryItemRef.current) {
+                setPendingHistoryItem(null);
+              }
+              commitPendingThought(userMessageTimestamp);
+              thoughtBuffer = '';
+              setThought(null);
+              geminiMessageBuffer = '';
+              toolCallRequests.length = 0;
+              clearRetryCountdown();
+              const fromModel =
+                sanitizeDisplayText(event.fromModel) ?? '(unknown)';
+              const toModel = sanitizeDisplayText(event.toModel) ?? '(unknown)';
+              addItem(
+                {
+                  type: 'notification',
+                  text: `Model ${fromModel} unavailable, falling back to ${toModel}`,
+                },
+                userMessageTimestamp,
+              );
+              break;
+            }
             case ServerGeminiEventType.HookSystemMessage:
               flushBufferedStreamEvents();
               // Display system message from Stop hooks with "Stop says:" prefix
@@ -2037,8 +2242,8 @@ export const useGeminiStream = (
         commitPendingThought(userMessageTimestamp);
         discardBufferedStreamEvents();
         flushBufferedStreamEventsRef.current.delete(flushBufferedStreamEvents);
+        dualOutput?.finalizeAssistantMessage();
       }
-      dualOutput?.finalizeAssistantMessage();
       // When a loop was detected, halt without scheduling the calls collected
       // before the guard fired. The core splice/clear only touches
       // turn.pendingToolCalls, which the TUI does not execute from — without
@@ -2052,7 +2257,10 @@ export const useGeminiStream = (
         !loopDetectedRef.current
       ) {
         const executableToolCallRequests: ToolCallRequestInfo[] = [];
-        const duplicateResponseParts: Part[] = [];
+        const duplicateResponses: Array<{
+          request: ToolCallRequestInfo;
+          response: ToolCallResponseInfo;
+        }> = [];
         let duplicatePromptId: string | undefined;
         const historyCallIdsWithResponse: Set<string> = geminiClient
           ? geminiClient.getHistoryFunctionResponseIds()
@@ -2096,7 +2304,7 @@ export const useGeminiStream = (
               `[processGeminiStreamEvents] Suppressing duplicate provider tool-call id: ${providerCallId} (tool: ${request.name})`,
             );
             dualOutput?.emitToolResult(request, response);
-            duplicateResponseParts.push(...response.responseParts);
+            duplicateResponses.push({ request, response });
             duplicatePromptId ??= request.prompt_id;
             continue;
           }
@@ -2105,7 +2313,7 @@ export const useGeminiStream = (
           executableToolCallRequests.push(request);
         }
 
-        if (duplicateResponseParts.length > 0) {
+        if (duplicateResponses.length > 0) {
           if (executableToolCallRequests.length > 0) {
             pendingDuplicateToolResponsesRef.current.push({
               executableCallIds: new Set(
@@ -2113,18 +2321,23 @@ export const useGeminiStream = (
               ),
               promptId:
                 duplicatePromptId ?? executableToolCallRequests[0]?.prompt_id,
-              responseParts: duplicateResponseParts,
+              callOrder: toolCallRequests.map((request) => request.callId),
+              duplicateResponses,
             });
           } else {
             immediateDuplicateToolResponsesRef.current = {
               promptId: duplicatePromptId,
-              responseParts: duplicateResponseParts,
+              responses: duplicateResponses,
             };
           }
         }
 
         if (executableToolCallRequests.length > 0) {
-          scheduleToolCalls(executableToolCallRequests, signal);
+          scheduleToolCalls(
+            executableToolCallRequests,
+            signal,
+            modelOverrideRef.current,
+          );
         }
       }
       return StreamProcessingStatus.Completed;
@@ -2157,6 +2370,255 @@ export const useGeminiStream = (
     ],
   );
 
+  const resolveSteeredMessages = useCallback(
+    async (
+      messages: string[],
+      signal: AbortSignal,
+    ): Promise<ResolvedSteerMessages> => {
+      const resolvedSegments: Part[][] = [];
+      const resolvedForRecording: Array<{
+        message: string;
+        parts: Part[];
+        sideEffects: Array<() => void>;
+      }> = [];
+      const restoreMessages: string[] = [];
+      let pendingGoalSegmentIndex: number | undefined;
+      const timestamp = Date.now();
+
+      for (let index = 0; index < messages.length; index += 1) {
+        if (signal.aborted) {
+          restoreMessages.push(...messages.slice(index));
+          break;
+        }
+
+        const message = messages[index];
+        if (GOAL_COMMAND_RE.test(message)) {
+          const activeGoalBeforeCommand = getActiveGoal(config.getSessionId());
+          const result = await handleSlashCommand(message);
+          const activeGoalAfterCommand = getActiveGoal(config.getSessionId());
+          if (result && result.type === 'submit_prompt') {
+            if (pendingGoalSegmentIndex !== undefined) {
+              resolvedSegments[pendingGoalSegmentIndex] = [];
+            }
+            pendingGoalSegmentIndex = resolvedSegments.length;
+            resolvedSegments.push(normalizePartList(result.content));
+          } else if (
+            activeGoalBeforeCommand?.hookId !== activeGoalAfterCommand?.hookId
+          ) {
+            if (pendingGoalSegmentIndex !== undefined) {
+              resolvedSegments[pendingGoalSegmentIndex] = [];
+              pendingGoalSegmentIndex = undefined;
+            }
+          }
+          continue;
+        }
+
+        restoreMessages.push(message);
+        const sideEffects: Array<() => void> = [];
+        let resolvedQuery: PartListUnion = [{ text: message }];
+        if (isAtCommand(message)) {
+          const timeout = new AbortController();
+          const atCommandSignal = AbortSignal.any([signal, timeout.signal]);
+          const timeoutId = setTimeout(() => {
+            timeout.abort(
+              new Error(MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE),
+            );
+          }, MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS);
+          try {
+            const atCommandResult = await resolveWithAbort(
+              atCommandSignal,
+              () =>
+                resolveAtCommandQuery({
+                  query: message,
+                  config,
+                  onDebugMessage,
+                  messageId: timestamp + index,
+                  signal: atCommandSignal,
+                }),
+            );
+            const shouldSkipMessage =
+              !atCommandResult.shouldProceed &&
+              (atCommandResult.toolDisplays?.length ?? 0) > 0;
+            if (
+              atCommandResult.shouldProceed &&
+              atCommandResult.processedQuery !== null
+            ) {
+              resolvedQuery = atCommandResult.processedQuery;
+            } else if (atCommandResult.toolDisplays?.length) {
+              const toolDisplays = atCommandResult.toolDisplays;
+              const showToolDisplays = () =>
+                addItem(
+                  { type: 'tool_group', tools: toolDisplays },
+                  timestamp + index,
+                );
+              if (shouldSkipMessage) showToolDisplays();
+              else sideEffects.push(showToolDisplays);
+            }
+            if (atCommandResult.recording) {
+              const recordAtCommand = () =>
+                config.getChatRecordingService?.()?.recordAtCommand?.({
+                  filesRead: atCommandResult.recording!.filesRead,
+                  status: atCommandResult.recording!.status,
+                  ...(atCommandResult.recording!.message
+                    ? { message: atCommandResult.recording!.message }
+                    : {}),
+                  userText: message,
+                });
+              if (shouldSkipMessage) recordAtCommand();
+              else sideEffects.push(recordAtCommand);
+            }
+            if (shouldSkipMessage) continue;
+          } catch (error) {
+            const errorMessage = getErrorMessage(error);
+            onDebugMessage(
+              `Failed to resolve mid-turn @ command: ${errorMessage}`,
+            );
+            if (!signal.aborted) {
+              addItem(
+                {
+                  type: MessageType.WARNING,
+                  text: `Could not attach file: ${errorMessage}`,
+                },
+                Date.now(),
+              );
+            }
+            continue;
+          } finally {
+            clearTimeout(timeoutId);
+          }
+          if (signal.aborted) {
+            restoreMessages.push(...messages.slice(index + 1));
+            break;
+          }
+        }
+
+        const bridgeResult = await applyVisionBridgeIfNeeded(
+          resolvedQuery,
+          timestamp + index,
+          signal,
+        );
+        if (!bridgeResult.shouldProceed) {
+          if (signal.aborted) {
+            restoreMessages.push(...messages.slice(index + 1));
+            break;
+          }
+          continue;
+        }
+
+        const messageParts = normalizePartList(
+          bridgeResult.parts ?? resolvedQuery,
+        );
+        const formatCheck = checkImageFormatsSupport(messageParts);
+        if (formatCheck.hasUnsupportedFormats) {
+          sideEffects.push(() =>
+            addItem(
+              {
+                type: MessageType.INFO,
+                text: getUnsupportedImageFormatWarning(),
+              },
+              Date.now(),
+            ),
+          );
+        }
+
+        resolvedSegments.push(messageParts);
+        resolvedForRecording.push({
+          message,
+          parts: messageParts,
+          sideEffects,
+        });
+      }
+
+      const resolvedMessages: Part[] = [];
+      for (const segment of resolvedSegments) {
+        if (segment.length === 0) continue;
+        if (resolvedMessages.length > 0) {
+          resolvedMessages.push({ text: '\n\n' });
+        }
+        resolvedMessages.push(...segment);
+      }
+
+      return {
+        parts: resolvedMessages,
+        restoreMessages,
+        accept: () => {
+          for (const { message, parts, sideEffects } of resolvedForRecording) {
+            for (const sideEffect of sideEffects) sideEffect();
+            config
+              .getChatRecordingService?.()
+              ?.recordMidTurnUserMessage(parts, message);
+            addItem(
+              {
+                type: MessageType.USER,
+                text: message,
+                // Intentionally false: preserves isRealUserTurn/rewind semantics (steer is not a standalone user turn).
+                sentToModel: false,
+              },
+              Date.now(),
+            );
+          }
+        },
+      };
+    },
+    [
+      addItem,
+      applyVisionBridgeIfNeeded,
+      config,
+      handleSlashCommand,
+      onDebugMessage,
+    ],
+  );
+
+  const resolveDrainedSteerMessages = useCallback(
+    async (
+      messages: string[],
+      signal: AbortSignal,
+    ): Promise<SteerInput | undefined> => {
+      try {
+        const resolved = await resolveSteeredMessages(messages, signal);
+        if (signal.aborted) {
+          if (resolved.restoreMessages.length > 0) {
+            midTurnRestoreRef?.current?.(resolved.restoreMessages);
+          }
+          return undefined;
+        }
+        if (resolved.parts.length === 0) return undefined;
+        let settled = false;
+        return {
+          parts: resolved.parts,
+          accept: () => {
+            if (settled) return;
+            settled = true;
+            resolved.accept();
+          },
+          restore: () => {
+            if (settled) return;
+            settled = true;
+            if (resolved.restoreMessages.length > 0) {
+              midTurnRestoreRef?.current?.(resolved.restoreMessages);
+            }
+          },
+        };
+      } catch (error) {
+        midTurnRestoreRef?.current?.(messages);
+        onDebugMessage(
+          `Failed to prepare steer input: ${getErrorMessage(error)}`,
+        );
+        return undefined;
+      }
+    },
+    [midTurnRestoreRef, onDebugMessage, resolveSteeredMessages],
+  );
+
+  const drainSteerAtBoundary = useCallback(
+    async (signal: AbortSignal): Promise<SteerInput | undefined> => {
+      const messages = midTurnDrainRef?.current?.() ?? [];
+      if (messages.length === 0) return undefined;
+      return resolveDrainedSteerMessages(messages, signal);
+    },
+    [midTurnDrainRef, resolveDrainedSteerMessages],
+  );
+
   const submitQuery = useCallback(
     async (
       query: PartListUnion,
@@ -2166,6 +2628,7 @@ export const useGeminiStream = (
         notificationDisplayText?: string;
         onDelivered?: () => void;
         onDeliveryFailed?: () => void;
+        steerInput?: SteerInput;
       },
     ) => {
       const allowConcurrentBtwDuringResponse =
@@ -2173,12 +2636,15 @@ export const useGeminiStream = (
         streamingState === StreamingState.Responding &&
         typeof query === 'string' &&
         isBtwCommand(query);
+      const isTurnContinuation =
+        submitType === SendMessageType.ToolResult ||
+        submitType === SendMessageType.Steer;
 
       // Prevent concurrent executions of submitQuery, but allow continuations
       // which are part of the same logical flow (tool responses)
       if (
         isSubmittingQueryRef.current &&
-        submitType !== SendMessageType.ToolResult &&
+        !isTurnContinuation &&
         !allowConcurrentBtwDuringResponse
       ) {
         metadata?.onDeliveryFailed?.();
@@ -2188,7 +2654,7 @@ export const useGeminiStream = (
       if (
         (streamingState === StreamingState.Responding ||
           streamingState === StreamingState.WaitingForConfirmation) &&
-        submitType !== SendMessageType.ToolResult &&
+        !isTurnContinuation &&
         !allowConcurrentBtwDuringResponse
       ) {
         metadata?.onDeliveryFailed?.();
@@ -2218,10 +2684,7 @@ export const useGeminiStream = (
       // ToolResult continuations and same-turn btw concurrencies keep
       // the trackers untouched — they're piggybacking on an in-flight
       // turn that already owns its own snapshot.
-      if (
-        submitType !== SendMessageType.ToolResult &&
-        !allowConcurrentBtwDuringResponse
-      ) {
+      if (!isTurnContinuation && !allowConcurrentBtwDuringResponse) {
         lastTurnUserItemRef.current = null;
         turnSawContentEventRef.current = false;
         handledProviderToolCallIdsRef.current.clear();
@@ -2232,9 +2695,16 @@ export const useGeminiStream = (
 
       const userMessageTimestamp = Date.now();
 
-      // Reset quota error flag when starting a new query (not a continuation)
+      // Reset quota error flag when starting a new query (not a continuation).
+      // Notifications (background agent/shell/monitor completions) are system
+      // events, not new user turns: they must not clear the user's model
+      // override or an in-flight retry countdown — clearing the override here
+      // silently reverted the session to the default model whenever a
+      // background agent finished, and a long history could then overflow the
+      // default model's smaller context window (#7114).
       if (
-        submitType !== SendMessageType.ToolResult &&
+        !isTurnContinuation &&
+        submitType !== SendMessageType.Notification &&
         !allowConcurrentBtwDuringResponse
       ) {
         setModelSwitchedFromQuotaError(false);
@@ -2373,10 +2843,11 @@ export const useGeminiStream = (
         setIsReceivingContent(false);
         // Reset char counter only on new user queries; tool-result continuations
         // keep accumulating so the token count only goes up within a turn.
-        if (submitType !== SendMessageType.ToolResult) {
+        if (!isTurnContinuation) {
           streamingResponseLengthRef.current = 0;
         }
 
+        let cleanupReviewLease = false;
         try {
           // Emit user message to dual output sidecar (if enabled).
           // Skip for tool-result submissions — those are emitted separately
@@ -2402,6 +2873,10 @@ export const useGeminiStream = (
               type: submitType,
               notificationDisplayText: metadata?.notificationDisplayText,
               modelOverride: modelOverrideRef.current,
+              steerInput: metadata?.steerInput,
+              ...(!allowConcurrentBtwDuringResponse && midTurnDrainRef
+                ? { getSteerInput: drainSteerAtBoundary }
+                : {}),
             },
           );
 
@@ -2412,6 +2887,7 @@ export const useGeminiStream = (
           );
 
           if (processingStatus === StreamProcessingStatus.UserCancelled) {
+            cleanupReviewLease = true;
             submitPromptOnCompleteRef.current = null;
             isSubmittingQueryRef.current = false;
             metadata?.onDeliveryFailed?.();
@@ -2427,8 +2903,35 @@ export const useGeminiStream = (
             immediateDuplicateToolResponsesRef.current;
           if (immediateDuplicateToolResponses) {
             immediateDuplicateToolResponsesRef.current = null;
+            const finalized = await finalizeToolResponses(
+              config,
+              immediateDuplicateToolResponses.responses.map(
+                ({ request, response }) => ({
+                  callId: request.callId,
+                  toolName: request.name,
+                  responseParts: response.responseParts,
+                  persistedOutputFiles: response.persistedOutputFiles,
+                }),
+              ),
+            );
+            const responseParts = finalized.flatMap(
+              (entry) => entry.responseParts,
+            );
+            immediateDuplicateToolResponses.responses.forEach(
+              ({ request, response }, index) => {
+                config
+                  .getChatRecordingService?.()
+                  ?.recordToolResult?.(finalized[index].responseParts, {
+                    callId: request.callId,
+                    status: response.error ? 'error' : 'success',
+                    resultDisplay: response.resultDisplay,
+                    error: response.error,
+                    errorType: response.errorType,
+                  });
+              },
+            );
             await submitQuery(
-              immediateDuplicateToolResponses.responseParts,
+              responseParts,
               SendMessageType.ToolResult,
               immediateDuplicateToolResponses.promptId,
             );
@@ -2439,8 +2942,19 @@ export const useGeminiStream = (
           // a new conversation turn (cleared in submitQuery).
           if (retryCountdownTimerRef.current) {
             clearRetryCountdown();
+          } else if (
+            pendingRetryErrorItemRef.current &&
+            !lastPromptErroredRef.current
+          ) {
+            // A countdown-originated error item lingers after the timer
+            // expired and the retry succeeded. Clear it so it does not
+            // stay on screen. Terminal errors (handleErrorEvent) set
+            // lastPromptErroredRef and are intentionally left visible.
+            clearRetryCountdown();
           }
-          if (loopDetectedRef.current) {
+          const loopDetected = loopDetectedRef.current;
+          if (loopDetected) {
+            cleanupReviewLease = true;
             loopDetectedRef.current = false;
             handleLoopDetectedEvent();
           }
@@ -2482,6 +2996,7 @@ export const useGeminiStream = (
             }
           }
         } catch (error: unknown) {
+          cleanupReviewLease = true;
           metadata?.onDeliveryFailed?.();
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
@@ -2499,6 +3014,13 @@ export const useGeminiStream = (
             });
           }
         } finally {
+          if (cleanupReviewLease) {
+            cleanupReviewWorktreeLeases({
+              sessionId: config.getSessionId(),
+              promptId: prompt_id!,
+              repositoryRoot: config.getProjectRoot(),
+            });
+          }
           submitPromptOnCompleteRef.current = null;
           activeModelStreamsRef.current = Math.max(
             0,
@@ -2533,6 +3055,8 @@ export const useGeminiStream = (
       setPendingRetryErrorItem,
       setPendingThoughtItem,
       dualOutput,
+      drainSteerAtBoundary,
+      midTurnDrainRef,
     ],
   );
 
@@ -2598,8 +3122,17 @@ export const useGeminiStream = (
         newApprovalMode === ApprovalMode.AUTO_EDIT
       ) {
         let awaitingApprovalCalls = toolCalls.filter(
-          (call): call is TrackedWaitingToolCall =>
-            call.status === 'awaiting_approval',
+          (call): call is TrackedWaitingToolCall => {
+            if (call.status !== 'awaiting_approval') {
+              return false;
+            }
+            const { confirmationDetails } = call;
+            return !(
+              confirmationDetails &&
+              'hideAlwaysAllow' in confirmationDetails &&
+              confirmationDetails.hideAlwaysAllow === true
+            );
+          },
         );
 
         // For AUTO_EDIT mode, only approve edit tools (edit/replace, write_file, notebook_edit)
@@ -2747,20 +3280,33 @@ export const useGeminiStream = (
           !processedMemoryToolsRef.current.has(t.request.callId),
       );
 
-      if (newSuccessfulMemorySaves.length > 0) {
-        // Perform the refresh only if there are new ones.
-        void performMemoryRefresh();
-        // Mark them as processed so we don't do this again on the next render.
-        newSuccessfulMemorySaves.forEach((t) =>
-          processedMemoryToolsRef.current.add(t.request.callId),
-        );
-      }
-
       const geminiTools = completedAndReadyToSubmitTools.filter(
         (t) =>
           !t.request.isClientInitiated &&
           !historyCallIdsWithResponse.has(t.request.callId),
       );
+      const didRefreshManagedMemory = await refreshMemoryAfterManagedWrite(
+        config,
+        completedAndReadyToSubmitTools.map((toolCall) => ({
+          toolName: toolCall.request.name,
+          args: toolCall.request.args as Record<string, unknown>,
+          status: toolCall.status,
+        })),
+        { logContext: 'interactive memory tool batch' },
+      );
+      if (newSuccessfulMemorySaves.length > 0) {
+        if (!didRefreshManagedMemory) {
+          // Perform the legacy save_memory refresh only when the managed-memory
+          // write refresh did not already rebuild and publish a fresher state.
+          void performMemoryRefresh().catch((err) => {
+            debugLogger.warn(`save_memory refresh failed: ${err}`);
+          });
+        }
+        // Mark them as processed so we don't do this again on the next render.
+        newSuccessfulMemorySaves.forEach((t) =>
+          processedMemoryToolsRef.current.add(t.request.callId),
+        );
+      }
       const completedCallIds = new Set(
         completedAndReadyToSubmitTools.map(
           (toolCall) => toolCall.request.callId,
@@ -2777,8 +3323,8 @@ export const useGeminiStream = (
           }
           return !isReady;
         });
-      const pendingDuplicateResponseParts = readyDuplicateBatches.flatMap(
-        (batch) => batch.responseParts,
+      const pendingDuplicateResponses = readyDuplicateBatches.flatMap(
+        (batch) => batch.duplicateResponses,
       );
       const pendingDuplicatePromptId = readyDuplicateBatches[0]?.promptId;
 
@@ -2789,12 +3335,76 @@ export const useGeminiStream = (
         );
       }
 
-      if (
-        geminiTools.length === 0 &&
-        pendingDuplicateResponseParts.length === 0
-      ) {
+      if (geminiTools.length === 0 && pendingDuplicateResponses.length === 0) {
         return;
       }
+
+      type ReadyToolResponse = {
+        request: ToolCallRequestInfo;
+        response: ToolCallResponseInfo;
+        status: 'success' | 'error' | 'cancelled';
+      };
+      const executableQueues = new Map<string, ReadyToolResponse[]>();
+      for (const toolCall of geminiTools) {
+        const queue = executableQueues.get(toolCall.request.callId) ?? [];
+        queue.push({
+          request: toolCall.request,
+          response: toolCall.response,
+          status: toolCall.status,
+        });
+        executableQueues.set(toolCall.request.callId, queue);
+      }
+      const duplicateQueues = new Map<string, ReadyToolResponse[]>();
+      for (const duplicate of pendingDuplicateResponses) {
+        const queue = duplicateQueues.get(duplicate.request.callId) ?? [];
+        queue.push({
+          ...duplicate,
+          status: duplicate.response.error ? 'error' : 'success',
+        });
+        duplicateQueues.set(duplicate.request.callId, queue);
+      }
+      const orderedResponses: ReadyToolResponse[] = [];
+      for (const batch of readyDuplicateBatches) {
+        for (const callId of batch.callOrder) {
+          const executable = executableQueues.get(callId)?.shift();
+          if (executable) {
+            orderedResponses.push(executable);
+            continue;
+          }
+          const duplicate = duplicateQueues.get(callId)?.shift();
+          if (duplicate) orderedResponses.push(duplicate);
+        }
+      }
+      for (const queue of executableQueues.values()) {
+        orderedResponses.push(...queue);
+      }
+      for (const queue of duplicateQueues.values()) {
+        orderedResponses.push(...queue);
+      }
+
+      const finalizedResponses = await finalizeToolResponses(
+        config,
+        orderedResponses.map(({ request, response }) => ({
+          callId: request.callId,
+          toolName: request.name,
+          responseParts: response.responseParts,
+          persistedOutputFiles: response.persistedOutputFiles,
+        })),
+      );
+      const responsesToSend = finalizedResponses.flatMap(
+        (entry) => entry.responseParts,
+      );
+      orderedResponses.forEach(({ request, response, status }, index) => {
+        config
+          .getChatRecordingService?.()
+          ?.recordToolResult?.(finalizedResponses[index].responseParts, {
+            callId: request.callId,
+            status,
+            resultDisplay: response.resultDisplay,
+            error: response.error,
+            errorType: response.errorType,
+          });
+      });
 
       if (
         turnCancelledRef.current ||
@@ -2811,16 +3421,13 @@ export const useGeminiStream = (
         (tc) => tc.status === 'cancelled',
       );
 
-      if (allToolsCancelled && pendingDuplicateResponseParts.length === 0) {
+      if (allToolsCancelled && pendingDuplicateResponses.length === 0) {
         if (geminiClient) {
           // We need to manually add the function responses to the history
           // so the model knows the tools were cancelled.
-          const combinedParts = geminiTools.flatMap(
-            (toolCall) => toolCall.response.responseParts,
-          );
           geminiClient.addHistory({
             role: 'user',
-            parts: combinedParts,
+            parts: responsesToSend,
           });
 
           // Report cancellation to arena (safety net — cancelOngoingRequest
@@ -2834,10 +3441,6 @@ export const useGeminiStream = (
         return;
       }
 
-      const responsesToSend: Part[] = geminiTools.flatMap(
-        (toolCall) => toolCall.response.responseParts,
-      );
-      responsesToSend.push(...pendingDuplicateResponseParts);
       const callIdsToMarkAsSubmitted = geminiTools.map(
         (toolCall) => toolCall.request.callId,
       );
@@ -2855,11 +3458,18 @@ export const useGeminiStream = (
       // while it is active.
       for (const toolCall of geminiTools) {
         if ('modelOverride' in toolCall.response) {
-          if (inlineModelOverrideActiveRef.current) {
+          if (
+            inlineModelOverrideActiveRef.current ||
+            modelOverrideRef.current?.endsWith('\0')
+          ) {
             debugLogger.debug(
               `skill-tool model override (${String(
                 toolCall.response.modelOverride,
-              )}) blocked: inline override active`,
+              )}) blocked: ${
+                inlineModelOverrideActiveRef.current
+                  ? 'inline override active'
+                  : 'full-turn override active'
+              }`,
             );
           } else {
             applyModelOverride(
@@ -2976,15 +3586,36 @@ export const useGeminiStream = (
         return;
       }
 
-      // Mid-turn queue drain: inject queued user messages alongside tool
-      // results so the model sees them in the next API call.
+      const backgroundTaskRegistry = config.getBackgroundTaskRegistry();
+      const backgroundLaunchExhaustedCapacity =
+        backgroundTaskRegistry.getMaxConcurrentBackgroundAgents() === 1 &&
+        !backgroundTaskRegistry.canStartBackgroundAgent() &&
+        geminiTools.some((toolCall) => {
+          const display = toolCall.response.resultDisplay;
+          return (
+            toolCall.request.name === ToolNames.AGENT &&
+            typeof display === 'object' &&
+            display !== null &&
+            'type' in display &&
+            'status' in display &&
+            display.type === 'task_execution' &&
+            display.status === 'background'
+          );
+        });
+      if (backgroundLaunchExhaustedCapacity) {
+        geminiClient?.addHistory({ role: 'user', parts: responsesToSend });
+        return;
+      }
+
+      // Drain steerable user messages at this sampling boundary and append
+      // them after the tool responses as genuine user content.
       // Skip if the turn was cancelled — messages stay in queue for next turn.
       const drained =
         turnCancelledRef.current || abortControllerRef.current?.signal.aborted
           ? []
           : (midTurnDrainRef?.current?.() ?? []);
+      let drainedSteer: SteerInput | undefined;
       if (drained.length > 0) {
-        const midTurnTimestamp = Date.now();
         const midTurnAbort =
           abortControllerRef.current ?? new AbortController();
         const shouldTrackMidTurnAbort = !abortControllerRef.current;
@@ -2992,119 +3623,12 @@ export const useGeminiStream = (
           auxiliaryAbortRefsRef.current.add(midTurnAbort);
         }
         try {
-          for (let index = 0; index < drained.length; index += 1) {
-            if (midTurnAbort.signal.aborted) {
-              break;
-            }
-            const msg = drained[index];
-            let resolvedMidTurnQuery: PartListUnion = [{ text: msg }];
-            if (isAtCommand(msg)) {
-              const atCommandTimeout = new AbortController();
-              const atCommandSignal = AbortSignal.any([
-                midTurnAbort.signal,
-                atCommandTimeout.signal,
-              ]);
-              const atCommandTimeoutId = setTimeout(() => {
-                atCommandTimeout.abort(
-                  new Error(MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE),
-                );
-              }, MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MS);
-              try {
-                const atCommandResult = await resolveWithAbort(
-                  atCommandSignal,
-                  () =>
-                    resolveAtCommandQuery({
-                      query: msg,
-                      config,
-                      onDebugMessage,
-                      messageId: midTurnTimestamp + index,
-                      signal: atCommandSignal,
-                    }),
-                );
-                const shouldSkipMidTurnMessage =
-                  !atCommandResult.shouldProceed &&
-                  (atCommandResult.toolDisplays?.length ?? 0) > 0;
-                if (
-                  atCommandResult.shouldProceed &&
-                  atCommandResult.processedQuery !== null
-                ) {
-                  resolvedMidTurnQuery = atCommandResult.processedQuery;
-                } else if (atCommandResult.toolDisplays?.length) {
-                  addItem(
-                    { type: 'tool_group', tools: atCommandResult.toolDisplays },
-                    midTurnTimestamp + index,
-                  );
-                }
-                if (atCommandResult.recording) {
-                  config.getChatRecordingService?.()?.recordAtCommand?.({
-                    filesRead: atCommandResult.recording.filesRead,
-                    status: atCommandResult.recording.status,
-                    ...(atCommandResult.recording.message
-                      ? { message: atCommandResult.recording.message }
-                      : {}),
-                    userText: msg,
-                  });
-                }
-                if (shouldSkipMidTurnMessage) {
-                  continue;
-                }
-              } catch (error) {
-                const errorMessage = getErrorMessage(error);
-                onDebugMessage(
-                  `Failed to resolve mid-turn @ command: ${errorMessage}`,
-                );
-                if (!midTurnAbort.signal.aborted) {
-                  addItem(
-                    {
-                      type: MessageType.WARNING,
-                      text: `Could not attach file: ${errorMessage}`,
-                    },
-                    Date.now(),
-                  );
-                }
-                continue;
-              } finally {
-                clearTimeout(atCommandTimeoutId);
-              }
-              if (midTurnAbort.signal.aborted) {
-                break;
-              }
-            }
-
-            const bridgeResult = await applyVisionBridgeIfNeeded(
-              resolvedMidTurnQuery,
-              midTurnTimestamp + index,
-              midTurnAbort.signal,
-            );
-            if (!bridgeResult.shouldProceed) {
-              if (midTurnAbort.signal.aborted) {
-                break;
-              }
-              continue;
-            }
-            resolvedMidTurnQuery = bridgeResult.parts ?? resolvedMidTurnQuery;
-
-            const midTurnUserMessageParts = prefixMidTurnUserMessageParts(
-              resolvedMidTurnQuery,
-              msg,
-            );
-            const formatCheck = checkImageFormatsSupport(
-              midTurnUserMessageParts,
-            );
-            if (formatCheck.hasUnsupportedFormats) {
-              addItem(
-                {
-                  type: MessageType.INFO,
-                  text: getUnsupportedImageFormatWarning(),
-                },
-                Date.now(),
-              );
-            }
-            responsesToSend.push(...midTurnUserMessageParts);
-            config
-              .getChatRecordingService?.()
-              ?.recordMidTurnUserMessage(midTurnUserMessageParts, msg);
-            addItem({ type: MessageType.NOTIFICATION, text: msg }, Date.now());
+          drainedSteer = await resolveDrainedSteerMessages(
+            drained,
+            midTurnAbort.signal,
+          );
+          if (drainedSteer) {
+            responsesToSend.push(...drainedSteer.parts);
           }
         } finally {
           if (shouldTrackMidTurnAbort) {
@@ -3118,10 +3642,15 @@ export const useGeminiStream = (
         turnCancelledRef.current ||
         abortControllerRef.current?.signal.aborted
       ) {
+        drainedSteer?.restore();
         return;
       }
 
-      submitQuery(responsesToSend, SendMessageType.ToolResult, promptId);
+      void submitQuery(responsesToSend, SendMessageType.ToolResult, promptId, {
+        steerInput: drainedSteer,
+        onDelivered: drainedSteer?.accept,
+        onDeliveryFailed: drainedSteer?.restore,
+      });
     },
     [
       submitQuery,
@@ -3133,8 +3662,7 @@ export const useGeminiStream = (
       midTurnDrainRef,
       addItem,
       dualOutput,
-      onDebugMessage,
-      applyVisionBridgeIfNeeded,
+      resolveDrainedSteerMessages,
     ],
   );
 
@@ -3248,6 +3776,7 @@ export const useGeminiStream = (
       displayText: string;
       modelText: string;
       sendMessageType: SendMessageType;
+      monitor?: { id: string; status: string };
       onDelivered?: () => void;
       onDeliveryFailed?: () => void;
     }>
@@ -3318,7 +3847,12 @@ export const useGeminiStream = (
       // already ran scheduler.stop(), so do not (re)install onFire.
       if (stopped) return;
       scheduler.start(
-        (job: { prompt: string; cronExpr?: string; missed?: boolean }) => {
+        (job: {
+          id?: string;
+          prompt: string;
+          cronExpr?: string;
+          missed?: boolean;
+        }) => {
           const source = job.cronExpr === '@wakeup' ? 'Loop' : 'Cron';
           const autonomousMode = detectAutonomousSentinel(job.prompt);
           let label = job.prompt.slice(0, 40);
@@ -3402,6 +3936,7 @@ export const useGeminiStream = (
         displayText,
         modelText,
         sendMessageType: SendMessageType.Notification,
+        monitor: { id: meta.monitorId, status: meta.status },
       });
       setNotificationTrigger((n) => n + 1);
     });
@@ -3422,48 +3957,75 @@ export const useGeminiStream = (
       !isSubmittingQueryRef.current &&
       notificationQueueRef.current.length > 0
     ) {
-      const queue = notificationQueueRef.current;
-      const targetType = queue[0]!.sendMessageType;
+      // Consumer-side guard for #7156: this effect can run on a render pass
+      // that React batched together with progress setState calls issued from
+      // INSIDE a subagent's AsyncLocalStorage frame, in which case the whole
+      // synchronous effect stack — and every async continuation submitQuery
+      // starts — inherits the subagent's runtime view, and the notification
+      // turn resolves Config.getModel() to the SUBAGENT's model. Exiting the
+      // frame here guarantees the drained turn always runs on the main
+      // session's configuration, regardless of which producer's setState
+      // triggered the commit.
+      runOutsideAgentContext(() => {
+        const queue = notificationQueueRef.current;
+        const monitorRegistry = config.getMonitorRegistry();
+        for (let i = queue.length - 1; i >= 0; i--) {
+          const monitor = queue[i]!.monitor;
+          if (
+            monitor?.status === 'running' &&
+            monitorRegistry.get(monitor.id)?.status === 'cancelled'
+          ) {
+            queue.splice(i, 1);
+          }
+        }
+        if (queue.length === 0) {
+          return;
+        }
+        const targetType = queue[0]!.sendMessageType;
 
-      // Cron prompts must run as individual turns — each needs its own
-      // slash/shell/@ preprocessing and approval cycle. Only batch
-      // Notification items (which pass through without preprocessing).
-      if (targetType === SendMessageType.Cron) {
-        const item = queue.shift()!;
-        addItem(
-          { type: 'notification' as const, text: item.displayText },
-          Date.now(),
-        );
-        submitQuery(item.modelText, item.sendMessageType, undefined, {
-          notificationDisplayText: item.displayText,
-          onDelivered: item.onDelivered,
-          onDeliveryFailed: item.onDeliveryFailed,
+        // Cron prompts must run as individual turns — each needs its own
+        // slash/shell/@ preprocessing and approval cycle. Only batch
+        // Notification items (which pass through without preprocessing).
+        if (targetType === SendMessageType.Cron) {
+          const item = queue.shift()!;
+          addItem(
+            { type: 'notification' as const, text: item.displayText },
+            Date.now(),
+          );
+          submitQuery(item.modelText, item.sendMessageType, undefined, {
+            notificationDisplayText: item.displayText,
+            onDelivered: item.onDelivered,
+            onDeliveryFailed: item.onDeliveryFailed,
+          });
+          return;
+        }
+
+        // Drain contiguous leading Notification items into one batch.
+        let splitIdx = 0;
+        while (
+          splitIdx < queue.length &&
+          queue[splitIdx]!.sendMessageType === targetType
+        ) {
+          splitIdx++;
+        }
+        const batch = queue.splice(0, splitIdx);
+
+        const now = Date.now();
+        for (const item of batch) {
+          addItem(
+            { type: 'notification' as const, text: item.displayText },
+            now,
+          );
+        }
+
+        const combinedModelText = batch.map((e) => e.modelText).join('\n\n');
+        const combinedDisplayText = batch.map((e) => e.displayText).join('; ');
+        submitQuery(combinedModelText, targetType, undefined, {
+          notificationDisplayText: combinedDisplayText,
         });
-        return;
-      }
-
-      // Drain contiguous leading Notification items into one batch.
-      let splitIdx = 0;
-      while (
-        splitIdx < queue.length &&
-        queue[splitIdx]!.sendMessageType === targetType
-      ) {
-        splitIdx++;
-      }
-      const batch = queue.splice(0, splitIdx);
-
-      const now = Date.now();
-      for (const item of batch) {
-        addItem({ type: 'notification' as const, text: item.displayText }, now);
-      }
-
-      const combinedModelText = batch.map((e) => e.modelText).join('\n\n');
-      const combinedDisplayText = batch.map((e) => e.displayText).join('; ');
-      submitQuery(combinedModelText, targetType, undefined, {
-        notificationDisplayText: combinedDisplayText,
       });
     }
-  }, [streamingState, submitQuery, notificationTrigger, addItem]);
+  }, [streamingState, submitQuery, notificationTrigger, addItem, config]);
 
   // ─── Teammate message integration ─────────────────────────
   // Each entry carries the full nonce-tagged envelope (`modelText`,
@@ -3537,20 +4099,23 @@ export const useGeminiStream = (
       !isSubmittingQueryRef.current &&
       teammateQueueRef.current.length > 0
     ) {
-      const batch = teammateQueueRef.current.splice(0);
-      // Render one compact `● …` line per teammate report; the full
-      // envelope goes only to the model (the USER bubble is suppressed
-      // for SendMessageType.Teammate in prepareQueryForGemini).
-      for (const entry of batch) {
-        addItem(
-          { type: 'notification' as const, text: entry.display },
-          Date.now(),
-        );
-      }
-      const modelText = batch.map((e) => e.modelText).join('\n\n');
-      const display = batch.map((e) => e.display).join('; ');
-      submitQuery(modelText, SendMessageType.Teammate, undefined, {
-        notificationDisplayText: display,
+      // React can flush this effect after restoring the teammate frame.
+      runOutsideAgentContext(() => {
+        const batch = teammateQueueRef.current.splice(0);
+        // Render one compact `● …` line per teammate report; the full
+        // envelope goes only to the model (the USER bubble is suppressed
+        // for SendMessageType.Teammate in prepareQueryForGemini).
+        for (const entry of batch) {
+          addItem(
+            { type: 'notification' as const, text: entry.display },
+            Date.now(),
+          );
+        }
+        const modelText = batch.map((e) => e.modelText).join('\n\n');
+        const display = batch.map((e) => e.display).join('; ');
+        submitQuery(modelText, SendMessageType.Teammate, undefined, {
+          notificationDisplayText: display,
+        });
       });
     }
   }, [streamingState, submitQuery, teammateTrigger, addItem]);

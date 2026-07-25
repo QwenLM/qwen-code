@@ -31,7 +31,7 @@ export interface OpenAICompatibleProvider {
     userPromptId: string,
   ): OpenAI.Chat.ChatCompletionCreateParams;
   getDefaultGenerationConfig(): GenerateContentConfig;
-  getResponseParsingOptions?(model?: string): OpenAIResponseParsingOptions;
+  getResponseParsingOptions?(): OpenAIResponseParsingOptions;
   getRequestContextOverrides?(): OpenAIRequestContextOverrides;
 }
 

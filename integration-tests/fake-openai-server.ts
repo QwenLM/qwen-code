@@ -25,14 +25,29 @@ export type FakeOpenAIToolCall = {
 };
 
 export type FakeOpenAIResponse = {
+  model?: string;
   content?: string;
+  contentChunks?: string[];
+  disconnectAfterContentChunks?: number;
   toolCalls?: FakeOpenAIToolCall[];
   finishReason?: 'stop' | 'tool_calls' | 'length';
+  choices?: FakeOpenAIChoice[];
   usage?: {
     prompt_tokens: number;
     completion_tokens: number;
     total_tokens: number;
+    prompt_tokens_details?: {
+      cached_tokens?: number;
+    };
   };
+};
+
+export type FakeOpenAIChoice = {
+  index: number;
+  content?: string;
+  contentChunks?: string[];
+  toolCalls?: FakeOpenAIToolCall[];
+  finishReason?: 'stop' | 'tool_calls' | 'length';
 };
 
 export type FakeOpenAIRequest = {
@@ -45,10 +60,22 @@ export type FakeOpenAIServer = {
   close: () => Promise<void>;
 };
 
+export type FakeOpenAIServerOptions =
+  | { listenHost?: undefined; baseUrlHost?: undefined }
+  | { listenHost: string; baseUrlHost: string };
+
 export type FakeOpenAIHandler = (ctx: {
   body: JsonObject;
   requestIndex: number;
 }) => FakeOpenAIResponse | Promise<FakeOpenAIResponse>;
+
+const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024;
+
+class RequestBodyTooLargeError extends Error {
+  constructor() {
+    super('fake OpenAI request body too large');
+  }
+}
 
 export function fakeToolCall(
   name: string,
@@ -67,6 +94,7 @@ export function fakeToolCall(
 
 export async function startFakeOpenAIServer(
   handler: FakeOpenAIHandler,
+  options: FakeOpenAIServerOptions = {},
 ): Promise<FakeOpenAIServer> {
   const requests: FakeOpenAIRequest[] = [];
   const server = createServer(async (req, res) => {
@@ -94,7 +122,13 @@ export async function startFakeOpenAIServer(
       } else {
         writeNonStreamed(res, getModel(body), response);
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) {
+        res.writeHead(413);
+        res.end('request body too large');
+        return;
+      }
+
       if (res.headersSent) {
         if (!res.writableEnded) {
           res.destroy();
@@ -125,7 +159,7 @@ export async function startFakeOpenAIServer(
     };
     server.once('error', onError);
     server.once('listening', onListening);
-    server.listen(0, '127.0.0.1');
+    server.listen(0, options.listenHost ?? '127.0.0.1');
   });
 
   const address = server.address();
@@ -134,7 +168,9 @@ export async function startFakeOpenAIServer(
   }
 
   return {
-    baseUrl: `http://127.0.0.1:${(address as AddressInfo).port}/v1`,
+    baseUrl: `http://${options.baseUrlHost ?? '127.0.0.1'}:${
+      (address as AddressInfo).port
+    }/v1`,
     requests,
     close: () => closeServer(server),
   };
@@ -143,8 +179,21 @@ export async function startFakeOpenAIServer(
 function readRequestBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', (chunk: Buffer) => chunks.push(chunk));
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    let totalLength = 0;
+    let tooLarge = false;
+    req.on('data', (chunk: Buffer) => {
+      if (tooLarge) return;
+      totalLength += chunk.length;
+      if (totalLength > MAX_REQUEST_BODY_BYTES) {
+        tooLarge = true;
+        reject(new RequestBodyTooLargeError());
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (!tooLarge) resolve(Buffer.concat(chunks).toString('utf8'));
+    });
     req.on('error', reject);
   });
 }
@@ -177,18 +226,16 @@ function writeNonStreamed(
       id: chatCompletionId(),
       object: 'chat.completion',
       created: nowSeconds(),
-      model,
-      choices: [
-        {
-          index: 0,
-          message: {
-            role: 'assistant',
-            content: message.content ?? null,
-            ...(message.toolCalls ? { tool_calls: message.toolCalls } : {}),
-          },
-          finish_reason: finishReason(message),
+      model: message.model ?? model,
+      choices: responseChoices(message).map((choice) => ({
+        index: choice.index,
+        message: {
+          role: 'assistant',
+          content: choice.content ?? choice.contentChunks?.join('') ?? null,
+          ...(choice.toolCalls ? { tool_calls: choice.toolCalls } : {}),
         },
-      ],
+        finish_reason: finishReason(choice),
+      })),
       usage: message.usage ?? DEFAULT_USAGE,
     }),
   );
@@ -207,7 +254,9 @@ function writeStreamed(
 
   const id = chatCompletionId();
   const created = nowSeconds();
+  const responseModel = message.model ?? model;
   const chunk = (
+    index: number,
     delta: JsonObject,
     finish_reason: string | null = null,
     usage?: FakeOpenAIResponse['usage'],
@@ -215,55 +264,102 @@ function writeStreamed(
     id,
     object: 'chat.completion.chunk',
     created,
-    model,
-    choices: [{ index: 0, delta, finish_reason }],
+    model: responseModel,
+    choices: [{ index, delta, finish_reason }],
     ...(usage ? { usage } : {}),
   });
-  const send = (payload: unknown) => {
-    res.write(`data: ${JSON.stringify(payload)}\n\n`);
+  const send = (payload: unknown, callback?: () => void) => {
+    res.write(`data: ${JSON.stringify(payload)}\n\n`, callback);
   };
 
-  send(chunk({ role: 'assistant' }));
-  if (message.content) {
-    send(chunk({ content: message.content }));
-  }
-  for (const [index, toolCall] of (message.toolCalls ?? []).entries()) {
-    send(
-      chunk({
-        tool_calls: [
-          {
-            index,
-            id: toolCall.id,
-            type: toolCall.type,
-            function: {
-              name: toolCall.function.name,
-              arguments: '',
-            },
-          },
-        ],
-      }),
-    );
-    if (toolCall.function.arguments) {
+  const choices = responseChoices(message);
+  for (const [choicePosition, choice] of choices.entries()) {
+    send(chunk(choice.index, { role: 'assistant' }));
+    for (const [contentIndex, content] of (
+      choice.contentChunks ?? []
+    ).entries()) {
+      if (message.disconnectAfterContentChunks === contentIndex + 1) {
+        send(chunk(choice.index, { content }), () => res.destroy());
+        return;
+      }
+      send(chunk(choice.index, { content }));
+    }
+    if (!choice.contentChunks && choice.content) {
+      send(chunk(choice.index, { content: choice.content }));
+    }
+    for (const [toolIndex, toolCall] of (choice.toolCalls ?? []).entries()) {
       send(
-        chunk({
+        chunk(choice.index, {
           tool_calls: [
             {
-              index,
+              index: toolIndex,
+              id: toolCall.id,
+              type: toolCall.type,
               function: {
-                arguments: toolCall.function.arguments,
+                name: toolCall.function.name,
+                arguments: '',
               },
             },
           ],
         }),
       );
+      if (toolCall.function.arguments) {
+        send(
+          chunk(choice.index, {
+            tool_calls: [
+              {
+                index: toolIndex,
+                function: {
+                  arguments: toolCall.function.arguments,
+                },
+              },
+            ],
+          }),
+        );
+      }
     }
+    send(
+      chunk(
+        choice.index,
+        {},
+        finishReason(choice),
+        choices.length === 1 && choicePosition === choices.length - 1
+          ? (message.usage ?? DEFAULT_USAGE)
+          : undefined,
+      ),
+    );
   }
-  send(chunk({}, finishReason(message), message.usage ?? DEFAULT_USAGE));
+  if (choices.length > 1) {
+    send({
+      id,
+      object: 'chat.completion.chunk',
+      created,
+      model: responseModel,
+      choices: [],
+      usage: message.usage ?? DEFAULT_USAGE,
+    });
+  }
   res.write('data: [DONE]\n\n');
   res.end();
 }
 
-function finishReason(message: FakeOpenAIResponse): string {
+function responseChoices(message: FakeOpenAIResponse): FakeOpenAIChoice[] {
+  return (
+    message.choices ?? [
+      {
+        index: 0,
+        content: message.content,
+        contentChunks: message.contentChunks,
+        toolCalls: message.toolCalls,
+        finishReason: message.finishReason,
+      },
+    ]
+  );
+}
+
+function finishReason(
+  message: Pick<FakeOpenAIChoice, 'finishReason' | 'toolCalls'>,
+): string {
   return message.finishReason ?? (message.toolCalls ? 'tool_calls' : 'stop');
 }
 

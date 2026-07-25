@@ -13,6 +13,8 @@ const debugLogger = createDebugLogger('STREAMING_TOOL_CALL_PARSER');
  * Type definition for the result of parsing a JSON chunk in tool calls
  */
 export interface ToolCallParseResult {
+  /** Parser index that received this chunk after collision remapping. */
+  actualIndex?: number;
   /** Whether the JSON parsing is complete */
   complete: boolean;
   /** The parsed JSON value (only present when complete is true) */
@@ -44,10 +46,15 @@ export class StreamingToolCallParser {
   private escapes: Map<number, boolean> = new Map();
   /** Metadata for each tool call index */
   private toolCallMeta: Map<number, { id?: string; name?: string }> = new Map();
+  private namelessToolCallIndices = new Set<number>();
   /** Map from tool call ID to actual index used for storage */
   private idToIndexMap: Map<string, number> = new Map();
+  /** Remapped slots awaiting a stable ID from a later chunk. */
+  private pendingIndexRemaps: Map<number, number> = new Map();
   /** Counter for generating new indices when collisions occur */
   private nextAvailableIndex: number = 0;
+  private conflictingToolCallIdentity = false;
+  private invalidToolCallIndex = false;
 
   /**
    * Processes a new chunk of tool call data and attempts to parse complete JSON objects
@@ -71,8 +78,31 @@ export class StreamingToolCallParser {
     id?: string,
     name?: string,
   ): ToolCallParseResult {
+    const validName = name?.trim() || undefined;
+    if (!Number.isSafeInteger(index) || index < 0) {
+      this.conflictingToolCallIdentity = true;
+      this.invalidToolCallIndex = true;
+      return {
+        complete: false,
+        error: new Error(`Invalid tool call index: ${index}`),
+      };
+    }
+    if (!id && !validName && !chunk.trim()) {
+      const depth = this.depths.get(index) ?? 0;
+      const inString = this.inStrings.get(index) ?? false;
+      if (!this.buffers.has(index) || (depth === 0 && !inString)) {
+        return { complete: false };
+      }
+    }
+
     let actualIndex = index;
     const isKnownId = Boolean(id && this.idToIndexMap.has(id));
+    const existingName = this.toolCallMeta.get(index)?.name;
+    const isNameOnlyDelta = Boolean(
+      validName &&
+        chunk.length === 0 &&
+        (!existingName || existingName === validName),
+    );
 
     // Handle tool call ID mapping for collision detection
     if (id) {
@@ -80,6 +110,11 @@ export class StreamingToolCallParser {
       if (this.idToIndexMap.has(id)) {
         // We've seen this ID before, use the existing mapped index
         actualIndex = this.idToIndexMap.get(id)!;
+      } else if (this.pendingIndexRemaps.has(index)) {
+        // Some providers stream name or arguments before the stable ID.
+        actualIndex = this.pendingIndexRemaps.get(index)!;
+        this.pendingIndexRemaps.delete(index);
+        this.idToIndexMap.set(id, actualIndex);
       } else {
         // New tool call ID
         // Check if the requested index is already occupied by a different complete tool call
@@ -88,20 +123,23 @@ export class StreamingToolCallParser {
           const existingDepth = this.depths.get(index)!;
           const existingMeta = this.toolCallMeta.get(index);
 
-          // Check if we have a complete tool call at this index
-          if (
-            existingBuffer.trim() &&
-            existingDepth === 0 &&
-            existingMeta?.id &&
-            existingMeta.id !== id
-          ) {
-            try {
-              JSON.parse(existingBuffer);
-              // We have a complete tool call with a different ID at this index
-              // Find a new index for this tool call
-              actualIndex = this.findNextAvailableIndex();
-            } catch {
-              // Existing buffer is not complete JSON, we can reuse this index
+          if (existingMeta?.id && existingMeta.id !== id) {
+            let existingComplete = existingDepth === 0;
+            if (existingComplete && existingBuffer.trim()) {
+              try {
+                JSON.parse(existingBuffer);
+              } catch {
+                existingComplete = false;
+              }
+            }
+            if (existingComplete) {
+              actualIndex = 0;
+              while (this.buffers.has(actualIndex)) actualIndex += 1;
+              if (!existingMeta.name) {
+                this.conflictingToolCallIdentity = true;
+              }
+            } else {
+              this.conflictingToolCallIdentity = true;
             }
           }
         }
@@ -109,11 +147,24 @@ export class StreamingToolCallParser {
         // Map this ID to the actual index we're using
         this.idToIndexMap.set(id, actualIndex);
       }
-    } else {
+    } else if (!isNameOnlyDelta) {
       // No ID provided - this is a continuation chunk
       // Try to find which tool call this belongs to based on the index
       // Look for an existing tool call at this index that's not complete
-      if (this.buffers.has(index)) {
+      if (this.pendingIndexRemaps.has(index)) {
+        // Keep later argument chunks on the remapped slot until the ID arrives.
+        actualIndex = this.pendingIndexRemaps.get(index)!;
+        const existingBuffer = this.buffers.get(actualIndex)!;
+        const existingDepth = this.depths.get(actualIndex)!;
+        if (existingDepth === 0 && existingBuffer.trim()) {
+          try {
+            JSON.parse(existingBuffer);
+            actualIndex = this.findMostRecentIncompleteIndex();
+          } catch {
+            // The remapped buffer is still incomplete; append below.
+          }
+        }
+      } else if (this.buffers.has(index)) {
         const existingBuffer = this.buffers.get(index)!;
         const existingDepth = this.depths.get(index)!;
 
@@ -146,22 +197,48 @@ export class StreamingToolCallParser {
 
     const currentBuffer = this.buffers.get(actualIndex)!;
     const currentDepth = this.depths.get(actualIndex)!;
-    if (isKnownId && currentBuffer.trim() && currentDepth === 0) {
-      try {
-        JSON.parse(currentBuffer);
-        debugLogger.debug(
-          `Ignoring replay chunk for completed toolCall id=${id}`,
-        );
-        return { complete: false };
-      } catch {
-        // Not complete yet; append the incoming chunk below.
+    const meta = this.toolCallMeta.get(actualIndex)!;
+    if (chunk.length === 0 && (id || validName)) {
+      if (id) meta.id = id;
+      if (validName && !meta.name) meta.name = validName;
+      if (!meta.name && meta.id) {
+        this.namelessToolCallIndices.add(actualIndex);
+      } else {
+        this.namelessToolCallIndices.delete(actualIndex);
+      }
+      if (!meta.id && actualIndex !== index) {
+        this.pendingIndexRemaps.set(index, actualIndex);
+      }
+      return { actualIndex, complete: false };
+    }
+
+    if (isKnownId && currentDepth === 0) {
+      if (currentBuffer.trim()) {
+        try {
+          JSON.parse(currentBuffer);
+          debugLogger.debug(
+            `Ignoring replay chunk for completed toolCall id=${id}`,
+          );
+          return { actualIndex, complete: false };
+        } catch {
+          // Not complete yet; append the incoming chunk below.
+        }
       }
     }
 
     // Update metadata
-    const meta = this.toolCallMeta.get(actualIndex)!;
+    const identityChanged = Boolean(id && meta.id && meta.id !== id);
     if (id) meta.id = id;
-    if (name) meta.name = name;
+    if (validName) {
+      if (!identityChanged && meta.name && meta.name !== validName) {
+        this.conflictingToolCallIdentity = true;
+      } else {
+        meta.name = validName;
+      }
+    }
+    if (!meta.id && actualIndex !== index) {
+      this.pendingIndexRemaps.set(index, actualIndex);
+    }
 
     // Get current state for the actual index
     const currentInString = this.inStrings.get(actualIndex)!;
@@ -170,6 +247,11 @@ export class StreamingToolCallParser {
     // Add chunk to buffer
     const newBuffer = currentBuffer + chunk;
     this.buffers.set(actualIndex, newBuffer);
+    if (!meta.name && (meta.id || /\S/.test(newBuffer))) {
+      this.namelessToolCallIndices.add(actualIndex);
+    } else {
+      this.namelessToolCallIndices.delete(actualIndex);
+    }
 
     // Track JSON structure depth - only count brackets/braces outside of strings
     let depth = currentDepth;
@@ -200,13 +282,14 @@ export class StreamingToolCallParser {
       try {
         // Standard JSON parsing attempt
         const parsed = JSON.parse(newBuffer);
-        return { complete: true, value: parsed };
+        return { actualIndex, complete: true, value: parsed };
       } catch (e) {
         // Intelligent repair: try auto-closing unclosed strings
         if (inString) {
           try {
             const repaired = JSON.parse(newBuffer + '"');
             return {
+              actualIndex,
               complete: true,
               value: repaired,
               repaired: true,
@@ -216,6 +299,7 @@ export class StreamingToolCallParser {
           }
         }
         return {
+          actualIndex,
           complete: false,
           error: e instanceof Error ? e : new Error(String(e)),
         };
@@ -223,7 +307,7 @@ export class StreamingToolCallParser {
     }
 
     // JSON structure is incomplete, continue accumulating chunks
-    return { complete: false };
+    return { actualIndex, complete: false };
   }
 
   /**
@@ -236,6 +320,34 @@ export class StreamingToolCallParser {
     return this.toolCallMeta.get(index) || {};
   }
 
+  hasNamelessToolCall(): boolean {
+    return this.namelessToolCallIndices.size > 0;
+  }
+
+  hasConflictingToolCallIdentity(): boolean {
+    return this.conflictingToolCallIdentity;
+  }
+
+  hasInvalidToolCallIndex(): boolean {
+    return this.invalidToolCallIndex;
+  }
+
+  hasInvalidToolCallArguments(): boolean {
+    for (const [index, buffer] of this.buffers.entries()) {
+      if (!this.toolCallMeta.get(index)?.name || buffer.length === 0) continue;
+
+      try {
+        const args: unknown = JSON.parse(buffer);
+        if (typeof args !== 'object' || args === null || Array.isArray(args)) {
+          return true;
+        }
+      } catch {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /**
    * Gets all completed tool calls that are ready to be emitted
    *
@@ -244,8 +356,10 @@ export class StreamingToolCallParser {
    * 2. Auto-close unclosed strings and retry
    * 3. Fallback to safeJsonParse for malformed data
    *
-   * Only returns tool calls with both name metadata and non-empty buffers.
-   * Should be called when streaming is complete (finish_reason is present).
+   * Only returns tool calls with name metadata. An empty buffer yields
+   * empty arguments ({}), matching the non-streaming path for no-argument
+   * tools. Should be called when streaming is complete (finish_reason is
+   * present).
    *
    * @returns Array of completed tool calls with their metadata and parsed arguments
    */
@@ -265,7 +379,7 @@ export class StreamingToolCallParser {
 
     for (const [index, buffer] of this.buffers.entries()) {
       const meta = this.toolCallMeta.get(index);
-      if (meta?.name && buffer.trim()) {
+      if (meta?.name) {
         if (meta.id) {
           if (emittedIds.has(meta.id)) {
             continue;
@@ -275,22 +389,45 @@ export class StreamingToolCallParser {
 
         let args: Record<string, unknown> = {};
 
-        // Try to parse the final buffer
-        try {
-          args = JSON.parse(buffer);
-        } catch {
-          // Try with repair (auto-close strings)
-          const inString = this.inStrings.get(index);
-          if (inString) {
-            try {
-              args = JSON.parse(buffer + '"');
-            } catch {
-              // If all parsing fails, use safeJsonParse as fallback
+        // An empty buffer is a legal end state: for no-argument tools some
+        // providers stream `arguments: ""` (or omit the field entirely) and
+        // never send an argument fragment. Keep args as {} to match the
+        // non-streaming path in converter.ts.
+        if (buffer.trim()) {
+          // Try to parse the final buffer
+          try {
+            args = JSON.parse(buffer);
+          } catch {
+            // Try with repair (auto-close strings)
+            const inString = this.inStrings.get(index);
+            if (inString) {
+              try {
+                args = JSON.parse(buffer + '"');
+              } catch {
+                // If all parsing fails, use safeJsonParse as fallback
+                args = safeJsonParse(buffer, {});
+              }
+            } else {
               args = safeJsonParse(buffer, {});
             }
-          } else {
-            args = safeJsonParse(buffer, {});
           }
+          // Tool arguments are always JSON objects; a corrupted buffer can
+          // parse or repair to a non-object value (e.g. a bare string), so
+          // collapse anything else to {}.
+          if (
+            typeof args !== 'object' ||
+            args === null ||
+            Array.isArray(args)
+          ) {
+            debugLogger.debug(
+              `Collapsing non-object arguments for tool call ${meta.name} (id=${meta.id}) at index ${index}; buffer likely polluted by a misrouted fragment`,
+            );
+            args = {};
+          }
+        } else {
+          debugLogger.debug(
+            `Emitting no-argument tool call ${meta.name} (id=${meta.id}) at index ${index} with empty buffer`,
+          );
         }
 
         completed.push({
@@ -309,8 +446,9 @@ export class StreamingToolCallParser {
    * Finds the next available index for a new tool call
    *
    * Scans indices starting from nextAvailableIndex to find one that's safe to use.
-   * Reuses indices with empty buffers or incomplete parsing states.
-   * Skips indices with complete, parseable tool call data to prevent overwriting.
+   * Reuses indices never claimed by a named tool call or with incomplete
+   * parsing states. Skips indices with complete tool call data — including
+   * no-argument calls with empty buffers — to prevent overwriting.
    *
    * @returns The next available index safe for storing a new tool call
    */
@@ -321,22 +459,23 @@ export class StreamingToolCallParser {
       const depth = this.depths.get(this.nextAvailableIndex)!;
       const meta = this.toolCallMeta.get(this.nextAvailableIndex);
 
-      // If buffer is empty or incomplete (depth > 0), this index is available
-      if (!buffer.trim() || depth > 0 || !meta?.id) {
+      // If the slot was never claimed by a named call or is incomplete
+      // (depth > 0), this index is available. An empty buffer alone does
+      // not mean available: with name metadata it is a complete
+      // no-argument call.
+      if (!meta?.name || depth > 0 || !meta?.id) {
         return this.nextAvailableIndex;
       }
 
-      // Try to parse the buffer to see if it's complete
-      try {
-        JSON.parse(buffer);
-        // If parsing succeeds and depth is 0, this index has a complete tool call
-        if (depth === 0) {
-          this.nextAvailableIndex++;
-          continue;
+      // A non-empty buffer must parse as complete JSON for the slot to be
+      // occupied; an empty buffer is already complete (no-argument call)
+      if (buffer.trim()) {
+        try {
+          JSON.parse(buffer);
+        } catch {
+          // If parsing fails, this index is available for reuse
+          return this.nextAvailableIndex;
         }
-      } catch {
-        // If parsing fails, this index is available for reuse
-        return this.nextAvailableIndex;
       }
 
       this.nextAvailableIndex++;
@@ -348,8 +487,9 @@ export class StreamingToolCallParser {
    * Finds the most recent incomplete tool call index
    *
    * Used when continuation chunks arrive without IDs. Scans existing tool calls
-   * to find the highest index with incomplete parsing state (depth > 0, empty buffer,
-   * or unparseable JSON). Falls back to creating a new index if none found.
+   * to find the highest index with incomplete parsing state (depth > 0, empty
+   * buffer with no name metadata yet, or unparseable JSON). Falls back to
+   * creating a new index if none found.
    *
    * @returns The index of the most recent incomplete tool call, or a new available index
    */
@@ -360,8 +500,10 @@ export class StreamingToolCallParser {
       const depth = this.depths.get(index)!;
       const meta = this.toolCallMeta.get(index);
 
-      // Check if this tool call is incomplete
-      if (meta?.id && (depth > 0 || !buffer.trim())) {
+      // Check if this tool call is incomplete. An empty buffer counts only
+      // while no name has arrived: with name metadata it is a complete
+      // no-argument call, and stray chunks must not be appended to it
+      if (meta?.id && (depth > 0 || (!buffer.trim() && !meta?.name))) {
         maxIndex = Math.max(maxIndex, index);
       } else if (buffer.trim()) {
         // Check if buffer is parseable (complete)
@@ -389,6 +531,12 @@ export class StreamingToolCallParser {
     this.inStrings.set(index, false);
     this.escapes.set(index, false);
     this.toolCallMeta.set(index, {});
+    this.namelessToolCallIndices.delete(index);
+    for (const [providerIndex, actualIndex] of this.pendingIndexRemaps) {
+      if (providerIndex === index || actualIndex === index) {
+        this.pendingIndexRemaps.delete(providerIndex);
+      }
+    }
   }
 
   /**
@@ -404,8 +552,12 @@ export class StreamingToolCallParser {
     this.inStrings.clear();
     this.escapes.clear();
     this.toolCallMeta.clear();
+    this.namelessToolCallIndices.clear();
     this.idToIndexMap.clear();
+    this.pendingIndexRemaps.clear();
     this.nextAvailableIndex = 0;
+    this.conflictingToolCallIdentity = false;
+    this.invalidToolCallIndex = false;
   }
 
   /**

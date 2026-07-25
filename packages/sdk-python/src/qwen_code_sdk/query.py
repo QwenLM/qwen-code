@@ -7,7 +7,7 @@ import contextlib
 from collections.abc import AsyncIterable, Mapping, MutableMapping
 from dataclasses import dataclass, replace
 from types import TracebackType
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from .errors import AbortError, ControlRequestTimeoutError
@@ -29,6 +29,7 @@ from .protocol import (
 from .transport import ProcessTransport
 from .types import (
     CanUseToolContext,
+    Effort,
     PermissionDenyResult,
     QueryOptions,
     QueryOptionsDict,
@@ -64,7 +65,9 @@ class Query:
         self._prompt = prompt
         self._single_turn = isinstance(prompt, str)
         self._session_id = session_id
-        self._session_id_locked = bool(options.resume or options.session_id)
+        self._session_id_locked = bool(
+            (options.resume or options.session_id) and not options.fork_session
+        )
 
         self._message_queue: asyncio.Queue[SDKMessage | Exception | object] = (
             asyncio.Queue()
@@ -110,6 +113,12 @@ class Query:
     async def _initialize(self) -> None:
         try:
             payload: dict[str, Any] = {"hooks": None}
+            if self._options.mcp_servers:
+                payload["mcpServers"] = self._options.mcp_servers
+            if self._options.agents:
+                payload["agents"] = self._options.agents
+            if self._options.effort:
+                payload["effort"] = self._options.effort
             await self._send_control_request("initialize", payload)
         except Exception as exc:
             await self._finish_with_error(exc)
@@ -482,6 +491,35 @@ class Query:
         await self._ensure_started()
         return await self._send_control_request("mcp_server_status")
 
+    async def set_effort(self, effort: Effort) -> bool:
+        await self._ensure_started()
+        response = await self._send_control_request("set_effort", {"effort": effort})
+        if response is None:
+            return False
+        return bool(response.get("applied", False))
+
+    async def get_available_models(self) -> dict[str, Any] | None:
+        await self._ensure_started()
+        return await self._send_control_request("get_available_models")
+
+    async def get_context_usage(
+        self, show_details: bool = False
+    ) -> dict[str, Any] | None:
+        await self._ensure_started()
+        return await self._send_control_request(
+            "get_context_usage", {"show_details": show_details}
+        )
+
+    async def get_usage_info(
+        self,
+        time_range: Literal["today", "week", "month", "all"] | None = None,
+    ) -> dict[str, Any] | None:
+        await self._ensure_started()
+        data: dict[str, Any] = {}
+        if time_range is not None:
+            data["range"] = time_range
+        return await self._send_control_request("get_usage_info", data)
+
     @property
     def control_request_timeout(self) -> float:
         return self._options.timeout.control_request
@@ -597,11 +635,15 @@ def query(
 
     validate_query_options(parsed_options)
 
-    session_id = parsed_options.resume or parsed_options.session_id
-    if session_id is None and not parsed_options.continue_session:
-        session_id = str(uuid4())
-    if parsed_options.resume is None and not parsed_options.continue_session:
-        parsed_options = replace(parsed_options, session_id=session_id)
+    session_id: str | None
+    if parsed_options.fork_session:
+        session_id = parsed_options.session_id or str(uuid4())
+    else:
+        session_id = parsed_options.resume or parsed_options.session_id
+        if session_id is None and not parsed_options.continue_session:
+            session_id = str(uuid4())
+        if parsed_options.resume is None and not parsed_options.continue_session:
+            parsed_options = replace(parsed_options, session_id=session_id)
 
     transport = ProcessTransport(parsed_options)
     return Query(transport, parsed_options, prompt, session_id or "")

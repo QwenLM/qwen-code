@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises';
 import type { ConfigParameters, SandboxConfig } from './config.js';
 import {
   Config,
@@ -19,6 +19,7 @@ import {
   matchesAnyServerPattern,
 } from './config.js';
 import { Storage } from './storage.js';
+import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -28,6 +29,7 @@ import {
   DEFAULT_OTLP_ENDPOINT,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
   QwenLogger,
+  initializeTelemetry,
   isTelemetrySdkInitialized,
   shutdownTelemetry,
   refreshSessionContext,
@@ -36,6 +38,7 @@ import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../core/contentGenerator.js';
+import { InputFormat } from '../output/types.js';
 import { DEFAULT_DASHSCOPE_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import {
   AuthType,
@@ -43,18 +46,33 @@ import {
   createContentGeneratorConfig,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
+import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { GeminiClient } from '../core/client.js';
 import { ShellTool } from '../tools/shell.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
+import { getSessionProjectDir } from '../utils/sessionIdContext.js';
 import { logRipgrepFallback } from '../telemetry/loggers.js';
 import { RipgrepFallbackEvent } from '../telemetry/types.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
+import {
+  MessageBusType,
+  type HookExecutionRequest,
+  type HookExecutionResponse,
+} from '../confirmation-bus/types.js';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
 import type { LoadServerHierarchicalMemoryOptions } from '../utils/memoryDiscovery.js';
-import { readAutoMemoryIndex } from '../memory/store.js';
+import {
+  readAutoMemoryIndexWithStats,
+  readUserAutoMemoryIndexWithStats,
+} from '../memory/store.js';
+import {
+  clearAutoMemoryRootCache,
+  getAutoMemoryIndexPath,
+  getUserAutoMemoryIndexPath,
+} from '../memory/paths.js';
 import {
   rebuildTeamAutoMemoryIndex,
   TeamMemoryRootSecurityError,
@@ -65,7 +83,16 @@ import * as runtimeStatus from '../utils/runtimeStatus.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { HookSystem } from '../hooks/index.js';
+import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
+import type { ChatRecordingFailureEvent } from '../services/chatRecordingService.js';
+import {
+  SessionTranscriptChangedError,
+  SessionWriterLease,
+} from '../services/session-writer-lease.js';
+import * as jsonl from '../utils/jsonl-utils.js';
+import { checkPriorRead } from '../tools/priorReadEnforcement.js';
+import { ToolErrorType } from '../tools/tool-error.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -153,8 +180,8 @@ vi.mock('../utils/memoryDiscovery.js', () => ({
 }));
 
 vi.mock('../memory/store.js', () => ({
-  readAutoMemoryIndex: vi.fn().mockResolvedValue(null),
-  readUserAutoMemoryIndex: vi.fn().mockResolvedValue(null),
+  readAutoMemoryIndexWithStats: vi.fn().mockResolvedValue(null),
+  readUserAutoMemoryIndexWithStats: vi.fn().mockResolvedValue(null),
 }));
 vi.mock('../memory/indexer.js', async (importActual) => ({
   // Keep the real exports (notably TeamMemoryRootSecurityError, which the sync
@@ -340,6 +367,19 @@ const MEMORY_PRESSURE_ENV_KEYS = [
   'QWEN_MEMORY_PRESSURE_CRITICAL',
 ];
 
+let mockAutoMemoryInode = 1;
+function mockAutoMemoryIndexRead(content: string) {
+  return {
+    content,
+    stats: {
+      dev: 1,
+      ino: mockAutoMemoryInode++,
+      mtimeMs: 1,
+      size: Buffer.byteLength(content),
+    } as fs.Stats,
+  };
+}
+
 vi.mock('../core/baseLlmClient.js');
 // Mock fireNotificationHook from toolHookTriggers
 vi.mock('../core/toolHookTriggers.js', () => ({
@@ -459,6 +499,7 @@ describe('Server Config (config.ts)', () => {
     userMemory: USER_MEMORY,
     telemetry: TELEMETRY_SETTINGS,
     model: MODEL,
+    chatRecording: false,
     usageStatisticsEnabled: false,
     overrideExtensions: [],
   };
@@ -466,6 +507,7 @@ describe('Server Config (config.ts)', () => {
   beforeEach(() => {
     // Reset mocks if necessary
     vi.clearAllMocks();
+    mockAutoMemoryInode = 1;
     for (const envName of MEMORY_PRESSURE_ENV_KEYS) {
       delete process.env[envName];
     }
@@ -498,6 +540,347 @@ describe('Server Config (config.ts)', () => {
         sources: {},
       }),
     );
+  });
+
+  describe('project-dir registry lifecycle', () => {
+    it('drops its session entry on shutdown — no daemon leak', async () => {
+      const sessionId = 'cfg-shutdown-test-session';
+      const config = new Config({ ...baseParams, sessionId });
+      expect(getSessionProjectDir(sessionId)).toBeUndefined();
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
+      expect(getSessionProjectDir(sessionId)).toBeDefined();
+      await config.shutdown();
+      // In daemon mode this is what stops the map growing per session.
+      expect(getSessionProjectDir(sessionId)).toBeUndefined();
+    });
+  });
+
+  describe('shell execution config', () => {
+    it('allows explicitly clearing the configured pager', () => {
+      const config = new Config(baseParams);
+
+      config.setShellExecutionConfig({ pager: 'less' });
+      expect(config.getShellExecutionConfig().pager).toBe('less');
+
+      config.setShellExecutionConfig({ pager: undefined });
+      expect(config.getShellExecutionConfig().pager).toBeUndefined();
+    });
+
+    it('preserves the existing pager when an update omits the pager key', () => {
+      const config = new Config(baseParams);
+
+      config.setShellExecutionConfig({ pager: 'less' });
+      expect(config.getShellExecutionConfig().pager).toBe('less');
+
+      config.setShellExecutionConfig({ terminalWidth: 120 });
+      expect(config.getShellExecutionConfig().pager).toBe('less');
+    });
+  });
+
+  describe('getMemoryAgentTimeoutMinutes', () => {
+    it('returns undefined when unset', () => {
+      expect(
+        new Config(baseParams).getMemoryAgentTimeoutMinutes(),
+      ).toBeUndefined();
+    });
+
+    it('passes through non-negative values, including 0 (no time limit)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentTimeoutMinutes: 30,
+        }).getMemoryAgentTimeoutMinutes(),
+      ).toBe(30);
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentTimeoutMinutes: 0,
+        }).getMemoryAgentTimeoutMinutes(),
+      ).toBe(0);
+    });
+
+    it('treats negative values as unset (schema validation is bypassed on load)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          memoryAgentTimeoutMinutes: -5,
+        }).getMemoryAgentTimeoutMinutes(),
+      ).toBeUndefined();
+    });
+  });
+
+  describe('getVisionBridgeTimeoutMs', () => {
+    it('returns undefined when unset', () => {
+      expect(new Config(baseParams).getVisionBridgeTimeoutMs()).toBeUndefined();
+    });
+
+    it('passes through positive values', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          visionBridgeTimeoutMs: 120_000,
+        }).getVisionBridgeTimeoutMs(),
+      ).toBe(120_000);
+    });
+
+    it('treats non-positive values as unset (schema validation is bypassed on load)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          visionBridgeTimeoutMs: 0,
+        }).getVisionBridgeTimeoutMs(),
+      ).toBeUndefined();
+      expect(
+        new Config({
+          ...baseParams,
+          visionBridgeTimeoutMs: -5000,
+        }).getVisionBridgeTimeoutMs(),
+      ).toBeUndefined();
+    });
+
+    it('rejects values AbortSignal.timeout cannot take (fractional, over 2^31-1, non-finite)', () => {
+      // These pass the number-typed schema's `minimum: 1` via /config but would
+      // make AbortSignal.timeout throw RangeError or degrade to a 1ms timer.
+      for (const bad of [
+        30_000.5,
+        2_147_483_648,
+        4_294_967_296,
+        1e300,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+      ]) {
+        expect(
+          new Config({
+            ...baseParams,
+            visionBridgeTimeoutMs: bad,
+          }).getVisionBridgeTimeoutMs(),
+        ).toBeUndefined();
+      }
+    });
+
+    it('accepts the maximum supported integer timeout', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          visionBridgeTimeoutMs: 2_147_483_647,
+        }).getVisionBridgeTimeoutMs(),
+      ).toBe(2_147_483_647);
+    });
+  });
+
+  describe('getShellDefaultTimeoutMs', () => {
+    it('returns undefined when unset', () => {
+      expect(new Config(baseParams).getShellDefaultTimeoutMs()).toBeUndefined();
+    });
+
+    it('passes through positive values', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          shellDefaultTimeoutMs: 300_000,
+        }).getShellDefaultTimeoutMs(),
+      ).toBe(300_000);
+    });
+
+    it('accepts 0 (disables the timeout — unlike the vision bridge)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          shellDefaultTimeoutMs: 0,
+        }).getShellDefaultTimeoutMs(),
+      ).toBe(0);
+    });
+
+    it('treats negative values as unset (schema validation is bypassed on load)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          shellDefaultTimeoutMs: -5000,
+        }).getShellDefaultTimeoutMs(),
+      ).toBeUndefined();
+    });
+
+    it('rejects values AbortSignal.timeout cannot take (fractional, over 2^31-1, non-finite)', () => {
+      // A hand-edited settings.json bypasses the schema and can reach
+      // AbortSignal.timeout, which would throw RangeError or degrade to a
+      // 1ms timer on these. Coerce to undefined → built-in default.
+      for (const bad of [
+        30_000.5,
+        2_147_483_648,
+        4_294_967_296,
+        1e300,
+        Number.NaN,
+        Number.POSITIVE_INFINITY,
+      ]) {
+        expect(
+          new Config({
+            ...baseParams,
+            shellDefaultTimeoutMs: bad,
+          }).getShellDefaultTimeoutMs(),
+        ).toBeUndefined();
+      }
+    });
+
+    it('accepts the maximum supported integer timeout', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          shellDefaultTimeoutMs: 2_147_483_647,
+        }).getShellDefaultTimeoutMs(),
+      ).toBe(2_147_483_647);
+    });
+  });
+
+  describe('getMaxSubagentDepth', () => {
+    it('defaults to 5 when unset', () => {
+      expect(new Config(baseParams).getMaxSubagentDepth()).toBe(5);
+    });
+
+    it('respects an explicit value', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: 3,
+        }).getMaxSubagentDepth(),
+      ).toBe(3);
+    });
+
+    it('clamps values below 1 up to 1 (never disables sub-agents)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: 0,
+        }).getMaxSubagentDepth(),
+      ).toBe(1);
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: -4,
+        }).getMaxSubagentDepth(),
+      ).toBe(1);
+    });
+
+    it('floors fractional values', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: 3.9,
+        }).getMaxSubagentDepth(),
+      ).toBe(3);
+    });
+
+    it('falls back to the default on non-finite values', () => {
+      // JSON `1e309` parses to Infinity — must not disable the recursion cap.
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: Infinity,
+        }).getMaxSubagentDepth(),
+      ).toBe(5);
+      // NaN comparisons are always false — must not silently block nesting.
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: NaN,
+        }).getMaxSubagentDepth(),
+      ).toBe(5);
+    });
+
+    it('caps absurdly large values at 100', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: 5000,
+        }).getMaxSubagentDepth(),
+      ).toBe(100);
+    });
+  });
+
+  describe('setAutoSkillEnabled', () => {
+    it('flips the live value read by getAutoSkillEnabled', () => {
+      const config = new Config({ ...baseParams, enableAutoSkill: true });
+      expect(config.getAutoSkillEnabled()).toBe(true);
+      config.setAutoSkillEnabled(false);
+      expect(config.getAutoSkillEnabled()).toBe(false);
+      config.setAutoSkillEnabled(true);
+      expect(config.getAutoSkillEnabled()).toBe(true);
+    });
+  });
+
+  describe('agents.maxParallelAgents', () => {
+    it('configures the background task registry concurrency cap', () => {
+      const config = new Config({
+        ...baseParams,
+        agents: {
+          maxParallelAgents: 1,
+        },
+      });
+      const registry = config.getBackgroundTaskRegistry();
+
+      registry.register({
+        agentId: 'bg-1',
+        description: 'one',
+        isBackgrounded: true,
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        outputFile: '/tmp/bg-1.jsonl',
+      });
+
+      expect(() =>
+        registry.register({
+          agentId: 'bg-2',
+          description: 'two',
+          isBackgrounded: true,
+          status: 'running',
+          startTime: Date.now(),
+          abortController: new AbortController(),
+          outputFile: '/tmp/bg-2.jsonl',
+        }),
+      ).toThrow('maximum concurrent background agents (1) reached');
+    });
+  });
+
+  describe('agents.maxParallelAgentsByModel', () => {
+    it('configures a per-model background task concurrency cap', () => {
+      const config = new Config({
+        ...baseParams,
+        agents: {
+          maxParallelAgentsByModel: { 'weak-model': 1 },
+        },
+      });
+      const registry = config.getBackgroundTaskRegistry();
+
+      registry.register({
+        agentId: 'bg-1',
+        description: 'one',
+        model: 'weak-model',
+        isBackgrounded: true,
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        outputFile: '/tmp/bg-1.jsonl',
+      });
+
+      expect(() =>
+        registry.register({
+          agentId: 'bg-2',
+          description: 'two',
+          model: 'weak-model',
+          isBackgrounded: true,
+          status: 'running',
+          startTime: Date.now(),
+          abortController: new AbortController(),
+          outputFile: '/tmp/bg-2.jsonl',
+        }),
+      ).toThrow('for model "weak-model" (1) reached');
+    });
   });
 
   describe('getTeamMemoryEnabled', () => {
@@ -542,6 +925,91 @@ describe('Server Config (config.ts)', () => {
           enableTeamMemory: true,
         }).getTeamMemoryEnabled(),
       ).toBe(false);
+    });
+  });
+
+  describe('getCronRecurringMaxAgeDays', () => {
+    const prevEnv = process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+    afterEach(() => {
+      if (prevEnv === undefined) {
+        delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      } else {
+        process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = prevEnv;
+      }
+    });
+
+    it('defaults to 7 days and follows the setting', () => {
+      delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      expect(new Config(baseParams).getCronRecurringMaxAgeDays()).toBe(7);
+      expect(
+        new Config({
+          ...baseParams,
+          cronRecurringMaxAgeDays: 30,
+        }).getCronRecurringMaxAgeDays(),
+      ).toBe(30);
+    });
+
+    it('maps 0 to Infinity (no expiry)', () => {
+      delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      expect(
+        new Config({
+          ...baseParams,
+          cronRecurringMaxAgeDays: 0,
+        }).getCronRecurringMaxAgeDays(),
+      ).toBe(Infinity);
+    });
+
+    it('QWEN_CODE_CRON_MAX_AGE_DAYS overrides the setting', () => {
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = '90';
+      expect(
+        new Config({
+          ...baseParams,
+          cronRecurringMaxAgeDays: 30,
+        }).getCronRecurringMaxAgeDays(),
+      ).toBe(90);
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = '0';
+      expect(new Config(baseParams).getCronRecurringMaxAgeDays()).toBe(
+        Infinity,
+      );
+    });
+
+    it('falls back to the default on invalid values', () => {
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = 'not-a-number';
+      expect(new Config(baseParams).getCronRecurringMaxAgeDays()).toBe(7);
+      delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      expect(
+        new Config({
+          ...baseParams,
+          cronRecurringMaxAgeDays: -3,
+        }).getCronRecurringMaxAgeDays(),
+      ).toBe(7);
+    });
+
+    it('warns on the console once at construction for an invalid value', () => {
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = 'not-a-number';
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const config = new Config(baseParams);
+        // The warning fires during construction, before any getter call,
+        // and repeated getter calls do not re-emit it.
+        expect(config.getCronRecurringMaxAgeDays()).toBe(7);
+        expect(config.getCronRecurringMaxAgeDays()).toBe(7);
+        const cronWarnings = warnSpy.mock.calls.filter((call) =>
+          String(call[0]).includes('QWEN_CODE_CRON_MAX_AGE_DAYS'),
+        );
+        expect(cronWarnings).toHaveLength(1);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('resolves once at construction, ignoring later env changes (requiresRestart)', () => {
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = '90';
+      const config = new Config(baseParams);
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = '3';
+      expect(config.getCronRecurringMaxAgeDays()).toBe(90);
+      delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      expect(config.getCronRecurringMaxAgeDays()).toBe(90);
     });
   });
 
@@ -623,19 +1091,24 @@ describe('Server Config (config.ts)', () => {
       );
     };
 
-    it('honors an explicit visionModel even across providers', () => {
-      const config = new Config({ ...baseParams, visionModel: 'vl-anthropic' });
+    it('keeps a bare cross-provider namesake on its exact agent route', () => {
+      const config = new Config({ ...baseParams, visionModel: 'text-primary' });
       stubProvider(config, [
         {
-          id: 'vl-anthropic',
+          id: 'text-primary',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+        },
+        {
+          id: 'text-primary',
           authType: AuthType.USE_ANTHROPIC,
-          baseUrl: 'https://api.anthropic.com',
           isVision: true,
+          capabilities: { vision: true, agent: true },
         },
       ]);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-anthropic',
-        baseUrl: 'https://api.anthropic.com',
+        id: 'anthropic:text-primary',
+        agentCapable: true,
       });
     });
 
@@ -652,7 +1125,7 @@ describe('Server Config (config.ts)', () => {
       // 'ghost-model' isn't configured, so the explicit pin is ignored and the
       // same-provider candidate is auto-picked instead.
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -668,7 +1141,7 @@ describe('Server Config (config.ts)', () => {
         },
       ]);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -725,6 +1198,39 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    it.each([false, true])(
+      'honors an exact visionModel route with ignored fast-only namesakes (reversed=%s)',
+      (reversed) => {
+        const baseUrl = 'https://vision.example.com/v1';
+        const routeEntries = [
+          {
+            id: 'vision-agent',
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+            isVision: true,
+            capabilities: { vision: true, agent: true },
+          },
+          {
+            id: 'vision-agent',
+            authType: AuthType.USE_OPENAI,
+            baseUrl,
+            fastOnly: true,
+          },
+        ];
+        const config = new Config({
+          ...baseParams,
+          visionModel: `openai:vision-agent\0${baseUrl}`,
+        });
+        stubProvider(config, reversed ? routeEntries.reverse() : routeEntries);
+
+        expect(config.getDefaultVisionBridgeModel()).toEqual({
+          id: 'openai:vision-agent',
+          baseUrl,
+          agentCapable: true,
+        });
+      },
+    );
+
     it('falls back to auto-select when a legacy visionModel matches multiple endpoints', () => {
       const config = new Config({
         ...baseParams,
@@ -751,7 +1257,7 @@ describe('Server Config (config.ts)', () => {
         },
       ]);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -770,7 +1276,7 @@ describe('Server Config (config.ts)', () => {
       ]);
       expect(() => config.getDefaultVisionBridgeModel()).not.toThrow();
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -791,7 +1297,7 @@ describe('Server Config (config.ts)', () => {
       ]);
 
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
       expect(warn).toHaveBeenCalledWith(
@@ -821,7 +1327,7 @@ describe('Server Config (config.ts)', () => {
         },
       ]);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
     });
@@ -844,22 +1350,134 @@ describe('Server Config (config.ts)', () => {
       ]);
       // Pinned first.
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-anthropic',
+        id: 'anthropic:vl-anthropic',
         baseUrl: 'https://api.anthropic.com',
       });
       // Cleared with '' — JSDoc promises a fall back to auto-select.
       config.setVisionModel('');
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
       // undefined clears too.
       config.setVisionModel('vl-anthropic');
       config.setVisionModel(undefined);
       expect(config.getDefaultVisionBridgeModel()).toEqual({
-        id: 'vl-same-provider',
+        id: 'openai:vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
+    });
+  });
+
+  describe('getModelFallbacks', () => {
+    it('returns empty array by default when unset', () => {
+      expect(new Config(baseParams).getModelFallbacks()).toEqual([]);
+    });
+
+    it('returns empty array when set to undefined', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: undefined,
+        }).getModelFallbacks(),
+      ).toEqual([]);
+    });
+
+    it('returns empty array when set to empty array', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: [],
+        }).getModelFallbacks(),
+      ).toEqual([]);
+    });
+
+    it('accepts an array of model IDs', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['qwen-plus', 'qwen-turbo'],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('caps at 3 entries', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: [
+            'model-a',
+            'model-b',
+            'model-c',
+            'model-d',
+            'model-e',
+          ],
+        }).getModelFallbacks(),
+      ).toEqual(['model-a', 'model-b', 'model-c']);
+    });
+
+    it('deduplicates entries', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['qwen-plus', 'qwen-turbo', 'qwen-plus'],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('trims whitespace from entries', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['  qwen-plus  ', ' qwen-turbo '],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('removes blank entries', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['', '  ', 'qwen-plus', '', 'qwen-turbo'],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('deduplicates after trimming', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['qwen-plus', ' qwen-plus ', 'qwen-turbo'],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('returns a readonly array', () => {
+      const config = new Config({
+        ...baseParams,
+        modelFallbacks: ['qwen-plus'],
+      });
+      const fallbacks = config.getModelFallbacks();
+      // The returned array should be readonly (TypeScript enforces this,
+      // but verify the reference is stable)
+      expect(fallbacks).toEqual(['qwen-plus']);
+    });
+
+    it('caps at 3 after deduplication and blank removal', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: [
+            '',
+            'model-a',
+            'model-a', // duplicate
+            '',
+            'model-b',
+            'model-c',
+            'model-d', // 4th unique, should be dropped
+          ],
+        }).getModelFallbacks(),
+      ).toEqual(['model-a', 'model-b', 'model-c']);
     });
   });
 
@@ -1538,6 +2156,34 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('startNewSession', () => {
+    it('rejects a session switch while the current recorder owns the writer lease', () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const originalSessionId = config.getSessionId();
+      const finalize = vi.fn();
+      const flush = vi.fn().mockResolvedValue(undefined);
+      const recorder = {
+        finalize,
+        flush,
+        hasWriteOwnership: () => true,
+      };
+      (
+        config as unknown as {
+          chatRecordingService: typeof recorder;
+        }
+      ).chatRecordingService = recorder;
+
+      expect(() => config.startNewSession('replacement-session')).toThrow(
+        expect.objectContaining({
+          name: 'SessionWriterUnavailableError',
+          errorKind: 'session_writer_unavailable',
+        }),
+      );
+      expect(config.getSessionId()).toBe(originalSessionId);
+      expect(config.getChatRecordingService()).toBe(recorder);
+      expect(finalize).not.toHaveBeenCalled();
+      expect(flush).not.toHaveBeenCalled();
+    });
+
     it('clears the FileReadCache so a new session does not inherit prior reads', () => {
       // Regression guard: the file-read cache backs ReadFile's
       // file_unchanged placeholder, whose correctness depends on the
@@ -1584,14 +2230,133 @@ describe('Server Config (config.ts)', () => {
           chatRecordingService?: {
             finalize: () => void;
             flush: () => Promise<void>;
+            hasWriteOwnership: () => boolean;
           };
         }
-      ).chatRecordingService = { finalize, flush };
+      ).chatRecordingService = {
+        finalize,
+        flush,
+        hasWriteOwnership: () => false,
+      };
 
       config.startNewSession();
 
       expect(finalize).toHaveBeenCalledTimes(1);
       expect(flush).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('chat recording failure listeners', () => {
+    const notify = (config: Config, event: ChatRecordingFailureEvent) => {
+      (
+        config as unknown as {
+          notifyChatRecordingFailure: (
+            failure: ChatRecordingFailureEvent,
+          ) => void;
+        }
+      ).notifyChatRecordingFailure(event);
+    };
+
+    it('notifies multiple listeners and disposes them independently', () => {
+      const config = new Config(baseParams);
+      const first = vi.fn();
+      const second = vi.fn();
+      const disposeFirst = config.onChatRecordingFailure(first);
+      config.onChatRecordingFailure(second);
+      const event = { sessionId: 's-1', error: new Error('write failed') };
+
+      notify(config, event);
+      disposeFirst();
+      notify(config, event);
+
+      expect(first).toHaveBeenCalledTimes(1);
+      expect(second).toHaveBeenCalledTimes(2);
+    });
+
+    it('keeps a subscription wired to a replacement session recorder', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const listener = vi.fn();
+      config.onChatRecordingFailure(listener);
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      config.startNewSession(sessionId);
+      const error = new Error('replacement write failed');
+      const writeLine = vi
+        .spyOn(jsonl, 'writeLine')
+        .mockRejectedValueOnce(error);
+
+      try {
+        const recorder = config.getChatRecordingService()!;
+        recorder.recordUserMessage([{ text: 'new session' }]);
+        await expect(recorder.flush()).rejects.toBe(error);
+
+        expect(listener).toHaveBeenCalledOnce();
+        await expect(config.assertCanStartTurn()).resolves.toBeUndefined();
+        expect(listener).toHaveBeenCalledWith({ sessionId, error });
+      } finally {
+        writeLine.mockRestore();
+      }
+    });
+
+    it('isolates synchronous throws and asynchronous listener rejections', async () => {
+      const config = new Config(baseParams);
+      const unhandled: unknown[] = [];
+      const onUnhandled = (error: unknown) => unhandled.push(error);
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        config.onChatRecordingFailure(() => {
+          throw new Error('listener threw');
+        });
+        config.onChatRecordingFailure(async () => {
+          throw new Error('listener rejected');
+        });
+
+        notify(config, {
+          sessionId: 's-1',
+          error: new Error('write failed'),
+        });
+        await new Promise((resolve) => setImmediate(resolve));
+
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+      }
+    });
+
+    it('keeps listeners through shutdown flush and clears them afterward', async () => {
+      const config = new Config(baseParams);
+      const listener = vi.fn();
+      config.onChatRecordingFailure(listener);
+      const event = { sessionId: 's-1', error: new Error('write failed') };
+      (
+        config as unknown as {
+          initialized: boolean;
+          chatRecordingService: {
+            finalize: () => void;
+            flush: () => Promise<void>;
+            close: () => Promise<void>;
+          };
+        }
+      ).initialized = true;
+      (
+        config as unknown as {
+          chatRecordingService: {
+            finalize: () => void;
+            flush: () => Promise<void>;
+            close: () => Promise<void>;
+          };
+        }
+      ).chatRecordingService = {
+        finalize: vi.fn(),
+        flush: async () => {
+          notify(config, event);
+        },
+        close: async () => {},
+      };
+
+      await config.shutdown();
+      notify(config, event);
+
+      expect(listener).toHaveBeenCalledOnce();
     });
   });
 
@@ -1702,7 +2467,228 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  it('should no-op LSP reinitialize when disabled or unavailable', async () => {
+    const disabledConfig = new Config({
+      ...baseParams,
+      lsp: { enabled: false },
+    });
+    await expect(disabledConfig.reinitializeLsp()).resolves.toBeUndefined();
+
+    const noClientConfig = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+    });
+    await expect(noClientConfig.reinitializeLsp()).resolves.toBeUndefined();
+  });
+
+  it('should delegate LSP reinitialize to the configured client', async () => {
+    const result = {
+      reconcile: {
+        added: ['tsserver'],
+        removed: [],
+        restarted: [],
+        unchanged: [],
+        failed: [],
+      },
+      skipped: [],
+    };
+    const reinitialize = vi.fn().mockResolvedValue(result);
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        reinitialize,
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    await expect(config.reinitializeLsp()).resolves.toBe(result);
+    expect(reinitialize).toHaveBeenCalledOnce();
+  });
+
+  it('should surface partial LSP reinitialize failures in status snapshot', async () => {
+    const result = {
+      reconcile: {
+        added: ['tsserver'],
+        removed: [],
+        restarted: [],
+        unchanged: [],
+        failed: ['clangd'],
+      },
+      skipped: [],
+    };
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        reinitialize: vi.fn().mockResolvedValue(result),
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    await expect(config.reinitializeLsp()).resolves.toBe(result);
+    expect(config.getLspStatusSnapshot()).toMatchObject({
+      initializationError: 'LSP reload partially failed: clangd',
+    });
+  });
+
+  it('should surface LSP reinitialize failures in status snapshot', async () => {
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        reinitialize: vi.fn().mockRejectedValue(new Error('invalid lsp json')),
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    await expect(config.reinitializeLsp()).rejects.toThrow('invalid lsp json');
+    expect(config.getLspStatusSnapshot()).toMatchObject({
+      initializationError: 'invalid lsp json',
+    });
+  });
+
+  it('should clear previous LSP reinitialize failures after recovery', async () => {
+    const result = {
+      reconcile: {
+        added: [],
+        removed: [],
+        restarted: [],
+        unchanged: ['tsserver'],
+        failed: [],
+      },
+      skipped: [],
+    };
+    const reinitialize = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('invalid lsp json'))
+      .mockResolvedValueOnce(result);
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        reinitialize,
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    await expect(config.reinitializeLsp()).rejects.toThrow('invalid lsp json');
+    expect(config.getLspStatusSnapshot()).toMatchObject({
+      initializationError: 'invalid lsp json',
+    });
+
+    await expect(config.reinitializeLsp()).resolves.toBe(result);
+    expect(config.getLspStatusSnapshot().initializationError).toBeUndefined();
+  });
+
+  it('should clear partial LSP reinitialize failures after full recovery', async () => {
+    const partialFailure = {
+      reconcile: {
+        added: [],
+        removed: [],
+        restarted: [],
+        unchanged: [],
+        failed: ['clangd'],
+      },
+      skipped: [],
+    };
+    const success = {
+      reconcile: {
+        added: [],
+        removed: [],
+        restarted: [],
+        unchanged: ['clangd'],
+        failed: [],
+      },
+      skipped: [],
+    };
+    const reinitialize = vi
+      .fn()
+      .mockResolvedValueOnce(partialFailure)
+      .mockResolvedValueOnce(success);
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        reinitialize,
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    await expect(config.reinitializeLsp()).resolves.toBe(partialFailure);
+    expect(config.getLspStatusSnapshot()).toMatchObject({
+      initializationError: 'LSP reload partially failed: clangd',
+    });
+
+    await expect(config.reinitializeLsp()).resolves.toBe(success);
+    expect(config.getLspStatusSnapshot().initializationError).toBeUndefined();
+  });
+
   describe('initialize', () => {
+    it('preserves activation and lease release failures', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+      });
+      const activationError = new SessionTranscriptChangedError();
+      const releaseError = new Error('lease release failed');
+      const release = vi.fn().mockRejectedValue(releaseError);
+      const acquire = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockResolvedValue({
+          transcriptExistedAtAcquire: false,
+          release,
+        } as unknown as SessionWriterLease);
+      vi.spyOn(
+        config.getSessionService(),
+        'getSessionLocation',
+      ).mockRejectedValue(activationError);
+
+      const result = await (
+        config as unknown as { activateChatRecording(): Promise<void> }
+      )
+        .activateChatRecording()
+        .catch((error: unknown) => error);
+
+      expect(result).toMatchObject({
+        name: 'SessionWriterUnavailableError',
+        errorKind: 'session_writer_unavailable',
+        rpcCode: -32023,
+        httpStatus: 503,
+        cause: expect.any(AggregateError),
+      });
+      expect(
+        (result as Error & { cause: AggregateError }).cause.errors,
+      ).toEqual([activationError, releaseError]);
+      expect(release).toHaveBeenCalledOnce();
+      acquire.mockRestore();
+    });
+
+    it('preserves initialization and recording close failures', async () => {
+      const config = new Config(baseParams);
+      const initializationError = new Error('initialization failed');
+      const closeError = new Error('recording close failed');
+      vi.spyOn(
+        config as unknown as {
+          initializeInternal: () => Promise<void>;
+        },
+        'initializeInternal',
+      ).mockRejectedValue(initializationError);
+      (
+        config as unknown as {
+          chatRecordingService: { close: () => Promise<void> };
+        }
+      ).chatRecordingService = {
+        close: vi.fn().mockRejectedValue(closeError),
+      };
+
+      const result = await config.initialize().catch((error: unknown) => error);
+
+      expect(result).toMatchObject({
+        name: 'SessionWriterUnavailableError',
+        cause: expect.any(AggregateError),
+      });
+      expect(
+        (result as Error & { cause: AggregateError }).cause.errors,
+      ).toEqual([initializationError, closeError]);
+    });
+
     it('should throw an error if initialized more than once', async () => {
       const config = new Config({
         ...baseParams,
@@ -1743,6 +2729,46 @@ describe('Server Config (config.ts)', () => {
       ]);
     });
 
+    it('should skip hook, skill, and file checkpointing side effects when requested', async () => {
+      const config = new Config({
+        ...baseParams,
+        fileCheckpointingEnabled: true,
+      });
+
+      await expect(
+        config.initialize({
+          skipMcpDiscovery: true,
+          skipHooks: true,
+          skipSkillManager: true,
+          skipFileCheckpointing: true,
+        }),
+      ).resolves.toBeUndefined();
+
+      expect(HookSystem).not.toHaveBeenCalled();
+      expect(config.getHookSystem()).toBeUndefined();
+      expect(SkillManager).not.toHaveBeenCalled();
+      expect(config.getSkillManager()).toBeNull();
+      expect(config.getFileCheckpointingEnabled()).toBe(false);
+    });
+
+    it('warms tools strictly by default and leniently when lenientToolWarmup is set', async () => {
+      // Regression guard for the read-only transcript-replay path: a Config that
+      // skips the SkillManager must warm tools leniently, otherwise warmAll()
+      // aborts initialize() when SkillTool's constructor throws.
+      const warmAll = vi.mocked(ToolRegistry.prototype.warmAll);
+
+      warmAll.mockClear();
+      await new Config({ ...baseParams }).initialize();
+      expect(warmAll).toHaveBeenLastCalledWith({ strict: true });
+
+      warmAll.mockClear();
+      await new Config({ ...baseParams }).initialize({
+        skipSkillManager: true,
+        lenientToolWarmup: true,
+      });
+      expect(warmAll).toHaveBeenLastCalledWith({ strict: false });
+    });
+
     it('registers loop_wakeup when cron is enabled', async () => {
       const config = new Config({ ...baseParams, cronEnabled: true });
       await config.initialize();
@@ -1773,6 +2799,257 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).toContain(ToolNames.READ_MCP_RESOURCE);
     });
 
+    it.each([
+      ['interactive', { interactive: true }],
+      ['ACP', { experimentalZedIntegration: true }],
+      ['stream-json', { inputFormat: InputFormat.STREAM_JSON }],
+    ] as const)(
+      'registers user-interaction tools in %s sessions',
+      async (_mode, params) => {
+        const config = new Config({ ...baseParams, ...params });
+        await config.initialize();
+
+        const registeredNames = (
+          ToolRegistry.prototype.registerFactory as Mock
+        ).mock.calls.map((call) => call[0]);
+        expect(registeredNames).toContain(ToolNames.ASK_USER_QUESTION);
+        expect(registeredNames).toContain(ToolNames.ENTER_PLAN_MODE);
+        expect(registeredNames).toContain(ToolNames.EXIT_PLAN_MODE);
+      },
+    );
+
+    it('registers ask_user_question but not plan tools in SDK mode with interaction support', async () => {
+      // ask_user_question is gated only by the resolved interaction mode, while
+      // enter_plan_mode/exit_plan_mode are additionally gated by !sdkMode. Guard
+      // this asymmetry so a future symmetric `!this.sdkMode` on the question gate
+      // cannot silently drop the tool from SDK-mode interactive sessions.
+      const config = new Config({
+        ...baseParams,
+        interactive: true,
+        sdkMode: true,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.ASK_USER_QUESTION);
+      expect(registeredNames).not.toContain(ToolNames.ENTER_PLAN_MODE);
+      expect(registeredNames).not.toContain(ToolNames.EXIT_PLAN_MODE);
+    });
+
+    it('does not register user-interaction tools in plain headless sessions', async () => {
+      const config = new Config({
+        ...baseParams,
+        interactive: false,
+        experimentalZedIntegration: false,
+        inputFormat: InputFormat.TEXT,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.ASK_USER_QUESTION);
+      expect(registeredNames).not.toContain(ToolNames.ENTER_PLAN_MODE);
+      expect(registeredNames).not.toContain(ToolNames.EXIT_PLAN_MODE);
+    });
+
+    it('keeps exit_plan_mode available for plan-required teammate filtering', async () => {
+      const config = new Config({
+        ...baseParams,
+        interactive: false,
+        experimentalZedIntegration: false,
+        inputFormat: InputFormat.TEXT,
+      });
+      await config.initialize();
+      vi.mocked(ToolRegistry.prototype.registerFactory).mockClear();
+
+      await config.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.ASK_USER_QUESTION);
+      expect(registeredNames).not.toContain(ToolNames.ENTER_PLAN_MODE);
+      expect(registeredNames).toContain(ToolNames.EXIT_PLAN_MODE);
+    });
+
+    it('does not register artifact tools when artifacts are disabled', async () => {
+      const config = new Config({ ...baseParams, artifactEnabled: false });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.ARTIFACT);
+      expect(registeredNames).not.toContain(ToolNames.RECORD_ARTIFACT);
+    });
+
+    it('registers image_gen when an image-only model route is selected', async () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+        imageModel: `openai:qwen-image-2.0\0${baseUrl}`,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.IMAGE_GEN);
+      expect(config.getImageGenerationConfig()).toEqual({
+        model: 'qwen-image-2.0',
+        baseUrl,
+        apiKeyEnv: 'TEST_IMAGE_GENERATION_KEY',
+      });
+    });
+
+    it('does not register image_gen without an image model selection', async () => {
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl: 'https://images.example.com/api/v1',
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.IMAGE_GEN);
+    });
+
+    it('does not use a protocol default as the image generation endpoint', () => {
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+        imageModel: 'openai:qwen-image-2.0',
+      });
+
+      expect(config.getImageGenerationConfig()).toBeUndefined();
+    });
+
+    it('registers image_gen immediately when the image model changes at runtime', async () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+      });
+      await config.initialize();
+      vi.mocked(ToolRegistry.prototype.registerFactory).mockClear();
+
+      await config.setImageModel(`openai:qwen-image-2.0\0${baseUrl}`);
+
+      expect(ToolRegistry.prototype.registerFactory).toHaveBeenCalledWith(
+        ToolNames.IMAGE_GEN,
+        expect.any(Function),
+      );
+      expect(ToolRegistry.prototype.ensureTool).toHaveBeenCalledWith(
+        ToolNames.IMAGE_GEN,
+      );
+    });
+
+    it('does not register image_gen when the permission manager disables it', async () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+      });
+      await config.initialize();
+      vi.mocked(ToolRegistry.prototype.registerFactory).mockClear();
+      (
+        config as unknown as {
+          permissionManager: { isToolEnabled: () => Promise<boolean> };
+        }
+      ).permissionManager = {
+        isToolEnabled: vi.fn().mockResolvedValue(false),
+      };
+
+      await config.setImageModel(`openai:qwen-image-2.0\0${baseUrl}`);
+
+      expect(ToolRegistry.prototype.registerFactory).not.toHaveBeenCalledWith(
+        ToolNames.IMAGE_GEN,
+        expect.any(Function),
+      );
+    });
+
+    it('registers both artifact tools by default for interactive sessions', async () => {
+      const config = new Config({
+        ...baseParams,
+        interactive: true,
+        sdkMode: false,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.ARTIFACT);
+      expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
+    });
+
+    it('registers only record_artifact by default for daemon artifact metadata', async () => {
+      const config = new Config({
+        ...baseParams,
+        interactive: false,
+        sdkMode: false,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.ARTIFACT);
+      expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
+    });
+
     describe('isArtifactEnabled', () => {
       const originalForceEnable = process.env['QWEN_CODE_ENABLE_ARTIFACT'];
       const originalDisable = process.env['QWEN_CODE_DISABLE_ARTIFACT'];
@@ -1795,19 +3072,30 @@ describe('Server Config (config.ts)', () => {
         }
       });
 
-      it('is disabled by default', () => {
+      it('enables metadata recording by default without publishing from daemon sessions', () => {
         const config = new Config(baseParams);
         expect(config.isArtifactEnabled()).toBe(false);
+        expect(config.isRecordArtifactEnabled()).toBe(true);
       });
 
-      it('honors settings when interactive and not in SDK mode', () => {
+      it('is enabled by default when interactive and not in SDK mode', () => {
         const config = new Config({
           ...baseParams,
-          artifactEnabled: true,
           interactive: true,
           sdkMode: false,
         });
         expect(config.isArtifactEnabled()).toBe(true);
+      });
+
+      it('honors settings that disable artifacts', () => {
+        const config = new Config({
+          ...baseParams,
+          artifactEnabled: false,
+          interactive: true,
+          sdkMode: false,
+        });
+        expect(config.isArtifactEnabled()).toBe(false);
+        expect(config.isRecordArtifactEnabled()).toBe(false);
       });
 
       it('lets QWEN_CODE_DISABLE_ARTIFACT override settings and env enablement', () => {
@@ -1836,7 +3124,7 @@ describe('Server Config (config.ts)', () => {
         expect(config.isArtifactEnabled()).toBe(false);
       });
 
-      it('stays disabled outside interactive mode even when force-enabled', () => {
+      it('keeps the Artifact tool disabled for daemon CLI env enablement', () => {
         process.env['QWEN_CODE_ENABLE_ARTIFACT'] = '1';
 
         const config = new Config({
@@ -1846,6 +3134,18 @@ describe('Server Config (config.ts)', () => {
         });
 
         expect(config.isArtifactEnabled()).toBe(false);
+        expect(config.isRecordArtifactEnabled()).toBe(true);
+      });
+
+      it('lets daemon sessions record metadata by default without publishing', () => {
+        const config = new Config({
+          ...baseParams,
+          interactive: false,
+          sdkMode: false,
+        });
+
+        expect(config.isArtifactEnabled()).toBe(false);
+        expect(config.isRecordArtifactEnabled()).toBe(true);
       });
 
       it('lets QWEN_CODE_ENABLE_ARTIFACT force-enable interactive CLI use', () => {
@@ -2086,6 +3386,92 @@ describe('Server Config (config.ts)', () => {
       // Verify that contentGeneratorConfig is updated
       expect(config.getContentGeneratorConfig()).toEqual(mockContentConfig);
       expect(GeminiClient).toHaveBeenCalledWith(config);
+    });
+
+    it('preserves the user reasoning effort across an auth refresh that wipes it', async () => {
+      // Regression: the provider sync (applyResolvedModelDefaults) overwrites
+      // `reasoning` with the provider preset's undefined value, dropping the
+      // user-global effort on every restart. refreshAuth must re-apply it.
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning: { effort: 'max' } },
+      });
+      const authType = AuthType.USE_GEMINI;
+
+      // The rebuilt config comes back WITHOUT reasoning (simulating the wipe).
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'qwen3-coder-plus',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await config.refreshAuth(authType);
+
+      expect(config.getReasoningEffort()).toBe('max');
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'max',
+      });
+    });
+
+    it('re-applies the reasoning effort on a full-refresh model switch that wiped modelsConfig', async () => {
+      // Regression for the model-switch path: switchModel() runs
+      // applyResolvedModelDefaults() (which overwrites modelsConfig's
+      // `reasoning` with the new model's preset) BEFORE onModelChange ->
+      // handleModelChange fires. So by the time the full-refresh path calls
+      // refreshAuth, refreshAuth's own capture reads undefined and cannot
+      // restore the tier. handleModelChange must re-apply it from the live
+      // contentGeneratorConfig captured before the rebuild.
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning: { effort: 'high' } },
+      });
+      const authType = AuthType.USE_GEMINI;
+
+      // Initial auth seeds the live config with the effort.
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'gemini-a',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      await config.refreshAuth(authType);
+      expect(config.getReasoningEffort()).toBe('high');
+
+      // Simulate switchModel()'s pre-callback wipe of modelsConfig's reasoning.
+      const genConfig = (
+        config as unknown as {
+          modelsConfig: { getGenerationConfig(): { reasoning?: unknown } };
+        }
+      ).modelsConfig.getGenerationConfig();
+      delete genConfig.reasoning;
+
+      // The new model resolves with no reasoning preset (the common case).
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'gemini-b',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await (
+        config as unknown as {
+          handleModelChange: (
+            authType: AuthType,
+            requiresRefresh: boolean,
+          ) => Promise<void>;
+        }
+      ).handleModelChange(authType, true);
+
+      // Effort survives the switch (previously silently dropped to undefined).
+      expect(config.getContentGeneratorConfig().model).toBe('gemini-b');
+      expect(config.getReasoningEffort()).toBe('high');
     });
 
     it('should fire auth_success notification hook when hooks are enabled', async () => {
@@ -2658,7 +4044,7 @@ describe('Server Config (config.ts)', () => {
     expect(config.getPreventSystemSleepEnabled()).toBe(false);
   });
 
-  it('refreshHierarchicalMemory should append managed auto-memory index when present', async () => {
+  it('refreshHierarchicalMemory should build the managed auto-memory prompt when present', async () => {
     const config = new Config(baseParams);
 
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
@@ -2668,15 +4054,151 @@ describe('Server Config (config.ts)', () => {
       conditionalRules: [],
       projectRoot: '/tmp',
     });
-    vi.mocked(readAutoMemoryIndex).mockResolvedValue(
-      '# Managed Auto-Memory Index\n\n- [Project Memory](project.md)',
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValue(
+      mockAutoMemoryIndexRead(
+        '# Managed Auto-Memory Index\n\n- [Project Memory](project.md)',
+      ),
     );
 
     await config.refreshHierarchicalMemory();
 
+    // Context files stay in userMemory; the volatile auto-memory section is
+    // kept separate so prompt assembly can order stable → context → volatile.
     expect(config.getUserMemory()).toContain('Project rules');
-    expect(config.getUserMemory()).toContain('# auto memory');
-    expect(config.getUserMemory()).toContain('[Project Memory](project.md)');
+    expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toContain(
+      '[Project Memory](project.md)',
+    );
+  });
+
+  it('refreshHierarchicalMemory seeds the FileReadCache for project and user MEMORY.md indexes', async () => {
+    const originalMemoryBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), 'auto-memory-cache-'));
+    const projectRoot = path.join(tempDir, 'project');
+    const memoryBaseDir = path.join(tempDir, 'memory-base');
+
+    await mkdir(projectRoot, { recursive: true });
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = memoryBaseDir;
+    clearAutoMemoryRootCache();
+
+    const managedIndexPath = getAutoMemoryIndexPath(projectRoot);
+    const userIndexPath = getUserAutoMemoryIndexPath();
+
+    await mkdir(path.dirname(managedIndexPath), { recursive: true });
+    await mkdir(path.dirname(userIndexPath), { recursive: true });
+    await writeFile(managedIndexPath, '# managed memory\n', 'utf-8');
+    await writeFile(userIndexPath, '# user memory\n', 'utf-8');
+
+    try {
+      const config = new Config({
+        ...baseParams,
+        cwd: projectRoot,
+        targetDir: projectRoot,
+      });
+
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce({
+        memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+        fileCount: 1,
+        ruleCount: 0,
+        conditionalRules: [],
+        projectRoot,
+      });
+      vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce({
+        content: '# managed memory\n',
+        stats: await stat(managedIndexPath),
+      });
+      vi.mocked(readUserAutoMemoryIndexWithStats).mockResolvedValueOnce({
+        content: '# user memory\n',
+        stats: await stat(userIndexPath),
+      });
+
+      await config.refreshHierarchicalMemory();
+
+      await expect(
+        checkPriorRead(
+          config.getFileReadCache(),
+          managedIndexPath,
+          'overwriting',
+        ),
+      ).resolves.toEqual({ ok: true });
+      await expect(
+        checkPriorRead(config.getFileReadCache(), userIndexPath, 'overwriting'),
+      ).resolves.toEqual({ ok: true });
+    } finally {
+      if (originalMemoryBaseDir === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBaseDir;
+      }
+      clearAutoMemoryRootCache();
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('refreshHierarchicalMemory records the stats captured with the auto-memory index read', async () => {
+    const originalMemoryBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    const tempDir = await mkdtemp(
+      path.join(os.tmpdir(), 'auto-memory-cache-race-'),
+    );
+    const projectRoot = path.join(tempDir, 'project');
+    const memoryBaseDir = path.join(tempDir, 'memory-base');
+
+    await mkdir(projectRoot, { recursive: true });
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = memoryBaseDir;
+    clearAutoMemoryRootCache();
+
+    const managedIndexPath = getAutoMemoryIndexPath(projectRoot);
+
+    await mkdir(path.dirname(managedIndexPath), { recursive: true });
+    await writeFile(managedIndexPath, '# old managed memory\n', 'utf-8');
+    const oldStats = await stat(managedIndexPath);
+    await writeFile(
+      managedIndexPath,
+      '# newer managed memory with extra bytes\n',
+      'utf-8',
+    );
+
+    try {
+      const config = new Config({
+        ...baseParams,
+        cwd: projectRoot,
+        targetDir: projectRoot,
+      });
+
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce({
+        memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+        fileCount: 1,
+        ruleCount: 0,
+        conditionalRules: [],
+        projectRoot,
+      });
+      vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce({
+        content: '# old managed memory\n',
+        stats: oldStats,
+      });
+
+      await config.refreshHierarchicalMemory();
+
+      await expect(
+        checkPriorRead(
+          config.getFileReadCache(),
+          managedIndexPath,
+          'overwriting',
+        ),
+      ).resolves.toMatchObject({
+        ok: false,
+        type: ToolErrorType.FILE_CHANGED_SINCE_READ,
+      });
+    } finally {
+      if (originalMemoryBaseDir === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBaseDir;
+      }
+      clearAutoMemoryRootCache();
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('refreshHierarchicalMemory should not load team memory from untrusted workspaces', async () => {
@@ -2866,14 +4388,18 @@ describe('Server Config (config.ts)', () => {
       conditionalRules: [],
       projectRoot: '/tmp',
     });
-    vi.mocked(readAutoMemoryIndex).mockResolvedValueOnce(
-      '# Managed Auto-Memory Index\n\n' + 'remember this '.repeat(80),
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce(
+      mockAutoMemoryIndexRead(
+        '# Managed Auto-Memory Index\n\n' + 'remember this '.repeat(80),
+      ),
     );
 
     await config.refreshHierarchicalMemory();
 
     expect(config.getWarnings()).toContainEqual(
-      expect.stringContaining('Loaded QWEN.md/context instructions'),
+      expect.stringContaining(
+        'Loaded always-on context (QWEN.md context files + auto-memory)',
+      ),
     );
   });
 
@@ -2894,7 +4420,9 @@ describe('Server Config (config.ts)', () => {
     await config.refreshHierarchicalMemory();
 
     expect(config.getWarnings()).toContainEqual(
-      expect.stringContaining('Loaded QWEN.md/context instructions'),
+      expect.stringContaining(
+        'Loaded always-on context (QWEN.md context files + auto-memory)',
+      ),
     );
     expect(config.getWarnings()).toContainEqual(
       expect.stringContaining("model's 1,000 token context window"),
@@ -2912,19 +4440,24 @@ describe('Server Config (config.ts)', () => {
     });
 
     expect(config.getWarnings()).toContainEqual(
-      expect.stringContaining('Loaded QWEN.md/context instructions'),
+      expect.stringContaining(
+        'Loaded always-on context (QWEN.md context files + auto-memory)',
+      ),
     );
   });
 
   it('getWarnings should use the model token limit when no contextWindowSize is configured', () => {
+    const warningThresholdTokens = Math.floor(DEFAULT_TOKEN_LIMIT * 0.15);
     const config = new Config({
       ...baseParams,
       model: 'unknown-model-for-context-warning-test',
-      userMemory: 'a'.repeat(100_000),
+      userMemory: 'a'.repeat((warningThresholdTokens + 1) * 4),
     });
 
     expect(config.getWarnings()).toContainEqual(
-      expect.stringContaining("model's 131,072 token context window"),
+      expect.stringContaining(
+        `model's ${DEFAULT_TOKEN_LIMIT.toLocaleString()} token context window`,
+      ),
     );
   });
 
@@ -2942,7 +4475,7 @@ describe('Server Config (config.ts)', () => {
       conditionalRules: [],
       projectRoot: '/tmp',
     });
-    vi.mocked(readAutoMemoryIndex).mockResolvedValueOnce(null);
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce(null);
 
     await config.refreshHierarchicalMemory();
 
@@ -2950,13 +4483,19 @@ describe('Server Config (config.ts)', () => {
       config
         .getWarnings()
         .some((warning) =>
-          warning.includes('Loaded QWEN.md/context instructions'),
+          warning.includes(
+            'Loaded always-on context (QWEN.md context files + auto-memory)',
+          ),
         ),
     ).toBe(false);
   });
 
   it('relocateWorkingDirectory should update the session working roots', async () => {
     const config = new Config(baseParams);
+    const disposeResidentAgents = vi.spyOn(
+      config.getBackgroundTaskRegistry(),
+      'disposeResidentAgents',
+    );
     const newDir = path.resolve('/path/to/other');
     const workspaceContext = config.getWorkspaceContext();
     const directoriesChanged = vi.fn();
@@ -2976,6 +4515,7 @@ describe('Server Config (config.ts)', () => {
     expect(config.getWorkspaceContext()).toBe(workspaceContext);
     expect(config.getWorkspaceContext().getDirectories()[0]).toBe(newDir);
     expect(config.storage.getProjectRoot()).toBe(newDir);
+    expect(disposeResidentAgents).toHaveBeenCalledOnce();
     expect(directoriesChanged).toHaveBeenCalled();
     expect(loadServerHierarchicalMemory).toHaveBeenCalledWith(
       newDir,
@@ -2990,6 +4530,36 @@ describe('Server Config (config.ts)', () => {
 
     chdirSpy.mockRestore();
     cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should preserve leased storage for an ACP cwd change', async () => {
+    const config = new Config(baseParams);
+    const originalStorage = config.storage;
+    const originalPersistenceRoot = originalStorage.getProjectRoot();
+    const newDir = path.resolve('/path/to/other');
+    (
+      config as unknown as {
+        chatRecordingService: { hasWriteOwnership: () => boolean };
+      }
+    ).chatRecordingService = { hasWriteOwnership: () => true };
+
+    await expect(
+      config.relocateWorkingDirectory(newDir, newDir, {
+        skipProcessChdir: true,
+        skipArtifactMigration: true,
+      }),
+    ).resolves.toEqual({});
+
+    expect(config.getTargetDir()).toBe(newDir);
+    expect(config.storage).toBe(originalStorage);
+    expect(config.getSessionService().getProjectRoot()).toBe(
+      originalPersistenceRoot,
+    );
+    await expect(config.relocateWorkingDirectory(newDir)).rejects.toMatchObject(
+      {
+        errorKind: 'session_writer_unavailable',
+      },
+    );
   });
 
   it('relocateWorkingDirectory should recreate cwd-derived file service', async () => {
@@ -3009,8 +4579,45 @@ describe('Server Config (config.ts)', () => {
     cwdSpy.mockRestore();
   });
 
-  it('relocateWorkingDirectory should move current session artifacts to the new workspace', async () => {
+  it('relocateWorkingDirectory should continue after recording flush fails', async () => {
     const config = new Config(baseParams);
+    const newDir = path.resolve('/path/to/other');
+    const finalize = vi.fn();
+    const flush = vi.fn().mockRejectedValue(new Error('recording failed'));
+    const resetStoragePaths = vi.fn();
+    (
+      config as unknown as {
+        chatRecordingService: {
+          finalize: () => void;
+          flush: () => Promise<void>;
+          resetStoragePaths: () => void;
+          hasWriteOwnership: () => boolean;
+        };
+      }
+    ).chatRecordingService = {
+      finalize,
+      flush,
+      resetStoragePaths,
+      hasWriteOwnership: () => false,
+    };
+    const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
+      // Keep the test process in its original directory.
+    });
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(newDir);
+
+    await expect(config.relocateWorkingDirectory(newDir)).resolves.toEqual({});
+
+    expect(finalize).toHaveBeenCalledOnce();
+    expect(flush).toHaveBeenCalledOnce();
+    expect(resetStoragePaths).toHaveBeenCalledOnce();
+    expect(config.getTargetDir()).toBe(newDir);
+
+    chdirSpy.mockRestore();
+    cwdSpy.mockRestore();
+  });
+
+  it('relocateWorkingDirectory should move current session artifacts to the new workspace', async () => {
+    const config = new Config({ ...baseParams, chatRecording: true });
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
     const oldStorage = new Storage(config.getTargetDir());
@@ -3111,7 +4718,11 @@ describe('Server Config (config.ts)', () => {
   });
 
   it('relocateWorkingDirectory should reject and roll back when session artifact migration fails', async () => {
-    const config = new Config(baseParams);
+    const config = new Config({ ...baseParams, chatRecording: true });
+    const disposeResidentAgents = vi.spyOn(
+      config.getBackgroundTaskRegistry(),
+      'disposeResidentAgents',
+    );
     const oldDir = config.getTargetDir();
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
@@ -3165,6 +4776,7 @@ describe('Server Config (config.ts)', () => {
     expect(config.getTargetDir()).toBe(oldDir);
     expect(config.storage.getProjectRoot()).toBe(oldDir);
     expect(config.getTranscriptPath()).toBe(oldTranscriptPath);
+    expect(disposeResidentAgents).not.toHaveBeenCalled();
 
     chdirSpy.mockRestore();
     cwdSpy.mockRestore();
@@ -3308,13 +4920,39 @@ describe('Server Config (config.ts)', () => {
       conditionalRules: [],
       projectRoot: '/tmp',
     });
-    vi.mocked(readAutoMemoryIndex).mockResolvedValue(null);
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValue(null);
 
     await config.refreshHierarchicalMemory();
 
     expect(config.getUserMemory()).toContain('Project rules');
-    expect(config.getUserMemory()).toContain('# auto memory');
-    expect(config.getUserMemory()).toContain('MEMORY.md is currently empty');
+    expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toContain(
+      'MEMORY.md is currently empty',
+    );
+  });
+
+  it('refreshHierarchicalMemory should omit managed auto-memory prompt when disabled', async () => {
+    const config = new Config({
+      ...baseParams,
+      enableManagedAutoMemory: false,
+    });
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValue(null);
+
+    await config.refreshHierarchicalMemory();
+
+    expect(config.getUserMemory()).toContain('Project rules');
+    expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toBe('');
+    expect(readAutoMemoryIndexWithStats).not.toHaveBeenCalled();
   });
 
   it('refreshHierarchicalMemory should only use explicit inputs in bare mode', async () => {
@@ -3336,9 +4974,9 @@ describe('Server Config (config.ts)', () => {
     const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
     expect(lastCall?.at(-1)).toMatchObject({ explicitOnly: true });
     expect(lastCall?.[1]).toEqual([]);
-    expect(readAutoMemoryIndex).not.toHaveBeenCalled();
+    expect(readAutoMemoryIndexWithStats).not.toHaveBeenCalled();
     expect(config.getUserMemory()).toContain('Project rules');
-    expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(config.getAutoMemoryPrompt()).toBe('');
   });
 
   describe('isManagedMemoryAvailable', () => {
@@ -3352,13 +4990,13 @@ describe('Server Config (config.ts)', () => {
       expect(config.isManagedMemoryAvailable()).toBe(false);
     });
 
-    it('returns true even when enableManagedAutoMemory is false', () => {
+    it('returns false when enableManagedAutoMemory is false', () => {
       const config = new Config({
         ...baseParams,
         enableManagedAutoMemory: false,
         bareMode: false,
       });
-      expect(config.isManagedMemoryAvailable()).toBe(true);
+      expect(config.isManagedMemoryAvailable()).toBe(false);
     });
   });
 
@@ -3405,7 +5043,8 @@ describe('Server Config (config.ts)', () => {
 
     const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
     const options = lastCall?.at(-1) as
-      LoadServerHierarchicalMemoryOptions | undefined;
+      | LoadServerHierarchicalMemoryOptions
+      | undefined;
     expect(options?.onInstructionsLoaded).toEqual(expect.any(Function));
 
     await options?.onInstructionsLoaded?.({
@@ -3493,6 +5132,21 @@ describe('Server Config (config.ts)', () => {
     };
     const config = new Config(paramsWithTelemetry);
     expect(config.getTelemetryEnabled()).toBe(true);
+    expect(config.isTelemetryInitializationDeferred()).toBe(false);
+    expect(initializeTelemetry).toHaveBeenCalledWith(config);
+  });
+
+  it('Config constructor should defer telemetry initialization when requested', () => {
+    const paramsWithTelemetry: ConfigParameters = {
+      ...baseParams,
+      telemetry: { enabled: true },
+      deferTelemetryInitialization: true,
+    };
+    const config = new Config(paramsWithTelemetry);
+
+    expect(config.getTelemetryEnabled()).toBe(true);
+    expect(config.isTelemetryInitializationDeferred()).toBe(true);
+    expect(initializeTelemetry).not.toHaveBeenCalled();
   });
 
   it('Config shutdown should flush telemetry when SDK is initialized', async () => {
@@ -4098,6 +5752,83 @@ describe('Server Config (config.ts)', () => {
       ]);
     });
 
+    it('registers web_search when enabled with a usable env-declared backend', async () => {
+      process.env['WEB_SEARCH_GATE_TEST_KEY'] = 'sk-test';
+      try {
+        const config = new Config({
+          ...baseParams,
+          webSearch: {
+            enabled: true,
+            model: 'qwen3.6-plus',
+            baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+            apiKeyEnv: 'WEB_SEARCH_GATE_TEST_KEY',
+          },
+        });
+        await config.initialize();
+
+        const registerToolMock = (
+          (await vi.importMock('../tools/tool-registry')) as {
+            ToolRegistry: { prototype: { registerFactory: Mock } };
+          }
+        ).ToolRegistry.prototype.registerFactory;
+
+        expect(
+          (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+        ).toContain(ToolNames.WEB_SEARCH);
+        expect(
+          config.getWarnings().filter((w) => w.includes('WebSearch')),
+        ).toEqual([]);
+      } finally {
+        delete process.env['WEB_SEARCH_GATE_TEST_KEY'];
+      }
+    });
+
+    it('does not register web_search or push a notice when the feature is disabled', async () => {
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.WEB_SEARCH);
+      expect(
+        config.getWarnings().filter((w) => w.includes('WebSearch')),
+      ).toEqual([]);
+    });
+
+    it('pushes a one-time notice when web_search is enabled but misconfigured', async () => {
+      // Enabled without a model: the tool must stay off with a diagnostic
+      // notice, pushed exactly once across registry rebuilds.
+      const config = new Config({
+        ...baseParams,
+        webSearch: { enabled: true },
+      });
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.WEB_SEARCH);
+
+      const webSearchNotices = () =>
+        config.getWarnings().filter((w) => w.includes('WebSearch'));
+      expect(webSearchNotices()).toHaveLength(1);
+      expect(webSearchNotices()[0]).toContain('no search model');
+
+      // A registry rebuild must not duplicate the notice.
+      await config.createToolRegistry(undefined, { skipDiscovery: true });
+      expect(webSearchNotices()).toHaveLength(1);
+    });
+
     it('should register a tool if coreTools contains an argument-specific pattern', async () => {
       const params: ConfigParameters = {
         ...baseParams,
@@ -4382,6 +6113,68 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('getMaxToolCallsPerTurn', () => {
+    it('should return the default cap when unset', () => {
+      const config = new Config(baseParams);
+      expect(config.getMaxToolCallsPerTurn()).toBe(
+        DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+      );
+    });
+
+    it('should use a custom maxToolCallsPerTurn if provided', () => {
+      const config = new Config({ ...baseParams, maxToolCallsPerTurn: 42 });
+      expect(config.getMaxToolCallsPerTurn()).toBe(42);
+    });
+
+    it('tracks whether maxToolCallsPerTurn was explicitly set', () => {
+      expect(
+        new Config({ ...baseParams }).isMaxToolCallsPerTurnExplicit(),
+      ).toBe(false);
+      expect(
+        new Config({
+          ...baseParams,
+          maxToolCallsPerTurn: 42,
+        }).isMaxToolCallsPerTurnExplicit(),
+      ).toBe(true);
+    });
+
+    it.each([0, -1])(
+      'should return infinity (cap disabled) when set to %d',
+      (capValue) => {
+        const config = new Config({
+          ...baseParams,
+          maxToolCallsPerTurn: capValue,
+        });
+        expect(config.getMaxToolCallsPerTurn()).toBe(Number.POSITIVE_INFINITY);
+      },
+    );
+
+    it.each([0.5, Number.NaN, Number.POSITIVE_INFINITY])(
+      'should reject an invalid maxToolCallsPerTurn value: %s',
+      (capValue) => {
+        expect(
+          () => new Config({ ...baseParams, maxToolCallsPerTurn: capValue }),
+        ).toThrow(/maxToolCallsPerTurn: must be an integer/);
+      },
+    );
+  });
+
+  describe('getMaxSessionTurns', () => {
+    it.each([-42, -1, 0, 42])('should accept %d', (maxSessionTurns) => {
+      const config = new Config({ ...baseParams, maxSessionTurns });
+      expect(config.getMaxSessionTurns()).toBe(maxSessionTurns);
+    });
+
+    it.each([0.5, Number.NaN, Number.POSITIVE_INFINITY])(
+      'should reject an invalid value: %s',
+      (maxSessionTurns) => {
+        expect(() => new Config({ ...baseParams, maxSessionTurns })).toThrow(
+          /maxSessionTurns: must be an integer/,
+        );
+      },
+    );
+  });
+
   describe('getClearContextOnIdle', () => {
     it('should default the cumulative tool result threshold to 500000 chars', () => {
       const config = new Config(baseParams);
@@ -4569,6 +6362,7 @@ describe('setApprovalMode with folder trust', () => {
     debugMode: false,
     model: 'test-model',
     cwd: '.',
+    chatRecording: false,
   };
 
   it('should throw a TrustGateError when setting YOLO mode in an untrusted folder', () => {
@@ -4669,25 +6463,66 @@ describe('setApprovalMode with folder trust', () => {
       expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
     });
 
-    // Regression for #5574: the gate state records whether the model or the
-    // user entered plan mode, so exit_plan_mode can decide whether to gate.
-    it('marks the plan gate entry as user-initiated by default', () => {
+    it('increments the approval mode revision only for actual changes', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      const initialRevision = config.getApprovalModeRevision();
+      config.setApprovalMode(ApprovalMode.PLAN);
+      expect(config.getApprovalModeRevision()).toBe(initialRevision + 1);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.PLAN, { enteredByModel: true });
+      expect(config.getApprovalModeRevision()).toBe(initialRevision + 1);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(config.getApprovalModeRevision()).toBe(initialRevision + 2);
+    });
+
+    it('queues a one-shot manual plan-exit notice on a manual exit', () => {
       const config = new Config(baseParams);
       vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
 
       config.setApprovalMode(ApprovalMode.PLAN);
-      expect(config.getPlanGateState()?.enteredByModel).toBe(false);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(true);
+      // One-shot: consumed on first read.
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
     });
 
-    it('marks the plan gate entry as model-initiated when enter_plan_mode requests it', () => {
+    it('does not queue the exit notice for an approved plan exit', () => {
       const config = new Config(baseParams);
       vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
 
-      config.setApprovalMode(ApprovalMode.PLAN, { enteredByModel: true });
-      expect(config.getPlanGateState()?.enteredByModel).toBe(true);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT, {
+        fromApprovedPlanExit: true,
+      });
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
     });
 
-    it('records prePlanMode=yolo and enteredByModel=false for a Shift+Tab cycle into plan mode (#5574)', () => {
+    it('clears a stale exit notice when plan mode is re-entered', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      config.setApprovalMode(ApprovalMode.PLAN);
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
+    });
+
+    it('does not queue the exit notice for non-plan mode changes', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+
+      expect(config.consumePendingManualPlanExitNotice()).toBe(false);
+    });
+
+    it('records prePlanMode=yolo for a Shift+Tab cycle into plan mode', () => {
       const config = new Config(baseParams);
       vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
 
@@ -4698,10 +6533,35 @@ describe('setApprovalMode with folder trust', () => {
       config.setApprovalMode(ApprovalMode.YOLO);
       config.setApprovalMode(ApprovalMode.PLAN);
 
-      // prePlanMode is yolo purely because it precedes plan in the cycle —
-      // it does NOT mean the user wants autonomous execution.
       expect(config.getPrePlanMode()).toBe(ApprovalMode.YOLO);
-      expect(config.getPlanGateState()?.enteredByModel).toBe(false);
+    });
+
+    it('does not partially apply plan exit bookkeeping when transition work fails', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      config.setApprovalMode(ApprovalMode.AUTO);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      const revision = config.getApprovalModeRevision();
+      (
+        config as unknown as {
+          permissionManager: {
+            stripDangerousRulesForAutoMode: () => void;
+            restoreDangerousRules: () => void;
+          };
+        }
+      ).permissionManager = {
+        stripDangerousRulesForAutoMode: () => {
+          throw new Error('strip failed');
+        },
+        restoreDangerousRules: vi.fn(),
+      };
+
+      expect(() => config.setApprovalMode(ApprovalMode.AUTO)).toThrow(
+        'strip failed',
+      );
+      expect(config.getApprovalMode()).toBe(ApprovalMode.PLAN);
+      expect(config.getPrePlanMode()).toBe(ApprovalMode.AUTO);
+      expect(config.getApprovalModeRevision()).toBe(revision);
     });
   });
 
@@ -5245,6 +7105,16 @@ describe('setApprovalMode with folder trust', () => {
       vi.clearAllMocks();
     });
 
+    it('registers the background-agent roster tool', async () => {
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      const calls = (ToolRegistry.prototype.registerFactory as Mock).mock.calls;
+      expect(calls.some((call) => call[0] === ToolNames.LIST_AGENTS)).toBe(
+        true,
+      );
+    });
+
     it('should register grep tool when useRipgrep is true and it is available', async () => {
       (canUseRipgrep as Mock).mockResolvedValue(true);
       const config = new Config({ ...baseParams, useRipgrep: true });
@@ -5363,6 +7233,7 @@ describe('disabledTools runtime sync (#4282 fold-in 5 P2-2 / #4297 fold-in 5)', 
     debugMode: false,
     model: 'test-model',
     cwd: '.',
+    chatRecording: false,
   };
 
   it('initializes from `disabledTools` ConfigParameters', () => {
@@ -5419,12 +7290,60 @@ describe('disabledTools runtime sync (#4282 fold-in 5 P2-2 / #4297 fold-in 5)', 
   });
 });
 
+describe('visibleTools', () => {
+  const baseParams: ConfigParameters = {
+    targetDir: '.',
+    debugMode: false,
+    model: 'test-model',
+    cwd: '.',
+    chatRecording: false,
+  };
+
+  it('initializes from `visibleTools` ConfigParameters', () => {
+    const config = new Config({
+      ...baseParams,
+      visibleTools: ['Foo', 'Bar'],
+    });
+    expect(config.getVisibleTools()).toEqual(new Set(['Foo', 'Bar']));
+  });
+
+  it('defaults to an empty set when `visibleTools` is omitted', () => {
+    const config = new Config(baseParams);
+    expect(config.getVisibleTools()).toEqual(new Set());
+  });
+
+  it('filters out non-string entries', () => {
+    const config = new Config({
+      ...baseParams,
+      visibleTools: [
+        'tool_a',
+        42 as unknown as string,
+        null as unknown as string,
+        'tool_b',
+      ],
+    });
+    expect(config.getVisibleTools()).toEqual(new Set(['tool_a', 'tool_b']));
+  });
+
+  it('is readonly — returned set preserves config state', () => {
+    const config = new Config({
+      ...baseParams,
+      visibleTools: ['web_fetch'],
+    });
+    const set = config.getVisibleTools();
+    expect(set.has('web_fetch')).toBe(true);
+    // always returns the same reference
+    expect(config.getVisibleTools()).toBe(set);
+  });
+});
+
 describe('computer use settings', () => {
   const baseParams: ConfigParameters = {
     targetDir: '.',
     debugMode: false,
     model: 'test-model',
     cwd: '.',
+    chatRecording: false,
   };
 
   it('exposes the configured idle timeout', () => {
@@ -5463,6 +7382,7 @@ describe('BaseLlmClient Lifecycle', () => {
     userMemory: USER_MEMORY,
     telemetry: TELEMETRY_SETTINGS,
     model: MODEL,
+    chatRecording: false,
     usageStatisticsEnabled: false,
   };
 
@@ -5493,6 +7413,20 @@ describe('BaseLlmClient Lifecycle', () => {
       config,
     );
   });
+
+  it('clears per-model generators when provider config is reloaded', async () => {
+    const config = new Config(baseParams);
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: { model: 'gemini-flash', apiKey: 'test-key' },
+      sources: {},
+    });
+    await config.refreshAuth(AuthType.USE_GEMINI);
+
+    const llmService = config.getBaseLlmClient();
+    config.reloadModelProvidersConfig({});
+
+    expect(llmService.clearPerModelGeneratorCache).toHaveBeenCalledOnce();
+  });
 });
 
 describe('Model Switching and Config Updates', () => {
@@ -5501,6 +7435,7 @@ describe('Model Switching and Config Updates', () => {
     targetDir: '/path/to/target',
     debugMode: false,
     model: 'qwen3-coder-plus',
+    chatRecording: false,
     usageStatisticsEnabled: false,
     telemetry: { enabled: false },
   };
@@ -5520,6 +7455,7 @@ describe('Model Switching and Config Updates', () => {
       ['contextWindowSize']: 1_000_000,
       ['samplingParams']: { temperature: 0.7 },
       ['enableCacheControl']: true,
+      ['forceGlobalCacheScope']: true,
     };
 
     vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
@@ -5545,6 +7481,7 @@ describe('Model Switching and Config Updates', () => {
       ['contextWindowSize']: 128_000,
       ['samplingParams']: { temperature: 0.8 },
       ['enableCacheControl']: false,
+      ['forceGlobalCacheScope']: false,
       ['toolResultContentFormat']: 'string',
       ['modalities']: { image: true },
     };
@@ -5556,6 +7493,7 @@ describe('Model Switching and Config Updates', () => {
         contextWindowSize: { kind: 'computed', detail: 'auto' },
         samplingParams: { kind: 'settings' },
         enableCacheControl: { kind: 'settings' },
+        forceGlobalCacheScope: { kind: 'settings' },
         toolResultContentFormat: { kind: 'settings' },
         modalities: { kind: 'computed', detail: 'auto' },
       },
@@ -5577,6 +7515,7 @@ describe('Model Switching and Config Updates', () => {
     expect(updatedConfig['contextWindowSize']).toBe(128_000);
     expect(updatedConfig['samplingParams']?.temperature).toBe(0.8);
     expect(updatedConfig['enableCacheControl']).toBe(false);
+    expect(updatedConfig['forceGlobalCacheScope']).toBe(false);
     expect(updatedConfig['toolResultContentFormat']).toBe('string');
     // Modalities are model-derived; a hot switch must refresh them so the
     // vision-bridge gate reflects the new model (it reads getEffectiveInputModalities()).
@@ -5591,6 +7530,7 @@ describe('Model Switching and Config Updates', () => {
     expect(sources['contextWindowSize']?.detail).toBe('auto');
     expect(sources['samplingParams']?.kind).toBe('settings');
     expect(sources['enableCacheControl']?.kind).toBe('settings');
+    expect(sources['forceGlobalCacheScope']?.kind).toBe('settings');
     expect(sources['toolResultContentFormat']?.kind).toBe('settings');
     expect(sources['modalities']?.kind).toBe('computed');
   });
@@ -5749,8 +7689,9 @@ describe('Model Switching and Config Updates', () => {
     }
 
     it('resolves getters to the runtime view inside the frame, instance fields outside', async () => {
-      const { runWithRuntimeContentGenerator } =
-        await import('../agents/runtime/agent-context.js');
+      const { runWithRuntimeContentGenerator } = await import(
+        '../agents/runtime/agent-context.js'
+      );
       const config = new Config(baseParams);
       const parentGenerator = {
         generateContentStream: vi.fn(),
@@ -5797,8 +7738,9 @@ describe('Model Switching and Config Updates', () => {
     });
 
     it('falls back to the parent model id when the runtime view config has no model', async () => {
-      const { runWithRuntimeContentGenerator } =
-        await import('../agents/runtime/agent-context.js');
+      const { runWithRuntimeContentGenerator } = await import(
+        '../agents/runtime/agent-context.js'
+      );
       const config = new Config(baseParams);
       setInstanceFields(
         config,
@@ -6022,6 +7964,150 @@ describe('Model Switching and Config Updates', () => {
 
       // Zero context_limit: returns undefined
       expect(buildContextUsage(0, 64000)).toBeUndefined();
+    });
+  });
+
+  describe('Stop dispatch through the hook execution bridge', () => {
+    it.each([
+      {
+        name: 'ignores non-blocking outputs',
+        otherOutput: { continue: true },
+        expected: false,
+        expectedReason: undefined,
+      },
+      {
+        name: 'detects another blocking output',
+        otherOutput: {
+          decision: 'block',
+          reason: 'Policy review is still required',
+        },
+        expected: true,
+        expectedReason: 'Policy review is still required',
+      },
+      {
+        name: 'preserves a stop reason',
+        otherOutput: {
+          continue: false,
+          stopReason: 'External stop hook feedback',
+        },
+        expected: true,
+        expectedReason: 'External stop hook feedback',
+      },
+    ])(
+      '$name when a goal hook blocks',
+      async ({ otherOutput, expected, expectedReason }) => {
+        const config = new Config({ ...baseParams });
+        await config.initialize();
+        const goalOutput = {
+          decision: 'block' as const,
+          reason: 'Keep working',
+          hookSpecificOutput: {
+            [GOAL_HOOK_ID_OUTPUT_KEY]: 'goal-hook-id',
+          },
+        };
+        const fireStopEvent = vi.fn().mockResolvedValue({
+          finalOutput: {
+            ...goalOutput,
+            ...otherOutput,
+          },
+          allOutputs: [goalOutput, otherOutput],
+        });
+        // @ts-expect-error - accessing private for testing
+        config['hookSystem'] = { fireStopEvent };
+
+        const response = await config
+          .getMessageBus()!
+          .request<HookExecutionRequest, HookExecutionResponse>(
+            {
+              type: MessageBusType.HOOK_EXECUTION_REQUEST,
+              eventName: 'Stop',
+              input: {
+                stop_hook_active: true,
+                last_assistant_message: 'last response',
+              },
+            },
+            MessageBusType.HOOK_EXECUTION_RESPONSE,
+          );
+
+        expect(response.error).toBeUndefined();
+        expect(response).toMatchObject({
+          success: true,
+          hasNonGoalBlockingStopHook: expected,
+        });
+        expect(response.nonGoalBlockingStopReason).toBe(expectedReason);
+      },
+    );
+  });
+
+  describe('MessageDisplay dispatch through the hook execution bridge', () => {
+    it('extracts message_id/displayed_text/is_final from the request input and forwards them positionally', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const fireMessageDisplayEvent = vi
+        .fn()
+        .mockResolvedValue({ finalOutput: undefined, allOutputs: [] });
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = { fireMessageDisplayEvent };
+
+      const messageBus = config.getMessageBus();
+      expect(messageBus).toBeDefined();
+
+      const response = await messageBus!.request<
+        HookExecutionRequest,
+        HookExecutionResponse
+      >(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'MessageDisplay',
+          input: {
+            message_id: 'msg-123',
+            displayed_text: 'Hello, world',
+            is_final: true,
+          },
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+
+      expect(fireMessageDisplayEvent).toHaveBeenCalledWith(
+        'msg-123',
+        'Hello, world',
+        true,
+        undefined,
+      );
+      expect(response.success).toBe(true);
+    });
+
+    it('defaults missing fields (empty message_id/text, is_final false) rather than throwing', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const fireMessageDisplayEvent = vi
+        .fn()
+        .mockResolvedValue({ finalOutput: undefined, allOutputs: [] });
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = { fireMessageDisplayEvent };
+
+      const messageBus = config.getMessageBus();
+      const response = await messageBus!.request<
+        HookExecutionRequest,
+        HookExecutionResponse
+      >(
+        {
+          type: MessageBusType.HOOK_EXECUTION_REQUEST,
+          eventName: 'MessageDisplay',
+          input: {},
+        },
+        MessageBusType.HOOK_EXECUTION_RESPONSE,
+      );
+
+      expect(fireMessageDisplayEvent).toHaveBeenCalledWith(
+        '',
+        '',
+        false,
+        undefined,
+      );
+      expect(response.success).toBe(true);
     });
   });
 });

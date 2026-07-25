@@ -59,8 +59,8 @@ const TOOL_ALIAS_MAP: Map<ToolName, Set<string>> = (() => {
   return map;
 })();
 
-const getAliasSetForTool = (toolName: ToolName): Set<string> => {
-  const aliases = TOOL_ALIAS_MAP.get(toolName);
+export const getAliasSetForTool = (toolName: string): Set<string> => {
+  const aliases = TOOL_ALIAS_MAP.get(toolName as ToolName);
   if (!aliases) {
     return new Set([normalizeIdentifier(toolName)]);
   }

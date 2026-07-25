@@ -7,6 +7,7 @@
 import type { HistoryItem, HistoryItemUser } from '../types.js';
 import type { Content } from '@google/genai';
 import {
+  CompressionStatus,
   getStartupContextLength,
   isSystemReminderContent,
 } from '@qwen-code/qwen-code-core';
@@ -58,6 +59,14 @@ function isUserTextContent(content: Content): boolean {
   return content.parts.some((part) => 'text' in part && part.text);
 }
 
+function findLastSuccessfulCompressionIndex(history: HistoryItem[]): number {
+  return history.findLastIndex(
+    (item) =>
+      item.type === 'compression' &&
+      item.compression.compressionStatus === CompressionStatus.COMPRESSED,
+  );
+}
+
 /**
  * Computes the number of API Content[] entries to keep when rewinding
  * to a specific user turn in the UI history.
@@ -88,19 +97,31 @@ export function computeApiTruncationIndex(
   targetUserItemId: number,
   apiHistory: Content[],
 ): number {
+  const targetIndex = uiHistory.findIndex(
+    (item) => item.id === targetUserItemId,
+  );
+  if (targetIndex === -1) return -1;
+
+  const compressionIndex = findLastSuccessfulCompressionIndex(uiHistory);
+  if (compressionIndex !== -1 && targetIndex <= compressionIndex) return -1;
+
   // Count how many UI user turns exist before the target
   let uiUserTurnCount = 0;
-  for (const item of uiHistory) {
-    if (item.id === targetUserItemId) {
-      break;
-    }
+  for (
+    let i = compressionIndex === -1 ? 0 : compressionIndex + 1;
+    i < targetIndex;
+    i++
+  ) {
+    const item = uiHistory[i]!;
     if (isRealUserTurn(item)) {
       uiUserTurnCount++;
     }
   }
 
   // Determine the starting index in the API history (skip startup context)
-  const startIndex = getStartupContextLength(apiHistory);
+  const startIndex = getStartupContextLength(apiHistory, {
+    includeCompressed: true,
+  });
 
   if (uiUserTurnCount === 0) {
     // Rewinding to the first user turn: keep only startup context (if any)

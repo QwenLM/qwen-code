@@ -11,13 +11,16 @@ import {
   truncateToolOutput,
   truncateLlmContent,
   TOOL_OUTPUT_TRUNCATED_PREFIX,
+  persistAndTruncateToolResult,
 } from './truncation.js';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import { logToolOutputTruncated } from '../telemetry/loggers.js';
+import { atomicWriteFile } from './atomicFileWrite.js';
 
 vi.mock('node:fs/promises');
+vi.mock('./atomicFileWrite.js');
 vi.mock('../telemetry/loggers.js', () => ({
   logToolOutputTruncated: vi.fn(),
 }));
@@ -31,6 +34,24 @@ describe('truncateAndSaveToFile', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mockMkdir.mockResolvedValue(undefined);
+  });
+
+  it('uses a preview budget independent from the persistence trigger', async () => {
+    const content = 'a'.repeat(10_000);
+    mockWriteFile.mockResolvedValue(undefined);
+
+    const result = await truncateAndSaveToFile(
+      content,
+      'separate-preview',
+      '/tmp',
+      5000,
+      Number.POSITIVE_INFINITY,
+      'both',
+      500,
+    );
+
+    expect(result.outputFile).toBe('/tmp/separate-preview.output');
+    expect(result.content.length).toBeLessThan(2000);
   });
 
   it('should return content unchanged if below both threshold and line limit', async () => {
@@ -446,6 +467,40 @@ describe('truncateAndSaveToFile', () => {
       expect(result.content.length).toBeLessThan(content.length);
       expect(mockWriteFile).toHaveBeenCalled();
     });
+  });
+});
+
+describe('persistAndTruncateToolResult', () => {
+  it('returns and accounts for the fallback file after the primary write fails', async () => {
+    const trackToolResultBytes = vi.fn();
+    vi.mocked(atomicWriteFile).mockRejectedValueOnce(new Error('primary'));
+    vi.mocked(fs.mkdir).mockResolvedValue(undefined);
+    vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+    const config = {
+      getToolResultBytesWritten: () => 0,
+      trackToolResultBytes,
+      getTruncateToolOutputThreshold: () => 100,
+      getTruncateToolOutputLines: () => 100,
+      storage: {
+        getToolResultsDir: () => '/primary',
+        getProjectTempDir: () => '/fallback',
+      },
+    } as unknown as Config;
+    const content = 'x'.repeat(10_000);
+
+    const result = await persistAndTruncateToolResult(
+      'call-1',
+      'shell',
+      content,
+      config,
+    );
+
+    expect(result.outputFile).toMatch(/^\/fallback\/shell_[a-f0-9]+\.output$/);
+    expect(result.bytesWritten).toBe(Buffer.byteLength(content));
+    expect(trackToolResultBytes).toHaveBeenCalledTimes(1);
+    expect(trackToolResultBytes).toHaveBeenCalledWith(
+      Buffer.byteLength(content),
+    );
   });
 });
 

@@ -6,18 +6,25 @@
 
 import type { UpdateObject } from '../ui/utils/updateCheck.js';
 import type { LoadedSettings } from '../config/settings.js';
-import { getInstallationInfo } from './installationInfo.js';
+import {
+  getInstallationInfo,
+  PackageManager,
+  resolveUpdateCommand,
+} from './installationInfo.js';
 import { updateEventEmitter } from './updateEventEmitter.js';
 import type { HistoryItemWithoutId } from '../ui/types.js';
 import { MessageType } from '../ui/types.js';
 import { spawnWrapper } from './spawnWrapper.js';
 import { performStandaloneUpdate } from './standalone-update.js';
+import { t } from '../i18n/index.js';
 import type { spawn } from 'node:child_process';
 import os from 'node:os';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+
+const debugLogger = createDebugLogger('AUTO_UPDATE');
 
 const UPDATE_SUCCESS_MESSAGE =
-  'Update successful! Please restart Qwen Code to use the new version. ' +
-  'Switching model providers before restarting may not work correctly.';
+  'Update successful! The new version will be used on your next run.';
 const UPDATE_FAILED_MESSAGE =
   'Automatic update failed. Please try updating manually.';
 
@@ -59,13 +66,20 @@ export function handleAutoUpdate(
       .then((result) => {
         const message =
           result === 'deferred'
-            ? 'Update downloaded. It will be applied after you exit this session.'
-            : 'Update successful! The new version will be used on your next run.';
+            ? t(
+                'Update downloaded. It will be applied after you exit this session.',
+              )
+            : t(
+                'Update successful! The new version will be used on your next run.',
+              );
         updateEventEmitter.emit('update-success', { message });
       })
       .catch((err: Error) => {
         updateEventEmitter.emit('update-failed', {
-          message: `Automatic update failed: ${err.message}. Re-run the installer to update manually.`,
+          message: t(
+            'Automatic update failed: {{error}}. Re-run the installer to update manually.',
+            { error: err.message },
+          ),
         });
       });
     return;
@@ -75,39 +89,74 @@ export function handleAutoUpdate(
   if (!installationInfo.updateCommand || !isAutoUpdateEnabled) {
     return;
   }
-  const isNightly = info.update.latest.includes('nightly');
-
-  const updateCommand = installationInfo.updateCommand.replace(
-    '@latest',
-    isNightly ? '@nightly' : `@${info.update.latest}`,
+  const updateCommand = resolveUpdateCommand(
+    installationInfo.updateCommand,
+    info.update.latest,
   );
-  const isWindows = os.platform() === 'win32';
-  const shell = isWindows ? 'cmd.exe' : 'bash';
-  const shellArgs = isWindows ? ['/c', updateCommand] : ['-c', updateCommand];
-  const updateProcess = spawnFn(shell, shellArgs, { stdio: 'pipe' });
+  const platform = os.platform();
+  const isWindows = platform === 'win32';
+  const isManagedNpmUpdate =
+    installationInfo.packageManager === PackageManager.NPM;
+  const command = isManagedNpmUpdate
+    ? process.execPath
+    : isWindows
+      ? 'cmd.exe'
+      : 'bash';
+  const commandArgs = isManagedNpmUpdate
+    ? [process.argv[1]!]
+    : isWindows
+      ? ['/c', updateCommand]
+      : ['-c', updateCommand];
+  const updateProcess = spawnFn(command, commandArgs, {
+    ...(isManagedNpmUpdate
+      ? {
+          detached: true,
+          env: {
+            ...process.env,
+            QWEN_CODE_MANAGED_NPM_UPDATE_VERSION: info.update.latest,
+          },
+          stdio: ['ignore', 'ignore', 'pipe'] as const,
+          windowsHide: true,
+        }
+      : { stdio: ['pipe', 'ignore', 'pipe'] as const }),
+  });
   let errorOutput = '';
-  updateProcess.stderr.on('data', (data) => {
+  updateProcess.stderr?.on('data', (data) => {
     errorOutput += data.toString();
   });
 
-  updateProcess.on('close', (code) => {
-    if (code === 0) {
-      updateEventEmitter.emit('update-success', {
-        message: UPDATE_SUCCESS_MESSAGE,
-      });
-    } else {
-      updateEventEmitter.emit('update-failed', {
-        message: `${UPDATE_FAILED_MESSAGE} (command: ${updateCommand}, stderr: ${errorOutput.trim()})`,
-      });
-    }
-  });
-
-  updateProcess.on('error', (err) => {
-    updateEventEmitter.emit('update-failed', {
-      message: `${UPDATE_FAILED_MESSAGE} (error: ${err.message})`,
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      try {
+        if (error) throw error;
+        updateEventEmitter.emit('update-success', {
+          message: t(UPDATE_SUCCESS_MESSAGE),
+        });
+        resolve(true);
+      } catch (error) {
+        debugLogger.warn('Automatic update failed:', error);
+        updateEventEmitter.emit('update-failed', {
+          message: t(UPDATE_FAILED_MESSAGE),
+        });
+        resolve(false);
+      }
+    };
+    updateProcess.once('close', (code) => {
+      finish(
+        code === 0
+          ? undefined
+          : new Error(
+              `Command failed: ${updateCommand}; stderr: ${errorOutput.trim()}`,
+            ),
+      );
+    });
+    updateProcess.once('error', (error) => {
+      finish(error);
     });
   });
-  return updateProcess;
 }
 
 export function setUpdateHandler(
@@ -126,7 +175,7 @@ export function setUpdateHandler(
     }
   };
 
-  const handleUpdateRecieved = (info: UpdateObject) => {
+  const handleUpdateReceived = (info: UpdateObject) => {
     setUpdateInfo(info);
     const savedMessage = info.message;
     setTimeout(() => {
@@ -140,11 +189,17 @@ export function setUpdateHandler(
     }, 60000);
   };
 
-  const handleUpdateFailed = (data?: { message?: string }) => {
+  const handleUpdateFailed = (data?: {
+    message?: string;
+    severity?: 'error' | 'warning';
+  }) => {
     setUpdateInfo(null);
     addItemOrDefer({
-      type: MessageType.ERROR,
-      text: data?.message ?? UPDATE_FAILED_MESSAGE,
+      // Background update-check failures are emitted with severity 'warning'
+      // (#7049); actual update installation failures stay errors.
+      type:
+        data?.severity === 'warning' ? MessageType.WARNING : MessageType.ERROR,
+      text: data?.message ?? t(UPDATE_FAILED_MESSAGE),
     });
   };
 
@@ -153,7 +208,7 @@ export function setUpdateHandler(
     setUpdateInfo(null);
     addItemOrDefer({
       type: MessageType.INFO,
-      text: data?.message ?? UPDATE_SUCCESS_MESSAGE,
+      text: data?.message ?? t(UPDATE_SUCCESS_MESSAGE),
     });
   };
 
@@ -164,13 +219,13 @@ export function setUpdateHandler(
     });
   };
 
-  updateEventEmitter.on('update-received', handleUpdateRecieved);
+  updateEventEmitter.on('update-received', handleUpdateReceived);
   updateEventEmitter.on('update-failed', handleUpdateFailed);
   updateEventEmitter.on('update-success', handleUpdateSuccess);
   updateEventEmitter.on('update-info', handleUpdateInfo);
 
   const cleanup = () => {
-    updateEventEmitter.off('update-received', handleUpdateRecieved);
+    updateEventEmitter.off('update-received', handleUpdateReceived);
     updateEventEmitter.off('update-failed', handleUpdateFailed);
     updateEventEmitter.off('update-success', handleUpdateSuccess);
     updateEventEmitter.off('update-info', handleUpdateInfo);

@@ -40,12 +40,6 @@ import { OUTPUT_LANGUAGE_AUTO } from '../../utils/languageUtils.js';
 const mockToggleVimEnabled = vi.fn();
 const mockSetVimMode = vi.fn();
 
-// Mock the CompactModeContext
-const mockSetCompactMode = vi.fn();
-
-// Mock the UIActionsContext
-const mockRefreshStatic = vi.fn();
-
 enum TerminalKeys {
   ENTER = '\u000D',
   TAB = '\t',
@@ -132,28 +126,6 @@ vi.mock('../contexts/VimModeContext.js', async () => {
       vimMode: 'INSERT' as const,
       toggleVimEnabled: mockToggleVimEnabled,
       setVimMode: mockSetVimMode,
-    }),
-  };
-});
-
-vi.mock('../contexts/CompactModeContext.js', async () => {
-  const actual = await vi.importActual('../contexts/CompactModeContext.js');
-  return {
-    ...actual,
-    useCompactMode: () => ({
-      compactMode: false,
-      compactInline: false,
-      setCompactMode: mockSetCompactMode,
-    }),
-  };
-});
-
-vi.mock('../contexts/UIActionsContext.js', async () => {
-  const actual = await vi.importActual('../contexts/UIActionsContext.js');
-  return {
-    ...actual,
-    useUIActions: () => ({
-      refreshStatic: mockRefreshStatic,
     }),
   };
 });
@@ -335,7 +307,7 @@ describe('SettingsDialog', () => {
       const secondLabel = secondKey
         ? (getSettingDefinition(secondKey)?.label ?? secondKey)
         : '';
-      expect(lastFrame()).toContain(`● ${secondLabel}`);
+      expect(lastFrame()).toContain(`●\uFE0E ${secondLabel}`);
 
       // The active index should have changed (tested indirectly through behavior)
       unmount();
@@ -395,7 +367,7 @@ describe('SettingsDialog', () => {
         : '';
 
       // The first item is highlighted while the list is focused.
-      expect(lastFrame()).toContain(`● ${firstLabel}`);
+      expect(lastFrame()).toContain(`●\uFE0E ${firstLabel}`);
 
       // ↑ from the first item moves focus to the search box: the list highlight
       // disappears and the tab bar is not yet focused.
@@ -403,7 +375,7 @@ describe('SettingsDialog', () => {
         stdin.write(TerminalKeys.UP_ARROW);
       });
       await wait();
-      expect(lastFrame()).not.toContain(`● ${firstLabel}`);
+      expect(lastFrame()).not.toContain(`●\uFE0E ${firstLabel}`);
       expect(lastFrame()).not.toContain('↓ to return');
 
       // ↑ again moves up to the tab bar (which shows its focused hint).
@@ -433,7 +405,7 @@ describe('SettingsDialog', () => {
 
       // Wait for initial render and verify we're on Tool Approval Mode (first setting)
       await waitFor(() => {
-        expect(lastFrame()).toContain('● Tool Approval Mode');
+        expect(lastFrame()).toContain('●\uFE0E Tool Approval Mode');
       });
 
       const dialogKeys = getDialogSettingKeys();
@@ -448,7 +420,7 @@ describe('SettingsDialog', () => {
         await wait();
       }
       await waitFor(() => {
-        expect(lastFrame()).toContain('● Vim Mode');
+        expect(lastFrame()).toContain('●\uFE0E Vim Mode');
       });
 
       // Toggle the setting
@@ -477,58 +449,6 @@ describe('SettingsDialog', () => {
         expect.any(LoadedSettings),
         SettingScope.User,
       );
-
-      unmount();
-    });
-
-    it('should sync compact mode with CompactModeContext when toggled', async () => {
-      vi.mocked(saveModifiedSettings).mockClear();
-      mockSetCompactMode.mockClear();
-      mockRefreshStatic.mockClear();
-
-      const settings = createMockSettings();
-      const onSelect = vi.fn();
-      const component = (
-        <KeypressProvider kittyProtocolEnabled={false}>
-          <SettingsDialog settings={settings} onSelect={onSelect} />
-        </KeypressProvider>
-      );
-
-      const { stdin, unmount, lastFrame } = render(component);
-
-      await waitFor(() => {
-        expect(lastFrame()).toContain('● Tool Approval Mode');
-      });
-
-      const dialogKeys = getDialogSettingKeys();
-      const targetIndex = dialogKeys.indexOf('ui.compactMode');
-      expect(targetIndex).toBeGreaterThan(0);
-
-      // Navigate to Compact Mode setting
-      for (let i = 0; i < targetIndex; i++) {
-        act(() => {
-          stdin.write(TerminalKeys.DOWN_ARROW as string);
-        });
-        await wait();
-      }
-      await waitFor(() => {
-        expect(lastFrame()).toContain('● Compact Mode');
-      });
-
-      // Toggle the setting
-      act(() => {
-        stdin.write(TerminalKeys.ENTER as string);
-      });
-      await waitFor(() => {
-        expect(
-          vi.mocked(saveModifiedSettings).mock.calls.length,
-        ).toBeGreaterThan(0);
-      });
-
-      // Verify compact mode context was synced
-      expect(mockSetCompactMode).toHaveBeenCalledWith(true);
-      // Verify refreshStatic was called to update rendered history
-      expect(mockRefreshStatic).toHaveBeenCalled();
 
       unmount();
     });
@@ -600,7 +520,7 @@ describe('SettingsDialog', () => {
 
         // Verify we're on Tool Approval Mode (first setting, an enum)
         await waitFor(() => {
-          expect(lastFrame()).toContain('● Tool Approval Mode');
+          expect(lastFrame()).toContain('●\uFE0E Tool Approval Mode');
         });
 
         // Press Enter to cycle the enum value
@@ -646,7 +566,7 @@ describe('SettingsDialog', () => {
 
         // Verify we're on Tool Approval Mode (first setting)
         await waitFor(() => {
-          expect(lastFrame()).toContain('● Tool Approval Mode');
+          expect(lastFrame()).toContain('●\uFE0E Tool Approval Mode');
         });
 
         // Press Enter to cycle - should loop back to first value (Plan)
@@ -749,7 +669,7 @@ describe('SettingsDialog', () => {
       });
 
       // The UI should show settings mode is active (scope is in separate view)
-      expect(lastFrame()).toContain('● Tool Approval Mode'); // Settings section active
+      expect(lastFrame()).toContain('●\uFE0E Tool Approval Mode'); // Settings section active
       expect(lastFrame()).not.toContain('Apply To'); // Scope is in a separate view
 
       // This test validates the initial state - scope selection is now
@@ -1217,7 +1137,7 @@ describe('SettingsDialog', () => {
       });
 
       // Verify initial state: settings mode active (scope is in separate view)
-      expect(lastFrame()).toContain('● Tool Approval Mode'); // Settings mode active
+      expect(lastFrame()).toContain('●\uFE0E Tool Approval Mode'); // Settings mode active
       expect(lastFrame()).not.toContain('Apply To'); // Scope is in a separate view
 
       // This test validates the rendered UI structure for tab navigation
@@ -1280,7 +1200,7 @@ describe('SettingsDialog', () => {
 
       // Verify the complete UI is rendered (scope is in separate view)
       expect(lastFrame()).toContain('Settings'); // Title
-      expect(lastFrame()).toContain('● Tool Approval Mode'); // Active setting
+      expect(lastFrame()).toContain('●\uFE0E Tool Approval Mode'); // Active setting
       expect(lastFrame()).not.toContain('Apply To'); // Scope is in a separate view (Tab to access)
       expect(lastFrame()).toContain(
         '(Use Enter to select, Tab to configure scope)',

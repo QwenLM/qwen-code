@@ -34,6 +34,8 @@ export interface StreamingTextDeltaState {
    * visible duplication).
    */
   emittedLength: number;
+  /** Integer token-estimate units accumulated from normalized emitted text. */
+  emittedTokenUnits?: number;
   cumulativeMode: boolean;
 }
 
@@ -64,24 +66,36 @@ export interface RequestContext {
    */
   reasoningDeltaState?: StreamingTextDeltaState;
   /**
-   * Set once tagged content parsing emits a thought in this stream. Used to
-   * suppress duplicate provider reasoning-channel output that arrives in a
-   * different chunk.
+   * Tracks whether tagged-thinking parsing has emitted a thought part in the
+   * current stream. Once true, separate reasoning_content deltas are considered
+   * duplicate reasoning and are suppressed.
    */
   hasTaggedThinkingThought?: boolean;
   /**
-   * Reasoning-channel text buffered while a tagged-thinking stream is still
-   * open. It is emitted only if the stream finishes without tagged content
-   * producing any thought parts. If a stream ends abnormally before a finish
-   * chunk, buffered reasoning is best-effort and may be lost.
+   * Buffered reasoning_content for tagged-thinking streams until we know
+   * whether visible content will emit tagged thought parts.
    */
   pendingReasoningText?: string;
   /**
-   * Visible content buffered behind pending reasoning-channel text while a
-   * tagged-thinking stream is still ambiguous. This preserves thought-before-
-   * answer ordering when the provider uses reasoning_content without tags.
+   * Visible content buffered behind pending reasoning_content so it can be
+   * emitted after the reasoning thought if no tagged thought appears.
    */
   pendingContentParts?: Part[];
+  /** Tool IDs whose preparing metadata has already been emitted in this stream. */
+  preparedToolCallIds?: Set<string>;
+  pendingUntrustedResponseParts?: Part[];
+  hasStructuredReasoningContent?: boolean;
+  hasThinkingTagInReasoning?: boolean;
+  hasVisibleContent?: boolean;
+  atVisibleLineStart?: boolean;
+  pendingThinkingTagCandidate?: {
+    text: string;
+    closingTagName?: 'think' | 'thinking';
+  };
+  protocolTagSanitized?: {
+    tagName: 'think' | 'thinking';
+    toolCallCount: number;
+  };
 }
 
 export interface ErrorHandler {

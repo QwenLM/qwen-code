@@ -11,7 +11,7 @@
  * are stripped by each caller.
  */
 export const PROMPT_UNSAFE_INVISIBLES =
-  /[\u0080-\u009f\u200b-\u200d\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g;
+  /[\u0080-\u009f\p{Cf}\u2028\u2029]|\p{Variation_Selector}/gu;
 
 /**
  * Truncate to at most `max` Unicode CODE POINTS (not UTF-16 code units). A cap
@@ -19,7 +19,7 @@ export const PROMPT_UNSAFE_INVISIBLES =
  * (e.g. an emoji \ud83c\udf89 = 2 units) leaves a lone surrogate that renders as `\ufffd`.
  * `Array.from` iterates by code point, so slicing it never splits a pair.
  */
-function truncateCodePoints(str: string, max: number): string {
+export function truncateCodePoints(str: string, max: number): string {
   const cp = Array.from(str);
   return cp.length > max ? cp.slice(0, max).join('') : str;
 }

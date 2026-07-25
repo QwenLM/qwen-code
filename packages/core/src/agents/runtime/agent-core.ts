@@ -20,20 +20,27 @@ import { randomUUID } from 'node:crypto';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reportError } from '../../utils/errorReporting.js';
 import { subagentNameContext } from '../../utils/subagentNameContext.js';
+import { runWithInvocationContext } from '../../utils/invocation-context.js';
 import type { Config } from '../../config/config.js';
 import {
+  getCurrentAgentDepth,
   getCurrentAgentId,
   getRuntimeContentGenerator,
+  isTopLevelSession,
   runWithAgentContext,
   runWithRuntimeContentGenerator,
+  spawnBlockReason,
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
 import {
   createDuplicateProviderToolCallResponse,
   findRepeatedDuplicateProviderToolCall,
+  GeminiEventType,
   markDuplicateProviderToolCallResponseSent,
+  type ServerGeminiStreamEvent,
   type ToolCallRequestInfo,
 } from '../../core/turn.js';
+import { LoopDetectionService } from '../../services/loopDetectionService.js';
 import {
   CoreToolScheduler,
   type ToolCall,
@@ -45,8 +52,13 @@ import type {
   ToolCallConfirmationDetails,
   ToolResultDisplay,
 } from '../../tools/tools.js';
+import { isShellProgressData } from '../../tools/tools.js';
 import { getInitialChatHistory } from '../../utils/environmentContext.js';
-import { FinishReason } from '@google/genai';
+import {
+  finalizeToolResponses,
+  type ToolResponseBudgetEntry,
+} from '../../utils/tool-response-finalizer.js';
+import { FinishReason } from '../../core/genai-compat.js';
 import type {
   Content,
   Part,
@@ -56,6 +68,7 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { GeminiChat } from '../../core/geminiChat.js';
+import { assembleSystemPrompt } from '../../core/prompts.js';
 import {
   dedupeToolCallsById,
   getProviderToolCallId,
@@ -85,6 +98,8 @@ import { matchesMcpPattern } from '../../permissions/rule-parser.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
+import { getResponseText } from '../../utils/partUtils.js';
+import { getThoughtSummary } from '../../utils/thoughtUtils.js';
 import {
   isTeammate,
   getTeammateContext,
@@ -92,7 +107,10 @@ import {
 } from '../team/identity.js';
 import type { TeammateIdentity } from '../team/types.js';
 import {
+  getLeaderOnlyToolUnavailableMessage,
   getSubagentPlanToolUnavailableMessage,
+  isLeaderOnlyToolUnavailableInSubagent,
+  isPlanRequiredTeammateContext,
   isPlanLifecycleToolUnavailableInSubagent,
   SUBAGENT_PLAN_LIFECYCLE_TOOLS,
 } from './subagent-plan-tool-policy.js';
@@ -103,7 +121,11 @@ import {
 /**
  * Tools that must never be available to non-team subagents (including
  * forked agents spawned via the Agent tool).
- * - AgentTool prevents recursive subagent spawning.
+ * - AgentTool is depth-gated rather than unconditionally excluded:
+ *   `isExcluded()` in `prepareTools()` re-admits it while
+ *   `canSpawnNestedAgent()` permits another nesting level, and consults
+ *   this set only for every other tool. The entry here remains the
+ *   fail-closed floor for consumers of the raw set.
  * - Cron tools are session-scoped and should only run from the main session.
  * - TaskStop and SendMessage are parent-side control-plane tools for managing
  *   background subagents; subagents have no agent IDs to manage natively, so
@@ -122,10 +144,12 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,
   ToolNames.CRON_DELETE,
+  ToolNames.LIST_AGENTS,
   ToolNames.TASK_STOP,
   ToolNames.SEND_MESSAGE,
   ToolNames.TEAM_CREATE,
   ToolNames.TEAM_DELETE,
+  ToolNames.TEAM_PLAN_APPROVAL,
   ToolNames.TASK_CREATE,
   ToolNames.TASK_UPDATE,
   ToolNames.TASK_LIST,
@@ -134,6 +158,9 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   // never enter or exit the user's worktree state independently.
   ToolNames.ENTER_WORKTREE,
   ToolNames.EXIT_WORKTREE,
+  // V1 session artifacts are owned by the parent daemon session.
+  ToolNames.ARTIFACT,
+  ToolNames.RECORD_ARTIFACT,
   // FIX-8 (SEC-I1): WORKFLOW is excluded to prevent unbounded recursive
   // fan-out: a subagent spawned by Workflow that calls Workflow would create
   // O(k^n) subagents.
@@ -151,9 +178,11 @@ const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,
   ToolNames.CRON_DELETE,
+  ToolNames.LIST_AGENTS,
   ToolNames.TASK_STOP,
   ToolNames.TEAM_CREATE,
   ToolNames.TEAM_DELETE,
+  ToolNames.TEAM_PLAN_APPROVAL,
   ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
   // Worktree management belongs to the parent session.
   ToolNames.ENTER_WORKTREE,
@@ -165,6 +194,19 @@ const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   // workflow re-arms the O(k^n) fan-out the subagent set prevents.
   ToolNames.WORKFLOW,
 ]);
+
+function getExcludedToolsForCurrentContext(): ReadonlySet<string> {
+  if (!isTeammate()) {
+    return EXCLUDED_TOOLS_FOR_SUBAGENTS;
+  }
+  if (!isPlanRequiredTeammateContext()) {
+    return EXCLUDED_TOOLS_FOR_TEAMMATES;
+  }
+
+  const excluded = new Set(EXCLUDED_TOOLS_FOR_TEAMMATES);
+  excluded.delete(ToolNames.EXIT_PLAN_MODE);
+  return excluded;
+}
 
 /**
  * Prefix applied to each external message injected into a background agent's
@@ -192,6 +234,8 @@ export interface ReasoningLoopOptions {
   maxTimeMinutes?: number;
   /** Start time in ms (for timeout calculation). Defaults to Date.now(). */
   startTimeMs?: number;
+  /** Rounds already completed in the same logical turn. */
+  roundOffset?: number;
   /**
    * Optional callback to drain external messages between model rounds.
    * Returned inputs are appended to the next model request as user-role
@@ -259,6 +303,7 @@ export interface ExecutionStats {
  * or final result interpretation — those are the caller's responsibility.
  */
 export class AgentCore {
+  private promptOrdinal = 0;
   readonly subagentId: string;
   readonly name: string;
   readonly runtimeContext: Config;
@@ -474,9 +519,34 @@ export class AgentCore {
     await toolRegistry.warmAll();
     const toolsList: FunctionDeclaration[] = [];
 
-    const excludedFromSubagents = isTeammate()
-      ? EXCLUDED_TOOLS_FOR_TEAMMATES
-      : EXCLUDED_TOOLS_FOR_SUBAGENTS;
+    const excludedFromSubagents = getExcludedToolsForCurrentContext();
+
+    // Nested sub-agents: the AgentTool is normally excluded to prevent
+    // recursive spawning, but when maxSubagentDepth permits another level we
+    // let it back in. prepareTools() runs inside this sub-agent's own
+    // AsyncLocalStorage frame (see AgentHeadless.run / AgentInteractive), so
+    // spawnBlockReason() reads this agent's own depth and context — the same
+    // shared predicate AgentTool.execute() backstops at runtime.
+    //
+    // !isTopLevelSession() fails closed: prepareTools() only ever serves
+    // agents — never the top-level user session — so a missing agent frame
+    // means the launch path forgot runWithAgentContext. Without this check
+    // such an agent would be depth-gated as the top-level session and receive
+    // the AgentTool even at maxSubagentDepth=1 (codex review: frame-less
+    // AgentInteractive.start(), since fixed to establish its frame).
+    const nestingAllowed =
+      !isTopLevelSession() &&
+      spawnBlockReason(this.runtimeContext.getMaxSubagentDepth()) === null;
+
+    // Effective exclusion test. AgentTool is depth-gated (allowed only when
+    // this sub-agent is shallow enough to spawn another level); every other
+    // control-plane tool follows the static exclusion set unchanged.
+    const isExcluded = (name: string | undefined): boolean => {
+      if (!name) return false;
+      if (name === ToolNames.AGENT) return !nestingAllowed;
+      return excludedFromSubagents.has(name);
+    };
+
     if (this.toolConfig) {
       const asStrings = this.toolConfig.tools.filter(
         (t): t is string => typeof t === 'string',
@@ -497,7 +567,7 @@ export class AgentCore {
         toolsList.push(
           ...toolRegistry
             .getFunctionDeclarations({ includeDeferred: true })
-            .filter((t) => !(t.name && excludedFromSubagents.has(t.name))),
+            .filter((t) => !isExcluded(t.name)),
         );
       } else {
         // Explicit tool list: apply the full subagent exclusion set (not just
@@ -505,7 +575,7 @@ export class AgentCore {
         // (CRON_CREATE, TASK_STOP, SEND_MESSAGE, etc.) from leaking into
         // explicitly-configured subagents that happen to list them.
         const allowedNames = asStrings.filter((name) => {
-          if (excludedFromSubagents.has(name)) {
+          if (isExcluded(name)) {
             this.runtimeContext
               .getDebugLogger()
               ?.debug(
@@ -519,10 +589,14 @@ export class AgentCore {
           ...toolRegistry.getFunctionDeclarationsFiltered(allowedNames),
         );
       }
-      // Also filter inline FunctionDeclaration[] passed directly in toolConfig.
+      // Also filter inline FunctionDeclaration[] passed directly in toolConfig
+      // through the same exclusion test as the registry branches, so the
+      // depth-gated AgentTool and every other control-plane tool are handled
+      // uniformly (the inline form must not become a leak path for
+      // workflow/cron/team tools into a subagent).
       toolsList.push(
         ...onlyInlineDecls.filter((d) => {
-          if (d.name && excludedFromSubagents.has(d.name)) {
+          if (isExcluded(d.name)) {
             this.runtimeContext
               .getDebugLogger()
               ?.debug(
@@ -539,7 +613,7 @@ export class AgentCore {
       toolsList.push(
         ...toolRegistry
           .getFunctionDeclarations({ includeDeferred: true })
-          .filter((t) => !(t.name && excludedFromSubagents.has(t.name))),
+          .filter((t) => !isExcluded(t.name)),
       );
     }
 
@@ -595,7 +669,9 @@ export class AgentCore {
         abortController,
         options,
       );
-    return this.runInAgentFrames(inner);
+    return runWithInvocationContext(undefined, () =>
+      this.runInAgentFrames(inner),
+    );
   }
 
   /**
@@ -626,7 +702,10 @@ export class AgentCore {
    * `inheritedAgentId` does the same for logical agent ownership. It is
    * needed by deferred approval because the user's approval response runs
    * from the parent UI chain, after the subagent's AsyncLocalStorage frame
-   * has unwound.
+   * has unwound. `inheritedAgentDepth` accompanies it: without the original
+   * nesting depth the restored frame recomputes to depth 0, letting a
+   * deferred-approved `agent` tool call from a leaf-depth sub-agent bypass
+   * maxSubagentDepth.
    *
    * `inheritedTeammateIdentity` restores the in-process teammate identity
    * frame (`teammateIdentityStore`). Deferred approval needs it for the
@@ -645,12 +724,21 @@ export class AgentCore {
     inheritedView?: RuntimeContentGeneratorView,
     inheritedAgentId?: string,
     inheritedTeammateIdentity?: TeammateIdentity,
+    inheritedAgentDepth?: number,
   ): Promise<T> {
     const runInner = () =>
       subagentNameContext.run(this.name, () => {
         const runWithView = () => this.withRuntimeView(fn, inheritedView);
+        // inheritedAgentDepth restores the agent's original nesting depth.
+        // Without it the frame recomputes from the UI's frame-less async
+        // chain to depth 0, and an approved `agent` tool call from a
+        // leaf-depth sub-agent would bypass maxSubagentDepth.
         return inheritedAgentId
-          ? runWithAgentContext(inheritedAgentId, runWithView)
+          ? runWithAgentContext(
+              inheritedAgentId,
+              runWithView,
+              inheritedAgentDepth,
+            )
           : runWithView();
       });
     return inheritedTeammateIdentity
@@ -680,6 +768,7 @@ export class AgentCore {
     options?: ReasoningLoopOptions,
   ): Promise<ReasoningLoopResult> {
     const startTime = options?.startTimeMs ?? Date.now();
+    const runId = randomUUID();
     let currentMessages = initialMessages;
     let turnCounter = 0;
     let finalText = '';
@@ -689,6 +778,19 @@ export class AgentCore {
     // provider id would keep deterministic providers in a tool-result loop.
     const duplicateProviderToolCallResponseIds = new Set<string>();
     let stickyMaxOutputTokens: number | undefined;
+    const loopDetector = new LoopDetectionService(this.runtimeContext);
+    loopDetector.reset(
+      `${this.runtimeContext.getSessionId()}#${this.subagentId}`,
+    );
+    const checkSubagentLoop = (event: ServerGeminiStreamEvent): boolean => {
+      if (loopDetector.checkAlwaysOnSafeties(event)) {
+        return true;
+      }
+      return (
+        !this.runtimeContext.getSkipLoopDetection() &&
+        loopDetector.addAndCheckHeuristicLoops(event)
+      );
+    };
 
     while (true) {
       // Check abort before starting a new round — prevents unnecessary API
@@ -717,7 +819,8 @@ export class AgentCore {
       const roundAbortController = createChildAbortController(abortController);
 
       try {
-        const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${turnCounter++}`;
+        const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${this.promptOrdinal++}`;
+        turnCounter += 1;
 
         const messageParams = {
           message: currentMessages[0]?.parts || [],
@@ -752,6 +855,7 @@ export class AgentCore {
           undefined;
         let currentResponseId: string | undefined = undefined;
         let wasOutputTruncated = false;
+        let loopDetectedInStream = false;
 
         for await (const streamEvent of responseStream) {
           if (roundAbortController.signal.aborted) {
@@ -766,6 +870,11 @@ export class AgentCore {
           // retry does not inherit stale data (e.g. wasOutputTruncated) from a
           // previous attempt that may have hit MAX_TOKENS.
           if (streamEvent.type === 'retry') {
+            if (checkSubagentLoop({ type: GeminiEventType.Retry })) {
+              terminateMode = AgentTerminateMode.LOOP_DETECTED;
+              loopDetectedInStream = true;
+              break;
+            }
             if (streamEvent.maxOutputTokensEscalated !== undefined) {
               stickyMaxOutputTokens = streamEvent.maxOutputTokensEscalated;
             }
@@ -797,7 +906,8 @@ export class AgentCore {
             if (resp.responseId) {
               currentResponseId = resp.responseId;
             }
-            if (resp.functionCalls) functionCalls.push(...resp.functionCalls);
+            const chunkFunctionCalls = resp.functionCalls ?? [];
+            functionCalls.push(...chunkFunctionCalls);
             if (
               resp.candidates?.[0]?.finishReason === FinishReason.MAX_TOKENS
             ) {
@@ -813,6 +923,7 @@ export class AgentCore {
               if (txt)
                 this.eventEmitter?.emit(AgentEventType.STREAM_TEXT, {
                   subagentId: this.subagentId,
+                  runId,
                   round: turnCounter,
                   text: txt,
                   thought: isThought,
@@ -820,21 +931,96 @@ export class AgentCore {
                 });
             }
             if (resp.usageMetadata) lastUsage = resp.usageMetadata;
+
+            const thoughtSummary = getThoughtSummary(resp);
+            if (
+              thoughtSummary &&
+              checkSubagentLoop({
+                type: GeminiEventType.Thought,
+                value: thoughtSummary,
+              })
+            ) {
+              terminateMode = AgentTerminateMode.LOOP_DETECTED;
+              loopDetectedInStream = true;
+              break;
+            }
+
+            const responseText = getResponseText(resp);
+            if (
+              responseText &&
+              checkSubagentLoop({
+                type: GeminiEventType.Content,
+                value: responseText,
+              })
+            ) {
+              terminateMode = AgentTerminateMode.LOOP_DETECTED;
+              loopDetectedInStream = true;
+              break;
+            }
+
+            for (const fc of chunkFunctionCalls) {
+              const toolName = String(fc.name);
+              if (
+                checkSubagentLoop({
+                  type: GeminiEventType.ToolCallRequest,
+                  value: {
+                    callId: fc.id ?? `${toolName}-${Date.now()}`,
+                    providerCallId: getProviderToolCallId(fc),
+                    name: toolName,
+                    args: (fc.args ?? {}) as Record<string, unknown>,
+                    isClientInitiated: false,
+                    prompt_id: promptId,
+                    response_id: currentResponseId,
+                    wasOutputTruncated,
+                  },
+                })
+              ) {
+                terminateMode = AgentTerminateMode.LOOP_DETECTED;
+                loopDetectedInStream = true;
+                break;
+              }
+            }
+            if (loopDetectedInStream) {
+              break;
+            }
+
+            const finishReason = resp.candidates?.[0]?.finishReason;
+            if (
+              finishReason &&
+              checkSubagentLoop({
+                type: GeminiEventType.Finished,
+                value: {
+                  reason: finishReason,
+                  usageMetadata: resp.usageMetadata,
+                },
+              })
+            ) {
+              terminateMode = AgentTerminateMode.LOOP_DETECTED;
+              loopDetectedInStream = true;
+              break;
+            }
           }
         }
 
-        if (roundText || roundThoughtText) {
+        if (loopDetectedInStream) {
+          break;
+        }
+
+        if (roundText || roundThoughtText || lastUsage) {
           this.eventEmitter?.emit(AgentEventType.ROUND_TEXT, {
             subagentId: this.subagentId,
+            runId,
             round: turnCounter,
             text: roundText,
             thoughtText: roundThoughtText,
+            usageMetadata: lastUsage,
             timestamp: Date.now(),
           } as AgentRoundTextEvent);
         }
 
-        this.executionStats.rounds = turnCounter;
-        this.stats.setRounds(turnCounter);
+        const cumulativeRounds = (options?.roundOffset ?? 0) + turnCounter;
+        this.executionStats.rounds = cumulativeRounds;
+        this.stats.setRounds(cumulativeRounds);
 
         durationMin = (Date.now() - startTime) / (1000 * 60);
         if (options?.maxTimeMinutes && durationMin >= options.maxTimeMinutes) {
@@ -1190,8 +1376,24 @@ export class AgentCore {
     messages: Content[];
     repeatedDuplicateProviderToolCall: boolean;
   }> {
-    const toolResponseParts: Part[] = [];
+    const responseByCallId = new Map<
+      string,
+      {
+        toolName: string;
+        responseParts: Part[];
+        persistedOutputFiles?: string[];
+        durationMs?: number;
+      }
+    >();
     const uniqueFunctionCalls = dedupeToolCallsById(functionCalls);
+    const generatedCallIdBase = randomUUID();
+    const callIdByFunctionCall = new Map(
+      uniqueFunctionCalls.map((functionCall, index) => [
+        functionCall,
+        functionCall.id ??
+          `${functionCall.name ?? 'tool'}-${generatedCallIdBase}-${index}`,
+      ]),
+    );
 
     // Build allowed tool names set for filtering
     const allowedToolNames = new Set(toolsList.map((t) => t.name));
@@ -1220,7 +1422,7 @@ export class AgentCore {
     const authorizedCalls: FunctionCall[] = [];
     let duplicateEventIndex = 0;
     for (const fc of uniqueFunctionCalls) {
-      const callId = fc.id ?? `${fc.name}-${Date.now()}`;
+      const callId = callIdByFunctionCall.get(fc)!;
       const providerCallId = getProviderToolCallId(fc) ?? fc.id;
       const toolName = String(fc.name);
       const args = (fc.args ?? {}) as Record<string, unknown>;
@@ -1228,7 +1430,9 @@ export class AgentCore {
       if (!allowedToolNames.has(fc.name)) {
         const errorMessage = isPlanLifecycleToolUnavailableInSubagent(toolName)
           ? getSubagentPlanToolUnavailableMessage(toolName)
-          : `Tool "${toolName}" not found. Tools must use the exact names provided.`;
+          : isLeaderOnlyToolUnavailableInSubagent(toolName)
+            ? getLeaderOnlyToolUnavailableMessage(toolName)
+            : `Tool "${toolName}" not found. Tools must use the exact names provided.`;
         const functionResponsePart = {
           functionResponse: {
             id: callId,
@@ -1247,7 +1451,11 @@ export class AgentCore {
           currentRound,
         });
 
-        toolResponseParts.push(functionResponsePart);
+        responseByCallId.set(callId, {
+          toolName,
+          responseParts: [functionResponsePart],
+          durationMs: 0,
+        });
         continue;
       }
 
@@ -1290,7 +1498,12 @@ export class AgentCore {
             currentRound,
           });
 
-          toolResponseParts.push(...response.responseParts);
+          responseByCallId.set(callId, {
+            toolName,
+            responseParts: response.responseParts,
+            persistedOutputFiles: response.persistedOutputFiles,
+            durationMs: 0,
+          });
           continue;
         }
         handledProviderToolCallIds.add(providerCallId);
@@ -1313,6 +1526,11 @@ export class AgentCore {
     const scheduler = new CoreToolScheduler({
       config: this.runtimeContext,
       outputUpdateHandler: (callId, outputChunk) => {
+        // Shell liveness heartbeats have no subagent consumer; broadcasting
+        // one would overwrite the live output view kept in liveOutputs.
+        if (isShellProgressData(outputChunk)) {
+          return;
+        }
         this.eventEmitter?.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
           subagentId: this.subagentId,
           round: currentRound,
@@ -1364,18 +1582,12 @@ export class AgentCore {
             timestamp: Date.now(),
           });
 
-          // Append response parts
-          const respParts = call.response.responseParts;
-          if (respParts) {
-            const parts = Array.isArray(respParts) ? respParts : [respParts];
-            for (const part of parts) {
-              if (typeof part === 'string') {
-                toolResponseParts.push({ text: part });
-              } else if (part) {
-                toolResponseParts.push(part);
-              }
-            }
-          }
+          responseByCallId.set(call.request.callId, {
+            toolName,
+            responseParts: call.response.responseParts,
+            persistedOutputFiles: call.response.persistedOutputFiles,
+            durationMs: duration,
+          });
         }
         // Signal that this batch is complete (all tools terminal)
         resolveBatch?.();
@@ -1431,6 +1643,10 @@ export class AgentCore {
             // restore it. See `runInAgentFrames` for the wiring.
             const inheritedView = getRuntimeContentGenerator();
             const inheritedAgentId = getCurrentAgentId();
+            // Depth pairs with the id: the continuation must re-enter the
+            // frame at this agent's original depth, or the depth guard on a
+            // deferred-approved `agent` tool call would see depth 0.
+            const inheritedAgentDepth = getCurrentAgentDepth();
             // Capture the teammate identity frame too, while the loop
             // frame is still live, so the deferred-approval continuation
             // can restore it. See `runInAgentFrames` for why this matters
@@ -1466,6 +1682,7 @@ export class AgentCore {
                   inheritedView,
                   inheritedAgentId ?? undefined,
                   inheritedTeammateIdentity,
+                  inheritedAgentDepth,
                 );
               },
               timestamp: Date.now(),
@@ -1482,7 +1699,7 @@ export class AgentCore {
     // Prepare requests and emit TOOL_CALL events
     const requests: ToolCallRequestInfo[] = authorizedCalls.map((fc) => {
       const toolName = String(fc.name || 'unknown');
-      const callId = fc.id ?? `${fc.name}-${Date.now()}`;
+      const callId = callIdByFunctionCall.get(fc)!;
       const providerCallId = getProviderToolCallId(fc) ?? fc.id;
       const args = (fc.args ?? {}) as Record<string, unknown>;
       const request: ToolCallRequestInfo = {
@@ -1539,6 +1756,15 @@ export class AgentCore {
           emittedCallIds.add(req.callId);
 
           const errorMessage = 'Tool call cancelled by user abort.';
+          const responseParts: Part[] = [
+            {
+              functionResponse: {
+                id: req.callId,
+                name: req.name,
+                response: { error: errorMessage },
+              },
+            },
+          ];
           this.recordToolCallStats(req.name, false, 0, errorMessage);
 
           this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
@@ -1548,19 +1774,16 @@ export class AgentCore {
             name: req.name,
             success: false,
             error: errorMessage,
-            responseParts: [
-              {
-                functionResponse: {
-                  id: req.callId,
-                  name: req.name,
-                  response: { error: errorMessage },
-                },
-              },
-            ],
+            responseParts,
             resultDisplay: errorMessage,
             durationMs: 0,
             timestamp: Date.now(),
           } as AgentToolResultEvent);
+          responseByCallId.set(req.callId, {
+            toolName: req.name,
+            responseParts,
+            durationMs: 0,
+          });
         }
       };
       abortController.signal.addEventListener('abort', onAbort, { once: true });
@@ -1583,12 +1806,54 @@ export class AgentCore {
       }
     }
 
-    // If all tool calls failed, inform the model so it can re-evaluate.
-    if (functionCalls.length > 0 && toolResponseParts.length === 0) {
-      toolResponseParts.push({
-        text: 'All tool calls failed. Please analyze the errors and try an alternative approach.',
+    const orderedResponses: ToolResponseBudgetEntry[] =
+      uniqueFunctionCalls.flatMap((fc) => {
+        const callId = callIdByFunctionCall.get(fc) ?? fc.id ?? '';
+        const response = responseByCallId.get(callId);
+        if (!response) return [];
+        return [
+          {
+            callId,
+            toolName: response.toolName,
+            responseParts: response.responseParts,
+            persistedOutputFiles: response.persistedOutputFiles,
+          },
+        ];
+      });
+    if (functionCalls.length > 0 && orderedResponses.length === 0) {
+      orderedResponses.push({
+        callId: 'tool-call-batch',
+        toolName: 'tool-call-batch',
+        responseParts: [
+          {
+            text: 'All tool calls failed. Please analyze the errors and try an alternative approach.',
+          },
+        ],
+        persistedOutputFiles: [],
       });
     }
+    const finalizedResponses = await finalizeToolResponses(
+      this.runtimeContext,
+      orderedResponses,
+    );
+    const toolResponseParts = finalizedResponses.flatMap(
+      (response) => response.responseParts,
+    );
+    this.eventEmitter?.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
+      subagentId: this.subagentId,
+      round: currentRound,
+      responses: finalizedResponses.map((response) => {
+        const collected = responseByCallId.get(response.callId);
+        return {
+          callId: response.callId,
+          responseParts: response.responseParts,
+          ...(collected?.durationMs !== undefined
+            ? { durationMs: collected.durationMs }
+            : {}),
+        };
+      }),
+      timestamp: Date.now(),
+    });
 
     return {
       messages: [{ role: 'user', parts: toolResponseParts }],
@@ -1655,6 +1920,22 @@ export class AgentCore {
   }
 
   // ─── Stats & Events ───────────────────────────────────────
+
+  resetExecutionStats(): void {
+    this.executionStats = {
+      startTimeMs: 0,
+      totalDurationMs: 0,
+      rounds: 0,
+      totalToolCalls: 0,
+      successfulToolCalls: 0,
+      failedToolCalls: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+    };
+    this.toolUsage.clear();
+    this.stats.reset();
+  }
 
   getEventEmitter(): AgentEventEmitter {
     return this.eventEmitter;
@@ -1868,13 +2149,13 @@ Important Rules:
  - When the task is complete, return the final result as a normal model response (not a tool call) and stop.`;
     }
 
-    // Append user memory (QWEN.md + output-language.md) to ensure subagent respects project conventions
-    const userMemory = this.runtimeContext.getUserMemory();
-    if (userMemory && userMemory.trim().length > 0) {
-      finalPrompt += `\n\n---\n\n${userMemory.trim()}`;
-    }
-
-    return finalPrompt;
+    // Context files (QWEN.md + output-language.md) keep the subagent aligned
+    // with project conventions; the volatile auto-memory section stays last.
+    return assembleSystemPrompt({
+      base: finalPrompt,
+      contextFiles: this.runtimeContext.getUserMemory(),
+      autoMemory: this.runtimeContext.getAutoMemoryPrompt(),
+    });
   }
 
   /**

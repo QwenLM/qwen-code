@@ -60,6 +60,7 @@ interface ConfigOverrides {
 let mockMonitorRegistry: {
   setNotificationCallback: ReturnType<typeof vi.fn>;
   setRegisterCallback: ReturnType<typeof vi.fn>;
+  get: ReturnType<typeof vi.fn>;
   abortAll: ReturnType<typeof vi.fn>;
 };
 let mockBackgroundShellRegistry: {
@@ -77,6 +78,7 @@ function createConfig(overrides: ConfigOverrides = {}): Config {
     getDebugMode: () => false,
     getApprovalMode: () => 'auto',
     getOutputFormat: () => 'stream-json',
+    getWarnings: () => [],
     initialize: vi.fn(),
     waitForMcpReady: vi.fn().mockResolvedValue(undefined),
     getMonitorRegistry: () => mockMonitorRegistry,
@@ -169,6 +171,7 @@ describe('runNonInteractiveStreamJson', () => {
   };
   let mockOutputAdapter: {
     emitResult: ReturnType<typeof vi.fn>;
+    emitMessage: ReturnType<typeof vi.fn>;
     emitUserMessage: ReturnType<typeof vi.fn>;
     emitSystemMessage: ReturnType<typeof vi.fn>;
   };
@@ -188,6 +191,7 @@ describe('runNonInteractiveStreamJson', () => {
     mockMonitorRegistry = {
       setNotificationCallback: vi.fn(),
       setRegisterCallback: vi.fn(),
+      get: vi.fn().mockReturnValue({ status: 'running' }),
       abortAll: vi.fn(),
     };
     mockBackgroundShellRegistry = {
@@ -202,10 +206,12 @@ describe('runNonInteractiveStreamJson', () => {
     // Setup mocks
     mockOutputAdapter = {
       emitResult: vi.fn(),
+      emitMessage: vi.fn(),
       emitUserMessage: vi.fn(),
       emitSystemMessage: vi.fn(),
     } as {
       emitResult: ReturnType<typeof vi.fn>;
+      emitMessage: ReturnType<typeof vi.fn>;
       emitUserMessage: ReturnType<typeof vi.fn>;
       emitSystemMessage: ReturnType<typeof vi.fn>;
       [key: string]: unknown;
@@ -325,6 +331,30 @@ describe('runNonInteractiveStreamJson', () => {
     await runNonInteractiveStreamJson(config, '');
 
     expect(mockDispatcher.dispatch).toHaveBeenCalledWith(initRequest);
+  });
+
+  it('writes only warnings produced during deferred initialization to stderr', async () => {
+    const warnings = ['Warning: already emitted before stream-json startup'];
+    const stderrWrite = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    config = createConfig({
+      getWarnings: () => warnings,
+      initialize: vi.fn().mockImplementation(async () => {
+        warnings.push('Warning: emitted during stream-json initialization');
+      }),
+    });
+
+    mockInputReader.read = async function* () {
+      yield createControlRequest('initialize');
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(stderrWrite).toHaveBeenCalledWith(
+      'Warning: emitted during stream-json initialization\n',
+    );
+    expect(stderrWrite).not.toHaveBeenCalledWith(
+      'Warning: already emitted before stream-json startup\n',
+    );
   });
 
   it('processes user message when received as first message', async () => {
@@ -562,6 +592,65 @@ describe('runNonInteractiveStreamJson', () => {
     );
   });
 
+  it('flushes recording failures before a session-level error result', async () => {
+    const { continueResults } = installContinueDispatch();
+    createInitializedGeminiClient([
+      { role: 'user', parts: [{ text: 'resume me' }] },
+    ]);
+    const order: string[] = [];
+    let failureListener:
+      | ((event: { sessionId: string; error: Error }) => void)
+      | undefined;
+    let flushCount = 0;
+    config = createConfig({
+      getGeminiClient: vi.fn().mockReturnValue(config.getGeminiClient()),
+      onChatRecordingFailure: (
+        listener: (event: { sessionId: string; error: Error }) => void,
+      ) => {
+        failureListener = listener;
+        return vi.fn();
+      },
+      getChatRecordingService: () => ({
+        finalize: () => order.push('finalize'),
+        flush: async () => {
+          order.push('flush');
+          if (flushCount++ === 0) {
+            failureListener?.({
+              sessionId: 'affected-session',
+              error: new Error('disk full'),
+            });
+          }
+        },
+      }),
+    });
+    mockOutputAdapter.emitMessage.mockImplementation(() => {
+      order.push('warning');
+    });
+    mockOutputAdapter.emitResult.mockImplementation(() => {
+      order.push('result');
+    });
+    runNonInteractiveMock.mockRejectedValueOnce(new Error('continue failed'));
+    const initRequest = createControlRequest('initialize');
+    const continueRequest = createContinueRequest();
+    mockInputReader.read = async function* () {
+      yield initRequest;
+      yield continueRequest;
+      await vi.waitFor(() => {
+        expect(continueResults).toHaveLength(1);
+      });
+    };
+
+    await runNonInteractiveStreamJson(config, '');
+
+    expect(order.slice(0, 3)).toEqual(['flush', 'warning', 'result']);
+    expect(mockOutputAdapter.emitMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        subtype: 'session_recording_degraded',
+        session_id: 'affected-session',
+      }),
+    );
+  });
+
   it('does not emit a second result when a failed continue turn already reported one', async () => {
     const { continueResults } = installContinueDispatch();
     createInitializedGeminiClient([
@@ -748,6 +837,65 @@ describe('runNonInteractiveStreamJson', () => {
         captureMonitorNotifications: false,
         captureMonitorRegistrations: false,
       }),
+    );
+  });
+
+  it('drops a queued running monitor event after cancellation', async () => {
+    const initRequest = createControlRequest('initialize');
+    const userMessage = createUserMessage('Start then stop a monitor');
+    let closeInput: (() => void) | undefined;
+    let monitorCallback:
+      | ((
+          displayText: string,
+          modelText: string,
+          meta: {
+            monitorId: string;
+            toolUseId?: string;
+            status: string;
+          },
+        ) => void)
+      | undefined;
+    let monitorStatus = 'running';
+
+    mockMonitorRegistry.get.mockImplementation(() => ({
+      status: monitorStatus,
+    }));
+    mockMonitorRegistry.setNotificationCallback.mockImplementation((cb) => {
+      monitorCallback = cb;
+    });
+    runNonInteractiveMock.mockImplementationOnce(async () => {
+      monitorCallback?.(
+        'Monitor "logs" event #1: ready',
+        '<task-notification>running</task-notification>',
+        {
+          monitorId: 'mon_1',
+          toolUseId: 'tool_mon_1',
+          status: 'running',
+        },
+      );
+      monitorStatus = 'cancelled';
+    });
+
+    mockInputReader.read = async function* () {
+      yield initRequest;
+      yield userMessage;
+      await new Promise<void>((resolve) => {
+        closeInput = resolve;
+      });
+    };
+
+    const sessionPromise = runNonInteractiveStreamJson(config, '');
+    await vi.waitFor(() => {
+      expect(runNonInteractiveMock).toHaveBeenCalledTimes(1);
+    });
+    closeInput?.();
+    await sessionPromise;
+
+    expect(runNonInteractiveMock).toHaveBeenCalledTimes(1);
+    expect(mockOutputAdapter.emitUserMessage).not.toHaveBeenCalled();
+    expect(mockOutputAdapter.emitSystemMessage).not.toHaveBeenCalledWith(
+      'task_notification',
+      expect.anything(),
     );
   });
 

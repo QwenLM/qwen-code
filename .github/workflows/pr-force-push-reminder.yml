@@ -27,7 +27,7 @@ jobs:
     runs-on: 'ubuntu-latest'
     steps:
       - name: 'Detect force-push and post reminder'
-        uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3'  # v9.0.0
+        uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3' # v9.0.0
         with:
           github-token: '${{ secrets.GITHUB_TOKEN }}'
           script: |
@@ -46,10 +46,9 @@ jobs:
             // sender.type === 'Bot', but the repo's own autofix bot pushes
             // (including force-pushes) via a PAT as the user account
             // qwen-code-dev-bot, which arrives with sender.type === 'User' — so
-            // also skip known automation logins (mirrors qwen-autofix.yml's
-            // KNOWN_BOTS). Only human contributors should be reminded.
+            // also skip known automation logins. Only human contributors should
+            // be reminded.
             const sender = context.payload.sender;
-            // KEEP IN SYNC with KNOWN_BOTS in .github/workflows/qwen-autofix.yml.
             const KNOWN_AUTOMATION = new Set([
               'qwen-code-ci-bot',
               'qwen-code-dev-bot',

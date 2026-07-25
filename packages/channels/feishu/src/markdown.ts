@@ -72,6 +72,7 @@ export function buildCardContent(
     title?: string;
     showStopButton?: boolean;
     isStreaming?: boolean;
+    statusLabel?: string;
     collapsible?: boolean;
     collapsibleThreshold?: number;
   },
@@ -79,8 +80,10 @@ export function buildCardContent(
   const elements: Array<Record<string, unknown>> = [];
 
   // Main content + streaming indicator in one markdown block
-  const contentMd = options?.isStreaming
-    ? markdown + '\n\n---\n*生成中...*'
+  const statusLabel =
+    options?.statusLabel ?? (options?.isStreaming ? '生成中...' : undefined);
+  const contentMd = statusLabel
+    ? `${markdown}\n\n---\n*${statusLabel}*`
     : markdown;
 
   const threshold = options?.collapsibleThreshold || 500;
@@ -114,10 +117,13 @@ export function buildCardContent(
     }
     const preview = markdown.slice(0, splitAt);
     const rest = markdown.slice(splitAt);
+    const previewContent = statusLabel
+      ? `${preview}\n\n---\n*${statusLabel}*`
+      : preview;
 
     elements.push({
       tag: 'markdown',
-      content: preview,
+      content: previewContent,
     });
     elements.push({
       tag: 'collapsible_panel',

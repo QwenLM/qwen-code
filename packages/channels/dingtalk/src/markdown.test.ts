@@ -1,68 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import {
-  convertTables,
   splitChunks,
   extractTitle,
   normalizeDingTalkMarkdown,
 } from './markdown.js';
 
 describe('DingTalk markdown utilities', () => {
-  describe('convertTables', () => {
-    it('converts a simple markdown table to pipe-separated text', () => {
-      const input = [
-        '| Name | Age |',
-        '| --- | --- |',
-        '| Alice | 30 |',
-        '| Bob | 25 |',
-      ].join('\n');
-      const result = convertTables(input);
-      expect(result).toContain('Name | Age');
-      expect(result).toContain('Alice | 30');
-      expect(result).not.toContain('---');
-    });
-
-    it('preserves non-table content', () => {
-      const input = 'Hello world\n\nSome text';
-      expect(convertTables(input)).toBe(input);
-    });
-
-    it('does not convert tables inside code fences', () => {
-      const input = [
-        '```',
-        '| Name | Age |',
-        '| --- | --- |',
-        '| Alice | 30 |',
-        '```',
-      ].join('\n');
-      const result = convertTables(input);
-      expect(result).toBe(input);
-    });
-
-    it('handles table with surrounding text', () => {
-      const input = [
-        'Before',
-        '| A | B |',
-        '| --- | --- |',
-        '| 1 | 2 |',
-        'After',
-      ].join('\n');
-      const result = convertTables(input);
-      expect(result).toContain('Before');
-      expect(result).toContain('After');
-      expect(result).toContain('A | B');
-    });
-
-    it('handles table with alignment colons in separator', () => {
-      const input = [
-        '| Left | Center | Right |',
-        '| :--- | :---: | ---: |',
-        '| a | b | c |',
-      ].join('\n');
-      const result = convertTables(input);
-      expect(result).not.toContain(':---');
-    });
-  });
-
   describe('splitChunks', () => {
     it('returns single chunk for short text', () => {
       expect(splitChunks('short text')).toEqual(['short text']);
@@ -221,11 +164,10 @@ describe('DingTalk markdown utilities', () => {
   });
 
   describe('normalizeDingTalkMarkdown', () => {
-    it('converts tables and splits into chunks', () => {
+    it('preserves markdown tables while splitting into chunks', () => {
       const input = ['| A | B |', '| --- | --- |', '| 1 | 2 |'].join('\n');
       const result = normalizeDingTalkMarkdown(input);
-      expect(result.length).toBeGreaterThanOrEqual(1);
-      expect(result[0]).not.toContain('---');
+      expect(result).toEqual([input]);
     });
 
     it('passes through plain text', () => {

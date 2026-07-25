@@ -56,6 +56,8 @@ function makeStopInput(lastAssistantText: string): StopInput {
     timestamp: new Date().toISOString(),
     stop_hook_active: true,
     last_assistant_message: lastAssistantText,
+    background_tasks: [],
+    crons: [],
   };
 }
 
@@ -71,6 +73,9 @@ function makeConfigWithRealHookSystem(): {
     getSessionId: () => SESSION,
     isTrustedFolder: () => true,
     getDisableAllHooks: () => false,
+    getBackgroundTaskRegistry: () => ({ hasRunningTasks: () => false }),
+    getBackgroundShellRegistry: () => ({ hasRunningEntries: () => false }),
+    getWorkflowRunRegistry: () => ({ hasRunningEntries: () => false }),
   } as unknown as Config;
   const hookSystem = new HookSystem(config);
   // Patch Config.getHookSystem to return our real system.
@@ -120,7 +125,7 @@ describe('/goal Stop hook integration', () => {
 
     // Iteration 1: judge says NOT met → continuation expected.
     judgeMock.mockResolvedValueOnce({
-      ok: false,
+      kind: 'not_met',
       reason: 'still missing letters e, s, t',
     });
     const out1 = await callback(makeStopInput('t'), undefined);
@@ -153,7 +158,7 @@ describe('/goal Stop hook integration', () => {
 
     // Iteration 2: judge says NOT met again → continuation again.
     judgeMock.mockResolvedValueOnce({
-      ok: false,
+      kind: 'not_met',
       reason: 'still missing letters s, t',
     });
     const out2 = await callback(makeStopInput('te'), undefined);
@@ -163,7 +168,7 @@ describe('/goal Stop hook integration', () => {
 
     // Iteration 3: judge says MET → continue:true and observer fires.
     judgeMock.mockResolvedValueOnce({
-      ok: true,
+      kind: 'met',
       reason: 'transcript contains "test"',
     });
     const out3 = await callback(makeStopInput('test'), undefined);
@@ -176,7 +181,7 @@ describe('/goal Stop hook integration', () => {
     expect(events[0]).toMatchObject({
       kind: 'achieved',
       condition: goal.condition,
-      iterations: 2, // not yet 3 — that update only happens for not-met cases
+      iterations: 3,
       lastReason: 'transcript contains "test"',
     });
     expect(events[0].durationMs).toBeGreaterThanOrEqual(0);
