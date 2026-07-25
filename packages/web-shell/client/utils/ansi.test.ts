@@ -70,13 +70,26 @@ describe('parseAnsi', () => {
     expect(parseAnsi(`${ESC}31;48;2;0;0;0;1mtext`)).toEqual([
       { text: 'text', color: '#fc8181', bold: true, dim: false },
     ]);
-    expect(parseAnsi(`${ESC}1m${ESC}58;5;2mtext`)[0]!.bold).toBe(true);
+    // Asserting the whole segment, not just `bold`: dropping 58 from the trio
+    // leaks its `2` argument into the dim branch, which a bold-only assertion
+    // cannot see.
+    expect(parseAnsi(`${ESC}1m${ESC}58;5;2mtext`)).toEqual([
+      { text: 'text', color: undefined, bold: true, dim: false },
+    ]);
   });
 
   it('drops malformed extended-color sequences without corrupting state', () => {
     // Out-of-range index and truncated argument lists yield no color rather
     // than a bogus one, and never fall through to the plain-code branches.
-    for (const seq of ['38;5;300', '38;5', '38;2;1;2', '38;7;1', '38']) {
+    // `38;2;999;0;0` is the truecolor equivalent: a channel outside 0–255.
+    for (const seq of [
+      '38;5;300',
+      '38;5',
+      '38;2;1;2',
+      '38;7;1',
+      '38',
+      '38;2;999;0;0',
+    ]) {
       expect(parseAnsi(`${ESC}1m${ESC}${seq}mtext`)).toEqual([
         { text: 'text', color: undefined, bold: true, dim: false },
       ]);
@@ -86,7 +99,14 @@ describe('parseAnsi', () => {
   it('leaves an already-set color alone when the sequence is malformed', () => {
     // An unreadable sequence is ignored, not treated as a reset: the red from
     // code 31 has to survive it.
-    for (const seq of ['38;5;300', '38;5', '38;2;1;2', '38;7;1', '38']) {
+    for (const seq of [
+      '38;5;300',
+      '38;5',
+      '38;2;1;2',
+      '38;7;1',
+      '38',
+      '38;2;999;0;0',
+    ]) {
       expect(parseAnsi(`${ESC}31m${ESC}${seq}mtext`)).toEqual([
         { text: 'text', color: '#fc8181', bold: false, dim: false },
       ]);
