@@ -490,19 +490,9 @@ function VirtualizedList<T>(
     endIndexOffsetRaw >= offsets.length
       ? data.length - 1
       : Math.min(data.length - 1, endIndexOffsetRaw);
-  const renderStartIndex = (() => {
-    if (!isStickingToBottom || renderStatic === true || endIndex < 0) {
-      return startIndex;
-    }
-
-    const targetOffset =
-      (offsets[endIndex + 1] ?? totalHeight) - viewHeightForEndIndex;
-    const backStart = findLastLE(offsets, targetOffset);
-    return Math.min(startIndex, Math.max(0, backStart));
-  })();
 
   const topSpacerHeight =
-    renderStatic === true ? 0 : (offsets[renderStartIndex] ?? 0);
+    renderStatic === true ? 0 : (offsets[startIndex] ?? 0);
   const bottomSpacerHeight = renderStatic
     ? 0
     : totalHeight - (offsets[endIndex + 1] ?? totalHeight);
@@ -522,24 +512,8 @@ function VirtualizedList<T>(
     );
   }
 
-  const renderRangeStart = renderStatic ? 0 : renderStartIndex;
+  const renderRangeStart = renderStatic ? 0 : startIndex;
   const renderRangeEnd = renderStatic ? data.length - 1 : endIndex;
-  const measuredRenderedHeight = (() => {
-    if (!isStickingToBottom || renderStatic === true || renderRangeEnd < 0) {
-      return undefined;
-    }
-
-    let total = 0;
-    for (let i = renderRangeStart; i <= renderRangeEnd; i++) {
-      const item = data[i];
-      if (!item) return undefined;
-      const measured = heights[keyExtractor(item, i)];
-      if (measured === undefined) return undefined;
-      total += measured;
-    }
-
-    return total;
-  })();
 
   const renderedItems = useMemo(() => {
     if (!isReady) {
@@ -909,13 +883,7 @@ function VirtualizedList<T>(
   // the full `containerHeight`, so scrolling is unaffected.
   const rootHeight =
     props.containerHeight !== undefined
-      ? Math.min(
-          props.containerHeight,
-          measuredRenderedHeight !== undefined &&
-            measuredRenderedHeight < props.containerHeight
-            ? measuredRenderedHeight
-            : totalHeight,
-        )
+      ? Math.min(props.containerHeight, totalHeight)
       : '100%';
 
   return (
