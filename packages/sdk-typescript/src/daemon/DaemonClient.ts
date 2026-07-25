@@ -1140,10 +1140,15 @@ export class DaemonClient {
     );
   }
 
-  async workspaceGitLog(limit?: number, skip?: number): Promise<DaemonGitLog> {
+  async workspaceGitLog(
+    limit?: number,
+    skip?: number,
+    range?: string,
+  ): Promise<DaemonGitLog> {
     const params = new URLSearchParams();
     if (limit != null) params.set('limit', String(limit));
     if (skip != null) params.set('skip', String(skip));
+    if (range) params.set('range', range);
     const qs = params.toString();
     return await this.jsonRequest<DaemonGitLog>(
       `/workspace/git/log${qs ? `?${qs}` : ''}`,
@@ -4856,11 +4861,13 @@ export class WorkspaceDaemonClient {
     limit?: number,
     skip?: number,
     cwd?: string,
+    range?: string,
   ): Promise<DaemonGitLog> {
     const params = new URLSearchParams();
     if (limit != null) params.set('limit', String(limit));
     if (skip != null) params.set('skip', String(skip));
     if (cwd != null) params.set('cwd', cwd);
+    if (range) params.set('range', range);
     const qs = params.toString();
     return this.client.workspaceJsonRequest<DaemonGitLog>(
       this.workspaceSelector,

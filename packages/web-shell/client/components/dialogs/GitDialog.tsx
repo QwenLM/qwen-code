@@ -256,11 +256,8 @@ export function GitDialog({
   useEffect(() => {
     if (!prFormOpen || !isCommit) return;
     const ws = client.workspaceByCwd(workspaceCwd);
-    ws.workspaceGitHubDefaultBranch()
-      .then((r) => setPrBase(r.branch))
-      .catch(() => setPrBase('main'));
 
-    // Fetch branch list for the target-branch dropdown.
+    // Fetch branch list for the target-branch dropdown (independent).
     ws.workspaceGitBranches()
       .then((branches) => {
         const local = branches.local.map((b) => b.name);
@@ -280,22 +277,28 @@ export function GitDialog({
       })
       .catch(() => setPrBranches(null));
 
+    setPrGenerating(true);
+    setPrTitle('');
+    setPrBody('');
+    const abort = new AbortController();
+
+    // Resolve base branch, session, then generate — all chained.
+    const baseBranchPromise = ws
+      .workspaceGitHubDefaultBranch()
+      .then((r) => r.branch)
+      .catch(() => 'main');
+
     const resolveSession = resolveSessionRef.current
       ? resolveSessionRef.current(workspaceCwd)
       : sessionId
         ? Promise.resolve(sessionId)
         : Promise.resolve(undefined);
 
-    setPrGenerating(true);
-    setPrTitle('');
-    setPrBody('');
-    const abort = new AbortController();
-
-    resolveSession
-      .then((sid) => {
+    Promise.all([baseBranchPromise, resolveSession])
+      .then(([base, sid]) => {
         if (abort.signal.aborted) return;
+        setPrBase(base);
         if (!sid) {
-          // No session available: fallback to branch name.
           ws.workspaceGit()
             .then((git) => {
               if (!abort.signal.aborted && git.branch && !git.detached)
@@ -307,9 +310,19 @@ export function GitDialog({
             });
           return;
         }
-        return ws.workspaceGitDiff(gitCwd).then((diff) => {
+        return Promise.all([
+          ws.workspaceGitLog(50, 0, gitCwd, `${base}..HEAD`),
+          ws.workspaceGitDiff(gitCwd),
+        ]).then(([log, diff]) => {
           if (abort.signal.aborted) return;
-          const fileSummary = diff.files
+          // Build context from branch commits + uncommitted changes.
+          const commitSummary =
+            log.entries.length > 0
+              ? log.entries
+                  .map((e) => `- ${e.shortSha} ${e.subject}`)
+                  .join('\n')
+              : '(no commits ahead of base)';
+          const uncommitted = diff.files
             .map((f: DaemonWorkspaceGitDiffFile) => {
               const status = f.isUntracked
                 ? 'new'
@@ -320,7 +333,10 @@ export function GitDialog({
             })
             .join('\n');
           const prompt =
-            `Generate a GitHub pull request title and body for these changes. ` +
+            `Generate a GitHub pull request title and body for the changes on this branch compared to ${base}. ` +
+            `Use the commit history and conversation context to understand what was done and why.\n\n` +
+            `Commits on this branch (not in ${base}):\n${commitSummary}\n\n` +
+            `${uncommitted ? `Uncommitted changes:\n${uncommitted}\n\n` : ''}` +
             `Follow these rules strictly:\n` +
             `1. Title: conventional commit format, e.g. "feat(web-shell): add branch picker". Under 70 chars.\n` +
             `2. Body must follow this exact template structure (fill in each section):\n\n` +
@@ -347,8 +363,7 @@ export function GitDialog({
             `<Full Chinese translation of the English body above, section by section.>\n\n` +
             `</details>\n\n` +
             `3. Do NOT hard-wrap paragraphs — write each paragraph as one long line.\n` +
-            `4. Reply with the title on the first line, then a blank line, then the body. No extra explanation.\n\n` +
-            `Changed files:\n${fileSummary}`;
+            `4. Reply with the title on the first line, then a blank line, then the body. No extra explanation.`;
           return btwWithRetryRef
             .current(sid, prompt, abort.signal)
             .then((result) => {

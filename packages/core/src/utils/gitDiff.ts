@@ -1469,7 +1469,7 @@ function parseLogFields(parts: string[]): GitLogEntry | null {
  */
 export async function fetchGitLog(
   cwd: string,
-  options?: { limit?: number; skip?: number },
+  options?: { limit?: number; skip?: number; range?: string },
 ): Promise<GitLogResult | null> {
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return null;
@@ -1489,6 +1489,7 @@ export async function fetchGitLog(
       '-n',
       String(limit + 1),
       ...(skip > 0 ? ['--skip', String(skip)] : []),
+      ...(options?.range ? [options.range] : []),
     ],
     gitRoot,
   );
