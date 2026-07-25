@@ -818,29 +818,41 @@ describe('qwen-triage verify hardening round 2', () => {
     const end = full.indexOf('# Snapshot PR metadata');
     expect(start).toBeGreaterThan(-1);
     expect(end).toBeGreaterThan(start);
-    const classifier = `set -uo pipefail\nfiles="$1"\n${full
+    // The list arrives through a FILE, not argv: Linux caps a single
+    // argument at 128 KB (MAX_ARG_STRLEN), so the 60k-entry case below
+    // spawns fine on macOS and fails with E2BIG on CI.
+    const classifier = `set -uo pipefail\nfiles="$(cat "$1")"\n${full
       .slice(start, end)
       .replace(/echo "::notice::[^\n]*\n/g, '')
       .replace(/echo "verdict=n\/a" >> "\$GITHUB_OUTPUT"/, 'echo NA')
       .replace(/echo "decision=na" >> "\$GITHUB_OUTPUT"/, '')}\necho RUN`;
-    const classify = (files) =>
-      spawnSync('bash', ['-c', classifier, '_', files], {
+    const dir = mkdtempSync(join(tmpdir(), 'verify-classify-'));
+    const classify = (files) => {
+      const listFile = join(dir, 'files.txt');
+      writeFileSync(listFile, files);
+      const proc = spawnSync('bash', ['-c', classifier, '_', listFile], {
         encoding: 'utf8',
         maxBuffer: 20 * 1024 * 1024,
-      })
-        .stdout.trim()
-        .split('\n')
-        .pop();
+      });
+      // Surface a spawn failure as itself, not as a TypeError on undefined.
+      expect(proc.error ?? null).toBe(null);
+      expect(typeof proc.stdout).toBe('string');
+      return proc.stdout.trim().split('\n').pop();
+    };
 
-    const bigEarlyCode = [
-      'packages/core/src/a.ts',
-      ...Array.from({ length: 60000 }, (_, i) => `docs/f${i}.md`),
-    ].join('\n');
-    expect(classify(bigEarlyCode)).toBe('RUN');
-    expect(classify('docs/a.md\nREADME.md\nassets/x.png')).toBe('NA');
-    expect(classify('.qwen/skills/verify-pr/SKILL.md')).toBe('RUN');
-    expect(classify('.github/workflows/x.yml')).toBe('RUN');
-    expect(classify('scripts/lint.js')).toBe('RUN');
+    try {
+      const bigEarlyCode = [
+        'packages/core/src/a.ts',
+        ...Array.from({ length: 60000 }, (_, i) => `docs/f${i}.md`),
+      ].join('\n');
+      expect(classify(bigEarlyCode)).toBe('RUN');
+      expect(classify('docs/a.md\nREADME.md\nassets/x.png')).toBe('NA');
+      expect(classify('.qwen/skills/verify-pr/SKILL.md')).toBe('RUN');
+      expect(classify('.github/workflows/x.yml')).toBe('RUN');
+      expect(classify('scripts/lint.js')).toBe('RUN');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   // Symlink stripping must happen AFTER the artifacts are copied in;
