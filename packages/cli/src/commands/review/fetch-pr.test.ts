@@ -269,6 +269,14 @@ vi.mock('./lib/merge-base.js', () => ({
 describe('fetch-pr report — audit-window contract', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    // clearAllMocks resets call history but NOT implementations, so a
+    // mockReturnValue a prior test set on readFileSync would leak into a test
+    // that relies on the default. Re-assert the default (no prior report →
+    // ENOENT) here so every test starts from a known state regardless of
+    // order.
+    producerMocks.readFileSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
     producerMocks.git.mockImplementation((...args: string[]) =>
       args[0] === 'rev-parse' ? 'f00df00df00d' : '',
     );
