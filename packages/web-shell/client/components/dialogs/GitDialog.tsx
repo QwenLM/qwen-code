@@ -70,6 +70,10 @@ export function GitDialog({
   const [prBusy, setPrBusy] = useState(false);
   const [prGenerating, setPrGenerating] = useState(false);
   const [prPreview, setPrPreview] = useState(false);
+  const [prBranches, setPrBranches] = useState<{
+    local: string[];
+    remotes: [string, string[]][];
+  } | null>(null);
   const [prStatus, setPrStatus] = useState<{
     msg: string;
     type: 'error' | 'success';
@@ -232,6 +236,26 @@ export function GitDialog({
     ws.workspaceGitHubDefaultBranch()
       .then((r) => setPrBase(r.branch))
       .catch(() => setPrBase('main'));
+
+    // Fetch branch list for the target-branch dropdown.
+    ws.workspaceGitBranches()
+      .then((branches) => {
+        const local = branches.local.map((b) => b.name);
+        const remoteMap = new Map<string, string[]>();
+        for (const b of branches.remote) {
+          const slash = b.name.indexOf('/');
+          const remote = slash > 0 ? b.name.slice(0, slash) : 'other';
+          const short = slash > 0 ? b.name.slice(slash + 1) : b.name;
+          let list = remoteMap.get(remote);
+          if (!list) {
+            list = [];
+            remoteMap.set(remote, list);
+          }
+          list.push(short);
+        }
+        setPrBranches({ local, remotes: Array.from(remoteMap.entries()) });
+      })
+      .catch(() => setPrBranches(null));
 
     const resolveSession = sessionId
       ? Promise.resolve(sessionId)
@@ -545,12 +569,36 @@ export function GitDialog({
                   )}
                 </div>
                 <div className={styles.prFormRow}>
-                  <input
-                    className={styles.prInputSmall}
-                    placeholder={t('gitCommit.prBasePlaceholder')}
+                  <select
+                    className={styles.prSelect}
                     value={prBase}
                     onChange={(e) => setPrBase(e.target.value)}
-                  />
+                  >
+                    {prBranches ? (
+                      <>
+                        {prBranches.remotes.map(([remote, names]) => (
+                          <optgroup key={remote} label={remote}>
+                            {names.map((n) => (
+                              <option key={`${remote}/${n}`} value={n}>
+                                {n}
+                              </option>
+                            ))}
+                          </optgroup>
+                        ))}
+                        {prBranches.local.length > 0 && (
+                          <optgroup label={t('branchPicker.section.local')}>
+                            {prBranches.local.map((n) => (
+                              <option key={n} value={n}>
+                                {n}
+                              </option>
+                            ))}
+                          </optgroup>
+                        )}
+                      </>
+                    ) : (
+                      <option value={prBase}>{prBase || 'main'}</option>
+                    )}
+                  </select>
                   <button
                     type="button"
                     className={`${styles.commitBtn} ${styles.commitBtnPrimary}`}

@@ -249,6 +249,14 @@
   color: var(--muted-foreground, #888);
 }
 
+.remoteGroupLabel {
+  padding: 3px 12px 1px 28px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--muted-foreground, #666);
+  letter-spacing: 0.3px;
+}
+
 .loading {
   padding: 24px 12px;
   text-align: center;

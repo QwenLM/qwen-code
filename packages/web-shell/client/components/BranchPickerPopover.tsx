@@ -197,6 +197,21 @@ export function BranchPickerPopover({
     return data.recent.filter((r) => r.toLowerCase().includes(q));
   }, [data, q]);
 
+  const remoteGroups = useMemo(() => {
+    const groups = new Map<string, DaemonGitBranchInfo[]>();
+    for (const b of filteredRemote) {
+      const slash = b.name.indexOf('/');
+      const remote = slash > 0 ? b.name.slice(0, slash) : 'other';
+      let list = groups.get(remote);
+      if (!list) {
+        list = [];
+        groups.set(remote, list);
+      }
+      list.push(b);
+    }
+    return groups;
+  }, [filteredRemote]);
+
   const actionsVisible =
     !q ||
     t('branchPicker.action.pull').toLowerCase().includes(q) ||
@@ -432,14 +447,21 @@ export function BranchPickerPopover({
                     {t('branchPicker.noBranches')}
                   </div>
                 ) : (
-                  filteredRemote.map((b) => (
-                    <BranchItem
-                      key={b.name}
-                      name={b.name}
-                      isHead={false}
-                      onClick={() => void handleCheckout(b.name)}
-                    />
-                  ))
+                  Array.from(remoteGroups.entries()).map(
+                    ([remote, branches]) => (
+                      <div key={remote}>
+                        <div className={styles.remoteGroupLabel}>{remote}</div>
+                        {branches.map((b) => (
+                          <BranchItem
+                            key={b.name}
+                            name={b.name.slice(remote.length + 1)}
+                            isHead={false}
+                            onClick={() => void handleCheckout(b.name)}
+                          />
+                        ))}
+                      </div>
+                    ),
+                  )
                 )}
               </BranchSection>
 
