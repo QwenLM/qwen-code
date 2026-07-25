@@ -306,7 +306,7 @@ export async function createGitHubPullRequest(
 }
 
 /**
- * Get the default branch name for the repo (e.g. "main" or "master").
+ * Get the default branch ref for the repo (e.g. "origin/main").
  */
 export async function getDefaultBranch(cwd: string): Promise<string | null> {
   const gitRoot = findGitRoot(cwd);
@@ -320,9 +320,8 @@ export async function getDefaultBranch(cwd: string): Promise<string | null> {
       ['symbolic-ref', 'refs/remotes/origin/HEAD', '--short'],
       { cwd: gitRoot, timeout: 5_000 },
     );
-    // Output is like "origin/main" — strip the remote prefix.
-    return stdout.trim().replace(/^origin\//, '') || 'main';
+    return stdout.trim() || 'origin/main';
   } catch {
-    return 'main';
+    return 'origin/main';
   }
 }

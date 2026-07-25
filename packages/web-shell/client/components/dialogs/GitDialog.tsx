@@ -272,13 +272,12 @@ export function GitDialog({
         for (const b of branches.remote) {
           const slash = b.name.indexOf('/');
           const remote = slash > 0 ? b.name.slice(0, slash) : 'other';
-          const short = slash > 0 ? b.name.slice(slash + 1) : b.name;
           let list = remoteMap.get(remote);
           if (!list) {
             list = [];
             remoteMap.set(remote, list);
           }
-          list.push(short);
+          list.push(b.name);
         }
         setPrBranches({ local, remotes: Array.from(remoteMap.entries()) });
       })
@@ -293,7 +292,7 @@ export function GitDialog({
     const baseBranchPromise = ws
       .workspaceGitHubDefaultBranch()
       .then((r) => r.branch)
-      .catch(() => 'main');
+      .catch(() => 'origin/main');
 
     const resolveSession = resolveSessionRef.current
       ? resolveSessionRef.current(workspaceCwd)
@@ -413,10 +412,14 @@ export function GitDialog({
     setPrStatus(null);
     try {
       const ws = client.workspaceByCwd(workspaceCwd);
+      // Strip remote prefix for gh pr create --base (e.g. origin/main → main)
+      const baseBranch = prBase.trim().includes('/')
+        ? prBase.trim().slice(prBase.trim().indexOf('/') + 1)
+        : prBase.trim();
       const result = await ws.workspaceGitHubCreatePullRequest({
         title: prTitle.trim(),
         body: prBody.trim() || undefined,
-        base: prBase.trim() || undefined,
+        base: baseBranch || undefined,
       });
       setPrStatus({
         msg: t('gitCommit.prCreated', { number: result.number }),
