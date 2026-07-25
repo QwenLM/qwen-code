@@ -2059,6 +2059,73 @@ jobs:
             printf '</code></pre>\n\n</details>\n\n'
           }
 
+          # Host the agent's evidence images (if any) on the pr-assets branch
+          # — the same convention hand-run verification rounds use — and build
+          # a markdown section referencing them. Image bytes come from a run
+          # that executed PR code: inert but untrusted, so filenames pass a
+          # strict allowlist, count/size are capped (8 files, <2 MB each; the
+          # find predicates enforce both), and any failure degrades to a
+          # text-only comment rather than blocking the report. The
+          # VERIFY_ASSETS_REMOTE override exists as a test seam only.
+          EVIDENCE_SECTION=''
+          collect_and_host_evidence() {
+            local imgs=() f base safe hosted=0
+            local dest_dir="verify/pr${PR_NUMBER}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
+            local clone_dir="${RUNNER_TEMP:-/tmp}/pr-assets"
+            local remote="${VERIFY_ASSETS_REMOTE:-https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git}"
+            while IFS= read -r f; do imgs+=("$f"); done < <(
+              find verify-results -type f -path '*/evidence/*.png' -size -2M 2>/dev/null | sort | head -8
+            )
+            [ "${#imgs[@]}" -gt 0 ] || return 0
+            rm -rf "$clone_dir"
+            if ! git clone -q --depth 1 --branch pr-assets "$remote" "$clone_dir" 2>/dev/null; then
+              echo "::warning::pr-assets branch unavailable; posting a text-only report." >&2
+              return 0
+            fi
+            mkdir -p "$clone_dir/$dest_dir"
+            for f in "${imgs[@]}"; do
+              base="$(basename "$f")"
+              safe="$(printf '%s' "$base" | tr -cd 'a-zA-Z0-9._-' | head -c 80)"
+              case "$safe" in
+                ''|.*) continue ;;
+                *.png) ;;
+                *) continue ;;
+              esac
+              [ -n "${safe%.png}" ] || continue
+              cp "$f" "$clone_dir/$dest_dir/$safe" || continue
+              hosted=$((hosted + 1))
+            done
+            [ "$hosted" -gt 0 ] || return 0
+            if ! (
+              cd "$clone_dir" &&
+              git -c user.name='qwen-code-ci-bot' \
+                  -c user.email='qwen-code-ci-bot@users.noreply.github.com' \
+                add "$dest_dir" &&
+              git -c user.name='qwen-code-ci-bot' \
+                  -c user.email='qwen-code-ci-bot@users.noreply.github.com' \
+                commit -q -m "verify evidence for PR #${PR_NUMBER} (run ${GITHUB_RUN_ID})" &&
+              {
+                git push -q origin HEAD:pr-assets 2>/dev/null ||
+                {
+                  # One retry after a racing push from another assets job.
+                  git pull -q --rebase origin pr-assets 2>/dev/null &&
+                  git push -q origin HEAD:pr-assets 2>/dev/null
+                }
+              }
+            ); then
+              echo "::warning::Failed to push evidence images; posting a text-only report." >&2
+              return 0
+            fi
+            local raw_base="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/pr-assets/${dest_dir}"
+            EVIDENCE_SECTION=$'### Evidence images\n\n'
+            for f in "${imgs[@]}"; do
+              base="$(basename "$f")"
+              safe="$(printf '%s' "$base" | tr -cd 'a-zA-Z0-9._-' | head -c 80)"
+              [ -f "$clone_dir/$dest_dir/$safe" ] || continue
+              EVIDENCE_SECTION+="![${safe%.png}](${raw_base}/${safe})"$'\n\n'
+            done
+          }
+
           # Fixed bilingual framing shared by every terminal body below.
           SCOPE_EN='Ran the PR in an isolated, token-free container: A/B against the base build, mock-free harness assertions, targeted gates. **Advisory evidence for human reviewers — not a review, an approval, or a CI check.**'
           SCOPE_ZH='沙箱验证在隔离、无凭证的容器中执行了该 PR 的代码（与 base 构建 A/B 对照、无 mock harness 断言、定向门禁）。仅作为评审证据，**不构成评审、批准或 CI 检查**。'
@@ -2113,6 +2180,7 @@ jobs:
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
             } > "$BODY_FILE"
           else
+            collect_and_host_evidence
             REPORT="$(find verify-results -name 'report.md' 2>/dev/null | head -1 || true)"
             ASSERTIONS_FILE="$(find verify-results -name 'assertions.json' 2>/dev/null | head -1 || true)"
             ASSERT_LINE=''
@@ -2158,6 +2226,9 @@ jobs:
                 printf '%s\n\n' "$MISSING_REPORT_NOTE"
               fi
               emit_block 'Verification report (report.md)' "$REPORT" 50000
+              if [ -n "$EVIDENCE_SECTION" ]; then
+                printf '%s' "$EVIDENCE_SECTION"
+              fi
               printf 'Harness scripts and raw logs are in the workflow run artifacts (7-day retention).\n\n'
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
             } > "$BODY_FILE"
