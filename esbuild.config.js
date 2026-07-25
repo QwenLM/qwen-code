@@ -123,7 +123,7 @@ const syncFileEncodingTreeShakePlugin = {
       { filter: /^\.\/utils\/sync-file-encoding\.js$/ },
       (args) => {
         if (
-          !/[\\/]packages[\\/]core[\\/](?:src|dist)[\\/]index\.(?:ts|js)$/.test(
+          !/[\\/]packages[\\/]core[\\/](?:src|dist[\\/]src)[\\/]index\.(?:ts|js)$/.test(
             args.importer,
           )
         ) {

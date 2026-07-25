@@ -27,4 +27,25 @@ describe('loadIconvLite', () => {
     expect(second).toBe(first);
     await expect(first).resolves.toBe(iconvLite);
   });
+
+  it('uses named exports', async () => {
+    const iconvLite = {
+      decode: vi.fn(),
+      encode: vi.fn(),
+      encodingExists: vi.fn(),
+    };
+    vi.doMock('iconv-lite', () => iconvLite);
+    const { loadIconvLite } = await import('./load-iconv-lite.js');
+
+    await expect(loadIconvLite()).resolves.toEqual(iconvLite);
+  });
+
+  it('rejects an unexpected module shape', async () => {
+    vi.doMock('iconv-lite', () => ({ default: undefined }));
+    const { loadIconvLite } = await import('./load-iconv-lite.js');
+
+    await expect(loadIconvLite()).rejects.toThrow(
+      'iconv-lite module does not match the expected API',
+    );
+  });
 });
