@@ -598,6 +598,8 @@ The `permissionDecision` value controls whether the tool runs:
 
 **Purpose**: Executed before Qwen concludes its response to provide final feedback or summaries.
 
+**Note**: Stop is not fired when the turn ends due to loop detection; `StopFailure` fires instead (see below).
+
 **Event-specific fields**:
 
 ```json
