@@ -8,7 +8,7 @@ export const INLINE_MATH_MAX_CHARS = 1024;
 
 export const INLINE_MATH_PATTERN_SOURCE = String.raw`(?<![\\\w$])\$(?![\s\d$])[^$\n]{0,${INLINE_MATH_MAX_CHARS - 1}}[^$\s](?<!\\)\$(?![\w$])`;
 
-export const INLINE_CODE_SPAN_PATTERN_SOURCE = String.raw`(?<inlineCodeFence>\`+).+?\k<inlineCodeFence>`;
+export const INLINE_CODE_SPAN_PATTERN_SOURCE = String.raw`(?<!\`)(?<inlineCodeFence>\`+)(?!\`).+?(?<!\`)\k<inlineCodeFence>(?!\`)`;
 
 const INLINE_CODE_SPAN_RE = new RegExp(INLINE_CODE_SPAN_PATTERN_SOURCE, 'g');
 

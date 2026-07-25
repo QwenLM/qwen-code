@@ -32,6 +32,9 @@ describe('inline math recognition', () => {
     expect(findInlineMathExpressions('Use ``a `$x$` b`` then $y$')).toEqual([
       'y',
     ]);
+    expect(findInlineMathExpressions('Use `a `` $x$ `` b` then $y$')).toEqual([
+      'y',
+    ]);
   });
 
   it('bounds formula length', () => {

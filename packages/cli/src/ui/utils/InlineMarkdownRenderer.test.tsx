@@ -69,25 +69,38 @@ describe('<RenderInline />', () => {
 
   it('preserves escaped inline math and inline code', () => {
     const { lastFrame } = renderWithProviders(
-      <RenderInline text={'Literal \\$xy$ and code `$z$`'} enableInlineMath />,
+      <RenderInline text={'Literal \\$xy$ and code `$xy$`'} enableInlineMath />,
     );
 
     expect((lastFrame() ?? '').replace(/\n/g, '')).toContain(
-      'Literal \\$xy$ and code$z$',
+      'Literal \\$xy$ and code$xy$',
     );
   });
 
   it('keeps math literal inside multi-backtick code spans', () => {
     const { lastFrame } = renderWithProviders(
-      <RenderInline text={'Use ``a `$x$` b`` then $y$'} enableInlineMath />,
+      <RenderInline text={'Use ``a `$xy$` b`` then $y$'} enableInlineMath />,
     );
 
-    expect(lastFrame()).toContain('$x$');
+    expect(lastFrame()).toContain('$xy$');
+    expect(lastFrame()).not.toContain('$y$');
+  });
+
+  it('keeps longer backtick runs inside single-backtick code spans', () => {
+    const { lastFrame } = renderWithProviders(
+      <RenderInline text={'Use `a `` $xy$ `` b` then $y$'} enableInlineMath />,
+    );
+
+    expect(lastFrame()).toContain('$xy$');
     expect(lastFrame()).not.toContain('$y$');
   });
 
   it('measures recognized single-character math without delimiters', () => {
     expect(getPlainTextLength('value $x$', true)).toBe('value x'.length);
+    expect(getPlainTextLength('code `$xy$`', true)).toBe('code $xy$'.length);
+    expect(getPlainTextLength('code ``a `$xy$` b``', true)).toBe(
+      'code a `$xy$` b'.length,
+    );
   });
 
   it('does not parse ordinary dollar amounts as inline math', () => {

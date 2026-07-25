@@ -549,7 +549,7 @@ describe('copyCommand', () => {
         role: 'model',
         parts: [
           {
-            text: 'Literal \\$xy$, code ``a `$z$` b``, then $x$ and $\\alpha$.',
+            text: 'Literal \\$xy$, code `$xy$`, longer ``a `$zz$` b``, then $x$ and $\\alpha$.',
           },
         ],
       },

@@ -1138,7 +1138,7 @@ Another paragraph.
       const text = `
 | Formula | Literal | Code |
 |---------|---------|------|
-| $x$ | \\$xy$ | \`\`a \`$z$\` b\`\` |
+| $x$ | \\$xy$ | \`\`a \`$zz$\` b\`\` |
 `.replace(/\n/g, eol);
       const { lastFrame } = renderWithProviders(
         <MarkdownDisplay {...baseProps} text={text} />,
@@ -1147,7 +1147,7 @@ Another paragraph.
 
       expect(output).toContain('│ x');
       expect(output).toContain('\\$xy$');
-      expect(output).toContain('a `$z$` b');
+      expect(output).toContain('a `$zz$` b');
       expect(output).not.toContain('$x$');
     });
 

@@ -8,7 +8,7 @@ const markdownPrompt = `Output a compact Markdown rendering verification sample 
 4. Inline math $x$ and $y = \\\\frac{-b \\\\pm \\\\sqrt{b^2 - 4ac}}{2a}$.
 5. One display math block using $$ fences.
 6. One checked and one unchecked task list item.
-7. Literal inline code \`$z$\` and escaped math source \\\\$xy$.
+7. Literal inline code \`$zz$\` and escaped math source \\\\$xy$.
 
 Do not explain the sample.`;
 

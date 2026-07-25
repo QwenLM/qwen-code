@@ -34,7 +34,7 @@ describe('splitMarkdownTableRow', () => {
     expect(splitMarkdownTableRow('$a|b$ | c')).toEqual(['$a|b$', 'c']);
   });
 
-  it('recognizes single-character math without consuming escaped spans', () => {
+  it('does not let escaped math consume table separators', () => {
     expect(splitMarkdownTableRow('$x$ | \\$a|b$ | c')).toEqual([
       '$x$',
       '\\$a',
