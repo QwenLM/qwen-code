@@ -233,3 +233,96 @@ export async function fetchGitHubPullRequests(
     return { kind: 'failed', message: ghErrorMessage(error), gitRoot };
   }
 }
+
+// ── Create PR ──────────────────────────────────────────────
+
+export interface CreateGitHubPullRequestOptions {
+  title: string;
+  body?: string;
+  base?: string;
+  head?: string;
+}
+
+export type CreateGitHubPullRequestResult =
+  | { kind: 'ok'; url: string; number: number }
+  | { kind: 'not_a_repo' }
+  | { kind: 'cli_unavailable' }
+  | { kind: 'failed'; message: string };
+
+const GH_CREATE_TIMEOUT_MS = 30_000;
+
+function runGhPrCreate(
+  gitRoot: string,
+  opts: CreateGitHubPullRequestOptions,
+): Promise<string> {
+  const args = ['pr', 'create', '--title', opts.title];
+  if (opts.body) args.push('--body', opts.body);
+  if (opts.base) args.push('--base', opts.base);
+  if (opts.head) args.push('--head', opts.head);
+  return new Promise((resolve, reject) => {
+    execFile(
+      'gh',
+      args,
+      {
+        cwd: gitRoot,
+        timeout: GH_CREATE_TIMEOUT_MS,
+        maxBuffer: GH_MAX_BUFFER,
+        windowsHide: true,
+        encoding: 'utf8',
+      },
+      (error, stdout) => {
+        if (error) reject(error);
+        else resolve(stdout);
+      },
+    );
+  });
+}
+
+/**
+ * Create a pull request via `gh pr create`. Returns the PR URL on success.
+ */
+export async function createGitHubPullRequest(
+  cwd: string,
+  opts: CreateGitHubPullRequestOptions,
+): Promise<CreateGitHubPullRequestResult> {
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return { kind: 'not_a_repo' };
+
+  let stdout: string;
+  try {
+    stdout = await runGhPrCreate(gitRoot, opts);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return { kind: 'cli_unavailable' };
+    }
+    return { kind: 'failed', message: ghErrorMessage(error) };
+  }
+
+  // `gh pr create` outputs the PR URL on stdout.
+  const url = stdout.trim();
+  const numberMatch = /\/pull\/(\d+)/.exec(url);
+  const number = numberMatch ? parseInt(numberMatch[1], 10) : 0;
+  return { kind: 'ok', url, number };
+}
+
+/**
+ * Get the default branch name for the repo (e.g. "main" or "master").
+ */
+export async function getDefaultBranch(cwd: string): Promise<string | null> {
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return null;
+  try {
+    const { execFile: ef } = await import('node:child_process');
+    const { promisify } = await import('node:util');
+    const exec = promisify(ef);
+    const { stdout } = await exec(
+      'git',
+      ['symbolic-ref', 'refs/remotes/origin/HEAD', '--short'],
+      { cwd: gitRoot, timeout: 5_000 },
+    );
+    // Output is like "origin/main" — strip the remote prefix.
+    return stdout.trim().replace(/^origin\//, '') || 'main';
+  } catch {
+    return 'main';
+  }
+}

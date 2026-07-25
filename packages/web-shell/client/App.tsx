@@ -3260,6 +3260,30 @@ export function App({
     },
     [clearFollowup, ensureSessionForPrompt, sessionActions],
   );
+
+  const getOrCreateSessionId = useCallback(async (): Promise<
+    string | undefined
+  > => {
+    if (connection.sessionId) return connection.sessionId;
+    try {
+      const primaryCwd = workspaces.find((w) => w.primary)?.cwd;
+      const result = await (
+        sessionActions as typeof sessionActions & SessionActionsWithCreate
+      ).createSession({
+        workspaceCwd: lockedWorkspaceCwd ?? selectedWorkspaceCwd ?? primaryCwd,
+      });
+      return result.sessionId;
+    } catch {
+      return undefined;
+    }
+  }, [
+    connection.sessionId,
+    sessionActions,
+    workspaces,
+    lockedWorkspaceCwd,
+    selectedWorkspaceCwd,
+  ]);
+
   const availableModels = useMemo(
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((m) => ({
@@ -6751,6 +6775,8 @@ export function App({
               workspaceCwd={gitDialog.workspaceCwd}
               gitCwd={gitDialog.gitCwd}
               initialView={gitDialog.view}
+              sessionId={connection.sessionId}
+              getOrCreateSessionId={getOrCreateSessionId}
               onClose={() => setGitDialog(undefined)}
             />
           )}
@@ -7044,6 +7070,9 @@ export function App({
                   onSelectWorkspace={setSelectedWorkspaceCwd}
                   onOpenGitDiff={(workspaceCwd) =>
                     setGitDialog({ workspaceCwd, view: 'diff' })
+                  }
+                  onOpenCommit={(workspaceCwd) =>
+                    setGitDialog({ workspaceCwd, view: 'commit' })
                   }
                   onOpenAddWorkspace={
                     dynamicWorkspaceRegistrationSupported
@@ -7937,6 +7966,16 @@ export function App({
                                     workspaceCwd: gitDiffWorkspaceCwd,
                                     gitCwd: sessionWorktree?.path,
                                     view: 'diff',
+                                  })
+                              : undefined
+                          }
+                          onOpenCommit={
+                            gitDiffWorkspaceCwd
+                              ? () =>
+                                  setGitDialog({
+                                    workspaceCwd: gitDiffWorkspaceCwd,
+                                    gitCwd: sessionWorktree?.path,
+                                    view: 'commit',
                                   })
                               : undefined
                           }

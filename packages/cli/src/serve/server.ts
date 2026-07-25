@@ -212,6 +212,10 @@ import {
   registerWorkspaceGitLogRoutes,
   registerWorkspaceQualifiedGitLogRoutes,
 } from './routes/workspace-git-log.js';
+import {
+  registerWorkspaceGitBranchRoutes,
+  registerWorkspaceQualifiedGitBranchRoutes,
+} from './routes/workspace-git-branches.js';
 import { registerWorkspaceQualifiedGitHubPrsRoutes } from './routes/workspace-github-prs.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
 import {
@@ -1365,6 +1369,14 @@ export function createServeApp(
     sendBridgeError,
   });
   registerWorkspaceQualifiedGitLogRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+  });
+  registerWorkspaceGitBranchRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    sendBridgeError,
+  });
+  registerWorkspaceQualifiedGitBranchRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
   });

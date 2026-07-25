@@ -52,6 +52,7 @@ import { getModelDisplayName } from '../utils/modelDisplay';
 import { VoiceButton } from '../voice/VoiceButton';
 import { GitBranchChipContent, GitBranchIndicator } from './GitBranchIndicator';
 import { GitModePopover, type SessionGitIntent } from './GitModePopover';
+import { BranchPickerPopover } from './BranchPickerPopover';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
 import { ChevronDownIcon, FolderClosedIcon } from 'lucide-react';
 import { WorkspaceSelector } from './WorkspaceSelector';
@@ -135,6 +136,8 @@ interface ChatEditorProps {
   gitStatus?: DaemonWorkspaceGitStatus;
   /** Opens the working-tree Changes dialog; makes the git chip clickable. */
   onOpenGitDiff?: () => void;
+  /** Opens the commit dialog. */
+  onOpenCommit?: () => void;
   /** Workspace name shown in the pane composer's `workspace` toolbar chip. */
   workspaceName?: string;
   /** Full workspace cwd, used as the chip's tooltip. */
@@ -1166,6 +1169,7 @@ export const ChatEditor = memo(
       onGitModeIntentChange,
       gitStatus,
       onOpenGitDiff,
+      onOpenCommit,
       workspaceName,
       workspaceTitle,
       workspaceColor,
@@ -1249,6 +1253,7 @@ export const ChatEditor = memo(
     const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
     const [quickActionsOpen, setQuickActionsOpen] = useState(false);
+    const [branchPickerOpen, setBranchPickerOpen] = useState(false);
     const [showQuickActions, setShowQuickActions] = useState(isTouchLikeDevice);
     const containerRef = useRef<HTMLDivElement>(null);
     const slashPanelRef = useRef<HTMLDivElement>(null);
@@ -2118,13 +2123,25 @@ export const ChatEditor = memo(
                         onIntentChange={onGitModeIntentChange}
                       />
                     ) : (
-                      <GitBranchIndicator
-                        branch={gitBranch}
-                        status={gitStatus}
-                        compact={!showGitBranchLabel}
+                      <BranchPickerPopover
+                        open={branchPickerOpen}
+                        onOpenChange={setBranchPickerOpen}
                         onOpenDiff={onOpenGitDiff}
-                        worktree={gitWorktree}
-                      />
+                        onOpenCommit={onOpenCommit}
+                      >
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          style={{ display: 'inline-flex' }}
+                        >
+                          <GitBranchIndicator
+                            branch={gitBranch}
+                            status={gitStatus}
+                            compact={!showGitBranchLabel}
+                            worktree={gitWorktree}
+                          />
+                        </span>
+                      </BranchPickerPopover>
                     ))}
                   {showModeAction && (
                     <div

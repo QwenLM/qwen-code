@@ -39,3 +39,180 @@
   flex: 1;
   flex-direction: column;
 }
+
+/* ── commit panel ─────────────────────────── */
+.commitPanel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+}
+
+.commitMessage {
+  width: 100%;
+  min-height: 80px;
+  max-height: 180px;
+  resize: vertical;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-radius: 6px;
+  background: var(--background, transparent);
+  color: var(--foreground, #e0e0e0);
+  font-size: 13px;
+  font-family: 'JetBrains Mono', monospace;
+  padding: 8px 10px;
+  outline: none;
+  line-height: 1.5;
+}
+
+.commitMessage:focus {
+  border-color: var(--primary, #3b82f6);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary, #3b82f6) 20%, transparent);
+}
+
+.commitMessage::placeholder {
+  color: var(--muted-foreground, #666);
+}
+
+.commitStatus {
+  font-size: 12px;
+  padding: 4px 0;
+}
+
+.commitStatusError {
+  color: var(--destructive, #ef4444);
+}
+
+.commitStatusSuccess {
+  color: #22c55e;
+}
+
+.commitActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.commitBtn {
+  padding: 6px 16px;
+  border-radius: 6px;
+  border: none;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  transition: opacity 0.15s;
+}
+
+.commitBtn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.commitBtnPrimary {
+  background: var(--primary, #3b82f6);
+  color: #fff;
+}
+
+.commitBtnPrimary:hover:not(:disabled) {
+  opacity: 0.9;
+}
+
+.commitBtnSecondary {
+  background: var(--secondary, rgba(128, 128, 128, 0.15));
+  color: var(--foreground, #e0e0e0);
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+}
+
+.commitBtnSecondary:hover:not(:disabled) {
+  background: var(--accent, rgba(128, 128, 128, 0.2));
+}
+
+.spin {
+  animation: spin 1s linear infinite;
+}
+
+@keyframes spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+/* ── PR create form ─────────────────────────── */
+.prForm {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 0 0;
+  border-top: 1px solid var(--border);
+  margin-top: 8px;
+}
+
+.prInput {
+  width: 100%;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-radius: 6px;
+  background: var(--background, transparent);
+  color: var(--foreground, #e0e0e0);
+  font-size: 13px;
+  padding: 6px 10px;
+  outline: none;
+}
+
+.prInput:focus {
+  border-color: var(--primary, #3b82f6);
+}
+
+.prInput::placeholder {
+  color: var(--muted-foreground, #666);
+}
+
+.prBody {
+  width: 100%;
+  min-height: 60px;
+  max-height: 120px;
+  resize: vertical;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-radius: 6px;
+  background: var(--background, transparent);
+  color: var(--foreground, #e0e0e0);
+  font-size: 13px;
+  padding: 6px 10px;
+  outline: none;
+  line-height: 1.4;
+}
+
+.prBody:focus {
+  border-color: var(--primary, #3b82f6);
+}
+
+.prBody::placeholder {
+  color: var(--muted-foreground, #666);
+}
+
+.prFormRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.prInputSmall {
+  width: 160px;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-radius: 6px;
+  background: var(--background, transparent);
+  color: var(--foreground, #e0e0e0);
+  font-size: 12px;
+  padding: 5px 8px;
+  outline: none;
+}
+
+.prInputSmall:focus {
+  border-color: var(--primary, #3b82f6);
+}
+
+.prInputSmall::placeholder {
+  color: var(--muted-foreground, #666);
+}

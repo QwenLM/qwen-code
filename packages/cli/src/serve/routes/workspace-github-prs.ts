@@ -8,9 +8,12 @@ import type { Application } from 'express';
 import {
   GITHUB_PR_ERROR_MESSAGE_MAX,
   fetchGitHubPullRequests,
+  createGitHubPullRequest,
+  getDefaultBranch,
   type FetchGitHubPullRequestsResult,
 } from '@qwen-code/qwen-code-core';
 import type { SendBridgeError } from '../server/error-response.js';
+import { safeBody } from '../server/request-helpers.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
   requireTrustedWorkspaceRuntime,
@@ -134,6 +137,79 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
             `unexpected fetchGitHubPullRequests result: ${JSON.stringify(result)}`,
           );
       }
+    } catch (err) {
+      deps.sendBridgeError(res, err, { route });
+    }
+  });
+
+  app.post('/workspaces/:workspace/github/prs/create', async (req, res) => {
+    const route = 'POST /workspaces/:workspace/github/prs/create';
+    const runtime = resolveWorkspaceRuntimeFromParam(
+      deps.workspaceRegistry,
+      req,
+      res,
+    );
+    if (!runtime) return;
+    if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
+
+    const body = safeBody(req);
+    const title = body['title'];
+    if (typeof title !== 'string' || !title.trim()) {
+      res.status(400).json({ error: 'title is required' });
+      return;
+    }
+    const prBody = typeof body['body'] === 'string' ? body['body'] : undefined;
+    const base = typeof body['base'] === 'string' ? body['base'] : undefined;
+    const head = typeof body['head'] === 'string' ? body['head'] : undefined;
+
+    try {
+      const result = await createGitHubPullRequest(runtime.workspaceCwd, {
+        title: title.trim(),
+        body: prBody,
+        base,
+        head,
+      });
+      switch (result.kind) {
+        case 'ok':
+          res.status(201).json({ url: result.url, number: result.number });
+          return;
+        case 'not_a_repo':
+          res.status(404).json({ error: 'not_a_git_repository' });
+          return;
+        case 'cli_unavailable':
+          res.status(502).json({
+            error: 'gh CLI not available',
+            code: 'github_cli_unavailable',
+          });
+          return;
+        case 'failed':
+          res.status(502).json({
+            error: result.message.slice(0, GITHUB_PR_ERROR_MESSAGE_MAX),
+            code: 'github_pr_create_failed',
+          });
+          return;
+        default:
+          res.status(500).json({ error: 'unexpected result' });
+          return;
+      }
+    } catch (err) {
+      deps.sendBridgeError(res, err, { route });
+    }
+  });
+
+  app.get('/workspaces/:workspace/github/default-branch', async (req, res) => {
+    const route = 'GET /workspaces/:workspace/github/default-branch';
+    const runtime = resolveWorkspaceRuntimeFromParam(
+      deps.workspaceRegistry,
+      req,
+      res,
+    );
+    if (!runtime) return;
+    if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
+
+    try {
+      const branch = await getDefaultBranch(runtime.workspaceCwd);
+      res.status(200).json({ branch: branch ?? 'main' });
     } catch (err) {
       deps.sendBridgeError(res, err, { route });
     }
