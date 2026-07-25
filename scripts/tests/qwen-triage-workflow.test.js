@@ -393,3 +393,133 @@ describe('qwen-triage tmux workflow', () => {
     expect(section).toContain('re-resolve immediately before EACH patch');
   });
 });
+
+describe('qwen-triage verify workflow', () => {
+  // Replay the authorize principal gate with a stubbed gh: /verify must
+  // require write from BOTH the PR author (whose code executes) and the
+  // commenter (who spends the runner slot + model budget). A refactor that
+  // drops the /verify patterns from the case statement falls back to
+  // commenter-only gating, which this catches via the author-without-write
+  // arm; dropping the commenter check is caught by the drive-by arm.
+  it('gates /verify on both the author and the commenter, fail-closed', () => {
+    const permStep = step('Check principal write permission');
+    const body = permStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
+    expect(body).toBeTruthy();
+    const script = body.replace(/^ {10}/gm, '');
+
+    const dir = mkdtempSync(join(tmpdir(), 'verify-auth-'));
+    writeFileSync(
+      join(dir, 'gh'),
+      [
+        '#!/usr/bin/env bash',
+        'u="${2##*collaborators/}"; u="${u%%/*}"',
+        'case "$u" in',
+        '  alice) echo write ;;',
+        '  bob) echo admin ;;',
+        '  mallory) echo none ;;',
+        '  *) echo "HTTP 404" >&2; exit 1 ;;',
+        'esac',
+      ].join('\n'),
+      { mode: 0o755 },
+    );
+
+    let n = 0;
+    const gate = (commentBody, author, commenter) => {
+      const out = join(dir, `out-${n++}`);
+      writeFileSync(out, '');
+      spawnSync('bash', ['-c', script], {
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          GH_TOKEN: 'x',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          GITHUB_STEP_SUMMARY: '/dev/null',
+          GITHUB_OUTPUT: out,
+          EVENT_NAME: 'issue_comment',
+          COMMENT_BODY: commentBody,
+          ISSUE_AUTHOR: author,
+          COMMENT_USER: commenter,
+          PR_NUMBER: '1',
+          TMUX_PR: '',
+        },
+        encoding: 'utf8',
+      });
+      const lines = readFileSync(out, 'utf8').trim().split('\n');
+      return {
+        run: lines.filter((l) => l.startsWith('should_run=')).pop(),
+        explain: lines.some((l) => l === 'explain_deny=true'),
+      };
+    };
+
+    try {
+      // Drive-by commenter without write cannot spend the sandbox budget.
+      const driveBy = gate('@qwen-code /verify', 'alice', 'mallory');
+      expect(driveBy.run).toBe('should_run=false');
+      expect(driveBy.explain).toBe(false);
+      // Both principals hold write -> allowed.
+      expect(gate('@qwen-code /verify', 'alice', 'bob').run).toBe(
+        'should_run=true',
+      );
+      // A trusted commenter on an untrusted author's PR is denied (the
+      // sandbox executes the AUTHOR's code) but gets the explanation flag.
+      const untrustedAuthor = gate('@qwen-code /verify', 'mallory', 'bob');
+      expect(untrustedAuthor.run).toBe('should_run=false');
+      expect(untrustedAuthor.explain).toBe(true);
+      // Author commenting on their own PR is checked exactly once.
+      expect(gate('@qwen-code /verify', 'alice', 'alice').run).toBe(
+        'should_run=true',
+      );
+      // A permission-API failure fails closed and stays silent.
+      const apiError = gate('@qwen-code /verify', 'charlie', 'bob');
+      expect(apiError.run).toBe('should_run=false');
+      expect(apiError.explain).toBe(false);
+      // /tmux keeps its existing author-only gate; /triage keeps the
+      // commenter gate.
+      expect(gate('@qwen-code /tmux', 'alice', 'mallory').run).toBe(
+        'should_run=true',
+      );
+      expect(gate('@qwen-code /triage', 'alice', 'mallory').run).toBe(
+        'should_run=false',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The pin step's sweep runs BEFORE npm ci/build execute the PR's
+  // lifecycle scripts, so a postinstall can re-plant a fake
+  // tmp/*-verify-* dir whose zeroed timestamp sorts ahead of the agent's
+  // real one. The agent step must therefore sweep again after the last
+  // PR-controlled process and before qwen launches.
+  it('sweeps planted verify artifacts after the last PR-controlled process', () => {
+    const runStep = step('Run verification agent');
+    const sweep =
+      "find tmp -maxdepth 2 -type d -name '*-verify-*' -exec rm -rf {} +";
+    expect(step('Pin agent inputs from base')).toContain(sweep);
+    expect(runStep).toContain(sweep);
+    // Order inside the agent step: sweep first, model proxy and qwen after.
+    expect(runStep.indexOf(sweep)).toBeGreaterThan(-1);
+    expect(runStep.indexOf(sweep)).toBeLessThan(
+      runStep.indexOf('start_openai_proxy'),
+    );
+    // Uploaded artifacts must not carry node-planted symlinks:
+    // actions/upload-artifact dereferences them.
+    expect(runStep).toContain('-type l -delete');
+  });
+
+  // RUNNER_TEMP hygiene between jobs is runner-managed; this pool is
+  // persistent, so both result dirs are flushed before reuse — a stale
+  // report or previous-report.md from ANOTHER PR's run must never leak
+  // into this run's artifacts or agent context.
+  it('resets RUNNER_TEMP verify dirs before reuse on the persistent pool', () => {
+    const resolveStep = step('Resolve PR and snapshot metadata');
+    expect(resolveStep).toContain('rm -rf "$RUNNER_TEMP/verify-context"');
+    // 'Install and build PR app' also exists in the tmux job, so scope the
+    // prepare assertions to the verify job's text.
+    const verifyJob = job('verify');
+    const rm = verifyJob.indexOf('rm -rf "$RUNNER_TEMP/verify-results"');
+    const mk = verifyJob.indexOf('mkdir -p "$RUNNER_TEMP/verify-results"');
+    expect(rm).toBeGreaterThan(-1);
+    expect(mk).toBeGreaterThan(rm);
+  });
+});

@@ -30,8 +30,9 @@ The workflow (`qwen-triage.yml` `verify` job) guarantees:
 - **You may execute PR code freely.** This job is the designated sandbox
   (container, no credentials) — the opposite of the `/triage` rules. Builds,
   node processes, loopback servers, and scratch `git worktree`s are all fine.
-- **Time budget ≈ 20 minutes** of agent time (hard 25-minute kill). Pick
-  scope first (below); when time runs out, ship the report with what ran.
+- **Time budget ≈ 20 minutes** of agent time (hard 25-minute kill; install
+  and build happen before your clock starts and do not eat it). Pick scope
+  first (below); when time runs out, ship the report with what ran.
 - If the directory holding `$QWEN_VERIFY_CONTEXT` contains
   `previous-report.md` (the last published verify comment), this is a
   **follow-up round**: lead the report with a previous-finding status table

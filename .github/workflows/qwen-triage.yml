@@ -101,6 +101,7 @@ jobs:
           TMUX_PR: '${{ github.event.inputs.tmux_pr }}'
         run: |-
           set -euo pipefail
+          IS_VERIFY=false
           if [ "$EVENT_NAME" = "pull_request_target" ]; then
             echo "Automatic PR triage allowed for PR #${PR_NUMBER} after same-repo/precheck gate." >> "$GITHUB_STEP_SUMMARY"
             echo "should_run=true" >> "$GITHUB_OUTPUT"
@@ -115,8 +116,14 @@ jobs:
               # drive-by account must not be able to spend that on someone
               # else's PR. /triage only reads content, so the commenter's
               # permission gates it.
+              # /verify checks the COMMENTER first: when the author check is
+              # what fails, we then know the requester is trusted and can be
+              # told why nothing ran (see 'Explain denied verify request').
               case "$COMMENT_BODY" in
-                '@qwen-code /verify'|'@qwen-code /verify '*) principals="$ISSUE_AUTHOR $COMMENT_USER" ;;
+                '@qwen-code /verify'|'@qwen-code /verify '*)
+                  IS_VERIFY=true
+                  principals="$COMMENT_USER $ISSUE_AUTHOR"
+                  ;;
                 '@qwen-code /tmux'|'@qwen-code /tmux '*) principals="$ISSUE_AUTHOR" ;;
                 *) principals="$COMMENT_USER" ;;
               esac
@@ -136,8 +143,13 @@ jobs:
           fi
           # Fail closed: any API error or non-write permission for ANY
           # required principal denies the run. Duplicates (an author
-          # commenting on their own PR) are checked once.
+          # commenting on their own PR) are checked once. For /verify,
+          # authorized_commenter records that the COMMENTER passed before a
+          # later (author) check failed — the one case where a denial gets a
+          # visible explanation instead of silence; API errors and untrusted
+          # commenters stay silent (nothing owed to a drive-by account).
           checked=' '
+          authorized_commenter=false
           for principal in $principals; do
             case "$checked" in *" $principal "*) continue ;; esac
             checked="${checked}${principal} "
@@ -155,10 +167,17 @@ jobs:
             fi
             rm -f "$api_error_file"
             case "$permission" in
-              admin|maintain|write) ;;
+              admin|maintain|write)
+                if [ "$IS_VERIFY" = true ] && [ "$principal" = "$COMMENT_USER" ]; then
+                  authorized_commenter=true
+                fi
+                ;;
               *)
                 echo "Denying: ${principal} permission is '${permission}' (needs write)." >> "$GITHUB_STEP_SUMMARY"
                 echo "should_run=false" >> "$GITHUB_OUTPUT"
+                if [ "$IS_VERIFY" = true ] && [ "$authorized_commenter" = true ] && [ "$principal" != "$COMMENT_USER" ]; then
+                  echo "explain_deny=true" >> "$GITHUB_OUTPUT"
+                fi
                 exit 0
                 ;;
             esac
@@ -185,6 +204,28 @@ jobs:
             "repos/${GITHUB_REPOSITORY}/issues/comments/${COMMENT_ID}/reactions" \
             -f content='eyes' > /dev/null ||
             echo "Failed to add verify acknowledgement reaction; continuing." >&2
+
+      # A trusted maintainer asking /verify on a PR whose AUTHOR lacks write
+      # would otherwise get pure silence: no ack, verify skipped,
+      # publish-verify skipped. Explain the denial — but only when the
+      # commenter themselves passed the write check (explain_deny), so a
+      # drive-by account still gets nothing.
+      - name: 'Explain denied verify request'
+        if: >-
+          steps.perm.outputs.explain_deny == 'true' &&
+          github.event_name == 'issue_comment' &&
+          (github.event.comment.body == '@qwen-code /verify' ||
+           startsWith(github.event.comment.body, '@qwen-code /verify '))
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          NUMBER: '${{ github.event.issue.number }}'
+        run: |-
+          printf -v BODY '%s\n\n%s' \
+            '**Sandboxed verification not started** — the PR author does not have write access to this repository, and `/verify` executes the author'"'"'s code on a maintainer runner. Use `@qwen-code /triage` for the static review instead.' \
+            '**沙箱验证未启动** —— 该 PR 作者不具备本仓库写权限，而 `/verify` 会在维护者 runner 上执行作者的代码。请改用 `@qwen-code /triage` 进行静态评审。'
+          gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+            -f body="$BODY" >/dev/null ||
+            echo "Failed to post verify denial explanation; continuing." >&2
 
   triage:
     needs: ['authorize']
@@ -1446,7 +1487,12 @@ jobs:
           format('{0}-verify-run-{1}', github.workflow, github.run_id)
         }}
       cancel-in-progress: false
-    timeout-minutes: 45
+    # 60, not 45: the agent's own 25m timeout is the graceful budget (it
+    # ships a partial report); the job limit only guards infra hangs. At 45
+    # a slow npm ci + build (15m+ on this monorepo) could let the JOB
+    # timeout kill the container mid-run, bypassing the agent's
+    # ship-what-ran path entirely.
+    timeout-minutes: 60
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     # The job checks out and executes PR code. Run the steps in a container so
     # package scripts/builds cannot persist changes in the self-hosted runner's
@@ -1542,6 +1588,10 @@ jobs:
           # carries no GitHub credential, so everything it may cite (title,
           # body, commit messages) is read from this file, and the tree/diff
           # comes from git parents (see the depth-2 checkout below).
+          # rm first: RUNNER_TEMP hygiene between jobs is runner-managed and
+          # this pool is persistent — a stale previous-report.md from another
+          # PR's run must never masquerade as this PR's prior round.
+          rm -rf "$RUNNER_TEMP/verify-context"
           mkdir -p "$RUNNER_TEMP/verify-context"
           gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" \
             --json number,title,body,author,baseRefName,baseRefOid,headRefOid,commits \
@@ -1620,12 +1670,16 @@ jobs:
           find tmp -maxdepth 2 -type d -name '*-verify-*' -exec rm -rf {} + 2>/dev/null || true
           # Scratch worktrees the previous agent left under tmp/ (the A/B
           # base tree): `git worktree prune` only drops metadata for deleted
-          # dirs, so remove the live ones explicitly.
+          # dirs, so remove the live ones explicitly. A plain leftover dir at
+          # the skill's canonical tmp/base-tree path (not git-registered)
+          # would still make the next `git worktree add` fail, so remove it
+          # by name too.
           git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | while IFS= read -r wt; do
             case "$wt" in
               "${GITHUB_WORKSPACE:-$PWD}"/tmp/*) git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt" ;;
             esac
           done
+          rm -rf tmp/base-tree 2>/dev/null || true
           git worktree prune -v || true
           echo "stale agent state cleaned"
 
@@ -1675,6 +1729,10 @@ jobs:
         run: |-
           set -euo pipefail
           unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
+          # rm first: on the persistent pool a stale verify-results from an
+          # EARLIER PR's run would otherwise ride along into this run's
+          # artifact upload and report selection.
+          rm -rf "$RUNNER_TEMP/verify-results"
           mkdir -p "$RUNNER_TEMP/verify-results"
           chown -R node:node "$GITHUB_WORKSPACE"
           prepare_log="$RUNNER_TEMP/verify-results/prepare.log"
@@ -1733,6 +1791,17 @@ jobs:
             echo "::error::qwen CLI not found on runner"
             exit 1
           fi
+
+          # The prepare step just ran the PR's npm lifecycle scripts
+          # (postinstall and friends), which could have re-planted fake
+          # tmp/*-verify-* artifact dirs AFTER the pin step's sweep — and a
+          # zeroed timestamp in the name would sort AHEAD of the agent's real
+          # dir at collection time. Sweep again here, after the last
+          # PR-controlled process and before the agent starts: from this
+          # point on, only the agent writes those dirs. (A steered agent can
+          # still forge its own artifacts — that residual is why the report
+          # is advisory and never a review.)
+          find tmp -maxdepth 2 -type d -name '*-verify-*' -exec rm -rf {} + 2>/dev/null || true
 
           # Bypass the runner proxy before launching qwen: the proxy cuts the
           # SSE stream to the model host, and qwen reads HTTP(S)_PROXY directly
@@ -1985,6 +2054,10 @@ jobs:
           # Collect the skill's artifacts (report.md, verdict.txt,
           # assertions.json, harness scripts, raw logs) into the upload dir.
           find tmp -maxdepth 2 -type d -name '*-verify-*' -exec cp -r {} "$RUNNER_TEMP/verify-results/" \; 2>/dev/null || true
+          # cp -r copies symlinks as symlinks (no deref), but
+          # actions/upload-artifact FOLLOWS them — a node-planted link would
+          # exfiltrate whatever it points at into the artifact. Drop links.
+          find "$RUNNER_TEMP/verify-results" -type l -delete 2>/dev/null || true
 
           if [ "$EXIT_CODE" -eq 124 ]; then
             VERDICT='timeout'
