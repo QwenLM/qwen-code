@@ -503,6 +503,22 @@ export class GeminiClient {
   }
 
   /**
+   * Fire-and-forget StopFailure hook for loop-detection early returns.
+   * Matches the detached pattern used by the CLI's API-error path
+   * (useGeminiStream.ts) — output and errors are ignored.
+   */
+  private fireLoopDetectedStopFailure(loopType: string | null): void {
+    if (this.config.getDisableAllHooks()) return;
+    const hookSystem = this.config.getHookSystem();
+    if (!hookSystem || !this.config.hasHooksForEvent('StopFailure')) return;
+    hookSystem
+      .fireStopFailureEvent('loop_detected', loopType ?? undefined)
+      .catch((err) => {
+        debugLogger.warn(`StopFailure hook failed: ${err}`);
+      });
+  }
+
+  /**
    * Walk-only accessor for the set of `functionResponse.id` strings in
    * raw history. Callers that only need the dedup id set (notably
    * `useGeminiStream.handleCompletedTools`) MUST prefer this over
@@ -2617,6 +2633,7 @@ export class GeminiClient {
             if (isTopLevelInteraction)
               endInteractionSpan('error', { errorMessage: 'loop detected' });
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+            this.fireLoopDetectedStopFailure(loopType);
             return turn;
           }
 
@@ -2648,6 +2665,7 @@ export class GeminiClient {
             // finally cleanup catches this, but cancel explicitly to match
             // the cleanup pattern at other early-return sites.
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+            this.fireLoopDetectedStopFailure(loopType);
             return turn;
           }
           // Update arena status on Finished events — stats are derived
