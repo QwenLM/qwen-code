@@ -772,6 +772,37 @@ describe('classifyHeadDrift', () => {
     expect(got.headDrift.anchorsAtRisk).toBe(true);
   });
 
+  it('treats a `behind` force-push-to-earlier as drift with anchors at risk, not "+0 unreviewed"', () => {
+    // The head moved BACK to an earlier commit: aheadBy 0, but the reviewed
+    // SHA is off the PR's line now. Must not read as proved-same or emit the
+    // self-contradictory "+0 unreviewed commit(s)".
+    const got = classifyHeadDrift(
+      'sha-ahead',
+      'sha-earlier',
+      { status: 'behind', aheadBy: 0, filesTouched: [], filesTotal: 0 },
+      ['src/z.ts'],
+    );
+    expect(got.headDrift.drifted).toBe(true);
+    expect(got.headDrift.anchorsAtRisk).toBe(true);
+    expect(got.downgradeReason).toContain('earlier commit');
+    expect(got.downgradeReason).not.toContain('unreviewed commit(s)');
+  });
+
+  it('renders an API-capped file total as a lower bound in the public reason', () => {
+    const got = classifyHeadDrift(
+      'sha-old',
+      'sha-new',
+      {
+        status: 'ahead',
+        aheadBy: 5,
+        filesTouched: Array.from({ length: 300 }, (_, i) => `f${i}.ts`),
+        filesTotal: 300,
+      },
+      null,
+    );
+    expect(got.downgradeReason).toContain('300+ file(s)');
+  });
+
   it('rules anchors safe only when a complete file list provably misses every finding', () => {
     const got = classifyHeadDrift('sha-old', 'sha-new', ahead, ['src/z.ts']);
     expect(got.headDrift.anchorsAtRisk).toBe(false);

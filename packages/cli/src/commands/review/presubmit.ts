@@ -221,12 +221,13 @@ export function classifyHeadDrift(
   compare: CompareSummary | null,
   findingPaths: string[] | null,
 ): { headDrift: HeadDrift; downgradeReason?: string } {
-  // `identical` (an abbreviated reviewed SHA compared against its own full
-  // form) and `behind`/`ahead_by: 0` (no commits the review has not seen)
-  // carry the compare's own proof that nothing is unreviewed — a SHA-string
-  // mismatch alone must not cap the verdict against that evidence.
-  const provedSame =
-    compare !== null && compare.status !== 'diverged' && compare.aheadBy === 0;
+  // `identical` is the only status that proves the reviewed SHA and the live
+  // head are the SAME commit (an abbreviated SHA vs its full form) — a
+  // SHA-string mismatch must not cap the verdict against that. `behind` is
+  // NOT proof of sameness: it means the head force-pushed BACK to an earlier
+  // commit, so the reviewed SHA is ahead of the head and no longer on the
+  // PR's line — its anchors may not exist in the head at all. That is drift.
+  const provedSame = compare !== null && compare.status === 'identical';
   const drifted =
     liveHeadSha !== '' && reviewedSha !== liveHeadSha && !provedSame;
   if (!drifted) {
@@ -247,15 +248,27 @@ export function classifyHeadDrift(
   const anchorsAtRisk =
     compare === null ||
     compare.status === 'diverged' ||
+    // `behind` moved the head off the reviewed commit's line — treat its
+    // anchors as at risk like a force-push, regardless of the touched files.
+    compare.status === 'behind' ||
     truncated ||
     findingPaths === null ||
     findingPaths.some((p) => compare.filesTouched.includes(p));
+  // GitHub's compare caps `files` at 300, so a total AT the cap may be an
+  // undercount — render it as a lower bound rather than a precise (and
+  // possibly wrong) public number.
+  const fileCount =
+    compare !== null && compare.filesTotal >= COMPARE_API_FILES_CAP
+      ? `${COMPARE_API_FILES_CAP}+`
+      : `${compare?.filesTotal ?? 0}`;
   const detail =
     compare === null
       ? ''
       : compare.status === 'diverged'
         ? ' (history rewritten — the reviewed commit is no longer on the PR)'
-        : ` (+${compare.aheadBy} unreviewed commit(s) touching ${compare.filesTotal} file(s))`;
+        : compare.status === 'behind'
+          ? ' (PR head moved to an earlier commit — the reviewed commit is no longer the head)'
+          : ` (+${compare.aheadBy} unreviewed commit(s) touching ${fileCount} file(s))`;
   return {
     headDrift: {
       reviewedSha,
