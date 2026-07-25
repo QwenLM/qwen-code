@@ -311,7 +311,7 @@ jobs:
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -uo pipefail
-          MARKER='<!-- qwen-triage stage=status -->'
+          MARKER='<!-- qwen-triage-lifecycle -->'
           printf -v BODY '%s\n\n%s\n\n%s' \
             "$MARKER" \
             "🔄 **Qwen Triage is running** — [watch live progress]($RUN_URL). Stage results will post in this thread as they complete." \
@@ -637,7 +637,7 @@ jobs:
           TRIAGE_OUTCOME: '${{ steps.triage.outcome }}'
         run: |-
           set -uo pipefail
-          MARKER='<!-- qwen-triage stage=status -->'
+          MARKER='<!-- qwen-triage-lifecycle -->'
           if [ "${TRIAGE_OUTCOME:-}" = 'success' ]; then
             EN="✅ **Qwen Triage finished** — [view run]($RUN_URL). See the stage comments in this thread for the result."
             ZH="✅ **Qwen Triage 已完成** —— [查看运行]($RUN_URL)。结果见本线程中的各阶段评论。"
