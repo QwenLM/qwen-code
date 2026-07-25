@@ -36,6 +36,21 @@ function step(name) {
   return match?.[0] ?? '';
 }
 
+// Several step names exist in more than one job (both `tmux-testing` and
+// `verify` have "Install and build PR app"). `step()` returns the FIRST
+// match, so anything asserting on a verify-lane step must scope to the job
+// or it silently tests the tmux copy — which has bitten this suite before.
+function stepIn(jobName, stepName) {
+  const scope = job(jobName);
+  const escaped = escapeRegExp(stepName);
+  const match = scope.match(
+    new RegExp(
+      `\\n\\s+- name:\\s*(['"])${escaped}\\1[\\s\\S]*?(?=\\n\\s+- name:\\s*['"]|$)`,
+    ),
+  );
+  return match?.[0] ?? '';
+}
+
 function job(name) {
   const start = workflow.indexOf(`\n  ${name}:`);
   if (start === -1) {
@@ -1264,6 +1279,191 @@ describe('qwen-triage verify publish fidelity', () => {
           '[.[][] | select((.body | startswith($m)) and .user.login == $bot)] | map(select(.body | contains($s) | not)) | last | "\\(.id)"',
         ),
       ).toBe('102');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('qwen-triage verify execution-time controls', () => {
+  // The queue-time gate is tested by executing it; these two controls run
+  // AFTER the scarce-runner wait and were untested. A refactor that
+  // disconnects the permission re-check, or inverts the head comparison,
+  // would execute a revoked author's code or an unreviewed head while every
+  // queue-time test stayed green.
+  it('refuses to run when the author lost write access after queueing', () => {
+    const resolve = step('Resolve PR and snapshot metadata');
+    const body = resolve
+      .match(/run: \|-\n([\s\S]*)$/)?.[1]
+      .replace(/^ {10}/gm, '');
+    const start = body.indexOf('# Re-authorize at execution time');
+    const end = body.indexOf('# Status comment with the live run link');
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const snippet = `set -euo pipefail\n${body.slice(start, end)}`;
+
+    const dir = mkdtempSync(join(tmpdir(), 'verify-reauth-'));
+    try {
+      mkdirSync(join(dir, 'verify-context'), { recursive: true });
+      writeFileSync(
+        join(dir, 'verify-context', 'pr.json'),
+        JSON.stringify({
+          author: { login: 'alice' },
+          headRefOid: 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+        }),
+      );
+      writeFileSync(
+        join(dir, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          'u="${2##*collaborators/}"; u="${u%%/*}"',
+          'case "$u" in',
+          '  alice) echo "${ALICE_PERM:-write}" ;;',
+          '  *) echo "HTTP 404" >&2; exit 1 ;;',
+          'esac',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      const run = (env) => {
+        const out = join(dir, 'out');
+        writeFileSync(out, '');
+        const proc = spawnSync('bash', ['-c', snippet], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            GH_TOKEN: 'x',
+            GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+            GITHUB_OUTPUT: out,
+            RUNNER_TEMP: dir,
+            ...env,
+          },
+        });
+        return {
+          out: readFileSync(out, 'utf8'),
+          log: proc.stdout + proc.stderr,
+        };
+      };
+
+      // Still a writer -> proceeds, and pins the head it authorized.
+      const ok = run({ ALICE_PERM: 'write' });
+      expect(ok.out).toContain('head_oid=deadbeef');
+      expect(ok.out).not.toContain('decision=skip');
+
+      // Access revoked during the wait -> refuses, with a reason to publish.
+      const revoked = run({ ALICE_PERM: 'read' });
+      expect(revoked.out).toContain('decision=skip');
+      expect(revoked.out).toContain('verdict=skipped');
+      expect(revoked.out).toContain('no longer has write access');
+      expect(revoked.out).not.toContain('head_oid=deadbeef');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The merge ref is resolved after queueing, so the head that gets checked
+  // out must be compared against the head that was authorized.
+  it('refuses a head that moved between authorization and checkout', () => {
+    const pin = step('Pin agent inputs from base');
+    const body = pin.match(/run: \|-\n([\s\S]*)$/)?.[1].replace(/^ {10}/gm, '');
+    expect(body).toContain('EXPECTED_HEAD');
+    const snippet = `set -euo pipefail\n${body}`;
+
+    const dir = mkdtempSync(join(tmpdir(), 'verify-headpin-'));
+    const sh = (cmd, cwd) =>
+      spawnSync('bash', ['-c', cmd], { cwd, encoding: 'utf8' });
+    try {
+      const repo = join(dir, 'repo');
+      mkdirSync(join(repo, '.qwen', 'skills'), { recursive: true });
+      // Build base -> feature, then a merge commit, so HEAD^1/HEAD^2 exist
+      // exactly as the merge-ref checkout produces them.
+      sh(
+        [
+          'git init -q .',
+          'git config user.email t@t && git config user.name t',
+          'echo base > f && mkdir -p .qwen/skills && echo skill > .qwen/skills/s.md',
+          'git add -A && git commit -qm base',
+          'git checkout -q -b feature',
+          'echo head > f && git commit -qam head',
+          'git checkout -q -',
+          'git merge -q --no-ff feature -m merge',
+        ].join(' && '),
+        repo,
+      );
+      const headOid = sh('git rev-parse HEAD^2', repo).stdout.trim();
+      expect(headOid).toMatch(/^[0-9a-f]{40}$/);
+
+      const run = (expected) =>
+        spawnSync('bash', ['-c', snippet], {
+          cwd: repo,
+          encoding: 'utf8',
+          env: { ...process.env, EXPECTED_HEAD: expected },
+        });
+
+      const matching = run(headOid);
+      expect(matching.status).toBe(0);
+      expect(matching.stdout).toContain('matches the authorized head');
+
+      const moved = run('0000000000000000000000000000000000000000');
+      expect(moved.status).not.toBe(0);
+      expect(`${moved.stdout}${moved.stderr}`).toContain(
+        'PR head moved after authorization',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The prepare log is written by PR-controlled code, so infra patterns must
+  // be ones only npm's reporter or the kernel emits.
+  it('does not let PR build output masquerade as an infrastructure failure', () => {
+    // Scoped: the tmux job has an identically named step without this
+    // helper, and an unscoped lookup would find that one.
+    const prepare = stepIn('verify', 'Install and build PR app');
+    const body = prepare
+      .match(/run: \|-\n([\s\S]*)$/)?.[1]
+      .replace(/^ {10}/gm, '');
+    const start = body.indexOf('classify_failure() {');
+    const end = body.indexOf('if [ "${install_status:-0}"');
+    expect(start).toBeGreaterThan(-1);
+    const dir = mkdtempSync(join(tmpdir(), 'verify-classify-fail-'));
+    try {
+      const logFile = join(dir, 'prepare.log');
+      const classify = (log, status) => {
+        writeFileSync(logFile, `${log}\n`);
+        return spawnSync(
+          'bash',
+          [
+            '-c',
+            `prepare_log="$1"\n${body.slice(start, end)}\nclassify_failure "$2"`,
+            '_',
+            logFile,
+            String(status),
+          ],
+          { encoding: 'utf8' },
+        ).stdout.trim();
+      };
+      // PR-authored output that merely mentions infrastructure words.
+      for (const log of [
+        'FAIL src/a.test.ts > expected ETIMEDOUT to equal ok',
+        'building... registry error handling module compiled',
+        "src/x.ts(3,5): error TS2322: Type '502 Bad Gateway' is not assignable",
+        'ENOSPC is handled by our retry logic',
+      ]) {
+        expect(classify(log, 1)).toBe('fail');
+      }
+      // Diagnostics only npm or the kernel produce.
+      for (const log of [
+        'npm ERR! code ETIMEDOUT',
+        'npm ERR! network request to https://registry.npmjs.org failed',
+        'npm ERR! code ENOSPC',
+        'Out of memory: Killed process 1234 (node)',
+        'Killed',
+      ]) {
+        expect(classify(log, 1)).toBe('infra-error');
+      }
+      // A signal exit needs no log evidence at all.
+      expect(classify('anything', 137)).toBe('infra-error');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

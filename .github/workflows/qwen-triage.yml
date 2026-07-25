@@ -1928,13 +1928,21 @@ jobs:
           # full disk, and OOM/signal kills are infrastructure — reporting
           # those as a PR verdict tells the author their code is broken when
           # it is not. Classify from the exit status and the log.
+          # ⚠️ The log is PR-influenced: lifecycle and build scripts print
+          # whatever they like, so a build that genuinely fails can also emit
+          # the word "ETIMEDOUT". Misreading that as infrastructure is the
+          # worse error — it tells the author to re-run something that will
+          # fail identically — so the patterns below are restricted to lines
+          # only npm's own reporter or the kernel produces, anchored at the
+          # start of a line. A signal exit (>128) needs no log evidence: it
+          # comes from the runner, not from the PR.
           classify_failure() { # $1 status -> echoes fail|infra-error
             local status="$1"
             if [ "$status" -gt 128 ]; then
               echo infra-error
               return
             fi
-            if grep -qiE 'ENOSPC|no space left|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up|network timeout|registry error|503 Service|502 Bad Gateway|Killed|out of memory|Cannot allocate memory' "$prepare_log" 2>/dev/null; then
+            if grep -qE '^(npm ERR! code (ENOSPC|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|EPROTO|ERR_SOCKET_TIMEOUT)|npm ERR! network |npm ERR! .*(50[0-9] (Internal Server Error|Bad Gateway|Service Unavailable))|Killed$|Out of memory: Kill|.*: cannot allocate memory)' "$prepare_log" 2>/dev/null; then
               echo infra-error
             else
               echo fail
