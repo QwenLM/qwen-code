@@ -219,6 +219,19 @@ export interface BridgeOptions {
    */
   compactedReplayMaxBytes?: number;
   /**
+   * Per-session cap on the number of raw events retained in the in-flight
+   * live journal (the current unfinished turn). When exceeded, the oldest
+   * journal entries are dropped. Defaults to 10 000. Must be a positive
+   * safe integer.
+   */
+  maxJournalEvents?: number;
+  /**
+   * Per-session byte cap on the in-flight live journal. When exceeded, the
+   * oldest journal entries are dropped (at least one entry is always kept).
+   * Defaults to 8 MiB. Must be a positive safe integer.
+   */
+  maxJournalBytes?: number;
+  /**
    * Per-`requestPermission` wall clock. After this many ms with
    * no client vote, the agent's permission promise resolves as
    * cancelled — the per-session FIFO can drain instead of poisoning
