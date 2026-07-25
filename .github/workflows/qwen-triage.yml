@@ -1609,6 +1609,11 @@ jobs:
       # version (present locally as the merge commit's first parent) and drop
       # any planted artifact dirs. Fail closed: if this step breaks, the job
       # stops before the agent runs.
+      # Bootstrap note: base always contains the verify-pr skill here —
+      # issue_comment workflows run the DEFAULT branch's YAML, so this job
+      # only exists once the lane has merged, at which point HEAD^1 carries
+      # the skill. A PR that edits the skill is verified with the base
+      # version by design; deleting the skill on base disables the lane.
       - name: 'Pin agent inputs from base'
         if: "steps.pr.outputs.decision == 'run'"
         run: |-
