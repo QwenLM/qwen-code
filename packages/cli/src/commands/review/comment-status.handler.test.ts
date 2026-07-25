@@ -60,14 +60,14 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 
 const { commentStatusCommand } = await import('./comment-status.js');
 
-async function run() {
+async function run(ownerRepo = 'o/r') {
   const handler = commentStatusCommand.handler;
   if (!handler) throw new Error('handler missing');
   await handler({
     _: [],
     $0: 'qwen',
     pr_number: '7632',
-    owner_repo: 'o/r',
+    owner_repo: ownerRepo,
     out: '/repo/.qwen/tmp/qwen-review-pr-7632-comment-status.json',
   } as unknown as Parameters<typeof handler>[0]);
 }
@@ -214,6 +214,31 @@ describe('comment-status handler', () => {
     expect(report.worktreeMissing).toBe(true);
     expect(report.threads[0].code.changedSinceComment).toBe('unknown');
     expect(warnings().join('\n')).toContain('no worktree at');
+  });
+
+  it('rejects an owner_repo with no slash (a caller error, not runtime degradation)', async () => {
+    await expect(run('ownerrepo')).rejects.toThrow(/owner\/repo/);
+  });
+
+  it('warns when the report exceeds the read_file truncation threshold', async () => {
+    // A big PR pushes the JSON past ~25k chars; the size warning is the only
+    // signal a consumer gets before a silent isTruncated on cut, unparseable
+    // JSON. Generate enough threads to cross the threshold.
+    mocks.ghApiAll.mockReturnValue(
+      Array.from({ length: 200 }, (_, i) => ({
+        id: i + 1,
+        user: { login: `reviewer-with-a-longish-name-${i}` },
+        path: `packages/cli/src/commands/review/some/deep/path/file-${i}.ts`,
+        line: i + 1,
+        original_line: i + 1,
+        original_commit_id: `commit-sha-placeholder-${i}`,
+        subject_type: 'line',
+        body: `A finding body number ${i} with enough text to add weight.`,
+      })),
+    );
+    queueHeads('headA', 'headA');
+    await run();
+    expect(warnings().join('\n')).toMatch(/chars; read_file returns the first/);
   });
 
   it('degrades gracefully when gh auth fails: no throw, empty report, warning', async () => {
