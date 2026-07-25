@@ -8,6 +8,7 @@ import {
   mkdirSync,
   readFileSync,
   writeFileSync,
+  renameSync,
   unlinkSync,
   chmodSync,
 } from 'node:fs';
@@ -49,8 +50,29 @@ export function loadAccount(): AccountData | null {
 
 export function saveAccount(data: AccountData): void {
   const p = accountPath();
-  writeFileSync(p, JSON.stringify(data, null, 2), 'utf-8');
-  chmodSync(p, 0o600);
+  const tmp = `${p}.tmp`;
+  try {
+    // Create the file already private. Writing first and narrowing afterwards
+    // leaves the token readable at the umask default (0644 under the usual
+    // 022) for the window between the two calls.
+    writeFileSync(tmp, JSON.stringify(data, null, 2), {
+      encoding: 'utf-8',
+      mode: 0o600,
+    });
+    // `mode` above only applies when the file is created, so a stale tmp left
+    // behind by a crashed run keeps whatever permissions it already had.
+    chmodSync(tmp, 0o600);
+    // Rename carries the 0600 mode onto the destination, so an account.json
+    // written by an older version is narrowed rather than left as it was.
+    renameSync(tmp, p);
+  } catch (e) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* best-effort cleanup */
+    }
+    throw e;
+  }
 }
 
 export function clearAccount(): void {
