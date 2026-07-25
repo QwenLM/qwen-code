@@ -13,9 +13,16 @@ import {
 } from 'react';
 import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
 import type { DaemonWorkspaceGitDiffFile } from '@qwen-code/sdk/daemon';
-import { EyeIcon, Loader2Icon, PencilIcon } from 'lucide-react';
+import {
+  ChevronDownIcon,
+  EyeIcon,
+  Loader2Icon,
+  PencilIcon,
+  SearchIcon,
+} from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { Markdown } from '../messages/Markdown';
+import { Popover, PopoverContent, PopoverTrigger } from '../ui/popover';
 import { DialogShell } from './DialogShell';
 import { GitDiffContent } from './GitDiffDialog';
 import { GitLogContent } from './GitLogDialog';
@@ -606,36 +613,11 @@ export function GitDialog({
                   )}
                 </div>
                 <div className={styles.prFormRow}>
-                  <select
-                    className={styles.prSelect}
+                  <BranchSelect
                     value={prBase}
-                    onChange={(e) => setPrBase(e.target.value)}
-                  >
-                    {prBranches ? (
-                      <>
-                        {prBranches.remotes.map(([remote, names]) => (
-                          <optgroup key={remote} label={remote}>
-                            {names.map((n) => (
-                              <option key={`${remote}/${n}`} value={n}>
-                                {n}
-                              </option>
-                            ))}
-                          </optgroup>
-                        ))}
-                        {prBranches.local.length > 0 && (
-                          <optgroup label={t('branchPicker.section.local')}>
-                            {prBranches.local.map((n) => (
-                              <option key={n} value={n}>
-                                {n}
-                              </option>
-                            ))}
-                          </optgroup>
-                        )}
-                      </>
-                    ) : (
-                      <option value={prBase}>{prBase || 'main'}</option>
-                    )}
-                  </select>
+                    onChange={setPrBase}
+                    branches={prBranches}
+                  />
                   <button
                     type="button"
                     className={`${styles.commitBtn} ${styles.commitBtnPrimary}`}
@@ -675,5 +657,130 @@ export function GitDialog({
         )}
       </div>
     </DialogShell>
+  );
+}
+
+type BranchList = {
+  local: string[];
+  remotes: [string, string[]][];
+} | null;
+
+function BranchSelect({
+  value,
+  onChange,
+  branches,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  branches: BranchList;
+}) {
+  const [open, setOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const q = search.toLowerCase().trim();
+
+  const filteredRemotes = branches
+    ? branches.remotes
+        .map(
+          ([remote, names]) =>
+            [
+              remote,
+              names.filter((n) => !q || n.toLowerCase().includes(q)),
+            ] as [string, string[]],
+        )
+        .filter(
+          ([remote, names]) =>
+            names.length > 0 || remote.toLowerCase().includes(q),
+        )
+    : [];
+
+  const filteredLocal = branches
+    ? branches.local.filter((n) => !q || n.toLowerCase().includes(q))
+    : [];
+
+  return (
+    <Popover
+      open={open}
+      onOpenChange={(v) => {
+        setOpen(v);
+        if (v) setTimeout(() => inputRef.current?.focus(), 50);
+        else setSearch('');
+      }}
+    >
+      <PopoverTrigger asChild>
+        <button type="button" className={styles.branchSelectTrigger}>
+          <span className={styles.branchSelectValue}>{value || 'main'}</span>
+          <ChevronDownIcon size={12} />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        className={styles.branchSelectPopover}
+        side="bottom"
+        align="start"
+        sideOffset={4}
+      >
+        <div className={styles.branchSelectSearch}>
+          <SearchIcon size={13} />
+          <input
+            ref={inputRef}
+            className={styles.branchSelectInput}
+            placeholder="Search branches…"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+          />
+        </div>
+        <div className={styles.branchSelectList}>
+          {filteredRemotes.map(([remote, names]) => (
+            <div key={remote}>
+              <div className={styles.branchSelectGroup}>{remote}</div>
+              {names.map((n) => (
+                <button
+                  key={`${remote}/${n}`}
+                  type="button"
+                  className={`${styles.branchSelectItem} ${
+                    n === value ? styles.branchSelectItemActive : ''
+                  }`}
+                  onClick={() => {
+                    onChange(n);
+                    setOpen(false);
+                  }}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+          ))}
+          {filteredLocal.length > 0 && (
+            <div>
+              <div className={styles.branchSelectGroup}>local</div>
+              {filteredLocal.map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  className={`${styles.branchSelectItem} ${
+                    n === value ? styles.branchSelectItemActive : ''
+                  }`}
+                  onClick={() => {
+                    onChange(n);
+                    setOpen(false);
+                  }}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+          )}
+          {!branches && (
+            <div className={styles.branchSelectEmpty}>Loading…</div>
+          )}
+          {branches &&
+            filteredRemotes.length === 0 &&
+            filteredLocal.length === 0 && (
+              <div className={styles.branchSelectEmpty}>No matches</div>
+            )}
+        </div>
+      </PopoverContent>
+    </Popover>
   );
 }

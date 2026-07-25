@@ -288,3 +288,108 @@
 .prSelect:focus {
   border-color: var(--primary, #3b82f6);
 }
+
+/* ── branch select (searchable) ─────────────── */
+.branchSelectTrigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 120px;
+  max-width: 200px;
+  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
+  border-radius: 6px;
+  background: var(--background, transparent);
+  color: var(--foreground, #e0e0e0);
+  font-size: 12px;
+  padding: 5px 8px;
+  cursor: pointer;
+}
+
+.branchSelectTrigger:hover {
+  border-color: var(--primary, #3b82f6);
+}
+
+.branchSelectValue {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.branchSelectPopover {
+  width: 240px;
+  max-height: 280px;
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  overflow: hidden;
+}
+
+.branchSelectSearch {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border, rgba(128, 128, 128, 0.2));
+  color: var(--muted-foreground, #888);
+}
+
+.branchSelectInput {
+  flex: 1;
+  border: none;
+  background: transparent;
+  color: var(--foreground, #e0e0e0);
+  font-size: 12px;
+  outline: none;
+}
+
+.branchSelectInput::placeholder {
+  color: var(--muted-foreground, #666);
+}
+
+.branchSelectList {
+  flex: 1;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.branchSelectGroup {
+  padding: 3px 10px 1px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--muted-foreground, #666);
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.branchSelectItem {
+  display: block;
+  width: 100%;
+  padding: 4px 10px 4px 16px;
+  border: none;
+  background: none;
+  color: var(--foreground, #e0e0e0);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.branchSelectItem:hover {
+  background: var(--accent, rgba(128, 128, 128, 0.12));
+}
+
+.branchSelectItemActive {
+  color: var(--primary, #60a5fa);
+  font-weight: 500;
+}
+
+.branchSelectEmpty {
+  padding: 12px 10px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--muted-foreground, #888);
+}
