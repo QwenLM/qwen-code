@@ -162,13 +162,19 @@ describe('useDaemonChannels', () => {
         expectedRevision: '1',
         enabled: true,
       });
+      await result?.remove('bot', { expectedRevision: '1' });
+      await result?.start('bot');
+      await result?.stop('bot');
       await result?.restart('bot');
     });
 
     expect(actions.upsertChannel).toHaveBeenCalledOnce();
     expect(actions.setChannelStartup).toHaveBeenCalledOnce();
+    expect(actions.removeChannel).toHaveBeenCalledOnce();
+    expect(actions.startChannel).toHaveBeenCalledOnce();
+    expect(actions.stopChannel).toHaveBeenCalledOnce();
     expect(actions.restartChannel).toHaveBeenCalledOnce();
-    expect(actions.loadChannels).toHaveBeenCalledTimes(4);
+    expect(actions.loadChannels).toHaveBeenCalledTimes(7);
   });
 
   it('does not expose stale Channel data while the workspace changes', async () => {

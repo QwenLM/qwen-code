@@ -302,6 +302,16 @@ describe('workspace actions', () => {
       expectedRevision: '1',
       config: { type: 'dingtalk' },
     });
+    expect(workspace.deleteWorkspaceChannel).toHaveBeenCalledWith('bot', {
+      expectedRevision: '1',
+    });
+    expect(workspace.setWorkspaceChannelStartup).toHaveBeenCalledWith('bot', {
+      expectedRevision: '1',
+      enabled: true,
+    });
+    expect(workspace.startWorkspaceChannel).toHaveBeenCalledWith('bot');
+    expect(workspace.stopWorkspaceChannel).toHaveBeenCalledWith('bot');
+    expect(workspace.restartWorkspaceChannel).toHaveBeenCalledWith('bot');
     expect(workspace.approveWorkspaceChannelPairing).toHaveBeenCalledWith(
       'bot',
       { code: 'abcdefgh' },
