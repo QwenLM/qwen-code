@@ -18,12 +18,17 @@
  * yields an empty list, and the caller decides what an empty list means.
  */
 export function parseReceiptIds(raw: string): number[] {
-  let parsed: { reviewIds?: unknown; reviewId?: unknown };
+  let value: unknown;
   try {
-    parsed = JSON.parse(raw) as { reviewIds?: unknown; reviewId?: unknown };
+    value = JSON.parse(raw);
   } catch {
     return [];
   }
+  // `JSON.parse('null')` (and any non-object) succeeds but has no fields to
+  // read — dereferencing it would throw, breaking the "never throws"
+  // contract callers may rely on.
+  if (value === null || typeof value !== 'object') return [];
+  const parsed = value as { reviewIds?: unknown; reviewId?: unknown };
   const ids = Array.isArray(parsed.reviewIds)
     ? parsed.reviewIds
     : typeof parsed.reviewId === 'number'

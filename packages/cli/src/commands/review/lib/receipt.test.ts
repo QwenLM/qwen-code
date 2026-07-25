@@ -36,4 +36,13 @@ describe('parseReceiptIds', () => {
     expect(parseReceiptIds(JSON.stringify({ reviewId: 'nope' }))).toEqual([]);
     expect(parseReceiptIds(JSON.stringify({ reviewIds: 'nope' }))).toEqual([]);
   });
+
+  it('does not throw on valid JSON that is not an object (null, number, array, string)', () => {
+    // `JSON.parse('null')` succeeds; dereferencing it would break the
+    // never-throws contract.
+    expect(parseReceiptIds('null')).toEqual([]);
+    expect(parseReceiptIds('42')).toEqual([]);
+    expect(parseReceiptIds('"x"')).toEqual([]);
+    expect(parseReceiptIds('[1,2]')).toEqual([]);
+  });
 });
