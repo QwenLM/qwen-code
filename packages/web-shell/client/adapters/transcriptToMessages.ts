@@ -54,9 +54,66 @@ interface TranscriptMessageOptions {
   labels?: TranscriptMessageLabels;
 }
 
+interface BackgroundAgentTaskUpdate {
+  status: string;
+  endTime: number;
+}
+
+function collectBackgroundAgentTaskUpdates(
+  blocks: readonly DaemonTranscriptBlock[],
+): ReadonlyMap<string, BackgroundAgentTaskUpdate> {
+  const updates = new Map<string, BackgroundAgentTaskUpdate>();
+  for (const block of blocks) {
+    if (block.kind !== 'assistant') continue;
+    const meta = getRecord(block.meta);
+    if (
+      meta?.['source'] !== 'background_notification' ||
+      meta['qwenDiscreteMessage'] !== true
+    ) {
+      continue;
+    }
+    const task = getRecord(meta['backgroundTask']);
+    const toolUseId = getString(task, 'toolUseId');
+    const status = getString(task, 'status');
+    if (task?.['kind'] !== 'agent' || !toolUseId || !status) continue;
+    updates.set(toolUseId, {
+      status,
+      endTime: block.serverTimestamp ?? block.clientReceivedAt,
+    });
+  }
+  return updates;
+}
+
+function applyBackgroundAgentTaskUpdate(
+  tool: DaemonMessageToolCall,
+  update: BackgroundAgentTaskUpdate | undefined,
+): void {
+  if (!update) return;
+  switch (update.status) {
+    case 'completed':
+      tool.status = 'completed';
+      tool.endTime = update.endTime;
+      break;
+    case 'failed':
+      tool.status = 'failed';
+      tool.endTime = update.endTime;
+      break;
+    case 'cancelled':
+    case 'canceled':
+      tool.status = 'completed';
+      tool.endTime = update.endTime;
+      tool.rawOutput = {
+        ...(getRecord(tool.rawOutput) ?? {}),
+        status: 'cancelled',
+      };
+      break;
+  }
+}
+
 function isIgnoredWebShellStatus(text: string): boolean {
   return (
     text.startsWith('language_changed (unrecognized daemon event):') ||
+    text.startsWith('session_cwd_changed (unrecognized daemon event):') ||
     text.startsWith('Model switched: ')
   );
 }
@@ -202,6 +259,7 @@ export function transcriptBlocksToDaemonMessages(
   // parentToolCallId; unparented blocks are rendered as top-level transcript.
   const toolsByCallId = new Map<string, DaemonMessageToolCall>();
   const permissionToolInfoByCallId = new Map<string, PermissionToolInfo>();
+  const backgroundAgentTaskUpdates = collectBackgroundAgentTaskUpdates(blocks);
   let currentAssistantIdx: number | null = null;
   let currentThinkingIdx: number | null = null;
   // Tool cards are standalone transcript turns. Once a tool is emitted,
@@ -393,6 +451,10 @@ export function transcriptBlocksToDaemonMessages(
       case 'tool': {
         const toolBlock = block as DaemonToolTranscriptBlock;
         const toolCall = daemonToolBlockToToolCall(toolBlock);
+        applyBackgroundAgentTaskUpdate(
+          toolCall,
+          backgroundAgentTaskUpdates.get(toolCall.callId),
+        );
         const permissionInfo = permissionToolInfoByCallId.get(toolCall.callId);
         if (permissionInfo?.title) {
           toolCall.title = permissionInfo.title;

@@ -133,7 +133,7 @@ describe('createAndAttachSessionForPrompt', () => {
         modeId: 'yolo',
         warn,
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({});
 
     expect(order).toEqual(['create', 'attach', 'model']);
     expect(warn).toHaveBeenCalledWith(
@@ -254,6 +254,28 @@ describe('createAndAttachSessionForPrompt', () => {
     expect(actions.createSession).toHaveBeenCalledWith({
       workspaceCwd: '/ws/secondary',
       sourceType: 'default',
+    });
+  });
+
+  it('forwards branch to createSession and returns the created branch', async () => {
+    const actions = createActions({
+      createSession: vi.fn(async () => ({
+        ...sessionResult,
+        branch: { name: 'feat/x', baseBranch: 'main' },
+      })),
+    });
+
+    await expect(
+      prepareSession({
+        sessionActions: actions,
+        branch: { name: 'feat/x' },
+      }),
+    ).resolves.toEqual({ branch: { name: 'feat/x', baseBranch: 'main' } });
+
+    expect(actions.createSession).toHaveBeenCalledWith({
+      workspaceCwd: undefined,
+      sourceType: 'default',
+      branch: { name: 'feat/x' },
     });
   });
 

@@ -418,22 +418,29 @@ function detectBackgroundEvents(
   //     (`backgroundRequested`/`shouldRunInBackground` in AgentTool.execute)
   //   - web-shell UI: packages/web-shell/client/adapters/toolClassification.ts
   //     (`isBackgroundSubAgentToolCall`)
-  // If the routing rule changes in core, update all three. This copy does not
-  // have the web-shell's `rawOutput.status === 'background'` fallback.
+  // If the routing rule changes in core, update all three. The web shell reads
+  // `rawOutput.status`; this adapter reads the serialized runtime result.
   const normalizedToolName = entry.name.toLowerCase();
   const isTopLevelQwenAgent =
     normalizedToolName === 'agent' && parentToolUseId === undefined;
+  const isForkAgent =
+    typeof entry.input.subagent_type === 'string' &&
+    entry.input.subagent_type.toLowerCase() === 'fork';
   const defaultsToBackground =
     isTopLevelQwenAgent &&
     entry.input.run_in_background === undefined &&
     entry.input.working_dir === undefined &&
     entry.input.name === undefined &&
-    // Core keeps fork fallbacks in the foreground (`!isForkRequested` in
-    // AgentTool.execute), so an omitted-flag `subagent_type: "fork"` call must
-    // not be classified as background here.
-    (typeof entry.input.subagent_type !== 'string' ||
-      entry.input.subagent_type.toLowerCase() !== 'fork');
+    // Args alone cannot distinguish an interactive detached fork from a
+    // headless registry-backed fork. The runtime result check below handles
+    // the latter.
+    !isForkAgent;
+  const runtimeReportedBackground =
+    isTopLevelQwenAgent &&
+    isForkAgent &&
+    resultStr.startsWith('Background agent launched successfully.');
   const wasRunInBackground =
+    runtimeReportedBackground ||
     (entry.input.run_in_background === true &&
       (normalizedToolName !== 'agent' || isTopLevelQwenAgent)) ||
     defaultsToBackground;

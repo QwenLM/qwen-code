@@ -18,6 +18,7 @@ export function getDecisionFromOutcome(
 ): ToolCallDecision {
   switch (outcome) {
     case ToolConfirmationOutcome.ProceedOnce:
+    case ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault:
     case ToolConfirmationOutcome.RestorePrevious:
       return ToolCallDecision.ACCEPT;
     case ToolConfirmationOutcome.ProceedAlways:

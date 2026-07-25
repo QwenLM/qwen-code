@@ -102,6 +102,80 @@ describe('ExtensionStore', () => {
     ).toMatchObject({ effective: 'enabled', source: 'workspace_override' });
   });
 
+  it('re-keys a policy to a new id for the same name after an id-formula change', async () => {
+    const store = makeStore();
+    const oldId = 'a'.repeat(64);
+    const newId = 'b'.repeat(64);
+    await store.ensureInitialized([{ id: oldId, name: 'dotnet' }]);
+    await store.setDefaultActivation({ id: oldId, name: 'dotnet' }, 'disabled');
+    await store.setWorkspaceActivation(
+      { id: oldId, name: 'dotnet' },
+      '/workspace/a',
+      'enabled',
+    );
+
+    const snapshot = await store.ensureInitialized([
+      { id: newId, name: 'dotnet' },
+    ]);
+
+    expect(snapshot.extensions[oldId]).toBeUndefined();
+    expect(snapshot.extensions[newId]).toMatchObject({
+      name: 'dotnet',
+      defaultActivation: 'disabled',
+      workspaceOverrides: { '/workspace/a': 'enabled' },
+    });
+  });
+
+  it('re-keys across a case mismatch and normalizes the stored name', async () => {
+    const store = makeStore();
+    const oldId = 'a'.repeat(64);
+    const newId = 'b'.repeat(64);
+    await store.ensureInitialized([{ id: oldId, name: 'DotNet' }]);
+    await store.setDefaultActivation({ id: oldId, name: 'DotNet' }, 'disabled');
+
+    const snapshot = await store.ensureInitialized([
+      { id: newId, name: 'dotnet' },
+    ]);
+
+    expect(snapshot.extensions[oldId]).toBeUndefined();
+    expect(snapshot.extensions[newId]).toMatchObject({
+      name: 'dotnet',
+      defaultActivation: 'disabled',
+    });
+  });
+
+  it('re-keys only the orphaned policy when a sibling plugin installs fresh', async () => {
+    const store = makeStore();
+    const repoOnlyId = 'a'.repeat(64);
+    const dotnetId = 'b'.repeat(64);
+    const dotnetTestId = 'c'.repeat(64);
+    await store.ensureInitialized([{ id: repoOnlyId, name: 'dotnet' }]);
+
+    const snapshot = await store.ensureInitialized([
+      { id: dotnetId, name: 'dotnet' },
+      { id: dotnetTestId, name: 'dotnet-test' },
+    ]);
+
+    expect(snapshot.extensions[repoOnlyId]).toBeUndefined();
+    expect(snapshot.extensions[dotnetId]?.name).toBe('dotnet');
+    expect(snapshot.extensions[dotnetTestId]?.name).toBe('dotnet-test');
+  });
+
+  it('does not re-key a policy still owned by another loaded extension', async () => {
+    const store = makeStore();
+    const demoId = 'a'.repeat(64);
+    const otherId = 'b'.repeat(64);
+    await store.ensureInitialized([{ id: demoId, name: 'demo' }]);
+
+    const snapshot = await store.ensureInitialized([
+      { id: demoId, name: 'demo' },
+      { id: otherId, name: 'other' },
+    ]);
+
+    expect(snapshot.extensions[demoId]?.name).toBe('demo');
+    expect(snapshot.extensions[otherId]?.name).toBe('other');
+  });
+
   it('uses an inherit mask when clearing an override matched by a legacy rule', async () => {
     await fsp.writeFile(
       enablementPath,

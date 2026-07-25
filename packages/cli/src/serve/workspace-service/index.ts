@@ -57,7 +57,10 @@ import {
   WorkspaceVoiceError,
   type WorkspaceVoiceSettingsWrite,
 } from '../../services/voice-service.js';
-import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  writeStderrLine,
+  writeStderrLineSafe,
+} from '../../utils/stdioHelpers.js';
 import {
   deleteWorkspaceSkill,
   installWorkspaceSkill,
@@ -206,6 +209,8 @@ export function createDaemonWorkspaceService(
 ): DaemonWorkspaceService {
   const {
     boundWorkspace,
+    isWorkspaceTrusted,
+    assertGenerationOpen,
     contextFilename,
     statusProvider,
     workspaceProvidersStatusProvider,
@@ -224,6 +229,16 @@ export function createDaemonWorkspaceService(
     refreshExtensionsForAllSessions: refreshExtensionsForAllSessionsOnBridge,
     publishWorkspaceEvent,
   } = deps;
+
+  const loadBoundSettings = (skipLoadEnvironment = false) => {
+    const workspaceTrusted = isWorkspaceTrusted();
+    return loadSettings(boundWorkspace, {
+      skipLoadEnvironment: skipLoadEnvironment || !workspaceTrusted,
+      skipWorkspaceSettings: !workspaceTrusted,
+      workspaceTrusted,
+    });
+  };
+  const assertActiveGeneration = () => assertGenerationOpen?.();
 
   // Last skills status answered by a live ACP child, retained so
   // skill-backed slash commands (e.g. `/review`) keep autocompleting after
@@ -337,13 +352,14 @@ export function createDaemonWorkspaceService(
       _ctx: WorkspaceRequestContext,
       opts?: { timeoutMs?: number },
     ): Promise<WorkspaceAcpPreheatResult> {
-      const startedAt = Date.now();
+      assertActiveGeneration();
+      const startedAt = performance.now();
       const channelLive = () => isChannelLive?.() ?? false;
       const finish = (
         result: Omit<WorkspaceAcpPreheatResult, 'durationMs'>,
       ): WorkspaceAcpPreheatResult => ({
         ...result,
-        durationMs: Date.now() - startedAt,
+        durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
       });
 
       if (channelLive()) {
@@ -354,46 +370,75 @@ export function createDaemonWorkspaceService(
           ready: false,
           channelLive: false,
           reason: 'error',
-          error: 'ACP preheat is not wired',
+          error: 'ACP preheat is unavailable',
         });
       }
 
       if (!inFlightAcpPreheat) {
-        inFlightAcpPreheat = preheatAcpChildOnBridge().finally(() => {
-          inFlightAcpPreheat = undefined;
-        });
-        void inFlightAcpPreheat.catch((err) => {
-          writeStderrLine(
-            `qwen serve: ACP preheat failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        });
+        const promise = Promise.resolve().then(preheatAcpChildOnBridge);
+        inFlightAcpPreheat = promise;
+        void promise.then(
+          () => {
+            if (inFlightAcpPreheat === promise) {
+              inFlightAcpPreheat = undefined;
+            }
+          },
+          (err) => {
+            try {
+              writeStderrLineSafe(
+                `qwen serve: ACP preheat failed: ${err instanceof Error ? err.message : String(err)}`,
+              );
+            } finally {
+              if (inFlightAcpPreheat === promise) {
+                inFlightAcpPreheat = undefined;
+              }
+            }
+          },
+        );
       }
 
+      const sharedPreheat = inFlightAcpPreheat;
       try {
         await withTimeout(
-          inFlightAcpPreheat,
+          sharedPreheat,
           opts?.timeoutMs ?? 5_000,
           'ACP preheat',
         );
       } catch (err) {
         if (err instanceof TimeoutError) {
-          inFlightAcpPreheat = undefined;
-          writeStderrLine(
+          writeStderrLineSafe(
             `qwen serve: ACP preheat timed out after ${opts?.timeoutMs ?? 5_000}ms`,
           );
         }
         const live = channelLive();
-        const message = err instanceof Error ? err.message : String(err);
+        if (live) {
+          return finish({ ready: true, channelLive: true });
+        }
         return finish({
-          ready: live,
-          channelLive: live,
+          ready: false,
+          channelLive: false,
           reason: err instanceof TimeoutError ? 'timeout' : 'error',
-          error: message,
+          error:
+            err instanceof TimeoutError
+              ? 'ACP preheat did not complete before the timeout'
+              : 'ACP preheat failed',
         });
       }
 
       const live = channelLive();
-      return finish({ ready: live, channelLive: live });
+      if (!live) {
+        writeStderrLineSafe(
+          'qwen serve: ACP preheat resolved without a live channel',
+        );
+      }
+      return live
+        ? finish({ ready: true, channelLive: true })
+        : finish({
+            ready: false,
+            channelLive: false,
+            reason: 'error',
+            error: 'ACP preheat did not produce a live channel',
+          });
     },
 
     async getWorkspaceAcpStatus(
@@ -504,22 +549,19 @@ export function createDaemonWorkspaceService(
 
     async getWorkspaceTrustStatus(_ctx: WorkspaceRequestContext) {
       return getWorkspaceTrustStatus(
-        loadSettings(boundWorkspace).merged,
+        loadBoundSettings(true).merged,
         boundWorkspace,
       );
     },
 
     async getWorkspacePermissionsStatus(_ctx: WorkspaceRequestContext) {
-      return buildPermissionSettings(loadSettings(boundWorkspace));
+      return buildPermissionSettings(loadBoundSettings());
     },
 
     async getWorkspaceVoiceStatus(_ctx: WorkspaceRequestContext) {
       return buildWorkspaceVoiceStatus(
         boundWorkspace,
-        loadSettings(
-          boundWorkspace,
-          voiceEnv ? { skipLoadEnvironment: true } : true,
-        ),
+        loadBoundSettings(Boolean(voiceEnv)),
       );
     },
 
@@ -529,6 +571,7 @@ export function createDaemonWorkspaceService(
       ctx: WorkspaceRequestContext,
       request: WorkspaceTrustChangeRequest,
     ) {
+      assertActiveGeneration();
       publishWorkspaceEvent({
         type: 'trust_change_requested',
         data: {
@@ -549,6 +592,7 @@ export function createDaemonWorkspaceService(
       ctx: WorkspaceRequestContext,
       request: WorkspacePermissionRulesUpdate,
     ) {
+      assertActiveGeneration();
       const key = `permissions.${request.ruleType}`;
       try {
         const result = await invokeWorkspaceCommand(
@@ -560,6 +604,7 @@ export function createDaemonWorkspaceService(
             rules: request.rules,
           },
         );
+        assertActiveGeneration();
         publishWorkspaceEvent({
           type: 'settings_changed',
           data: { key, value: request.rules, scope: request.scope },
@@ -578,6 +623,7 @@ export function createDaemonWorkspaceService(
       ctx: WorkspaceRequestContext,
       request: WorkspaceVoiceSettingsUpdate,
     ) {
+      assertActiveGeneration();
       if (!persistSettings && !persistSetting) {
         throw new WorkspaceVoiceError(
           501,
@@ -586,16 +632,10 @@ export function createDaemonWorkspaceService(
         );
       }
 
-      const settings = loadSettings(
-        boundWorkspace,
-        voiceEnv ? { skipLoadEnvironment: true } : true,
-      );
+      const settings = loadBoundSettings(Boolean(voiceEnv));
       validateWorkspaceVoiceState(settings, request, { env: voiceEnv });
-      const workspaceTrusted =
-        getWorkspaceTrustStatus(settings.merged, boundWorkspace).effective
-          .state === 'trusted';
       const writes = buildWorkspaceVoiceSettingsWrites(settings, request, {
-        workspaceTrusted,
+        workspaceTrusted: isWorkspaceTrusted(),
         ...(voiceSettingsScope ? { scopeOverride: voiceSettingsScope } : {}),
       });
 
@@ -613,15 +653,17 @@ export function createDaemonWorkspaceService(
 
       if (persistSettings) {
         try {
-          await persistSettings(boundWorkspace, writes);
+          await persistSettings(boundWorkspace, writes, assertGenerationOpen);
         } catch (err) {
           if (err instanceof WorkspaceSettingsPartialPersistError) {
+            assertActiveGeneration();
             for (const write of err.committedWrites) {
               publishWrite(write);
             }
           }
           throw err;
         }
+        assertActiveGeneration();
         for (const write of writes) {
           publishWrite(write);
         }
@@ -634,8 +676,10 @@ export function createDaemonWorkspaceService(
               write.scope,
               write.key,
               write.value,
+              assertGenerationOpen,
             );
           } catch (err) {
+            assertActiveGeneration();
             writeStderrLine(
               `qwen serve: workspace voice partial persist error (workspace=${boundWorkspace}, committed=${committed.length}/${writes.length}, failedKey=${write.key}, failedScope=${voiceSettingsScopeToWire(write.scope)}): ${
                 err instanceof Error ? err.message : String(err)
@@ -650,8 +694,10 @@ export function createDaemonWorkspaceService(
               err,
             );
           }
+          assertActiveGeneration();
           committed.push(write);
         }
+        assertActiveGeneration();
         for (const write of committed) {
           publishWrite(write);
         }
@@ -659,10 +705,7 @@ export function createDaemonWorkspaceService(
 
       return buildWorkspaceVoiceStatus(
         boundWorkspace,
-        loadSettings(
-          boundWorkspace,
-          voiceEnv ? { skipLoadEnvironment: true } : true,
-        ),
+        loadBoundSettings(Boolean(voiceEnv)),
       );
     },
 
@@ -671,7 +714,14 @@ export function createDaemonWorkspaceService(
       toolName: string,
       enabled: boolean,
     ) {
-      await persistDisabledTools(boundWorkspace, toolName, enabled);
+      assertActiveGeneration();
+      await persistDisabledTools(
+        boundWorkspace,
+        toolName,
+        enabled,
+        assertGenerationOpen,
+      );
+      assertActiveGeneration();
       publishWorkspaceEvent({
         type: 'tool_toggled',
         data: { toolName, enabled },
@@ -685,6 +735,7 @@ export function createDaemonWorkspaceService(
       requestedSkillName: string,
       enabled: boolean,
     ): Promise<WorkspaceSkillToggleResult> {
+      assertActiveGeneration();
       const normalizedName = requestedSkillName.trim().toLowerCase();
       const status = await getWorkspaceSkillsStatus();
       const skill = status.skills.find(
@@ -698,7 +749,7 @@ export function createDaemonWorkspaceService(
         );
       }
 
-      const disabled = loadSettings(boundWorkspace).merged.skills?.disabled;
+      const disabled = loadBoundSettings().merged.skills?.disabled;
       const disabledNames = new Set(
         (Array.isArray(disabled) ? disabled : [])
           .filter((name): name is string => typeof name === 'string')
@@ -720,7 +771,9 @@ export function createDaemonWorkspaceService(
         boundWorkspace,
         skill.name,
         enabled,
+        assertGenerationOpen,
       );
+      assertActiveGeneration();
       const channelLive = isChannelLive?.() ?? false;
       let activation: WorkspaceSkillToggleResult['activation'] = channelLive
         ? 'applied'
@@ -738,6 +791,7 @@ export function createDaemonWorkspaceService(
                 SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
                 { cwd: boundWorkspace },
               );
+            assertActiveGeneration();
             sessionsRefreshed = refreshed.sessionsRefreshed;
             sessionsFailed = refreshed.sessionsFailed;
             if (sessionsFailed > 0) activation = 'partial';
@@ -757,6 +811,7 @@ export function createDaemonWorkspaceService(
           }
         }
 
+        assertActiveGeneration();
         publishWorkspaceEvent({
           type: 'settings_changed',
           data: {
@@ -783,12 +838,16 @@ export function createDaemonWorkspaceService(
       _ctx: WorkspaceRequestContext,
       request: WorkspaceSkillInstallRequest,
     ): Promise<WorkspaceSkillMutationResult> {
+      assertActiveGeneration();
       const result = await installWorkspaceSkill(
         boundWorkspace,
         request,
         skillInstallEnv?.['GH_TOKEN'] ?? skillInstallEnv?.['GITHUB_TOKEN'],
+        assertGenerationOpen,
       );
+      assertActiveGeneration();
       await refreshWorkspaceSkillsAfterMutation();
+      assertActiveGeneration();
       return result;
     },
 
@@ -797,6 +856,7 @@ export function createDaemonWorkspaceService(
       requestedSkillName: string,
       scope: WorkspaceSkillScope,
     ): Promise<WorkspaceSkillMutationResult> {
+      assertActiveGeneration();
       const normalizedName = requestedSkillName.trim().toLowerCase();
       const status = await getWorkspaceSkillsStatus();
       const skill = status.skills.find(
@@ -816,8 +876,11 @@ export function createDaemonWorkspaceService(
         scope,
         skill.name,
         skill.installedPath,
+        assertGenerationOpen,
       );
+      assertActiveGeneration();
       await refreshWorkspaceSkillsAfterMutation();
+      assertActiveGeneration();
       return result;
     },
 
@@ -825,6 +888,7 @@ export function createDaemonWorkspaceService(
       ctx: WorkspaceRequestContext,
       opts: { force?: boolean },
     ) {
+      assertActiveGeneration();
       // Resolve the context filename against the workspace root.
       const filename = contextFilename;
       const target = path.resolve(boundWorkspace, filename);
@@ -912,6 +976,7 @@ export function createDaemonWorkspaceService(
         // Atomic exclusive create to close TOCTOU window.
         let fh: import('node:fs/promises').FileHandle;
         try {
+          assertActiveGeneration();
           fh = await fs.open(target, 'wx');
         } catch (err) {
           const code = (err as { code?: unknown } | null | undefined)?.code;
@@ -932,6 +997,7 @@ export function createDaemonWorkspaceService(
           // TOCTOU window between `canonicalizeExistingAncestor` and
           // `fs.open`. Must verify before writing content.
           await verifyParentPostOpen(target, wsCanonical, fh);
+          assertActiveGeneration();
           await fh.writeFile('', 'utf8');
         } finally {
           await fh.close();
@@ -941,6 +1007,7 @@ export function createDaemonWorkspaceService(
         // may have been swapped in between our lstat check and this open.
         let overwriteFh: import('node:fs/promises').FileHandle;
         try {
+          assertActiveGeneration();
           overwriteFh = await fs.open(
             target,
             fsConstants.O_WRONLY | (fsConstants.O_NOFOLLOW ?? 0),
@@ -972,6 +1039,7 @@ export function createDaemonWorkspaceService(
           // Post-open parent re-verification (same as create path).
           await verifyParentPostOpen(target, wsCanonical, overwriteFh);
           // Truncate AFTER verify, using the fd we already hold.
+          assertActiveGeneration();
           await overwriteFh.truncate(0);
         } finally {
           await overwriteFh.close();
@@ -979,6 +1047,7 @@ export function createDaemonWorkspaceService(
       }
       // action === 'noop' — no write needed.
 
+      assertActiveGeneration();
       publishWorkspaceEvent({
         type: 'workspace_initialized',
         data: { path: target, action },
@@ -993,6 +1062,7 @@ export function createDaemonWorkspaceService(
       serverName: string,
       opts?: { entryIndex?: number },
     ) {
+      assertActiveGeneration();
       const params: Record<string, unknown> = { serverName };
       if (opts?.entryIndex !== undefined) {
         params['entryIndex'] = opts.entryIndex;
@@ -1024,6 +1094,7 @@ export function createDaemonWorkspaceService(
         throw err;
       }
 
+      assertActiveGeneration();
       // Pool-mode: fan out per-entry events.
       if ('entries' in result) {
         const entries = Array.isArray(result.entries) ? result.entries : [];
@@ -1093,15 +1164,17 @@ export function createDaemonWorkspaceService(
     },
 
     async reload(ctx: WorkspaceRequestContext) {
+      assertActiveGeneration();
       if (deps.reloadDaemonEnv) {
         try {
-          await deps.reloadDaemonEnv(boundWorkspace);
+          await deps.reloadDaemonEnv(boundWorkspace, assertGenerationOpen);
         } catch (err) {
           writeStderrLine(
             `qwen serve: daemon reload failed: ${err instanceof Error ? err.message : String(err)}`,
           );
         }
       }
+      assertActiveGeneration();
 
       let childReloaded = false;
       let env: { updatedKeys: string[]; removedKeys: string[] } = {
@@ -1137,6 +1210,7 @@ export function createDaemonWorkspaceService(
         }
       }
 
+      assertActiveGeneration();
       publishWorkspaceEvent({
         type: 'settings_reloaded',
         data: {
@@ -1165,6 +1239,7 @@ export function createDaemonWorkspaceService(
     },
 
     async refreshExtensionsForAllSessions() {
+      assertActiveGeneration();
       try {
         if (!refreshExtensionsForAllSessionsOnBridge) {
           throw new Error('refreshExtensionsForAllSessions is not wired');

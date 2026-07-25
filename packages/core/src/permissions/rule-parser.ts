@@ -106,6 +106,11 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   WebFetch: 'web_fetch',
   WebFetchTool: 'web_fetch',
 
+  // WebSearch tool
+  web_search: 'web_search',
+  WebSearch: 'web_search',
+  WebSearchTool: 'web_search',
+
   // ReadMcpResource tool
   read_mcp_resource: 'read_mcp_resource',
   ReadMcpResource: 'read_mcp_resource',
@@ -408,6 +413,7 @@ const CANONICAL_TO_RULE_DISPLAY: Readonly<Record<string, string>> = {
   monitor: 'Monitor',
   // Web
   web_fetch: 'WebFetch',
+  web_search: 'WebSearch',
   read_mcp_resource: 'ReadMcpResource',
   // Agent / Skill
   agent: 'Agent',
@@ -552,6 +558,7 @@ const DISPLAY_NAME_TO_VERB: Readonly<Record<string, string>> = {
   Bash: 'run commands',
   Monitor: 'monitor commands',
   WebFetch: 'fetch from',
+  WebSearch: 'search the web',
   Agent: 'use agent',
   Skill: 'use skill',
   SaveMemory: 'save memory',

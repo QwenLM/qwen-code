@@ -1016,6 +1016,21 @@ describe('fastOnly and voiceOnly flags', () => {
     expect(models.find((m) => m.id === 'whisper-1')?.voiceOnly).toBe(true);
   });
 
+  it('should propagate imageOnly flag to AvailableModel', () => {
+    const config: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'qwen-image-2.0',
+          imageOnly: true,
+        },
+      ],
+    };
+    const registry = new ModelRegistry(config);
+    expect(
+      registry.getModelsForAuthType(AuthType.USE_OPENAI)[0]?.imageOnly,
+    ).toBe(true);
+  });
+
   it('should warn when both fastOnly and voiceOnly are set', () => {
     const config: ModelProvidersConfig = {
       openai: [

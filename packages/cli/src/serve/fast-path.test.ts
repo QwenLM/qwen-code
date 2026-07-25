@@ -69,6 +69,11 @@ const originalRateLimit = process.env['QWEN_SERVE_RATE_LIMIT'];
 const originalRateLimitPrompt = process.env['QWEN_SERVE_RATE_LIMIT_PROMPT'];
 const originalCloudShell = process.env['CLOUD_SHELL'];
 const originalGoogleCloudProject = process.env['GOOGLE_CLOUD_PROJECT'];
+const originalNodeCompileCache = process.env['NODE_COMPILE_CACHE'];
+const originalNodeDisableCompileCache =
+  process.env['NODE_DISABLE_COMPILE_CACHE'];
+const originalPendingCompileCache =
+  process.env['QWEN_CODE_PENDING_COMPILE_CACHE'];
 const originalCwd = process.cwd();
 const cliPackageRoot = process.cwd();
 
@@ -334,6 +339,22 @@ afterEach(() => {
   } else {
     process.env['GOOGLE_CLOUD_PROJECT'] = originalGoogleCloudProject;
   }
+  if (originalNodeCompileCache === undefined) {
+    delete process.env['NODE_COMPILE_CACHE'];
+  } else {
+    process.env['NODE_COMPILE_CACHE'] = originalNodeCompileCache;
+  }
+  if (originalNodeDisableCompileCache === undefined) {
+    delete process.env['NODE_DISABLE_COMPILE_CACHE'];
+  } else {
+    process.env['NODE_DISABLE_COMPILE_CACHE'] = originalNodeDisableCompileCache;
+  }
+  if (originalPendingCompileCache === undefined) {
+    delete process.env['QWEN_CODE_PENDING_COMPILE_CACHE'];
+  } else {
+    process.env['QWEN_CODE_PENDING_COMPILE_CACHE'] =
+      originalPendingCompileCache;
+  }
   if (originalQwenRuntimeDir === undefined) {
     delete process.env['QWEN_RUNTIME_DIR'];
   } else {
@@ -452,9 +473,13 @@ describe('CLI entry import boundary', () => {
     expect(requestHelpersSource).toContain(
       "import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';",
     );
-    expect(requestHelpersSource).toContain(
-      "import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';",
+    // MAX_WORKSPACE_PATH_LENGTH (and, since #7139, the sandbox path
+    // translation) must come from the workspacePaths subpath — never the
+    // acp-bridge barrel or the compatibility shim.
+    expect(requestHelpersSource).toMatch(
+      /import \{[^}]*\bMAX_WORKSPACE_PATH_LENGTH\b[^}]*\} from '@qwen-code\/acp-bridge\/workspacePaths';/,
     );
+    expect(requestHelpersSource).not.toMatch(/from '@qwen-code\/acp-bridge';/);
   });
 
   it('keeps the runQwenServe static source graph free of ACP runtime modules', () => {
@@ -642,6 +667,7 @@ describe('serve fast path argument parsing', () => {
       ['prompt-deadline-ms', ['--prompt-deadline-ms', '1000']],
       ['writer-idle-timeout-ms', ['--writer-idle-timeout-ms', '1000']],
       ['channel-idle-timeout-ms', ['--channel-idle-timeout-ms', '1000']],
+      ['initialize-timeout-ms', ['--initialize-timeout-ms', '30000']],
       ['session-reap-interval-ms', ['--session-reap-interval-ms', '1000']],
       ['session-idle-timeout-ms', ['--session-idle-timeout-ms', '1000']],
       [
@@ -1126,6 +1152,26 @@ describe('serve fast path environment bootstrap', () => {
     await bootstrapServeFastPathEnvironment(tempWorkspace);
 
     expect(process.env['QWEN_SERVER_TOKEN']).toBe('from-workspace-env');
+  });
+
+  it('preserves workspace .env compile cache over the pending default', async () => {
+    delete process.env['NODE_COMPILE_CACHE'];
+    delete process.env['NODE_DISABLE_COMPILE_CACHE'];
+    process.env['QWEN_CODE_PENDING_COMPILE_CACHE'] = '/tmp/generated-cache';
+    useTempQwenHome();
+    tempWorkspace = realpathSync(
+      mkdtempSync(join(os.tmpdir(), 'qws-fast-path-compile-cache-')),
+    );
+    mkdirSync(join(tempWorkspace, '.qwen'));
+    writeFileSync(
+      join(tempWorkspace, '.qwen', '.env'),
+      'NODE_COMPILE_CACHE=/tmp/operator-cache\n',
+    );
+
+    await bootstrapServeFastPathEnvironment(tempWorkspace);
+
+    expect(process.env['NODE_COMPILE_CACHE']).toBe('/tmp/operator-cache');
+    expect(process.env['QWEN_CODE_PENDING_COMPILE_CACHE']).toBeUndefined();
   });
 
   it('loads .env from --workspace even when launched from another directory', async () => {

@@ -32,6 +32,10 @@ import {
   runWithForkedChatModel,
 } from '../utils/forkedAgent.js';
 import { getFilterReason, SUGGESTION_PROMPT } from './suggestionGenerator.js';
+import {
+  finalizeToolResponses,
+  type ToolResponseBudgetEntry,
+} from '../utils/tool-response-finalizer.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -272,7 +276,8 @@ async function runSpeculativeLoop(
       }
 
       // Process each function call through the tool gate
-      const functionResponses: Part[] = [];
+      let functionResponses: Part[] = [];
+      const responseEntries: ToolResponseBudgetEntry[] = [];
       let hitBoundary = false;
 
       for (const part of functionCalls) {
@@ -280,6 +285,8 @@ async function runSpeculativeLoop(
         const name = fc.name ?? '';
         const id = fc.id;
         const args = (fc.args ?? {}) as Record<string, unknown>;
+        const persistenceCallId =
+          id ?? `${name}-${state.id}-${turn}-${responseEntries.length}`;
         const gate = await evaluateToolCall(
           name,
           args,
@@ -308,12 +315,18 @@ async function runSpeculativeLoop(
           const toolRegistry = config.getToolRegistry();
           const tool = await toolRegistry.ensureTool(name);
           if (!tool) {
-            functionResponses.push({
+            const responsePart: Part = {
               functionResponse: {
                 ...(id ? { id } : {}),
                 name,
                 response: { error: `Tool '${name}' not found` },
               },
+            };
+            functionResponses.push(responsePart);
+            responseEntries.push({
+              callId: persistenceCallId,
+              toolName: name,
+              responseParts: [responsePart],
             });
             continue;
           }
@@ -343,8 +356,14 @@ async function runSpeculativeLoop(
                 return { ...responsePart, functionResponse };
               });
           functionResponses.push(...responseParts);
+          responseEntries.push({
+            callId: persistenceCallId,
+            toolName: name,
+            responseParts,
+            persistedOutputFiles: result.persistedOutputFiles,
+          });
         } catch (error: unknown) {
-          functionResponses.push({
+          const responsePart: Part = {
             functionResponse: {
               ...(id ? { id } : {}),
               name,
@@ -355,8 +374,19 @@ async function runSpeculativeLoop(
                     : 'Tool execution failed',
               },
             },
+          };
+          functionResponses.push(responsePart);
+          responseEntries.push({
+            callId: persistenceCallId,
+            toolName: name,
+            responseParts: [responsePart],
           });
         }
+      }
+
+      if (responseEntries.length > 0) {
+        const finalized = await finalizeToolResponses(config, responseEntries);
+        functionResponses = finalized.flatMap((entry) => entry.responseParts);
       }
 
       if (hitBoundary) {

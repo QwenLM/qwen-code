@@ -9,8 +9,14 @@ import { join } from 'node:path';
 
 const cleanupFunctions: Array<(() => void) | (() => Promise<void>)> = [];
 
-export function registerCleanup(fn: (() => void) | (() => Promise<void>)) {
+export function registerCleanup(
+  fn: (() => void) | (() => Promise<void>),
+): () => void {
   cleanupFunctions.push(fn);
+  return () => {
+    const index = cleanupFunctions.indexOf(fn);
+    if (index !== -1) cleanupFunctions.splice(index, 1);
+  };
 }
 
 /**

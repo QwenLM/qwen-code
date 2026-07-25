@@ -306,6 +306,55 @@ describe('SessionTranscriptReader', () => {
     expect(second.hasMore).toBe(false);
   });
 
+  it('starts backward paging at the persisted tail', async () => {
+    await writeRecords([
+      record('u1', null, 'first prompt'),
+      record('a1', 'u1', 'first answer'),
+      record('u2', 'a1', 'second prompt'),
+      record('a2', 'u2', 'second answer'),
+    ]);
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const page = await reader.readPage(sessionId, {
+      direction: 'backward',
+      limit: 2,
+    });
+
+    expect(page.records.map((item) => item.uuid)).toEqual(['u2', 'a2']);
+    expect(page.direction).toBe('backward');
+    expect(page.hasMore).toBe(true);
+    expect(page.nextCursorState).toMatchObject({
+      position: 2,
+      direction: 'backward',
+    });
+  });
+
+  it('includes leading session metadata with the first backward page', async () => {
+    const sessionSource = {
+      ...record('source', null, 'session source'),
+      type: 'system' as const,
+      subtype: 'session_source' as const,
+    };
+    await writeRecords([
+      sessionSource,
+      record('u1', 'source', 'first prompt'),
+      record('a1', 'u1', 'first answer'),
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { direction: 'backward', limit: 100 },
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual([
+      'source',
+      'u1',
+      'a1',
+    ]);
+    expect(page.hasMore).toBe(false);
+    expect(page.nextCursorState).toBeUndefined();
+  });
+
   it('keeps backward pages within a normal user turn boundary', async () => {
     const toolCall = record('a-tool', 'u1', 'call tool');
     const toolResult = {

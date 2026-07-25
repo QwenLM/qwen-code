@@ -305,6 +305,97 @@ describe('UiTelemetryService', () => {
     });
   });
 
+  describe('Generation Timing Metrics', () => {
+    const timedResponse = (
+      overrides: Partial<ApiResponseEvent> = {},
+    ): ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE } =>
+      ({
+        'event.name': EVENT_API_RESPONSE,
+        model: 'qwen3-coder',
+        prompt_id: 'user-query',
+        duration_ms: 500,
+        ttft_ms: 100,
+        input_token_count: 10,
+        output_token_count: 20,
+        total_token_count: 30,
+        cached_content_token_count: 0,
+        thoughts_token_count: 0,
+        ...overrides,
+      }) as ApiResponseEvent & {
+        'event.name': typeof EVENT_API_RESPONSE;
+      };
+
+    it('aggregates timed streaming responses and keeps the latest sample', () => {
+      service.addEvent(timedResponse());
+      service.addEvent(
+        timedResponse({
+          model: 'qwen-plus',
+          duration_ms: 800,
+          ttft_ms: 200,
+          output_token_count: 30,
+        }),
+      );
+
+      expect(service.getMetrics().generation).toEqual({
+        timedRequests: 2,
+        totalTtftMs: 300,
+        totalGenerationDurationMs: 1000,
+        totalThroughputOutputTokens: 50,
+        last: {
+          model: 'qwen-plus',
+          ttftMs: 200,
+          generationDurationMs: 600,
+          outputTokens: 30,
+        },
+      });
+    });
+
+    it('does not create samples for missing TTFT or internal prompts', () => {
+      service.addEvent(timedResponse({ ttft_ms: undefined }));
+      service.addEvent(timedResponse({ prompt_id: 'prompt_suggestion' }));
+
+      expect(service.getMetrics().generation).toBeUndefined();
+    });
+
+    it('clamps sampling time when TTFT exceeds request duration', () => {
+      service.addEvent(timedResponse({ duration_ms: 100, ttft_ms: 150 }));
+
+      expect(service.getMetrics().generation).toMatchObject({
+        timedRequests: 1,
+        totalGenerationDurationMs: 0,
+        totalThroughputOutputTokens: 0,
+        last: {
+          ttftMs: 150,
+          generationDurationMs: 0,
+        },
+      });
+    });
+
+    it('keeps generation metrics isolated per session', () => {
+      service.addEvent(timedResponse(), 'session-a');
+      service.addEvent(
+        timedResponse({ model: 'qwen-plus', ttft_ms: 250 }),
+        'session-b',
+      );
+
+      expect(
+        service.getMetricsForSession('session-a').generation?.last?.model,
+      ).toBe('qwen3-coder');
+      expect(
+        service.getMetricsForSession('session-b').generation?.last?.model,
+      ).toBe('qwen-plus');
+    });
+
+    it('clears generation metrics when the service resets', () => {
+      service.addEvent(timedResponse());
+      expect(service.getMetrics().generation).toBeDefined();
+
+      service.reset();
+
+      expect(service.getMetrics().generation).toBeUndefined();
+    });
+  });
+
   describe('API Error Event Processing', () => {
     it('should process a single ApiErrorEvent', () => {
       const event = {

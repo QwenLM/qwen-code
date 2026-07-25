@@ -17,6 +17,7 @@ import { MAX_REGISTERED_WORKSPACES } from './workspace-inputs.js';
 const SCHEMA_VERSION = 1;
 const MAX_SECONDARY_WORKSPACES = MAX_REGISTERED_WORKSPACES - 1;
 const MAX_STORE_BYTES = 256 * 1024;
+export const MAX_WORKSPACE_DISPLAY_NAME_LENGTH = 256;
 const LOCK_OPTIONS: lockfile.LockOptions = {
   realpath: false,
   stale: 10_000,
@@ -34,6 +35,44 @@ export interface WorkspaceRegistrationSnapshot {
   schemaVersion: 1;
   primaryWorkspace: string;
   workspaces: string[];
+  displayNames?: Record<string, string>;
+}
+
+export class WorkspaceDisplayNameValidationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'WorkspaceDisplayNameValidationError';
+  }
+}
+
+function containsDisplayNameControlCharacter(value: string): boolean {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0)!;
+    if (codePoint <= 0x1f || codePoint === 0x7f) return true;
+  }
+  return false;
+}
+
+export function normalizeWorkspaceDisplayName(
+  value: unknown,
+): string | undefined {
+  if (typeof value !== 'string') {
+    throw new WorkspaceDisplayNameValidationError(
+      'Workspace display name must be a string',
+    );
+  }
+  const trimmed = value.trim();
+  if (trimmed.length > MAX_WORKSPACE_DISPLAY_NAME_LENGTH) {
+    throw new WorkspaceDisplayNameValidationError(
+      `Workspace display name exceeds ${MAX_WORKSPACE_DISPLAY_NAME_LENGTH} characters`,
+    );
+  }
+  if (containsDisplayNameControlCharacter(trimmed)) {
+    throw new WorkspaceDisplayNameValidationError(
+      'Workspace display name contains control characters',
+    );
+  }
+  return trimmed.length === 0 ? undefined : trimmed;
 }
 
 export class WorkspaceRegistrationStoreError extends Error {
@@ -99,6 +138,45 @@ function validateWorkspacePath(value: unknown, label: string): string {
   return value;
 }
 
+function validateStoredDisplayName(value: unknown, label: string): string {
+  let displayName: string | undefined;
+  try {
+    displayName = normalizeWorkspaceDisplayName(value);
+  } catch (err) {
+    throw new WorkspaceRegistrationStoreError(
+      `${label} is invalid: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  if (displayName === undefined) {
+    throw new WorkspaceRegistrationStoreError(`${label} must not be empty`);
+  }
+  return displayName;
+}
+
+function setSnapshotDisplayName(
+  snapshot: WorkspaceRegistrationSnapshot,
+  registrationId: string,
+  displayName: string | undefined,
+): boolean {
+  if (displayName === undefined) {
+    if (
+      !snapshot.displayNames ||
+      !Object.hasOwn(snapshot.displayNames, registrationId)
+    ) {
+      return false;
+    }
+    delete snapshot.displayNames[registrationId];
+    if (Object.keys(snapshot.displayNames).length === 0) {
+      delete snapshot.displayNames;
+    }
+    return true;
+  }
+  if (snapshot.displayNames?.[registrationId] === displayName) return false;
+  snapshot.displayNames ??= {};
+  snapshot.displayNames[registrationId] = displayName;
+  return true;
+}
+
 function parseSnapshot(
   raw: string,
   primaryWorkspace: string,
@@ -160,7 +238,38 @@ function parseSnapshot(
     seen.add(normalizedWorkspace);
     return workspace;
   });
-  return { schemaVersion: SCHEMA_VERSION, primaryWorkspace, workspaces };
+  const rawDisplayNames = record['displayNames'];
+  let displayNames: Record<string, string> | undefined;
+  if (rawDisplayNames !== undefined) {
+    if (
+      typeof rawDisplayNames !== 'object' ||
+      rawDisplayNames === null ||
+      Array.isArray(rawDisplayNames)
+    ) {
+      throw new WorkspaceRegistrationStoreError(
+        'Workspace registration store displayNames must be an object',
+      );
+    }
+    const registrationIds = new Set(workspaces.map(workspaceRegistrationId));
+    for (const [registrationId, value] of Object.entries(rawDisplayNames)) {
+      if (!registrationIds.has(registrationId)) {
+        throw new WorkspaceRegistrationStoreError(
+          `Workspace registration store displayNames contains unknown registration id ${JSON.stringify(registrationId)}`,
+        );
+      }
+      displayNames ??= {};
+      displayNames[registrationId] = validateStoredDisplayName(
+        value,
+        `displayNames[${JSON.stringify(registrationId)}]`,
+      );
+    }
+  }
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    primaryWorkspace,
+    workspaces,
+    ...(displayNames ? { displayNames } : {}),
+  };
 }
 
 const updateChains = new Map<string, Promise<unknown>>();
@@ -312,8 +421,12 @@ export class WorkspaceRegistrationStore {
     }
   }
 
-  async add(workspace: string): Promise<boolean> {
+  async add(workspace: string, displayName?: string): Promise<boolean> {
     validateWorkspacePath(workspace, 'workspace');
+    const normalizedDisplayName =
+      displayName === undefined
+        ? undefined
+        : normalizeWorkspaceDisplayName(displayName);
     if (
       normalizedScopePath(workspace) ===
       normalizedScopePath(this.primaryWorkspace)
@@ -337,6 +450,11 @@ export class WorkspaceRegistrationStore {
         );
       }
       snapshot.workspaces.push(workspace);
+      if (normalizedDisplayName !== undefined) {
+        snapshot.displayNames ??= {};
+        snapshot.displayNames[workspaceRegistrationId(workspace)] =
+          normalizedDisplayName;
+      }
       return true;
     });
   }
@@ -345,18 +463,53 @@ export class WorkspaceRegistrationStore {
     return (await this.removeByIds([id])) > 0;
   }
 
+  async setDisplayNameByIds(
+    ids: readonly string[],
+    displayName?: string,
+  ): Promise<number> {
+    const normalizedDisplayName =
+      displayName === undefined
+        ? undefined
+        : normalizeWorkspaceDisplayName(displayName);
+    const requested = new Set(ids);
+    if (requested.size === 0) return 0;
+    let matched = 0;
+    await this.update((snapshot) => {
+      let changed = false;
+      for (const workspace of snapshot.workspaces) {
+        const registrationId = workspaceRegistrationId(workspace);
+        if (!requested.has(registrationId)) continue;
+        matched++;
+        changed =
+          setSnapshotDisplayName(
+            snapshot,
+            registrationId,
+            normalizedDisplayName,
+          ) || changed;
+      }
+      return changed;
+    });
+    return matched;
+  }
+
   async removeByIds(ids: readonly string[]): Promise<number> {
     const requested = new Set(ids);
     if (requested.size === 0) return 0;
     let removed = 0;
     await this.update((snapshot) => {
+      const removedIds = new Set<string>();
       const retained = snapshot.workspaces.filter((workspace) => {
-        if (!requested.has(workspaceRegistrationId(workspace))) return true;
+        const registrationId = workspaceRegistrationId(workspace);
+        if (!requested.has(registrationId)) return true;
         removed++;
+        removedIds.add(registrationId);
         return false;
       });
       if (removed === 0) return false;
       snapshot.workspaces.splice(0, snapshot.workspaces.length, ...retained);
+      for (const registrationId of removedIds) {
+        setSnapshotDisplayName(snapshot, registrationId, undefined);
+      }
       return true;
     });
     return removed;

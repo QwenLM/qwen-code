@@ -81,6 +81,7 @@ export const EVENT_PERFORMANCE_REGRESSION = 'qwen-code.performance.regression';
 export const EVENT_MEMORY_EXTRACT = 'qwen-code.memory.extract';
 export const EVENT_MEMORY_DREAM = 'qwen-code.memory.dream';
 export const EVENT_MEMORY_RECALL = 'qwen-code.memory.recall';
+export const EVENT_MEMORY_RECALL_DELIVERY = 'qwen-code.memory.recall.delivery';
 
 // Session Tracing Span Names
 export const SPAN_INTERACTION = 'qwen-code.interaction';

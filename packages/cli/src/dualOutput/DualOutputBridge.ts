@@ -17,6 +17,7 @@ import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
 } from '@qwen-code/qwen-code-core';
+import type { PermissionSuggestion } from '../nonInteractive/types.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { StreamJsonOutputAdapter } from '../nonInteractive/io/index.js';
@@ -291,6 +292,7 @@ export class DualOutputBridge {
     toolUseId: string,
     input: unknown,
     blockedPath: string | null = null,
+    permissionSuggestions: PermissionSuggestion[] | null = null,
   ): void {
     if (!this.active) return;
     this.disableIfBufferOverflowed();
@@ -302,6 +304,7 @@ export class DualOutputBridge {
         toolUseId,
         input,
         blockedPath,
+        permissionSuggestions,
       );
     } catch (err) {
       debugLogger.error('DualOutput emitPermissionRequest error:', err);

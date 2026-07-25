@@ -15,6 +15,7 @@ import {
   type ChatRecord,
 } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import type { SessionWriterLease } from './session-writer-lease.js';
 
 const tryGenerateSessionTitleMock = vi.fn();
 
@@ -73,9 +74,42 @@ function findCustomTitleRecord(): ChatRecord | undefined {
     .find((r) => r.type === 'system' && r.subtype === 'custom_title');
 }
 
+function resumedSessionWithTitle(
+  title: string,
+  source?: 'manual' | 'auto',
+): NonNullable<ReturnType<Config['getResumedSessionData']>> {
+  return {
+    conversation: {
+      sessionId: 'test-session-id',
+      projectHash: 'test-project',
+      startTime: '2026-01-01T00:00:00.000Z',
+      lastUpdated: '2026-01-01T00:00:00.000Z',
+      messages: [
+        {
+          uuid: 'title-uuid',
+          parentUuid: null,
+          sessionId: 'test-session-id',
+          timestamp: '2026-01-01T00:00:00.000Z',
+          type: 'system',
+          subtype: 'custom_title',
+          cwd: '/test/project/root',
+          version: '1.0.0',
+          systemPayload: {
+            customTitle: title,
+            ...(source ? { titleSource: source } : {}),
+          },
+        },
+      ],
+    },
+    filePath: '/test/session.jsonl',
+    lastCompletedUuid: 'parent-uuid',
+  };
+}
+
 describe('ChatRecordingService - auto-title trigger', () => {
   let chatRecordingService: ChatRecordingService;
   let mockConfig: Config;
+  let mockLease: SessionWriterLease;
   let fastModelValue: string | undefined;
   let uuidCounter = 0;
 
@@ -133,12 +167,40 @@ describe('ChatRecordingService - auto-title trigger', () => {
     vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
     vi.spyOn(fs, 'existsSync').mockReturnValue(false);
 
-    chatRecordingService = new ChatRecordingService(mockConfig);
-
     // writeLine is async; mockResolvedValue lets the writeChain settle when
     // tests await flushMicrotasks() / chatRecordingService.flush().
     vi.mocked(jsonl.writeLine).mockResolvedValue(undefined);
+    mockLease = {
+      sessionId: 'test-session-id',
+      ownerId: 'test-owner-id',
+      appendJsonLine: vi.fn((record: unknown) =>
+        jsonl.writeLine('/test/session.jsonl', record),
+      ),
+      assertOwnedAndUnchanged: vi.fn().mockResolvedValue(undefined),
+      release: vi.fn().mockResolvedValue(undefined),
+    } as unknown as SessionWriterLease;
+    chatRecordingService = activateRecording(
+      new ChatRecordingService(mockConfig, undefined, true),
+      mockConfig,
+    );
   });
+
+  function activateRecording(
+    service: ChatRecordingService,
+    config: Config,
+  ): ChatRecordingService {
+    const resumed = config.getResumedSessionData();
+    service.activate(
+      mockLease,
+      resumed && !resumed.conversation
+        ? {
+            conversation: { messages: [] },
+            lastCompletedUuid: resumed.lastCompletedUuid,
+          }
+        : resumed,
+    );
+    return service;
+  }
 
   afterEach(() => {
     vi.restoreAllMocks();
@@ -352,13 +414,18 @@ describe('ChatRecordingService - auto-title trigger', () => {
     };
     const resumedConfig = {
       ...mockConfig,
-      getResumedSessionData: vi.fn().mockReturnValue({
-        lastCompletedUuid: 'parent-uuid',
-      }),
+      getResumedSessionData: vi
+        .fn()
+        .mockReturnValue(
+          resumedSessionWithTitle('Auto-generated title', 'auto'),
+        ),
       getSessionService: vi.fn().mockReturnValue(mockSessionService),
     } as unknown as Config;
 
-    const svc = new ChatRecordingService(resumedConfig);
+    const svc = activateRecording(
+      new ChatRecordingService(resumedConfig, undefined, true),
+      resumedConfig,
+    );
 
     expect(svc.getCurrentCustomTitle()).toBe('Auto-generated title');
     expect(svc.getCurrentTitleSource()).toBe('auto');
@@ -390,13 +457,16 @@ describe('ChatRecordingService - auto-title trigger', () => {
     };
     const resumedConfig = {
       ...mockConfig,
-      getResumedSessionData: vi.fn().mockReturnValue({
-        lastCompletedUuid: 'parent-uuid',
-      }),
+      getResumedSessionData: vi
+        .fn()
+        .mockReturnValue(resumedSessionWithTitle('User chose this', 'manual')),
       getSessionService: vi.fn().mockReturnValue(mockSessionService),
     } as unknown as Config;
 
-    const svc = new ChatRecordingService(resumedConfig);
+    const svc = activateRecording(
+      new ChatRecordingService(resumedConfig, undefined, true),
+      resumedConfig,
+    );
 
     expect(svc.getCurrentCustomTitle()).toBe('User chose this');
     expect(svc.getCurrentTitleSource()).toBe('manual');
@@ -423,13 +493,16 @@ describe('ChatRecordingService - auto-title trigger', () => {
     };
     const resumedConfig = {
       ...mockConfig,
-      getResumedSessionData: vi.fn().mockReturnValue({
-        lastCompletedUuid: 'parent-uuid',
-      }),
+      getResumedSessionData: vi
+        .fn()
+        .mockReturnValue(resumedSessionWithTitle('Legacy title')),
       getSessionService: vi.fn().mockReturnValue(mockSessionService),
     } as unknown as Config;
 
-    const svc = new ChatRecordingService(resumedConfig);
+    const svc = activateRecording(
+      new ChatRecordingService(resumedConfig, undefined, true),
+      resumedConfig,
+    );
 
     expect(svc.getCurrentCustomTitle()).toBe('Legacy title');
     // Must stay undefined so the JSONL isn't upgraded to a misleading

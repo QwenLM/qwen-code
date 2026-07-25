@@ -58,7 +58,8 @@ describe('createTranscriptReplayMachine', () => {
   });
 
   it('uses stable synthetic ids and finalizes dangling calls once', () => {
-    const machine = createTranscriptReplayMachine();
+    const onDiagnostic = vi.fn();
+    const machine = createTranscriptReplayMachine({ onDiagnostic });
     const projected = updates(
       machine,
       record('assistant-1', 'assistant', {
@@ -88,6 +89,13 @@ describe('createTranscriptReplayMachine', () => {
         },
       ],
     });
+    expect(onDiagnostic).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'missing_tool_result',
+        affectsCompleteness: true,
+        recordId: 'assistant-1',
+      }),
+    );
     expect([...machine.finalize()]).toEqual([]);
   });
 

@@ -4,7 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeAll,
+  beforeEach,
+  afterEach,
+} from 'vitest';
 
 // Hoist mockWarn and mockConsoleError so they're available to both the vi.mock and test cases
 const { mockWarn, mockConsoleError } = vi.hoisted(() => ({
@@ -57,14 +65,23 @@ vi.mock('undici', () => {
 import {
   buildRuntimeFetchOptions,
   extractHostnameFromProxyUrl,
+  getOrCreateMcpDispatcher,
   getOrCreateSharedDispatcher,
   isTlsVerificationDisabled,
+  preloadRuntimeFetchModule,
   redactProxyCredentials,
   redactProxyError,
   resetDispatcherCache,
+  setResolvedProxyUrlForRuntimeFetch,
 } from './runtimeFetchOptions.js';
 
 type UndiciOptions = Record<string, unknown>;
+
+// The sync option builders require undici to be preloaded (issue #7264);
+// vi.mock('undici') intercepts the dynamic import, so this loads the mock.
+beforeAll(async () => {
+  await preloadRuntimeFetchModule();
+});
 
 describe('buildRuntimeFetchOptions (node runtime)', () => {
   beforeEach(() => {
@@ -289,6 +306,37 @@ describe('getOrCreateSharedDispatcher', () => {
       result as { fetchOptions?: { dispatcher?: unknown } }
     ).fetchOptions?.dispatcher;
     expect(sdkDispatcher).toBe(shared);
+  });
+});
+
+describe('getOrCreateMcpDispatcher', () => {
+  beforeEach(() => {
+    resetDispatcherCache();
+  });
+
+  it('routes MCP traffic through the explicitly configured proxy dispatcher', () => {
+    setResolvedProxyUrlForRuntimeFetch('http://proxy.example.com:8080');
+    const dispatcher = getOrCreateMcpDispatcher(false);
+    expect(dispatcher).toBe(
+      getOrCreateSharedDispatcher('http://proxy.example.com:8080', false),
+    );
+  });
+
+  it('falls back to a cached env-aware dispatcher when no explicit proxy is registered', () => {
+    const d1 = getOrCreateMcpDispatcher(false);
+    expect(d1).toBe(getOrCreateMcpDispatcher(false));
+    expect(d1).not.toBe(
+      getOrCreateSharedDispatcher('http://proxy.local', false),
+    );
+  });
+
+  it('drops the registered explicit proxy when the dispatcher cache is reset', () => {
+    setResolvedProxyUrlForRuntimeFetch('http://proxy.example.com:8080');
+    resetDispatcherCache();
+    const dispatcher = getOrCreateMcpDispatcher(false);
+    expect(dispatcher).not.toBe(
+      getOrCreateSharedDispatcher('http://proxy.example.com:8080', false),
+    );
   });
 });
 
@@ -702,5 +750,15 @@ describe('extractHostnameFromProxyUrl', () => {
     expect(extractHostnameFromProxyUrl('http://user:secret@')).toBe(
       'http://<redacted>@',
     );
+  });
+});
+
+describe('requireUndici guard', () => {
+  it('throws an actionable error when a sync builder runs before preload', async () => {
+    vi.resetModules();
+    const fresh = await import('./runtimeFetchOptions.js');
+    expect(() =>
+      fresh.getOrCreateSharedDispatcher('http://proxy.local'),
+    ).toThrow(/undici is not loaded yet; await preloadRuntimeFetchModule\(\)/);
   });
 });

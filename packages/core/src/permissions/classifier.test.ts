@@ -131,14 +131,14 @@ describe('classifyAction — stage 1 escalates to stage 2', () => {
   });
 });
 
-describe('classifyAction — fail-closed on stage 1 failure', () => {
+describe('classifyAction — unavailable on stage 1 failure', () => {
   it('returns unavailable=true when stage 1 throws an API error', async () => {
     runSideQueryMock.mockRejectedValueOnce(new Error('API 500'));
     const result = await classifyAction(makeInput());
     expect(result.shouldBlock).toBe(true);
     expect(result.unavailable).toBe(true);
     expect(result.stage).toBe('fast');
-    expect(result.reason).toMatch(/blocked for safety/);
+    expect(result.reason).toBe('Classifier stage 1 unavailable');
   });
 
   it('surfaces a context-overflow reason when stage 1 fails with that error', async () => {
@@ -163,7 +163,7 @@ describe('classifyAction — fail-closed on stage 1 failure', () => {
   });
 });
 
-describe('classifyAction — fail-closed on stage 2 failure', () => {
+describe('classifyAction — unavailable on stage 2 failure', () => {
   it('honors stage 1 block when stage 2 fails (unavailable=true)', async () => {
     runSideQueryMock
       .mockResolvedValueOnce({ shouldBlock: true })

@@ -18,6 +18,8 @@ import type {
   Config,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../../config/settings.js';
+import { getScreenBuffer } from '../../selection/screen-buffer.js';
+import { getSelectedText } from '../../selection/selection-text.js';
 
 // Global compact mode was removed (#5666); type-based tool rendering no longer
 // consumes a compact-mode context.
@@ -468,7 +470,7 @@ describe('<ToolMessage />', () => {
       // The C0 strip regex intentionally skips \x09 (TAB) and \x0a (LF) so
       // multi-line / column-aligned file output still renders. Lock that in:
       // stripping them would collapse the segments together.
-      const { lastFrame } = renderWithContext(
+      const { lastFrame, stdout } = renderWithContext(
         <ToolMessage
           {...baseProps}
           name="ReadFile"
@@ -489,6 +491,17 @@ describe('<ToolMessage />', () => {
       expect(output).toContain('row2B');
       expect(output).not.toContain('colAcolB');
       expect(output).not.toContain('colBrow2A');
+      const frame = getScreenBuffer(
+        stdout as unknown as NodeJS.WriteStream,
+      )!.frame!;
+      expect(
+        getSelectedText(frame, {
+          sx: 0,
+          sy: 0,
+          ex: frame.width - 1,
+          ey: frame.height - 1,
+        }),
+      ).toContain('colA\tcolB\nrow2A\trow2B');
     });
 
     it('keeps the summary when forced but NOT in fullDetail mode (main-view force)', () => {

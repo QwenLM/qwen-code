@@ -7,8 +7,12 @@
 import express from 'express';
 import type { Application } from 'express';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
-import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core';
+import {
+  hashDaemonWorkspace,
+  type DurableCronTask,
+} from '@qwen-code/qwen-code-core';
 import type { DaemonLogger } from './daemon-logger.js';
+import type { DaemonTrustPolicySnapshot } from '../config/daemon-trust-policy.js';
 import type {
   DaemonMetricsBucket,
   DaemonPerfSnapshot,
@@ -75,6 +79,7 @@ import {
   mountWorkspaceAgentsRoutes,
   mountWorkspaceQualifiedAgentsRoutes,
 } from './workspace-agents.js';
+import { mountWorkspaceGenerationRoutes } from './workspace-generation.js';
 import { registerDaemonStatusRoutes } from './routes/daemon-status.js';
 import { createHealthDemoRoutes } from './routes/health-demo.js';
 import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
@@ -99,6 +104,7 @@ import {
   registerScheduledTasksRoutes,
   registerWorkspaceQualifiedScheduledTasksRoutes,
 } from './routes/scheduled-tasks.js';
+import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
 import { registerGoalsRoutes } from './routes/goals.js';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
@@ -139,6 +145,7 @@ import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.j
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import { setRateLimiter } from './rate-limit.js';
 import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
+import { VirtualSubagentSessions } from './virtual-subagent-sessions.js';
 import {
   createTotalSessionAdmissionController,
   type TotalSessionAdmissionSnapshot,
@@ -169,10 +176,16 @@ import { installSelfOriginStripMiddleware } from './server/self-origin.js';
 import {
   createSingleWorkspaceRegistry,
   createWorkspaceSessionOwnerIndex,
+  WorkspaceGenerationClosedError,
   type WorkspaceRegistry,
   type WorkspaceRuntime,
   type WorkspaceRuntimeEnvMetadata,
 } from './workspace-registry.js';
+import {
+  isScratchRootCompatible,
+  type ManagedScratchRoot,
+  type WorkspaceRuntimeProvenance,
+} from './managed-scratch-workspace.js';
 import {
   isPortableAbsolutePath,
   resolveRegisteredWorkspaceRuntimeByPathSelector,
@@ -195,13 +208,20 @@ import {
   registerWorkspaceGitDiffRoutes,
   registerWorkspaceQualifiedGitDiffRoutes,
 } from './routes/workspace-git-diff.js';
+import {
+  registerWorkspaceGitLogRoutes,
+  registerWorkspaceQualifiedGitLogRoutes,
+} from './routes/workspace-git-log.js';
+import { registerWorkspaceQualifiedGitHubPrsRoutes } from './routes/workspace-github-prs.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
 import {
   registerWorkspaceMcpControlRoutes,
   registerWorkspaceQualifiedMcpControlRoutes,
 } from './routes/workspace-mcp-control.js';
 import { registerWorkspaceChannelControlRoutes } from './routes/workspace-channel-control.js';
+import { registerWorkspaceChannelManagementRoutes } from './routes/workspace-channel-management.js';
 import { registerWorkspaceChannelObservedContactRoutes } from './routes/workspace-channel-observed-contacts.js';
+import type { ChannelManagementService } from './channel-management-service.js';
 import {
   registerWorkspaceQualifiedToolsRoutes,
   registerWorkspaceToolsRoutes,
@@ -211,6 +231,11 @@ import {
   registerWorkspaceSkillsRoutes,
 } from './routes/workspace-skills.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
+import type {
+  ChannelDeliveryAccepted,
+  ChannelDeliveryRequest,
+} from './channel-delivery-ipc.js';
+import type { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 import {
   parseChannelWebhookConfigLenient,
   type parseChannelWebhookConfig,
@@ -223,10 +248,8 @@ export {
   resolveBoundWorkspacesFromIdeEnv,
   resolveBridgeFsFactory,
 } from './server/fs-factory.js';
-export {
-  PromptDeadlineExceededError,
-  resolvePromptDeadlineMs,
-} from './server/prompt-deadline.js';
+export { PromptDeadlineExceededError } from './acp-session-bridge.js';
+export { resolvePromptDeadlineMs } from './server/prompt-deadline.js';
 export { detectFromLoopback } from './server/request-helpers.js';
 export {
   InvalidCursorError,
@@ -400,6 +423,7 @@ export interface ServeAppDeps {
    */
   installAuthProvider?: (
     req: ServeAuthProviderInstallRequest,
+    assertGenerationOpen?: () => void,
   ) => Promise<ServeAuthProviderInstallResult>;
   /**
    * Optional daemon logger. When provided, `sendBridgeError` routes
@@ -419,6 +443,11 @@ export interface ServeAppDeps {
   ) => Promise<ChannelWorkerSetResult>;
   stopChannelWorker?: () => Promise<ChannelWorkerStopResult>;
   enqueueChannelWebhookTask?: ChannelWorkerSupervisor['enqueueWebhookTask'];
+  deliverChannelMessage?: (
+    workspaceCwd: string,
+    request: ChannelDeliveryRequest,
+  ) => Promise<ChannelDeliveryAccepted>;
+  channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
   channelWebhookConfigSources?: readonly ChannelWebhookConfigSource[];
   getChannelWebhookConfigSources?: () => readonly ChannelWebhookConfigSource[];
   getChannelWebhookConfigVersion?: () => number;
@@ -429,6 +458,12 @@ export interface ServeAppDeps {
    * `channel_reload` is advertised only while the control state is enabled.
    */
   reloadChannelWorker?: () => Promise<ChannelWorkerSnapshot>;
+  channelManagementService?: (
+    runtime: WorkspaceRuntime,
+  ) =>
+    | ChannelManagementService
+    | undefined
+    | Promise<ChannelManagementService | undefined>;
   getPerfSnapshot?: () => DaemonPerfSnapshot;
   /** Rolling metrics series for the Daemon Status charts (oldest→newest). */
   getMetricsSeries?: () => DaemonMetricsBucket[];
@@ -452,6 +487,7 @@ export interface ServeAppDeps {
     scope: import('../config/settings.js').SettingScope,
     key: string,
     value: unknown,
+    assertGenerationOpen?: () => void,
   ) => Promise<void | import('../config/settings.js').LoadedSettings>;
   persistSettings?: (
     workspace: string,
@@ -460,6 +496,7 @@ export interface ServeAppDeps {
       key: string;
       value: unknown;
     }>,
+    assertGenerationOpen?: () => void,
   ) => Promise<void>;
   sessionArtifactsPersistenceAvailable?: boolean;
   /**
@@ -474,7 +511,19 @@ export interface ServeAppDeps {
    */
   clientMcpSenderRegistry?: ClientMcpSenderRegistry;
   workspaceRegistry?: WorkspaceRegistry;
-  createWorkspaceRuntime?: (cwd: string) => Promise<WorkspaceRuntime>;
+  workspaceTrustHotReloadAvailable?: boolean;
+  getWorkspaceTrustPolicySnapshot?: () =>
+    | DaemonTrustPolicySnapshot
+    | Promise<DaemonTrustPolicySnapshot>;
+  createWorkspaceRuntime?: (
+    cwd: string,
+    options: { provenance: WorkspaceRuntimeProvenance },
+  ) => Promise<WorkspaceRuntime>;
+  managedScratchRoot?: ManagedScratchRoot;
+  validateWorkspaceRuntimeForPublication?: (
+    runtime: WorkspaceRuntime,
+  ) => Promise<WorkspaceRuntime>;
+  runWorkspaceTrustOperation?: <T>(operation: () => Promise<T>) => Promise<T>;
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
   workspaceRuntimeRemoval?: WorkspaceRuntimeRemovalController;
   primaryWorkspaceTrusted?: boolean;
@@ -538,6 +587,35 @@ export function computeKeepaliveIntervalMs(idleTimeoutMs: number): number {
     KEEPALIVE_MAX_INTERVAL_MS,
   );
   return Math.max(1, Math.min(target, Math.floor(idleTimeoutMs / 2)));
+}
+
+function createLiveWorkspaceDelegate<T extends object>(getTarget: () => T): T {
+  return new Proxy({} as T, {
+    get(_target, property) {
+      const target = getTarget();
+      const value = Reflect.get(target, property, target) as unknown;
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+    set(_target, property, value) {
+      return Reflect.set(getTarget(), property, value);
+    },
+    has(_target, property) {
+      return Reflect.has(getTarget(), property);
+    },
+    ownKeys() {
+      return Reflect.ownKeys(getTarget());
+    },
+    getOwnPropertyDescriptor(_target, property) {
+      const descriptor = Reflect.getOwnPropertyDescriptor(
+        getTarget(),
+        property,
+      );
+      return descriptor ? { ...descriptor, configurable: true } : undefined;
+    },
+    getPrototypeOf() {
+      return Reflect.getPrototypeOf(getTarget());
+    },
+  });
 }
 
 export function createServeApp(
@@ -679,6 +757,33 @@ export function createServeApp(
   const primaryRuntimeEnvMetadata =
     injectedWorkspaceRegistry?.primary.env ?? deps.primaryRuntimeEnv;
   const primaryEffectiveEnv = getRuntimeEffectiveEnv(primaryRuntimeEnvMetadata);
+  const daemonEnv = deps.daemonEnv ?? process.env;
+  const primaryRuntimeTrustAuthoritative =
+    deps.workspaceTrustHotReloadAvailable === true ||
+    deps.primaryWorkspaceTrusted !== undefined ||
+    injectedWorkspaceRegistry !== undefined;
+  let primaryTrustRegistry = injectedWorkspaceRegistry;
+  const isPrimaryWorkspaceTrusted = (): boolean => {
+    if (!primaryRuntimeTrustAuthoritative) return true;
+    const entry = primaryTrustRegistry?.primaryEntry;
+    if (entry) {
+      return (
+        entry.state === 'active' && entry.current?.runtime.trusted === true
+      );
+    }
+    return deps.primaryWorkspaceTrusted ?? false;
+  };
+  const capturePrimaryGenerationAssertion = (): (() => void) | undefined => {
+    const registry = primaryTrustRegistry;
+    if (!registry) return undefined;
+    const guard = registry.primaryEntry.current?.guard;
+    if (!guard) {
+      return () => {
+        throw new WorkspaceGenerationClosedError();
+      };
+    }
+    return () => guard.assertOpen();
+  };
   const { languageCodes, currentServeFeatures, invalidateServeFeaturesCache } =
     createServeFeatures({
       opts,
@@ -695,6 +800,12 @@ export function createServeApp(
           )
         );
       },
+      workspaceGenerationAvailable: () => {
+        const entry = workspaceRegistry.primaryEntry;
+        const runtime =
+          entry.state === 'active' ? entry.current?.runtime : undefined;
+        return runtime?.bridge.generateWorkspaceContent !== undefined;
+      },
       // Registry injection supplies the primary workspace service through the
       // runtime, so it has the same reload surface as legacy deps.workspace.
       reloadAvailable:
@@ -703,6 +814,7 @@ export function createServeApp(
         deps.getChannelWorkerControl !== undefined &&
         deps.setChannelWorkerSelection !== undefined &&
         deps.stopChannelWorker !== undefined,
+      channelManagementAvailable: deps.channelManagementService !== undefined,
       channelReloadAvailable: () => {
         if (deps.reloadChannelWorker === undefined) return false;
         const control = deps.getChannelWorkerControl?.();
@@ -720,12 +832,45 @@ export function createServeApp(
         );
       },
       sessionShellCommandEnabled,
-      multiWorkspaceSessionsEnabled: () => workspaceRegistry.list().length > 1,
+      multiWorkspaceSessionsEnabled: () =>
+        workspaceRegistry.listEntries().length > 1,
+      dynamicWorkspaceRegistrationAvailable:
+        deps.createWorkspaceRuntime !== undefined,
       persistentWorkspaceRegistrationAvailable:
         deps.workspaceRegistrationStore !== undefined,
+      // Scratch creation is advertised only while every managed runtime still
+      // respects the root boundary and a complete disposal owner is present.
+      scratchWorkspaceRegistrationAvailable: () =>
+        deps.createWorkspaceRuntime !== undefined &&
+        deps.managedScratchRoot !== undefined &&
+        deps.workspaceRuntimeRemoval !== undefined &&
+        workspaceRegistry
+          .listManaged()
+          .every((runtime) =>
+            isScratchRootCompatible(
+              runtime.workspaceCwd,
+              deps.managedScratchRoot!.canonicalRoot,
+            ),
+          ),
       workspaceRuntimeRemovalAvailable:
         deps.workspaceRuntimeRemoval !== undefined,
-      ...(primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {}),
+      workspaceTrustHotReloadAvailable:
+        deps.workspaceTrustHotReloadAvailable === true,
+      isPrimaryWorkspaceTrusted: () => isPrimaryWorkspaceTrusted(),
+      ...(deps.workspaceTrustHotReloadAvailable === true
+        ? {
+            getEnv: () => {
+              const entry = primaryTrustRegistry?.primaryEntry;
+              const runtimeEnv =
+                entry?.state === 'active'
+                  ? entry.current?.runtime.env
+                  : undefined;
+              return getRuntimeEffectiveEnv(runtimeEnv) ?? daemonEnv;
+            },
+          }
+        : primaryEffectiveEnv
+          ? { env: primaryEffectiveEnv }
+          : {}),
     });
   (
     app.locals as {
@@ -766,6 +911,7 @@ export function createServeApp(
       maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
       eventRingSize: opts.eventRingSize,
       compactedReplayMaxBytes: opts.compactedReplayMaxBytes,
+      initializeTimeoutMs: opts.initializeTimeoutMs,
       permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs,
       boundWorkspace,
       sessionShellCommandEnabled,
@@ -812,7 +958,7 @@ export function createServeApp(
         if (!reg) return [bridge];
         return reg
           .list()
-          .filter((rt) => rt.primary || rt.trusted)
+          .filter((rt) => rt.trusted)
           .map((rt) => rt.bridge);
       },
     });
@@ -832,12 +978,16 @@ export function createServeApp(
     deps.workspace ??
     createDaemonWorkspaceService({
       boundWorkspace,
+      isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
       contextFilename: deps.contextFilename ?? 'QWEN.md',
       statusProvider,
-      workspaceProvidersStatusProvider: createWorkspaceProvidersStatusProvider(
-        primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {},
-      ),
-      workspaceSkillsStatusProvider: createWorkspaceSkillsStatusProvider(),
+      workspaceProvidersStatusProvider: createWorkspaceProvidersStatusProvider({
+        ...(primaryEffectiveEnv ? { env: primaryEffectiveEnv } : {}),
+        workspaceTrusted: isPrimaryWorkspaceTrusted(),
+      }),
+      workspaceSkillsStatusProvider: createWorkspaceSkillsStatusProvider({
+        workspaceTrusted: isPrimaryWorkspaceTrusted(),
+      }),
       ...(primaryEffectiveEnv ? { skillInstallEnv: primaryEffectiveEnv } : {}),
       ...(primaryEffectiveEnv ? { voiceEnv: primaryEffectiveEnv } : {}),
       isChannelLive: () => bridge.isChannelLive(),
@@ -894,21 +1044,45 @@ export function createServeApp(
         clientMcpSenderRegistry,
       },
       defaultSessionOwnerIndex
-        ? { sessionOwnerIndex: defaultSessionOwnerIndex }
+        ? {
+            sessionOwnerIndex: defaultSessionOwnerIndex,
+            scanUnindexedOwners: deps.bridge !== undefined,
+          }
         : {},
     );
   (app.locals as { workspaceRegistry?: WorkspaceRegistry }).workspaceRegistry =
     workspaceRegistry;
-  const primaryRuntime = workspaceRegistry.primary;
-  const daemonEnv = deps.daemonEnv ?? process.env;
-  const primaryRuntimeEffectiveEnv =
-    getRuntimeEffectiveEnv(primaryRuntime.env) ?? daemonEnv;
+  primaryTrustRegistry = workspaceRegistry;
+  const primaryRuntime = createLiveWorkspaceDelegate(
+    () => workspaceRegistry.primary,
+  );
+  const primaryRuntimeEffectiveEnv = createLiveWorkspaceDelegate(
+    () => getRuntimeEffectiveEnv(workspaceRegistry.primary.env) ?? daemonEnv,
+  );
   const voiceCoordinator =
     deps.voiceCoordinator ?? new WorkspaceVoiceCoordinator();
+  const acquirePrimaryVoiceLease = () => {
+    const entry = workspaceRegistry.primaryEntry;
+    const runtime =
+      entry.state === 'active' ? entry.current?.runtime : undefined;
+    return runtime
+      ? voiceCoordinator.acquire(runtime)
+      : ({ kind: 'rejected', reason: 'draining' } as const);
+  };
   const primaryBoundWorkspace = primaryRuntime.workspaceCwd;
-  const primaryBridge = primaryRuntime.bridge;
-  const primaryWorkspace = primaryRuntime.workspaceService;
-  const primaryRouteFileSystemFactory = primaryRuntime.routeFileSystemFactory;
+  const primaryBridge = createLiveWorkspaceDelegate(
+    () => workspaceRegistry.primary.bridge,
+  );
+  const primaryWorkspace = createLiveWorkspaceDelegate(
+    () => workspaceRegistry.primary.workspaceService,
+  );
+  const primaryRouteFileSystemFactory = createLiveWorkspaceDelegate(
+    () => workspaceRegistry.primary.routeFileSystemFactory,
+  );
+  if (deps.workspaceTrustHotReloadAvailable === true) {
+    (app.locals as { fsFactory?: WorkspaceFileSystemFactory }).fsFactory =
+      primaryRouteFileSystemFactory;
+  }
   const workspaceGitState = new WorkspaceGitState();
   (app.locals as { stopWorkspaceGitState?: () => void }).stopWorkspaceGitState =
     () => workspaceGitState.dispose();
@@ -1141,12 +1315,21 @@ export function createServeApp(
     languageCodes,
   });
 
+  registerChannelNotifyRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    deliverChannelMessage: deps.deliverChannelMessage,
+  });
+
   registerWorkspaceStatusRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
     workspace: primaryWorkspace,
     mutate,
     sendBridgeError,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
   registerWorkspaceQualifiedStatusRoutes(app, {
     workspaceRegistry,
@@ -1157,6 +1340,8 @@ export function createServeApp(
     bridge: primaryBridge,
     gitState: workspaceGitState,
     sendBridgeError,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
   registerWorkspaceQualifiedGitRoutes(app, {
     workspaceRegistry,
@@ -1166,8 +1351,22 @@ export function createServeApp(
   registerWorkspaceGitDiffRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     sendBridgeError,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
   registerWorkspaceQualifiedGitDiffRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+  });
+  registerWorkspaceGitLogRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    sendBridgeError,
+  });
+  registerWorkspaceQualifiedGitLogRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+  });
+  registerWorkspaceQualifiedGitHubPrsRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
   });
@@ -1179,6 +1378,8 @@ export function createServeApp(
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
   mountWorkspaceQualifiedMemoryRoutes(app, {
     workspaceRegistry,
@@ -1192,10 +1393,20 @@ export function createServeApp(
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
   mountWorkspaceAgentsRoutes(app, {
     bridge: primaryBridge,
     boundWorkspace: primaryBoundWorkspace,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+  });
+  mountWorkspaceGenerationRoutes(app, {
+    bridge: primaryBridge,
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
@@ -1213,6 +1424,7 @@ export function createServeApp(
     workspace: primaryWorkspace,
     mutate,
     sendBridgeError,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
   registerWorkspaceQualifiedDiagnosticStatusRoutes(app, {
     workspaceRegistry,
@@ -1227,6 +1439,10 @@ export function createServeApp(
     safeBody,
     sendBridgeError,
     workspaceRegistry,
+    ...(primaryRuntimeTrustAuthoritative
+      ? { isWorkspaceTrusted: isPrimaryWorkspaceTrusted }
+      : {}),
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
     ...(deps.maxExtensionOperationHistory === undefined
       ? {}
       : { maxExtensionOperationHistory: deps.maxExtensionOperationHistory }),
@@ -1257,6 +1473,10 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
     env: primaryRuntimeEffectiveEnv,
+    ...(primaryRuntimeTrustAuthoritative
+      ? { isWorkspaceTrusted: isPrimaryWorkspaceTrusted }
+      : {}),
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
@@ -1264,6 +1484,14 @@ export function createServeApp(
   registerWorkspaceTrustRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     workspace: primaryWorkspace,
+    workspaceRegistry,
+    workspaceTrustHotReloadAvailable:
+      deps.workspaceTrustHotReloadAvailable === true,
+    ...(deps.getWorkspaceTrustPolicySnapshot
+      ? {
+          getWorkspaceTrustPolicySnapshot: deps.getWorkspaceTrustPolicySnapshot,
+        }
+      : {}),
     mutate,
     safeBody,
     parseAndValidateClientId: (req, res) =>
@@ -1271,6 +1499,13 @@ export function createServeApp(
   });
   registerWorkspaceQualifiedTrustRoutes(app, {
     workspaceRegistry,
+    workspaceTrustHotReloadAvailable:
+      deps.workspaceTrustHotReloadAvailable === true,
+    ...(deps.getWorkspaceTrustPolicySnapshot
+      ? {
+          getWorkspaceTrustPolicySnapshot: deps.getWorkspaceTrustPolicySnapshot,
+        }
+      : {}),
     mutate,
     safeBody,
   });
@@ -1281,6 +1516,10 @@ export function createServeApp(
     mutate,
     safeBody,
     createWorkspaceRuntime: deps.createWorkspaceRuntime,
+    managedScratchRoot: deps.managedScratchRoot,
+    validateWorkspaceRuntimeForPublication:
+      deps.validateWorkspaceRuntimeForPublication,
+    runWorkspaceTrustOperation: deps.runWorkspaceTrustOperation,
     workspaceRegistrationStore: deps.workspaceRegistrationStore,
     getAcpHandle: () => acpHandleRef.current,
     runtimeRemoval: deps.workspaceRuntimeRemoval,
@@ -1312,6 +1551,8 @@ export function createServeApp(
     const persistSetting = deps.persistSetting;
     registerWorkspaceSettingsRoutes(app, {
       boundWorkspace: primaryBoundWorkspace,
+      isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+      captureGenerationAssertion: capturePrimaryGenerationAssertion,
       mutate,
       safeBody,
       persistSetting: async (...args) => {
@@ -1333,6 +1574,8 @@ export function createServeApp(
   }
   registerWorkspacePermissionsRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
     mutate,
     safeBody,
     workspace: primaryWorkspace,
@@ -1351,8 +1594,12 @@ export function createServeApp(
     persistSetting: deps.persistSetting,
     persistSettings: deps.persistSettings,
     transcribe: deps.voiceTranscriber,
-    env: getRuntimeEffectiveEnv(primaryRuntime.env),
-    acquireVoiceLease: () => voiceCoordinator.acquire(primaryRuntime),
+    env: primaryRuntimeEffectiveEnv,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+    acquireVoiceLease: acquirePrimaryVoiceLease,
+    ...(primaryRuntimeTrustAuthoritative
+      ? { isWorkspaceTrusted: isPrimaryWorkspaceTrusted }
+      : {}),
     broadcastSettingsChanged,
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
@@ -1372,6 +1619,8 @@ export function createServeApp(
   if (deps.persistSettings) {
     registerWorkspaceModelsRoutes(app, {
       boundWorkspace: primaryBoundWorkspace,
+      isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+      captureGenerationAssertion: capturePrimaryGenerationAssertion,
       mutate,
       safeBody,
       persistSettings: deps.persistSettings,
@@ -1388,7 +1637,9 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     mutate,
     safeBody,
-    env: getRuntimeEffectiveEnv(primaryRuntime.env),
+    env: primaryRuntimeEffectiveEnv,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
     // UI-server discovery uses the daemon's workspace MCP status, which
     // includes servers registered at runtime.
     getMcpServers: async () => {
@@ -1410,7 +1661,10 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     allowPrivateAuthBaseUrl: opts.allowPrivateAuthBaseUrl === true,
     installAuthProvider: deps.installAuthProvider,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
+
+  const virtualSubagentSessions = new VirtualSubagentSessions();
 
   registerSessionRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
@@ -1420,9 +1674,11 @@ export function createServeApp(
     mutate,
     sendBridgeError,
     daemonLog,
+    channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
     promptDeadlineMs: opts.promptDeadlineMs,
     sessionShellCommandEnabled,
     languageCodes,
+    virtualSubagentSessions,
   });
 
   registerWorkspaceMcpControlRoutes(app, {
@@ -1432,6 +1688,8 @@ export function createServeApp(
     mutate,
     safeBody,
     sendBridgeError,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
@@ -1487,9 +1745,22 @@ export function createServeApp(
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
     });
   }
+  if (deps.channelManagementService) {
+    registerWorkspaceChannelManagementRoutes(app, {
+      primaryRuntime,
+      workspaceRegistry,
+      resolveService: deps.channelManagementService,
+      mutate,
+      safeBody,
+      parseAndValidateClientId: (req, res, runtime) =>
+        parseAndValidateWorkspaceClientId(req, res, runtime.bridge),
+    });
+  }
   registerWorkspaceChannelObservedContactRoutes(app, {
     primaryWorkspace: primaryBoundWorkspace,
     workspaceRegistry,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
   registerWorkspaceLifecycleRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
@@ -1498,6 +1769,8 @@ export function createServeApp(
     safeBody,
     sendBridgeError,
     invalidateServeFeaturesCache,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
     parseAndValidateClientId: (req, res) =>
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
@@ -1511,6 +1784,8 @@ export function createServeApp(
   registerWorkspaceToolsRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     workspace: primaryWorkspace,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
     mutate,
     safeBody,
     sendBridgeError,
@@ -1553,7 +1828,12 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     mutate,
     safeBody,
-    bridge: deps.manageScheduledTaskSessions ? bridge : undefined,
+    bridge: deps.manageScheduledTaskSessions ? primaryBridge : undefined,
+    getRuntime: () =>
+      workspaceRegistry.primaryEntry.state === 'active'
+        ? workspaceRegistry.primaryEntry.current?.runtime
+        : undefined,
+    channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
   });
 
   // Workspace-wide active-goal listing (the Web Shell "Goals" page). Read-only
@@ -1562,6 +1842,8 @@ export function createServeApp(
   registerGoalsRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
 
   // The same CRUD surface, workspace-qualified, so a multi-workspace Web Shell
@@ -1573,6 +1855,7 @@ export function createServeApp(
     mutate,
     safeBody,
     manageScheduledTaskSessions: deps.manageScheduledTaskSessions === true,
+    channelDeliveryAuthorizations: deps.channelDeliveryAuthorizations,
   });
 
   // Read-only token-usage dashboard (Daemon Status "统计" tab). Aggregate local
@@ -1583,6 +1866,25 @@ export function createServeApp(
   // embeds that call createServeApp neither spawn sessions on boot nor hold a
   // heartbeat timer (both would read the bound workspace's real tasks file).
   if (deps.manageScheduledTaskSessions) {
+    const registerScheduledTaskAuthorizations = (
+      workspaceCwd: string,
+      tasks: readonly DurableCronTask[],
+    ) => {
+      const authorizations = deps.channelDeliveryAuthorizations;
+      if (!authorizations) return;
+      for (const task of tasks) {
+        if (!task.delivery || !task.sessionId) continue;
+        authorizations.registerScheduledTask(workspaceCwd, {
+          sessionId: task.sessionId,
+          taskId: task.id,
+          target: task.delivery.target,
+          recurring: task.recurring,
+          ...(typeof task.lastFiredAt === 'number'
+            ? { lastFiredAt: task.lastFiredAt }
+            : {}),
+        });
+      }
+    };
     // Keepalive: keep task sessions resident so their in-child schedulers keep
     // ticking rather than being idle-reaped, AND revive a re-enabled bound
     // session the reaper already let go. The revive loop is needed even when the
@@ -1604,6 +1906,8 @@ export function createServeApp(
       void rehydrateScheduledTaskSessions({
         bridge: taskBridge,
         boundWorkspace: workspaceCwd,
+        onTasksRead: (tasks) =>
+          registerScheduledTaskAuthorizations(workspaceCwd, tasks),
         onError: (sessionId, err) => {
           process.stderr.write(
             `qwen serve: failed to rehydrate scheduled-task session ${sessionId}: ${
@@ -1625,18 +1929,21 @@ export function createServeApp(
       });
     };
 
-    // Every registered workspace gets its own keepalive + rehydration against
-    // its own cron file + bridge, so a bound task created through the
-    // workspace-qualified route fires (and survives a restart) exactly like a
-    // primary-workspace one — otherwise a secondary workspace's tasks would be
-    // written to disk but silently never revived.
+    // Every trusted workspace gets its own keepalive + rehydration against its
+    // own cron file + bridge.
     const keepaliveStops = new Map<string, () => void>();
     const startKeepaliveForWorkspace = (runtime: WorkspaceRuntime) => {
+      const trusted = runtime.primary
+        ? isPrimaryWorkspaceTrusted()
+        : runtime.trusted;
+      if (!trusted) return;
       if (keepaliveStops.has(runtime.workspaceCwd)) return;
       const keepalive = startScheduledTaskKeepalive({
         bridge: runtime.bridge,
         boundWorkspace: runtime.workspaceCwd,
         intervalMs: keepaliveIntervalMs,
+        onTasksRead: (tasks) =>
+          registerScheduledTaskAuthorizations(runtime.workspaceCwd, tasks),
       });
       rehydrateWorkspace(runtime.bridge, runtime.workspaceCwd);
       keepaliveStops.set(runtime.workspaceCwd, keepalive.stop);
@@ -1686,6 +1993,7 @@ export function createServeApp(
     daemonLog,
     writerIdleTimeoutMs: opts.writerIdleTimeoutMs,
     sendBridgeError,
+    virtualSubagentSessions,
   });
 
   // Official ACP Streamable HTTP transport (RFD #721) mounted at `/acp`
@@ -1701,6 +2009,7 @@ export function createServeApp(
     // Phase 4 (issue #6378): pass the registry so `/workspaces/:workspace/acp`
     // mounts a per-runtime ACP dispatcher for each registered workspace.
     workspaceRegistry,
+    isPrimaryWorkspaceTrusted,
     archiveCoordinator,
     workspace: primaryWorkspace,
     fsFactory: primaryRouteFileSystemFactory,
@@ -1744,14 +2053,16 @@ export function createServeApp(
       {
         path: '/voice/stream',
         onConnection: createVoiceWsConnectionHandler(primaryBoundWorkspace, {
-          env: getRuntimeEffectiveEnv(primaryRuntime.env),
-          acquireVoiceLease: () => voiceCoordinator.acquire(primaryRuntime),
+          env: primaryRuntimeEffectiveEnv,
+          isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+          acquireVoiceLease: acquirePrimaryVoiceLease,
         }),
       },
     ],
     workspaceVoiceConnection: (runtime, ws, req) =>
       createVoiceWsConnectionHandler(runtime.workspaceCwd, {
         env: getRuntimeEffectiveEnv(runtime.env),
+        isWorkspaceTrusted: () => runtime.trusted,
         acquireVoiceLease: () => voiceCoordinator.acquire(runtime),
       })(ws, req),
   });

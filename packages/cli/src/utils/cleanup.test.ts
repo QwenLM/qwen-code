@@ -51,6 +51,17 @@ describe('cleanup', () => {
     expect(asyncFn).toHaveBeenCalledTimes(1);
   });
 
+  it('should let a caller unregister a cleanup', async () => {
+    const cleanupFn = vi.fn();
+    const unregister = registerCleanup(cleanupFn);
+
+    unregister();
+    unregister();
+    await runExitCleanup();
+
+    expect(cleanupFn).not.toHaveBeenCalled();
+  });
+
   it('should continue running cleanup functions even if one throws an error', async () => {
     const errorFn = vi.fn(() => {
       throw new Error('Test Error');

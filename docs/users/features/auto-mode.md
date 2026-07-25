@@ -175,8 +175,8 @@ This is useful for production or high-security environments where you
 want defense-in-depth: even seemingly harmless commands are reviewed by
 the classifier before execution. The trade-off is added latency (~300ms
 per read-only shell call) and reliance on classifier availability — if
-the classifier API is unreachable, read-only shell commands will also be
-blocked (fail-closed).
+the classifier API is unreachable, read-only shell commands will also require
+manual approval.
 
 > [!note]
 >
@@ -187,18 +187,13 @@ blocked (fail-closed).
 
 ## Reading the decision
 
-When the classifier blocks an action, the tool call fails with one of
-the following error texts:
+When the classifier blocks an action, the tool call fails with:
 
 - **`Blocked by auto mode policy: <reason>`** —
   the classifier judged the action unsafe. The reason comes from Stage
   2 of the classifier.
-- **`Auto mode classifier unavailable; action blocked for safety`** —
-  the classifier API was unreachable, timed out, or returned an
-  un-parseable response. This is fail-closed behavior: when in doubt,
-  block.
 
-Both messages are followed by a trailing guidance line telling the agent
+This message is followed by a trailing guidance line telling the agent
 that the **denied action specifically** must not be completed through
 another tool, shell indirection, generated script, alias, symlink,
 config change, hook, command file, MCP configuration, encoded payload,
@@ -219,16 +214,24 @@ want non-English reasons, add a hint like
 
 Auto Mode protects you from getting stuck:
 
+- If the classifier API is unreachable, times out, exceeds its context window,
+  or returns an invalid response, the current action immediately falls back to
+  manual approval. The confirmation recommends Default Mode and offers
+  **Switch to Default Mode and allow once** alongside Allow once and Reject.
+  Switching affects only the current runtime session; it does not change your
+  saved settings.
+
 - After **3 consecutive policy blocks** the next tool call falls back to
   the standard manual-approval prompt. This catches the case where the
   agent keeps trying minor variants of a forbidden command.
-- After **2 consecutive unavailable** results (classifier API failures)
-  the next tool call also falls back. This avoids waiting on a broken
-  classifier.
+- After **2 consecutive unavailable** results (classifier API failures),
+  later calls skip the known-broken classifier and go directly to manual
+  approval. The first unavailable result already asks; the threshold avoids
+  repeatedly waiting for classifier retries.
 
-The session itself stays in Auto Mode — only the single fallback call
-goes through manual approval. The counters reset when you approve the
-fallback call or switch modes.
+The session stays in Auto Mode unless you explicitly select the switch option.
+Only the fallback call goes through manual approval. The counters reset when
+you approve the fallback call or switch modes.
 
 If you find yourself constantly hitting fallback, the most likely causes
 are an outage on the classifier API or hints that need tuning. Switch to

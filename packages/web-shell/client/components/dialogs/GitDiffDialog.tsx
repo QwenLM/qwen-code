@@ -357,12 +357,12 @@ function DiffFileRow({
   );
 }
 
-export function GitDiffDialog({
+export function GitDiffContent({
   workspaceCwd,
-  onClose,
+  onSubtitleChange,
 }: {
   workspaceCwd: string;
-  onClose: () => void;
+  onSubtitleChange?: (subtitle: string | undefined) => void;
 }) {
   const { t } = useI18n();
   const { client } = useWorkspace();
@@ -400,6 +400,10 @@ export function GitDiffDialog({
         })
       : undefined;
 
+  useEffect(() => {
+    onSubtitleChange?.(subtitle);
+  }, [onSubtitleChange, subtitle]);
+
   let body: ReactNode;
   if (loading) {
     body = <div className={styles.placeholder}>{t('gitDiff.loading')}</div>;
@@ -431,15 +435,25 @@ export function GitDiffDialog({
     );
   }
 
+  return <div className={styles.content}>{body}</div>;
+}
+
+export function GitDiffDialog({
+  workspaceCwd,
+  onClose,
+}: {
+  workspaceCwd: string;
+  onClose: () => void;
+}) {
+  const { t } = useI18n();
   return (
     <DialogShell
       title={t('gitDiff.title')}
-      subtitle={subtitle}
       size="xl"
       allowFullscreen
       onClose={onClose}
     >
-      {body}
+      <GitDiffContent workspaceCwd={workspaceCwd} />
     </DialogShell>
   );
 }

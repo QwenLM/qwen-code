@@ -66,6 +66,7 @@ export interface PermissionResolvedEvent {
 interface ChannelAgentBridgeEventMap {
   sessionDied: [SessionDiedEvent];
   textChunk: [sessionId: string, chunk: string];
+  backgroundResponse: [sessionId: string, text: string];
   responseBoundary: [sessionId: string];
   toolCall: [ToolCallEvent];
   permissionRequest: [PermissionRequestEvent];

@@ -406,6 +406,9 @@ function makeBridge(
     getSessionLastEventId() {
       return 41;
     },
+    getSessionEventEpoch() {
+      return 'fake-epoch';
+    },
     sendPrompt(
       sessionId: string,
       _req: unknown,
@@ -690,6 +693,7 @@ function makeBridge(
 function makeRuntime(input: {
   workspaceId: string;
   workspaceCwd: string;
+  displayName?: string;
   primary: boolean;
   trusted: boolean;
   bridge: AcpSessionBridge;
@@ -769,6 +773,7 @@ function makeHarness(opts?: {
     makeRuntime({
       workspaceId: 'secondary-id',
       workspaceCwd: SECONDARY_CWD,
+      displayName: 'Secondary workspace',
       primary: false,
       trusted: opts?.secondaryTrusted ?? true,
       bridge: secondaryBridge,
@@ -807,11 +812,13 @@ describe('multi-workspace session dispatch', () => {
     expect(res.body.features).toContain('workspace_persisted_transcript');
     expect(res.body.features).toContain('workspace_session_export');
     expect(res.body.features).toContain('workspace_archived_session_export');
+    expect(res.body.features).toContain('workspace_display_name');
     expect(res.body.workspaces).toEqual([
       { id: 'primary-id', cwd: PRIMARY_CWD, primary: true, trusted: true },
       {
         id: 'secondary-id',
         cwd: SECONDARY_CWD,
+        displayName: 'Secondary workspace',
         primary: false,
         trusted: true,
       },
@@ -845,6 +852,7 @@ describe('multi-workspace session dispatch', () => {
       {
         id: 'secondary-id',
         cwd: SECONDARY_CWD,
+        displayName: 'Secondary workspace',
         primary: false,
         trusted: true,
       },
@@ -893,6 +901,29 @@ describe('multi-workspace session dispatch', () => {
       workspaceCwd: SECONDARY_CWD,
     });
     expect(res.body.workspaceCwd).toBe(SECONDARY_CWD);
+  });
+
+  it('returns retryable unavailable for explicit session creation on a transitioning workspace', async () => {
+    const { app, registry, primaryBridge, secondaryBridge } = makeHarness();
+    const secondaryEntry = registry.getEntryByWorkspaceId('secondary-id');
+    expect(secondaryEntry).toBeDefined();
+    registry.beginReplacement(secondaryEntry!, 'policy-2');
+
+    const res = await request(app)
+      .post('/session')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+
+    expect(res.status).toBe(503);
+    expect(res.headers['retry-after']).toBe('1');
+    expect(res.body).toEqual({
+      error: 'Workspace runtime is not active.',
+      code: 'workspace_runtime_unavailable',
+      workspaceCwd: SECONDARY_CWD,
+      workspaceId: 'secondary-id',
+    });
+    expect(primaryBridge.spawnCalls).toEqual([]);
+    expect(secondaryBridge.spawnCalls).toEqual([]);
   });
 
   it('applies a creation-time approvalMode on the owning non-primary runtime', async () => {

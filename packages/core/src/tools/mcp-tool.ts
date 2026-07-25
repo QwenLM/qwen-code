@@ -25,6 +25,10 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 import { getMCPServerStatus, MCPServerStatus } from './mcp-status.js';
 import {
+  getInvocationContext,
+  INVOCATION_CONTEXT_META_KEY,
+} from '../utils/invocation-context.js';
+import {
   generateLegacyMcpToolName,
   normalizeToolNameForProvider,
 } from '../utils/tool-name-utils.js';
@@ -51,7 +55,11 @@ type ToolParams = Record<string, unknown>;
  */
 export interface McpDirectClient {
   callTool(
-    params: { name: string; arguments?: Record<string, unknown> },
+    params: {
+      name: string;
+      arguments?: Record<string, unknown>;
+      _meta?: Record<string, unknown>;
+    },
     resultSchema?: unknown,
     options?: {
       onprogress?: (progress: {
@@ -144,6 +152,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     private readonly mcpTimeout?: number,
     private readonly mcpToolIdleTimeoutMs?: number,
     private readonly annotations?: McpToolAnnotations,
+    private readonly allowInvocationContext: boolean = false,
     private readonly retryCount: number = 0,
   ) {
     super(params);
@@ -268,6 +277,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           this.mcpTimeout,
           this.mcpToolIdleTimeoutMs,
           this.annotations,
+          newTool['allowInvocationContext'] === true,
           this.retryCount + 1,
         );
         return newInvocation.execute(signal, updateOutput);
@@ -352,10 +362,20 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       // Start the idle timeout
       resetIdleTimeout();
 
+      const invocationContext = this.allowInvocationContext
+        ? getInvocationContext()
+        : undefined;
       const callToolResult = await this.mcpClient!.callTool(
         {
           name: this.serverToolName,
           arguments: this.params as Record<string, unknown>,
+          ...(invocationContext
+            ? {
+                _meta: {
+                  [INVOCATION_CONTEXT_META_KEY]: invocationContext,
+                },
+              }
+            : {}),
         },
         undefined,
         {
@@ -403,11 +423,15 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       }
 
       const transformedParts = transformMcpContentToParts(rawResponseParts);
-      const truncatedParts = await this.truncateTextParts(transformedParts);
+      const truncated = await this.truncateTextParts(transformedParts);
 
       return {
-        llmContent: truncatedParts,
-        returnDisplay: getDisplayFromParts(truncatedParts),
+        llmContent: truncated.parts,
+        returnDisplay: getDisplayFromPartsWithPersistedOutput(
+          transformedParts,
+          truncated.persistedOutputFiles,
+        ),
+        persistedOutputFiles: truncated.persistedOutputFiles,
       };
     } catch (error) {
       return this.handleReconnectOnError(error, signal, updateOutput);
@@ -482,11 +506,15 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       }
 
       const transformedParts = transformMcpContentToParts(rawResponseParts);
-      const truncatedParts = await this.truncateTextParts(transformedParts);
+      const truncated = await this.truncateTextParts(transformedParts);
 
       return {
-        llmContent: truncatedParts,
-        returnDisplay: getDisplayFromParts(truncatedParts),
+        llmContent: truncated.parts,
+        returnDisplay: getDisplayFromPartsWithPersistedOutput(
+          transformedParts,
+          truncated.persistedOutputFiles,
+        ),
+        persistedOutputFiles: truncated.persistedOutputFiles,
       };
     } catch (error) {
       return this.handleReconnectOnError(error, signal);
@@ -497,12 +525,17 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
    * Truncates text parts in the transformed result if they exceed the
    * configured threshold. Non-text parts (images, audio, etc.) are preserved.
    */
-  private async truncateTextParts(parts: Part[]): Promise<Part[]> {
+  private async truncateTextParts(parts: Part[]): Promise<{
+    parts: Part[];
+    persistedOutputFiles?: string[];
+  }> {
     if (!this.cliConfig) {
-      return parts;
+      return { parts };
     }
 
     const result: Part[] = [];
+    const persistedOutputFiles: string[] = [];
+    let persistenceAttempted = false;
     for (const part of parts) {
       if (part.text && !part.inlineData) {
         const truncated = await truncateToolOutput(
@@ -515,14 +548,25 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           // undercut the 500k char budget — many short lines (structured JSON,
           // tables) would otherwise truncate while chars remain. Consistent
           // with the shell tool's in-tool truncation.
-          { threshold: 500_000, lines: Number.POSITIVE_INFINITY },
+          {
+            threshold: 500_000,
+            previewChars: 2000,
+            lines: Number.POSITIVE_INFINITY,
+          },
         );
         result.push({ text: truncated.content });
+        persistenceAttempted ||= truncated.content !== part.text;
+        if (truncated.outputFile) {
+          persistedOutputFiles.push(truncated.outputFile);
+        }
       } else {
         result.push(part);
       }
     }
-    return result;
+    return {
+      parts: result,
+      ...(persistenceAttempted ? { persistedOutputFiles } : {}),
+    };
   }
 
   getDescription(): string {
@@ -563,6 +607,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
     private readonly mcpToolIdleTimeoutMs?: number,
     readonly annotations?: McpToolAnnotations,
     alwaysLoad = false,
+    private readonly allowInvocationContext: boolean = false,
   ) {
     super(
       nameOverride ??
@@ -597,6 +642,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.mcpToolIdleTimeoutMs,
       this.annotations,
       this.alwaysLoad,
+      this.allowInvocationContext,
     );
   }
 
@@ -634,6 +680,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.mcpToolIdleTimeoutMs,
       this.annotations,
       this.alwaysLoad,
+      this.allowInvocationContext,
     );
   }
 
@@ -654,6 +701,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.mcpTimeout,
       this.mcpToolIdleTimeoutMs,
       this.annotations,
+      this.allowInvocationContext,
     );
   }
 }
@@ -792,6 +840,17 @@ function getDisplayFromParts(parts: Part[]): string {
   }
 
   return displayParts.join('\n');
+}
+
+function getDisplayFromPartsWithPersistedOutput(
+  parts: Part[],
+  persistedOutputFiles: string[] | undefined,
+): string {
+  const display = getDisplayFromParts(parts);
+  if (!persistedOutputFiles?.length) return display;
+
+  const paths = persistedOutputFiles.map((file) => `- ${file}`).join('\n');
+  return `${display}\nOutput too long and was saved to:\n${paths}`;
 }
 
 /** Visible for testing */

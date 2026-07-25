@@ -21,6 +21,7 @@ import {
   type AnsiOutput,
 } from '../utils/terminalSerializer.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
+import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -764,7 +765,7 @@ export class ShellExecutionService {
         detached: !isWindows,
         windowsHide: isWindows,
         env: {
-          ...normalizePathEnvForWindows(process.env),
+          ...normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
           ...getShellPagerEnv(pager, {
@@ -1467,7 +1468,7 @@ export class ShellExecutionService {
         cols,
         rows,
         env: {
-          ...normalizePathEnvForWindows(process.env),
+          ...normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
           ...getShellPagerEnv(shellExecutionConfig.pager, {

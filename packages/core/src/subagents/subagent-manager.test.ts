@@ -1130,6 +1130,22 @@ You are weird.
       );
     });
 
+    it('rejects creation at the commit boundary without writing', async () => {
+      const commitError = new Error('generation closed');
+
+      await expect(
+        manager.createSubagent(validConfig, {
+          level: 'project',
+          assertCanCommit: () => {
+            throw commitError;
+          },
+        }),
+      ).rejects.toBe(commitError);
+
+      expect(fs.mkdir).not.toHaveBeenCalled();
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
     it('should throw error if file already exists and overwrite is false', async () => {
       vi.mocked(fs.access).mockResolvedValue(undefined); // File exists
 
@@ -1455,6 +1471,20 @@ You are a helpful assistant.`;
       );
     });
 
+    it('rejects updates at the commit boundary without writing', async () => {
+      const commitError = new Error('generation closed');
+
+      await expect(
+        manager.updateSubagent('test-agent', {}, undefined, {
+          assertCanCommit: () => {
+            throw commitError;
+          },
+        }),
+      ).rejects.toBe(commitError);
+
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
     it('should throw error if subagent not found', async () => {
       vi.mocked(fs.readdir).mockRejectedValue(new Error('Directory not found'));
 
@@ -1492,6 +1522,23 @@ You are a helpful assistant.`;
       expect(fs.unlink).toHaveBeenCalledWith(
         path.normalize('/test/project/.qwen/agents/test-agent.md'),
       );
+    });
+
+    it('rejects deletion at the commit boundary without unlinking', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(fs.readdir).mockResolvedValue(['test-agent.md'] as any);
+      vi.mocked(fs.readFile).mockResolvedValue(validMarkdown);
+      const commitError = new Error('generation closed');
+
+      await expect(
+        manager.deleteSubagent('test-agent', 'project', undefined, {
+          assertCanCommit: () => {
+            throw commitError;
+          },
+        }),
+      ).rejects.toBe(commitError);
+
+      expect(fs.unlink).not.toHaveBeenCalled();
     });
 
     it('should delete from both levels if no level specified', async () => {
@@ -1911,6 +1958,35 @@ bad`);
         ]);
       });
 
+      it('fails closed when the allow-list is only the unavailable WebSearch', async () => {
+        // The unresolved name stays a dead, restrictive entry: the agent
+        // runs tool-less rather than inheriting shell/write it was not
+        // configured for. Deliberate — supersedes the earlier inherit-all
+        // compatibility fallback for converted Claude agents.
+        const configWithUnregistered: SubagentConfig = {
+          ...validConfig,
+          tools: ['WebSearch'],
+        };
+
+        const runtimeConfig = await manager.convertToRuntimeConfig(
+          configWithUnregistered,
+        );
+
+        expect(runtimeConfig.toolConfig?.tools).toEqual(['WebSearch']);
+      });
+
+      it('does not widen an allow-list whose names simply fail to resolve', async () => {
+        // A typo'd or temporarily-unavailable tool set must stay a dead,
+        // restrictive list — never silently become inherit-all (that would
+        // grant shell/write to an agent configured without them).
+        const runtimeConfig = await manager.convertToRuntimeConfig({
+          ...validConfig,
+          tools: ['Sheell'],
+        });
+
+        expect(runtimeConfig.toolConfig?.tools).toEqual(['Sheell']);
+      });
+
       it('should set modelConfig.model from model selector and merge run configurations', async () => {
         const configWithCustom: SubagentConfig = {
           ...validConfig,
@@ -2118,6 +2194,27 @@ bad`);
         await manager.createAgentHeadless(config, mockConfig);
 
         expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+      });
+
+      it('should snapshot the launch provider when inherit receives a concrete model override', async () => {
+        const config = { ...agentConfig, model: 'inherit' };
+
+        await manager.createAgentHeadless(config, mockConfig, {
+          modelConfigOverrides: { model: 'launch-model' },
+          runtimeAuthOverrides: {
+            authType: AuthType.USE_ANTHROPIC,
+            baseUrl: 'https://launch-provider.example.com',
+          },
+        });
+
+        expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+          expect.objectContaining({
+            model: 'launch-model',
+            authType: AuthType.USE_ANTHROPIC,
+            baseUrl: 'https://launch-provider.example.com',
+          }),
+          mockConfig,
+        );
       });
 
       it('should NOT create a new ContentGenerator when model is omitted', async () => {

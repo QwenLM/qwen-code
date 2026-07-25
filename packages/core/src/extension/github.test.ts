@@ -284,6 +284,10 @@ describe('git extension helpers', () => {
           'protocol.allow=never',
           'protocol.https.allow=always',
         ],
+        unsafe: {
+          allowUnsafeConfigPaths: true,
+          allowUnsafeProtocolOverride: true,
+        },
       });
       expect(mockGit.env).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -591,6 +595,10 @@ describe('git extension helpers', () => {
           'protocol.allow=never',
           'protocol.https.allow=always',
         ],
+        unsafe: {
+          allowUnsafeConfigPaths: true,
+          allowUnsafeProtocolOverride: true,
+        },
       });
       expect(mockGit.listRemote).toHaveBeenCalledWith([
         'https://github.com/owner/repo.git',
@@ -2075,9 +2083,14 @@ describe('git extension helpers', () => {
     }
 
     async function waitForFileData(filePath: string): Promise<void> {
-      for (let attempt = 0; attempt < 1_000; attempt += 1) {
+      // Poll on a real wall-clock budget (~10s), not a fixed iteration count:
+      // setImmediate turns are sub-millisecond, so 1_000 of them could elapse
+      // in <100ms while the tar extraction I/O is still catching up on a
+      // contended runner — the source of the "Timed out waiting for extracted
+      // data" flake. Stays well under the 15s per-test ceiling.
+      for (let attempt = 0; attempt < 2_000; attempt += 1) {
         if ((await getFileSize(filePath)) > 0) return;
-        await new Promise((resolve) => setImmediate(resolve));
+        await new Promise((resolve) => setTimeout(resolve, 5));
       }
       throw new Error(`Timed out waiting for extracted data at ${filePath}`);
     }

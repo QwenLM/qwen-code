@@ -20,6 +20,7 @@ const mockAddChannelMemoryEntries = vi.hoisted(() => vi.fn());
 const mockUpdateChannelMemoryEntry = vi.hoisted(() => vi.fn());
 const mockRemoveChannelMemoryEntries = vi.hoisted(() => vi.fn());
 const mockClearChannelMemory = vi.hoisted(() => vi.fn());
+const mockRecordChannelMemoryRecallMetrics = vi.hoisted(() => vi.fn());
 const mockParseCron = vi.hoisted(() => vi.fn());
 const mockNextFireTime = vi.hoisted(() =>
   vi.fn((cron: string) => {
@@ -113,6 +114,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   normalizeProxyUrl: mockNormalizeProxyUrl,
   parseCron: mockParseCron,
   readChannelMemory: mockReadChannelMemory,
+  recordChannelMemoryRecallMetrics: mockRecordChannelMemoryRecallMetrics,
   removeChannelMemoryEntries: mockRemoveChannelMemoryEntries,
   updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,
   Storage: {
@@ -224,10 +226,10 @@ beforeEach(() => {
 });
 
 describe('resolveProxy', () => {
-  it('prefers the CLI proxy over settings and environment proxies', () => {
+  it('prefers the CLI proxy over settings and environment proxies', async () => {
     process.env['HTTPS_PROXY'] = 'http://env.example.com:8080';
 
-    const proxy = resolveProxy(
+    const proxy = await resolveProxy(
       'http://cli.example.com:8080',
       'http://settings.example.com:8080',
     );
@@ -242,10 +244,13 @@ describe('resolveProxy', () => {
     });
   });
 
-  it('prefers settings.proxy over environment proxies', () => {
+  it('prefers settings.proxy over environment proxies', async () => {
     process.env['HTTPS_PROXY'] = 'http://env.example.com:8080';
 
-    const proxy = resolveProxy(undefined, 'http://settings.example.com:8080');
+    const proxy = await resolveProxy(
+      undefined,
+      'http://settings.example.com:8080',
+    );
 
     expect(proxy).toBe('http://settings.example.com:8080');
     expect(mockEnvHttpProxyAgent).toHaveBeenCalledWith({
@@ -254,10 +259,10 @@ describe('resolveProxy', () => {
     });
   });
 
-  it('falls back to proxy environment variables', () => {
+  it('falls back to proxy environment variables', async () => {
     process.env['HTTP_PROXY'] = 'http://env.example.com:8080';
 
-    const proxy = resolveProxy();
+    const proxy = await resolveProxy();
 
     expect(proxy).toBe('http://env.example.com:8080');
     expect(mockEnvHttpProxyAgent).toHaveBeenCalledWith({
@@ -884,6 +889,7 @@ describe('startCommand.handler', () => {
         memoryIntentClassifier: expect.objectContaining({
           classifyChannelMemoryIntent: expect.any(Function),
         }),
+        channelMemoryRecallObserver: mockRecordChannelMemoryRecallMetrics,
       }),
     );
   });
@@ -926,6 +932,7 @@ describe('startCommand.handler', () => {
         memoryIntentClassifier: expect.objectContaining({
           classifyChannelMemoryIntent: expect.any(Function),
         }),
+        channelMemoryRecallObserver: mockRecordChannelMemoryRecallMetrics,
       }),
     );
     expect(mockCreateChannel).toHaveBeenNthCalledWith(

@@ -54,12 +54,69 @@ describe('fleet shepherd workflow', () => {
       'AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || \'qwen-code-dev-bot\' }}"',
     );
     expect(workflow).toContain('--author "${AUTOFIX_BOT}" --base main');
-    expect(workflow).toContain('.isCrossRepository != true');
+    // Fail CLOSED on the fork field, matching the autofix workflow's
+    // convention (jq's // treats false as empty; == false rejects a
+    // missing field instead of passing it through).
+    expect(workflow).toContain('.isCrossRepository == false');
+    expect(workflow).not.toContain('.isCrossRepository != true');
     // One list call carries all per-PR metadata — no N+1 gh pr view loop.
     expect(workflow).toContain(
       '--json number,headRefName,headRefOid,mergeable,isCrossRepository,statusCheckRollup',
     );
-    expect(workflow).not.toContain('gh pr view');
+    // Per-PR metadata still rides the ONE list call — the sole gh pr view
+    // is the labels-only live-skip recheck immediately before a mutation.
+    expect(workflow.split('gh pr view').length - 1).toBe(1);
+    expect(workflow).toContain(
+      'gh pr view "${pr}" --repo "${REPO}" --json labels',
+    );
+    // autofix/skip is the maintainer opt-out honored at every engagement
+    // path: a skip-labeled PR gets no shepherd levers and no dashboard row.
+    // Replay the filter VERBATIM to prove the label actually excludes.
+    expect(workflow).toContain("SKIP_LABEL: 'autofix/skip'");
+    const fleetFilter = workflow.match(
+      /jq --arg skip "\$\{SKIP_LABEL\}" \\\n\s+'([\s\S]*?)' \\\n\s+\/tmp\/fleet-raw\.json/,
+    )?.[1];
+    expect(fleetFilter).toBeTruthy();
+    const kept = JSON.parse(
+      execFileSync('jq', ['--arg', 'skip', 'autofix/skip', fleetFilter], {
+        encoding: 'utf8',
+        input: JSON.stringify([
+          { number: 1, isCrossRepository: false, labels: [] },
+          {
+            number: 2,
+            isCrossRepository: false,
+            labels: [{ name: 'autofix/skip' }],
+          },
+          { number: 3, isCrossRepository: true, labels: [] },
+          { number: 4, labels: [] },
+        ]),
+      }),
+    ).map((r) => r.number);
+    expect(kept).toEqual([1]);
+    // The PRODUCER must request labels too — the filter replay above stays
+    // green on fixtures even if a future edit drops the field and every PR
+    // silently bypasses the opt-out.
+    expect(workflow).toContain(
+      '--limit 50 --json number,headRefName,headRefOid,mergeable,isCrossRepository,statusCheckRollup,labels',
+    );
+    // The snapshot filter is only tick-start state: every MUTATING lever
+    // re-checks the live label first (fail closed — an unreadable label
+    // state counts as skipped), so consent withdrawn mid-tick still wins
+    // before a dispatch or branch sync.
+    expect(workflow).toContain('live_skip() {');
+    expect(workflow).toContain('return 0');
+    // Reason-aware notes: an API outage (fail closed) is never reported as
+    // a maintainer decision, and the per-tick budget is checked BEFORE the
+    // PAT-backed live read so an exhausted tick stops spending API calls.
+    expect(workflow).toContain("LIVE_SKIP_REASON='unreadable'");
+    expect(workflow).toContain('consent withdrawn, no %s');
+    expect(workflow).toContain('fail closed, no %s');
+    expect(workflow).toMatch(
+      /DISPATCHES\}" -ge "\$\{MAX_CONFLICT_DISPATCHES_PER_TICK\}" \]\]; then[\s\S]{0,220}elif live_skip "\$\{PR\}"; then/,
+    );
+    expect(workflow).toMatch(
+      /SYNCS\}" -ge "\$\{MAX_SYNCS_PER_TICK\}" \]\]; then[\s\S]{0,160}elif live_skip "\$\{PR\}"; then/,
+    );
     // PAT identity is verified before any write.
     expect(workflow).toContain(
       "::error::CI_DEV_BOT_PAT authenticates as '${bot_actor:-unknown}'",

@@ -10,6 +10,14 @@ const daemonProxy: ProxyOptions = {
   changeOrigin: true,
   bypass: (req) => {
     if (req.url?.startsWith('/api/')) return undefined;
+    // `/extensions/*` is both a daemon API and a client source directory.
+    if (
+      req.method === 'GET' &&
+      req.url?.startsWith('/extensions/') &&
+      /\.(?:[cm]?[jt]sx?|css|map)(?:\?|$)/.test(req.url)
+    ) {
+      return req.url;
+    }
     const fetchMode = req.headers['sec-fetch-mode'];
     const fetchDest = req.headers['sec-fetch-dest'];
     const accept = req.headers.accept ?? '';
@@ -77,6 +85,7 @@ export default defineConfig(({ command }) => ({
       '/session': daemonProxy,
       '/permission': daemonProxy,
       '/workspace': daemonProxy,
+      '/extensions': daemonProxy,
       '/file': daemonProxy,
       '/stat': daemonProxy,
       '/list': daemonProxy,

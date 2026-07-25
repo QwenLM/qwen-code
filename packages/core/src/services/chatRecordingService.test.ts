@@ -24,6 +24,10 @@ import {
   serializeSnapshot,
   type FileHistorySnapshot,
 } from './fileHistoryService.js';
+import type {
+  SessionWriterUnavailableError,
+  SessionWriterLease,
+} from './session-writer-lease.js';
 
 vi.mock('node:path');
 vi.mock('node:child_process');
@@ -40,6 +44,7 @@ vi.mock('../utils/jsonl-utils.js');
 describe('ChatRecordingService', () => {
   let chatRecordingService: ChatRecordingService;
   let mockConfig: Config;
+  let mockLease: SessionWriterLease;
 
   let uuidCounter = 0;
 
@@ -87,13 +92,40 @@ describe('ChatRecordingService', () => {
     vi.spyOn(fs, 'writeFileSync').mockImplementation(() => undefined);
     vi.spyOn(fs, 'existsSync').mockReturnValue(false);
 
-    chatRecordingService = new ChatRecordingService(mockConfig);
-
     // Mock jsonl-utils. writeLine is async — mockResolvedValue returns
     // a settled Promise so the writeChain in ChatRecordingService advances
     // when flushed.
     vi.mocked(jsonl.writeLine).mockResolvedValue(undefined);
+
+    mockLease = {
+      sessionId: 'test-session-id',
+      ownerId: 'test-owner-id',
+      appendJsonLine: vi.fn((record: unknown) =>
+        jsonl.writeLine('/test/session.jsonl', record),
+      ),
+      assertOwnedAndUnchanged: vi.fn().mockResolvedValue(undefined),
+      release: vi.fn().mockResolvedValue(undefined),
+    } as unknown as SessionWriterLease;
+    chatRecordingService = activateRecording(
+      new ChatRecordingService(mockConfig),
+    );
   });
+
+  function activateRecording(
+    service: ChatRecordingService,
+  ): ChatRecordingService {
+    const resumed = mockConfig.getResumedSessionData();
+    service.activate(
+      mockLease,
+      resumed && !resumed.conversation
+        ? {
+            conversation: { messages: [] },
+            lastCompletedUuid: resumed.lastCompletedUuid,
+          }
+        : resumed,
+    );
+    return service;
+  }
 
   afterEach(() => {
     vi.restoreAllMocks();
@@ -117,6 +149,48 @@ describe('ChatRecordingService', () => {
       expect(record.cwd).toBe('/test/project/root');
       expect(record.version).toBe('1.0.0');
       expect(record.gitBranch).toBe('main');
+    });
+
+    it('blocks later turns after a generic durable write failure', async () => {
+      const failure = new Error('disk full');
+      vi.mocked(mockLease.appendJsonLine).mockRejectedValueOnce(failure);
+
+      chatRecordingService.recordUserMessage([{ text: 'not durable' }]);
+      await expect(chatRecordingService.flush()).rejects.toBe(failure);
+      await expect(
+        chatRecordingService.assertCanStartTurn(),
+      ).rejects.toMatchObject({
+        name: 'SessionWriterUnavailableError',
+        cause: failure,
+      } satisfies Partial<SessionWriterUnavailableError>);
+      chatRecordingService.recordUserMessage([{ text: 'must be blocked' }]);
+      expect(mockLease.appendJsonLine).toHaveBeenCalledTimes(1);
+    });
+
+    it('orders new appends after an authoritative read barrier', async () => {
+      let releaseRead!: () => void;
+      let markReadStarted!: () => void;
+      const readStarted = new Promise<void>((resolve) => {
+        markReadStarted = resolve;
+      });
+      const readGate = new Promise<void>((resolve) => {
+        releaseRead = resolve;
+      });
+      const snapshot = chatRecordingService.runWithWriteBarrier(async () => {
+        markReadStarted();
+        await readGate;
+        return 'snapshot';
+      });
+      await readStarted;
+
+      chatRecordingService.recordUserMessage([{ text: 'after snapshot' }]);
+      expect(mockLease.appendJsonLine).not.toHaveBeenCalled();
+      releaseRead();
+
+      await expect(snapshot).resolves.toBe('snapshot');
+      await chatRecordingService.flush();
+      expect(mockLease.appendJsonLine).toHaveBeenCalledOnce();
+      expect(mockLease.assertOwnedAndUnchanged).toHaveBeenCalledTimes(2);
     });
 
     it('should chain messages correctly with parentUuid', async () => {
@@ -174,7 +248,9 @@ describe('ChatRecordingService', () => {
       vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
         lastCompletedUuid: 'assistant-1',
       } as unknown as ReturnType<Config['getResumedSessionData']>);
-      chatRecordingService = new ChatRecordingService(mockConfig);
+      chatRecordingService = activateRecording(
+        new ChatRecordingService(mockConfig),
+      );
 
       chatRecordingService.rebuildTurnBoundaries([
         {
@@ -207,6 +283,23 @@ describe('ChatRecordingService', () => {
       const rewind = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
       expect(rewind.subtype).toBe('rewind');
       expect(rewind.parentUuid).toBe('pre-resume-parent');
+    });
+  });
+
+  describe('recordUserTextElements', () => {
+    it('records user text elements as a strict system payload', async () => {
+      const payload = {
+        content: 'hello',
+        textElements: [{ text: 'hello', start: 0, end: 5 }],
+      };
+
+      await chatRecordingService.recordUserTextElements(payload);
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.type).toBe('system');
+      expect(record.subtype).toBe('user_text_elements');
+      expect(record.systemPayload).toEqual(payload);
     });
   });
 
@@ -956,7 +1049,9 @@ describe('ChatRecordingService', () => {
       chatRecordingService.recordUserMessage([{ text: 'first' }]);
       await expect(chatRecordingService.flush()).rejects.toThrow('disk full');
 
-      const nextRecordingService = new ChatRecordingService(mockConfig);
+      const nextRecordingService = activateRecording(
+        new ChatRecordingService(mockConfig),
+      );
       nextRecordingService.recordUserMessage([{ text: 'new session' }]);
       await expect(nextRecordingService.flush()).resolves.toBeUndefined();
 
@@ -985,7 +1080,9 @@ describe('ChatRecordingService', () => {
         }),
       );
       const listener = vi.fn();
-      const service = new ChatRecordingService(mockConfig, listener);
+      const service = activateRecording(
+        new ChatRecordingService(mockConfig, listener),
+      );
 
       service.recordUserMessage([{ text: 'first' }]);
       service.recordUserMessage([{ text: 'queued descendant' }]);
@@ -1011,11 +1108,15 @@ describe('ChatRecordingService', () => {
         .mockRejectedValueOnce(new Error('first failure'))
         .mockRejectedValueOnce(new Error('second failure'));
 
-      const first = new ChatRecordingService(mockConfig, firstListener);
+      const first = activateRecording(
+        new ChatRecordingService(mockConfig, firstListener),
+      );
       first.recordUserMessage([{ text: 'first' }]);
       await expect(first.flush()).rejects.toThrow('first failure');
 
-      const second = new ChatRecordingService(mockConfig, secondListener);
+      const second = activateRecording(
+        new ChatRecordingService(mockConfig, secondListener),
+      );
       second.recordUserMessage([{ text: 'second' }]);
       await expect(second.flush()).rejects.toThrow('second failure');
 
@@ -1028,9 +1129,11 @@ describe('ChatRecordingService', () => {
       const handler = (error: unknown) => unhandled.push(error);
       process.on('unhandledRejection', handler);
       try {
-        const syncFailure = new ChatRecordingService(mockConfig, () => {
-          throw new Error('listener threw');
-        });
+        const syncFailure = activateRecording(
+          new ChatRecordingService(mockConfig, () => {
+            throw new Error('listener threw');
+          }),
+        );
         vi.mocked(jsonl.writeLine).mockRejectedValueOnce(
           new Error('sync observer write failure'),
         );
@@ -1039,9 +1142,11 @@ describe('ChatRecordingService', () => {
           'sync observer write failure',
         );
 
-        const asyncFailure = new ChatRecordingService(mockConfig, async () => {
-          throw new Error('listener rejected');
-        });
+        const asyncFailure = activateRecording(
+          new ChatRecordingService(mockConfig, async () => {
+            throw new Error('listener rejected');
+          }),
+        );
         vi.mocked(jsonl.writeLine).mockRejectedValueOnce(
           new Error('async observer write failure'),
         );
@@ -1057,12 +1162,8 @@ describe('ChatRecordingService', () => {
     });
   });
 
-  describe('ensureChatsDir caching', () => {
-    it('does not cache when mkdirSync throws so the next write retries', async () => {
-      // Regression: a transient mkdir failure used to poison the cache and
-      // silently drop the rest of the session's records. We have to fail
-      // both mkdir AND the wx-create, otherwise ensureConversationFile's
-      // own cache short-circuits ensureChatsDir on the second call.
+  describe('legacy recorder', () => {
+    it('retries directory setup after a synchronous failure', async () => {
       const mkdirSpy = vi.spyOn(fs, 'mkdirSync');
       mkdirSpy.mockImplementationOnce(() => {
         throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
@@ -1075,12 +1176,13 @@ describe('ChatRecordingService', () => {
       });
       writeSpy.mockImplementation(() => undefined);
 
-      chatRecordingService.recordUserMessage([{ text: 'retry me' }]);
+      const service = new ChatRecordingService(mockConfig, undefined, false);
+      service.recordUserMessage([{ text: 'retry me' }]);
+      await expect(service.flush()).resolves.toBeUndefined();
       expect(jsonl.writeLine).not.toHaveBeenCalled();
-      await expect(chatRecordingService.flush()).resolves.toBeUndefined();
 
-      chatRecordingService.recordUserMessage([{ text: 'retry me' }]);
-      await expect(chatRecordingService.flush()).resolves.toBeUndefined();
+      service.recordUserMessage([{ text: 'retry me' }]);
+      await expect(service.flush()).resolves.toBeUndefined();
 
       expect(mkdirSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
       expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
@@ -1090,7 +1192,7 @@ describe('ChatRecordingService', () => {
 
     it('does not notify for a synchronous conversation-file failure', () => {
       const listener = vi.fn();
-      const service = new ChatRecordingService(mockConfig, listener);
+      const service = new ChatRecordingService(mockConfig, listener, false);
       vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(() => {
         throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
       });
@@ -1101,19 +1203,44 @@ describe('ChatRecordingService', () => {
       expect(jsonl.writeLine).not.toHaveBeenCalled();
     });
 
-    it('caches after a successful mkdir so steady-state writes skip the syscall', async () => {
+    it('caches successful directory setup', async () => {
       const mkdirSpy = vi
         .spyOn(fs, 'mkdirSync')
         .mockImplementation(() => undefined);
+      const service = new ChatRecordingService(mockConfig, undefined, false);
 
-      chatRecordingService.recordUserMessage([{ text: 'first' }]);
-      await chatRecordingService.flush();
-      chatRecordingService.recordUserMessage([{ text: 'second' }]);
-      await chatRecordingService.flush();
-      chatRecordingService.recordUserMessage([{ text: 'third' }]);
-      await chatRecordingService.flush();
+      service.recordUserMessage([{ text: 'first' }]);
+      await service.flush();
+      service.recordUserMessage([{ text: 'second' }]);
+      await service.flush();
+      service.recordUserMessage([{ text: 'third' }]);
+      await service.flush();
 
       expect(mkdirSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('retries an identical attribution snapshot after a synchronous failure', async () => {
+      const snapshot = {
+        type: 'attribution-snapshot' as const,
+        version: 1,
+        surface: 'cli',
+        fileStates: {},
+        promptCount: 0,
+        promptCountAtLastCommit: 0,
+      };
+      const writeFileSpy = vi.spyOn(fs, 'writeFileSync');
+      writeFileSpy.mockImplementationOnce(() => {
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      });
+      const service = new ChatRecordingService(mockConfig, undefined, false);
+
+      service.recordAttributionSnapshot(snapshot);
+      await service.flush();
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+
+      service.recordAttributionSnapshot(snapshot);
+      await service.flush();
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -1339,37 +1466,6 @@ describe('ChatRecordingService', () => {
       expect(artifact.parentUuid).toBe(before.uuid);
       expect(after.parentUuid).toBe(before.uuid);
       expect(after.parentUuid).not.toBe(artifact.uuid);
-    });
-
-    // appendRecord can throw SYNCHRONOUSLY before returning a promise
-    // (e.g. ensureConversationFile fails because the conversation
-    // file can't be created). Without rollback in the outer catch,
-    // the dedup key stays set on a write that never happened, so
-    // all future identical snapshots get suppressed.
-    it('should retry an identical snapshot after a synchronous failure', async () => {
-      // First call: force writeFileSync (used by ensureConversationFile
-      // to wx-create the JSONL file) to throw a non-EEXIST error.
-      // ensureConversationFile rethrows that, which propagates through
-      // appendRecord SYNCHRONOUSLY before any promise is returned.
-      const writeFileSpy = vi.spyOn(fs, 'writeFileSync');
-      writeFileSpy.mockImplementationOnce(() => {
-        const e = new Error(
-          'EACCES: permission denied',
-        ) as NodeJS.ErrnoException;
-        e.code = 'EACCES';
-        throw e;
-      });
-
-      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
-      await chatRecordingService.flush();
-      // Sync failure: writeLine never reached.
-      expect(vi.mocked(jsonl.writeLine)).not.toHaveBeenCalled();
-
-      // Identical snapshot on retry: dedup key should have been
-      // rolled back so this fires a fresh write.
-      chatRecordingService.recordAttributionSnapshot(baseSnapshot);
-      await chatRecordingService.flush();
-      expect(vi.mocked(jsonl.writeLine)).toHaveBeenCalledTimes(1);
     });
   });
 

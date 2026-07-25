@@ -37,6 +37,7 @@ describe('no-AK integration CI wiring', () => {
         './fake-openai-server.test.ts',
         './cli/qwen-serve-routes.test.ts',
         './cli/qwen-serve-streaming.test.ts',
+        './cli/daemon-invocation-context.test.ts',
       ].join(' '),
     );
   });
