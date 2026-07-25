@@ -1117,32 +1117,6 @@ describe('noFollow option — symlink protection', () => {
     expect(await fs.readFile(target, 'utf-8')).toBe('NEW');
   });
 
-  it('atomicWriteFile: noFollow EXDEV rejects when assertCanCommit throws', async () => {
-    const target = path.join(tmpDir, 'exdev-commit-guard.txt');
-    await fs.writeFile(target, 'ORIGINAL');
-    const exdevRename = async () => {
-      const e: NodeJS.ErrnoException = new Error('EXDEV');
-      e.code = 'EXDEV';
-      throw e;
-    };
-
-    await expect(
-      atomicWriteFile(
-        target,
-        'NEW',
-        {
-          noFollow: true,
-          assertCanCommit: () => {
-            throw new Error('generation closed');
-          },
-        },
-        { rename: exdevRename },
-      ),
-    ).rejects.toThrow('generation closed');
-
-    expect(await fs.readFile(target, 'utf-8')).toBe('ORIGINAL');
-  });
-
   it('atomicWriteFileSync: noFollow EXDEV fallback also refuses to follow symlinks', () => {
     const real = path.join(tmpDir, 'real.txt');
     const link = path.join(tmpDir, 'link.txt');

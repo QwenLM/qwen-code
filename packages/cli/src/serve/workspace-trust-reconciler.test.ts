@@ -336,7 +336,7 @@ describe('workspace trust reconciler', () => {
     );
   });
 
-  it('blocks only the affected entry when dispose fails', async () => {
+  it('blocks only the affected entry when containment fails', async () => {
     const primary = makeRuntime('/primary', { primary: true });
     const secondary = makeRuntime('/secondary');
     const registry = createWorkspaceRegistry([primary, secondary]);
@@ -361,12 +361,11 @@ describe('workspace trust reconciler', () => {
     expect(registry.primary).toBe(primary);
     expect(registry.getEntryByWorkspaceCwd('/secondary')).toMatchObject({
       state: 'blocked',
-      applyError: expect.stringContaining('stuck'),
-      current: undefined,
+      applyError: expect.stringContaining('containment failed'),
     });
   });
 
-  it('recovers a blocked entry without re-draining after dispose failure', async () => {
+  it('retries containment before recovering a blocked entry', async () => {
     const primary = makeRuntime('/primary', { primary: true });
     const registry = createWorkspaceRegistry([primary]);
     const nextPolicy = policy('two', {
@@ -405,7 +404,7 @@ describe('workspace trust reconciler', () => {
 
     await reconciler.reconcile(nextPolicy);
 
-    expect(disposeRuntime).toHaveBeenCalledTimes(1);
+    expect(disposeRuntime).toHaveBeenCalledTimes(2);
     expect(buildRuntime).toHaveBeenCalledOnce();
     expect(registry.primary.trusted).toBe(false);
   });

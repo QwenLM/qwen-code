@@ -118,9 +118,9 @@ export function createWorkspaceTrustReconciler(
       if (previous) {
         const drainError = await (planned.drainResult ??
           drainRuntime(previous));
-        if (drainError) options.onError?.(entry, drainError);
-        contained = true;
         await options.disposeRuntime(previous, 'trust_reconfigured');
+        contained = true;
+        if (drainError) options.onError?.(entry, drainError);
       }
 
       let desiredSnapshot = snapshot;

@@ -119,7 +119,6 @@ describe('POST /workspace/settings', () => {
       expect.any(String),
       'general.cleanupPeriodDays',
       value,
-      expect.any(Function),
     );
     expect(broadcastSettingsChanged).toHaveBeenCalledWith(
       'general.cleanupPeriodDays',
@@ -151,7 +150,6 @@ describe('POST /workspace/settings', () => {
       'User',
       'general.cleanupPeriodDays',
       7,
-      expect.any(Function),
     );
     expect(broadcastSettingsChanged).toHaveBeenCalledWith(
       'general.cleanupPeriodDays',
@@ -222,7 +220,6 @@ describe('POST /workspace/settings', () => {
         expect.any(String),
         'mcpServers',
         value,
-        expect.any(Function),
       );
       expect(broadcastSettingsChanged).toHaveBeenCalledWith(
         'mcpServers',
@@ -263,7 +260,6 @@ describe('POST /workspace/settings', () => {
         docs: { command: 'docs-server' },
         new: { command: 'new-server' },
       },
-      expect.any(Function),
     );
   });
 
@@ -297,7 +293,6 @@ describe('POST /workspace/settings', () => {
       expect.any(String),
       'mcpServers',
       { keep: { command: 'keep-server' } },
-      expect.any(Function),
     );
   });
 
@@ -343,7 +338,6 @@ describe('POST /workspace/settings', () => {
       'Workspace',
       'mcpServers',
       existing,
-      expect.any(Function),
     );
     expect(JSON.stringify(broadcastSettingsChanged.mock.calls)).not.toContain(
       'env-secret',
@@ -394,7 +388,6 @@ describe('POST /workspace/settings', () => {
         expect.any(String),
         'general.sessionRecapAwayThresholdMinutes',
         value,
-        expect.any(Function),
       );
       expect(broadcastSettingsChanged).toHaveBeenCalledWith(
         'general.sessionRecapAwayThresholdMinutes',

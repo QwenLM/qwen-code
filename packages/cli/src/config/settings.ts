@@ -509,7 +509,6 @@ export class LoadedSettings {
     onScopeCommitted?: (scope: SettingScope) => void,
     assertCanCommit?: () => void,
   ): void {
-    assertCanCommit?.();
     const scopes = new Set<SettingScope>();
     for (const write of writes) {
       const value =
@@ -526,6 +525,7 @@ export class LoadedSettings {
     for (let i = 0; i < scopeList.length; i++) {
       const scope = scopeList[i]!;
       try {
+        assertCanCommit?.();
         saveSettings(this.forScope(scope), undefined, undefined, {
           throwOnWriteFailure: true,
         });
