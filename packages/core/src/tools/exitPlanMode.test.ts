@@ -10,6 +10,8 @@ import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
 import { ExitPlanModeTool, type ExitPlanModeParams } from './exitPlanMode.js';
 import { ToolConfirmationOutcome } from './tools.js';
+import { StructuredToolError } from './priorReadEnforcement.js';
+import { ToolErrorType } from './tool-error.js';
 
 describe('ExitPlanModeTool', () => {
   let tool: ExitPlanModeTool;
@@ -75,17 +77,46 @@ describe('ExitPlanModeTool', () => {
     const invocation = tool.build({ plan: 'Plan' });
 
     expect(invocation.requiresUserInteraction?.()).toBe(true);
-    await expect(invocation.getDefaultPermission()).resolves.toBe('ask');
+    // getDefaultPermission always returns 'allow'; requiresUserInteraction
+    // forces 'ask' via permissionFlow when in plan mode (#7671).
+    await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
   });
 
-  it('denies outside plan mode without constructing a misleading prompt', async () => {
+  it('allows outside plan mode but execute returns guidance error (#7671)', async () => {
     approvalMode = ApprovalMode.DEFAULT;
     const invocation = tool.build({ plan: 'Plan' });
 
-    await expect(invocation.getDefaultPermission()).resolves.toBe('deny');
-    await expect(
-      invocation.getConfirmationDetails(new AbortController().signal),
-    ).rejects.toThrow('outside plan mode');
+    // Permission layer allows — not a security concern, just wrong state
+    await expect(invocation.getDefaultPermission()).resolves.toBe('allow');
+
+    // No user interaction required outside plan mode — execute() handles it
+    expect(invocation.requiresUserInteraction?.()).toBe(false);
+
+    // Execute layer returns a helpful error with EXECUTION_DENIED type
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeDefined();
+    expect(result.error?.type).toBe(ToolErrorType.EXECUTION_DENIED);
+    expect(result.llmContent).toContain('not in plan mode');
+    expect(result.llmContent).toContain('Do not call exit_plan_mode again');
+  });
+
+  it('getConfirmationDetails throws structured guidance outside plan mode (#7671)', async () => {
+    approvalMode = ApprovalMode.DEFAULT;
+    const invocation = tool.build({ plan: 'Plan' });
+
+    try {
+      await invocation.getConfirmationDetails(new AbortController().signal);
+      expect.unreachable('should have thrown');
+    } catch (error) {
+      expect(error).toBeInstanceOf(StructuredToolError);
+      expect((error as StructuredToolError).errorType).toBe(
+        ToolErrorType.EXECUTION_DENIED,
+      );
+      expect((error as Error).message).toContain('not in plan mode');
+      expect((error as Error).message).toContain(
+        'Do not call exit_plan_mode again',
+      );
+    }
   });
 
   it.each([
