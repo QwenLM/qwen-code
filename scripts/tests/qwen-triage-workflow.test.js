@@ -213,7 +213,7 @@ describe('qwen-triage tmux workflow', () => {
   it('posts an early live-progress status comment and finalizes the same one', () => {
     const statusStep = step('Post triage status comment');
     // Announced up front (before the long agent step) with the live run link.
-    expect(statusStep).toContain('<!-- qwen-triage stage=status -->');
+    expect(statusStep).toContain('<!-- qwen-triage-lifecycle -->');
     expect(statusStep).toContain('actions/runs/${{ github.run_id }}');
     expect(statusStep).toContain('watch live progress');
     // Upsert by marker so a re-run reuses the one comment instead of stacking.
@@ -225,7 +225,7 @@ describe('qwen-triage tmux workflow', () => {
 
     const finalizeStep = step('Finalize triage status comment');
     // Runs on both outcomes and edits the SAME marker comment (no second post).
-    expect(finalizeStep).toContain('<!-- qwen-triage stage=status -->');
+    expect(finalizeStep).toContain('<!-- qwen-triage-lifecycle -->');
     expect(finalizeStep).toContain('success() || failure()');
     expect(finalizeStep).toContain('steps.triage.outcome');
     expect(finalizeStep).toContain('--method PATCH');
