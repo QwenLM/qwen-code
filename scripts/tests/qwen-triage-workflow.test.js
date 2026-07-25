@@ -185,8 +185,11 @@ describe('qwen-triage tmux workflow', () => {
   });
 
   it('verifies fresh bot-authored triage output instead of the status marker', () => {
+    const resolveStep = step('Resolve target number');
     const verifyStep = step('Verify triage output posted');
 
+    expect(resolveStep).toContain('started_at=');
+    expect(resolveStep).toContain('GITHUB_OUTPUT');
     expect(verifyStep).toContain('--method GET');
     expect(verifyStep).toContain('--paginate');
     expect(verifyStep).toContain('jq -rs');

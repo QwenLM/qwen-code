@@ -3638,6 +3638,9 @@ describe('qwen-autofix workflow', () => {
     expect(flakeDetectionStep).toContain(
       'if [[ "${DRY_RUN}" != \'true\' ]]; then',
     );
+    expect(flakeDetectionStep).toContain('gh issue close');
+    expect(flakeDetectionStep).toContain("--reason 'not planned'");
+    expect(flakeDetectionStep).toContain("--add-label 'autofix/skip'");
 
     for (const guardedStep of [
       claimIssueStep,
