@@ -451,7 +451,7 @@ Interaction mode reminder: ${interaction.questions}
   return `${basePrompt}${memorySuffix}${appendSuffix}`;
 }
 
-function buildSystemPromptSuffix(text?: string): string {
+export function buildSystemPromptSuffix(text?: string): string {
   const trimmed = text?.trim();
   return trimmed ? `\n\n---\n\n${trimmed}` : '';
 }
