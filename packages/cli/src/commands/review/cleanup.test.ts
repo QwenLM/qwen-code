@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   ghApiAll: vi.fn((_path: string): unknown[] => []),
   currentUser: vi.fn(() => 'reviewer'),
   setGhHost: vi.fn(),
+  getGhHost: vi.fn((): string | undefined => undefined),
 }));
 
 vi.mock('node:child_process', async (importOriginal) => {
@@ -70,6 +71,7 @@ vi.mock('./lib/gh.js', () => ({
   ghApiAll: mocks.ghApiAll,
   currentUser: mocks.currentUser,
   setGhHost: mocks.setGhHost,
+  getGhHost: mocks.getGhHost,
 }));
 
 vi.mock('./lib/paths.js', () => ({
@@ -390,6 +392,27 @@ describe('runCleanup — bypass-write audit', () => {
       .map((c) => String(c[0]))
       .filter((l) => l.startsWith('warning:'));
     expect(warnings.join('\n')).toContain('posted comment 9');
+  });
+
+  it('restores the prior gh host after the audit instead of leaking the override', () => {
+    // A host set before cleanup ran must be back in place afterwards — the
+    // audit's Enterprise override is scoped to the audit block.
+    mocks.getGhHost.mockReturnValue('prior.example.com');
+    mocks.readFileSync.mockReturnValue(
+      JSON.stringify({
+        prNumber: '123',
+        ownerRepo: 'acme/widgets',
+        fetchedAt: '2026-07-24T08:00:00Z',
+        host: 'ghe.example.com',
+      }),
+    );
+    mocks.ghApiAll.mockReturnValue([]);
+
+    runCleanup('pr-123');
+
+    // Override applied, then the prior host restored (the last call).
+    expect(mocks.setGhHost).toHaveBeenCalledWith('ghe.example.com');
+    expect(mocks.setGhHost).toHaveBeenLastCalledWith('prior.example.com');
   });
 
   it('does not resolve the current user when the window has no comments at all', () => {

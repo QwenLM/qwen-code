@@ -18,7 +18,8 @@ import { existsSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { clearReviewWorktreeLease } from '../../services/review-worktree-lease.js';
-import { currentUser, ghApiAll, setGhHost } from './lib/gh.js';
+import { currentUser, getGhHost, ghApiAll, setGhHost } from './lib/gh.js';
+import { parseReceiptIds } from './lib/receipt.js';
 import { refExists, releaseWorktree } from './lib/git.js';
 import {
   worktreePath,
@@ -248,20 +249,17 @@ function readAuditWindow(
 
 /**
  * The set of review ids sanctioned submits recorded this session — empty when
- * none did. Reads the current `reviewIds: number[]` shape and migrates a
- * legacy single `reviewId` a receipt from an older CLI carries.
+ * none did. The shape parse is shared with submit's writer
+ * (`lib/receipt.ts`); only the empty-case wrapper (a `Set` here, `[]` there)
+ * differs.
  */
 function readSubmitReceipt(target: string): Set<number> {
   try {
-    const receipt = JSON.parse(
-      readFileSync(tmpFile(target, 'submit-receipt.json'), 'utf8'),
-    ) as { reviewIds?: unknown; reviewId?: unknown };
-    const ids = Array.isArray(receipt.reviewIds)
-      ? receipt.reviewIds
-      : typeof receipt.reviewId === 'number'
-        ? [receipt.reviewId]
-        : [];
-    return new Set(ids.filter((n): n is number => typeof n === 'number'));
+    return new Set(
+      parseReceiptIds(
+        readFileSync(tmpFile(target, 'submit-receipt.json'), 'utf8'),
+      ),
+    );
   } catch {
     return new Set();
   }
@@ -297,6 +295,11 @@ function auditPrWrites(target: string, prNumber: string): void {
     return;
   }
   const window = read.window;
+  // The audit routes gh at the PR's host, but that override must not leak out
+  // of this block — cleanup runs last today, but a future caller after it (or
+  // a second auditPrWrites) would otherwise inherit the Enterprise host. Save
+  // and restore around the block.
+  const prevHost = getGhHost();
   try {
     setGhHost(window.host ?? undefined);
     // The boundary backs off from the recorded opening: fetchedAt is local
@@ -359,6 +362,8 @@ function auditPrWrites(target: string, prNumber: string): void {
     );
   } catch (err) {
     skipNote(briefErrorLine(err));
+  } finally {
+    setGhHost(prevHost);
   }
 }
 

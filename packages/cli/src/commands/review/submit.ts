@@ -48,6 +48,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { ghWithInput, setGhHost } from './lib/gh.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
+import { parseReceiptIds } from './lib/receipt.js';
 import { parseReviewArgs } from './parse-args.js';
 import { composeReview, type ComposeReviewInput } from './compose-review.js';
 import {
@@ -80,24 +81,14 @@ function defaultSkillArgsPath(): string {
 const EVENTS = new Set(['APPROVE', 'REQUEST_CHANGES', 'COMMENT']);
 
 /**
- * Review ids a prior submit in this window already recorded. Accepts both the
- * current `reviewIds: number[]` shape and the legacy single `reviewId` a
- * receipt written by an older CLI carries. Best-effort: an absent or
- * unreadable receipt is an empty list, never a throw — the caller adds the
- * current id regardless.
+ * Review ids a prior submit in this window already recorded. Best-effort: an
+ * absent or unreadable receipt is an empty list, never a throw — the caller
+ * adds the current id regardless. The shape parse is shared with cleanup's
+ * reader (`lib/receipt.ts`) so the two halves cannot drift.
  */
 function readReceiptIds(receiptPath: string): number[] {
   try {
-    const r = JSON.parse(readFileSync(receiptPath, 'utf8')) as {
-      reviewIds?: unknown;
-      reviewId?: unknown;
-    };
-    const ids = Array.isArray(r.reviewIds)
-      ? r.reviewIds
-      : typeof r.reviewId === 'number'
-        ? [r.reviewId]
-        : [];
-    return ids.filter((n): n is number => typeof n === 'number');
+    return parseReceiptIds(readFileSync(receiptPath, 'utf8'));
   } catch {
     return [];
   }

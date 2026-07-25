@@ -329,6 +329,12 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         prev.prNumber === prNumber &&
         prevSince !== null &&
         !Number.isNaN(Date.parse(prevSince)) &&
+        // `< auditSince` (which is `fetchedAt`, i.e. now) is also the upper
+        // bound: the window opening only ever moves BACKWARD to an earlier
+        // attempt, never forward. A corrupted far-future `auditSince`
+        // (`"2099-…"`) is therefore rejected here — it would push the window
+        // ahead of every real comment and silently report a clean audit.
+        // (ISO-8601 strings from `toISOString()` compare chronologically.)
         prevSince < auditSince
       ) {
         auditSince = prevSince;
