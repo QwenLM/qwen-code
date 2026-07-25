@@ -29,11 +29,14 @@ export function registerWorkspaceGitRoutes(
     sendBridgeError: SendBridgeError;
   },
 ): void {
-  app.get('/workspace/git', async (_req, res) => {
+  app.get('/workspace/git', async (req, res) => {
     try {
-      res
-        .status(200)
-        .json(await deps.gitState.getStatus(deps.boundWorkspace, deps.bridge));
+      const wait = req.query['wait'] === '1';
+      res.status(200).json(
+        await deps.gitState.getStatus(deps.boundWorkspace, deps.bridge, {
+          wait,
+        }),
+      );
     } catch (err) {
       deps.sendBridgeError(res, err, { route: 'GET /workspace/git' });
     }
@@ -106,9 +109,12 @@ export function registerWorkspaceQualifiedGitRoutes(
             : { v: 2, workspaceCwd: gitCwd, branch: null },
         );
       } else {
+        const wait = req.query['wait'] === '1';
         res
           .status(200)
-          .json(await deps.gitState.getStatus(gitCwd, runtime.bridge));
+          .json(
+            await deps.gitState.getStatus(gitCwd, runtime.bridge, { wait }),
+          );
       }
     } catch (err) {
       deps.sendBridgeError(res, err, { route });
