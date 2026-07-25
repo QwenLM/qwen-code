@@ -421,22 +421,13 @@ export function registerWorkspaceSettingsRoutes(
             deps.isWorkspaceTrusted?.() ?? true,
           );
           publicValue = prepared.publicValue;
-          if (deps.captureGenerationAssertion) {
-            await persistSetting(
-              boundWorkspace,
-              settingScope,
-              key,
-              prepared.persistedValue,
-              assertGenerationOpen,
-            );
-          } else {
-            await persistSetting(
-              boundWorkspace,
-              settingScope,
-              key,
-              prepared.persistedValue,
-            );
-          }
+          await persistSetting(
+            boundWorkspace,
+            settingScope,
+            key,
+            prepared.persistedValue,
+            assertGenerationOpen,
+          );
         };
         if (mcpServerMutation) {
           await withMcpServerMutationLock(
