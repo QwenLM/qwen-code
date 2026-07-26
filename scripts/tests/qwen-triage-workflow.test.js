@@ -2037,77 +2037,115 @@ describe('qwen-triage verify maintainer-review round', () => {
     }
   });
 
-  // A saturated concurrency group drops the third request with no job and
-  // therefore no comment; the always-hosted authorize job says so instead.
-  it('warns when the verify queue is already saturated', () => {
-    const notice = stepIn('authorize', 'Report saturated verify queue');
-    expect(notice).toContain('github.event.issue.pull_request');
-    expect(notice).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
-    const script = notice
+  // GitHub cancels the OLDER pending run in a concurrency group, so the
+  // requester's own /verify proceeds — the earlier "queued behind other
+  // runs" notice had that backwards and warned the wrong person. The real
+  // silent drop is the victim of that replacement: a verify job cancelled
+  // while pending never evaluates its `outputs:` block, so the publisher
+  // must not depend on it for the PR number.
+  it('still identifies the PR when verify was cancelled before it started', () => {
+    const publishJob = job('publish-verify');
+    // The fallback has to live where the value is READ.
+    expect(publishJob).toContain(
+      'needs.verify.outputs.pr_number || github.event.issue.number',
+    );
+    // ...and the step that warned on the inverted premise is gone.
+    expect(job('authorize')).not.toContain('Report saturated verify queue');
+
+    const publishStep = stepIn(
+      'publish-verify',
+      'Post verification report comment',
+    );
+    const script = publishStep
       .match(/run: \|-\n([\s\S]*)$/)?.[1]
       .replace(/^ {10}/gm, '');
-
-    const dir = mkdtempSync(join(tmpdir(), 'verify-saturated-'));
+    const dir = mkdtempSync(join(tmpdir(), 'verify-cancelled-'));
     try {
       writeFileSync(
         join(dir, 'gh'),
         [
           '#!/usr/bin/env bash',
-          // Join first: ${*#pat} applies the pattern to each positional
-          // parameter separately, which silently yielded a wrong run id
-          // while this stub was being written.
-          'all="$*"',
-          'case "$all" in',
-          '  *"pr view"*) echo "${FAKE_PR_TITLE-Some PR title}" ;;',
-          '  *workflows/qwen-triage.yml/runs*) printf "%s\\n" ${FAKE_RUN_IDS:-} ;;',
-          '  *actions/runs/*/jobs*)',
-          '    rid="${all#*actions/runs/}"; rid="${rid%%/jobs*}"',
-          '    case " ${FAKE_VERIFY_RUNS:-} " in *" $rid "*) echo 1 ;; *) echo 0 ;; esac ;;',
-          '  *) for a in "$@"; do case "$a" in body=*) echo posted >> "$POSTED";; esac; done ;;',
+          'for a in "$@"; do case "$a" in body=*) echo posted >> "$POSTED" ;; esac; done',
+          'case "$*" in',
+          '  *user*) echo qwen-code-ci-bot ;;',
+          "  *comments*--method*GET*) echo '[]' ;;",
           'esac',
           'exit 0',
         ].join('\n'),
         { mode: 0o755 },
       );
+      mkdirSync(join(dir, 'work'), { recursive: true });
       const posted = join(dir, 'posted');
-      const run = (runIds, verifyRuns, extra = {}) => {
+      const run = (prNumber) => {
         writeFileSync(posted, '');
-        spawnSync('bash', ['-c', script], {
+        const res = spawnSync('bash', ['-c', script], {
+          cwd: join(dir, 'work'),
           encoding: 'utf8',
           env: {
             ...process.env,
             PATH: `${dir}:${process.env.PATH}`,
+            POSTED: posted,
+            GH_STUB_OUT: join(dir, 'body.md'),
             GH_TOKEN: 'x',
             GITHUB_REPOSITORY: 'QwenLM/qwen-code',
-            NUMBER: '7710',
-            RUN_ID: '99',
-            FAKE_RUN_IDS: runIds,
-            FAKE_VERIFY_RUNS: verifyRuns,
-            POSTED: posted,
-            ...extra,
+            RUNNER_TEMP: dir,
+            GITHUB_STEP_SUMMARY: '/dev/null',
+            GITHUB_RUN_ID: '1',
+            GITHUB_RUN_ATTEMPT: '1',
+            PR_NUMBER: prNumber,
+            RUN_URL: 'u',
+            VERIFY_RESULT: 'cancelled',
+            DOWNLOAD_OUTCOME: 'success',
+            VERDICT: '',
+            SKIP_REASON: '',
+            PREPARE_FAILURE_PHASE: '',
+            AGENT_VERDICT: '',
+            VERIFY_ASSETS_REMOTE: join(dir, 'none.git'),
           },
         });
-        return readFileSync(posted, 'utf8').trim().length > 0;
+        return {
+          posted: readFileSync(posted, 'utf8').trim().length > 0,
+          log: `${res.stdout}${res.stderr}`,
+        };
       };
-      // Nothing else in flight.
-      expect(run('', '')).toBe(false);
-      // Two runs in flight, but both are /triage or /tmux. Those live in
-      // their own concurrency groups, so the verify slot is free and a
-      // warning here would describe a queue that does not exist.
-      expect(run('101 102', '')).toBe(false);
-      // One verify run still leaves a pending slot; two do not.
-      expect(run('101 102', '101')).toBe(false);
-      expect(run('101 102', '101 102')).toBe(true);
-      expect(run('101 102 103', '101 103')).toBe(true);
-      // Without a resolvable PR title there is no per-PR scope, so it stays
-      // silent rather than warning about other PRs' runs.
-      expect(run('101 102', '101 102', { FAKE_PR_TITLE: '' })).toBe(false);
-      const notice = stepIn('authorize', 'Report saturated verify queue');
-      expect(notice).toContain('.display_title == $ENV.PR_TITLE');
-      expect(notice).toContain('select(.name == "verify")');
+      // A number resolved either way must produce the cancelled notice.
+      const resolved = run('7710');
+      expect(resolved.posted).toBe(true);
+      // With an empty number the step can only warn and exit — which is why
+      // the workflow expression must never let that happen.
+      const empty = run('');
+      expect(empty.posted).toBe(false);
+      expect(empty.log).toContain('No PR number resolved');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // The published copy must name only the condition that can actually
+  // produce infra-error. Naming causes the code cannot reach is the same
+  // mis-attribution the classifier removal set out to fix, pointed the
+  // other way: it tells an author with a genuinely broken install that
+  // their code is fine.
+  it('names only the reachable cause in the infra-error body', () => {
+    const publish = stepIn(
+      'publish-verify',
+      'Post verification report comment',
+    );
+    // Anchor on the prepare-failure arm specifically: "infrastructure
+    // failure" also appears in the earlier artifact/infra-result branch,
+    // whose copy is unrelated to the install classification.
+    const start = publish.indexOf(
+      'Reachable: the prepare step reports infra-error',
+    );
+    expect(start).toBeGreaterThan(-1);
+    const body = publish.slice(start, publish.indexOf('emit_block', start));
+    expect(body).toContain('registry.npmjs.org` was unreachable');
+    // Causes the current prepare step can no longer emit.
+    expect(body).not.toContain('signal/OOM');
+    expect(body).not.toContain('full disk');
+    expect(body).not.toContain('磁盘写满');
+    // And the fix is offered, not asserted.
+    expect(body).not.toContain('is the fix');
   });
 
   // Registry reachability is the one signal about an install failure that

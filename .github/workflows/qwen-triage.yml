@@ -234,75 +234,6 @@ jobs:
             -f content='eyes' > /dev/null ||
             echo "Failed to add verify acknowledgement reaction; continuing." >&2
 
-      # A GitHub concurrency group holds one running plus one pending job,
-      # so a third /verify while two are in flight is dropped with no job
-      # and therefore no comment. This job always runs on a hosted runner,
-      # so it is the only place that can say so. Best-effort: an API hiccup
-      # here must not deny an otherwise-valid request.
-      - name: 'Report saturated verify queue'
-        if: >-
-          steps.perm.outputs.should_run == 'true' &&
-          vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' &&
-          github.event_name == 'issue_comment' &&
-          github.event.issue.pull_request &&
-          (github.event.comment.body == '@qwen-code /verify' ||
-           startsWith(github.event.comment.body, '@qwen-code /verify '))
-        env:
-          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
-          NUMBER: '${{ github.event.issue.number }}'
-          RUN_ID: '${{ github.run_id }}'
-        run: |-
-          set -uo pipefail
-          # Count this workflow's other in-flight runs for this PR. Two or
-          # more already queued/running means this request will be dropped
-          # by the concurrency group before it ever becomes a job.
-          # Count only runs for THIS pull request: the concurrency group is
-          # per-PR, so a run on another PR never contends for this slot and
-          # counting it would warn about a queue that does not exist. For
-          # issue_comment runs GitHub sets display_title to the issue title,
-          # which is the only per-PR handle these run records carry.
-          PR_TITLE="$(gh pr view "$NUMBER" --repo "$GITHUB_REPOSITORY" --json title --jq '.title' 2>/dev/null)" || PR_TITLE=''
-          if [ -z "$PR_TITLE" ]; then
-            exit 0
-          fi
-          # Runs are narrowed twice: to THIS pull request (display_title is
-          # the only per-PR handle an issue_comment run record carries) and
-          # to /verify runs specifically. /triage and /tmux live in their own
-          # concurrency groups, so counting them would warn about a verify
-          # queue that is actually empty. The command is not on the run
-          # record, so it is read from each run's triggering comment.
-          IN_FLIGHT=0
-          CANDIDATES="$(
-            PR_TITLE="$PR_TITLE" gh api "repos/$GITHUB_REPOSITORY/actions/workflows/qwen-triage.yml/runs?event=issue_comment&per_page=100" \
-              --jq '[.workflow_runs[]
-                     | select(.status == "queued" or .status == "in_progress")
-                     | select((.id | tostring) != $ENV.RUN_ID)
-                     | select(.display_title == $ENV.PR_TITLE)
-                     | .id] | .[]' 2>/dev/null
-          )" || CANDIDATES=''
-          for rid in $CANDIDATES; do
-            case "$rid" in ''|*[!0-9]*) continue ;; esac
-            # display_title is the issue title for issue_comment runs, so it
-            # cannot discriminate the command. The run's JOBS can: only a
-            # /verify run has a job named 'verify' (the others resolve to
-            # triage/tmux-testing), and a queued run already lists its jobs.
-            if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$rid/jobs?per_page=100" \
-                 --jq '[.jobs[] | select(.name == "verify")] | length' 2>/dev/null \
-                 | grep -qE '^[1-9]'; then
-              IN_FLIGHT=$((IN_FLIGHT + 1))
-            fi
-          done
-          case "$IN_FLIGHT" in
-            ''|*[!0-9]*) exit 0 ;;
-          esac
-          [ "$IN_FLIGHT" -ge 2 ] || exit 0
-          printf -v BODY '%s\n\n%s' \
-            '**Sandboxed verification queued behind other runs** — a verification is already running for this repository with another queued behind it, and GitHub keeps only one pending run per pull request, so this request may be dropped. Re-comment `@qwen-code /verify` once the current run finishes.' \
-            '**沙箱验证排队已满** —— 已有一次验证在运行、另一次在排队，而 GitHub 每个 PR 只保留一个待运行任务，因此本次请求可能被丢弃。请在当前运行结束后重新评论 `@qwen-code /verify`。'
-          gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
-            -f body="$BODY" >/dev/null ||
-            echo "Failed to post saturated-queue notice; continuing." >&2
-
       # The verify job is ECS-only (it needs the container + the persistent
       # pool). When the maintainer kill switch is set, that job would queue
       # against a disabled pool forever, so say so here instead of leaving an
@@ -1451,7 +1382,9 @@ jobs:
       - name: 'Post tmux result comment'
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
-          PR_NUMBER: '${{ needs.tmux-testing.outputs.pr_number }}'
+          # Same reason as publish-verify: a tmux job cancelled while
+          # pending never evaluates its outputs.
+          PR_NUMBER: '${{ needs.tmux-testing.outputs.pr_number || github.event.issue.number }}'
           VERDICT: '${{ needs.tmux-testing.outputs.verdict }}'
           PREPARE_FAILURE_PHASE: '${{ needs.tmux-testing.outputs.failure_phase }}'
           TMUX_RESULT: '${{ needs.tmux-testing.result }}'
@@ -2661,7 +2594,13 @@ jobs:
       - name: 'Post verification report comment'
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
-          PR_NUMBER: '${{ needs.verify.outputs.pr_number }}'
+          # The fallback must live where the value is READ. A verify job
+          # cancelled while still pending never reaches a runner, so its
+          # `outputs:` block is never evaluated and needs.verify.outputs
+          # comes through empty — which used to hit the no-PR-number guard
+          # below and exit 0 silently, in exactly the scenario that produces
+          # cancellations. Verified by executing this step with both values.
+          PR_NUMBER: '${{ needs.verify.outputs.pr_number || github.event.issue.number }}'
           VERDICT: '${{ needs.verify.outputs.verdict }}'
           AGENT_VERDICT: '${{ needs.verify.outputs.agent_verdict }}'
           SKIP_REASON: '${{ needs.verify.outputs.skip_reason }}'
@@ -2909,18 +2848,21 @@ jobs:
                 echo "::warning::Unrecognized prepare failure phase: ${UNKNOWN_PREPARE_PHASE}"
                 ;;
             esac
-            # The prepare step already classified this (signals, ENOSPC,
-            # registry/network errors -> infra-error). Saying "treated as a
-            # PR failure" for an infrastructure incident tells the author
-            # their code is broken when the workflow decided otherwise.
+            # infra-error can now arise from exactly one condition: npm ci
+            # failed AND the registry was unreachable from the runner (the
+            # log-pattern classifier is gone, and build failures are always
+            # `fail`). The copy must name that condition and nothing else —
+            # naming causes the code can no longer produce is the same
+            # mis-attribution this commit set out to remove, pointed the
+            # other way.
             {
               printf '%s\n\n' '<!-- qwen-triage:verify -->'
               # Reachable: the prepare step reports infra-error when the
-            # registry was unreachable from the runner at failure time.
-            if [ "${VERDICT:-}" = 'infra-error' ]; then
+              # registry was unreachable from the runner at failure time.
+              if [ "${VERDICT:-}" = 'infra-error' ]; then
                 printf '**Sandboxed verification: infrastructure failure** - [workflow run](%s)\n\n' "$RUN_URL"
-                printf '`%s` failed before any verification started, and the failure looks like an infrastructure incident (a signal/OOM kill, a full disk, or a registry/network error) rather than a problem with this PR. Re-running `@qwen-code /verify` is the fix.\n\n' "$PREPARE_COMMAND"
-                printf '`%s` 在验证开始前失败，且失败特征属于基础设施问题（信号/OOM、磁盘写满、镜像源或网络错误），而非本 PR 的代码问题。重新运行 `@qwen-code /verify` 即可。\n\n' "$PREPARE_COMMAND"
+                printf '`%s` failed before any verification started, and `registry.npmjs.org` was unreachable from the runner at that moment — so this looks like an infrastructure incident rather than a problem with this PR. Re-running `@qwen-code /verify` may well succeed; the install log below is the place to confirm.\n\n' "$PREPARE_COMMAND"
+                printf '`%s` 在验证开始前失败，且当时 runner 无法访问 `registry.npmjs.org`——因此更像基础设施问题而非本 PR 的代码问题。重新运行 `@qwen-code /verify` 有可能成功；下方安装日志可用于确认。\n\n' "$PREPARE_COMMAND"
               else
                 printf '%s\n\n' '<!-- qwen-triage:verify-substantive -->'
                 printf '**Sandboxed verification: fail** - [workflow run](%s)\n\n' "$RUN_URL"
