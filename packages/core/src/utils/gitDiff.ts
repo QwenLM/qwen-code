@@ -1489,7 +1489,10 @@ export async function fetchGitLog(
       '-n',
       String(limit + 1),
       ...(skip > 0 ? ['--skip', String(skip)] : []),
-      ...(options?.range && !options.range.startsWith('-')
+      ...(options?.range &&
+      !options.range.startsWith('-') &&
+      !options.range.startsWith('..') &&
+      /^[A-Za-z0-9_./~-]+$/.test(options.range)
         ? [options.range, '--']
         : []),
     ],

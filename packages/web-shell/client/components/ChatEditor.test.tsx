@@ -77,6 +77,14 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
             head: 'main',
             detached: false,
           }),
+          workspaceGitCheckout: vi.fn().mockResolvedValue(undefined),
+          workspaceGitCreateBranch: vi.fn().mockResolvedValue(undefined),
+          workspaceGitPush: vi
+            .fn()
+            .mockResolvedValue({ success: true, output: '' }),
+          workspaceGitPull: vi
+            .fn()
+            .mockResolvedValue({ success: true, output: '' }),
           listWorkspaceSessions: vi.fn().mockResolvedValue([]),
         }),
       },

@@ -25,6 +25,18 @@ test('branch picker, commit dialog, create PR form', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario({
+    capabilities: {
+      features: [
+        'session_events',
+        'permission_vote',
+        'session_permission_vote',
+        'session_scope_override',
+        'session_source_metadata',
+        'workspace_settings',
+        'workspace_voice',
+        'workspace_github_prs',
+      ],
+    },
     gitStatus: {
       v: 2,
       workspaceCwd: '/mock/workspace',

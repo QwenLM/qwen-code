@@ -112,6 +112,19 @@ describe('gitCheckout', () => {
       );
     },
   );
+
+  it('does not revert a dirty file when ref names a tracked path', async () => {
+    const dir = makeRepo();
+    // 'a.txt' is a tracked file AND a valid ref name (passes
+    // isValidCheckoutRef). Without the -- terminator, git checkout
+    // would interpret it as a pathspec and revert the working tree.
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'LOCAL EDIT\n');
+
+    await expect(gitCheckout(dir, 'a.txt')).rejects.toThrow();
+    expect(fs.readFileSync(path.join(dir, 'a.txt'), 'utf8')).toBe(
+      'LOCAL EDIT\n',
+    );
+  });
 });
 
 describe('gitCreateBranch', () => {
@@ -130,6 +143,16 @@ describe('gitCreateBranch', () => {
       const dir = makeRepo();
       await expect(gitCreateBranch(dir, 'topic', startPoint)).rejects.toThrow(
         /invalid start point/,
+      );
+    },
+  );
+
+  it.each(['-f', '--orphan', ''])(
+    'rejects an invalid branch name %s',
+    async (name) => {
+      const dir = makeRepo();
+      await expect(gitCreateBranch(dir, name)).rejects.toThrow(
+        /invalid branch name/,
       );
     },
   );

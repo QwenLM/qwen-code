@@ -246,10 +246,11 @@ export function GitDialog({
             });
           } catch (pushErr) {
             setCommitStatus({
-              msg:
-                t('gitCommit.commitSuccess', { sha: result.sha }) +
-                ' — push failed: ' +
-                (pushErr instanceof Error ? pushErr.message : String(pushErr)),
+              msg: t('gitCommit.commitSuccessPushFailed', {
+                sha: result.sha,
+                error:
+                  pushErr instanceof Error ? pushErr.message : String(pushErr),
+              }),
               type: 'error',
             });
           }
@@ -482,7 +483,13 @@ export function GitDialog({
             </button>
           ))}
           {isCommit && (
-            <span className={`${styles.tab} ${styles.tabActive}`}>
+            <span
+              id="git-dialog-tab-commit"
+              role="tab"
+              aria-selected="true"
+              aria-controls="git-dialog-panel"
+              className={`${styles.tab} ${styles.tabActive}`}
+            >
               {t('gitCommit.title')}
             </span>
           )}
@@ -491,7 +498,7 @@ export function GitDialog({
           id="git-dialog-panel"
           className={styles.tabPanel}
           role="tabpanel"
-          aria-labelledby={`git-dialog-tab-${clampedTab}`}
+          aria-labelledby={`git-dialog-tab-${isCommit ? 'commit' : clampedTab}`}
         >
           {clampedTab === 'diff' || isCommit ? (
             <GitDiffContent
@@ -697,6 +704,7 @@ function BranchSelect({
   onChange: (v: string) => void;
   branches: BranchList;
 }) {
+  const { t } = useI18n();
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
@@ -748,7 +756,7 @@ function BranchSelect({
           <input
             ref={inputRef}
             className={styles.branchSelectInput}
-            placeholder="Search branches…"
+            placeholder={t('branchSelect.search')}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />
@@ -795,12 +803,16 @@ function BranchSelect({
             </div>
           )}
           {!branches && (
-            <div className={styles.branchSelectEmpty}>Loading…</div>
+            <div className={styles.branchSelectEmpty}>
+              {t('branchSelect.loading')}
+            </div>
           )}
           {branches &&
             filteredRemotes.length === 0 &&
             filteredLocal.length === 0 && (
-              <div className={styles.branchSelectEmpty}>No matches</div>
+              <div className={styles.branchSelectEmpty}>
+                {t('branchSelect.noMatches')}
+              </div>
             )}
         </div>
       </PopoverContent>

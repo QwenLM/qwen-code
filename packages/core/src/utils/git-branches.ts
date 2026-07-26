@@ -77,12 +77,18 @@ export async function fetchGitBranches(
       'refs/tags/',
     ]).catch(() => ''),
     runGit(cwd, ['symbolic-ref', '--short', 'HEAD']).catch(() => ''),
-    runGit(cwd, [
-      'reflog',
-      'show',
-      '--format=%gs',
-      `-${MAX_REFLOG_ENTRIES}`,
-    ]).catch(() => ''),
+    execFileAsync(
+      'git',
+      ['reflog', 'show', '--format=%gs', `-${MAX_REFLOG_ENTRIES}`],
+      {
+        cwd,
+        timeout: GIT_TIMEOUT_MS,
+        maxBuffer: 10 * 1024 * 1024,
+        env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
+      },
+    )
+      .then(({ stdout }) => stdout)
+      .catch(() => ''),
   ]);
 
   const local = parseBranchLines(localRaw);
@@ -109,6 +115,7 @@ function parseBranchLines(raw: string): GitBranchInfo[] {
     .trim()
     .split('\n')
     .filter(Boolean)
+    .filter((line) => !line.split(SEPARATOR)[0]?.endsWith('/HEAD'))
     .map((line) => {
       const parts = line.split(SEPARATOR);
       const name = parts[0] ?? '';
@@ -241,6 +248,9 @@ export async function gitCreateBranch(
   name: string,
   startPoint?: string,
 ): Promise<GitCheckoutResult> {
+  if (!isValidRefName(name) || name.startsWith('-')) {
+    throw new Error(`invalid branch name: ${name}`);
+  }
   const args = ['checkout', '-b', name];
   if (startPoint) {
     if (!isValidCheckoutRef(startPoint)) {
@@ -248,6 +258,7 @@ export async function gitCreateBranch(
     }
     args.push(startPoint);
   }
+  args.push('--');
   await runGit(cwd, args);
   return { branch: name, detached: false };
 }

@@ -2126,6 +2126,7 @@ export const ChatEditor = memo(
                       <BranchPickerPopover
                         open={branchPickerOpen}
                         onOpenChange={setBranchPickerOpen}
+                        workspaceCwd={selectedWorkspace?.cwd ?? ''}
                         onOpenDiff={onOpenGitDiff}
                         onOpenCommit={onOpenCommit}
                       >

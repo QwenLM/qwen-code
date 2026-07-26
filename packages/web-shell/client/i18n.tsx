@@ -71,6 +71,11 @@ const EN: Messages = {
   'gitCommit.prCreated': (v) => `Pull Request #${v?.number ?? ''} created`,
   'gitCommit.commitSuccess': (v) => `Committed ${v?.sha ?? ''}`,
   'gitCommit.commitPushSuccess': (v) => `Committed & pushed ${v?.sha ?? ''}`,
+  'gitCommit.commitSuccessPushFailed': (v) =>
+    `Committed ${v?.sha ?? ''} — push failed: ${v?.error ?? 'unknown'}`,
+  'branchSelect.search': 'Search branches…',
+  'branchSelect.loading': 'Loading…',
+  'branchSelect.noMatches': 'No matches',
   'gitCommit.untracked': 'New',
   'gitCommit.added': 'Added',
   'gitCommit.modified': 'Modified',
@@ -2395,6 +2400,11 @@ const ZH: Messages = {
   'gitCommit.prCreated': (v) => `合并请求 #${v?.number ?? ''} 已创建`,
   'gitCommit.commitSuccess': (v) => `已提交 ${v?.sha ?? ''}`,
   'gitCommit.commitPushSuccess': (v) => `已提交并推送 ${v?.sha ?? ''}`,
+  'gitCommit.commitSuccessPushFailed': (v) =>
+    `已提交 ${v?.sha ?? ''} — 推送失败：${v?.error ?? '未知错误'}`,
+  'branchSelect.search': '搜索分支…',
+  'branchSelect.loading': '加载中…',
+  'branchSelect.noMatches': '无匹配',
   'gitCommit.untracked': '新文件',
   'gitCommit.added': '已添加',
   'gitCommit.modified': '已修改',

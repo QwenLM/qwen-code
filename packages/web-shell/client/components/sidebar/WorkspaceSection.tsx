@@ -361,6 +361,7 @@ export function WorkspaceSection({
           <BranchPickerPopover
             open={branchPickerOpen}
             onOpenChange={setBranchPickerOpen}
+            workspaceCwd={workspace.cwd}
             onOpenDiff={() => onOpenGitDiff(workspace.cwd)}
             onOpenCommit={
               onOpenCommit ? () => onOpenCommit(workspace.cwd) : undefined

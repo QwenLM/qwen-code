@@ -25,6 +25,7 @@ import {
   requireTrustedWorkspaceRuntime,
   resolveContainedCwd,
   resolveWorkspaceRuntimeFromParam,
+  sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
 
 function resolveTrustedRuntime(
@@ -44,7 +45,10 @@ function sendGitError(
   sendBridgeError: SendBridgeError,
 ): void {
   const msg = err instanceof Error ? err.message : String(err);
-  if (/not a git repository/i.test(msg) || /could not resolve/i.test(msg)) {
+  if (
+    /not a git repository/i.test(msg) ||
+    /could not resolve.*to a revision/i.test(msg)
+  ) {
     res.status(404).json({ error: 'not_a_git_repository', message: msg });
     return;
   }
@@ -211,9 +215,17 @@ async function handleCommit(
 
 export function registerWorkspaceGitBranchRoutes(
   app: Application,
-  deps: { boundWorkspace: string; sendBridgeError: SendBridgeError },
+  deps: {
+    boundWorkspace: string;
+    sendBridgeError: SendBridgeError;
+    isWorkspaceTrusted?: () => boolean;
+  },
 ): void {
   app.get('/workspace/git/branches', (_req, res) => {
+    if (deps.isWorkspaceTrusted?.() === false) {
+      sendUntrustedWorkspaceResponse(res);
+      return;
+    }
     void handleBranches(
       res,
       deps.boundWorkspace,
@@ -222,6 +234,10 @@ export function registerWorkspaceGitBranchRoutes(
     );
   });
   app.post('/workspace/git/checkout', (req, res) => {
+    if (deps.isWorkspaceTrusted?.() === false) {
+      sendUntrustedWorkspaceResponse(res);
+      return;
+    }
     void handleCheckout(
       req,
       res,
@@ -231,6 +247,10 @@ export function registerWorkspaceGitBranchRoutes(
     );
   });
   app.post('/workspace/git/branch', (req, res) => {
+    if (deps.isWorkspaceTrusted?.() === false) {
+      sendUntrustedWorkspaceResponse(res);
+      return;
+    }
     void handleCreateBranch(
       req,
       res,
@@ -240,6 +260,10 @@ export function registerWorkspaceGitBranchRoutes(
     );
   });
   app.post('/workspace/git/push', (req, res) => {
+    if (deps.isWorkspaceTrusted?.() === false) {
+      sendUntrustedWorkspaceResponse(res);
+      return;
+    }
     void handlePush(
       req,
       res,
@@ -249,6 +273,10 @@ export function registerWorkspaceGitBranchRoutes(
     );
   });
   app.post('/workspace/git/pull', (req, res) => {
+    if (deps.isWorkspaceTrusted?.() === false) {
+      sendUntrustedWorkspaceResponse(res);
+      return;
+    }
     void handlePull(
       req,
       res,
@@ -258,6 +286,10 @@ export function registerWorkspaceGitBranchRoutes(
     );
   });
   app.post('/workspace/git/commit', (req, res) => {
+    if (deps.isWorkspaceTrusted?.() === false) {
+      sendUntrustedWorkspaceResponse(res);
+      return;
+    }
     void handleCommit(
       req,
       res,

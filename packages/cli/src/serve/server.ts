@@ -1375,6 +1375,7 @@ export function createServeApp(
   registerWorkspaceGitBranchRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     sendBridgeError,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
   });
   registerWorkspaceQualifiedGitBranchRoutes(app, {
     workspaceRegistry,
