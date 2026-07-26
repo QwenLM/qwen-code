@@ -36,6 +36,7 @@ export function buildPermissionCheckContext(
   toolName: string,
   toolParams: Record<string, unknown>,
   targetDir: string,
+  toolAliases?: readonly string[],
 ): PermissionCheckContext {
   const rawCommand =
     'command' in toolParams ? String(toolParams['command']) : undefined;
@@ -88,7 +89,16 @@ export function buildPermissionCheckContext(
           ? toolParams['server_name']
           : undefined;
 
-  return { toolName, command, cwd, filePath, domain, specifier, toolParams };
+  return {
+    toolName,
+    toolAliases,
+    command,
+    cwd,
+    filePath,
+    domain,
+    specifier,
+    toolParams,
+  };
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

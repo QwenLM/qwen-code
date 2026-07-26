@@ -5,6 +5,9 @@
  */
 
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { getShellContextEnvVars } from './shellContextEnv.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { promptIdContext } from './promptIdContext.js';
@@ -27,10 +30,25 @@ vi.mock('../telemetry/trace-context.js', () => ({
 
 describe('getShellContextEnvVars', () => {
   let originalSessionId: string | undefined;
+  // Isolated for the same reason as the session id, and it matters more now: the
+  // CLI exports QWEN_CODE_CLI to every shell it spawns, so a `npm test` run started
+  // from inside a qwen session inherits it — and the exact-equality assertion below
+  // would fail on a variable the test never set.
+  let originalCli: string | undefined;
+  // And QWEN_CODE_PROJECT_DIR, for the same reason again — the CLI exports it
+  // too, and the `.toEqual()` exact matches below fail on the inherited key.
+  // Reproduced: with it set, exactly the two exact-match tests fail. Restoring it
+  // here also cleans up after the per-session tests below, which assign it and
+  // used to leak the assignment into every later test in the file.
+  let originalProjectDir: string | undefined;
 
   beforeEach(() => {
     originalSessionId = process.env['QWEN_CODE_SESSION_ID'];
     delete process.env['QWEN_CODE_SESSION_ID'];
+    originalCli = process.env['QWEN_CODE_CLI'];
+    delete process.env['QWEN_CODE_CLI'];
+    originalProjectDir = process.env['QWEN_CODE_PROJECT_DIR'];
+    delete process.env['QWEN_CODE_PROJECT_DIR'];
   });
 
   afterEach(() => {
@@ -39,6 +57,131 @@ describe('getShellContextEnvVars', () => {
     } else {
       delete process.env['QWEN_CODE_SESSION_ID'];
     }
+    if (originalCli !== undefined) {
+      process.env['QWEN_CODE_CLI'] = originalCli;
+    } else {
+      delete process.env['QWEN_CODE_CLI'];
+    }
+    if (originalProjectDir !== undefined) {
+      process.env['QWEN_CODE_PROJECT_DIR'] = originalProjectDir;
+    } else {
+      delete process.env['QWEN_CODE_PROJECT_DIR'];
+    }
+  });
+
+  it('passes the running CLI down, so a subprocess does not resolve `qwen` off PATH', () => {
+    // A skill that shells out to `qwen …` would otherwise reach whatever the machine
+    // has installed. Dogfooded: a dev-daemon session ran `qwen review agent-prompt
+    // --role 0`, PATH found a v0.19.10 whose agent-prompt predates --role, and the
+    // review died on "Missing required argument: chunk".
+    const dir = mkdtempSync(join(tmpdir(), 'cli-entry-'));
+    try {
+      const entry = join(dir, 'cli-entry.js');
+      writeFileSync(entry, '#!/usr/bin/env node\nconsole.log("hi");\n', {
+        mode: 0o755,
+      });
+      process.env['QWEN_CODE_CLI'] = entry;
+      expect(getShellContextEnvVars()['QWEN_CODE_CLI']).toBe(entry);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('overwrites a shebang-less .js with an EMPTY string — omission would leak it through the spread', () => {
+    // The variable predates this mechanism with a second meaning: the desktop
+    // app's scripts set it to a vendored `dist/cli.js` — a module path meant for
+    // `node <path>`, with no shebang. `"${QWEN_CODE_CLI:-qwen}"` executing that
+    // runs a JS bundle as a shell script (exit 126). Filtering must WRITE `''`:
+    // every spawn site composes the child env as `{...process.env, ...vars}`,
+    // so a key merely omitted from the returned record arrives anyway, inherited
+    // through the spread — reproduced: exit 126 on exactly the hosts the filter
+    // was written for. The `:-` expansion falls back to `qwen` on empty.
+    const dir = mkdtempSync(join(tmpdir(), 'cli-nosb-'));
+    try {
+      const bundle = join(dir, 'cli.js');
+      writeFileSync(bundle, '"use strict";\nconsole.log("bundle");\n');
+      process.env['QWEN_CODE_CLI'] = bundle;
+
+      const vars = getShellContextEnvVars();
+      expect(vars['QWEN_CODE_CLI']).toBe('');
+      // The contract, one spread up — the channel the omission bug lived in:
+      const childEnv = { ...process.env, ...vars };
+      expect(childEnv['QWEN_CODE_CLI']).toBe('');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('an unreadable entry is filtered through the same spread-safe channel', () => {
+    // The catch branch (`shebangless = true` on read failure) must not leak the
+    // inherited value either — a deleted or permission-blocked path is exactly
+    // as unusable as a shebang-less one.
+    process.env['QWEN_CODE_CLI'] = '/no/such/dir/cli.js';
+    const childEnv = { ...process.env, ...getShellContextEnvVars() };
+    expect(childEnv['QWEN_CODE_CLI']).toBe('');
+  });
+
+  it('an EXECUTABLE shebang-less .js is filtered by the header check itself', () => {
+    // The other shebang-less test writes a 0644 file, which the X_OK check
+    // rejects before the header is ever read — leaving the shebang-reading
+    // branch untested for its primary real-world target: a desktop vendored
+    // dist/cli.js that IS executable and still has no shebang. A regression in
+    // the header read (wrong byte count, offset, or comparison) would have
+    // passed every test.
+    const dir = mkdtempSync(join(tmpdir(), 'cli-exec-nosb-'));
+    try {
+      const bundle = join(dir, 'cli.js');
+      writeFileSync(bundle, '"use strict";\nconsole.log("bundle");\n', {
+        mode: 0o755,
+      });
+      process.env['QWEN_CODE_CLI'] = bundle;
+      const childEnv = { ...process.env, ...getShellContextEnvVars() };
+      expect(childEnv['QWEN_CODE_CLI']).toBe('');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a shebang-bearing script with no execute bit is filtered too — EACCES is not an entry', () => {
+    // The header check alone passes a 0644 script, and the shell then dies on
+    // EACCES instead of falling back. Execute permission is part of "the shell
+    // can exec this".
+    const dir = mkdtempSync(join(tmpdir(), 'cli-noexec-'));
+    try {
+      const entry = join(dir, 'entry.js');
+      writeFileSync(entry, '#!/usr/bin/env node\nconsole.log("hi");\n', {
+        mode: 0o644,
+      });
+      process.env['QWEN_CODE_CLI'] = entry;
+      const childEnv = { ...process.env, ...getShellContextEnvVars() };
+      expect(childEnv['QWEN_CODE_CLI']).toBe('');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('a shebang-bearing entry still passes through the spread intact', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'cli-sb-'));
+    try {
+      const entry = join(dir, 'entry.js');
+      writeFileSync(entry, '#!/usr/bin/env node\nconsole.log("hi");\n', {
+        mode: 0o755,
+      });
+      process.env['QWEN_CODE_CLI'] = entry;
+      const childEnv = { ...process.env, ...getShellContextEnvVars() };
+      expect(childEnv['QWEN_CODE_CLI']).toBe(entry);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('omits QWEN_CODE_CLI when the host does not export one', () => {
+    // Nothing to override: when the process env has no value, the spread at the
+    // spawn sites has nothing to leak either, so absence is correct here. (NOT
+    // because an empty string would shadow the fallback — the consumer is the
+    // colon form `${QWEN_CODE_CLI:-qwen}`, which falls back on unset AND empty.
+    // That mistaken comment is what produced the filter-by-omission bug below.)
+    expect('QWEN_CODE_CLI' in getShellContextEnvVars()).toBe(false);
   });
 
   it('returns empty strings for agent/prompt when no context is available', () => {

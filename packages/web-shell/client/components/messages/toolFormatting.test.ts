@@ -48,6 +48,15 @@ describe('toolFormatting', () => {
       );
       expect(sanitizeControlChars('a\tb\nc')).toBe('a\tb\nc');
     });
+
+    it('escapes Unicode bidi embedding/isolate controls', () => {
+      // RLO/LRE (U+202A–202E) and LRI/PDI (U+2066–2069) can visually reorder
+      // a filename to spoof its extension (mirrors the CLI-side coverage).
+      expect(sanitizeControlChars('a\u202eb')).toBe('a\\u202eb');
+      expect(sanitizeControlChars('a\u202ab')).toBe('a\\u202ab');
+      expect(sanitizeControlChars('a\u2066b')).toBe('a\\u2066b');
+      expect(sanitizeControlChars('a\u2069b')).toBe('a\\u2069b');
+    });
   });
 
   it('normalizes web fetch display names', () => {

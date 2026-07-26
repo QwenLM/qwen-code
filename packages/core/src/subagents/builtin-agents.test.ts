@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect } from 'vitest';
+import { ToolNames } from '../tools/tool-names.js';
 import { BuiltinAgentRegistry } from './builtin-agents.js';
 
 describe('BuiltinAgentRegistry', () => {
@@ -35,6 +36,21 @@ describe('BuiltinAgentRegistry', () => {
 
       expect(generalAgent).toBeDefined();
       expect(generalAgent?.description).toContain('General-purpose agent');
+      expect(generalAgent?.systemPrompt).toContain(
+        'general-purpose subagent working for a parent agent',
+      );
+      expect(generalAgent?.systemPrompt).toContain(
+        'Preserve unrelated user changes',
+      );
+      expect(generalAgent?.systemPrompt).toContain(
+        'Verify factual claims before reporting',
+      );
+      expect(generalAgent?.systemPrompt).toContain(
+        'run the smallest relevant checks',
+      );
+      expect(generalAgent?.systemPrompt).toContain(
+        'Report uncertainty or blockers',
+      );
     });
 
     it('should let the Explore agent inherit the main model', () => {
@@ -42,6 +58,28 @@ describe('BuiltinAgentRegistry', () => {
 
       expect(exploreAgent).toBeDefined();
       expect(exploreAgent?.model).toBeUndefined();
+    });
+
+    it('keeps the Explore agent read-only without banning shell pipelines', () => {
+      const exploreAgent = BuiltinAgentRegistry.getBuiltinAgent('Explore');
+
+      expect(exploreAgent?.tools).not.toContain(ToolNames.TODO_WRITE);
+      expect(exploreAgent?.tools).not.toContain(ToolNames.MEMORY);
+      expect(exploreAgent?.tools).not.toContain(ToolNames.ASK_USER_QUESTION);
+      expect(exploreAgent?.systemPrompt).toContain(
+        'pipelines are allowed when every command is read-only',
+      );
+      expect(exploreAgent?.systemPrompt).not.toContain('(>, >>, |)');
+    });
+
+    // Regression for #7126: Explore is a read-only search worker that
+    // typically runs as a subagent with no human in the loop. An
+    // interactive question tool would block the pipeline forever.
+    it('should not give the Explore agent the interactive question tool', () => {
+      const exploreAgent = BuiltinAgentRegistry.getBuiltinAgent('Explore');
+
+      expect(exploreAgent?.tools).toBeDefined();
+      expect(exploreAgent?.tools).not.toContain('ask_user_question');
     });
   });
 

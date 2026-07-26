@@ -20,6 +20,7 @@ import {
   type ChannelMemoryDocument,
   type ChannelMemoryEntry,
 } from './channel-memory-document.js';
+import { scanForSecrets } from './secret-scanner.js';
 
 export interface ChannelMemoryTarget {
   channelName: string;
@@ -77,6 +78,15 @@ interface Mutation<T> {
 
 function isMissingFile(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === 'ENOENT';
+}
+
+function assertNoChannelMemorySecrets(
+  content: string | readonly string[],
+): void {
+  const texts = typeof content === 'string' ? [content] : content;
+  if (texts.some((text) => scanForSecrets(text).length > 0)) {
+    throw new Error('Channel memory cannot store detected credentials');
+  }
 }
 
 async function releaseLock(release: () => Promise<void>): Promise<void> {
@@ -334,14 +344,48 @@ export async function listChannelMemoryEntries(
   return document.entries;
 }
 
+async function getFileRevision(filePath: string): Promise<string> {
+  try {
+    const stats = await fs.stat(filePath, { bigint: true });
+    return [
+      stats.dev,
+      stats.ino,
+      stats.size,
+      stats.mtimeNs,
+      stats.ctimeNs,
+    ].join(':');
+  } catch (error) {
+    if (isMissingFile(error)) {
+      return 'missing';
+    }
+    throw error;
+  }
+}
+
+export async function getChannelMemoryRevision(
+  target: ChannelMemoryTarget,
+): Promise<string> {
+  const [canonical, legacy] = await Promise.all([
+    getFileRevision(getChannelMemoryFilePath(target)),
+    getFileRevision(getLegacyChannelMemoryFilePath(target)),
+  ]);
+  return createHash('sha256')
+    .update(canonical)
+    .update('\0')
+    .update(legacy)
+    .digest('hex');
+}
+
 export async function addChannelMemoryEntries(
   target: ChannelMemoryTarget,
   texts: readonly string[],
   createdBy?: string,
 ): Promise<AddChannelMemoryResult> {
-  if (texts.length > MAX_CHANNEL_MEMORY_ENTRIES_PER_REQUEST) {
+  const textSnapshot = Array.from(texts);
+  if (textSnapshot.length > MAX_CHANNEL_MEMORY_ENTRIES_PER_REQUEST) {
     throw new Error('Channel memory accepts at most 10 entries per request');
   }
+  assertNoChannelMemorySecrets(textSnapshot);
 
   const filePath = getChannelMemoryFilePath(target);
   return mutateChannelMemory<AddChannelMemoryResult>(target, (document) => {
@@ -355,7 +399,7 @@ export async function addChannelMemoryEntries(
     const added: ChannelMemoryEntry[] = [];
     const duplicateIds: string[] = [];
 
-    for (const text of texts) {
+    for (const text of textSnapshot) {
       const normalizedText = normalizeChannelMemoryText(text);
       if (!normalizedText) {
         continue;
@@ -398,26 +442,25 @@ export async function updateChannelMemoryEntry(
   target: ChannelMemoryTarget,
   mutation: { id: string; text: string; expectedText?: string },
 ): Promise<UpdateChannelMemoryResult> {
+  const id = mutation.id;
+  const text = mutation.text;
+  const expectedText = mutation.expectedText;
+  assertNoChannelMemorySecrets(text);
   const filePath = getChannelMemoryFilePath(target);
   return mutateChannelMemory<UpdateChannelMemoryResult>(target, (document) => {
-    const entry = document.entries.find(
-      (candidate) => candidate.id === mutation.id,
-    );
+    const entry = document.entries.find((candidate) => candidate.id === id);
     if (entry === undefined) {
-      if (mutation.expectedText !== undefined) {
+      if (expectedText !== undefined) {
         throw new Error('Channel memory entry changed');
       }
       return { changed: false, result: { changed: false, filePath } };
     }
-    if (
-      mutation.expectedText !== undefined &&
-      entry.text !== mutation.expectedText
-    ) {
+    if (expectedText !== undefined && entry.text !== expectedText) {
       throw new Error('Channel memory entry changed');
     }
 
     const replacement = createChannelMemoryEntry({
-      text: mutation.text,
+      text,
       now: new Date().toISOString(),
       randomHex: '000000000000',
     });

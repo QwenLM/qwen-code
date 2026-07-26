@@ -57,6 +57,8 @@ export function briefPath(planPath: string, key: string): string {
   return join(promptRecordDir(planPath), `${encodeURIComponent(key)}.brief.md`);
 }
 
+const RULES_MARKER = '## Project rules';
+
 /**
  * Write the brief this agent is told to read.
  *
@@ -78,6 +80,27 @@ export function writeBrief(
   brief: string,
 ): string {
   const p = briefPath(planPath, key);
+  // Refuse the rules downgrade. The launch prompt POINTS at this file and never
+  // mentions the rules, so rebuilding a rules-bearing brief without --rules
+  // leaves the recorded launch byte-identical: every delivery check keeps
+  // passing while the project's review rules silently vanish from the one file
+  // the agent treats as authoritative. Reproduced upstream; refused here, at the
+  // single choke point both the single-role and roster builds pass through.
+  let hadRules = false;
+  try {
+    hadRules = readFileSync(p, 'utf8').includes(RULES_MARKER);
+  } catch {
+    // No existing brief — nothing to downgrade.
+  }
+  if (hadRules && !brief.includes(RULES_MARKER)) {
+    throw new Error(
+      `agent-prompt: rebuilding "${key}" without --rules would overwrite a ` +
+        `rules-bearing brief with a rules-free one, and no delivery check ` +
+        `could see it — the launch prompt only points at the brief. Pass the ` +
+        `same --rules file as the original build; to intentionally start a ` +
+        `rules-free review, delete ${promptRecordDir(planPath)} first.`,
+    );
+  }
   try {
     mkdirSync(promptRecordDir(planPath), { recursive: true });
     writeFileSync(p, brief);

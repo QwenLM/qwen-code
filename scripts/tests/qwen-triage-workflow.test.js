@@ -4,10 +4,23 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/qwen-triage.yml', 'utf8');
+const prSkill = readFileSync(
+  '.qwen/skills/triage/references/pr-workflow.md',
+  'utf8',
+);
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -124,6 +137,107 @@ describe('qwen-triage tmux workflow', () => {
     expect(checkStep).toContain('if [[ -z "${RESPONSE}"');
   });
 
+  it('tells an action crash apart from a silent agent, and replays both', () => {
+    const checkStep = step('Check triage response');
+    // The outcome must arrive through env like RESPONSE does — inlining the
+    // expression into the script would be the injection shape this step
+    // already avoids for RESPONSE.
+    expect(checkStep).toContain(
+      "TRIAGE_OUTCOME: '${{ steps.triage.outcome }}'",
+    );
+    expect(checkStep).not.toContain('TRIAGE_OUTCOME="${{');
+
+    const body = checkStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
+    expect(body).toBeTruthy();
+    const script = body.replace(/^ {10}/gm, '');
+    const run = (env) => {
+      const proc = spawnSync('bash', ['-c', script], {
+        env: {
+          ...process.env,
+          RESPONSE: '',
+          TRIAGE_OUTCOME: 'success',
+          ...env,
+        },
+        encoding: 'utf8',
+      });
+      return { status: proc.status, out: `${proc.stdout}${proc.stderr}` };
+    };
+
+    // A crashed action: no model call happened, so nothing about the PR can
+    // explain it and the guidance must say "re-run", not "read the log" —
+    // the install runs under `npm --silent`, so there is no log to read.
+    const crashed = run({ TRIAGE_OUTCOME: 'failure' });
+    expect(crashed.status).not.toBe(0);
+    expect(crashed.out).toContain('Triage did not start');
+    expect(crashed.out).toContain('re-run the failed job');
+    expect(crashed.out).not.toContain('Triage silent failure');
+
+    // A completed action with no summary IS worth reading the step output for.
+    const silent = run({ TRIAGE_OUTCOME: 'success' });
+    expect(silent.status).not.toBe(0);
+    expect(silent.out).toContain('Triage silent failure');
+    expect(silent.out).toContain('model or prompt problem');
+    expect(silent.out).not.toContain('Triage did not start');
+
+    // A real response still passes, and 'null' still counts as no response.
+    expect(run({ RESPONSE: 'triaged' }).status).toBe(0);
+    expect(run({ RESPONSE: 'null' }).status).not.toBe(0);
+  });
+
+  it('notifies the author when a manual triage re-run posts no review', () => {
+    const notifyStep = step('Notify silent triage re-run');
+
+    expect(notifyStep).toContain("github.event_name == 'issue_comment'");
+    expect(notifyStep).toContain('github.event.issue.pull_request');
+    expect(notifyStep).toContain(
+      "startsWith(github.event.comment.body, '@qwen-code /triage')",
+    );
+    expect(notifyStep).toContain('--method GET');
+    expect(notifyStep).toContain('--paginate');
+    expect(notifyStep).toContain('any(.[][];');
+    expect(notifyStep).toContain('.user.login == $bot');
+    expect(notifyStep).toContain('.submitted_at != null');
+    expect(notifyStep).toContain('.submitted_at >= $since');
+    // "Did this re-run post anything?" must stay state-agnostic: a re-posted
+    // CHANGES_REQUESTED counts as a review just as much as an approval. The
+    // separate head-commit probe below is the one that filters on state.
+    const sinceQuery = notifyStep.match(/any\(\.\[\]\[\];[^\n]*\$since\)/)?.[0];
+    expect(sinceQuery).toBeTruthy();
+    expect(sinceQuery).not.toContain('.state');
+    expect(notifyStep).toContain('HAS_REVIEW=false');
+    expect(notifyStep).toContain(
+      'gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments"',
+    );
+    expect(notifyStep).toContain('<!-- qwen-triage stage=rerun-summary -->');
+    expect(notifyStep).toContain(
+      'Triage re-run completed without a new review.',
+    );
+    expect(notifyStep).not.toContain('-X PATCH');
+  });
+
+  it('posts an early live-progress status comment and finalizes the same one', () => {
+    const statusStep = step('Post triage status comment');
+    // Announced up front (before the long agent step) with the live run link.
+    expect(statusStep).toContain('<!-- qwen-triage stage=status -->');
+    expect(statusStep).toContain('actions/runs/${{ github.run_id }}');
+    expect(statusStep).toContain('watch live progress');
+    // Upsert by marker so a re-run reuses the one comment instead of stacking.
+    expect(statusStep).toContain('contains($m)');
+    expect(statusStep).toContain('--method PATCH');
+    // Best-effort: a failed status post warns and continues, never fails triage.
+    expect(statusStep).toContain('set -uo pipefail');
+    expect(statusStep).toContain('continuing.');
+
+    const finalizeStep = step('Finalize triage status comment');
+    // Runs on both outcomes and edits the SAME marker comment (no second post).
+    expect(finalizeStep).toContain('<!-- qwen-triage stage=status -->');
+    expect(finalizeStep).toContain('success() || failure()');
+    expect(finalizeStep).toContain('steps.triage.outcome');
+    expect(finalizeStep).toContain('--method PATCH');
+    expect(finalizeStep).toContain('Qwen Triage finished');
+    expect(finalizeStep).toContain('ended early');
+  });
+
   it('reports timeout and infra-error without claiming the flow was exercised', () => {
     const postStep = step('Post tmux result comment');
 
@@ -209,4 +323,225 @@ describe('qwen-triage tmux workflow', () => {
       workflow.indexOf("- name: 'Install tmux runner tools'"),
     ).toBeLessThan(workflow.indexOf("- name: 'Checkout PR merge ref'"));
   });
+
+  it('escapes injected model names and fails loudly when the signature literal is gone', () => {
+    const injectStep = step('Inject model name into triage signature');
+    const body = injectStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
+    expect(body).toBeTruthy();
+    const script = body.replace(/^ {10}/gm, '');
+    // The workflow step only ever executes on ubuntu runners (GNU sed), but
+    // this suite also runs in the macOS merge-queue job, where BSD sed
+    // requires an extension argument after -i. Shim ONLY on darwin: on GNU
+    // sed a separated '' is parsed as the sed script (not the -i suffix), so
+    // an unconditional rewrite would break the Linux runs that actually
+    // mirror production.
+    const portableScript =
+      process.platform === 'darwin'
+        ? script.replace(/sed -i /g, "sed -i '' ")
+        : script;
+
+    const run = (model, content) => {
+      const dir = mkdtempSync(join(tmpdir(), 'triage-inject-'));
+      try {
+        const target = join(dir, '.qwen/skills/triage/references');
+        mkdirSync(target, { recursive: true });
+        writeFileSync(join(target, 'pr-workflow.md'), content);
+        const proc = spawnSync('bash', ['-c', portableScript], {
+          cwd: dir,
+          env: { ...process.env, OPENAI_MODEL: model },
+          encoding: 'utf8',
+        });
+        return {
+          status: proc.status,
+          out: readFileSync(join(target, 'pr-workflow.md'), 'utf8'),
+          log: `${proc.stdout}${proc.stderr}`,
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    // A model name carrying every sed replacement metacharacter (/ & \) must
+    // land verbatim — the old unescaped sed corrupted the skill text on these.
+    const meta = run('m1/pre&post\\x', 'sig: qwen3.7-max end');
+    expect(meta.status).toBe(0);
+    expect(meta.out).toBe('sig: m1/pre&post\\x end');
+
+    // The signature literal disappearing from the skill must fail the step —
+    // the old silent no-op shipped the wrong model name in every comment.
+    const missing = run('m2', 'sig: some-other-model end');
+    expect(missing.status).not.toBe(0);
+    expect(missing.log).toContain('Signature literal');
+    expect(missing.out).toBe('sig: some-other-model end');
+
+    // No model configured → file untouched, step succeeds.
+    const empty = run('', 'sig: qwen3.7-max end');
+    expect(empty.status).toBe(0);
+    expect(empty.out).toBe('sig: qwen3.7-max end');
+  });
+
+  it('pins the re-run comment-id recipe to startswith and the bot-author filter', () => {
+    // The skill's stage_comment_id() exists because a re-run once PATCHed the
+    // stage=3 comment with stage=1 content (#7693). Its two load-bearing
+    // constraints must not silently regress: `startswith` (a `contains` match
+    // would also hit a comment that merely quotes a marker) and the
+    // bot-author filter (markers are public text; the PAT may be able to
+    // edit other users' comments).
+    const section = prSkill.slice(
+      prSkill.indexOf('**Re-runs:**'),
+      prSkill.indexOf('Never create duplicates'),
+    );
+    expect(section).toContain('stage_comment_id()');
+    expect(section).toContain('select(.user.login == $bot)');
+    expect(section).toContain('startswith($m)');
+    expect(section).not.toContain('contains($m)');
+    expect(section).toContain('re-resolve immediately before EACH patch');
+  });
+
+  it('scopes the approve-skip check to the bot own approval on the reviewed commit', () => {
+    // A maintainer approved a PR three minutes before re-triggering /triage.
+    // The agent read that human approval as "existing approval from prior run
+    // still valid", skipped its own approve, and reported 5/5 Approved — the
+    // PR sat at 1 of the 2 required approvals with nothing marked wrong. The
+    // skip is worth keeping (three re-runs must not stack three approvals),
+    // but all three filters are load-bearing: login (another account's vote is
+    // not the bot's), state (a DISMISSED review is not an approval), and
+    // commit (dismiss_stale_reviews voids the bot's own on every push).
+    const section = prSkill.slice(
+      prSkill.indexOf('**Approve once per commit'),
+      prSkill.indexOf("Only approve when you're genuinely confident"),
+    );
+    expect(section).toContain('.user.login == $bot');
+    expect(section).toContain('.state == "APPROVED"');
+    expect(section).toContain('.commit_id == $sha');
+    expect(section).toContain('--paginate');
+    expect(section).toContain('DISMISSED');
+
+    // The terminal-gate probe shares the same failure mode: an unpaginated
+    // read sees only the first 30 reviews, and re-runs land on exactly the
+    // heavily-reviewed PRs where the gating review sits on a later page.
+    const terminalGate = prSkill.slice(
+      prSkill.indexOf('Never create duplicates'),
+      prSkill.indexOf('**Signature & footer:**'),
+    );
+    expect(terminalGate).toContain('--paginate');
+    expect(terminalGate).toContain('.state == "CHANGES_REQUESTED"');
+    expect(terminalGate).not.toContain("--jq '[.[] | select");
+  });
+
+  it.skipIf(spawnSync('jq', ['--version']).status !== 0)(
+    'warns when a triage re-run leaves the bot with no review on the head commit',
+    () => {
+      const notifyStep = step('Notify silent triage re-run');
+      const body = notifyStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
+      expect(body).toBeTruthy();
+      const script = body.replace(/^ {10}/gm, '');
+
+      const REVIEWS = {
+        // The observed case: the bot's approval was dismissed by a push, its
+        // only review on the head commit is a /review downgrade to COMMENTED,
+        // and the sole APPROVED on that commit belongs to a maintainer.
+        humanOnly: [
+          { user: { login: 'bot' }, state: 'DISMISSED', commit_id: 'old' },
+          { user: { login: 'bot' }, state: 'COMMENTED', commit_id: 'head' },
+          {
+            user: { login: 'human' },
+            state: 'APPROVED',
+            submitted_at: '2026-01-01T00:00:00Z',
+            commit_id: 'head',
+          },
+        ],
+        ownApproval: [
+          { user: { login: 'bot' }, state: 'APPROVED', commit_id: 'head' },
+          { user: { login: 'human' }, state: 'APPROVED', commit_id: 'head' },
+        ],
+        postedNow: [
+          {
+            user: { login: 'bot' },
+            state: 'CHANGES_REQUESTED',
+            submitted_at: '2030-01-01T00:00:00Z',
+            commit_id: 'head',
+          },
+        ],
+      };
+
+      const run = (reviews, head) => {
+        const dir = mkdtempSync(join(tmpdir(), 'triage-notify-'));
+        try {
+          const bin = join(dir, 'bin');
+          mkdirSync(bin, { recursive: true });
+          writeFileSync(join(dir, 'reviews.json'), JSON.stringify(reviews));
+          // Stand-in for `gh`: serves the review list and head SHA, and
+          // captures the comment body the step would have posted.
+          writeFileSync(
+            join(bin, 'gh'),
+            [
+              '#!/usr/bin/env bash',
+              'case "$*" in',
+              `  "api user --jq .login") echo bot ;;`,
+              `  *"/pulls/1/reviews"*) cat "${join(dir, 'reviews.json')}" ;;`,
+              `  *"/pulls/1 --jq .head.sha") [ -n "$FAKE_HEAD" ] && echo "$FAKE_HEAD" || exit 1 ;;`,
+              `  *"/issues/1/comments"*)`,
+              `    for a in "$@"; do case "$a" in body=*) printf '%s' "\${a#body=}" > "${join(dir, 'comment.txt')}" ;; esac; done`,
+              `    echo '{}' ;;`,
+              '  *) echo "unexpected gh call: $*" >&2; exit 1 ;;',
+              'esac',
+            ].join('\n'),
+            { mode: 0o755 },
+          );
+          const proc = spawnSync('bash', ['-c', script], {
+            env: {
+              ...process.env,
+              PATH: `${bin}:${process.env.PATH}`,
+              GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+              NUMBER: '1',
+              TRIGGERED_AT: '2026-01-02T00:00:00Z',
+              RUN_URL: 'https://example.invalid/run',
+              FAKE_HEAD: head,
+            },
+            encoding: 'utf8',
+          });
+          let comment = '';
+          try {
+            comment = readFileSync(join(dir, 'comment.txt'), 'utf8');
+          } catch {
+            comment = '';
+          }
+          return {
+            status: proc.status,
+            log: `${proc.stdout}${proc.stderr}`,
+            comment,
+          };
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      };
+
+      // The silent skip must surface as a warning AND in the posted comment.
+      const humanOnly = run(REVIEWS.humanOnly, 'head');
+      expect(humanOnly.status).toBe(0);
+      expect(humanOnly.log).toContain('Triage re-run left no bot review');
+      expect(humanOnly.comment).toContain('no review of its own');
+      expect(humanOnly.comment).toContain('does not count as the bot');
+
+      // The bot's own approval standing on the head commit is the benign case.
+      const ownApproval = run(REVIEWS.ownApproval, 'head');
+      expect(ownApproval.status).toBe(0);
+      expect(ownApproval.log).not.toContain('Triage re-run left no bot review');
+      expect(ownApproval.comment).toContain('review of its own');
+      expect(ownApproval.comment).toContain('still stands');
+
+      // A review posted by this very re-run short-circuits before commenting.
+      const postedNow = run(REVIEWS.postedNow, 'head');
+      expect(postedNow.status).toBe(0);
+      expect(postedNow.log).toContain('no summary comment needed');
+      expect(postedNow.comment).toBe('');
+
+      // An unreadable head SHA must not masquerade as either verdict.
+      const noHead = run(REVIEWS.humanOnly, '');
+      expect(noHead.status).toBe(0);
+      expect(noHead.log).not.toContain('Triage re-run left no bot review');
+      expect(noHead.comment).toContain('could not be read');
+    },
+  );
 });

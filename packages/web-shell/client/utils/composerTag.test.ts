@@ -3,6 +3,8 @@ import {
   createInputAnnotationsFromComposerTags,
   getComposerTagIconUrl,
   getComposerTagViewModel,
+  isBuiltinComposerTagIconUrl,
+  parseUserMessageContentSafely,
   splitComposerTagContentByAnnotations,
 } from './composerTag';
 
@@ -40,6 +42,20 @@ describe('composer tag icon URLs', () => {
 
   it('falls back to built-in tag icons', () => {
     expect(getComposerTagIconUrl('file')).toBeTruthy();
+  });
+
+  it('recognizes only exact built-in tag icon URLs', () => {
+    for (const kind of ['extension', 'file', 'mcp', 'skill'] as const) {
+      const iconUrl = getComposerTagIconUrl(kind);
+      expect(iconUrl).toMatch(/^data:image\/svg\+xml/);
+      expect(isBuiltinComposerTagIconUrl(iconUrl)).toBe(true);
+    }
+    expect(
+      isBuiltinComposerTagIconUrl(
+        'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" />',
+      ),
+    ).toBe(false);
+    expect(isBuiltinComposerTagIconUrl('javascript:alert(1)')).toBe(false);
   });
 
   it('ignores inherited object properties', () => {
@@ -119,6 +135,65 @@ describe('getComposerTagViewModel', () => {
       fallback: 'dataset:users',
       iconUrl: undefined,
     });
+  });
+});
+
+describe('parseUserMessageContentSafely', () => {
+  it('rejects an empty parser result', () => {
+    expect(
+      parseUserMessageContentSafely('original', () => [], 'test warning'),
+    ).toBeNull();
+  });
+
+  it('rejects a non-array parser result', () => {
+    const parser = (() => 'not an array') as unknown as Parameters<
+      typeof parseUserMessageContentSafely
+    >[1];
+
+    expect(
+      parseUserMessageContentSafely('original', parser, 'test warning'),
+    ).toBeNull();
+  });
+
+  it('rejects a text part with non-string text', () => {
+    const parser = (() => [{ type: 'text', text: 1 }]) as unknown as Parameters<
+      typeof parseUserMessageContentSafely
+    >[1];
+
+    expect(
+      parseUserMessageContentSafely('original', parser, 'test warning'),
+    ).toBeNull();
+  });
+
+  it('rejects a tag without an id', () => {
+    const parser = (() => [
+      { type: 'tag', tag: { value: 'orders' } },
+    ]) as unknown as Parameters<typeof parseUserMessageContentSafely>[1];
+
+    expect(
+      parseUserMessageContentSafely('original', parser, 'test warning'),
+    ).toBeNull();
+  });
+
+  it('allows valid non-round-tripping parts when source preservation is omitted', () => {
+    const parts = parseUserMessageContentSafely(
+      'original',
+      () => [{ type: 'text', text: 'rewritten' }],
+      'test warning',
+    );
+
+    expect(parts).toEqual([{ type: 'text', text: 'rewritten' }]);
+  });
+
+  it('rejects valid non-round-tripping parts when source preservation is required', () => {
+    const parts = parseUserMessageContentSafely(
+      'original',
+      () => [{ type: 'text', text: 'rewritten' }],
+      'test warning',
+      { requireSourcePreservation: true },
+    );
+
+    expect(parts).toBeNull();
   });
 });
 

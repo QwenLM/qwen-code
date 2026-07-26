@@ -724,6 +724,7 @@ function createExtensionProvider(
             const insertName = escapeAtReferenceText(
               sanitizeInsertText(ext.name),
             );
+            const serialized = `@ext:${insertName}`;
             const displayName = sanitizeDisplayText(ext.displayName ?? '');
             const description = sanitizeDisplayText(ext.description ?? '');
             return {
@@ -737,7 +738,13 @@ function createExtensionProvider(
                 displayName && description
                   ? `${displayName} - ${description}`
                   : (displayName ?? description),
-              insertText: `@ext:${insertName} `,
+              composerTag: {
+                id: `extension:${serialized}`,
+                kind: 'extension',
+                value: displayName || label,
+                serialized,
+              },
+              insertText: `${serialized} `,
             };
           })
           .filter((ext) => {

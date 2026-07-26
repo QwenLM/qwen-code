@@ -9,8 +9,10 @@ import { withActionTimeout } from '../timing.js';
 import type {
   DaemonDirectoryListing,
   DaemonFileStat,
+  DaemonGoal,
   DaemonScheduledTask,
   DaemonWorkspaceActions,
+  DaemonWorkspacePathSuggestions,
 } from './types.js';
 
 const AGENT_GENERATE_TIMEOUT_MS = 330_000;
@@ -149,6 +151,99 @@ export function createDaemonWorkspaceActions({
         throw new Error(result.errors[0].error);
       }
       return result.unarchived.length > 0 || result.alreadyActive.length > 0;
+    },
+
+    async loadChannels() {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load channels failed',
+      );
+      const [catalog, snapshot] = await withActionTimeout(
+        Promise.all([
+          workspace.workspaceChannelTypes(),
+          workspace.workspaceChannels(),
+        ]),
+        'Load channels timed out',
+      );
+      return { catalog, snapshot };
+    },
+
+    async upsertChannel(name, request) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Update channel failed',
+      );
+      return workspace.upsertWorkspaceChannel(name, request);
+    },
+
+    async removeChannel(name, request) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Remove channel failed',
+      );
+      return workspace.deleteWorkspaceChannel(name, request);
+    },
+
+    async setChannelStartup(name, request) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Update channel startup failed',
+      );
+      return workspace.setWorkspaceChannelStartup(name, request);
+    },
+
+    async startChannel(name) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Start channel failed',
+      );
+      return workspace.startWorkspaceChannel(name);
+    },
+
+    async stopChannel(name) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Stop channel failed',
+      );
+      return workspace.stopWorkspaceChannel(name);
+    },
+
+    async restartChannel(name) {
+      const workspace = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Restart channel failed',
+      );
+      return workspace.restartWorkspaceChannel(name);
+    },
+
+    channelPairing: {
+      async list(name) {
+        const workspace = requireWorkspaceClient(
+          getClient,
+          getWorkspaceCwd,
+          'Load channel pairing requests failed',
+        );
+        return withActionTimeout(
+          workspace.workspaceChannelPairingRequests(name),
+          'Load channel pairing requests timed out',
+        );
+      },
+
+      async approve(name, code) {
+        const workspace = requireWorkspaceClient(
+          getClient,
+          getWorkspaceCwd,
+          'Approve channel pairing failed',
+        );
+        return workspace.approveWorkspaceChannelPairing(name, { code });
+      },
     },
 
     async loadMcpStatus() {
@@ -329,6 +424,15 @@ export function createDaemonWorkspaceActions({
       return withActionTimeout(client.workspaceTools(), 'Load tools timed out');
     },
 
+    async preheatAcp(timeoutMs) {
+      const client = requireClient(getClient, 'Preheat ACP failed');
+      return withActionTimeout(
+        client.workspaceAcpPreheat(timeoutMs),
+        'Preheat ACP timed out',
+        timeoutMs === undefined ? undefined : timeoutMs + 2_000,
+      );
+    },
+
     async setWorkspaceToolEnabled(toolName, enabled) {
       const client = requireClient(getClient, 'Set tool enabled failed');
       return withActionTimeout(
@@ -384,6 +488,13 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async *generateContent(prompt, opts) {
+      const client = requireClient(getClient, 'Generate content failed');
+      yield* client.generateWorkspaceContent(prompt, {
+        signal: opts?.signal,
+      });
+    },
+
     async listAgents() {
       const client = requireClient(getClient, 'List agents failed');
       return withActionTimeout(
@@ -392,10 +503,10 @@ export function createDaemonWorkspaceActions({
       );
     },
 
-    async getAgent(agentType) {
+    async getAgent(agentType, scope) {
       const client = requireClient(getClient, 'Get agent failed');
       return withActionTimeout(
-        client.getWorkspaceAgent(agentType),
+        client.getWorkspaceAgent(agentType, scope ? { scope } : {}),
         'Get agent timed out',
       );
     },
@@ -629,6 +740,57 @@ export function createDaemonWorkspaceActions({
       }
     },
 
+    // Goals. `GET /goals` is REST-only (like /scheduled-tasks) and not on the
+    // DaemonClient transport; the clear path reuses the existing per-session
+    // route so a page-level clear and a `/goal clear` in chat take the same
+    // code path in the daemon.
+    async listGoals() {
+      requireClient(getClient, 'List goals failed');
+      const url = createDaemonRequestUrl(baseUrl, '/goals');
+      const res = await withActionTimeout(
+        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+          headers: createDaemonHeaders(token),
+        }),
+        'List goals timed out',
+      );
+      if (!res.ok) {
+        throw new Error(await readDaemonError(res, 'GET /goals'));
+      }
+      const data = (await res.json()) as {
+        goals?: DaemonGoal[];
+        droppedCount?: number;
+      };
+      return {
+        goals: Array.isArray(data.goals) ? data.goals : [],
+        droppedCount:
+          typeof data.droppedCount === 'number' && data.droppedCount > 0
+            ? data.droppedCount
+            : 0,
+      };
+    },
+
+    async clearGoal(sessionId) {
+      requireClient(getClient, 'Clear goal failed');
+      const url = createDaemonRequestUrl(
+        baseUrl,
+        `/session/${encodeURIComponent(sessionId)}/goal/clear`,
+      );
+      const res = await withActionTimeout(
+        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+          method: 'POST',
+          headers: createDaemonJsonHeaders(token),
+          body: '{}',
+        }),
+        'Clear goal timed out',
+      );
+      if (!res.ok) {
+        throw new Error(
+          await readDaemonError(res, `POST /session/${sessionId}/goal/clear`),
+        );
+      }
+      return (await res.json()) as { cleared: boolean };
+    },
+
     async loadEnv() {
       const client = requireClient(getClient, 'Load env failed');
       return withActionTimeout(client.workspaceEnv(), 'Load env timed out');
@@ -821,6 +983,32 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    /** Applies the standard mutation timeout without retrying the POST. */
+    async addScratchWorkspace() {
+      const client = requireClient(getClient, 'Add scratch workspace failed');
+      return withActionTimeout(
+        client.addScratchWorkspace(),
+        'Add scratch workspace timed out',
+      );
+    },
+
+    async suggestWorkspacePaths(prefix) {
+      const client = requireClient(getClient, 'Suggest workspace paths failed');
+      const result = await withActionTimeout(
+        client.workspacePathSuggestions(prefix),
+        'Suggest workspace paths timed out',
+      );
+      return result as DaemonWorkspacePathSuggestions;
+    },
+
+    async updateWorkspace(workspaceSelector, update) {
+      const client = requireClient(getClient, 'Update workspace failed');
+      return withActionTimeout(
+        client.updateWorkspace(workspaceSelector, update),
+        'Update workspace timed out',
+      );
+    },
+
     async removeWorkspace(workspaceId, options) {
       const client = requireClient(getClient, 'Remove workspace failed');
       const removal = client.workspaceById(workspaceId).remove(options);
@@ -855,6 +1043,15 @@ function requireWorkspaceCwd(
     throw new Error('Daemon workspace is not connected');
   }
   return cwd;
+}
+
+function requireWorkspaceClient(
+  getClient: () => DaemonClient | undefined,
+  getWorkspaceCwd: () => string | undefined,
+  action: string,
+) {
+  const client = requireClient(getClient, action);
+  return client.workspaceByCwd(requireWorkspaceCwd(getWorkspaceCwd));
 }
 
 // Builds a scheduled-tasks REST path. With a `workspaceId` it targets that

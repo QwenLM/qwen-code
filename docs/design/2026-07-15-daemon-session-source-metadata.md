@@ -26,6 +26,12 @@ matched together. Source filters are not combined with the organized view.
 Daemon scheduled tasks tag their dedicated session with
 `sourceType: "scheduled_task"` and the durable task id as `sourceId`.
 
+Daemon channel workers tag sessions they create with `sourceType: "channel"`
+and the configured channel instance name (e.g. `feishu-main`) as `sourceId`,
+so the channel instance — and, via the channel configuration, the channel kind
+(dingtalk/feishu/...) — is attributable on the daemon data plane. Loading or
+attaching an existing session never re-stamps its creation source.
+
 ## Persistence
 
 A fresh session stores one `session_source` system record near the head of its

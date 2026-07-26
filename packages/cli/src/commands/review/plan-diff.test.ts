@@ -69,6 +69,44 @@ describe('plan-diff', () => {
     expect(plan.files[0].kind).toBe('source');
   });
 
+  it('carries the PR identity when told to — the roster requires Agent 0 from it', () => {
+    // A lightweight cross-repo review has a PR but no worktree. Without these
+    // fields the plan classifies as diff-only, the roster omits issue fidelity,
+    // and check-coverage blesses the omission — the skill's own lightweight path
+    // says Agent 0 runs whenever pr-context succeeded. Presence of the pair IS
+    // the context-availability signal: the skill passes the flags only then.
+    const diffPath = join(dir, 'local.diff');
+    const out = join(dir, 'plan.json');
+    writeFileSync(diffPath, makeDiff('src/a.ts', 60));
+    (planDiffCommand.handler as (a: unknown) => void)({
+      diff_path: diffPath,
+      out,
+      maxChunkLines: 400,
+      pr: 6998,
+      repo: 'QwenLM/qwen-code',
+    });
+
+    const plan = JSON.parse(readFileSync(out, 'utf8'));
+    expect(plan.prNumber).toBe('6998');
+    expect(plan.ownerRepo).toBe('QwenLM/qwen-code');
+    // And no worktree appears — the identity does not fake a tree.
+    expect(plan.worktreePath).toBeUndefined();
+  });
+
+  it('refuses half a PR identity — a roster cannot require an agent nobody can build', () => {
+    const diffPath = join(dir, 'local.diff');
+    const out = join(dir, 'plan.json');
+    writeFileSync(diffPath, makeDiff('src/a.ts', 60));
+    expect(() =>
+      (planDiffCommand.handler as (a: unknown) => void)({
+        diff_path: diffPath,
+        out,
+        maxChunkLines: 400,
+        pr: 6998,
+      }),
+    ).toThrow(/--pr and --repo go together/);
+  });
+
   it('cannot decide heaviness without a tree, and says so by omission', () => {
     // A bare diff file has no ref to resolve a post-image against, so no file
     // is heavy and no `addedRanges` are emitted. Chunk coverage still holds.

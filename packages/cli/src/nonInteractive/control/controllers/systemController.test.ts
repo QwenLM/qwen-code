@@ -345,6 +345,11 @@ describe('SystemController', () => {
           baseUrl: 'https://internal-proxy.corp/v1',
           envKey: 'SECRET_API_KEY',
         },
+        {
+          id: 'qwen-image-2.0',
+          label: 'Qwen Image 2.0',
+          imageOnly: true,
+        },
       ]);
       const controller = new SystemController(
         context,

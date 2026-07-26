@@ -12,6 +12,7 @@ import {
   COMMAND_SUBSTITUTION_WARNING,
   detectSelfKillCommand,
   escapeShellArg,
+  getCommandRoot,
   getCommandRoots,
   getShellConfiguration,
   hasNonFinalTopLevelBackgroundOperator,
@@ -322,6 +323,20 @@ describe('checkCommandPermissions', () => {
       });
     });
 
+    it('should not let a backslash inside single quotes hide a blocked command', async () => {
+      // `echo 'a\'; rm ...` is two commands to the shell. If the splitter
+      // mistakes `\'` for an escaped quote it sees a single `echo` command
+      // and the deny rule never gets to look at `rm`.
+      config.getPermissionsDeny = () => ['ShellTool(rm)'];
+      const result = await checkCommandPermissions(
+        "echo 'a\\'; rm -rf /tmp/x",
+        config,
+      );
+      expect(result.allAllowed).toBe(false);
+      expect(result.isHardDenial).toBe(true);
+      expect(result.disallowedCommands).toEqual(['rm -rf /tmp/x']);
+    });
+
     it('should return a detailed failure object for a command not on a strict allowlist', async () => {
       config.getCoreTools = () => ['ShellTool(ls)'];
       const result = await checkCommandPermissions('git status && ls', config);
@@ -398,6 +413,80 @@ describe('checkCommandPermissions', () => {
       expect(result.allAllowed).toBe(false);
       expect(result.disallowedCommands).toEqual(['rm -rf /']);
     });
+  });
+});
+
+describe('getCommandRoot — parameter expansion in command position', () => {
+  // The bundled /review skill invokes every command as
+  // `"${QWEN_CODE_CLI:-qwen}" review …`. Before this resolver, such a command
+  // had NO identifiable root — the shell tool hard-refused it ("Could not
+  // identify command root to obtain permission from user") before any approval
+  // mode was consulted, YOLO included. Dogfooded live on every /review run.
+  const NAME = 'SHELL_UTILS_TEST_ENTRY';
+  afterEach(() => {
+    delete process.env[NAME];
+  });
+
+  it('resolves ${VAR:-default} to the variable when set and non-empty', () => {
+    process.env[NAME] = '/repo/scripts/dev.js';
+    expect(getCommandRoot(`"\${${NAME}:-qwen}" review foo`)).toBe('dev.js');
+    expect(getCommandRoot(`\${${NAME}:-qwen} review foo`)).toBe('dev.js');
+  });
+
+  it('resolves ${VAR:-default} to the default when unset OR empty — POSIX :-', () => {
+    expect(getCommandRoot(`"\${${NAME}:-qwen}" review foo`)).toBe('qwen');
+    process.env[NAME] = '';
+    expect(getCommandRoot(`"\${${NAME}:-qwen}" review foo`)).toBe('qwen');
+  });
+
+  it('resolves ${VAR-default} to the default only when unset — POSIX -', () => {
+    expect(getCommandRoot(`"\${${NAME}-qwen}" review foo`)).toBe('qwen');
+    process.env[NAME] = '';
+    // Empty-but-set: `-` keeps the empty value; nothing to name, no root.
+    expect(getCommandRoot(`"\${${NAME}-qwen}" review foo`)).toBeUndefined();
+  });
+
+  it('resolves a bare "$VAR" head, and yields no root when it is unset', () => {
+    process.env[NAME] = '/usr/local/bin/qwen';
+    expect(getCommandRoot(`"$${NAME}" review foo`)).toBe('qwen');
+    delete process.env[NAME];
+    // Unset with no default resolves to nothing: the command stays refusable,
+    // exactly as an empty command would be — there is nothing to name.
+    expect(getCommandRoot(`"$${NAME}" review foo`)).toBeUndefined();
+  });
+
+  it('field-splits an UNQUOTED expansion the way the shell does', () => {
+    // Both cases verified against real bash. Unset: `$VAR printf OK` removes
+    // the empty expansion and runs `printf` — returning no root here would
+    // hard-refuse a command the shell executes fine. Multi-word: with
+    // VAR='/usr/bin/env printf', the shell's command is `env` after splitting;
+    // reporting 'env printf' would show the wrong permission root.
+    expect(getCommandRoot(`$${NAME} printf OK`)).toBe('printf');
+    expect(getCommandRoot(`\${${NAME}} printf OK`)).toBe('printf');
+    process.env[NAME] = '/usr/bin/env printf';
+    expect(getCommandRoot(`$${NAME} OK`)).toBe('env');
+    // Quoting suppresses splitting: the whole value is one (unrunnable) word,
+    // and the root is its basename — faithful to what the shell would exec.
+    expect(getCommandRoot(`"$${NAME}" OK`)).toBe('env printf');
+  });
+
+  it('an empty unquoted expansion with nothing after it still has no root', () => {
+    expect(getCommandRoot(`$${NAME}`)).toBeUndefined();
+  });
+
+  it('skips leading env assignments before the expansion, like the plain path', () => {
+    process.env[NAME] = '/repo/scripts/dev.js';
+    expect(getCommandRoot(`FOO=1 "\${${NAME}:-qwen}" review foo`)).toBe(
+      'dev.js',
+    );
+  });
+
+  it('feeds getCommandRoots, so the shell tool no longer hard-refuses the skill form', () => {
+    expect(
+      getCommandRoots(
+        `"\${${NAME}:-qwen}" review fetch-pr 7 --out x.json && echo done`,
+      ),
+    ).toEqual(['qwen', 'echo']);
   });
 });
 
@@ -488,6 +577,26 @@ describe('getCommandRoots', () => {
     expect(getCommandRoots('"C:\\Program Files\\foo\\bar.exe" arg1')).toEqual([
       'bar.exe',
     ]);
+  });
+
+  it('should treat a backslash inside single quotes as literal, not an escape', async () => {
+    // The shell performs no escaping inside single quotes, so `'a\'` closes
+    // the quote and `;` separates two commands:
+    //   $ echo 'a\'; rm -rf /tmp/x   ->   prints "a\", then runs rm
+    // Treating `\'` as an escaped quote would leave the parser inside the
+    // quote and swallow `rm` entirely.
+    expect(getCommandRoots("echo 'a\\'; rm -rf /tmp/x")).toEqual([
+      'echo',
+      'rm',
+    ]);
+  });
+
+  it('should still honour backslash escapes outside single quotes', async () => {
+    // Inside double quotes a backslash *does* escape, so the quote stays open
+    // and the whole string is one command.
+    expect(getCommandRoots('echo "a\\"; rm -rf /tmp/x"')).toEqual(['echo']);
+    // An escaped separator outside quotes is likewise not a separator.
+    expect(getCommandRoots('echo a\\; rm -rf /tmp/x')).toEqual(['echo']);
   });
 });
 

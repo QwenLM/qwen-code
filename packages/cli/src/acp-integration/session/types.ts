@@ -48,6 +48,8 @@ export interface CumulativeUsage {
 
 export interface SessionEmitterContext extends SessionUpdateSender {
   readonly sessionId: string;
+  /** History replay hook used to correlate emitted updates with disk records. */
+  setActiveRecordId?: (id: string | null, timestamp?: string) => void;
   /** Optional message rewrite middleware for ACP message transformation.
    *  Installed after history replay to avoid rewriting historical messages. */
   messageRewriter?: MessageRewriteMiddleware;

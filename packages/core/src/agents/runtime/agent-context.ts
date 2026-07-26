@@ -99,6 +99,23 @@ export function getRuntimeContentGenerator():
 }
 
 /**
+ * Runs `fn` with NO agent frame on the async-local stack, so
+ * `Config.getModel()` / `getContentGeneratorConfig()` resolve to the main
+ * session's configuration and `getCurrentAgentId()` returns null.
+ *
+ * AsyncLocalStorage context propagates through every async continuation
+ * started inside `fn` — React state updates, queued microtasks, timers —
+ * which is exactly how a background agent's runtime view leaked into the
+ * notification drain and switched the main session onto the subagent's
+ * model (#7156). Wrap main-session-owned work that can be triggered from
+ * inside an agent frame (notification emission, completion bookkeeping)
+ * with this helper.
+ */
+export function runOutsideAgentContext<T>(fn: () => T): T {
+  return storage.exit(fn);
+}
+
+/**
  * True when there is no active agent frame — i.e. we are in the top-level
  * user session, not inside a sub-agent. The canonical "top-level only"
  * predicate for gating capabilities (teammate spawning, forking) that must

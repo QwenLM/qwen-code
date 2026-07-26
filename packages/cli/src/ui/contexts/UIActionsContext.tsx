@@ -57,6 +57,7 @@ export interface UIActions {
     fastModelMode?: boolean;
     voiceModelMode?: boolean;
     visionModelMode?: boolean;
+    imageModelMode?: boolean;
   }) => void;
   openArenaDialog: (type: Exclude<ArenaDialogType, null>) => void;
   closeArenaDialog: () => void;
@@ -74,7 +75,10 @@ export interface UIActions {
   onEscapePromptChange: (show: boolean) => void;
   onTabConsumerChange: (active: boolean) => void;
   refreshStatic: () => void;
-  handleFinalSubmit: (value: string) => void;
+  handleFinalSubmit: (
+    value: string,
+    options?: { deferUntilIdle?: boolean },
+  ) => void;
   handleRetryLastPrompt: () => void;
   handleClearScreen: () => void;
   popAllQueuedMessages: () => string | null;

@@ -22,7 +22,7 @@
  *   config.getMemoryManager().forget(projectRoot, query, options)
  *   config.getMemoryManager().getStatus(projectRoot)
  *   config.getMemoryManager().drain(options?)
- *   config.getMemoryManager().appendToUserMemory(userMemory, projectRoot)
+ *   config.getMemoryManager().buildAutoMemoryPrompt(projectRoot)
  *
  * # Task records
  * Each scheduled operation is tracked as a lightweight MemoryTaskRecord.
@@ -70,7 +70,7 @@ import {
 } from './recall.js';
 import { getManagedAutoMemoryStatus } from './status.js';
 import {
-  appendManagedAutoMemoryToUserMemory,
+  buildManagedAutoMemoryPrompt,
   type BuildMemoryPromptOptions,
   type UserAutoMemorySection,
   type TeamAutoMemorySection,
@@ -1433,24 +1433,24 @@ export class MemoryManager {
     return getManagedAutoMemoryStatus(projectRoot, this);
   }
 
-  // ─── Prompt append ────────────────────────────────────────────────────────────
+  // ─── Prompt build ─────────────────────────────────────────────────────────────
 
   /**
-   * Append the managed auto-memory section to a user memory string.
-   * When `userSection` is provided, the prompt teaches the model to route
-   * saves between the project dir and the user (cross-project) dir using
-   * the per-type scope guidance.
+   * Build the managed auto-memory section of the system prompt. This is the
+   * volatile prompt layer — it is rewritten in-session on every memory save,
+   * so callers must keep it after the stable/context layers. When
+   * `userSection` is provided, the prompt teaches the model to route saves
+   * between the project dir and the user (cross-project) dir using the
+   * per-type scope guidance.
    */
-  appendToUserMemory(
-    userMemory: string,
+  buildAutoMemoryPrompt(
     memoryDir: string,
     indexContent?: string | null,
     userSection?: UserAutoMemorySection,
     teamSection?: TeamAutoMemorySection,
     options?: BuildMemoryPromptOptions,
   ): string {
-    return appendManagedAutoMemoryToUserMemory(
-      userMemory,
+    return buildManagedAutoMemoryPrompt(
       memoryDir,
       indexContent,
       userSection,

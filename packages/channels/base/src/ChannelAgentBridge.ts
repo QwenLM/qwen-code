@@ -66,6 +66,7 @@ export interface PermissionResolvedEvent {
 interface ChannelAgentBridgeEventMap {
   sessionDied: [SessionDiedEvent];
   textChunk: [sessionId: string, chunk: string];
+  backgroundResponse: [sessionId: string, text: string];
   responseBoundary: [sessionId: string];
   toolCall: [ToolCallEvent];
   permissionRequest: [PermissionRequestEvent];
@@ -80,6 +81,13 @@ export interface BridgeSessionInfo {
 
 export interface ChannelAgentBridgeSessionOptions {
   approvalMode?: string;
+  /**
+   * Channel instance name (e.g. `feishu-main`) stamped as the daemon `sourceId`
+   * on **new** sessions — creation-time attribution paired with
+   * `sourceType: 'channel'`. Ignored by `loadSession`: loading an existing
+   * session never re-stamps its creation attribution.
+   */
+  sourceId?: string;
 }
 
 export interface ChannelAgentBridge {

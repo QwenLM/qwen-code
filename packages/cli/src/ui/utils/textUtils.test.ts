@@ -15,6 +15,7 @@ import {
   sanitizeMultilineForDisplay,
   sanitizeSensitiveText,
   sliceTextByVisualHeight,
+  truncateToWidth,
 } from './textUtils.js';
 
 describe('textUtils', () => {
@@ -254,6 +255,16 @@ describe('textUtils', () => {
       expect(sanitizeFilenameForDisplay('a\x9fb')).toBe('a\\u009fb');
     });
 
+    it('escapes Unicode bidi embedding/isolate controls', () => {
+      // RLO/LRE (U+202A–202E) and LRI/PDI (U+2066–2069) can visually reorder
+      // a filename to spoof its extension (e.g. "report‮fdp.exe" reads as
+      // "reportexe.pdf").
+      expect(sanitizeFilenameForDisplay('a\u202eb')).toBe('a\\u202eb');
+      expect(sanitizeFilenameForDisplay('a\u202ab')).toBe('a\\u202ab');
+      expect(sanitizeFilenameForDisplay('a\u2066b')).toBe('a\\u2066b');
+      expect(sanitizeFilenameForDisplay('a\u2069b')).toBe('a\\u2069b');
+    });
+
     it('strips multi-byte ANSI CSI sequences', () => {
       // SGR color/reset and cursor movement should not survive to the
       // terminal — `escapeAnsiCtrlCodes` neutralizes the ESC byte, then
@@ -359,6 +370,30 @@ describe('textUtils', () => {
       expect(result).not.toContain('secretkey12345678901234');
       expect(result).not.toContain('mypass123');
       expect(result).not.toContain('sk-test123456789012345678901');
+    });
+  });
+
+  describe('truncateToWidth', () => {
+    it('returns the full text when it fits the budget', () => {
+      expect(truncateToWidth('Color', 12)).toBe('Color');
+    });
+
+    it('clips with an ellipsis when over budget', () => {
+      expect(truncateToWidth('Target config', 6)).toBe('Targe…');
+    });
+
+    it('returns a lone ellipsis at a one-cell budget', () => {
+      expect(truncateToWidth('Target config', 1)).toBe('…');
+    });
+
+    it('returns empty (no stray ellipsis) at a zero or negative budget', () => {
+      expect(truncateToWidth('Target config', 0)).toBe('');
+      expect(truncateToWidth('Target config', -3)).toBe('');
+    });
+
+    it('bounds CJK text by display width, not character count', () => {
+      // 5 CJK characters (10 cells) plus the ellipsis fit an 11-cell budget.
+      expect(truncateToWidth('目标配置参数设置', 11)).toBe('目标配置参…');
     });
   });
 });

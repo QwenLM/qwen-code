@@ -270,6 +270,37 @@ export function makeRelative(
 }
 
 /**
+ * Formats a file path for terminal display.
+ *
+ * - Project-internal paths render relative to `rootDirectory` (the root
+ *   itself renders as '.').
+ * - Paths outside the project stay absolute, with the home directory
+ *   shortened to '~'.
+ * - Anything longer than `maxLen` is compressed by shortenPath(), which
+ *   drops middle segments rather than truncating the file name.
+ *
+ * Relative and '~'-prefixed inputs are resolved against `rootDirectory`
+ * first, so callers can pass raw user-supplied tool params verbatim.
+ *
+ * @param filePath The path to format (absolute, relative, or tilde-prefixed).
+ * @param rootDirectory The absolute path of the project root.
+ * @param maxLen Maximum display length before middle-segment compression.
+ * @returns The formatted path for display.
+ */
+export function formatDisplayPath(
+  filePath: string,
+  rootDirectory: string,
+  maxLen: number = 80,
+): string {
+  const resolved = resolvePath(rootDirectory, filePath);
+  const relative = makeRelative(resolved, rootDirectory);
+  // makeRelative returns the resolved absolute path when the target is
+  // outside rootDirectory — only then does the home-dir shorthand apply.
+  const display = path.isAbsolute(relative) ? tildeifyPath(relative) : relative;
+  return shortenPath(display, maxLen);
+}
+
+/**
  * Escapes special characters in a file path like macOS terminal does.
  * Escapes: spaces, parentheses, brackets, braces, semicolons, ampersands, pipes,
  * asterisks, question marks, dollar signs, backticks, quotes, hash, and other shell metacharacters.

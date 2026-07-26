@@ -136,7 +136,19 @@ describe('SessionRouter', () => {
 
       expect(bridge.newSession).toHaveBeenCalledWith(
         '/tmp',
-        { approvalMode: 'yolo' },
+        { approvalMode: 'yolo', sourceId: 'ch' },
+        expect.any(Object),
+      );
+    });
+
+    it('stamps channel name as sourceId when creating sessions', async () => {
+      const router = new SessionRouter(bridge, '/tmp');
+
+      await router.resolve('dingtalk-main', 'alice', 'chat1');
+
+      expect(bridge.newSession).toHaveBeenCalledWith(
+        '/tmp',
+        { sourceId: 'dingtalk-main' },
         expect.any(Object),
       );
     });
@@ -241,6 +253,23 @@ describe('SessionRouter', () => {
       expect(d1).not.toBe(d2);
     });
 
+    it('chat_thread scope: routes by channel + chatId + threadId', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'chat_thread');
+      const s1 = await router.resolve('ch', 'alice', 'repo-a', 'issue:1');
+      const s2 = await router.resolve('ch', 'bob', 'repo-a', 'issue:1');
+      expect(s1).toBe(s2); // same chat+thread = same session
+
+      const s3 = await router.resolve('ch', 'alice', 'repo-b', 'issue:1');
+      expect(s1).not.toBe(s3); // different chatId = different session
+    });
+
+    it('chat_thread scope: falls back to chatId when no threadId', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'chat_thread');
+      const s1 = await router.resolve('ch', 'alice', 'repo-a');
+      const s2 = await router.resolve('ch', 'bob', 'repo-a');
+      expect(s1).toBe(s2);
+    });
+
     it('mixed per-channel scopes work independently', async () => {
       const router = new SessionRouter(bridge, '/tmp');
       router.setChannelScope('ch-thread', 'thread');
@@ -270,7 +299,7 @@ describe('SessionRouter', () => {
       await router.resolve('ch', 'alice', 'chat1', undefined, '/custom');
       expect(bridge.newSession).toHaveBeenCalledWith(
         '/custom',
-        undefined,
+        { sourceId: 'ch' },
         expect.any(Object),
       );
     });
@@ -280,7 +309,7 @@ describe('SessionRouter', () => {
       await router.resolve('ch', 'alice', 'chat1');
       expect(bridge.newSession).toHaveBeenCalledWith(
         '/default',
-        undefined,
+        { sourceId: 'ch' },
         expect.any(Object),
       );
     });
@@ -290,7 +319,7 @@ describe('SessionRouter', () => {
       await router.resolve('ch', 'alice', 'chat1', undefined, '');
       expect(bridge.newSession).toHaveBeenCalledWith(
         '/default',
-        undefined,
+        { sourceId: 'ch' },
         expect.any(Object),
       );
     });
@@ -1755,6 +1784,12 @@ describe('SessionRouter', () => {
 
       await expect(router.resolve('ch', 'alice', 'chat1')).resolves.toBe(
         'replacement-session',
+      );
+      // Load-failure replacement also stamps the channel name as sourceId.
+      expect(lazyBridge.newSession).toHaveBeenCalledWith(
+        '/tmp',
+        { sourceId: 'ch' },
+        expect.any(Object),
       );
       expect(JSON.parse(readFileSync(persistPath, 'utf-8'))).toEqual({
         'ch:alice:chat1': expect.objectContaining({

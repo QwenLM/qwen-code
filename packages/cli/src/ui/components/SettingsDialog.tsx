@@ -13,6 +13,7 @@ import { SettingScope } from '../../config/settings.js';
 import { getScopeMessageForSetting } from '../../utils/dialogScopeUtils.js';
 import { ScopeSelector } from './shared/ScopeSelector.js';
 import { t } from '../../i18n/index.js';
+import { ICON } from '../constants.js';
 import {
   getDialogSettingKeys,
   setPendingSettingValue,
@@ -28,7 +29,10 @@ import {
   getEffectiveValue,
   validateSettingValue,
 } from '../../utils/settingsUtils.js';
-import { writeOutputLanguageAndRegisterPath } from '../../utils/languageUtils.js';
+import {
+  isAutoLanguage,
+  writeOutputLanguageAndRegisterPath,
+} from '../../utils/languageUtils.js';
 import {
   useVimModeState,
   useVimModeActions,
@@ -1259,21 +1263,29 @@ export function SettingsDialog({
 
               const defaultValue = getDefaultValue(item.value);
 
-              if (currentValue !== undefined && currentValue !== null) {
-                displayValue = String(currentValue);
-              } else {
-                displayValue =
-                  defaultValue !== undefined && defaultValue !== null
-                    ? String(defaultValue)
-                    : '';
-              }
-
-              // Add * if value differs from default OR if currently being modified
-              const isModified = modifiedSettings.has(item.value);
               const effectiveCurrentValue =
                 currentValue !== undefined && currentValue !== null
                   ? currentValue
                   : defaultValue;
+
+              if (
+                item.value === 'general.outputLanguage' &&
+                isAutoLanguage(
+                  effectiveCurrentValue as string | null | undefined,
+                )
+              ) {
+                displayValue = t('Auto (follow user input)');
+              } else if (
+                effectiveCurrentValue !== undefined &&
+                effectiveCurrentValue !== null
+              ) {
+                displayValue = String(effectiveCurrentValue);
+              } else {
+                displayValue = '';
+              }
+
+              // Add * if value differs from default OR if currently being modified
+              const isModified = modifiedSettings.has(item.value);
               const isDifferentFromDefault =
                 effectiveCurrentValue !== defaultValue;
 
@@ -1312,7 +1324,7 @@ export function SettingsDialog({
                       isActive ? theme.status.success : theme.text.secondary
                     }
                   >
-                    {isActive ? '●' : ''}
+                    {isActive ? ICON.CIRCLE_FILLED : ''}
                   </Text>
                 </Box>
                 <Box flexGrow={1} flexShrink={1}>

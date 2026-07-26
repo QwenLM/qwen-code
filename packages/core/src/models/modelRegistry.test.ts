@@ -190,6 +190,32 @@ describe('ModelRegistry', () => {
       const model = registry.getModel(AuthType.USE_VERTEX_AI, 'some-model');
       expect(model).toBeUndefined();
     });
+
+    it('matches a plain registry key by its resolved default baseUrl', () => {
+      const registry = new ModelRegistry({
+        openai: [{ id: 'default-endpoint-model' }],
+      });
+      const unkeyed = registry.getModel(
+        AuthType.USE_OPENAI,
+        'default-endpoint-model',
+      );
+
+      expect(unkeyed?.baseUrl).toBeTruthy();
+      expect(
+        registry.getModel(
+          AuthType.USE_OPENAI,
+          'default-endpoint-model',
+          unkeyed?.baseUrl,
+        ),
+      ).toBe(unkeyed);
+      expect(
+        registry.getModel(
+          AuthType.USE_OPENAI,
+          'default-endpoint-model',
+          'https://wrong.example.com',
+        ),
+      ).toBeUndefined();
+    });
   });
 
   describe('modalities auto-fill', () => {
@@ -988,6 +1014,21 @@ describe('fastOnly and voiceOnly flags', () => {
     const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
     expect(models.find((m) => m.id === 'gpt-4o')?.voiceOnly).toBeUndefined();
     expect(models.find((m) => m.id === 'whisper-1')?.voiceOnly).toBe(true);
+  });
+
+  it('should propagate imageOnly flag to AvailableModel', () => {
+    const config: ModelProvidersConfig = {
+      openai: [
+        {
+          id: 'qwen-image-2.0',
+          imageOnly: true,
+        },
+      ],
+    };
+    const registry = new ModelRegistry(config);
+    expect(
+      registry.getModelsForAuthType(AuthType.USE_OPENAI)[0]?.imageOnly,
+    ).toBe(true);
   });
 
   it('should warn when both fastOnly and voiceOnly are set', () => {

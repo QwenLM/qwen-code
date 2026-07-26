@@ -16,6 +16,7 @@ vi.mock('../../utils/schemaConverter.js', () => ({
 
 import { convertSchema } from '../../utils/schemaConverter.js';
 import { AnthropicContentConverter } from './converter.js';
+import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 
 describe('AnthropicContentConverter', () => {
   let converter: AnthropicContentConverter;
@@ -231,6 +232,48 @@ describe('AnthropicContentConverter', () => {
           },
         ],
       });
+    });
+
+    it('normalizes legacy dotted MCP names before sending history', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-legacy-mcp',
+                  name: 'mcp__zybio__database.query_uniprot',
+                  args: { query: 'P12345' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call-legacy-mcp',
+                  name: 'mcp__zybio__database.query_uniprot',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+      const assistant = messages[0];
+      const toolUse = Array.isArray(assistant?.content)
+        ? assistant.content.find((block) => block.type === 'tool_use')
+        : undefined;
+
+      expect(toolUse?.type).toBe('tool_use');
+      if (toolUse?.type === 'tool_use') {
+        expect(toolUse.name).toMatch(/^[A-Za-z][A-Za-z0-9_-]*$/);
+        expect(toolUse.name).not.toContain('.');
+      }
     });
 
     it('converts functionResponse parts into user tool_result messages', () => {
@@ -2160,6 +2203,10 @@ describe('AnthropicContentConverter', () => {
         totalTokenCount: 8,
         cachedContentTokenCount: 0,
       });
+      expect(getGenAiUsageProvenance(response.usageMetadata)).toEqual({
+        cachedInputTokensReported: false,
+        cacheCreationInputTokens: undefined,
+      });
 
       const parts = response.candidates?.[0]?.content?.parts || [];
       expect(parts).toEqual([
@@ -2213,6 +2260,22 @@ describe('AnthropicContentConverter', () => {
         totalTokenCount: 43_688,
         cachedContentTokenCount: 32_088,
       });
+      expect(getGenAiUsageProvenance(response.usageMetadata)).toEqual({
+        cachedInputTokensReported: true,
+        cacheCreationInputTokens: 8_700,
+      });
+    });
+
+    it('does not substitute the request model when the provider omits its model', () => {
+      const response = converter.convertAnthropicResponseToGemini({
+        id: 'msg-no-model',
+        model: '',
+        stop_reason: 'end_turn',
+        content: [{ type: 'text', text: 'ok' }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      } as unknown as Anthropic.Message);
+
+      expect(response.modelVersion).toBeUndefined();
     });
   });
 

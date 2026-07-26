@@ -15,6 +15,9 @@ const DEFAULT_ACTIVE_DAYS = 7;
 const DEFAULT_MAX_CANDIDATES = 5;
 const MAX_ACTIONS = 3;
 const ACTIONS = new Set(['rerun', 'comment', 'no_action']);
+const DEFLAKE_MARKER = 'qwen-deflake';
+const DEFLAKE_LABELS = ['status/ready-for-agent', 'autofix/approved'];
+const DEFLAKE_MAX_CHARS = 200;
 
 function timeMs(value) {
   const ms = Date.parse(value ?? '');
@@ -306,6 +309,88 @@ function validDecision(target, decision) {
   );
 }
 
+function wellFormedFlakyTest(ft) {
+  return (
+    !!ft &&
+    typeof ft === 'object' &&
+    typeof ft.file === 'string' &&
+    ft.file.trim().length > 0 &&
+    ft.file.length <= DEFLAKE_MAX_CHARS &&
+    typeof ft.name === 'string' &&
+    ft.name.trim().length > 0 &&
+    ft.name.length <= DEFLAKE_MAX_CHARS
+  );
+}
+
+// A backtick cannot be escaped INSIDE an inline code span — it closes the span
+// and lets the remainder render as live Markdown (mention/markup injection via
+// a test path or name). Drop backticks so the value stays inert in its span.
+function codeSpanSafe(value) {
+  return String(value).replaceAll('`', "'");
+}
+
+export function deflakeKey(flakyTest) {
+  return createHash('sha256')
+    .update(`${flakyTest.file}\u0000${flakyTest.name}`)
+    .digest('hex')
+    .slice(0, 16);
+}
+
+export function deflakeMarker(flakyTest) {
+  return `<!-- ${DEFLAKE_MARKER} key=${deflakeKey(flakyTest)} -->`;
+}
+
+export function deflakeIssueBody(flakyTest, decision, target, repo) {
+  const marker = deflakeMarker(flakyTest);
+  const runUrl = `https://github.com/${
+    repo ?? target?.repo ?? 'QwenLM/qwen-code'
+  }/actions/runs/${target?.runId ?? ''}`;
+  const file = codeSpanSafe(flakyTest.file);
+  const name = codeSpanSafe(flakyTest.name);
+  return [
+    `CI Failure Patrol flagged this test as flaky and triggered a rerun on the same commit. If it passes on rerun it is nondeterministic; if it fails again deterministically it is a real bug, not flakiness — in that case do NOT stabilize it.`,
+    ``,
+    `- **Test file:** \`${file}\``,
+    `- **Test name:** \`${name}\``,
+    `- **Observed on:** #${target?.prNumber ?? '?'} (${runUrl})`,
+    `- **Signature:** ${safeReason(decision?.reason_en ?? 'flaky test')}`,
+    ``,
+    `Fix it with \`.qwen/skills/deflake/SKILL.md\` — a minimal, assertion-preserving stabilization. Never weaken, skip, or delete the assertion.`,
+    ``,
+    `<details>`,
+    `<summary>中文说明</summary>`,
+    ``,
+    `CI Failure Patrol 判定此测试疑似 flaky 并在同一 commit 上触发了重跑。重跑通过则为非确定性;若确定性再次失败则是真 bug 而非 flaky —— 那种情况不要稳化它。`,
+    ``,
+    `- **测试文件:** \`${file}\``,
+    `- **用例名:** \`${name}\``,
+    `- **出现于:** #${target?.prNumber ?? '?'}(${runUrl})`,
+    `- **签名:** ${safeReason(decision?.reason_zh ?? 'flaky 测试')}`,
+    ``,
+    `请依据 \`.qwen/skills/deflake/SKILL.md\` 做最小、保留断言的稳化修复,绝不弱化、跳过或删除断言。`,
+    ``,
+    `</details>`,
+    ``,
+    marker,
+  ].join('\n');
+}
+
+export async function ensureDeflakeIssue(client, target, decision) {
+  if (!wellFormedFlakyTest(decision?.flakyTest)) return;
+  const marker = deflakeMarker(decision.flakyTest);
+  if (await client.hasOpenIssueWithMarker(marker)) return;
+  const title =
+    `deflake: ${decision.flakyTest.file} \u203a ${decision.flakyTest.name}`.slice(
+      0,
+      240,
+    );
+  await client.createIssue({
+    title,
+    body: deflakeIssueBody(decision.flakyTest, decision, target, client?.repo),
+    labels: DEFLAKE_LABELS,
+  });
+}
+
 function currentFailure(run, target) {
   return (
     run.status === 'completed' &&
@@ -387,6 +472,18 @@ export async function actOnDecision(client, target, decision) {
   if (decision.action === 'rerun') {
     await client.rerunFailedJobs(target.runId);
     await client.comment(target.prNumber, marker);
+    // A flaky TEST (not infra) also gets a deflake issue so the autofix loop
+    // can stabilize it. Best-effort: the rerun + marker already succeeded, so a
+    // transient issue-creation failure must not propagate (it would surface as
+    // a misleading "skipping PR" and, with the marker already posted,
+    // permanently suppress the deflake). Retried on the next flaky occurrence.
+    try {
+      await ensureDeflakeIssue(client, target, decision);
+    } catch (error) {
+      console.error(
+        `::warning::deflake issue creation failed for #${target.prNumber}; the rerun stands and it retries on the next flaky occurrence: ${error?.message ?? error}`,
+      );
+    }
   } else if (decision.action === 'comment') {
     await client.comment(
       target.prNumber,
@@ -573,6 +670,39 @@ export class GhClient {
 
   async jobLog(jobId) {
     return this.gh(['api', `repos/${this.repo}/actions/jobs/${jobId}/logs`]);
+  }
+
+  async hasOpenIssueWithMarker(marker) {
+    const output = await this.gh([
+      'issue',
+      'list',
+      '--repo',
+      this.repo,
+      '--state',
+      'open',
+      '--search',
+      `${marker} in:body`,
+      '--json',
+      'number',
+      '--limit',
+      '1',
+    ]);
+    return JSON.parse(output).length > 0;
+  }
+
+  async createIssue({ title, body, labels }) {
+    await this.gh([
+      'issue',
+      'create',
+      '--repo',
+      this.repo,
+      '--title',
+      title,
+      '--body',
+      body,
+      '--label',
+      labels.join(','),
+    ]);
   }
 }
 

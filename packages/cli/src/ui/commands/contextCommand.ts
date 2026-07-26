@@ -22,6 +22,7 @@ import {
   DiscoveredMCPTool,
   uiTelemetryService,
   getCoreSystemPrompt,
+  resolveInteractionMode,
   DEFAULT_TOKEN_LIMIT,
   ToolNames,
   buildSkillLlmContent,
@@ -123,7 +124,12 @@ export async function collectContextData(
   // refines the messages-vs-cache split, not the headline total or tier.
   const apiCachedTokens = uiTelemetryService.getLastCachedContentTokenCount();
 
-  const systemPromptText = getCoreSystemPrompt(undefined, modelName);
+  const systemPromptText = getCoreSystemPrompt(
+    undefined,
+    modelName,
+    undefined,
+    resolveInteractionMode(config),
+  );
   const systemPromptTokens = estimateTokens(systemPromptText);
 
   const toolRegistry = config.getToolRegistry();
@@ -163,6 +169,13 @@ export async function collectContextData(
 
   const memoryContent = config.getUserMemory();
   const memoryFiles = parseMemoryFiles(memoryContent);
+  const autoMemoryPrompt = config.getAutoMemoryPrompt();
+  if (autoMemoryPrompt) {
+    memoryFiles.push({
+      path: t('auto memory'),
+      tokens: estimateTokens(autoMemoryPrompt),
+    });
+  }
   const memoryFilesTokens = memoryFiles.reduce((sum, f) => sum + f.tokens, 0);
 
   const skillTool = allTools.find((tool) => tool.name === ToolNames.SKILL);

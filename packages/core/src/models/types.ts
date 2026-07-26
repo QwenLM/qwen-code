@@ -17,6 +17,8 @@ import type { ConfigSources } from '../utils/configResolver.js';
 export interface ModelCapabilities {
   /** Supports image/vision inputs */
   vision?: boolean;
+  /** Can run the normal agent tool loop, not only transcription requests. */
+  agent?: boolean;
 }
 
 /**
@@ -30,6 +32,8 @@ export type ModelGenerationConfig = Pick<
   | 'samplingParams'
   | 'timeout'
   | 'maxRetries'
+  | 'retryInitialDelayMs'
+  | 'retryMaxDelayMs'
   | 'retryErrorCodes'
   | 'enableCacheControl'
   | 'forceGlobalCacheScope'
@@ -37,6 +41,7 @@ export type ModelGenerationConfig = Pick<
   | 'reasoning'
   | 'customHeaders'
   | 'extra_body'
+  | 'thinkingMandatory'
   | 'contextWindowSize'
   | 'modalities'
   | 'splitToolMedia'
@@ -57,7 +62,7 @@ export interface ModelConfig {
   envKey?: string;
   /** API endpoint override */
   baseUrl?: string;
-  /** Model capabilities, reserve for future use. Now we do not read this to determine multi-modal support or other capabilities. */
+  /** Explicit model capabilities used for safe feature routing. */
   capabilities?: ModelCapabilities;
   /** Generation configuration (sampling parameters) */
   generationConfig?: ModelGenerationConfig;
@@ -65,6 +70,8 @@ export interface ModelConfig {
   fastOnly?: boolean;
   /** When true, this model only appears in the voice model selector, not the main model list */
   voiceOnly?: boolean;
+  /** When true, this model only appears in the image generation model selector */
+  imageOnly?: boolean;
 }
 
 /**
@@ -131,6 +138,8 @@ export interface AvailableModel {
   fastOnly?: boolean;
   /** When true, this model only appears in the voice model selector */
   voiceOnly?: boolean;
+  /** When true, this model only appears in the image generation model selector */
+  imageOnly?: boolean;
 
   /** Whether this is a runtime model (not from modelProviders) */
   isRuntimeModel?: boolean;

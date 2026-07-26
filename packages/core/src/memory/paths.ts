@@ -102,6 +102,25 @@ export function clearAutoMemoryRootCache(): void {
 }
 
 /**
+ * The trusted filesystem anchor for a project's managed-memory root: the prefix
+ * of getAutoMemoryRoot() that is derived from the user's environment rather than
+ * repo-tracked contents, and is therefore safe to canonicalize through symlinks.
+ *
+ * In local-memory mode (`QWEN_CODE_MEMORY_LOCAL=1`) the root is
+ * `<projectRoot>/.qwen/memory`, so the anchor is the project root; otherwise the
+ * root lives under the shared memory base dir, which is the anchor. The write
+ * boundary (isAllowedMemoryPath) canonicalizes this anchor but appends the
+ * managed suffix literally, so a symlink planted INSIDE the suffix (e.g. a
+ * repo-tracked `.qwen -> /outside`) can't silently relocate the allowed root
+ * out of the trusted anchor.
+ */
+export function getAutoMemoryTrustedAnchor(projectRoot: string): string {
+  return process.env['QWEN_CODE_MEMORY_LOCAL'] === '1'
+    ? projectRoot
+    : getMemoryBaseDir();
+}
+
+/**
  * Returns the project-level state directory that holds auxiliary files
  * (meta.json, extract-cursor.json, consolidation.lock) for the given project.
  * This is the parent of getAutoMemoryRoot(), so memory/ stays clean:

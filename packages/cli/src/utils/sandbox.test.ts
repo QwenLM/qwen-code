@@ -6,9 +6,32 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
+import { EventEmitter } from 'node:events';
 import { pathToFileURL } from 'node:url';
-import { FatalSandboxError, QWEN_DIR } from '@qwen-code/qwen-code-core';
+import {
+  FatalSandboxError,
+  PRIVATE_ACP_CAPABILITY_ENV,
+  QWEN_DIR,
+} from '@qwen-code/qwen-code-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+
+const spawnMock = vi.hoisted(() => vi.fn());
+const execSyncMock = vi.hoisted(() => vi.fn());
+
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:child_process')>();
+  return {
+    ...actual,
+    default: {
+      ...actual,
+      execSync: execSyncMock,
+      spawn: spawnMock,
+    },
+    execSync: execSyncMock,
+    spawn: spawnMock,
+  };
+});
+
 import { isContainerPathWithinWorkdir } from './sandbox-path.js';
 import {
   getSandboxPassthroughEnvArgs,
@@ -21,6 +44,59 @@ import { parseSandboxMountSpec } from './sandboxMounts.js';
 afterEach(() => {
   vi.restoreAllMocks();
   vi.unstubAllEnvs();
+});
+
+describe('start_sandbox', () => {
+  it('passes child environment variables into a container sandbox', async () => {
+    vi.stubEnv('SANDBOX_SET_UID_GID', 'false');
+    vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+    vi.spyOn(fs, 'realpathSync').mockImplementation((filePath) =>
+      String(filePath),
+    );
+    execSyncMock.mockReturnValue(Buffer.from(''));
+
+    const imageCheck = Object.assign(new EventEmitter(), {
+      stdout: new EventEmitter(),
+    });
+    const child = new EventEmitter();
+    spawnMock
+      .mockImplementationOnce(() => {
+        queueMicrotask(() => {
+          imageCheck.stdout.emit('data', Buffer.from('image-id'));
+          imageCheck.emit('close', 0);
+        });
+        return imageCheck;
+      })
+      .mockReturnValueOnce(child);
+
+    const capability = 'private-capability';
+    const result = start_sandbox(
+      { command: 'docker', image: 'example.com/qwen-code:latest' },
+      [],
+      undefined,
+      [process.execPath, '/path/to/cli.js', '--acp'],
+      { [PRIVATE_ACP_CAPABILITY_ENV]: capability },
+    );
+
+    await vi.waitFor(() => expect(spawnMock).toHaveBeenCalledTimes(2));
+    const args = spawnMock.mock.calls[1]?.[1] as string[];
+    const options = spawnMock.mock.calls[1]?.[2];
+    const envFlagIndex = args.indexOf(PRIVATE_ACP_CAPABILITY_ENV);
+    expect(args.slice(envFlagIndex - 1, envFlagIndex + 1)).toEqual([
+      '--env',
+      PRIVATE_ACP_CAPABILITY_ENV,
+    ]);
+    expect(options).toEqual(
+      expect.objectContaining({
+        env: expect.objectContaining({
+          [PRIVATE_ACP_CAPABILITY_ENV]: capability,
+        }),
+      }),
+    );
+
+    child.emit('close', 0);
+    await expect(result).resolves.toBe(0);
+  });
 });
 
 describe('resolveSeatbeltProfileFile', () => {
@@ -78,6 +154,37 @@ describe('resolveSeatbeltProfileFile', () => {
       ),
     );
   });
+
+  it.each([
+    ['managed ACP', '1', true],
+    ['ordinary', undefined, false],
+  ])(
+    'handles Electron Node mode for a %s seatbelt re-exec',
+    async (_name, marker, expected) => {
+      vi.stubEnv('QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE', marker ?? '');
+      vi.spyOn(fs, 'existsSync').mockReturnValue(true);
+      vi.spyOn(fs, 'mkdirSync').mockReturnValue(undefined);
+      vi.spyOn(fs, 'realpathSync').mockImplementation(
+        (filePath) => String(filePath) || '/tmp',
+      );
+      execSyncMock.mockReturnValue(Buffer.from('/tmp/cache\n'));
+
+      const child = new EventEmitter();
+      spawnMock.mockReturnValue(child);
+      const result = start_sandbox(
+        { command: 'sandbox-exec', image: '' },
+        [],
+        undefined,
+        [process.execPath, '/path/to/cli.js', '--acp'],
+      );
+
+      const args = spawnMock.mock.calls[0]?.[1] as string[];
+      expect(args.at(-1)?.includes('ELECTRON_RUN_AS_NODE=1')).toBe(expected);
+
+      child.emit('close', 0);
+      await expect(result).resolves.toBe(0);
+    },
+  );
 });
 
 describe('getSandboxPassthroughEnvArgs', () => {

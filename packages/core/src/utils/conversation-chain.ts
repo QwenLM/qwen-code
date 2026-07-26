@@ -5,6 +5,12 @@
  */
 
 import type { ChatRecord } from '../services/chatRecordingService.js';
+import {
+  isTranscriptConversationRecord,
+  selectTranscriptLeaf,
+  walkTranscriptUuidChain,
+  type TranscriptRecordInput,
+} from './transcript-records.js';
 
 /**
  * A break in the persisted parentUuid chain: a record whose `parentUuid` is
@@ -66,46 +72,20 @@ export function buildOrderedUuidChain(
 
   const detectGaps = opts?.detectGaps ?? false;
 
-  // First record per uuid (matches the historical `recordsForUuid[0]`
-  // selection semantics).
-  const firstByUuid = new Map<string, ChatRecord>();
+  const transcriptRecords: TranscriptRecordInput[] = records;
+  const firstByUuid = new Map<string, TranscriptRecordInput>();
   for (const r of records) {
-    if (!firstByUuid.has(r.uuid)) firstByUuid.set(r.uuid, r);
-  }
-
-  const uuids: string[] = [];
-  const gaps: HistoryGap[] = [];
-  const visited = new Set<string>();
-
-  const startUuid = opts?.leafUuid ?? records[records.length - 1].uuid;
-  // A caller-supplied leafUuid not backed by any record yields no chain.
-  if (!firstByUuid.has(startUuid)) return { uuids: [], gaps: [] };
-  let currentUuid: string | null = startUuid;
-
-  while (currentUuid) {
-    if (visited.has(currentUuid)) break; // cycle guard (partial transcript)
-    visited.add(currentUuid);
-    uuids.push(currentUuid);
-
-    const rec = firstByUuid.get(currentUuid);
-    if (!rec) break;
-
-    const parent = rec.parentUuid;
-    if (!parent) break; // reached a real root
-
-    if (firstByUuid.has(parent)) {
-      currentUuid = parent; // normal step
-      continue;
+    if (isTranscriptConversationRecord(r) && !firstByUuid.has(r.uuid)) {
+      firstByUuid.set(r.uuid, r);
     }
-
-    // GAP: parent is set but physically missing. Record it (so the surface can
-    // mark the break) but never stitch across it — see HistoryGap docstring.
-    if (detectGaps) {
-      gaps.push({ childUuid: currentUuid, missingParentUuid: parent });
-    }
-    break;
   }
-
-  uuids.reverse();
-  return { uuids, gaps };
+  const startUuid = selectTranscriptLeaf(transcriptRecords, opts?.leafUuid);
+  if (!startUuid) return { uuids: [], gaps: [] };
+  const chain = walkTranscriptUuidChain(startUuid, (uuid) =>
+    firstByUuid.get(uuid),
+  );
+  return {
+    uuids: [...chain.uuids],
+    gaps: detectGaps ? [...chain.gaps] : [],
+  };
 }

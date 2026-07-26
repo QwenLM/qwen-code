@@ -15,6 +15,8 @@ import {
   isNonPrimaryWorkspaceSession,
   mergeSessionsById,
   workspaceBasename,
+  workspaceLabel,
+  workspaceLabelForCwd,
 } from './workspace';
 
 function caps(workspaces?: DaemonWorkspaceCapability[]): DaemonCapabilities {
@@ -45,6 +47,23 @@ describe('workspaceBasename', () => {
   it('falls back to the whole string when there are no segments', () => {
     expect(workspaceBasename('/')).toBe('/');
     expect(workspaceBasename('')).toBe('');
+  });
+});
+
+describe('workspaceLabel', () => {
+  it('prefers a display name and falls back to the cwd basename', () => {
+    expect(
+      workspaceLabel({ cwd: '/work/payments', displayName: 'Payments API' }),
+    ).toBe('Payments API');
+    expect(workspaceLabel({ cwd: '/work/payments' })).toBe('payments');
+  });
+
+  it('looks up a display name by cwd and falls back when unregistered', () => {
+    const workspaces = [{ cwd: '/work/payments', displayName: 'Payments API' }];
+    expect(workspaceLabelForCwd('/work/payments', workspaces)).toBe(
+      'Payments API',
+    );
+    expect(workspaceLabelForCwd('/work/web', workspaces)).toBe('web');
   });
 });
 

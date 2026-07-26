@@ -25,7 +25,7 @@ on:
       version:
         description: 'Version to release (without v prefix)'
         required: true
-        default: '0.7.2'
+        default: '0.7.3'
       notarize:
         description: 'Codesign + notarize the macOS artifacts (false to skip during
           iteration)'
@@ -60,6 +60,10 @@ jobs:
             echo "::error::Release version $VERSION does not match Cargo version $CARGO_VERSION"
             exit 1
           fi
+      - uses: 'dtolnay/rust-toolchain@stable'
+      - name: 'Test model payload filtering'
+        working-directory: 'packages/cua-driver/rust'
+        run: 'cargo test -p cua-driver-core --locked model_payload'
 
   # ── Linux (x86_64 + arm64) ───────────────────────────────────────────────
   # Built inside debian:11 (glibc 2.31) so binaries run on Debian 11+,
@@ -367,6 +371,7 @@ jobs:
         uses: 'softprops/action-gh-release@v2'
         with:
           tag_name: '${{ steps.version.outputs.tag }}'
+          target_commitish: '${{ github.sha }}'
           name: 'cua-driver-rs v${{ steps.version.outputs.version }}'
           files: 'release-upload/**/*'
           prerelease: true
@@ -381,6 +386,9 @@ jobs:
 
             Enable relative coordinates: `CUA_DRIVER_RS_COORDINATE_SPACE=1`
             (default `0` = off; optional `CUA_DRIVER_RS_COORDINATE_SCALE=1000`).
+
+            Enable textual MCP payload filtering for affected model API routes:
+            `MCP_MODEL_PAYLOAD_FILTER=1` (default off).
 
   sync-installer-version:
     name: 'Sync installer version to main'

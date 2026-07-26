@@ -49,7 +49,11 @@ const DialogOverlay = React.forwardRef<
       ref={ref}
       data-slot="dialog-overlay"
       className={cn(
-        'fixed inset-0 isolate z-[var(--web-shell-dialog-backdrop-z-index,50)] bg-black/10 duration-100 supports-backdrop-filter:backdrop-blur-xs data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0',
+        // No backdrop-blur: it forces the browser to rasterize and blur the
+        // entire content behind the overlay on open, which freezes the page
+        // when a long transcript sits behind it. The bg-black/10 scrim keeps
+        // the visual separation without that cost.
+        'fixed inset-0 isolate z-[var(--web-shell-dialog-backdrop-z-index,50)] bg-black/10 duration-100 data-open:animate-in data-open:fade-in-0 data-closed:animate-out data-closed:fade-out-0',
         className,
       )}
       {...props}

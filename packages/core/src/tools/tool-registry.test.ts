@@ -217,6 +217,47 @@ describe('ToolRegistry', () => {
       expect(registry.getTool('mcp__github__create_issue')).toBeUndefined();
     });
 
+    it('honors a legacy dotted disabled MCP tool name', () => {
+      const legacyName = 'mcp__zybio__literature.search_pubmed';
+      const disabledConfig = new Config({
+        ...baseConfigParams,
+        disabledTools: [legacyName],
+      });
+      const registry = new ToolRegistry(disabledConfig);
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'zybio',
+        'literature.search_pubmed',
+        'description',
+        {},
+      );
+
+      expect(mcpTool.name).not.toBe(legacyName);
+      registry.registerTool(mcpTool);
+      expect(registry.getTool(mcpTool.name)).toBeUndefined();
+    });
+
+    it('honors a legacy truncated disabled MCP tool name', () => {
+      const rawName = `mcp__server__${'x'.repeat(80)}`;
+      const legacyName = rawName.slice(0, 28) + '___' + rawName.slice(-32);
+      const disabledConfig = new Config({
+        ...baseConfigParams,
+        disabledTools: [legacyName],
+      });
+      const registry = new ToolRegistry(disabledConfig);
+      const mcpTool = new DiscoveredMCPTool(
+        {} as CallableTool,
+        'server',
+        'x'.repeat(80),
+        'description',
+        {},
+      );
+
+      expect(mcpTool.name).not.toBe(legacyName);
+      registry.registerTool(mcpTool);
+      expect(registry.getTool(mcpTool.name)).toBeUndefined();
+    });
+
     it('skips lazy factories whose name is in Config.disabledTools', async () => {
       const disabledConfig = new Config({
         ...baseConfigParams,
@@ -799,6 +840,96 @@ describe('ToolRegistry', () => {
           },
         },
       });
+    });
+
+    it('strips Qwen-internal daemon secrets from the discovery and tool-call child env (#6601)', async () => {
+      const originalServerToken = process.env['QWEN_SERVER_TOKEN'];
+      const originalDaemonToken = process.env['QWEN_DAEMON_TOKEN'];
+      process.env['QWEN_SERVER_TOKEN'] = 'serve-secret';
+      process.env['QWEN_DAEMON_TOKEN'] = 'daemon-secret';
+      try {
+        mockConfigGetToolDiscoveryCommand.mockReturnValue(
+          'my-discovery-command',
+        );
+        vi.spyOn(config, 'getToolCallCommand').mockReturnValue(
+          'my-call-command',
+        );
+
+        const toolDeclaration: FunctionDeclaration = {
+          name: 'secret-probe',
+          description: 'A tool',
+          parametersJsonSchema: { type: 'object', properties: {} },
+        };
+
+        const mockSpawn = vi.mocked(spawn);
+        const discoveryProcess = {
+          stdout: { on: vi.fn(), removeListener: vi.fn() },
+          stderr: { on: vi.fn(), removeListener: vi.fn() },
+          on: vi.fn(),
+        };
+        mockSpawn.mockReturnValueOnce(discoveryProcess as any);
+        discoveryProcess.stdout.on.mockImplementation((event, callback) => {
+          if (event === 'data') {
+            callback(
+              Buffer.from(
+                JSON.stringify([{ functionDeclarations: [toolDeclaration] }]),
+              ),
+            );
+          }
+        });
+        discoveryProcess.on.mockImplementation((event, callback) => {
+          if (event === 'close') {
+            callback(0);
+          }
+        });
+
+        await toolRegistry.discoverAllTools();
+        const discoveredTool = toolRegistry.getTool('secret-probe');
+        expect(discoveredTool).toBeDefined();
+
+        const executionProcess = {
+          stdout: { on: vi.fn(), removeListener: vi.fn() },
+          stderr: { on: vi.fn(), removeListener: vi.fn() },
+          stdin: { write: vi.fn(), end: vi.fn() },
+          on: vi.fn(),
+          connected: true,
+          disconnect: vi.fn(),
+          removeListener: vi.fn(),
+        };
+        mockSpawn.mockReturnValueOnce(executionProcess as any);
+        executionProcess.on.mockImplementation((event, callback) => {
+          if (event === 'close') {
+            callback(0);
+          }
+        });
+
+        await (discoveredTool as DiscoveredTool)
+          .build({})
+          .execute(new AbortController().signal);
+
+        // Both the discovery command and the tool-call command are child
+        // processes launched on the agent's behalf, so neither may inherit
+        // the internal daemon secrets.
+        for (const call of mockSpawn.mock.calls) {
+          const env = (call[2] as { env: NodeJS.ProcessEnv }).env;
+          expect(env['QWEN_SERVER_TOKEN']).toBeUndefined();
+          expect(env['QWEN_DAEMON_TOKEN']).toBeUndefined();
+          // Benign inherited env is preserved.
+          expect(env['PATH']).toBeDefined();
+        }
+        expect(mockSpawn.mock.calls).toHaveLength(2);
+      } finally {
+        if (originalServerToken === undefined) {
+          delete process.env['QWEN_SERVER_TOKEN'];
+        } else {
+          process.env['QWEN_SERVER_TOKEN'] = originalServerToken;
+        }
+        if (originalDaemonToken === undefined) {
+          delete process.env['QWEN_DAEMON_TOKEN'];
+        } else {
+          process.env['QWEN_DAEMON_TOKEN'] = originalDaemonToken;
+        }
+      }
     });
 
     it('should return a DISCOVERED_TOOL_EXECUTION_ERROR on tool failure', async () => {

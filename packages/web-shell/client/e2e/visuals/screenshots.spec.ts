@@ -16,6 +16,7 @@ import {
   captureScreenshot,
   completeReplay,
   fillComposer,
+  gotoNewSession,
   gotoSession,
   installScenario,
   resolveBaseURL,
@@ -342,11 +343,7 @@ for (const theme of THEMES) {
     });
 
     test(`workspace sidebar`, async ({ page }, testInfo) => {
-      // Two workspaces make the sidebar group sessions per workspace and tag the
-      // primary one — the surface the "primary workspace" label/badge lives on.
-      // Every other scenario here is single-workspace, where that tag never
-      // renders (it is gated on more than one displayed workspace), so this is
-      // the only scenario that can surface a change to the workspace labels.
+      // Two workspaces make the sidebar group sessions per workspace.
       //
       // Pin the primary workspace cwd and its loaded session name explicitly,
       // rather than leaning on createWebShellDaemonScenario's defaults: the
@@ -381,10 +378,7 @@ for (const theme of THEMES) {
         resolveBaseURL(testInfo),
       );
       await gotoSession(page, scenario, daemon, theme);
-      // Each workspace renders a section headed by its basename; the primary one
-      // also carries a "Primary" tag. Assert both workspace names and the tag so
-      // a regression in the grouping or the (removable) primary label fails an
-      // assertion, not only the visually-reviewed screenshot.
+      // Each workspace renders a section headed by its basename.
       const sidebar = page.getByRole('complementary');
       await expect(
         sidebar.getByText('qwen-web-shell-e2e', { exact: true }),
@@ -392,13 +386,68 @@ for (const theme of THEMES) {
       await expect(
         sidebar.getByText('qwen-api-service', { exact: true }),
       ).toBeVisible();
-      await expect(sidebar.getByText('Primary', { exact: true })).toBeVisible();
       // The primary workspace auto-expands and streams its session rows in via a
       // per-workspace fetch. Wait for the loaded session's row before capturing
       // so the async load has settled — otherwise the row list races the
       // screenshot and the capture differs between runs.
       await expect(sidebar.getByText(primarySessionName)).toBeVisible();
       await captureScreenshot(page, `workspace-sidebar-${theme}`);
+    });
+
+    test(`git mode selector`, async ({ page }, testInfo) => {
+      // The new-session composer offers a git-mode selector (current branch /
+      // new branch / worktree) only when the workspace the next session would
+      // use is trusted AND a git repo, and App.tsx wires the intent props only
+      // while no session is loaded. So this empty state is the suite's only
+      // view of the popover — without a scenario the whole selector (and the
+      // empty-state composer around it) is invisible to the before/after
+      // preview.
+      const workspaceCwd = '/tmp/qwen-web-shell-e2e';
+      const scenario = createWebShellDaemonScenario({
+        workspaceCwd,
+        capabilities: {
+          workspaces: [
+            { id: 'primary', cwd: workspaceCwd, primary: true, trusted: true },
+          ],
+        },
+        gitStatus: { v: 2, workspaceCwd, branch: 'main' },
+      });
+      await installScenario(page, scenario, resolveBaseURL(testInfo));
+      await gotoNewSession(page, theme);
+
+      // Closed: the composer chip advertising the current git mode.
+      const chip = page.locator('[data-testid="git-mode-chip"]');
+      await expect(chip).toBeVisible();
+      await captureScreenshot(page, `git-mode-chip-${theme}`);
+
+      // Open: the three-mode popover (current / new branch / worktree). Assert
+      // an option is visible (not just the chip's aria-label) so a regression
+      // that fails to open the popover fails here, not only in the visually
+      // reviewed screenshot.
+      await chip.click();
+      await expect(
+        page.getByText('Current branch', { exact: true }),
+      ).toBeVisible();
+      await captureScreenshot(page, `git-mode-popover-${theme}`);
+
+      // #7668 keeps this sub-state open. Match the option by role — its label
+      // spans a name + description span, so getByText is ambiguous.
+      const popover = page.locator('[data-slot="popover-content"]');
+      await popover.getByRole('radio', { name: /New branch/ }).click();
+      const branchInput = page.locator('[data-testid="git-mode-branch-input"]');
+      await expect(branchInput).toBeVisible();
+      await branchInput.fill('feat/my-feature');
+      // Regression guard for #7668: the input flashes visible on click, but the
+      // pre-fix dismissal landed ~100ms later, so an immediate assertion still
+      // passed. Settle past that window and re-assert, so a re-dismissal hard-fails
+      // here — mirroring the functional web-shell.git-mode.spec.ts.
+      await page.waitForTimeout(300);
+      await expect(popover).toBeVisible();
+      await expect(branchInput).toBeVisible();
+      await expect(
+        page.locator('[data-testid="git-mode-confirm-branch"]'),
+      ).toBeEnabled();
+      await captureScreenshot(page, `git-mode-branch-${theme}`);
     });
 
     test(`slash menu`, async ({ page }, testInfo) => {

@@ -272,7 +272,8 @@ describe('ExtensionFileWatcher', () => {
     }
   });
 
-  it('treats the first successful generation read as a change after an initial read failure', () => {
+  it('establishes baseline on first successful generation read and detects subsequent changes', () => {
+    vi.useFakeTimers();
     mockReadFileSync.mockImplementationOnce(() => {
       throw new Error('state unavailable');
     });
@@ -287,9 +288,43 @@ describe('ExtensionFileWatcher', () => {
     try {
       watcher.startWatching();
 
+      // First successful read establishes baseline (undefined→2), no change.
+      expect(refreshState.markExtensionsChanged).not.toHaveBeenCalled();
+
+      // A subsequent real generation change IS detected.
+      mockReadFileSync.mockReturnValue('{"generation":3}');
+      vi.advanceTimersByTime(30_000);
+
       expect(refreshState.markExtensionsChanged).toHaveBeenCalledWith(
         'extension store generation changed',
       );
+    } finally {
+      watcher.stopWatching();
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not fire a change notification when the store writes its first snapshot on a fresh install', () => {
+    // Fresh install: state.json does not exist yet, so baseline is undefined.
+    mockReadFileSync.mockImplementationOnce(() => {
+      const err = new Error('ENOENT') as NodeJS.ErrnoException;
+      err.code = 'ENOENT';
+      throw err;
+    });
+    const refreshState = createRefreshState();
+    const watcher = new ExtensionFileWatcher(
+      configWithExtensions([]),
+      extensionsDir,
+      refreshState,
+    );
+    // The extension store initializes and writes generation:0.
+    mockReadFileSync.mockReturnValue('{"generation":0}');
+
+    try {
+      watcher.startWatching();
+
+      // undefined→0 is baseline establishment, not a change (#7029).
+      expect(refreshState.markExtensionsChanged).not.toHaveBeenCalled();
     } finally {
       watcher.stopWatching();
     }

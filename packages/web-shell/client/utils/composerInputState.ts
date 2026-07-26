@@ -50,8 +50,15 @@ export function getComposerPlaceholderKey(input: {
 
 export function shouldBlockComposerSubmit({
   connectionStatus,
+  hasSession,
+  restartSseOnPrompt,
 }: {
   connectionStatus: ComposerConnectionStatus;
+  hasSession: boolean;
+  restartSseOnPrompt: boolean;
 }): boolean {
-  return connectionStatus === 'disconnected' || connectionStatus === 'error';
+  if (connectionStatus === 'error') return true;
+  return (
+    connectionStatus === 'disconnected' && (!restartSseOnPrompt || !hasSession)
+  );
 }

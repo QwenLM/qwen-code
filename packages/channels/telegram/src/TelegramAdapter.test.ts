@@ -14,7 +14,7 @@ type LifecycleBase = Omit<
 
 type TestTelegramMessage = {
   from: { id: number; first_name: string; last_name?: string };
-  chat: { id: number; type: string };
+  chat: { id: number; type: string; title?: string };
   message_thread_id?: number;
   reply_to_message?: { from?: { id: number }; text?: string };
 };
@@ -53,6 +53,29 @@ class TestTelegramChannel extends TelegramChannel {
     return this.pushProactive(
       { channelName: 'telegram', senderId: '1', ...target },
       text,
+    );
+  }
+
+  sendTestResponse(chatId: string, text: string, sessionId: string) {
+    return this.sendResponseMessage(chatId, text, sessionId);
+  }
+
+  sendTestResponseFromThread(
+    threadId: string | undefined,
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ) {
+    const inboundRoute = (
+      this as unknown as {
+        inboundRoute: {
+          run<T>(store: { threadId?: string }, callback: () => T): T;
+        };
+      }
+    ).inboundRoute;
+    const route = threadId === undefined ? {} : { threadId };
+    return inboundRoute.run(route, () =>
+      this.sendResponseMessage(chatId, text, sessionId),
     );
   }
 }
@@ -337,6 +360,89 @@ describe('TelegramChannel', () => {
     );
   });
 
+  it('sends command replies back to the Telegram forum topic', async () => {
+    const channel = createChannel({
+      groupPolicy: 'open',
+      groups: { '*': { requireMention: false } },
+    });
+    const bot = installFakeBot(channel);
+
+    await channel.handleInbound(
+      envelope({
+        chatId: '2',
+        threadId: '42',
+        text: '/start',
+        isGroup: true,
+      }),
+    );
+
+    expect(bot.api.sendMessage).toHaveBeenCalledWith(
+      '2',
+      expect.stringContaining('Qwen Code Telegram bot'),
+      { parse_mode: 'HTML', message_thread_id: 42 },
+    );
+  });
+
+  it('sends agent responses back to their routed Telegram forum topic', async () => {
+    const router = {
+      getTarget: vi.fn().mockReturnValue({
+        channelName: 'telegram',
+        senderId: 'user-1',
+        chatId: '2',
+        threadId: '42',
+      }),
+    };
+    const channel = createChannel({}, router);
+    const bot = installFakeBot(channel);
+
+    await channel.sendTestResponse('2', 'topic response', 'session-1');
+
+    expect(router.getTarget).toHaveBeenCalledWith('session-1');
+    expect(bot.api.sendMessage).toHaveBeenCalledWith('2', expect.any(String), {
+      parse_mode: 'HTML',
+      message_thread_id: 42,
+    });
+  });
+
+  it('prefers the current inbound topic over a stale session route', async () => {
+    const router = {
+      getTarget: vi.fn().mockReturnValue({
+        channelName: 'telegram',
+        senderId: 'user-1',
+        chatId: '2',
+        threadId: '42',
+      }),
+    };
+    const channel = createChannel({}, router);
+    const bot = installFakeBot(channel);
+
+    await channel.sendTestResponseFromThread(
+      '43',
+      '2',
+      'new topic response',
+      'session-1',
+    );
+    await channel.sendTestResponseFromThread(
+      undefined,
+      '2',
+      'general response',
+      'session-1',
+    );
+
+    expect(bot.api.sendMessage).toHaveBeenNthCalledWith(
+      1,
+      '2',
+      expect.any(String),
+      { parse_mode: 'HTML', message_thread_id: 43 },
+    );
+    expect(bot.api.sendMessage).toHaveBeenNthCalledWith(
+      2,
+      '2',
+      expect.any(String),
+      { parse_mode: 'HTML' },
+    );
+  });
+
   it('only treats addressed Telegram bot commands as mentions in groups', () => {
     const channel = createChannel();
     installFakeBot(channel);
@@ -385,6 +491,36 @@ describe('TelegramChannel', () => {
     );
 
     expect(topicMessage.threadId).toBe('42');
+  });
+
+  it('preserves group and supergroup display names in envelopes', () => {
+    const channel = createChannel();
+
+    const groupMessage = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 2, type: 'group', title: 'Project Group' },
+      },
+      'group message',
+    );
+    const supergroupMessage = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 3, type: 'supergroup', title: 'Project Supergroup' },
+      },
+      'supergroup message',
+    );
+    const privateMessage = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private', title: 'Ignored Title' },
+      },
+      'direct message',
+    );
+
+    expect(groupMessage.chatName).toBe('Project Group');
+    expect(supergroupMessage.chatName).toBe('Project Supergroup');
+    expect(privateMessage.chatName).toBeUndefined();
   });
 
   it('sends proactive messages back to the Telegram forum topic', async () => {

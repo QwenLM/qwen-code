@@ -341,4 +341,19 @@ describe('daemon-tracing', () => {
       addDaemonRequestAttribute('qwen-code.prompt_id', 'orphan'),
     ).not.toThrow();
   });
+
+  it('bridge telemetry sets attributes on the active span', () => {
+    const setAttributes = vi.fn();
+    vi.spyOn(trace, 'getSpan').mockReturnValue({
+      setAttributes,
+    } as unknown as Span);
+
+    createDaemonBridgeTelemetry().setActiveSpanAttributes?.({
+      'qwen-code.daemon.acp_startup.profile.version': 1,
+    });
+
+    expect(setAttributes).toHaveBeenCalledWith({
+      'qwen-code.daemon.acp_startup.profile.version': 1,
+    });
+  });
 });

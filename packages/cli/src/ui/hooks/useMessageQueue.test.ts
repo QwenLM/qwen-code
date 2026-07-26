@@ -184,6 +184,45 @@ describe('useMessageQueue', () => {
       expect(result.current.messageQueue).toEqual(['/model']);
     });
 
+    it('drains goal commands during an active turn', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('steer now');
+        result.current.addMessage('/goal clear');
+        result.current.addMessage('/model');
+        result.current.addMessage('/goal replace the active goal');
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue();
+      });
+
+      expect(drained).toEqual([
+        'steer now',
+        '/goal clear',
+        '/goal replace the active goal',
+      ]);
+      expect(result.current.messageQueue).toEqual(['/model']);
+    });
+
+    it('leaves goal commands queued at the idle boundary', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('/goal clear');
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue(true);
+      });
+
+      expect(drained).toEqual([]);
+      expect(result.current.messageQueue).toEqual(['/goal clear']);
+    });
+
     it('returns an empty array when the queue contains only slash commands', () => {
       const { result } = renderHook(() => useMessageQueue());
 
@@ -217,6 +256,54 @@ describe('useMessageQueue', () => {
 
       expect(drained).toEqual(['a', 'b', 'c']);
       expect(result.current.messageQueue).toEqual([]);
+    });
+
+    it('leaves Ctrl+Q messages queued during an active turn', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('steer now');
+        result.current.addMessage('wait for idle', true);
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue();
+      });
+
+      expect(drained).toEqual(['steer now']);
+      expect(result.current.messageQueue).toEqual(['wait for idle']);
+    });
+
+    it('drains Ctrl+Q messages at the idle boundary', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('wait for idle', true);
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue(true);
+      });
+
+      expect(drained).toEqual(['wait for idle']);
+      expect(result.current.messageQueue).toEqual([]);
+    });
+
+    it('restores interrupted steer messages ahead of newer queued input', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('steer now');
+      });
+      act(() => {
+        result.current.drainQueue();
+        result.current.addMessage('newer input');
+        result.current.restoreMessages(['steer now']);
+      });
+
+      expect(result.current.messageQueue).toEqual(['steer now', 'newer input']);
     });
   });
 

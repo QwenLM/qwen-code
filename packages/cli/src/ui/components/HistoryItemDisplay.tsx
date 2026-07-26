@@ -68,6 +68,7 @@ import {
   layoutRowForEvent,
 } from '../utils/measure-element-position.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
+import { ICON } from '../constants.js';
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
@@ -121,6 +122,7 @@ const ClickableThinkMessage: React.FC<{
   onToggle,
 }) => {
   const ref = useRef<DOMElement>(null);
+  const pressRef = useRef<{ col: number; row: number } | null>(null);
   const { rows: terminalHeight } = useTerminalSize();
   const settings = useSettings();
   const clickable = !!settings.merged.ui?.useTerminalBuffer;
@@ -129,16 +131,38 @@ const ClickableThinkMessage: React.FC<{
   useMouseEvents(
     useCallback(
       (event: MouseEvent) => {
-        if (event.name !== 'left-press' || !ref.current) return;
+        if (!ref.current) return;
+        if (event.name === 'move') {
+          if (
+            pressRef.current &&
+            (event.col !== pressRef.current.col ||
+              event.row !== pressRef.current.row)
+          ) {
+            pressRef.current = null;
+          }
+          return;
+        }
+        if (event.name !== 'left-press' && event.name !== 'left-release') {
+          pressRef.current = null;
+          return;
+        }
         const metrics = measureElementPosition(ref.current);
         const col = event.col - 1;
         const row = layoutRowForEvent(ref.current, event.row, terminalHeight);
-        if (
+        const isInside =
           col >= metrics.x &&
           col < metrics.x + metrics.width &&
           row >= metrics.y &&
-          row < metrics.y + metrics.height
-        ) {
+          row < metrics.y + metrics.height;
+        if (event.name === 'left-press') {
+          pressRef.current = isInside
+            ? { col: event.col, row: event.row }
+            : null;
+          return;
+        }
+        const press = pressRef.current;
+        pressRef.current = null;
+        if (isInside && press?.col === event.col && press.row === event.row) {
           onToggle();
         }
       },
@@ -380,8 +404,11 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         />
       )}
       {itemForDisplay.type === 'tool_use_summary' && (
-        <Box paddingLeft={1}>
-          <Text dimColor>● {itemForDisplay.summary}</Text>
+        <Box flexDirection="row">
+          <Box width={2} flexShrink={0}>
+            <Text dimColor>{ICON.CIRCLE_FILLED}</Text>
+          </Box>
+          <Text dimColor>{itemForDisplay.summary}</Text>
         </Box>
       )}
       {itemForDisplay.type === 'compression' && (

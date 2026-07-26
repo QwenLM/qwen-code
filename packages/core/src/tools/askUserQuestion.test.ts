@@ -73,12 +73,16 @@ describe('AskUserQuestionTool', () => {
       expect(result).toContain('between 1 and 4 questions');
     });
 
-    it('should reject question with header too long', () => {
+    it('should accept a header longer than 12 characters', () => {
+      // The 12-char limit is guidance in the schema, not a hard constraint.
+      // A slightly over-length header (e.g. "Target config", 13 chars) must
+      // pass validation instead of bouncing the tool call back to the model;
+      // the TUI truncates over-length headers for the chip/tab layout.
       const params = {
         questions: [
           {
             question: 'Test question?',
-            header: 'ThisHeaderIsTooLong',
+            header: 'Target config',
             options: [
               { label: 'A', description: 'Option A' },
               { label: 'B', description: 'Option B' },
@@ -89,7 +93,7 @@ describe('AskUserQuestionTool', () => {
       };
 
       const result = tool.validateToolParams(params);
-      expect(result).toContain('12 characters or less');
+      expect(result).toBeNull();
     });
 
     it('should reject question with too few options', () => {

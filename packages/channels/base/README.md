@@ -298,10 +298,10 @@ When `requireMention` is `true` (default), group messages are only processed if 
 ### PairingStore
 
 ```typescript
-constructor(channelName: string)
+constructor(channelName: string, workspaceCwd?: string)
 ```
 
-Persists pairing state to `~/.qwen/channels/{channelName}-pairing.json` and `{channelName}-allowlist.json`.
+Persists pairing state to `{channelName}-pairing.json` and `{channelName}-allowlist.json`. With `workspaceCwd` (what `ChannelBase` passes — the channel's `cwd`), the files live under the workspace-scoped directory `~/.qwen/channels/<workspace-scope>/` so two workspaces reusing the same channel name never share pairing requests or allowlist entries. Without it, the legacy global `~/.qwen/channels/` layout is used. The first time a given (workspace, channel) pair is constructed, existing legacy global files are copied in once (grandfathering) so already-approved senders stay approved; a per-channel `<channel>.migrated` sentinel in the scope directory marks that decision, after which legacy files are never consulted again for that channel. Channel names are URI-encoded in file names, so a name containing path separators cannot escape the scope directory. To revoke a sender, remove their entry from the scoped allowlist (and from the legacy global file, while it exists) — deleting the scoped file does not revoke, and recreating the scope directory from scratch re-imports the legacy baseline.
 
 | Method                                | Description                                                                                               |
 | ------------------------------------- | --------------------------------------------------------------------------------------------------------- |
@@ -320,6 +320,7 @@ interface Envelope {
   senderId: string; // stable, unique sender ID
   senderName: string; // display name
   chatId: string; // distinguishes DMs from groups
+  chatName?: string; // inbound group display name, when provided
   text: string; // message text (@mentions stripped)
   messageId?: string; // platform message ID
   threadId?: string; // for thread-scoped sessions

@@ -46,7 +46,7 @@ export const disableCommand: CommandModule = {
         type: 'string',
       })
       .option('scope', {
-        describe: t('The scope to disable the extenison in.'),
+        describe: t('The scope to disable the extension in.'),
         type: 'string',
         default: SettingScope.User,
       })

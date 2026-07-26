@@ -559,6 +559,50 @@ describe('PermissionController', () => {
     );
   });
 
+  it('includes teammate Plan shell warnings in permission suggestions', async () => {
+    const controller = new PermissionController(
+      createContext(120_000),
+      createRegistry(),
+      'PermissionController',
+    );
+    const send = vi.spyOn(controller, 'sendControlRequest').mockResolvedValue({
+      subtype: 'success',
+      request_id: 'teammate-warning',
+      response: { behavior: 'deny' },
+    });
+
+    await controller.handleTeammateApproval({
+      teammateName: 'worker',
+      toolName: 'run_shell_command',
+      toolInput: { command: "python -c 'print(1)'" },
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Confirm shell',
+        command: "python -c 'print(1)'",
+        rootCommand: 'python',
+        hideAlwaysAllow: true,
+        warnings: ['Exact one-off approval required'],
+      },
+      respond: vi.fn().mockResolvedValue(undefined),
+      timestamp: 790,
+    });
+
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        permission_suggestions: expect.arrayContaining([
+          expect.objectContaining({
+            type: 'allow',
+            description: expect.stringContaining(
+              'Exact one-off approval required',
+            ),
+          }),
+        ]),
+      }),
+      undefined,
+      expect.any(AbortSignal),
+    );
+  });
+
   it('omits modify suggestions when edit confirmation hides modify actions', () => {
     const controller = new PermissionController(
       createContext(),

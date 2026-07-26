@@ -1086,6 +1086,40 @@ describe('SettingsUtils', () => {
         );
         expect(result).toBe('true*'); // changed from default (false) to true
       });
+
+      it('should display auto output language as following user input', () => {
+        vi.mocked(getSettingsSchema).mockReturnValue({
+          general: {
+            type: 'object',
+            label: 'General',
+            category: 'General',
+            requiresRestart: false,
+            default: {},
+            description: 'General settings.',
+            showInDialog: false,
+            properties: {
+              outputLanguage: {
+                type: 'string',
+                label: 'Output Language',
+                category: 'General',
+                requiresRestart: false,
+                default: 'auto',
+                description: 'LLM output language.',
+                showInDialog: true,
+              },
+            },
+          },
+        } as unknown as SettingsSchemaType);
+
+        const result = getDisplayValue(
+          'general.outputLanguage',
+          makeMockSettings({ general: { outputLanguage: 'auto' } }),
+          makeMockSettings({ general: { outputLanguage: 'auto' } }),
+          new Set<string>(),
+        );
+
+        expect(result).toBe('Auto (follow user input)*');
+      });
     });
 
     describe('isDefaultValue', () => {

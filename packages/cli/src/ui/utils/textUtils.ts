@@ -146,6 +146,38 @@ export const getCachedStringWidth = (str: string): number => {
   return width;
 };
 
+const graphemeSegmenter = new Intl.Segmenter(undefined, {
+  granularity: 'grapheme',
+});
+
+/**
+ * Truncate text to a display width (terminal cells), appending an ellipsis
+ * when clipped. Grapheme- and width-aware (via `getCachedStringWidth`) so CJK
+ * text — two cells per character — is bounded correctly. Returns an empty
+ * string when even the ellipsis would overflow the budget.
+ */
+export function truncateToWidth(text: string, maxWidth: number): string {
+  if (maxWidth <= 0) {
+    return '';
+  }
+  if (getCachedStringWidth(text) <= maxWidth) {
+    return text;
+  }
+  const ellipsis = '…';
+  const budget = Math.max(0, maxWidth - getCachedStringWidth(ellipsis));
+  let width = 0;
+  let result = '';
+  for (const { segment } of graphemeSegmenter.segment(text)) {
+    const segmentWidth = getCachedStringWidth(segment);
+    if (width + segmentWidth > budget) {
+      break;
+    }
+    result += segment;
+    width += segmentWidth;
+  }
+  return `${result}${ellipsis}`;
+}
+
 export interface VisualHeightSlice {
   text: string;
   hiddenLinesCount: number;
@@ -459,13 +491,19 @@ export function sanitizeSensitiveText(
 // `escapeAnsiCtrlCodes` only neutralizes multi-byte ANSI sequences; raw single
 // bytes like `\n`, `\r`, BEL, BS slip past it and can still break layouts or
 // inject terminal effects when rendered as part of a git-supplied filename.
-// eslint-disable-next-line no-control-regex
-const FILENAME_CONTROL_CHARS_REGEX = /[\x00-\x1f\x7f-\x9f]/g;
+// The Unicode bidi embedding/isolate controls (U+202A–202E, U+2066–2069) are
+// also stripped so a crafted filename can't visually spoof its extension.
+/* eslint-disable no-control-regex */
+const FILENAME_CONTROL_CHARS_REGEX =
+  /[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g;
+/* eslint-enable no-control-regex */
 
 // Same as FILENAME_CONTROL_CHARS_REGEX minus `\n` (row separator) and `\t`
 // (benign indentation), which multi-line display treats as layout.
-// eslint-disable-next-line no-control-regex
-const MULTILINE_CONTROL_CHARS_REGEX = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+/* eslint-disable no-control-regex */
+const MULTILINE_CONTROL_CHARS_REGEX =
+  /[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g;
+/* eslint-enable no-control-regex */
 
 function escapeControlChar(ch: string): string {
   switch (ch) {

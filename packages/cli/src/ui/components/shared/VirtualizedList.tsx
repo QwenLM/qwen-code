@@ -63,6 +63,12 @@ export type VirtualizedListRef<T> = {
     scrollHeight: number;
     innerHeight: number;
   };
+  getViewportRect: () => {
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  } | null;
 };
 
 // Returns the smallest index i such that arr[i] > target. If every entry is
@@ -782,6 +788,8 @@ function VirtualizedList<T>(
           innerHeight: scrollableContainerHeight,
         };
       },
+      getViewportRect: () =>
+        rootRef.current ? measureElementPosition(rootRef.current) : null,
     }),
     [
       offsets,
@@ -841,10 +849,14 @@ function VirtualizedList<T>(
           // the viewport never reflows (which would force a per-item
           // re-measure + visible jitter).
           if (!scrollbarThumbActive) {
-            return <Text key={i}> </Text>;
+            return (
+              <Text key={i} selectable={false}>
+                {' '}
+              </Text>
+            );
           }
           return (
-            <Text key={i} dimColor={!inThumb}>
+            <Text key={i} dimColor={!inThumb} selectable={false}>
               {inThumb ? '█' : '│'}
             </Text>
           );

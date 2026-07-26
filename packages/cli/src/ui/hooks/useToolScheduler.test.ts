@@ -30,6 +30,8 @@ import {
   DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
   MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
   ApprovalMode,
+  CoreToolScheduler,
+  getRuntimeContentGenerator,
   MockTool,
 } from '@qwen-code/qwen-code-core';
 import { ToolCallStatus } from '../types.js';
@@ -66,10 +68,11 @@ const mockConfig = {
     model: 'test-model',
     authType: 'gemini',
   }),
+  getBaseLlmClient: vi.fn(),
   getUseModelRouter: () => false,
   getGeminiClient: () => null, // No client needed for these tests
   getShellExecutionConfig: () => ({ terminalWidth: 80, terminalHeight: 24 }),
-  getChatRecordingService: () => undefined,
+  getChatRecordingService: vi.fn(() => undefined),
   getMessageBus: vi.fn().mockReturnValue(undefined),
   getDisableAllHooks: vi.fn().mockReturnValue(true),
   getHookSystem: vi.fn().mockReturnValue(undefined),
@@ -104,6 +107,8 @@ describe('useReactToolScheduler in YOLO Mode', () => {
     setPendingHistoryItem = vi.fn();
     mockToolRegistry.getTool.mockClear();
     mockToolRegistry.ensureTool.mockClear();
+    (mockConfig.getBaseLlmClient as Mock).mockReset();
+    (mockConfig.getChatRecordingService as Mock).mockReturnValue(undefined);
     (mockToolRequiresConfirmation.execute as Mock).mockClear();
     (mockToolRequiresConfirmation.getConfirmationDetails as Mock).mockClear();
 
@@ -274,6 +279,7 @@ describe('useReactToolScheduler', () => {
     (mockTool.execute as Mock).mockClear();
     (mockToolRequiresConfirmation.execute as Mock).mockClear();
     (mockToolRequiresConfirmation.getConfirmationDetails as Mock).mockClear();
+    (mockConfig.getChatRecordingService as Mock).mockReturnValue(undefined);
 
     mockOnUserConfirmForToolConfirmation = vi.fn();
     (
@@ -360,6 +366,143 @@ describe('useReactToolScheduler', () => {
       }),
     ]);
     expect(result.current[0]).toEqual([]);
+  });
+
+  it('resolves full-turn tool calls against the exact model runtime', async () => {
+    mockToolRegistry.getTool.mockReturnValue(mockTool);
+    const runtimeView = {
+      contentGenerator: {},
+      contentGeneratorConfig: {
+        model: 'vision-agent',
+        authType: 'openai',
+      },
+      model: 'vision-agent',
+    };
+    (mockTool.execute as Mock).mockImplementation(async () => {
+      expect(getRuntimeContentGenerator()).toBe(runtimeView);
+      return {
+        llmContent: 'Tool output',
+        returnDisplay: 'Tool output',
+      } as ToolResult;
+    });
+    const resolveForModel = vi.fn().mockResolvedValue(runtimeView);
+    (mockConfig.getBaseLlmClient as Mock).mockReturnValue({
+      resolveForModel,
+    });
+    const { result } = renderScheduler();
+    const request = {
+      callId: 'full-turn-call',
+      name: 'mockTool',
+      args: {},
+    } as ToolCallRequestInfo;
+
+    act(() => {
+      result.current[1](
+        [request],
+        new AbortController().signal,
+        'openai:vision-agent\0https://vision.example.com/v1\0',
+      );
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(resolveForModel).toHaveBeenCalledWith(
+      'openai:vision-agent\0https://vision.example.com/v1',
+      { failClosed: true },
+    );
+    expect(mockTool.execute).toHaveBeenCalled();
+  });
+
+  it('fails closed when the full-turn tool runtime cannot be resolved', async () => {
+    mockToolRegistry.getTool.mockReturnValue(mockTool);
+    const recordToolResult = vi.fn();
+    (mockConfig.getChatRecordingService as Mock).mockReturnValue({
+      recordToolResult,
+    });
+    (mockConfig.getBaseLlmClient as Mock).mockReturnValue({
+      resolveForModel: vi.fn().mockRejectedValue(new Error('missing route')),
+    });
+    const { result } = renderScheduler();
+    const request = {
+      callId: 'unresolved-full-turn-call',
+      name: 'mockTool',
+      args: {},
+    } as ToolCallRequestInfo;
+
+    act(() => {
+      result.current[1](
+        [request],
+        new AbortController().signal,
+        'vision-agent\0',
+      );
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(mockTool.execute).not.toHaveBeenCalled();
+    expect(recordToolResult).not.toHaveBeenCalled();
+    expect(onComplete).toHaveBeenCalledWith([
+      expect.objectContaining({
+        status: 'error',
+        request,
+        response: expect.objectContaining({
+          error: expect.objectContaining({
+            message: expect.stringContaining('tool was not executed'),
+          }),
+        }),
+      }),
+    ]);
+  });
+
+  it('fails closed when full-turn tool scheduling rejects', async () => {
+    mockToolRegistry.getTool.mockReturnValue(mockTool);
+    const runtimeView = {
+      contentGenerator: {},
+      contentGeneratorConfig: {
+        model: 'vision-agent',
+        authType: 'openai',
+      },
+      model: 'vision-agent',
+    };
+    (mockConfig.getBaseLlmClient as Mock).mockReturnValue({
+      resolveForModel: vi.fn().mockResolvedValue(runtimeView),
+    });
+    const scheduleSpy = vi
+      .spyOn(CoreToolScheduler.prototype, 'schedule')
+      .mockRejectedValueOnce(new Error('already running'));
+    const { result } = renderScheduler();
+    const request = {
+      callId: 'rejected-full-turn-call',
+      name: 'mockTool',
+      args: {},
+    } as ToolCallRequestInfo;
+
+    act(() => {
+      result.current[1](
+        [request],
+        new AbortController().signal,
+        'vision-agent\0',
+      );
+    });
+    await act(async () => {
+      await vi.runAllTimersAsync();
+    });
+
+    expect(mockTool.execute).not.toHaveBeenCalled();
+    expect(onComplete).toHaveBeenCalledWith([
+      expect.objectContaining({
+        status: 'error',
+        request,
+        response: expect.objectContaining({
+          error: expect.objectContaining({
+            message: expect.stringContaining('tool was not executed'),
+          }),
+        }),
+      }),
+    ]);
+    scheduleSpy.mockRestore();
   });
 
   it('should handle tool not found', async () => {

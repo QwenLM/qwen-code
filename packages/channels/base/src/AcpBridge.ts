@@ -203,12 +203,12 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   async loadSession(sessionId: string, cwd: string): Promise<string> {
     const conn = this.ensureConnection();
     await this.registerChannelLoopMcpServer();
-    const response = await conn.loadSession({
+    await conn.loadSession({
       sessionId,
       cwd,
       mcpServers: [],
     });
-    return response.sessionId;
+    return sessionId;
   }
 
   async prompt(
@@ -320,6 +320,17 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         const content = update['content'] as
           | { type?: string; text?: string }
           | undefined;
+        if (meta?.['qwenDiscreteMessage'] === true) {
+          if (
+            meta['source'] === 'background_notification_response' &&
+            meta['rewritten'] !== true &&
+            content?.type === 'text' &&
+            content.text
+          ) {
+            this.emit('backgroundResponse', sessionId, content.text);
+          }
+          break;
+        }
         if (content?.type === 'text' && content.text) {
           this.emit(
             meta?.['source'] === 'slash_command'

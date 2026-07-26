@@ -6,6 +6,7 @@
 
 import type { Content, Part } from '@google/genai';
 import type { ChatCompressionSettings } from '../config/config.js';
+import type { InputModalities } from '../core/contentGenerator.js';
 
 /**
  * Prepares `historyToCompress` for the side-query summary model by
@@ -284,7 +285,10 @@ interface SlimStats {
  * same length and ordering as the input; identity-equal when nothing
  * changed.
  */
-export function slimCompactionInput(history: Content[]): SlimResult {
+export function slimCompactionInput(
+  history: Content[],
+  supportedModalities?: InputModalities,
+): SlimResult {
   const stats: SlimStats = {
     imagesStripped: 0,
     documentsStripped: 0,
@@ -296,7 +300,7 @@ export function slimCompactionInput(history: Content[]): SlimResult {
 
     let touched = false;
     const newParts: Part[] = content.parts.map((part) => {
-      const replacement = transformPart(part, stats);
+      const replacement = transformPart(part, stats, supportedModalities);
       if (replacement !== part) {
         touched = true;
         return replacement;
@@ -315,11 +319,25 @@ export function slimCompactionInput(history: Content[]): SlimResult {
   };
 }
 
-function transformPart(part: Part, stats: SlimStats): Part {
+function transformPart(
+  part: Part,
+  stats: SlimStats,
+  supportedModalities?: InputModalities,
+): Part {
   if (part.inlineData) {
+    if (
+      supportsMimeType(part.inlineData.mimeType, supportedModalities) === true
+    ) {
+      return part;
+    }
     return mediaPlaceholderPart(part.inlineData.mimeType, stats);
   }
   if (part.fileData) {
+    if (
+      supportsMimeType(part.fileData.mimeType, supportedModalities) === true
+    ) {
+      return part;
+    }
     return mediaPlaceholderPart(part.fileData.mimeType, stats);
   }
   // Walk into functionResponse.parts (qwen-code's nested-media carrier
@@ -330,7 +348,7 @@ function transformPart(part: Part, stats: SlimStats): Part {
   if (nested) {
     let touched = false;
     const newNested = nested.map((inner) => {
-      const replacement = transformPart(inner, stats);
+      const replacement = transformPart(inner, stats, supportedModalities);
       if (replacement !== inner) {
         touched = true;
       }
@@ -347,6 +365,19 @@ function transformPart(part: Part, stats: SlimStats): Part {
     }
   }
   return part;
+}
+
+function supportsMimeType(
+  mimeType: string | undefined,
+  modalities: InputModalities | undefined,
+): boolean | undefined {
+  if (!modalities) return undefined;
+  const mime = mimeType ?? DEFAULT_MIME;
+  if (mime.startsWith('image/')) return modalities.image;
+  if (mime === 'application/pdf') return modalities.pdf;
+  if (mime.startsWith('audio/')) return modalities.audio;
+  if (mime.startsWith('video/')) return modalities.video;
+  return false;
 }
 
 function mediaPlaceholderPart(

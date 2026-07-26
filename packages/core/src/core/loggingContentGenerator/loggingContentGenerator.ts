@@ -53,9 +53,6 @@ import {
 import {
   startLLMRequestSpan,
   endLLMRequestSpan,
-  addSystemPromptAttributes,
-  addToolSchemaAttributes,
-  addModelOutputAttributes,
   areSensitiveSpanAttributesEnabled,
 } from '../../telemetry/index.js';
 import {
@@ -67,6 +64,16 @@ import {
   retryContext,
   type RetryAttemptContext,
 } from '../../utils/retryContext.js';
+import {
+  resolveGenAiOperationName,
+  resolveGenAiOutputType,
+  resolveGenAiProviderName,
+} from '../../telemetry/gen-ai-provider.js';
+import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
+import {
+  createGenAiExchange,
+  type GenAiExchangeController,
+} from '../../telemetry/gen-ai-request.js';
 
 /**
  * Phase 4b — read the active retry context once, default attempt to 1 when
@@ -92,6 +99,40 @@ function snapshotRetryMetadata(): {
   };
 }
 
+function usageSpanMetadata(
+  usage: GenerateContentResponseUsageMetadata | undefined,
+) {
+  const provenance = getGenAiUsageProvenance(usage);
+  return {
+    inputTokens: usage?.promptTokenCount,
+    outputTokens: usage?.candidatesTokenCount,
+    cachedInputTokens: usage?.cachedContentTokenCount,
+    cachedInputTokensReported:
+      provenance?.cachedInputTokensReported ??
+      usage?.cachedContentTokenCount !== undefined,
+    cacheCreationInputTokens: provenance?.cacheCreationInputTokens,
+  };
+}
+
+function orderedFinishReasons(
+  response: GenerateContentResponse,
+): string[] | undefined {
+  const reasons = (response.candidates ?? [])
+    .map((candidate, position) => ({
+      index: candidate.index ?? position,
+      reason: candidate.finishReason
+        ? String(candidate.finishReason)
+        : undefined,
+    }))
+    .filter(
+      (entry): entry is { index: number; reason: string } =>
+        entry.reason !== undefined,
+    )
+    .sort((left, right) => left.index - right.index)
+    .map((entry) => entry.reason);
+  return reasons.length > 0 ? reasons : undefined;
+}
+
 const debugLogger = createDebugLogger('LOGGING_CONTENT_GENERATOR');
 
 const MAX_RESPONSE_TEXT_LENGTH = 4096;
@@ -107,6 +148,8 @@ export class LoggingContentGenerator implements ContentGenerator {
   private splitToolMedia?: boolean;
   private toolResultContentFormat?: ContentGeneratorConfig['toolResultContentFormat'];
   private readonly generatorAuthType: ContentGeneratorConfig['authType'];
+  private readonly genAiProviderName: string;
+  private readonly genAiOperationName: 'chat' | 'generate_content';
 
   constructor(
     private readonly wrapped: ContentGenerator,
@@ -117,6 +160,13 @@ export class LoggingContentGenerator implements ContentGenerator {
     this.splitToolMedia = generatorConfig.splitToolMedia;
     this.toolResultContentFormat = generatorConfig.toolResultContentFormat;
     this.generatorAuthType = generatorConfig.authType;
+    this.genAiProviderName = resolveGenAiProviderName(
+      generatorConfig,
+      process.env['DASHSCOPE_PROXY_BASE_URL'],
+    );
+    this.genAiOperationName = resolveGenAiOperationName(
+      generatorConfig.authType,
+    );
 
     // Extract fields needed for initialization from passed config
     // (config.getContentGeneratorConfig() may not be available yet during refreshAuth)
@@ -157,6 +207,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     prompt_id: string,
     usageMetadata?: GenerateContentResponseUsageMetadata,
     responseText?: string,
+    ttftMs?: number,
   ): void {
     logApiResponse(
       this.config,
@@ -169,6 +220,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         usageMetadata,
         responseText,
         subagentNameContext.getStore(),
+        ttftMs,
       ),
     );
   }
@@ -225,6 +277,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     prompt_id: string,
     usageMetadata?: GenerateContentResponseUsageMetadata,
     responseText?: string,
+    ttftMs?: number,
   ): void {
     try {
       this._logApiResponse(
@@ -234,6 +287,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         prompt_id,
         usageMetadata,
         responseText,
+        ttftMs,
       );
     } catch (loggingError) {
       debugLogger.warn('Failed to log API response:', loggingError);
@@ -248,7 +302,11 @@ export class LoggingContentGenerator implements ContentGenerator {
     // await. ALS frame from `retryWithBackoff` is guaranteed to be active here.
     const retrySnapshot = snapshotRetryMetadata();
 
-    const llmSpan = startLLMRequestSpan(req.model, userPromptId);
+    const llmSpan = startLLMRequestSpan(req.model, userPromptId, {
+      operationName: this.genAiOperationName,
+      providerName: this.genAiProviderName,
+      outputType: resolveGenAiOutputType(this.generatorAuthType, req.config),
+    });
     try {
       llmSpan.setAttribute('llm_request.stream', false);
     } catch {
@@ -257,28 +315,26 @@ export class LoggingContentGenerator implements ContentGenerator {
     // Capture span context so the API call and logging activate it via
     // context.with(). Without this, nested OTel spans (HTTP instrumentation,
     // log-bridge spans) parent to session root instead of llm_request.
-    const spanContext = trace.setSpan(context.active(), llmSpan);
+    const isInternal = isInternalPromptId(userPromptId);
+    const exchange = createGenAiExchange(
+      trace.setSpan(context.active(), llmSpan),
+      llmSpan,
+      {
+        captureContent:
+          !isInternal && this.shouldCollectSensitiveSpanAttributes(),
+        sensitiveAttributeMaxLength:
+          this.config.getTelemetrySensitiveSpanAttributeMaxLength(),
+      },
+    );
+    const spanContext = exchange.context;
 
     const startTime = Date.now();
-    const isInternal = isInternalPromptId(userPromptId);
     const session = this.startCaptureSession();
     try {
       runtimeDiagnostics.recordGenerateContentRequest(req, {
         stream: false,
         source: 'generateContent',
       });
-      if (!isInternal) {
-        addSystemPromptAttributes(
-          this.config,
-          llmSpan,
-          req.config?.systemInstruction,
-        );
-        addToolSchemaAttributes(
-          this.config,
-          llmSpan,
-          req.config?.tools as unknown[] | undefined,
-        );
-      }
       const response = await context.with(spanContext, async () => {
         if (!isInternal) {
           this.logApiRequest(
@@ -291,20 +347,9 @@ export class LoggingContentGenerator implements ContentGenerator {
           this.wrapped.generateContent(req, userPromptId),
         );
         const durationMs = Date.now() - startTime;
-        const shouldCollectSensitiveSpanAttributes =
-          !isInternal && this.shouldCollectSensitiveSpanAttributes();
-        const modelOutput = shouldCollectSensitiveSpanAttributes
-          ? this.extractResponseTextForSensitiveSpan(
-              result,
-              this.config.getTelemetrySensitiveSpanAttributeMaxLength(),
-            )
-          : undefined;
         const responseText = isInternal
           ? undefined
           : this.extractResponseText(result, MAX_RESPONSE_TEXT_LENGTH);
-        if (shouldCollectSensitiveSpanAttributes) {
-          this.safelyAddModelOutputAttributes(llmSpan, modelOutput);
-        }
         this.safelyLogApiResponse(
           result.responseId ?? '',
           durationMs,
@@ -325,15 +370,14 @@ export class LoggingContentGenerator implements ContentGenerator {
         }
         return result;
       });
+      const observedFinishReasons = exchange.controller.finalize(true);
       endLLMRequestSpan(llmSpan, {
         success: true,
-        inputTokens: response.usageMetadata?.promptTokenCount,
-        outputTokens: response.usageMetadata?.candidatesTokenCount,
-        cachedInputTokens: response.usageMetadata?.cachedContentTokenCount,
+        ...usageSpanMetadata(response.usageMetadata),
         durationMs: Date.now() - startTime,
         responseId: response.responseId || undefined,
-        finishReason:
-          (response.candidates?.[0]?.finishReason as string) || undefined,
+        responseModel: response.modelVersion || undefined,
+        finishReasons: observedFinishReasons ?? orderedFinishReasons(response),
         thoughtsTokenCount: response.usageMetadata?.thoughtsTokenCount,
         subagentName: subagentNameContext.getStore() || undefined,
         ...retrySnapshot,
@@ -342,6 +386,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       return response;
     } catch (error) {
       const durationMs = Date.now() - startTime;
+      const observedFinishReasons = exchange.controller.finalize(false);
       // End the span BEFORE the (potentially-throwing) logging block, so a
       // logging-side rejection cannot prevent span finalization. Mirrors the
       // streaming path order. Use abort-specific status message when the
@@ -356,6 +401,7 @@ export class LoggingContentGenerator implements ContentGenerator {
           : API_CALL_FAILED_SPAN_STATUS_MESSAGE,
         errorType: getErrorType(error),
         errorStatusCode: getErrorStatus(error),
+        finishReasons: observedFinishReasons,
         subagentName: subagentNameContext.getStore() || undefined,
         ...retrySnapshot,
         config: this.config,
@@ -390,7 +436,11 @@ export class LoggingContentGenerator implements ContentGenerator {
     // endLLMRequestSpan callsites (success / error / idle-timeout / abort).
     const retrySnapshot = snapshotRetryMetadata();
 
-    const llmSpan = startLLMRequestSpan(req.model, userPromptId);
+    const llmSpan = startLLMRequestSpan(req.model, userPromptId, {
+      operationName: this.genAiOperationName,
+      providerName: this.genAiProviderName,
+      outputType: resolveGenAiOutputType(this.generatorAuthType, req.config),
+    });
     try {
       llmSpan.setAttribute('llm_request.stream', true);
     } catch {
@@ -399,10 +449,20 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     // Capture the span context so the stream wrapper can activate it
     // during iteration — not just during generator creation.
-    const spanContext = trace.setSpan(context.active(), llmSpan);
+    const isInternal = isInternalPromptId(userPromptId);
+    const exchange = createGenAiExchange(
+      trace.setSpan(context.active(), llmSpan),
+      llmSpan,
+      {
+        captureContent:
+          !isInternal && this.shouldCollectSensitiveSpanAttributes(),
+        sensitiveAttributeMaxLength:
+          this.config.getTelemetrySensitiveSpanAttributeMaxLength(),
+      },
+    );
+    const spanContext = exchange.context;
 
     const startTime = Date.now();
-    const isInternal = isInternalPromptId(userPromptId);
     const session = this.startCaptureSession();
 
     let stream: AsyncGenerator<GenerateContentResponse>;
@@ -411,18 +471,6 @@ export class LoggingContentGenerator implements ContentGenerator {
         stream: true,
         source: 'generateContentStream',
       });
-      if (!isInternal) {
-        addSystemPromptAttributes(
-          this.config,
-          llmSpan,
-          req.config?.systemInstruction,
-        );
-        addToolSchemaAttributes(
-          this.config,
-          llmSpan,
-          req.config?.tools as unknown[] | undefined,
-        );
-      }
       stream = await context.with(spanContext, async () => {
         if (!isInternal) {
           this.logApiRequest(
@@ -437,6 +485,7 @@ export class LoggingContentGenerator implements ContentGenerator {
       });
     } catch (error) {
       const durationMs = Date.now() - startTime;
+      const observedFinishReasons = exchange.controller.finalize(false);
       context.with(spanContext, () =>
         this.safelyLogApiError('', durationMs, error, req.model, userPromptId),
       );
@@ -449,6 +498,7 @@ export class LoggingContentGenerator implements ContentGenerator {
           : API_CALL_FAILED_SPAN_STATUS_MESSAGE,
         errorType: getErrorType(error),
         errorStatusCode: getErrorStatus(error),
+        finishReasons: observedFinishReasons,
         subagentName: subagentNameContext.getStore() || undefined,
         ...retrySnapshot,
         config: this.config,
@@ -486,6 +536,7 @@ export class LoggingContentGenerator implements ContentGenerator {
         spanContext,
         req.config?.abortSignal,
         retrySnapshot,
+        exchange.controller,
       ),
     );
   }
@@ -527,6 +578,7 @@ export class LoggingContentGenerator implements ContentGenerator {
     // idle-timeout `setTimeout` callback sees the same values as the
     // entry-time read.
     retrySnapshot?: ReturnType<typeof snapshotRetryMetadata>,
+    exchangeController?: GenAiExchangeController,
   ): AsyncGenerator<GenerateContentResponse> {
     const isInternal = isInternalPromptId(userPromptId);
     // Skip collecting full responses for internal prompts to avoid memory
@@ -539,9 +591,16 @@ export class LoggingContentGenerator implements ContentGenerator {
     // values even when we skip collecting full responses for internal prompts.
     let firstResponseId = '';
     let firstModelVersion = '';
+    let lastResponse: GenerateContentResponse | undefined;
     let lastUsageMetadata: GenerateContentResponseUsageMetadata | undefined;
+    const refreshLateUsageMetadata = () => {
+      if (lastResponse?.usageMetadata) {
+        lastUsageMetadata = lastResponse.usageMetadata;
+      }
+    };
     let errorOccurred = false;
-    let lastFinishReason: string | undefined;
+    let streamCompleted = false;
+    const finishReasons = new Map<number, string>();
     let lastError: unknown;
     const subagentName = subagentNameContext.getStore();
 
@@ -575,16 +634,27 @@ export class LoggingContentGenerator implements ContentGenerator {
           if (spanEndedByTimeout) return;
           if (spanEndTimeout !== undefined) clearTimeout(spanEndTimeout);
           spanEndTimeout = setTimeout(() => {
+            refreshLateUsageMetadata();
             try {
               span.setAttribute('stream.timed_out', true);
             } catch {
               // OTel errors must not interrupt the consumer.
             }
+            const observedFinishReasons = exchangeController?.finalize(false);
             endLLMRequestSpan(span, {
               success: false,
+              ...usageSpanMetadata(lastUsageMetadata),
               durationMs: Date.now() - startTime,
               error: 'Stream span timed out (idle)',
               responseId: firstResponseId || undefined,
+              responseModel: firstModelVersion || undefined,
+              finishReasons:
+                observedFinishReasons ??
+                (finishReasons.size > 0
+                  ? [...finishReasons.entries()]
+                      .sort(([left], [right]) => left - right)
+                      .map(([, reason]) => reason)
+                  : undefined),
               subagentName: subagentName || undefined,
               ...retrySnapshot,
               config: this.config,
@@ -598,6 +668,7 @@ export class LoggingContentGenerator implements ContentGenerator {
 
     try {
       for await (const response of stream) {
+        lastResponse = response;
         if (!firstResponseId && response.responseId) {
           firstResponseId = response.responseId;
         }
@@ -617,8 +688,15 @@ export class LoggingContentGenerator implements ContentGenerator {
         if (response.usageMetadata) {
           lastUsageMetadata = response.usageMetadata;
         }
-        if (candidate?.finishReason) {
-          lastFinishReason = candidate.finishReason as string;
+        for (const [position, responseCandidate] of (
+          response.candidates ?? []
+        ).entries()) {
+          if (responseCandidate.finishReason) {
+            finishReasons.set(
+              responseCandidate.index ?? position,
+              String(responseCandidate.finishReason),
+            );
+          }
         }
         // Capture TTFT on the first stream chunk that contains user-visible
         // content. hasUserVisibleContent skips role-only / usageMetadata-only
@@ -630,6 +708,8 @@ export class LoggingContentGenerator implements ContentGenerator {
         resetSpanTimeout?.();
         yield response;
       }
+      streamCompleted = true;
+      refreshLateUsageMetadata();
       if (spanEndTimeout !== undefined) {
         clearTimeout(spanEndTimeout);
         spanEndTimeout = undefined;
@@ -645,16 +725,9 @@ export class LoggingContentGenerator implements ContentGenerator {
       const consolidatedResponse = shouldCollectResponses
         ? this.consolidateGeminiResponsesForLogging(responses)
         : undefined;
-      const shouldCollectSensitiveSpanAttributes =
-        !isInternal &&
-        span !== undefined &&
-        this.shouldCollectSensitiveSpanAttributes();
-      const streamModelOutput = shouldCollectSensitiveSpanAttributes
-        ? this.extractResponseTextForSensitiveSpan(
-            consolidatedResponse,
-            this.config.getTelemetrySensitiveSpanAttributeMaxLength(),
-          )
-        : undefined;
+      if (consolidatedResponse) {
+        consolidatedResponse.usageMetadata = lastUsageMetadata;
+      }
       const streamResponseText = isInternal
         ? undefined
         : this.extractResponseText(
@@ -675,11 +748,9 @@ export class LoggingContentGenerator implements ContentGenerator {
             userPromptId,
             lastUsageMetadata,
             streamResponseText,
+            ttftMs,
           ),
         );
-        if (shouldCollectSensitiveSpanAttributes && span) {
-          this.safelyAddModelOutputAttributes(span, streamModelOutput);
-        }
         await runInSpan(() =>
           this.safelyLogOpenAIInteraction(
             openaiRequest,
@@ -722,17 +793,19 @@ export class LoggingContentGenerator implements ContentGenerator {
       if (spanEndTimeout !== undefined) {
         clearTimeout(spanEndTimeout);
       }
+      refreshLateUsageMetadata();
       // If the idle timeout already ended the span, skip the redundant
       // endLLMRequestSpan call. The helper itself would no-op due to its
       // own ended guard, but we want to avoid pretending the final token
       // counts were recorded — they weren't, the span is the timeout one.
       if (span && !spanEndedByTimeout) {
         const aborted = abortSignal?.aborted ?? false;
+        const observedFinishReasons = exchangeController?.finalize(
+          !errorOccurred && streamCompleted,
+        );
         endLLMRequestSpan(span, {
           success: !errorOccurred,
-          inputTokens: lastUsageMetadata?.promptTokenCount,
-          outputTokens: lastUsageMetadata?.candidatesTokenCount,
-          cachedInputTokens: lastUsageMetadata?.cachedContentTokenCount,
+          ...usageSpanMetadata(lastUsageMetadata),
           ttftMs,
           durationMs: Date.now() - startTime,
           error: errorOccurred
@@ -741,7 +814,14 @@ export class LoggingContentGenerator implements ContentGenerator {
               : API_CALL_FAILED_SPAN_STATUS_MESSAGE
             : undefined,
           responseId: firstResponseId || undefined,
-          finishReason: lastFinishReason,
+          responseModel: firstModelVersion || undefined,
+          finishReasons:
+            observedFinishReasons ??
+            (finishReasons.size > 0
+              ? [...finishReasons.entries()]
+                  .sort(([left], [right]) => left - right)
+                  .map(([, reason]) => reason)
+              : undefined),
           thoughtsTokenCount: lastUsageMetadata?.thoughtsTokenCount,
           subagentName: subagentName || undefined,
           errorType: lastError ? getErrorType(lastError) : undefined,
@@ -985,27 +1065,6 @@ export class LoggingContentGenerator implements ContentGenerator {
     return truncated ? `${text}${RESPONSE_TEXT_TRUNCATION_SUFFIX}` : text;
   }
 
-  private extractResponseTextForSensitiveSpan(
-    response: GenerateContentResponse | undefined,
-    maxLength: number,
-  ): { text: string; originalLength: number } | undefined {
-    let text = '';
-    let originalLength = 0;
-    const hasText = this.forEachVisibleResponseText(response, (partText) => {
-      originalLength += partText.length;
-      const remaining = maxLength - text.length;
-      if (remaining > 0) {
-        text += partText.slice(0, remaining);
-      }
-    });
-
-    if (!hasText) {
-      return undefined;
-    }
-
-    return { text, originalLength };
-  }
-
   private forEachVisibleResponseText(
     response: GenerateContentResponse | undefined,
     onText: (text: string) => void,
@@ -1040,22 +1099,6 @@ export class LoggingContentGenerator implements ContentGenerator {
       return part.text;
     }
     return undefined;
-  }
-
-  private safelyAddModelOutputAttributes(
-    span: Span,
-    modelOutput: { text: string; originalLength: number } | undefined,
-  ): void {
-    try {
-      addModelOutputAttributes(
-        this.config,
-        span,
-        modelOutput?.text,
-        modelOutput?.originalLength,
-      );
-    } catch (error) {
-      debugLogger.warn('Failed to add model output span attributes:', error);
-    }
   }
 
   private shouldCollectSensitiveSpanAttributes(): boolean {

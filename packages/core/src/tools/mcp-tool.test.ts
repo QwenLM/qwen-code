@@ -22,6 +22,11 @@ import {
   removeMCPServerStatus,
   updateMCPServerStatus,
 } from './mcp-client.js';
+import {
+  INVOCATION_CONTEXT_META_KEY,
+  runWithInvocationContext,
+  type InvocationContextV1,
+} from '../utils/invocation-context.js';
 
 vi.mock('node:fs/promises');
 
@@ -42,19 +47,42 @@ describe('generateValidName', () => {
   });
 
   it('should replace invalid characters with underscores', () => {
-    expect(generateValidName('invalid-name with spaces')).toBe(
-      'invalid-name_with_spaces',
+    const normalized = generateValidName('invalid-name with spaces');
+    expect(normalized).toMatch(/^[A-Za-z][A-Za-z0-9_-]*$/);
+    expect(normalized).not.toBe('invalid-name with spaces');
+  });
+
+  it('should normalize dotted MCP names for strict providers', () => {
+    const normalized = generateValidName(
+      'mcp__zybio__literature.search_pubmed',
+    );
+
+    expect(normalized).toMatch(/^[A-Za-z][A-Za-z0-9_-]*$/);
+    expect(normalized).not.toContain('.');
+    expect(normalized).toBe(
+      generateValidName('mcp__zybio__literature.search_pubmed'),
+    );
+    expect(generateValidName(normalized)).toBe(normalized);
+  });
+
+  it('should not collide after replacing unsupported characters', () => {
+    expect(generateValidName('mcp__zybio__literature.search_pubmed')).not.toBe(
+      generateValidName('mcp__zybio__literature_search_pubmed'),
     );
   });
 
   it('should truncate long names', () => {
-    expect(generateValidName('x'.repeat(80))).toBe(
-      'xxxxxxxxxxxxxxxxxxxxxxxxxxxx___xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-    );
+    const name = 'x'.repeat(80);
+    const normalized = generateValidName(name);
+
+    expect(normalized).toHaveLength(63);
+    expect(normalized).toMatch(/^[A-Za-z][A-Za-z0-9_-]*$/);
+    expect(normalized).toBe(generateValidName(name));
+    expect(normalized).not.toBe(generateValidName(`${name}y`));
   });
 
   it('should handle names with only invalid characters', () => {
-    expect(generateValidName('!@#$%^&*()')).toBe('__________');
+    expect(generateValidName('!@#$%^&*()')).toMatch(/^[A-Za-z][A-Za-z0-9_-]*$/);
   });
 
   it('should handle names that are exactly 63 characters long', () => {
@@ -81,6 +109,115 @@ describe('DiscoveredMCPTool', () => {
   };
 
   let tool: DiscoveredMCPTool;
+
+  describe('invocation context metadata', () => {
+    const invocationContext: InvocationContextV1 = {
+      version: 1,
+      sessionId: 'session-1',
+      promptId: 'prompt-1',
+      originatorClientId: 'client-1',
+    };
+
+    const createDirectTool = (
+      mcpClient: McpDirectClient,
+      allowInvocationContext: boolean,
+    ) =>
+      new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        mcpClient,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        allowInvocationContext,
+      );
+
+    const successfulClient = () =>
+      ({
+        callTool: vi.fn<McpDirectClient['callTool']>(async () => ({
+          content: [{ type: 'text', text: 'ok' }],
+        })),
+      }) satisfies McpDirectClient;
+
+    it('injects trusted request metadata for an allowed stdio tool', async () => {
+      const mcpClient = successfulClient();
+      const modelArguments = {
+        param: 'test',
+        _meta: {
+          [INVOCATION_CONTEXT_META_KEY]: { forged: true },
+        },
+      };
+
+      await runWithInvocationContext(invocationContext, () =>
+        createDirectTool(mcpClient, true)
+          .build(modelArguments)
+          .execute(new AbortController().signal),
+      );
+
+      expect(mcpClient.callTool).toHaveBeenCalledWith(
+        {
+          name: serverToolName,
+          arguments: modelArguments,
+          _meta: {
+            [INVOCATION_CONTEXT_META_KEY]: invocationContext,
+          },
+        },
+        undefined,
+        expect.objectContaining({ onprogress: expect.any(Function) }),
+      );
+    });
+
+    it.each([
+      { allowInvocationContext: false, runWithContext: true },
+      { allowInvocationContext: true, runWithContext: false },
+    ])(
+      'omits request metadata for $allowInvocationContext/$runWithContext',
+      async ({ allowInvocationContext, runWithContext }) => {
+        const mcpClient = successfulClient();
+        const execute = () =>
+          createDirectTool(mcpClient, allowInvocationContext)
+            .build({ param: 'test' })
+            .execute(new AbortController().signal);
+
+        if (runWithContext) {
+          await runWithInvocationContext(invocationContext, execute);
+        } else {
+          await execute();
+        }
+
+        expect(
+          Object.hasOwn(
+            vi.mocked(mcpClient.callTool).mock.calls[0][0],
+            '_meta',
+          ),
+        ).toBe(false);
+      },
+    );
+
+    it('preserves the policy through qualification and trust clones', async () => {
+      const mcpClient = successfulClient();
+      const clonedTool = createDirectTool(mcpClient, true)
+        .asFullyQualifiedTool()
+        .withTrust(true);
+
+      await runWithInvocationContext(invocationContext, () =>
+        clonedTool
+          .build({ param: 'test' })
+          .execute(new AbortController().signal),
+      );
+
+      expect(vi.mocked(mcpClient.callTool).mock.calls[0][0]._meta).toEqual({
+        [INVOCATION_CONTEXT_META_KEY]: invocationContext,
+      });
+    });
+  });
 
   beforeEach(() => {
     mockCallTool.mockClear();
@@ -807,6 +944,26 @@ describe('DiscoveredMCPTool', () => {
         ]);
       }
     });
+
+    it('should use the registered provider-safe name in permission rules', async () => {
+      const dottedTool = new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        'literature.search_pubmed',
+        baseDescription,
+        inputSchema,
+      );
+      const confirmation = await dottedTool
+        .build({ param: 'mock' })
+        .getConfirmationDetails(new AbortController().signal);
+
+      expect(dottedTool.name).not.toContain('.');
+      expect(dottedTool.schema.name).toBe(dottedTool.name);
+      expect(confirmation.type).toBe('mcp');
+      if (confirmation.type === 'mcp') {
+        expect(confirmation.permissionRules).toEqual([dottedTool.name]);
+      }
+    });
   });
 
   describe('getDefaultPermission with folder trust', () => {
@@ -960,8 +1117,12 @@ describe('DiscoveredMCPTool', () => {
       );
       const combinedText = textParts.map((p: Part) => p.text).join('');
       expect(combinedText.length).toBeLessThan(largeText.length);
+      expect(combinedText.length).toBeLessThan(10_000);
       expect(combinedText).toContain('CONTENT TRUNCATED');
-      expect(result.returnDisplay).toContain('CONTENT TRUNCATED');
+      expect(result.persistedOutputFiles).toHaveLength(1);
+      expect(result.returnDisplay).toBe(
+        `${largeText}\nOutput too long and was saved to:\n- ${result.persistedOutputFiles![0]}`,
+      );
     });
 
     it('should truncate large text results from callable tool execution', async () => {
@@ -997,8 +1158,12 @@ describe('DiscoveredMCPTool', () => {
       );
       const combinedText = textParts.map((p: Part) => p.text).join('');
       expect(combinedText.length).toBeLessThan(largeText.length);
+      expect(combinedText.length).toBeLessThan(10_000);
       expect(combinedText).toContain('CONTENT TRUNCATED');
-      expect(result.returnDisplay).toContain('CONTENT TRUNCATED');
+      expect(result.persistedOutputFiles).toHaveLength(1);
+      expect(result.returnDisplay).toBe(
+        `${largeText}\nOutput too long and was saved to:\n- ${result.persistedOutputFiles![0]}`,
+      );
     });
 
     it('should not truncate small text results', async () => {
@@ -1290,6 +1455,7 @@ describe('DiscoveredMCPTool', () => {
   describe('auto-reconnect on connection error', () => {
     it('should attempt reconnect and retry on connection error', async () => {
       const params = { param: 'test' };
+      const reconnectServerToolName = 'literature.search_pubmed';
       const mockMcpClient: McpDirectClient = {
         callTool: vi.fn(),
       };
@@ -1305,7 +1471,7 @@ describe('DiscoveredMCPTool', () => {
       const newTool = new DiscoveredMCPTool(
         mockCallableToolInstance,
         serverName,
-        serverToolName,
+        reconnectServerToolName,
         baseDescription,
         inputSchema,
         undefined,
@@ -1334,7 +1500,7 @@ describe('DiscoveredMCPTool', () => {
       const reconnectTool = new DiscoveredMCPTool(
         mockCallableToolInstance,
         serverName,
-        serverToolName,
+        reconnectServerToolName,
         baseDescription,
         inputSchema,
         undefined,
@@ -1349,6 +1515,7 @@ describe('DiscoveredMCPTool', () => {
       expect(mockMcpClient.callTool).toHaveBeenCalledTimes(1);
       expect(newMockMcpClient.callTool).toHaveBeenCalledTimes(1);
       expect(discoverToolsForServer).toHaveBeenCalledWith(serverName);
+      expect(ensureTool).toHaveBeenCalledWith(reconnectTool.name);
       expect(result.llmContent).toEqual([{ text: 'Success after reconnect' }]);
     });
 

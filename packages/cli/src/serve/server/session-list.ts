@@ -7,6 +7,7 @@
 import {
   SessionService,
   SessionOrganizationError,
+  readWorktreeSession,
   type SessionArchiveState,
   type SessionGroupPresetColor,
 } from '@qwen-code/qwen-code-core';
@@ -272,6 +273,34 @@ function encodeMetadataSessionCursor(
   ).toString('base64url');
 }
 
+/**
+ * Enrich persisted session summaries with worktree metadata from sidecar
+ * files so the ⑂ badge survives daemon restarts. Shared by all three
+ * listing paths (default, organized, metadata-filtered).
+ */
+async function enrichWorktreeSidecars(
+  bySessionId: Map<string, BridgeSessionSummary>,
+  sessionService: SessionService,
+  archiveState: SessionArchiveState = 'active',
+): Promise<void> {
+  for (const [sessionId, summary] of bySessionId) {
+    if (summary.worktree) continue;
+    const sidecar = await readWorktreeSession(
+      sessionService.getWorktreeSessionPathForArchiveState(
+        sessionId,
+        archiveState,
+      ),
+    ).catch(() => null);
+    if (sidecar) {
+      summary.worktree = {
+        slug: sidecar.slug,
+        path: sidecar.worktreePath,
+        branch: sidecar.worktreeBranch,
+      };
+    }
+  }
+}
+
 function toSummary(item: {
   sessionId: string;
   cwd: string;
@@ -491,6 +520,8 @@ async function listOrganizedWorkspaceSessionsForResponse(
     );
   }
 
+  await enrichWorktreeSidecars(bySessionId, sessionService, archiveState);
+
   if (
     readOptions.mergeLive !== false &&
     archiveState !== 'archived' &&
@@ -509,7 +540,18 @@ async function listOrganizedWorkspaceSessionsForResponse(
               organization,
             ),
           );
-        } else if (!(await sessionService.sessionExists(live.sessionId))) {
+        } else if (
+          // `listAllPersistedSummaries` already scanned every persisted
+          // session when the scan wasn't truncated, so a `sessionId` missing
+          // from `bySessionId` is definitively new — no disk re-check
+          // needed. Re-checking here raced a session that persists its
+          // first write (e.g. a `displayName` update) between the scan
+          // above and this point: `existing` stayed undefined but
+          // `sessionExists` flipped to true, silently dropping the live
+          // session from the response instead of merging it.
+          !persisted.truncated ||
+          !(await sessionService.sessionExists(live.sessionId))
+        ) {
           bySessionId.set(
             live.sessionId,
             applyOrganization(
@@ -606,6 +648,8 @@ async function listWorkspaceSessionsByMetadataForResponse(
     bySessionId.set(session.sessionId, session);
   }
 
+  await enrichWorktreeSidecars(bySessionId, sessionService, archiveState);
+
   let liveMergeFailed = false;
   if (readOptions.mergeLive !== false && archiveState !== 'archived') {
     try {
@@ -616,7 +660,14 @@ async function listWorkspaceSessionsByMetadataForResponse(
             live.sessionId,
             mergeLiveSessionSummary(existing, live),
           );
-        } else if (!(await sessionService.sessionExists(live.sessionId))) {
+        } else if (
+          // See the matching comment in
+          // `listOrganizedWorkspaceSessionsForResponse`: an untruncated scan
+          // already covers every persisted session, so skip the racy
+          // re-check when nothing was truncated.
+          !persisted.truncated ||
+          !(await sessionService.sessionExists(live.sessionId))
+        ) {
           bySessionId.set(live.sessionId, {
             ...live,
             createdAt: live.createdAt,
@@ -749,6 +800,8 @@ export async function listWorkspaceSessionsForResponse(
     bySessionId.set(item.sessionId, toSummary(item));
   }
 
+  await enrichWorktreeSidecars(bySessionId, sessionService, archiveState);
+
   if (archiveState === 'archived' || readOptions.mergeLive === false) {
     const sessions = [...bySessionId.values()];
     const nextCursor =
@@ -763,7 +816,15 @@ export async function listWorkspaceSessionsForResponse(
       bySessionId.set(live.sessionId, mergeLiveSessionSummary(existing, live));
     } else if (
       isFirstPage &&
-      !(await sessionService.sessionExists(live.sessionId))
+      // If this is a complete scan (no further pages), a missing
+      // `sessionId` here is definitively new — no disk re-check needed.
+      // Re-checking raced a session that persists its first write (e.g. a
+      // `displayName` update) between the scan above and this point:
+      // `existing` stayed undefined but `sessionExists` flipped to true,
+      // silently dropping the live session from the response instead of
+      // merging it.
+      (persisted.nextCursor == null ||
+        !(await sessionService.sessionExists(live.sessionId)))
     ) {
       bySessionId.set(live.sessionId, {
         ...live,

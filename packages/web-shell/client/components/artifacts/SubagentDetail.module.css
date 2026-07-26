@@ -1,0 +1,146 @@
+.detail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.state {
+  color: var(--muted-foreground);
+  display: grid;
+  gap: 12px;
+  justify-items: start;
+  padding: 16px 4px;
+}
+
+.overview {
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+  padding-bottom: 12px;
+}
+
+.descriptionRow {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.statusTag {
+  border-color: transparent;
+  flex: 0 0 auto;
+}
+
+.statusActions {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.stopButton {
+  appearance: none;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--error-color) 45%, var(--border));
+  border-radius: 6px;
+  color: var(--error-color);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 20px;
+  padding: 0 9px;
+}
+
+.stopButton:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--error-color) 10%, transparent);
+}
+
+.stopButton:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+
+.stopError {
+  color: var(--error-color);
+  font-size: 12px;
+  text-align: right;
+}
+
+.statusTag::before {
+  background: currentColor;
+  border-radius: 50%;
+  content: '';
+  height: 6px;
+  width: 6px;
+}
+
+.statusTag[data-status='completed'],
+.statusTag[data-status='success'] {
+  background: var(--success-bg);
+  border-color: color-mix(in srgb, var(--success-color) 35%, transparent);
+  color: var(--success-color);
+}
+
+.statusTag[data-status='running'],
+.statusTag[data-status='in_progress'] {
+  background: color-mix(in srgb, var(--agent-blue-500) 12%, transparent);
+  border-color: color-mix(in srgb, var(--agent-blue-500) 35%, transparent);
+  color: var(--agent-blue-500);
+}
+
+.statusTag[data-status='failed'],
+.statusTag[data-status='error'],
+.statusTag[data-status='cancelled'],
+.statusTag[data-status='canceled'] {
+  background: color-mix(in srgb, var(--error-color) 12%, transparent);
+  border-color: color-mix(in srgb, var(--error-color) 35%, transparent);
+  color: var(--error-color);
+}
+
+.statusTag[data-status='paused'] {
+  background: color-mix(in srgb, var(--warning-color) 12%, transparent);
+  border-color: color-mix(in srgb, var(--warning-color) 35%, transparent);
+  color: var(--warning-color);
+}
+
+.description {
+  color: var(--foreground);
+}
+
+.prompt {
+  background: var(--muted);
+  border-radius: 6px;
+  color: var(--foreground);
+  font: inherit;
+  margin: 2px 0 0;
+  max-height: 240px;
+  overflow: auto;
+  padding: 10px;
+  white-space: pre-wrap;
+}
+
+.transcript {
+  margin: 0 -24px;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  height: min(65vh, 720px);
+  min-height: 0;
+}
+
+.retry {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--foreground);
+  border-radius: 6px;
+  cursor: pointer;
+  font: inherit;
+  padding: 5px 10px;
+}
+
+.retry:hover {
+  background: var(--accent);
+}

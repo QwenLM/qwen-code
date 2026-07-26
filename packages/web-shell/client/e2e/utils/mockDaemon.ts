@@ -11,6 +11,8 @@ import {
   type DaemonSessionState,
   type DaemonSessionSummary,
   type DaemonWorkspaceExtensionsStatus,
+  type DaemonGitHubPullRequestList,
+  type DaemonWorkspaceGitStatus,
   type DaemonWorkspaceMcpResourcesStatus,
   type DaemonWorkspaceMcpStatus,
   type DaemonWorkspaceMcpToolsStatus,
@@ -44,6 +46,7 @@ export interface WebShellDaemonScenario {
   providers: DaemonWorkspaceProvidersStatus;
   skills: DaemonWorkspaceSkillsStatus;
   settings: DaemonWorkspaceSettingsStatus;
+  voice: DaemonWorkspaceVoiceStatus;
   extensions: DaemonWorkspaceExtensionsStatus;
   extensionOperations: ExtensionActiveOperations;
   extensionUpdateCheck: ExtensionUpdateCheckResponse;
@@ -51,6 +54,16 @@ export interface WebShellDaemonScenario {
   sessionGroups: DaemonSessionGroup[];
   events: DaemonEvent[];
   state: DaemonSessionState;
+  /**
+   * Response for `GET /workspaces/:cwd/git`. Defaults to a null-branch status
+   * (non-git workspace), matching the real daemon's graceful degradation.
+   */
+  gitStatus?: DaemonWorkspaceGitStatus;
+  /**
+   * Response for `GET /workspaces/:cwd/github/prs`. Defaults to an available,
+   * empty pull-request list.
+   */
+  gitHubPrs?: DaemonGitHubPullRequestList;
 }
 
 export interface MockDaemonController {
@@ -71,6 +84,7 @@ type ScenarioOverrides = Partial<
     | 'providers'
     | 'skills'
     | 'settings'
+    | 'voice'
     | 'extensions'
     | 'extensionOperations'
     | 'extensionUpdateCheck'
@@ -83,6 +97,7 @@ type ScenarioOverrides = Partial<
   providers?: Partial<DaemonWorkspaceProvidersStatus>;
   skills?: Partial<DaemonWorkspaceSkillsStatus>;
   settings?: Partial<DaemonWorkspaceSettingsStatus>;
+  voice?: Partial<DaemonWorkspaceVoiceStatus>;
   extensions?: Partial<DaemonWorkspaceExtensionsStatus>;
   extensionOperations?: Partial<ExtensionActiveOperations>;
   extensionUpdateCheck?: Partial<ExtensionUpdateCheckResponse>;
@@ -230,6 +245,17 @@ export function createWebShellDaemonScenario(
     ...(overrides.settings ?? {}),
   };
 
+  const voice: DaemonWorkspaceVoiceStatus = {
+    v: 1,
+    workspaceCwd,
+    enabled: false,
+    mode: 'hold',
+    language: 'en',
+    voiceModel: null,
+    availableVoiceModels: [],
+    ...(overrides.voice ?? {}),
+  };
+
   const extensions: DaemonWorkspaceExtensionsStatus = {
     v: 1,
     workspaceCwd,
@@ -282,6 +308,7 @@ export function createWebShellDaemonScenario(
     providers,
     skills,
     settings,
+    voice,
     extensions,
     extensionOperations,
     extensionUpdateCheck,
@@ -289,6 +316,8 @@ export function createWebShellDaemonScenario(
     sessionGroups: overrides.sessionGroups ?? [],
     events: overrides.events ?? [],
     state,
+    gitStatus: overrides.gitStatus,
+    gitHubPrs: overrides.gitHubPrs,
   };
 }
 
@@ -485,6 +514,8 @@ function isDaemonPath(path: string): boolean {
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
     /^\/workspace\/.+\/session-groups\/?$/.test(path) ||
+    /^\/workspaces\/.+\/git\/?$/.test(path) ||
+    /^\/workspaces\/.+\/github\/prs\/?$/.test(path) ||
     path === '/session' ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
@@ -540,6 +571,12 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   if (method === 'GET' && /^\/session\/[^/]+\/events\/?$/.test(path)) {
+    return true;
+  }
+  if (method === 'GET' && /^\/workspaces\/.+\/git\/?$/.test(path)) {
+    return true;
+  }
+  if (method === 'GET' && /^\/workspaces\/.+\/github\/prs\/?$/.test(path)) {
     return true;
   }
   if (
@@ -657,6 +694,29 @@ async function handleDaemonRoute(
       colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
     };
     await json(route, catalog);
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/.+\/git\/?$/.test(path)) {
+    await json(
+      route,
+      scenario.gitStatus ?? {
+        v: 2,
+        workspaceCwd: scenario.workspaceCwd,
+        branch: null,
+      },
+    );
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/.+\/github\/prs\/?$/.test(path)) {
+    await json(
+      route,
+      scenario.gitHubPrs ?? {
+        v: 1,
+        workspaceCwd: scenario.workspaceCwd,
+        available: true,
+        pullRequests: [],
+      },
+    );
     return;
   }
   if (method === 'POST' && path === '/session') {
@@ -934,15 +994,7 @@ function workspaceTools(
 function workspaceVoice(
   scenario: WebShellDaemonScenario,
 ): DaemonWorkspaceVoiceStatus {
-  return {
-    v: 1,
-    workspaceCwd: scenario.workspaceCwd,
-    enabled: false,
-    mode: 'hold',
-    language: 'en',
-    voiceModel: null,
-    availableVoiceModels: [],
-  };
+  return scenario.voice;
 }
 
 async function json(route: Route, body: unknown, status = 200): Promise<void> {

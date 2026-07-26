@@ -15,7 +15,14 @@ import {
   type AgentTaskRegistration,
   type BackgroundApproval,
   type BackgroundTaskEntry,
+  type ResidentBackgroundAgent,
 } from './background-tasks.js';
+import {
+  getCurrentAgentId,
+  getRuntimeContentGenerator,
+  runWithAgentContext,
+  runWithRuntimeContentGenerator,
+} from './runtime/agent-context.js';
 import * as transcript from './agent-transcript.js';
 import { AgentEventEmitter, AgentEventType } from './runtime/agent-events.js';
 import { ToolConfirmationOutcome } from '../tools/tools.js';
@@ -51,6 +58,56 @@ function makeRegistration(
     ...overrides,
   };
 }
+
+describe('notification emission and agent context (#7156)', () => {
+  // A background agent's terminal transition fires inside its own
+  // AsyncLocalStorage frame, and ALS context follows every async
+  // continuation the notification callback starts (React state updates,
+  // the drain effect, the next conversation turn). The callback must
+  // therefore run with NO agent frame, or Config.getModel() resolves to
+  // the subagent's model for the notification turn and the main session's
+  // history can overflow the smaller context window.
+  it('invokes the notification callback outside the agent ALS frame', async () => {
+    const registry = new BackgroundTaskRegistry();
+    const seen: Array<{
+      agentId: string | null;
+      runtimeView: unknown;
+    }> = [];
+    registry.setNotificationCallback(() => {
+      seen.push({
+        agentId: getCurrentAgentId(),
+        runtimeView: getRuntimeContentGenerator(),
+      });
+    });
+
+    registry.register({
+      agentId: 'bg-1',
+      description: 'bg agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/bg.jsonl',
+    });
+
+    const fakeView = {
+      contentGenerator: {} as never,
+      contentGeneratorConfig: { model: 'subagent-model' } as never,
+    };
+    await runWithAgentContext('bg-1', () =>
+      runWithRuntimeContentGenerator(fakeView, async () => {
+        // Sanity: we ARE inside the subagent frame here.
+        expect(getCurrentAgentId()).toBe('bg-1');
+        expect(getRuntimeContentGenerator()).toBe(fakeView);
+        registry.complete('bg-1', 'done');
+      }),
+    );
+
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.agentId).toBeNull();
+    expect(seen[0]!.runtimeView).toBeUndefined();
+  });
+});
 
 describe('BackgroundTaskRegistry', () => {
   let registry: BackgroundTaskRegistry;
@@ -170,6 +227,235 @@ describe('BackgroundTaskRegistry', () => {
     expect(callback).toHaveBeenCalledOnce();
     const [displayText] = callback.mock.calls[0] as [string, string];
     expect(displayText).toContain('failed');
+  });
+
+  describe('resident background agents', () => {
+    function makeResident(
+      overrides: Partial<ResidentBackgroundAgent> = {},
+    ): ResidentBackgroundAgent {
+      return {
+        continue: vi.fn(() => true),
+        dispose: vi.fn(),
+        ...overrides,
+      };
+    }
+
+    it('continues only completed resident agents and supports guarded unregister', async () => {
+      registry.register(makeRegistration('resident-1'));
+      const resident = makeResident();
+      registry.registerResidentAgent('resident-1', resident);
+
+      expect(registry.continueResidentAgent('resident-1', 'too early')).toBe(
+        false,
+      );
+
+      registry.complete('resident-1', 'first result');
+      expect(registry.continueResidentAgent('resident-1', 'keep going')).toBe(
+        true,
+      );
+      expect(resident.continue).toHaveBeenCalledWith('keep going');
+
+      const staleHandle = makeResident();
+      expect(registry.unregisterResidentAgent('resident-1', staleHandle)).toBe(
+        false,
+      );
+      expect(registry.unregisterResidentAgent('resident-1', resident)).toBe(
+        true,
+      );
+      expect(resident.dispose).not.toHaveBeenCalled();
+      expect(
+        registry.continueResidentAgent('resident-1', 'after unregister'),
+      ).toBe(false);
+    });
+
+    it('disposes a replaced resident without letting its stale handle remove the replacement', () => {
+      registry.register(makeRegistration('resident-1'));
+      const first = makeResident();
+      const second = makeResident();
+
+      registry.registerResidentAgent('resident-1', first);
+      registry.registerResidentAgent('resident-1', second);
+
+      expect(first.dispose).toHaveBeenCalledOnce();
+      expect(registry.disposeResidentAgent('resident-1', first)).toBe(false);
+      expect(second.dispose).not.toHaveBeenCalled();
+      expect(registry.disposeResidentAgent('resident-1', second)).toBe(true);
+      expect(second.dispose).toHaveBeenCalledOnce();
+    });
+
+    it('disposes the resident when a cold task registration replaces its entry', () => {
+      registry.register(makeRegistration('resident-1'));
+      const resident = makeResident();
+      registry.registerResidentAgent('resident-1', resident);
+      registry.complete('resident-1', 'done');
+      const completed = registry.get('resident-1')!;
+
+      registry.register({
+        ...completed,
+        status: 'paused',
+        abortController: new AbortController(),
+      });
+
+      expect(resident.dispose).toHaveBeenCalledOnce();
+    });
+
+    it('restarts a completed entry with clean turn state and normal callbacks', () => {
+      const onRegister = vi.fn();
+      const onStatusChange = vi.fn();
+      registry.setRegisterCallback(onRegister);
+      registry.setStatusChangeCallback(onStatusChange);
+      const originalController = new AbortController();
+      registry.register(
+        makeRegistration('resident-1', {
+          abortController: originalController,
+          recentActivities: [
+            { name: 'Read', description: 'old activity', at: 1 },
+          ],
+          pendingMessages: ['already queued'],
+        }),
+      );
+      registry.complete('resident-1', 'first result', {
+        totalTokens: 10,
+        outputTokens: 4,
+        toolUses: 1,
+        durationMs: 20,
+      });
+      const completed = registry.get('resident-1')!;
+      completed.error = 'stale error';
+      completed.resumeBlockedReason = 'stale block';
+      completed.persistedCancellationStatus = 'cancelled';
+      const completedAt = completed.endTime;
+      const nextController = new AbortController();
+
+      const restarted = registry.restartCompletedAgent(
+        'resident-1',
+        nextController,
+      );
+
+      expect(restarted).toBe(completed);
+      expect(restarted).toMatchObject({
+        status: 'running',
+        abortController: nextController,
+        recentActivities: [],
+        pendingApprovals: [],
+        pendingMessages: ['already queued'],
+        notified: false,
+        outputOffset: 0,
+      });
+      expect(restarted?.startTime).toBeGreaterThan(0);
+      expect(restarted?.endTime).toBeUndefined();
+      expect(restarted?.result).toBeUndefined();
+      expect(restarted?.error).toBeUndefined();
+      expect(restarted?.resumeBlockedReason).toBeUndefined();
+      expect(restarted?.stats).toBeUndefined();
+      expect(restarted?.persistedCancellationStatus).toBeUndefined();
+      expect(completedAt).toBeDefined();
+      expect(onRegister).toHaveBeenCalledTimes(2);
+      expect(onStatusChange).toHaveBeenCalledTimes(3);
+    });
+
+    it('leaves a completed entry unchanged when restart capacity is full', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+      registry.register(makeRegistration('resident-1'));
+      registry.complete('resident-1', 'first result', {
+        totalTokens: 10,
+        outputTokens: 4,
+        toolUses: 1,
+        durationMs: 20,
+      });
+      const completed = registry.get('resident-1')!;
+      const completedController = completed.abortController;
+      const completedAt = completed.endTime;
+      registry.register(makeRegistration('busy'));
+
+      expect(() =>
+        registry.restartCompletedAgent('resident-1', new AbortController()),
+      ).toThrow('maximum concurrent background agents (1) reached');
+      expect(completed).toMatchObject({
+        status: 'completed',
+        abortController: completedController,
+        result: 'first result',
+        endTime: completedAt,
+        notified: true,
+      });
+      expect(completed.stats).toEqual({
+        totalTokens: 10,
+        outputTokens: 4,
+        toolUses: 1,
+        durationMs: 20,
+      });
+    });
+
+    it('keeps a successful runtime resident but disposes failed and cancelled runtimes', () => {
+      registry.register(makeRegistration('completed'));
+      const completedResident = makeResident();
+      registry.registerResidentAgent('completed', completedResident);
+      registry.complete('completed', 'done');
+      expect(completedResident.dispose).not.toHaveBeenCalled();
+
+      registry.register(makeRegistration('failed'));
+      const failedResident = makeResident();
+      registry.registerResidentAgent('failed', failedResident);
+      registry.fail('failed', 'boom');
+      expect(failedResident.dispose).toHaveBeenCalledOnce();
+
+      registry.register(makeRegistration('cancelled'));
+      const cancelledResident = makeResident();
+      registry.registerResidentAgent('cancelled', cancelledResident);
+      registry.cancel('cancelled');
+      expect(cancelledResident.dispose).toHaveBeenCalledOnce();
+      registry.finalizeCancelled('cancelled', 'partial');
+      expect(cancelledResident.dispose).toHaveBeenCalledOnce();
+    });
+
+    it('removes a cancelled resident before publishing a raced completion', () => {
+      registry.register(makeRegistration('cancelled-completion'));
+      const resident = makeResident();
+      registry.registerResidentAgent('cancelled-completion', resident);
+      let continuation: boolean | undefined;
+      registry.setNotificationCallback(() => {
+        continuation = registry.continueResidentAgent(
+          'cancelled-completion',
+          'do not restart the cancelled runtime',
+        );
+      });
+
+      registry.cancel('cancelled-completion');
+      registry.complete('cancelled-completion', 'finished while cancelling');
+
+      expect(continuation).toBe(false);
+      expect(resident.continue).not.toHaveBeenCalled();
+      expect(resident.dispose).toHaveBeenCalledOnce();
+    });
+
+    it('disposes all resident runtimes on abortAll and reset', () => {
+      registry.register(makeRegistration('running'));
+      const runningResident = makeResident();
+      registry.registerResidentAgent('running', runningResident);
+      registry.register(
+        makeRegistration('completed', {
+          status: 'completed',
+        }),
+      );
+      const completedResident = makeResident();
+      registry.registerResidentAgent('completed', completedResident);
+
+      registry.abortAll({ notify: false });
+
+      expect(runningResident.dispose).toHaveBeenCalledOnce();
+      expect(completedResident.dispose).toHaveBeenCalledOnce();
+
+      registry.register(makeRegistration('next'));
+      const nextResident = makeResident();
+      registry.registerResidentAgent('next', nextResident);
+      registry.complete('next', 'done');
+
+      registry.reset();
+
+      expect(nextResident.dispose).toHaveBeenCalledOnce();
+    });
   });
 
   it('cancels a running background agent without emitting a notification', () => {
@@ -483,6 +769,7 @@ describe('BackgroundTaskRegistry', () => {
       registry = new BackgroundTaskRegistry({
         maxConcurrentBackgroundAgents: 2,
       });
+      expect(registry.getMaxConcurrentBackgroundAgents()).toBe(2);
 
       registry.register(makeRegistration('bg-1'));
       registry.register(makeRegistration('bg-2'));
@@ -753,6 +1040,173 @@ describe('BackgroundTaskRegistry', () => {
           slotReservation: reservation,
         }),
       ).toThrow('invalidated by session reset');
+    });
+  });
+
+  describe('per-model background concurrency limit', () => {
+    it('caps a single model while leaving room for others', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 10,
+        maxConcurrentBackgroundAgentsByModel: { 'weak-model': 1 },
+      });
+
+      registry.register(makeRegistration('bg-1', { model: 'weak-model' }));
+
+      // The capped model is full...
+      expect(() =>
+        registry.register(makeRegistration('bg-2', { model: 'weak-model' })),
+      ).toThrow(
+        'Cannot start background agent: maximum concurrent background agents ' +
+          'for model "weak-model" (1) reached. Stop an existing agent on that ' +
+          'model first.',
+      );
+      expect(registry.get('bg-2')).toBeUndefined();
+
+      // ...but a different model is unaffected.
+      registry.register(makeRegistration('bg-3', { model: 'strong-model' }));
+      expect(registry.get('bg-3')?.status).toBe('running');
+    });
+
+    it('lets a model without a per-model cap use the global limit', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 2,
+        maxConcurrentBackgroundAgentsByModel: { 'weak-model': 1 },
+      });
+
+      registry.register(makeRegistration('bg-1', { model: 'uncapped-model' }));
+      registry.register(makeRegistration('bg-2', { model: 'uncapped-model' }));
+
+      // The global cap still bounds uncapped models.
+      expect(() =>
+        registry.register(
+          makeRegistration('bg-3', { model: 'uncapped-model' }),
+        ),
+      ).toThrow('maximum concurrent background agents (2) reached');
+    });
+
+    it('enforces the global cap even when the per-model cap has room', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+        maxConcurrentBackgroundAgentsByModel: { 'weak-model': 5 },
+      });
+
+      registry.register(makeRegistration('bg-1', { model: 'other-model' }));
+
+      expect(() =>
+        registry.register(makeRegistration('bg-2', { model: 'weak-model' })),
+      ).toThrow('maximum concurrent background agents (1) reached');
+    });
+
+    it('counts reservations against the per-model cap', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 10,
+        maxConcurrentBackgroundAgentsByModel: { 'weak-model': 1 },
+      });
+
+      const reservation = registry.tryReserveBackgroundSlot('weak-model');
+      expect(reservation).toBeDefined();
+      expect(reservation?.model).toBe('weak-model');
+
+      // A second reservation for the same model is refused while the first
+      // is outstanding.
+      expect(registry.tryReserveBackgroundSlot('weak-model')).toBeUndefined();
+      // A reservation for a different model is still granted.
+      expect(registry.tryReserveBackgroundSlot('strong-model')).toBeDefined();
+
+      // Releasing frees the per-model slot.
+      registry.releaseBackgroundSlot(reservation!);
+      expect(registry.tryReserveBackgroundSlot('weak-model')).toBeDefined();
+    });
+
+    it('frees the per-model cap when an agent on that model completes', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 10,
+        maxConcurrentBackgroundAgentsByModel: { 'weak-model': 1 },
+      });
+
+      registry.register(makeRegistration('bg-1', { model: 'weak-model' }));
+      expect(registry.tryReserveBackgroundSlot('weak-model')).toBeUndefined();
+
+      registry.complete('bg-1', 'done');
+      registry.register(makeRegistration('bg-2', { model: 'weak-model' }));
+      expect(registry.get('bg-2')?.status).toBe('running');
+    });
+
+    it('drains a different-model waiter while a capped-model waiter stays queued', async () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 2,
+        maxConcurrentBackgroundAgentsByModel: { 'weak-model': 1 },
+      });
+      // Fill both the weak-model cap (1) and the global cap (2) so neither
+      // waiter below can reserve a slot immediately.
+      registry.register(makeRegistration('bg-weak', { model: 'weak-model' }));
+      registry.register(makeRegistration('bg-other', { model: 'other-model' }));
+
+      // Both queue because the global cap is full.
+      const weakWaiter = registry.waitForBackgroundSlot(
+        new AbortController().signal,
+        'weak-model',
+      );
+      const strongWaiter = registry.waitForBackgroundSlot(
+        new AbortController().signal,
+        'strong-model',
+      );
+      expect(registry.getQueuedCount()).toBe(2);
+
+      // Freeing one global slot (but NOT the weak-model slot) lets the
+      // strong-model waiter through while the weak-model waiter stays queued.
+      registry.complete('bg-other', 'done');
+
+      const strongReservation = await strongWaiter;
+      expect(strongReservation.model).toBe('strong-model');
+      expect(registry.getQueuedCount()).toBe(1);
+
+      // The weak-model waiter is released only once a weak-model slot frees.
+      registry.complete('bg-weak', 'done');
+      const weakReservation = await weakWaiter;
+      expect(weakReservation.model).toBe('weak-model');
+      expect(registry.getQueuedCount()).toBe(0);
+    });
+
+    it('ignores malformed per-model cap values', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 10,
+        maxConcurrentBackgroundAgentsByModel: {
+          'bad-zero': 0,
+          'bad-negative': -3,
+          'bad-float': 1.5,
+          good: 1,
+        } as Record<string, number>,
+      });
+
+      // Malformed entries are dropped, so those models fall back to the
+      // global cap and can each start.
+      registry.register(makeRegistration('bg-zero', { model: 'bad-zero' }));
+      registry.register(
+        makeRegistration('bg-negative', { model: 'bad-negative' }),
+      );
+      registry.register(makeRegistration('bg-float', { model: 'bad-float' }));
+      expect(registry.get('bg-zero')?.status).toBe('running');
+      expect(registry.get('bg-negative')?.status).toBe('running');
+      expect(registry.get('bg-float')?.status).toBe('running');
+
+      // The one valid entry is still enforced.
+      registry.register(makeRegistration('bg-good', { model: 'good' }));
+      expect(() =>
+        registry.register(makeRegistration('bg-good-2', { model: 'good' })),
+      ).toThrow('for model "good" (1) reached');
+    });
+
+    it('accepts a ReadonlyMap for the per-model caps', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 10,
+        maxConcurrentBackgroundAgentsByModel: new Map([['weak-model', 1]]),
+      });
+
+      registry.register(makeRegistration('bg-1', { model: 'weak-model' }));
+      expect(() =>
+        registry.register(makeRegistration('bg-2', { model: 'weak-model' })),
+      ).toThrow('for model "weak-model" (1) reached');
     });
   });
 
@@ -1347,6 +1801,24 @@ describe('BackgroundTaskRegistry', () => {
       ).toBeDefined();
     });
 
+    it('disposes a resident runtime when its terminal entry is evicted', () => {
+      registry.register(makeRegisteredEntry('resident-oldest', 0));
+      const resident = {
+        continue: vi.fn(() => true),
+        dispose: vi.fn(),
+      };
+      registry.registerResidentAgent('resident-oldest', resident);
+      registry.complete('resident-oldest', 'done');
+
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_AGENTS; i++) {
+        registry.register(makeRegisteredEntry(`newer-${i}`, 1000 + i));
+        registry.complete(`newer-${i}`, 'done');
+      }
+
+      expect(registry.get('resident-oldest')).toBeUndefined();
+      expect(resident.dispose).toHaveBeenCalledOnce();
+    });
+
     it('never evicts running entries even when terminal entries blow past the cap', () => {
       // The user's only handle on a live subagent is its row in the
       // dialog; a prune that drops a running entry would silently
@@ -1505,6 +1977,30 @@ describe('BackgroundTaskRegistry', () => {
 
     it('returns empty array for non-existent agent', () => {
       expect(registry.drainMessages('nope')).toEqual([]);
+    });
+
+    it('rejects new messages after finalization begins and releases waiters on completion', async () => {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/test.jsonl',
+      });
+
+      expect(registry.beginFinishing('test-1')).toBe(true);
+      expect(registry.queueMessage('test-1', 'late correction')).toBe(false);
+
+      const settled = registry.waitForFinishing(
+        'test-1',
+        new AbortController().signal,
+      );
+      registry.complete('test-1', 'done');
+
+      await expect(settled).resolves.toBe(true);
+      expect(registry.get('test-1')!.pendingMessages).toEqual([]);
     });
   });
 
@@ -1989,29 +2485,48 @@ describe('BackgroundTaskRegistry', () => {
       ToolConfirmationOutcome.ProceedAlwaysUser,
       ToolConfirmationOutcome.ProceedAlwaysServer,
       ToolConfirmationOutcome.ProceedAlwaysTool,
-    ])(
-      'downgrades persistent approval outcome %s to one-time approval',
-      async (outcome) => {
-        const respond = vi.fn(async () => {});
-        registry.register(makeRegistration(`bg-appr-${outcome}`));
-        registry.addPendingApproval(
-          `bg-appr-${outcome}`,
-          makeApproval('c1', respond),
-        );
+    ])('cancels unoffered persistent approval outcome %s', async (outcome) => {
+      const respond = vi.fn(async () => {});
+      registry.register(makeRegistration(`bg-appr-${outcome}`));
+      registry.addPendingApproval(
+        `bg-appr-${outcome}`,
+        makeApproval('c1', respond),
+      );
 
-        const resolved = await registry.resolvePendingApproval(
-          `bg-appr-${outcome}`,
-          'c1',
-          outcome,
-        );
+      const resolved = await registry.resolvePendingApproval(
+        `bg-appr-${outcome}`,
+        'c1',
+        outcome,
+      );
 
-        expect(resolved).toBe(true);
-        expect(respond).toHaveBeenCalledWith(
-          ToolConfirmationOutcome.ProceedOnce,
-          undefined,
-        );
-      },
-    );
+      expect(resolved).toBe(true);
+      expect(respond).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.Cancel,
+        undefined,
+      );
+    });
+
+    it('preserves the explicit plan ProceedAlways outcome', async () => {
+      const respond = vi.fn(async () => {});
+      registry.register(makeRegistration('bg-plan-always'));
+      registry.addPendingApproval('bg-plan-always', {
+        ...makeApproval('c1', respond),
+        confirmationDetails: {
+          type: 'plan',
+        } as BackgroundApproval['confirmationDetails'],
+      });
+
+      await registry.resolvePendingApproval(
+        'bg-plan-always',
+        'c1',
+        ToolConfirmationOutcome.ProceedAlways,
+      );
+
+      expect(respond).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedAlways,
+        undefined,
+      );
+    });
 
     it('returns false when resolving a non-parked call', async () => {
       registry.register(makeRegistration('bg-appr-5'));

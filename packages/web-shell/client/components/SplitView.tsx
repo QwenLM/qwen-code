@@ -11,6 +11,7 @@ import {
   type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import type { WebShellSlashCommandHandler } from '../App';
 import { useI18n } from '../i18n';
 import { ChatPane } from './ChatPane';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -22,6 +23,7 @@ import type {
 import {
   SESSION_LIST_PAGE_SIZE,
   SESSION_ORGANIZATION_FEATURE,
+  WEB_SHELL_HISTORY_PAGE_SIZE,
   WEB_SHELL_MAX_TRANSCRIPT_BLOCKS,
 } from '../constants/sessions';
 import { useOtherWorkspaceSessions } from '../hooks/useOtherWorkspaceSessions';
@@ -29,7 +31,7 @@ import { useScopedSessions } from '../hooks/useScopedSessions';
 import {
   hasMultipleWorkspaces,
   mergeSessionsById,
-  workspaceBasename,
+  workspaceLabelForCwd,
 } from '../utils/workspace';
 import { isEditableTarget } from '../utils/dom';
 import styles from './SplitView.module.css';
@@ -50,6 +52,7 @@ export interface SplitViewProps {
   /** Leave the split view (back to the single-session chat). */
   onExit: () => void;
   onError?: (error: unknown, fallback: string) => void;
+  onSlashCommand?: WebShellSlashCommandHandler;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onPaneArtifactsChange?: (
     sessionId: string,
@@ -66,6 +69,10 @@ export interface SplitViewProps {
   includeOtherWorkspaces?: boolean;
   /** Limit session discovery and pane attachment to this workspace. */
   workspaceCwd?: string;
+  /** Restart each pane's SSE event stream after an accepted prompt. */
+  restartSseOnPrompt?: boolean;
+  /** Persisted transcript records requested per page by each pane. */
+  historyPageSize?: number;
 }
 
 /**
@@ -80,12 +87,15 @@ export function SplitView({
   onPanesChange,
   onExit,
   onError,
+  onSlashCommand,
   onRightPanelOpen,
   onPaneArtifactsChange,
   messageTurnOutputs,
   sessionListReloadToken,
   includeOtherWorkspaces = true,
   workspaceCwd,
+  restartSseOnPrompt,
+  historyPageSize = WEB_SHELL_HISTORY_PAGE_SIZE,
 }: SplitViewProps) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -393,7 +403,10 @@ export function SplitView({
                         className={styles.pickerItemWorkspace}
                         title={session.workspaceCwd}
                       >
-                        {workspaceBasename(session.workspaceCwd)}
+                        {workspaceLabelForCwd(
+                          session.workspaceCwd,
+                          connection.capabilities?.workspaces,
+                        )}
                       </span>
                     )}
                   </button>
@@ -468,8 +481,11 @@ export function SplitView({
                     // tab's panes) for the same session, so the attachments don't
                     // collide on one client identity.
                     clientId={`split-pane:${instanceId}:${sessionId}`}
-                    suppressOwnUserEcho
+                    historyPageSize={historyPageSize}
+                    subagentTranscriptMode="summary"
                     maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
+                    suppressOwnUserEcho
+                    restartEventStreamOnPrompt={restartSseOnPrompt}
                   >
                     <ChatPane
                       title={titleById.get(sessionId)}
@@ -482,9 +498,11 @@ export function SplitView({
                       }
                       isMaximized={isMaximized}
                       onError={onError}
+                      onSlashCommand={onSlashCommand}
                       onRightPanelOpen={onRightPanelOpen}
                       onPaneArtifactsChange={onPaneArtifactsChange}
                       messageTurnOutputs={messageTurnOutputs}
+                      restartSseOnPrompt={restartSseOnPrompt}
                     />
                   </DaemonSessionProvider>
                 </ErrorBoundary>
