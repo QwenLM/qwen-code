@@ -2428,6 +2428,9 @@ export function App({
   // Cleared in three places: the session-switch effect, the drain loop, and
   // handleCancel. Bumping drainGenerationRef at each clear site also cancels
   // any in-flight inline ! command whose ensureSessionForPrompt is resolving.
+  // The session-switch effect exempts the lazy-creation transition (into
+  // preparingSessionIdRef.current) so a submit's own session creation does
+  // not cancel the command.
   const queuedShellCommandsRef = useRef<string[]>([]);
   const drainGenerationRef = useRef(0);
   const shellSubmitInFlightRef = useRef(false);
@@ -3887,7 +3890,12 @@ export function App({
     prevQueueSessionIdRef.current = connection.sessionId;
     const dropped = queuedShellCommandsRef.current.length;
     queuedShellCommandsRef.current = [];
-    drainGenerationRef.current++;
+    // Skip the bump when the transition is into the session that
+    // ensureSessionForPrompt is preparing — that is the submit's own lazy
+    // creation, not a user-initiated switch.
+    if (connection.sessionId !== preparingSessionIdRef.current) {
+      drainGenerationRef.current++;
+    }
     if (dropped > 0) {
       pushToast('warning', t('queue.shellDropped', { count: dropped }));
     }

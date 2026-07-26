@@ -1156,6 +1156,60 @@ describe('App shell command queueing', () => {
     });
   });
 
+  it('runs the ! command in a new task even when the session-id render commits before attach resolves', async () => {
+    mockConnection.sessionId = undefined;
+    mockSessionActions.createSession.mockImplementation(async () => {
+      // Mirrors the real createSession(): setConnection({ sessionId }) fires
+      // synchronously before the promise resolves.
+      mockConnection.sessionId = 'session-1';
+      return { sessionId: 'session-1' };
+    });
+    // attachSession() is a further round-trip after the sessionId is already
+    // live, so React commits + flushes effects in that window.
+    let releaseAttach!: () => void;
+    const attachGate = new Promise<void>((r) => {
+      releaseAttach = r;
+    });
+    mockSessionActions.attachSession.mockReturnValue(attachGate);
+
+    const { rerender } = renderApp({});
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit(
+        '!echo hi',
+        undefined,
+        editorCommit,
+      );
+      await Promise.resolve();
+    });
+
+    // Commit the render carrying the new sessionId so the session-switch
+    // effect fires — this is what the real useConnection context triggers.
+    act(() => {
+      rerender({});
+    });
+    await act(async () => {
+      for (let i = 0; i < 5; i++) {
+        await new Promise<void>((r) => setTimeout(r, 0));
+      }
+    });
+
+    // Resolve attachSession — the command must still execute.
+    await act(async () => {
+      releaseAttach();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      for (let i = 0; i < 15; i++) {
+        await new Promise<void>((r) => setTimeout(r, 0));
+      }
+    });
+
+    expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith('echo hi');
+    expect(editorCommit).toHaveBeenCalled();
+  });
+
   it('returns true and clears editor for ! commands with an existing session', async () => {
     renderApp({});
     await flush();
