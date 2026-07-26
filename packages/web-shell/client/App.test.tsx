@@ -1549,6 +1549,86 @@ describe('App shell command queueing', () => {
     );
   });
 
+  it('does not drop queued commands when a new command is queued mid-drain', async () => {
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    let resolveFirst!: () => void;
+    const firstDone = new Promise<void>((r) => {
+      resolveFirst = r;
+    });
+    mockSessionActions.sendShellCommand
+      .mockReturnValueOnce(firstDone)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined);
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onToast });
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!aaa');
+      testState.latestChatEditorProps?.onSubmit('!bbb');
+      testState.latestChatEditorProps?.onSubmit('!ccc');
+      await Promise.resolve();
+    });
+
+    // Go idle — drain starts and blocks on the pending first command.
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender({ onToast });
+    });
+    await flush();
+    expect(mockSessionActions.sendShellCommand).toHaveBeenCalledTimes(1);
+
+    // The running command drives streamingState non-idle; while it runs the
+    // user queues another command, then streamingState returns to idle. That
+    // idle transition must not start a competing drain that bumps the
+    // generation and drops the still-pending batch.
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onToast });
+    });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!ddd');
+      await Promise.resolve();
+    });
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender({ onToast });
+    });
+    await flush();
+
+    // Resolve the first command — the rest of the batch must still drain in
+    // FIFO order, followed by the command queued mid-drain.
+    await act(async () => {
+      resolveFirst();
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendShellCommand).toHaveBeenCalledTimes(4);
+      });
+    });
+
+    expect(mockSessionActions.sendShellCommand).toHaveBeenNthCalledWith(
+      1,
+      'aaa',
+    );
+    expect(mockSessionActions.sendShellCommand).toHaveBeenNthCalledWith(
+      2,
+      'bbb',
+    );
+    expect(mockSessionActions.sendShellCommand).toHaveBeenNthCalledWith(
+      3,
+      'ccc',
+    );
+    expect(mockSessionActions.sendShellCommand).toHaveBeenNthCalledWith(
+      4,
+      'ddd',
+    );
+  });
+
   it('continues draining after a command fails', async () => {
     const onToast = vi.fn();
     const { rerender } = renderApp({ onToast });

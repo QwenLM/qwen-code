@@ -2434,6 +2434,7 @@ export function App({
   const queuedShellCommandsRef = useRef<string[]>([]);
   const drainGenerationRef = useRef(0);
   const shellSubmitInFlightRef = useRef(false);
+  const isDrainingRef = useRef(false);
   const localStreamingStartedAtRef = useRef(Date.now());
   const previousStreamingStateRef =
     useRef<DaemonStreamingState>(streamingState);
@@ -3895,6 +3896,7 @@ export function App({
     // creation, not a user-initiated switch.
     if (connection.sessionId !== preparingSessionIdRef.current) {
       drainGenerationRef.current++;
+      isDrainingRef.current = false;
     }
     if (dropped > 0) {
       pushToast('warning', t('queue.shellDropped', { count: dropped }));
@@ -3911,30 +3913,49 @@ export function App({
     // streamingState non-idle while each command runs, so cancelling the drain
     // on every streamingState change would drop every command after the first.
     if (prev === 'idle' || streamingState !== 'idle') return;
+    // A running drain re-reads the queue after each batch, so commands queued
+    // mid-drain are picked up by it. Starting a second drain here would bump the
+    // generation and cancel the in-flight batch, silently dropping commands.
+    if (isDrainingRef.current) return;
     const cmds = queuedShellCommandsRef.current;
     if (cmds.length === 0) return;
     queuedShellCommandsRef.current = [];
+    isDrainingRef.current = true;
     const generation = ++drainGenerationRef.current;
     const drainSessionId = connectionRef.current.sessionId;
     void (async () => {
-      for (let i = 0; i < cmds.length; i++) {
-        if (
-          drainGenerationRef.current !== generation ||
-          connectionRef.current.sessionId !== drainSessionId ||
-          connectionRef.current.status !== 'connected'
-        ) {
-          const dropped = cmds.length - i;
-          console.warn(
-            '[web-shell] dropping %d queued shell command(s)',
-            dropped,
-          );
-          pushToast('warning', t('queue.shellDropped', { count: dropped }));
-          return;
+      try {
+        let batch = cmds;
+        while (batch.length > 0) {
+          for (let i = 0; i < batch.length; i++) {
+            if (
+              drainGenerationRef.current !== generation ||
+              connectionRef.current.sessionId !== drainSessionId ||
+              connectionRef.current.status !== 'connected'
+            ) {
+              const dropped = batch.length - i;
+              console.warn(
+                '[web-shell] dropping %d queued shell command(s)',
+                dropped,
+              );
+              pushToast('warning', t('queue.shellDropped', { count: dropped }));
+              return;
+            }
+            try {
+              await sessionActions.sendShellCommand(batch[i]);
+            } catch (error: unknown) {
+              reportError(error, 'Failed to execute shell command');
+            }
+          }
+          batch = queuedShellCommandsRef.current;
+          queuedShellCommandsRef.current = [];
         }
-        try {
-          await sessionActions.sendShellCommand(cmds[i]);
-        } catch (error: unknown) {
-          reportError(error, 'Failed to execute shell command');
+      } finally {
+        // Release the lock only if this IIFE is still the active drainer; a
+        // cancel or session switch may have bumped the generation and handed
+        // the lock to a newer drain that must not be unblocked prematurely.
+        if (drainGenerationRef.current === generation) {
+          isDrainingRef.current = false;
         }
       }
     })();
@@ -6072,6 +6093,7 @@ export function App({
     const dropped = queuedShellCommandsRef.current.length;
     queuedShellCommandsRef.current = [];
     drainGenerationRef.current++;
+    isDrainingRef.current = false;
     if (dropped > 0) {
       pushToast('warning', t('queue.shellDropped', { count: dropped }));
     }
