@@ -3867,6 +3867,12 @@ export function App({
     streamingStateRef.current = streamingState;
   }, [streamingState]);
 
+  // Drop queued commands on a session switch so the drain never runs a
+  // command against a different workspace's daemon (mirrors useQueuedPrompts).
+  useEffect(() => {
+    queuedShellCommandsRef.current = [];
+  }, [connection.sessionId]);
+
   useEffect(() => {
     if (streamingState !== 'idle') return;
     const cmds = queuedShellCommandsRef.current;
@@ -5878,10 +5884,31 @@ export function App({
           pushToast('info', t('queue.shellQueued'));
           return true;
         }
+        const needsSession = !connectionRef.current.sessionId;
+        if (needsSession) setIsPreparingPrompt(true);
         void ensureSessionForPrompt()
-          .then(() => sessionActions.sendShellCommand(cmd))
+          .then(() => {
+            if (needsSession && connectionRef.current.sessionId) {
+              setSessionListReloadToken((n) => n + 1);
+              if (delayedReloadTimerRef.current !== null) {
+                clearTimeout(delayedReloadTimerRef.current);
+              }
+              delayedReloadTimerRef.current = setTimeout(() => {
+                setSessionListReloadToken((n) => n + 1);
+              }, 2000);
+            }
+            return sessionActions.sendShellCommand(cmd);
+          })
           .catch((error: unknown) => {
-            reportError(error, 'Failed to execute shell command');
+            reportError(
+              error,
+              connectionRef.current.sessionId
+                ? 'Failed to execute shell command'
+                : 'Failed to create session for shell command',
+            );
+          })
+          .finally(() => {
+            if (needsSession) setIsPreparingPrompt(false);
           });
         return true;
       } else {

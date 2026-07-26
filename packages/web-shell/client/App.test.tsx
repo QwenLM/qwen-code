@@ -1116,6 +1116,103 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('App shell command queueing', () => {
+  it('lazily creates a session for ! shell commands in a new task', async () => {
+    mockConnection.sessionId = undefined;
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!echo hi');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith(
+          'echo hi',
+        );
+      });
+    });
+    expect(mockSessionActions.createSession).toHaveBeenCalled();
+  });
+
+  it('reports an error and skips the command when session creation fails', async () => {
+    mockConnection.sessionId = undefined;
+    mockSessionActions.createSession.mockRejectedValueOnce(
+      new Error('no session'),
+    );
+    const onToast = vi.fn();
+    renderApp({ onToast });
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!echo hi');
+      await vi.waitFor(() => {
+        expect(onToast).toHaveBeenCalledWith('error', expect.any(String));
+      });
+    });
+
+    expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+  });
+
+  it('queues a ! command during a turn and drains it when the turn ends', async () => {
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onToast });
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!echo queued');
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+    expect(onToast).toHaveBeenCalledWith('info', expect.any(String));
+
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender({ onToast });
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith(
+          'echo queued',
+        );
+      });
+    });
+  });
+
+  it('drops queued ! commands when the session changes', async () => {
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onToast });
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!rm -rf build/');
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+
+    // Switch to a different, idle session in a single commit: the queue must be
+    // wiped before the drain effect runs, so the command never reaches the new
+    // session's daemon.
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      testState.streamingState = 'idle';
+      rerender({ onToast });
+    });
+    await flush();
+
+    expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+  });
+});
+
 describe('App session callbacks', () => {
   it('submits through a disconnected session when prompt SSE restart is enabled', async () => {
     mockConnection.status = 'disconnected';
