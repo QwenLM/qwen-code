@@ -279,9 +279,14 @@ export async function gitPush(
   const args = ['push'];
   if (opts?.force) args.push('--force-with-lease');
   if (opts?.setUpstream) {
-    const branch = (
-      await runGit(cwd, ['symbolic-ref', '--short', 'HEAD'])
-    ).trim();
+    let branch: string;
+    try {
+      branch = (await runGit(cwd, ['symbolic-ref', '--short', 'HEAD'])).trim();
+    } catch {
+      throw new Error(
+        'cannot push with --set-upstream in detached HEAD state; check out a branch first',
+      );
+    }
     args.push('--set-upstream', 'origin', branch);
   }
   const output = await runGit(cwd, args);

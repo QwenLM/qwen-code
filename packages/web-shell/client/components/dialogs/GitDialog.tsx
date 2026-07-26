@@ -305,7 +305,7 @@ export function GitDialog({
     const baseBranchPromise = ws
       .workspaceGitHubDefaultBranch()
       .then((r) => r.branch)
-      .catch(() => 'origin/main');
+      .catch(() => 'main');
 
     const resolveSession = resolveSessionRef.current
       ? resolveSessionRef.current(workspaceCwd)

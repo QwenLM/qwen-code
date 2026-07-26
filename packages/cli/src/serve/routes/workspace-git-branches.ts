@@ -64,6 +64,10 @@ function sendGitError(
     res.status(400).json({ error: 'nothing_to_commit', message: msg });
     return;
   }
+  if (/detached HEAD/i.test(msg)) {
+    res.status(409).json({ error: 'detached_head', message: msg });
+    return;
+  }
   if (/no upstream|set-upstream/i.test(msg)) {
     res.status(400).json({ error: 'no_upstream', message: msg });
     return;

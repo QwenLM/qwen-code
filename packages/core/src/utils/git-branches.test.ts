@@ -12,6 +12,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   gitCheckout,
   gitCreateBranch,
+  gitPush,
   isValidCheckoutRef,
 } from './git-branches.js';
 
@@ -156,4 +157,16 @@ describe('gitCreateBranch', () => {
       );
     },
   );
+});
+
+describe('gitPush', () => {
+  it('throws a clear error when setUpstream is used in detached HEAD', async () => {
+    const dir = makeRepo();
+    git(dir, 'tag', 'v1.0');
+    git(dir, 'checkout', '-q', 'v1.0');
+
+    await expect(gitPush(dir, { setUpstream: true })).rejects.toThrow(
+      /detached HEAD/,
+    );
+  });
 });
