@@ -419,9 +419,9 @@ created it.
 Channel loops differ from the session-scoped tasks described in
 [Run Prompts on a Schedule](../scheduled-tasks):
 
-- They are stored in `$QWEN_HOME/channels/cron.json` (normally
-  `~/.qwen/channels/cron.json`) and survive standalone or daemon-managed channel
-  restarts.
+- They are stored under `$QWEN_HOME/channels/` — standalone channels use
+  `cron.json` directly, while daemon-managed channels use a per-workspace file
+  under `daemon/`. Both survive channel restarts.
 - They are scoped to the current channel chat or thread. Each target can have up
   to 10 enabled loops, and each prompt is limited to 4,000 characters.
 - They require an adapter and target that support proactive delivery. Telegram,
