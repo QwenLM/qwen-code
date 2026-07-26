@@ -640,8 +640,26 @@ describe('commandUtils', () => {
 });
 
 describe('findMidInputSlashCommand', () => {
-  it('returns null when input starts with / (handled by start-of-line completion)', () => {
+  it('returns null for a slash at position 0 (handled by start-of-line completion)', () => {
     expect(findMidInputSlashCommand('/review', 7)).toBeNull();
+  });
+
+  it('returns match for a later slash token when the buffer starts with /', () => {
+    const result = findMidInputSlashCommand('/review /sto', 12);
+    expect(result).toEqual({
+      token: '/sto',
+      startPos: 8,
+      partialCommand: 'sto',
+    });
+  });
+
+  it('returns match for a slash token after a newline when the buffer starts with /', () => {
+    const result = findMidInputSlashCommand('/review\n/sto', 12);
+    expect(result).toEqual({
+      token: '/sto',
+      startPos: 8,
+      partialCommand: 'sto',
+    });
   });
 
   it('returns null when cursor is before the slash token', () => {
@@ -794,6 +812,102 @@ describe('findSlashCommandTokens', () => {
     );
     expect(tokens).toHaveLength(1);
     expect(tokens[0]).toMatchObject({ commandName: 'clear', valid: false });
+  });
+
+  it('marks same-line stacked skill tokens as valid even when the later skill is not model-invocable', () => {
+    const commands = [
+      {
+        name: 'review-skill',
+        description: 'Review code',
+        kind: 'skill' as const,
+        modelInvocable: true,
+        userInvocable: true,
+        hidden: false,
+      },
+      {
+        name: 'store-locally',
+        description: 'Store locally',
+        kind: 'skill' as const,
+        modelInvocable: false,
+        userInvocable: true,
+        hidden: false,
+      },
+    ] as Parameters<typeof findSlashCommandTokens>[1];
+
+    const tokens = findSlashCommandTokens(
+      '/review-skill /store-locally',
+      commands,
+    );
+
+    expect(tokens).toHaveLength(2);
+    expect(tokens[0]).toMatchObject({
+      commandName: 'review-skill',
+      valid: true,
+    });
+    expect(tokens[1]).toMatchObject({
+      commandName: 'store-locally',
+      valid: true,
+    });
+  });
+
+  it('does not mark non-skill tokens valid after a stacked skill prefix', () => {
+    const commands = [
+      {
+        name: 'review-skill',
+        description: 'Review code',
+        kind: 'skill' as const,
+        modelInvocable: true,
+        userInvocable: true,
+        hidden: false,
+      },
+      {
+        name: 'clear',
+        description: 'Clear conversation',
+        kind: 'built-in' as const,
+        modelInvocable: false,
+        userInvocable: true,
+        hidden: false,
+      },
+    ] as Parameters<typeof findSlashCommandTokens>[1];
+
+    const tokens = findSlashCommandTokens('/review-skill /clear', commands);
+
+    expect(tokens).toHaveLength(2);
+    expect(tokens[0]).toMatchObject({
+      commandName: 'review-skill',
+      valid: true,
+    });
+    expect(tokens[1]).toMatchObject({ commandName: 'clear', valid: false });
+  });
+
+  it('does not mark stackable skills valid after a non-skill prefix', () => {
+    const commands = [
+      {
+        name: 'clear',
+        description: 'Clear conversation',
+        kind: 'built-in' as const,
+        modelInvocable: false,
+        userInvocable: true,
+        hidden: false,
+      },
+      {
+        name: 'store-locally',
+        description: 'Store locally',
+        kind: 'skill' as const,
+        modelInvocable: false,
+        userInvocable: true,
+        hidden: false,
+      },
+    ] as Parameters<typeof findSlashCommandTokens>[1];
+
+    const tokens = findSlashCommandTokens('/clear /store-locally', commands);
+
+    expect(tokens).toHaveLength(2);
+    expect(tokens[0]).toMatchObject({ commandName: 'clear', valid: true });
+    expect(tokens[1]).toMatchObject({
+      commandName: 'store-locally',
+      valid: false,
+    });
   });
 
   it('marks unknown token as invalid', () => {

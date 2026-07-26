@@ -222,6 +222,12 @@ const FORBIDDEN_ACP_PACKAGES = [
   { label: 'iconv-lite encoding tables', packageName: 'iconv-lite' },
   { label: 'xterm headless runtime', packageName: '@xterm/headless' },
   { label: 'simple-git runtime', packageName: 'simple-git' },
+  { label: 'comment-json parser', packageName: 'comment-json' },
+  { label: 'esprima parser', packageName: 'esprima' },
+  {
+    label: 'jsonc-parser UMD build',
+    packageName: 'jsonc-parser/lib/umd',
+  },
 ];
 
 export function normalizeMetafilePath(filePath) {
@@ -514,7 +520,7 @@ function main() {
     const acpResult = checkAcpImportBoundary();
     if (!acpResult.ok) {
       console.error(
-        'ACP static import closure includes TUI runtime modules:\n' +
+        'ACP static import closure includes forbidden runtime modules:\n' +
           formatServeFastPathBundleOffenders(acpResult.offenders),
       );
       process.exitCode = 1;

@@ -26,9 +26,10 @@ import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 const ghMock = vi.hoisted(() =>
   vi.fn((_payload: string, ..._rest: string[]) => ''),
 );
+const ghViewMock = vi.hoisted(() => vi.fn((..._args: string[]) => ''));
 vi.mock('./lib/gh.js', () => ({
   ghWithInput: ghMock,
-  gh: vi.fn(() => ''),
+  gh: ghViewMock,
   setGhHost: vi.fn(),
 }));
 
@@ -84,6 +85,7 @@ function args(over: Record<string, unknown> = {}) {
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'review-submit-'));
   ghMock.mockClear();
+  ghViewMock.mockClear();
   writeStdoutSpy.mockClear();
   process.exitCode = undefined;
   savedSessionId = process.env['QWEN_CODE_SESSION_ID'];
@@ -704,6 +706,33 @@ describe('what the reviewer caught in this change', () => {
     );
     expect(out.event).toBe('COMMENT');
     expect(out.cappedBy).toContain('uncoverable-chunk');
+  });
+
+  it('strips a caller-supplied prBodyFetcher — a state JSON cannot suppress the Chinese fold', () => {
+    // submit is the only boundary that posts, and its strip is the one with no
+    // test. Deleting `prBodyFetcher: _droppedFetcher` from the destructure
+    // leaves every other test green. Without the strip, `null` is invoked as
+    // a function, throws, and the fail-safe catch drops the fold — the exact
+    // regression this PR closes, through the door that publishes.
+    ghViewMock.mockReturnValue('{"body":"这个 PR 修复了双语渲染。"}');
+    const planPath = file('plan.json', {
+      chunks: [],
+      ownerRepo: 'QwenLM/qwen-code',
+      prNumber: '6771',
+    });
+    runSubmit(
+      authorized({
+        review: file('fetcher-strip.json', {
+          commit_id: 'abc123',
+          comments: [],
+          state: { modelId: 'm', planPath, prBodyFetcher: null },
+        }),
+      }),
+    );
+    const body = (
+      JSON.parse(ghMock.mock.calls[0][0] as string) as { body: string }
+    ).body;
+    expect(body).toContain('中文说明');
   });
 });
 

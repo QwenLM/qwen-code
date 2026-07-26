@@ -58,6 +58,16 @@ export interface RosterPlan {
   worktreePath?: unknown;
   prNumber?: unknown;
   untrackedFiles?: unknown;
+  /**
+   * The review's effort, as the capturing command recorded it (`--effort`).
+   * `'medium'` is the balanced tier and drops the adversarial personas; anything
+   * else — including absent — keeps the full roster. It lives in the plan, not in
+   * a caller argument, on purpose: the roster this file computes must not be
+   * shrinkable by whoever calls `requiredAgents`, or the shrink is what gets
+   * called. `check-coverage`, `agent-prompt --roster` and `compose-review`'s
+   * recomputation then all read the same value and cannot disagree.
+   */
+  effort?: unknown;
 }
 
 /** One agent this review must launch. */
@@ -106,7 +116,7 @@ function hasDeletions(plan: RosterPlan): boolean {
 
 /** A PR number the plan actually resolved: a positive integer, as a number or the
  *  string `fetch-pr` writes. `null`, `0`, `''` and non-numeric junk are 'no PR'. */
-function isPositivePrNumber(value: unknown): boolean {
+export function isPositivePrNumber(value: unknown): boolean {
   if (typeof value === 'number') return Number.isInteger(value) && value > 0;
   if (typeof value === 'string')
     return /^\d+$/.test(value) && Number(value) > 0;
@@ -178,9 +188,17 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
     add('3');
     add('4');
     add('5');
-    add('6a');
-    add('6b');
-    add('6c');
+    // The three adversarial personas are a high-effort dimension. A `medium`
+    // (balanced) review deliberately skips them, so they must not be *required*
+    // either — otherwise `check-coverage` flags them missing and exits 3, and a
+    // medium review of every small (3A) diff halts before Step 4. Only high
+    // requires them. The effort is read from the plan the capturing command
+    // wrote, never from a caller argument (see `RosterPlan.effort`).
+    if (plan.effort !== 'medium') {
+      add('6a');
+      add('6b');
+      add('6c');
+    }
   }
 
   // Both topologies. 1b owns the deleted side; 1c owns the cross-file walk and
