@@ -554,15 +554,34 @@ describe('qwen-triage verify hardening', () => {
 
   // /verify on a plain issue would be acknowledged with 👀 while the verify
   // job's PR guard skips it and publish-verify skips with it — accepted
-  // looking, permanently silent.
-  it('restricts the verify ack and denial notice to pull requests', () => {
+  // looking, permanently silent. Every step that answers a /verify request
+  // carries the same guard.
+  it('restricts every verify notice to pull requests', () => {
     for (const name of [
       'Acknowledge verify request',
+      'Report disabled verify lane',
       'Explain denied verify request',
     ]) {
-      const raw = step(name);
+      const raw = stepIn('authorize', name);
+      expect(raw, `${name} is missing from the authorize job`).not.toBe('');
       expect(raw).toContain('github.event.issue.pull_request');
     }
+  });
+
+  // The kill switch must produce an answer, not an indefinite queue: the
+  // verify job refuses to start and the hosted authorize job says why.
+  it('answers a /verify request when the runner pool is disabled', () => {
+    const notice = stepIn('authorize', 'Report disabled verify lane');
+    expect(notice).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED == 'true'");
+    expect(notice).toContain("steps.perm.outputs.should_run == 'true'");
+    // Bilingual, and it names the alternative rather than just refusing.
+    expect(notice).toContain('Sandboxed verification unavailable');
+    expect(notice).toContain('沙箱验证当前不可用');
+    expect(notice).toContain('@qwen-code /triage');
+    // ...and the verify job itself must stay out of the disabled pool.
+    expect(job('verify')).toContain(
+      "vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'",
+    );
   });
 
   // extensions.worktreeConfig activates .git/config.worktree, which
