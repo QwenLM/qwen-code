@@ -1754,6 +1754,82 @@ describe('App shell command queueing', () => {
 
     expect(mockSessionActions.sendShellCommand).toHaveBeenCalledTimes(2);
   });
+
+  it('skips sendShellCommand when the user cancels during session creation', async () => {
+    mockConnection.sessionId = undefined;
+    let resolveCreate!: () => void;
+    const createDone = new Promise<void>((r) => {
+      resolveCreate = r;
+    });
+    mockSessionActions.createSession.mockImplementation(() => {
+      return createDone.then(() => {
+        mockConnection.sessionId = 'session-1';
+        return { sessionId: 'session-1' };
+      });
+    });
+    renderApp({});
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!deploy prod');
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+
+    // User presses Stop while session creation is still in flight.
+    await act(async () => {
+      testState.latestChatEditorProps?.onCancel?.();
+      await Promise.resolve();
+    });
+
+    // Resolve session creation — the command must NOT execute.
+    await act(async () => {
+      resolveCreate();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+  });
+
+  it('skips sendShellCommand when the session changes during session creation', async () => {
+    mockConnection.sessionId = undefined;
+    let resolveCreate!: () => void;
+    const createDone = new Promise<void>((r) => {
+      resolveCreate = r;
+    });
+    mockSessionActions.createSession.mockImplementation(() => {
+      return createDone.then(() => {
+        mockConnection.sessionId = 'session-1';
+        return { sessionId: 'session-1' };
+      });
+    });
+    const { rerender } = renderApp({});
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!rm -rf build/');
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+
+    // User switches workspace while session creation is still in flight.
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      rerender({});
+    });
+    await flush();
+
+    // Resolve session creation — the command must NOT execute against
+    // the new session.
+    await act(async () => {
+      resolveCreate();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+  });
 });
 
 describe('App session callbacks', () => {

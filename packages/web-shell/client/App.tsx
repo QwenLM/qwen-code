@@ -2425,6 +2425,9 @@ export function App({
     useState(false);
   const streamingState = useStreamingState();
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
+  // Cleared in three places: the session-switch effect, the drain loop, and
+  // handleCancel. Bumping drainGenerationRef at each clear site also cancels
+  // any in-flight inline ! command whose ensureSessionForPrompt is resolving.
   const queuedShellCommandsRef = useRef<string[]>([]);
   const drainGenerationRef = useRef(0);
   const shellSubmitInFlightRef = useRef(false);
@@ -3884,6 +3887,7 @@ export function App({
     prevQueueSessionIdRef.current = connection.sessionId;
     const dropped = queuedShellCommandsRef.current.length;
     queuedShellCommandsRef.current = [];
+    drainGenerationRef.current++;
     if (dropped > 0) {
       pushToast('warning', t('queue.shellDropped', { count: dropped }));
     }
@@ -5930,6 +5934,7 @@ export function App({
           setIsPreparingPrompt(true);
         }
         let sessionCreated = false;
+        const generationAtSubmit = drainGenerationRef.current;
         void ensureSessionForPrompt()
           .finally(() => {
             if (needsSession) {
@@ -5938,6 +5943,7 @@ export function App({
             }
           })
           .then(() => {
+            if (drainGenerationRef.current !== generationAtSubmit) return;
             if (needsSession && connectionRef.current.sessionId) {
               sessionCreated = true;
               if (commitComposerAccepted) {
