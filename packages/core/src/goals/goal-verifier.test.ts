@@ -96,6 +96,7 @@ describe('createGoalVerifier', () => {
     );
     const value = input() as GoalVerifierInput & { fullHistory?: string[] };
     value.fullHistory = ['must not leak'];
+    value.currentDeliveredOutput = ['compatibility copy'];
 
     await expect(createGoalVerifier(config)(value)).resolves.toEqual({
       decision: 'accept',
@@ -155,17 +156,39 @@ describe('createGoalVerifier', () => {
     });
   });
 
+  it('preserves the legacy delivered-output input contract', async () => {
+    const { config, generateText } = configFor(
+      '{"decision":"accept","reason":"grounded"}',
+    );
+    const value = input();
+    value.currentTurnId = undefined;
+    value.currentDeliveredOutput = ['legacy output'];
+
+    await createGoalVerifier(config)(value);
+
+    const request = generateText.mock.calls[0]![0] as Parameters<
+      BaseLlmClient['generateText']
+    >[0];
+    const payload = JSON.parse(
+      request.contents[0]?.parts?.[0]?.text ?? '',
+    ) as Record<string, unknown>;
+    expect(payload).not.toHaveProperty('currentTurnId');
+    expect(payload).toMatchObject({
+      currentDeliveredOutput: ['legacy output'],
+    });
+  });
+
   it('keeps maximum valid evidence and proposal reason within the request limit', async () => {
     const { config, generateText } = configFor(
       '{"decision":"accept","reason":"grounded"}',
     );
     const value = input();
-    value.proposal.reason = 'r'.repeat(16_000);
+    value.proposal.reason = '\0'.repeat(8_000);
     value.evidence = [
       {
         ...value.evidence[0]!,
         proofKind: 'delivered_output',
-        content: 'e'.repeat(24_000),
+        content: '\0'.repeat(24_000),
       },
     ];
 
@@ -181,7 +204,7 @@ describe('createGoalVerifier', () => {
       '{"decision":"accept","reason":"grounded"}',
     );
     const value = input();
-    value.goal.objective = 'x'.repeat(64_000);
+    value.goal.objective = 'x'.repeat(256_000);
 
     await expect(createGoalVerifier(config)(value)).rejects.toBeInstanceOf(
       GoalVerifierInputTooLargeError,

@@ -93,7 +93,7 @@ export interface GoalPendingProposal {
 
 export interface GoalRuntime {
   getSnapshot(): GoalSnapshotV2;
-  getSnapshotForPermit(permit: GoalTurnPermit): GoalSnapshotV2;
+  getSnapshotForPermit?(permit: GoalTurnPermit): GoalSnapshotV2;
   subscribe(
     listener: (snapshot: GoalSnapshotV2, cause?: GoalStateCause) => void,
   ): () => void;
@@ -114,9 +114,22 @@ export interface GoalRuntime {
   dispose(): void;
 }
 
+function normalizeRecoveredBlockedAudit(
+  audit: NonNullable<GoalStateRecordPayloadV2['blockedAudit']>,
+): NonNullable<GoalStateRecordPayloadV2['blockedAudit']> {
+  return {
+    ...structuredClone(audit),
+    fingerprint: audit.fingerprint.startsWith('\n')
+      ? `repeated${audit.fingerprint}`
+      : audit.fingerprint,
+  };
+}
+
 export function createGoalRuntime(
   options: CreateGoalRuntimeOptions,
-): GoalRuntime {
+): GoalRuntime & {
+  getSnapshotForPermit(permit: GoalTurnPermit): GoalSnapshotV2;
+} {
   if (Boolean(options.evidenceSource) !== Boolean(options.verifier)) {
     throw new Error(
       'Goal evidence source and verifier must be configured together',
@@ -328,6 +341,13 @@ export function createGoalRuntime(
     attempt: VerificationAttempt,
     evidence: ReturnType<typeof validateGoalEvidenceReferences>,
   ): GoalVerifierInput => {
+    const currentDeliveredOutput = evidence.citedRecords
+      .filter(
+        (record) =>
+          record.proofKind === 'delivered_output' &&
+          record.turnId === attempt.permit.turnId,
+      )
+      .map((record) => record.content);
     const base = {
       goal: {
         goalId: attempt.goal.goalId,
@@ -336,6 +356,7 @@ export function createGoalRuntime(
       },
       currentTurnId: attempt.permit.turnId,
       evidence: evidence.citedRecords,
+      ...(currentDeliveredOutput.length > 0 ? { currentDeliveredOutput } : {}),
     };
     if (attempt.proposal.status === 'complete') {
       return {
@@ -562,7 +583,7 @@ export function createGoalRuntime(
               activity: 'idle',
             };
             blockedAudit = recovery.payload.blockedAudit
-              ? structuredClone(recovery.payload.blockedAudit)
+              ? normalizeRecoveredBlockedAudit(recovery.payload.blockedAudit)
               : undefined;
             recoveredCause = recovery.payload.cause;
           } else if (recovery.kind === 'legacy') {

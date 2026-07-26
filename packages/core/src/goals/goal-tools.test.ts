@@ -33,6 +33,14 @@ const permit: GoalTurnPermit = {
   turnId: 'turn-4',
 };
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((nextResolve) => {
+    resolve = nextResolve;
+  });
+  return { promise, resolve };
+}
+
 function makeConfig(runtime: Partial<GoalRuntime>) {
   return {
     getGoalRuntime: vi.fn(() => runtime as GoalRuntime),
@@ -196,6 +204,7 @@ describe('UpdateGoalTool', () => {
         evidenceRefs: {
           description?: string;
           items?: { description?: string };
+          maxItems?: number;
         };
         blockerKind: { description?: string };
       };
@@ -228,6 +237,7 @@ describe('UpdateGoalTool', () => {
     expect(schema.properties.evidenceRefs.items?.description).toContain(
       'not a turnId',
     );
+    expect(schema.properties.evidenceRefs.maxItems).toBe(100);
     expect(schema.properties.reason.maxLength).toBe(
       GOAL_PROPOSAL_REASON_MAX_CHARACTERS,
     );
@@ -373,6 +383,63 @@ describe('UpdateGoalTool', () => {
       uncitedCurrentDeliveredOutput: ['letter-x'],
       error:
         'The completion proposal omitted delivered output from the current Goal turn. Call get_goal after delivering the final output, then retry update_goal with the returned evidenceCatalog UUIDs.',
+    });
+    expect(recordTerminalProposal).not.toHaveBeenCalled();
+  });
+
+  it('rejects completion when the evidence catalog is truncated', async () => {
+    const recordTerminalProposal = vi.fn();
+    const runtime = {
+      getGoalForWorker: vi.fn().mockResolvedValue({
+        goalId: permit.goalId,
+        revision: permit.revision,
+        objective: 'Ship Goal v3',
+        evidenceCursor: { recordId: 'goal-created' },
+        evidenceCatalog: {
+          entries: [
+            {
+              uuid: 'output',
+              provenance: 'assistant_output',
+              turnId: permit.turnId,
+              preview: 'done',
+              proofKind: 'delivered_output',
+            },
+          ],
+          lineageTurnIds: [permit.turnId],
+          truncated: true,
+        },
+      }),
+      getSnapshotForPermit: vi.fn(() => ({
+        v: 2 as const,
+        activity: 'running' as const,
+        goal: {
+          goalId: permit.goalId,
+          revision: permit.revision,
+          objective: 'Ship Goal v3',
+          status: 'active' as const,
+          evidenceCursor: { recordId: 'goal-created' },
+          turnCount: 1,
+          activeTimeMs: 0,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      })),
+      recordTerminalProposal,
+    };
+    const invocation = goalTurnContext.run(permit, () =>
+      new UpdateGoalTool(makeConfig(runtime)).build({
+        status: 'complete',
+        reason: 'done',
+        evidenceRefs: ['output'],
+      }),
+    );
+
+    const result = await invocation.execute(new AbortController().signal);
+
+    expect(JSON.parse(String(result.llmContent))).toMatchObject({
+      proposalRecorded: false,
+      readyForVerification: false,
+      error: expect.stringContaining('not provably exhaustive'),
     });
     expect(recordTerminalProposal).not.toHaveBeenCalled();
   });
@@ -679,6 +746,44 @@ describe('UpdateGoalTool', () => {
     ).rejects.toBe(unexpectedError);
     expect(getGoalForWorker).toHaveBeenCalledTimes(2);
     expect(runtime.recordTerminalProposal).not.toHaveBeenCalled();
+  });
+
+  it('honors cancellation before recording an update proposal', async () => {
+    const workerRead = deferred<{
+      goalId: string;
+      revision: number;
+      objective: string;
+      evidenceCursor: { recordId: string };
+    }>();
+    const recordTerminalProposal = vi.fn();
+    const getGoalForWorker = vi.fn(() => workerRead.promise);
+    const runtime = {
+      getGoalForWorker,
+      getSnapshotForPermit: vi.fn(),
+      recordTerminalProposal,
+    };
+    const invocation = goalTurnContext.run(permit, () =>
+      new UpdateGoalTool(makeConfig(runtime)).build({
+        status: 'complete',
+        reason: 'done',
+        evidenceRefs: ['evidence-1'],
+      }),
+    );
+    const controller = new AbortController();
+    const execution = invocation.execute(controller.signal);
+    await vi.waitFor(() => expect(getGoalForWorker).toHaveBeenCalledOnce());
+
+    controller.abort(new Error('cancelled'));
+
+    await expect(execution).rejects.toThrow('cancelled');
+    workerRead.resolve({
+      goalId: permit.goalId,
+      revision: permit.revision,
+      objective: 'Ship Goal v3',
+      evidenceCursor: { recordId: 'cursor' },
+    });
+    await Promise.resolve();
+    expect(recordTerminalProposal).not.toHaveBeenCalled();
   });
 
   it.each(['missing snapshot API', 'stale snapshot API'] as const)(

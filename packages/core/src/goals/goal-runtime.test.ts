@@ -258,7 +258,13 @@ describe('goal runtime', () => {
     await runtime.finishTurn(permit);
 
     expect(evidenceSource.flush).toHaveBeenCalledOnce();
-    expect(verifier).toHaveBeenCalledOnce();
+    expect(verifier).toHaveBeenCalledWith(
+      expect.objectContaining({
+        currentTurnId: permit.turnId,
+        currentDeliveredOutput: ['Delivered result'],
+      }),
+      expect.any(AbortSignal),
+    );
     expect(journal.appended.map((payload) => payload.cause)).toEqual([
       'create',
       'turn_finished',
@@ -1670,10 +1676,17 @@ describe('goal runtime', () => {
 
     const restoredHost = fakeGoalTurnHost();
     const restored = createGoalRuntime({ journal: fakeGoalJournal() });
+    const recoveredPayload = journal.appended.at(-1)!;
     await restored.restore([
       {
-        ...goalStateRecord(journal.appended.at(-1)!.snapshot),
-        systemPayload: journal.appended.at(-1)!,
+        ...goalStateRecord(recoveredPayload.snapshot),
+        systemPayload: {
+          ...recoveredPayload,
+          blockedAudit: {
+            ...recoveredPayload.blockedAudit!,
+            fingerprint: '\nwaiting for access',
+          },
+        },
       },
     ]);
     restored.bindHost(restoredHost);

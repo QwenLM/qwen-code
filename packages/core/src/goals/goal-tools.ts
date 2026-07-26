@@ -6,6 +6,7 @@
 
 import { ToolDisplayNames, ToolNames } from '../tools/tool-names.js';
 import type { ToolInvocation, ToolResult } from '../tools/tools.js';
+import { GOAL_EVIDENCE_REFERENCE_LIMIT } from './goal-evidence.js';
 import {
   BaseDeclarativeTool,
   BaseToolInvocation,
@@ -43,15 +44,16 @@ export interface GoalToolResult extends ToolResult {
   terminateTurn?: boolean;
 }
 
-type GetGoalRuntime = Pick<
-  GoalRuntime,
-  'getGoalForWorker' | 'getSnapshotForPermit'
->;
+type GetGoalRuntime = Pick<GoalRuntime, 'getGoalForWorker'> & {
+  getSnapshotForPermit?: GoalRuntime['getSnapshotForPermit'];
+};
 
 type UpdateGoalRuntime = Pick<
   GoalRuntime,
-  'getGoalForWorker' | 'getSnapshotForPermit' | 'recordTerminalProposal'
->;
+  'getGoalForWorker' | 'recordTerminalProposal'
+> & {
+  getSnapshotForPermit?: GoalRuntime['getSnapshotForPermit'];
+};
 
 class GetGoalInvocation extends BaseToolInvocation<
   GetGoalToolParams,
@@ -69,7 +71,7 @@ class GetGoalInvocation extends BaseToolInvocation<
     return 'Read the current goal';
   }
 
-  async execute(): Promise<GoalToolResult> {
+  async execute(signal: AbortSignal): Promise<GoalToolResult> {
     if (!this.runtime || !this.permit) {
       const message = 'No active Goal is available for this turn.';
       return {
@@ -78,7 +80,8 @@ class GetGoalInvocation extends BaseToolInvocation<
       };
     }
 
-    const view = await workerViewForPermit(this.runtime, this.permit);
+    const view = await workerViewForPermit(this.runtime, this.permit, signal);
+    signal.throwIfAborted();
     const snapshot = snapshotForPermit(this.runtime, this.permit);
     if (
       view.goalId !== this.permit.goalId ||
@@ -140,13 +143,14 @@ class UpdateGoalInvocation extends BaseToolInvocation<
     return `Propose that the Goal is ${this.params.status} for this permitted turn`;
   }
 
-  async execute(): Promise<GoalToolResult> {
+  async execute(signal: AbortSignal): Promise<GoalToolResult> {
     if (!this.runtime || !this.permit) {
       throw new Error('No active Goal is available for this turn');
     }
     const permit = this.permit;
 
-    const view = await workerViewForPermit(this.runtime, permit);
+    const view = await workerViewForPermit(this.runtime, permit, signal);
+    signal.throwIfAborted();
     snapshotForPermit(this.runtime, permit);
     if (
       view.goalId !== this.permit.goalId ||
@@ -181,6 +185,12 @@ class UpdateGoalInvocation extends BaseToolInvocation<
         };
       }
       const citedEvidenceRefs = new Set(normalizedEvidenceRefs);
+      if (
+        this.params.status === 'complete' &&
+        view.evidenceCatalog?.truncated
+      ) {
+        return truncatedCatalogResult();
+      }
       const uncitedCurrentDeliveredOutput = evidenceEntries
         .filter(
           (entry) =>
@@ -217,6 +227,7 @@ class UpdateGoalInvocation extends BaseToolInvocation<
         ? { blockerKind: this.params.blockerKind }
         : {}),
     };
+    signal.throwIfAborted();
     const receipt = recordTerminalProposalForPermit(
       this.runtime,
       this.permit,
@@ -281,7 +292,7 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
             type: 'array',
             minItems: 1,
             uniqueItems: true,
-            maxItems: 12,
+            maxItems: GOAL_EVIDENCE_REFERENCE_LIMIT,
             description:
               'Exact values from the latest get_goal evidenceCatalog.entries[].uuid.',
             items: {
@@ -335,7 +346,9 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
 }
 
 function snapshotForPermit(
-  runtime: { getSnapshotForPermit: (permit: GoalTurnPermit) => GoalSnapshotV2 },
+  runtime: {
+    getSnapshotForPermit?: (permit: GoalTurnPermit) => GoalSnapshotV2;
+  },
   permit: GoalTurnPermit,
 ): GoalSnapshotV2 {
   const getSnapshotForPermit: unknown = runtime.getSnapshotForPermit;
@@ -352,12 +365,37 @@ function snapshotForPermit(
 async function workerViewForPermit(
   runtime: Pick<GoalRuntime, 'getGoalForWorker'>,
   permit: GoalTurnPermit,
+  signal: AbortSignal,
 ): Promise<GoalWorkerView> {
+  signal.throwIfAborted();
+  let onAbort: (() => void) | undefined;
   try {
-    return await runtime.getGoalForWorker(permit);
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => reject(signal.reason);
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    });
+    return await Promise.race([runtime.getGoalForWorker(permit), aborted]);
   } catch (error) {
-    throwNormalizedRuntimeError(error);
+    return throwNormalizedRuntimeError(error);
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort);
   }
+}
+
+function truncatedCatalogResult(): GoalToolResult {
+  const error =
+    'The bounded evidence catalog is truncated, so current-turn output is not provably exhaustive. Continue in a new Goal turn with a smaller evidence set.';
+  return {
+    llmContent: JSON.stringify({
+      proposalRecorded: false,
+      readyForVerification: false,
+      goalLifecycleChanged: false,
+      error,
+    }),
+    returnDisplay:
+      'Goal proposal was not recorded because its evidence catalog is truncated.',
+  };
 }
 
 function recordTerminalProposalForPermit(
