@@ -1812,6 +1812,24 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('A vacuous test is a **Suggestion**');
     expect(p).toContain('report **that behaviour** as the Critical');
     expect(p).not.toContain('is a **Critical**: a green-no-matter-what');
+    // The test-matrix agent applies Agent 5's rules to the behaviour/test pairing
+    // it owns, so its severity must move in lockstep — a revert of just this bullet
+    // would let the two agents grade the same inert test differently on one PR.
+    expect(buildRoleBrief(PLAN, 'test-matrix')).toContain(
+      'a **Suggestion** on its own, Critical only when',
+    );
+  });
+
+  it('carries the command-aware subprocess-injection correction into Agent 2', () => {
+    // The all-role test sees only that Agent 2 gets the diff and the format; it
+    // cannot see whether the `--` correction reached it. If a revert restores the
+    // old "terminate the argv with `--`" guidance, that test stays green while
+    // Agent 2 again advises that `--` alone closes the injection — but
+    // `git checkout -- .` still discards unstaged changes. Pin the corrected wording.
+    const p = buildRoleBrief(PLAN, '2');
+    expect(p).toContain('does **not** neutralize a *pathspec*');
+    expect(p).toContain('the value allowlist is what closes the injection');
+    expect(p).not.toContain('terminate the argv with');
   });
 
   it('gives Agent 7 no diff — its evidence is the commands it ran', () => {
