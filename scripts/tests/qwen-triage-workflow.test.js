@@ -228,6 +228,9 @@ describe('qwen-triage tmux workflow', () => {
     // startswith (not contains) prevents matching a comment that merely quotes
     // the marker; the bot-author filter prevents matching a human's comment.
     expect(statusStep).toContain("gh api user --jq '.login'");
+    expect(statusStep).toContain(
+      'Cannot resolve bot identity; skipping status comment upsert.',
+    );
     expect(statusStep).toContain('select(.user.login == $bot)');
     expect(statusStep).toContain('startswith($m)');
     expect(statusStep).not.toContain('contains($m)');
@@ -246,6 +249,9 @@ describe('qwen-triage tmux workflow', () => {
     );
     expect(finalizeStep).toContain('success() || failure()');
     expect(finalizeStep).toContain('steps.triage.outcome');
+    expect(finalizeStep).toContain(
+      'Cannot resolve bot identity; skipping final status comment upsert.',
+    );
     expect(finalizeStep).toContain('select(.user.login == $bot)');
     expect(finalizeStep).toContain('startswith($m)');
     expect(finalizeStep).not.toContain('contains($m)');

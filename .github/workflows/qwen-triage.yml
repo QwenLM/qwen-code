@@ -313,26 +313,29 @@ jobs:
           set -uo pipefail
           MARKER='<!-- qwen-triage lifecycle -->'
           LEGACY_MARKER='<!-- qwen-triage stage=status -->'
-          BOT_LOGIN="$(gh api user --jq '.login' 2>/dev/null || true)"
-          printf -v BODY '%s\n\n%s\n\n%s' \
-            "$MARKER" \
-            "🔄 **Qwen Triage is running** — [watch live progress]($RUN_URL). Stage results will post in this thread as they complete." \
-            "🔄 **Qwen Triage 正在运行** —— [查看实时进度]($RUN_URL)。各阶段结果完成后会更新在本线程。"
-          EXISTING_ID="$(
-            gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
-              --method GET --paginate -F per_page=100 |
-              jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" --arg bot "$BOT_LOGIN" \
-                '[.[][] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))] | last | .id // empty'
-          )" || EXISTING_ID=''
-          if [ -n "$EXISTING_ID" ]; then
-            gh api --method PATCH \
-              "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
-              -f body="$BODY" >/dev/null ||
-              echo "::warning::Failed to update triage status comment; continuing." >&2
+          if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
+            echo "::warning::Cannot resolve bot identity; skipping status comment upsert."
           else
-            gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
-              -f body="$BODY" >/dev/null ||
-              echo "::warning::Failed to post triage status comment; continuing." >&2
+            printf -v BODY '%s\n\n%s\n\n%s' \
+              "$MARKER" \
+              "🔄 **Qwen Triage is running** — [watch live progress]($RUN_URL). Stage results will post in this thread as they complete." \
+              "🔄 **Qwen Triage 正在运行** —— [查看实时进度]($RUN_URL)。各阶段结果完成后会更新在本线程。"
+            EXISTING_ID="$(
+              gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+                --method GET --paginate -F per_page=100 |
+                jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" --arg bot "$BOT_LOGIN" \
+                  '[.[][] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))] | last | .id // empty'
+            )" || EXISTING_ID=''
+            if [ -n "$EXISTING_ID" ]; then
+              gh api --method PATCH \
+                "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
+                -f body="$BODY" >/dev/null ||
+                echo "::warning::Failed to update triage status comment; continuing." >&2
+            else
+              gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+                -f body="$BODY" >/dev/null ||
+                echo "::warning::Failed to post triage status comment; continuing." >&2
+            fi
           fi
 
       - name: 'Inject model name into triage signature'
@@ -677,30 +680,33 @@ jobs:
           set -uo pipefail
           MARKER='<!-- qwen-triage lifecycle -->'
           LEGACY_MARKER='<!-- qwen-triage stage=status -->'
-          BOT_LOGIN="$(gh api user --jq '.login' 2>/dev/null || true)"
-          if [ "${TRIAGE_OUTCOME:-}" = 'success' ]; then
-            EN="✅ **Qwen Triage finished** — [view run]($RUN_URL). See the stage comments in this thread for the result."
-            ZH="✅ **Qwen Triage 已完成** —— [查看运行]($RUN_URL)。结果见本线程中的各阶段评论。"
+          if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
+            echo "::warning::Cannot resolve bot identity; skipping final status comment upsert."
           else
-            EN="⚠️ **Qwen Triage ended early** — [view run]($RUN_URL). It stopped before finishing; check the run log."
-            ZH="⚠️ **Qwen Triage 提前结束** —— [查看运行]($RUN_URL)。未跑完,请查看运行日志。"
-          fi
-          printf -v BODY '%s\n\n%s\n\n%s' "$MARKER" "$EN" "$ZH"
-          EXISTING_ID="$(
-            gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
-              --method GET --paginate -F per_page=100 |
-              jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" --arg bot "$BOT_LOGIN" \
-                '[.[][] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))] | last | .id // empty'
-          )" || EXISTING_ID=''
-          if [ -n "$EXISTING_ID" ]; then
-            gh api --method PATCH \
-              "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
-              -f body="$BODY" >/dev/null ||
-              echo "::warning::Failed to finalize triage status comment; continuing." >&2
-          else
-            gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
-              -f body="$BODY" >/dev/null ||
-              echo "::warning::Failed to post final triage status comment; continuing." >&2
+            if [ "${TRIAGE_OUTCOME:-}" = 'success' ]; then
+              EN="✅ **Qwen Triage finished** — [view run]($RUN_URL). See the stage comments in this thread for the result."
+              ZH="✅ **Qwen Triage 已完成** —— [查看运行]($RUN_URL)。结果见本线程中的各阶段评论。"
+            else
+              EN="⚠️ **Qwen Triage ended early** — [view run]($RUN_URL). It stopped before finishing; check the run log."
+              ZH="⚠️ **Qwen Triage 提前结束** —— [查看运行]($RUN_URL)。未跑完,请查看运行日志。"
+            fi
+            printf -v BODY '%s\n\n%s\n\n%s' "$MARKER" "$EN" "$ZH"
+            EXISTING_ID="$(
+              gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+                --method GET --paginate -F per_page=100 |
+                jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" --arg bot "$BOT_LOGIN" \
+                  '[.[][] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))] | last | .id // empty'
+            )" || EXISTING_ID=''
+            if [ -n "$EXISTING_ID" ]; then
+              gh api --method PATCH \
+                "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
+                -f body="$BODY" >/dev/null ||
+                echo "::warning::Failed to finalize triage status comment; continuing." >&2
+            else
+              gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+                -f body="$BODY" >/dev/null ||
+                echo "::warning::Failed to post final triage status comment; continuing." >&2
+            fi
           fi
 
   # On-demand real-user testing: a write-permission user comments
