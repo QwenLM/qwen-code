@@ -2187,9 +2187,18 @@ describe('qwen-triage verify maintainer-review round', () => {
   // Upstream failure text can name resolved hosts and TLS detail; the agent
   // only needs to know the call failed.
   it('does not forward upstream error text to the agent', () => {
-    const runStep = stepIn('verify', 'Run verification agent');
-    expect(runStep).toContain("res.end('proxy error: upstream request failed");
-    expect(runStep).not.toContain('proxy error: ${error instanceof Error');
+    // Both lanes share the proxy design and must both keep upstream
+    // topology out of the agent's error text.
+    for (const [jobName, stepName] of [
+      ['verify', 'Run verification agent'],
+      ['tmux-testing', 'Run tmux real-user testing'],
+    ]) {
+      const runStep = stepIn(jobName, stepName);
+      expect(runStep).toContain(
+        "res.end('proxy error: upstream request failed",
+      );
+      expect(runStep).not.toContain('proxy error: ${error instanceof Error');
+    }
   });
 });
 
@@ -2210,6 +2219,10 @@ describe('qwen-triage tmux lane parity', () => {
     expect(runStep).toContain('kill -0 "$OPENAI_PROXY_PID"');
     expect(runStep).toContain('PROXY_TOKEN');
     expect(runStep).toContain('proxy: unauthorized');
+    // The agent must actually present this run's token: reverting the env
+    // wire to a literal makes every completion 401 and turns the verdict
+    // into a false 'fail'. Assert the wire, not just the gate's presence.
+    expect(runStep).toContain('"OPENAI_API_KEY=$proxy_token"');
 
     // Execute the real proxy and prove the nonce + bearer token work.
     const proxy = runStep.match(/<<'NODE'\n([\s\S]*?)\n\s*NODE\n/)?.[1];
@@ -2239,6 +2252,7 @@ describe('qwen-triage tmux lane parity', () => {
         'echo "health=$(curl -sS "http://127.0.0.1:$P/__health")"',
         'echo "unauth=$(curl -sS -o /dev/null -w %{http_code} -X POST "http://127.0.0.1:$P/v1/chat/completions")"',
         'echo "auth=$(curl -sS -o /dev/null -w %{http_code} -X POST -H "Authorization: Bearer t0ken" "http://127.0.0.1:$P/v1/chat/completions")"',
+        'echo "wrong=$(curl -sS -o /dev/null -w %{http_code} -X POST -H "Authorization: Bearer nope" "http://127.0.0.1:$P/v1/chat/completions")"',
         'kill $UP $PX 2>/dev/null',
       ].join('\n');
       const out = spawnSync('bash', ['-c', driver, '_', dir], {
@@ -2251,6 +2265,9 @@ describe('qwen-triage tmux lane parity', () => {
       expect(out).toContain('health=n0nce');
       expect(out).toContain('unauth=401');
       expect(out).toContain('auth=200');
+      // The gate exists for the wrong-token case: a prefix match would let
+      // any 'Bearer ...' caller spend the real key.
+      expect(out).toContain('wrong=401');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -2345,5 +2362,35 @@ describe('qwen-triage tmux lane parity', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // A detached lifecycle child can outlive the build step and the one-shot
+  // sweep, re-planting artifacts or scanning localhost for the model proxy.
+  // The verify lane kills the build user's processes before any cleanup; the
+  // tmux lane runs the same untrusted code on the same pool and must too.
+  it('kills surviving build-user processes before the tmux agent starts', () => {
+    const runStep = stepIn('tmux-testing', 'Run tmux real-user testing');
+    expect(runStep).toContain('pkill -KILL -u node');
+    expect(runStep).toContain(
+      'Processes owned by the build user survived; refusing to start the agent.',
+    );
+    // Before the sweep and the proxy: the cleanup must not race a live
+    // process, and no leftover child may be alive when the proxy binds.
+    const killAt = runStep.indexOf('pkill -KILL -u node');
+    expect(killAt).toBeGreaterThan(-1);
+    expect(killAt).toBeLessThan(
+      runStep.indexOf("find tmp -maxdepth 2 -type d -name '*-tmux-*'"),
+    );
+    expect(killAt).toBeLessThan(runStep.indexOf('start_openai_proxy'));
+  });
+
+  // publish-verify bounds itself so a hung gh call cannot hold a hosted
+  // runner for the 360-minute default; publish-tmux posts the same way.
+  it('bounds the publish-tmux job with a timeout', () => {
+    const publish = job('publish-tmux');
+    expect(publish).toMatch(/timeout-minutes: \d+/);
+    const minutes = Number(publish.match(/timeout-minutes: (\d+)/)?.[1]);
+    expect(minutes).toBeGreaterThan(0);
+    expect(minutes).toBeLessThanOrEqual(30);
   });
 });

@@ -1074,6 +1074,26 @@ jobs:
             exit 1
           fi
 
+          # `npm ci`/`npm run build` ran the PR's lifecycle scripts as `node`
+          # in the previous step. A detached postinstall child can outlive that
+          # step and the one-shot sweep below — re-planting a `*-tmux-*`
+          # artifact dir after the sweep runs, or tampering with the agent's
+          # inputs while it executes. Kill anything still running as the build
+          # user BEFORE any cleanup, same as the verify lane, so the sweep is
+          # not racing a live process. This also removes the localhost blind
+          # scan surface the bearer-gated proxy defends against. The proxy
+          # started further below runs as root, so this cannot touch it.
+          pkill -KILL -u node 2>/dev/null || true
+          for _ in 1 2 3; do
+            pgrep -u node >/dev/null 2>&1 || break
+            sleep 1
+            pkill -KILL -u node 2>/dev/null || true
+          done
+          if pgrep -u node >/dev/null 2>&1; then
+            echo "::error::Processes owned by the build user survived; refusing to start the agent."
+            exit 1
+          fi
+
           # `npm ci`/`npm run build` just ran the PR's lifecycle scripts, which
           # can plant a `tmp/<name>-tmux-<ts>/` directory holding a report.md
           # and a transcript. The collector below globs `*-tmux-*` and the
@@ -1249,9 +1269,11 @@ jobs:
                   return;
                 }
                 throw error;
-              } finally {
-                clearTimeout(timer);
               }
+              // NOTE: the timer is deliberately NOT cleared here. fetch()
+              // resolves on HEADERS, so clearing now would let an upstream
+              // that stalls mid-body hang until the outer 20-minute
+              // watchdog. It is cleared when the body ends or errors below.
               const responseHeaders = {};
               upstream.headers.forEach((value, key) => {
                 const lower = key.toLowerCase();
@@ -1261,13 +1283,27 @@ jobs:
               });
               res.writeHead(upstream.status, responseHeaders);
               if (upstream.body) {
-                Readable.fromWeb(upstream.body).pipe(res);
+                const body = Readable.fromWeb(upstream.body);
+                const done = () => clearTimeout(timer);
+                body.on('end', done);
+                body.on('error', done);
+                // A downstream disconnect must abort the upstream request
+                // too, or the stalled fetch keeps the socket alive.
+                res.on('close', () => {
+                  done();
+                  controller.abort();
+                });
+                body.pipe(res);
               } else {
+                clearTimeout(timer);
                 res.end();
               }
             } catch (error) {
+              // The message can carry resolved hosts, IPs and TLS detail.
+              // The agent needs to know the call failed, not the topology.
+              console.error('proxy upstream failure:', error);
               res.writeHead(502, { 'content-type': 'text/plain' });
-              res.end(`proxy error: ${error instanceof Error ? error.message : String(error)}\n`);
+              res.end('proxy error: upstream request failed\n');
             }
           });
 
@@ -1440,6 +1476,10 @@ jobs:
        (needs.tmux-testing.result == 'success' &&
         needs.tmux-testing.outputs.verdict != '' &&
         needs.tmux-testing.outputs.verdict != 'n/a'))
+    # Downloads one artifact and posts one comment; without this it would
+    # inherit the 360-minute default and a hung gh call could hold a hosted
+    # runner for six hours. Same bound as publish-verify.
+    timeout-minutes: 10
     runs-on: 'ubuntu-latest'
     permissions:
       pull-requests: 'write'

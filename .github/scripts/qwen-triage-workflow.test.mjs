@@ -288,6 +288,23 @@ describe('qwen-triage: tmux-lane security controls', () => {
     assert.match(run.run, /QWEN_PROXY_NONCE/);
     assert.match(run.run, /PROXY_TOKEN/);
     assert.match(run.run, /proxy: unauthorized/);
+    // The agent must present this run's token; a literal here 401s every
+    // completion and turns the verdict into a false 'fail'.
+    assert.match(run.run, /OPENAI_API_KEY=\$proxy_token/);
+  });
+
+  it('kills surviving build-user processes before the agent starts', () => {
+    const run = findStep('Run tmux real-user testing');
+    assert.ok(run, "'Run tmux real-user testing' step must exist");
+    assert.match(run.run, /pkill -KILL -u node/);
+    assert.match(run.run, /Processes owned by the build user survived/);
+    // The kill must precede the artifact sweep so cleanup is not racing a
+    // live process.
+    assert.ok(
+      run.run.indexOf('pkill -KILL -u node') <
+        run.run.indexOf("find tmp -maxdepth 2 -type d -name '*-tmux-*'"),
+      'pkill must run before the artifact sweep',
+    );
   });
 
   it('strips symlinks from collected artifacts before upload', () => {
