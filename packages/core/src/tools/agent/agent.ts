@@ -665,6 +665,12 @@ export async function createApprovalModeOverride(
   // These own properties intentionally mirror Config's TS-private field names.
   // Config prototype methods read/write them at runtime on this override object.
   override.approvalMode = mode;
+  override.manualPlanExitNoticeEventState = {
+    ...(override.manualPlanExitNoticeEventState ?? {
+      version: 0,
+      kind: 'clear',
+    }),
+  };
   override.getApprovalMode = Config.prototype.getApprovalMode;
   override.prePlanMode =
     mode === ApprovalMode.PLAN

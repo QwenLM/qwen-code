@@ -187,6 +187,7 @@ const mainBuild = esbuild.build({
   },
   alias: {
     'is-in-ci': path.resolve(__dirname, 'packages/cli/src/patches/is-in-ci.ts'),
+    'jsonc-parser': require.resolve('jsonc-parser/lib/esm/main.js'),
     '@qwen-code/web-templates': path.resolve(
       __dirname,
       'packages/web-templates/src/index.ts',

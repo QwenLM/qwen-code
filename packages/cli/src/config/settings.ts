@@ -33,7 +33,7 @@ import {
 import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import { setNestedPropertySafe } from '../utils/settingsUtils.js';
 import { customDeepMerge } from '../utils/deepMerge.js';
-import { updateSettingsFilePreservingFormat } from '../utils/commentJson.js';
+import { updateSettingsFilePreservingFormat } from '../utils/jsonc-editor.js';
 import { runMigrations, needsMigration } from './migration/index.js';
 import {
   V1_TO_V2_MIGRATION_MAP,

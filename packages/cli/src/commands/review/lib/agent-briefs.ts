@@ -189,6 +189,8 @@ For every line the diff deletes or replaces:
 - **Search the new code for where that behaviour is re-established** — in the replacement lines, in a callee, in a helper. If you cannot find it, that is a candidate finding: a removed guard, a dropped error path, a narrowed validation, a lost cleanup, a deleted test that covered a real case.
 - **Treat a replacement as a deletion plus an insertion.** Check the new form preserves the old behaviour for **all** inputs, not just the common case: a rewritten condition that quietly drops one operand, a broadened \`catch\` that used to rethrow specific codes.
 - **Removed or renamed _exported_ symbols get the same treatment, one level up.** Enumerate every export the diff deletes or renames. Find what replaced it — often in another file — and compare the two as **behaviour, not as names**: did a default flip (\`includeSubdirs: true\` → an exact-match override)? did a scope narrow? did an error that used to propagate become a log line? Then look at **the call sites the diff never touches**: they still call the new thing and now mean something different by it. A replacement that compiles is not a replacement that behaves, nothing in the build will tell you, and the callers live outside the diff where no other agent will look.
+- **A changed _literal_ is a contract too, not just a symbol.** When the diff renames or reformats a *value* that other code matches on its raw shape — a marker or sentinel string, a serialization key, a status/enum code, a path prefix, the exact text a regex or \`includes\`/\`startsWith\`/\`contains\` keys on — grep for consumers of the **old shape**, not the symbol, and **include hidden paths** (\`rg --hidden --glob '!.git/**' --fixed-strings -- '<old-shape>' .\`): a consumer in \`.github/workflows/*.yml\` or a sibling CI script is invisible to a default root search, and that is exactly the automation this rule exists to catch. A rename that compiles can silently stop matching a filter three files (or three CI workflows) away, and nothing in the build will flag it: the consumer just quietly changes what it lets through or drops. Name the consumer and the concrete regression (a bot comment that now bypasses a filter, an event that no longer routes, a record that no longer dedupes).
+- **A rename / format / schema / default change must handle the data that already exists.** If the change reads, matches, or upserts against persisted state — rows in a store, comments on a thread, entries in a cache, a config or lockfile on disk — check it handles the **pre-change population**, not just new writes. A marker renamed with no legacy fallback leaves every existing record unmatched (orphaned, or double-written on the next upsert); a widened schema with no migration splits state into old- and new-shaped halves. Flag the un-migrated population and the split-brain it causes, and note that the fix is usually a two-line fallback (accept the old shape while writing the new).
 - **For moved or renamed code, check the move is faithful.** A branch dropped during a move looks like clean refactoring in each hunk separately, and is invisible unless the two hunks are compared.
 
 Each failure scenario must name what input or state now slips past the removed behaviour, and what wrong outcome results.`,
@@ -231,6 +233,7 @@ Expect the three ends to be far apart. The declaration, the pass-through, and th
     brief: `You are **Agent 2: Security**. Review the diff for:
 
 - Injection — SQL, command, prototype pollution, code injection
+- **Argument / option injection into a subprocess — the sink \`execFile\`/\`spawn\` (no shell) does NOT close.** When user-controlled input reaches a subprocess as a **positional argument** — a \`git\`, \`gh\`, \`tar\`, \`ffmpeg\` … invocation built from request/config data — check whether that value can be reinterpreted as an **option or special token**. A value that starts with \`-\` becomes a flag (\`git log --output=<path>\` overwrites an arbitrary file as the daemon user; \`git checkout -f\` discards the working tree), and tokens like \`.\` / \`..\` become a pathspec (\`git checkout .\` silently drops unstaged changes). \`execFile\` stops *shell* injection but passes these straight through, so a no-shell spawn is not a clean bill of health. Flag every such positional; the fix is to validate the value against the subcommand's own grammar (a ref/name allowlist, reject a leading \`-\`). A \`--\` separator ends *option* parsing but does **not** neutralize a *pathspec* — for an overloaded command it can create one (\`git checkout -- release\` restores the path \`release\` instead of switching to that branch; \`git checkout -- .\` still discards unstaged changes), so a \`--\` helps only where it keeps the operand's role, and is never a blanket fix — the value allowlist is what closes the injection. Watch for the asymmetry too — one call site validates, its sibling does not.
 - XSS — stored, reflected, DOM-based
 - SSRF and path traversal
 - Authentication and authorization bypass
@@ -250,6 +253,7 @@ Expect the three ends to be far apart. The declaration, the pass-through, and th
 
 - Style consistency with the surrounding codebase; naming conventions
 - **Duplication and missed reuse.** When the diff re-implements something the codebase already has, grep the shared/utility modules and the files adjacent to the change, and **name the existing helper it should call instead**. A duplication finding that does not name the thing being duplicated is not a finding.
+- **Sibling consistency — a guard one path has and its twin lacks.** When one member of a family of parallel paths carries a validation, guard, cleanup, or shape-check — sibling loaders, the handlers of a route table, the pair of functions that build the same command — check that **every** sibling carries it too. A lone exception is usually accidental, and the missing half is a latent **asymmetric failure**: harmless until the one input that path sees. Name the divergent sibling and the guard it is missing. When the missing guard is a validation on **untrusted input** (one \`gitCheckout\` validates its ref, its sibling does not), that is not a style nit — hand it to the security pass as a likely bug, not a consistency note.
 - Over-engineering and unnecessary abstraction
 - **Altitude** — is each change implemented at the right depth, or is it a fragile bandaid? A special case layered onto shared infrastructure to make one caller work is a sign the fix is not deep enough: prefer generalizing the underlying mechanism. The mirror image — a new abstraction serving a single call site — is over-engineering. **Name the depth the change should live at.**
 - Missing or misleading comments; dead code`,
@@ -268,7 +272,12 @@ Expect the three ends to be far apart. The declaration, the pass-through, and th
 - Unnecessary re-renders, for UI code
 - Inefficient algorithms or data structures
 - Missing caching opportunities
-- Bundle-size impact`,
+- Bundle-size impact
+
+**Do not take the PR's own performance numbers on trust — separate the claims you can reproduce from the ones you cannot.**
+
+- **Reproducible by inspection or a cheap deterministic check** — bundle bytes from the esbuild metafile, whether an import is actually tree-shaken out of the shipped chunk, a loop's iteration count, whether a cache is really consulted on the hot path: reproduce it and confirm the magnitude, or report that it does **not** reproduce. A claimed win whose mechanism cannot produce it (the "optimized" path still does the work, the lazy import is still statically reachable) is a finding, even when the PR shows a number.
+- **A runtime benchmark you cannot re-run in review** — a wall-clock latency, a throughput figure tied to specific hardware: do not endorse it, and do not treat its absence as a defect. Where the number is **load-bearing** for the PR, the actionable finding is to **request the benchmark script, its environment, and the raw results** so a reader can reproduce it; where it is incidental, it produces **no finding** — record it under what the review did not verify, never as a defect. Either way a green review must not launder an unreproduced benchmark into a merge.`,
   },
 
   '5': {
@@ -286,7 +295,17 @@ Expect the three ends to be far apart. The declaration, the pass-through, and th
 - Do the assertions actually verify *behaviour*, or only that the code ran without throwing?
 - Are integration boundaries tested, not just the unit-level happy path?
 
-**Do not complain about "low coverage" abstractly.** Point to a specific code path in the diff that lacks a test and say what scenario is uncovered. And keep the severity honest: a missing test is a **Suggestion**. If a missing test would let a specific incorrect behaviour ship, report **that behaviour** as the Critical and cite the missing test as your evidence — naming the bug is the work, naming the gap is not.`,
+**Do not complain about "low coverage" abstractly.** Point to a specific code path in the diff that lacks a test and say what scenario is uncovered. And keep the severity honest: a missing test is a **Suggestion**. If a missing test would let a specific incorrect behaviour ship, report **that behaviour** as the Critical and cite the missing test as your evidence — naming the bug is the work, naming the gap is not.
+
+**Mutation-test the tests that matter — a test that exists is not the same as a test that would catch the bug.** For any test this diff adds or changes to pin a specific value or behaviour, name the one-line mutation to the *code under test* (or to the test's own value extraction) that *should* make it fail; if no plausible mutation does, the test is **vacuous** — it passes whether the code is right or wrong. The recurring shapes to check for:
+
+- both sides of the assertion are computed the same way, so they move together — e.g. \`expect(extract(a)).toBe(extract(b))\` where a loose or unanchored \`extract\` returns \`undefined\` on both, i.e. \`expect(undefined).toBe(undefined)\`; **pin the literal** instead;
+- the assertion reads only the *first* of several sites the changed behaviour spans, so drift in a later site passes green;
+- an \`expect(x).toBe(x)\` / round-trip tautology, or a "does not throw" assertion for code whose bug would be a *wrong value*, not a throw.
+
+A vacuous test is a **Suggestion** — an ineffective guard is a gap, not a defect in the code, and grading it Critical merely for being the sole guard is the severity inflation the shared ladder is built to avoid (Agent 7's efficacy probe reports the very same inert test as a Suggestion, and Step 4 keeps the higher of the two). Escalate only the way this dimension always does: if the vacuous test lets a **specific incorrect behaviour** ship, report **that behaviour** as the Critical with the test as your evidence — naming the bug is the work, naming the gap is not; and a test that asserts the **opposite** of the intended behaviour, or was **weakened/disabled in this diff**, is already Critical under the existing rule.
+
+Before you call a test vacuous, rule out the **equivalent mutant** — a mutation that leaves observable behaviour unchanged is not a coverage gap, because *nothing* could discriminate it. If the branch you would flip is unreachable given an invariant the code already holds, or two paths are provably identical for every input the code can actually reach, the test is not weak; the mutation is unobservable by construction. Name the mutation you tried and the input that makes it observable — a surviving mutation is a finding only when a real input tells the mutant apart from the original.`,
   },
 
   '6a': {
@@ -378,7 +397,8 @@ Use \`Source: [build]\` or \`Source: [test]\`, never \`[review]\`.`,
 
 - **Map each behavioural change in the production code to the test that exercises it**, wherever that test lives.
 - **Flag behaviour/test pairs split across territories** — the change in one place, its only test weakened or deleted in another. That pairing is invisible to both of the agents who own those halves, which is the entire reason you exist.
-- Otherwise apply Agent 5's rules: name the specific untested scenario, never "coverage is low". A missing test is a **Suggestion**. **A test weakened, disabled, or deleted _in this diff_ so that new behaviour passes is Critical** — as is a test that asserts the opposite of the intended behaviour, because it will bless the very regression it was written to catch.`,
+- Otherwise apply Agent 5's rules: name the specific untested scenario, never "coverage is low". A missing test is a **Suggestion**. **A test weakened, disabled, or deleted _in this diff_ so that new behaviour passes is Critical** — as is a test that asserts the opposite of the intended behaviour, because it will bless the very regression it was written to catch.
+- **Mutation-test the pairing, do not just confirm it exists:** for the test you paired to a change, name the mutation that should turn it red; a test that stays green under that mutation — both sides of its assertion move together (\`expect(undefined).toBe(undefined)\`), or it reads only the first of the sites the change spans — is **vacuous** — a **Suggestion** on its own, Critical only when it asserts the opposite of the intended behaviour, was weakened in this diff, or lets a **specific incorrect behaviour** ship (report that behaviour, not the gap).`,
   },
 
   'invariant-a': {

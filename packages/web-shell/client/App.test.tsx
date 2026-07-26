@@ -255,6 +255,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     hasMore: false,
     loading: false,
     capacityReached: false,
+    paginationError: false,
     loadMore: vi.fn(),
     release: vi.fn(),
   }),

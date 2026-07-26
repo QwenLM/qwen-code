@@ -573,6 +573,31 @@ describe('copyCommand', () => {
     });
   });
 
+  it('should copy formulas containing or adjacent to escaped dollars', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistoryShallow.mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          {
+            text: String.raw`literal \$x$
+formula $x + \$5$
+literal then math: \$$x^2$
+math then literal: $x^2\$$`,
+          },
+        ],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const expected = [String.raw`x + \$5`, 'x^2', String.raw`x^2\$`];
+    for (const [offset, expression] of expected.entries()) {
+      await copyCommand.action(mockContext, `inline-latex ${offset + 1}`);
+      expect(mockCopyToClipboard).toHaveBeenLastCalledWith(expression);
+    }
+  });
+
   it('should copy a numbered inline LaTeX expression with /copy latex inline 1', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 

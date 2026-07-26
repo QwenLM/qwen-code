@@ -7743,6 +7743,8 @@ export function App({
                                 historyCapacityReached={
                                   transcriptHistory.capacityReached
                                 }
+                                historyPaginationError={
+                                  transcriptHistory.paginationError}
                                 onLoadOlderHistory={transcriptHistory.loadMore}
                                 transcriptBlockCount={blocks.length}
                                 transcriptActivity={store}
