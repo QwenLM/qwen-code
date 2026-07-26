@@ -1386,6 +1386,7 @@ export function createServeApp(
   registerWorkspaceQualifiedGitHubPrsRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
+    mutate,
   });
 
   // Workspace memory + agents CRUD routes.

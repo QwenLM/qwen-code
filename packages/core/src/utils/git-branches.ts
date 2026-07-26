@@ -57,6 +57,8 @@ function gitEnv(): Record<string, string | undefined> {
   for (const key of GIT_ENV_VARS_TO_CLEAR) {
     delete env[key];
   }
+  env['LC_ALL'] = 'C';
+  env['LANG'] = 'C';
   return env;
 }
 

@@ -24,6 +24,9 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
 
 const fetchGitHubPullRequestsMock = vi.mocked(fetchGitHubPullRequests);
 
+const passthroughMutate = () =>
+  ((_req: unknown, _res: unknown, next: () => void) => next()) as never;
+
 function runtime(
   workspaceId: string,
   workspaceCwd: string,
@@ -47,6 +50,7 @@ function mount(deps: { cacheTtlMs?: number } = {}) {
   registerWorkspaceQualifiedGitHubPrsRoutes(app, {
     workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
     sendBridgeError,
+    mutate: passthroughMutate,
     ...deps,
   });
   return app;
@@ -80,6 +84,7 @@ describe('workspace GitHub PR routes', () => {
     registerWorkspaceQualifiedGitHubPrsRoutes(app, {
       workspaceRegistry: registry([primary, secondary]),
       sendBridgeError,
+      mutate: passthroughMutate,
     });
 
     const response = await request(app).get('/workspaces/secondary/github/prs');
@@ -100,6 +105,7 @@ describe('workspace GitHub PR routes', () => {
     registerWorkspaceQualifiedGitHubPrsRoutes(app, {
       workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
       sendBridgeError,
+      mutate: passthroughMutate,
     });
 
     const response = await request(app).get('/workspaces/primary/github/prs');
@@ -121,6 +127,7 @@ describe('workspace GitHub PR routes', () => {
         runtime('untrusted', '/work/untrusted', false),
       ]),
       sendBridgeError,
+      mutate: passthroughMutate,
     });
 
     const response = await request(app).get('/workspaces/untrusted/github/prs');
@@ -135,6 +142,7 @@ describe('workspace GitHub PR routes', () => {
     registerWorkspaceQualifiedGitHubPrsRoutes(app, {
       workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
       sendBridgeError,
+      mutate: passthroughMutate,
     });
 
     const response = await request(app).get('/workspaces/missing/github/prs');
@@ -152,6 +160,7 @@ describe('workspace GitHub PR routes', () => {
     registerWorkspaceQualifiedGitHubPrsRoutes(app, {
       workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
       sendBridgeError,
+      mutate: passthroughMutate,
     });
 
     const response = await request(app).get('/workspaces/primary/github/prs');
@@ -170,6 +179,7 @@ describe('workspace GitHub PR routes', () => {
     registerWorkspaceQualifiedGitHubPrsRoutes(app, {
       workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
       sendBridgeError,
+      mutate: passthroughMutate,
     });
 
     const response = await request(app).get('/workspaces/primary/github/prs');
@@ -196,6 +206,7 @@ describe('workspace GitHub PR routes', () => {
     registerWorkspaceQualifiedGitHubPrsRoutes(app, {
       workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
       sendBridgeError,
+      mutate: passthroughMutate,
     });
 
     const response = await request(app).get('/workspaces/primary/github/prs');
@@ -212,6 +223,7 @@ describe('workspace GitHub PR routes', () => {
     registerWorkspaceQualifiedGitHubPrsRoutes(app, {
       workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
       sendBridgeError,
+      mutate: passthroughMutate,
     });
 
     const response = await request(app).get('/workspaces/primary/github/prs');

@@ -146,8 +146,10 @@ export function GitDialog({
 
     resolveSession
       .then((sid) => {
-        if (abort.signal.aborted || !sid) {
-          if (!abort.signal.aborted) setGenerating(false);
+        if (abort.signal.aborted) return;
+        if (!sid) {
+          setGenFailed(true);
+          setGenerating(false);
           return;
         }
         const ws = client.workspaceByCwd(workspaceCwd);
@@ -249,10 +251,10 @@ export function GitDialog({
         const result = await ws.workspaceGitCommit(commitMsg.trim(), {
           all: true,
         });
-        setCommitMsg('');
         if (andPush) {
           try {
             await ws.workspaceGitPush({ setUpstream: true });
+            setCommitMsg('');
             setCommitStatus({
               msg: t('gitCommit.commitPushSuccess', { sha: result.sha }),
               type: 'success',
@@ -268,6 +270,7 @@ export function GitDialog({
             });
           }
         } else {
+          setCommitMsg('');
           setCommitStatus({
             msg: t('gitCommit.commitSuccess', { sha: result.sha }),
             type: 'success',
@@ -452,7 +455,7 @@ export function GitDialog({
         base: baseBranch || undefined,
       });
       setPrStatus({
-        msg: t('gitCommit.prCreated', { number: result.number }),
+        msg: t('gitCommit.prCreated', { number: result.number ?? '' }),
         type: 'success',
         url: result.url,
       });
@@ -494,8 +497,9 @@ export function GitDialog({
             </button>
           ))}
           {isCommit && (
-            <span
+            <button
               id="git-dialog-tab-commit"
+              type="button"
               role="tab"
               aria-selected="true"
               aria-controls="git-dialog-panel"
@@ -504,7 +508,7 @@ export function GitDialog({
               onKeyDown={onTabKeyDown}
             >
               {t('gitCommit.title')}
-            </span>
+            </button>
           )}
         </div>
         <div

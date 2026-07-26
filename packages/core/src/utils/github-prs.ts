@@ -251,7 +251,7 @@ export interface CreateGitHubPullRequestOptions {
 }
 
 export type CreateGitHubPullRequestResult =
-  | { kind: 'ok'; url: string; number: number }
+  | { kind: 'ok'; url: string; number: number | null }
   | { kind: 'not_a_repo' }
   | { kind: 'cli_unavailable' }
   | { kind: 'failed'; message: string };
@@ -312,7 +312,7 @@ export async function createGitHubPullRequest(
   // `gh pr create` outputs the PR URL on stdout.
   const url = stdout.trim();
   const numberMatch = /\/pull\/(\d+)/.exec(url);
-  const number = numberMatch ? parseInt(numberMatch[1], 10) : 0;
+  const number = numberMatch ? parseInt(numberMatch[1], 10) : null;
   return { kind: 'ok', url, number };
 }
 

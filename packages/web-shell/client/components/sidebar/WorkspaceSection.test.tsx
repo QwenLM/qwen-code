@@ -25,6 +25,8 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
       client: {
         workspaceGitBranches: vi.fn().mockResolvedValue({
           v: 1,
+          workspaceCwd: '/tmp/project',
+          available: true,
           local: [],
           remote: [],
           tags: [],
@@ -44,6 +46,8 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
           workspaceGit,
           workspaceGitBranches: vi.fn().mockResolvedValue({
             v: 1,
+            workspaceCwd: '/tmp/project',
+            available: true,
             local: [],
             remote: [],
             tags: [],
@@ -76,6 +80,8 @@ function makeClient(): DaemonClient {
       workspaceGit,
       workspaceGitBranches: vi.fn().mockResolvedValue({
         v: 1,
+        workspaceCwd: '/tmp/project',
+        available: true,
         local: [],
         remote: [],
         tags: [],

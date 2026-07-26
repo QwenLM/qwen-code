@@ -314,7 +314,7 @@ export interface DaemonGitHubPullRequestList {
 /** Response from `POST /workspaces/:workspace/github/prs/create`. */
 export interface DaemonGitHubPullRequestCreateResult {
   url: string;
-  number: number;
+  number: number | null;
 }
 
 /** Capabilities envelope returned from `GET /capabilities`. */

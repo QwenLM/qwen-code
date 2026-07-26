@@ -178,6 +178,22 @@ async function handlePush(
   route: string,
 ): Promise<void> {
   const body = safeBody(req);
+  if (
+    body['setUpstream'] !== undefined &&
+    typeof body['setUpstream'] !== 'boolean'
+  ) {
+    res.status(400).json({
+      error: 'invalid_set_upstream',
+      message: 'setUpstream must be a boolean',
+    });
+    return;
+  }
+  if (body['force'] !== undefined && typeof body['force'] !== 'boolean') {
+    res
+      .status(400)
+      .json({ error: 'invalid_force', message: 'force must be a boolean' });
+    return;
+  }
   const setUpstream = body['setUpstream'] === true;
   const force = body['force'] === true;
   try {

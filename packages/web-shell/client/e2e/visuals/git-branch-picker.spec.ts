@@ -77,7 +77,7 @@ test('branch picker, commit dialog, create PR form', async ({
   await page.waitForTimeout(1000);
 
   // Click the branch chip in the composer toolbar to open the branch picker
-  const branchChip = page.locator('[class*="gitBranch"]').first();
+  const branchChip = page.locator('[data-web-shell-git-branch]').first();
   await expect(branchChip).toBeVisible({ timeout: 5000 });
   await branchChip.click();
   await page.waitForTimeout(1500);
