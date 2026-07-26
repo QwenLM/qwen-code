@@ -27,11 +27,12 @@
 
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createReviewWorktreeLease } from '../../services/review-worktree-lease.js';
 import { ensureAuthenticated, gh, setGhHost } from './lib/gh.js';
+import type { ReviewEffort } from './parse-args.js';
 import { git, gitOpt, gitRaw, refExists, releaseWorktree } from './lib/git.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
 import {
@@ -70,16 +71,35 @@ interface FetchPrArgs {
   owner_repo: string;
   remote: string;
   out: string;
+  host?: string;
   /** yargs camelCases `--max-chunk-lines`; the snake_case form does not exist. */
   maxChunkLines: number;
+  effort?: ReviewEffort;
 }
 
 type FetchPrResult = PlanReport & {
+  /** The review's effort, recorded so the roster reads one value everywhere. */
+  effort?: ReviewEffort;
   prNumber: string;
   ownerRepo: string;
   remote: string;
   ref: string;
   fetchedSha: string;
+  /**
+   * When this review window opened (ISO-8601). `cleanup` audits the PR for
+   * writes by the current user inside [fetchedAt, cleanup) that did not go
+   * through `qwen review submit` — the submit-only contract's tripwire.
+   */
+  fetchedAt: string;
+  /**
+   * Earliest `fetchedAt` across drift restarts of the SAME PR (the head-drift
+   * rule reruns fetch-pr, overwriting this report). Cleanup audits from here,
+   * so a write made during an abandoned attempt stays inside the window.
+   */
+  auditSince: string;
+  /** GitHub host this PR lives on (Enterprise), null for github.com — so the
+   * cleanup audit queries the same host the review did. */
+  host: string | null;
   worktreePath: string;
   baseRefName: string;
   headRefName: string;
@@ -276,13 +296,73 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     plan = buildDiffPlan('', args.maxChunkLines);
   }
 
-  // 6. Emit the report.
+  // 6. Emit the report. The window opening survives drift restarts: this
+  // command overwrites its own report, and a reset boundary would hide any
+  // bypass write made during the abandoned attempt from cleanup's audit.
+  const fetchedAt = new Date().toISOString();
+  let auditSince = fetchedAt;
+  let prevRaw: string | null = null;
+  try {
+    prevRaw = readFileSync(out, 'utf8');
+  } catch (err) {
+    // ENOENT is the normal first attempt for this target — silent. Any other
+    // read failure (EACCES, EISDIR, I/O) is NOT "no previous report"; name it
+    // so an operator is not sent toward the wrong cause.
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code !== 'ENOENT') {
+      writeStderrLine(
+        `WARNING: could not read the previous fetch report at ${out} (${code ?? (err as Error).message}); ` +
+          `the audit window starts at this fetch and may not reach an earlier abandoned attempt.`,
+      );
+    }
+  }
+  if (prevRaw !== null) {
+    try {
+      const prev = JSON.parse(prevRaw) as {
+        prNumber?: unknown;
+        fetchedAt?: unknown;
+        auditSince?: unknown;
+      };
+      const prevSince =
+        typeof prev.auditSince === 'string'
+          ? prev.auditSince
+          : typeof prev.fetchedAt === 'string'
+            ? prev.fetchedAt
+            : null;
+      if (
+        prev.prNumber === prNumber &&
+        prevSince !== null &&
+        !Number.isNaN(Date.parse(prevSince)) &&
+        // `< auditSince` (which is `fetchedAt`, i.e. now) is also the upper
+        // bound: the window opening only ever moves BACKWARD to an earlier
+        // attempt, never forward. A corrupted far-future `auditSince`
+        // (`"2099-…"`) is therefore rejected here — it would push the window
+        // ahead of every real comment and silently report a clean audit.
+        // (ISO-8601 strings from `toISOString()` compare chronologically.)
+        prevSince < auditSince
+      ) {
+        auditSince = prevSince;
+      }
+    } catch {
+      // The file exists but is unparseable — a crash mid-write leaves
+      // truncated JSON. Silently resetting the window to this fetch would let
+      // a bypass write from the abandoned attempt escape the audit, so warn:
+      // the window may not reach it.
+      writeStderrLine(
+        `WARNING: the previous fetch report at ${out} is not valid JSON (a crash mid-write?); ` +
+          `the audit window starts at this fetch and may not reach an earlier abandoned attempt.`,
+      );
+    }
+  }
   const result: FetchPrResult = {
     prNumber,
     ownerRepo,
     remote,
     ref,
     fetchedSha,
+    fetchedAt,
+    auditSince,
+    host: args.host ?? null,
     worktreePath: wt,
     baseRefName: meta.baseRefName,
     headRefName: meta.headRefName,
@@ -297,6 +377,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     diffPath,
     diffPathAbsolute,
     prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
+    ...(args.effort ? { effort: args.effort } : {}),
     ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path)),
   };
 
@@ -362,6 +443,15 @@ export const fetchPrCommand: CommandModule = {
         default: DEFAULT_MAX_CHUNK_LINES,
         describe:
           'Target size, in diff lines, of each review chunk. A chunk boundary falls on a hunk boundary; a hunk larger than this is split only at a top-level declaration, never inside a function.',
+      })
+      .option('effort', {
+        type: 'string',
+        choices: ['low', 'medium', 'high'],
+        describe:
+          'The review effort. `medium` (balanced) drops the adversarial ' +
+          'personas from the required roster; recorded in the plan so ' +
+          'check-coverage, agent-prompt --roster and compose-review all read ' +
+          'one value. Omit for the full (high) roster.',
       }),
   handler: async (argv) => {
     setGhHost((argv as { host?: string }).host);

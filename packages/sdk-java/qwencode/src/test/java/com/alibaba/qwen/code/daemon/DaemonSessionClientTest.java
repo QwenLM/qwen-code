@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.daemon;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -128,6 +129,26 @@ class DaemonSessionClientTest {
             assertEquals(List.of("rest"), capabilities.getTransports());
             assertTrue(!capabilities.getRaw().getClass().getName()
                     .startsWith("com.alibaba.fastjson2"));
+        }
+    }
+
+    @Test
+    void rejectsCompressedRestResponse() {
+        server.removeContext("/capabilities");
+        server.createContext("/capabilities", exchange -> {
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.getResponseHeaders().set("Content-Encoding", "gzip");
+            byte[] body = "{\"v\":1}".getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+
+        try (DaemonClient daemon = newClient()) {
+            DaemonProtocolException failure = assertThrows(
+                    DaemonProtocolException.class, daemon::capabilities);
+            assertTrue(failure.getMessage().contains(
+                    "unsupported Content-Encoding"));
         }
     }
 
@@ -340,6 +361,196 @@ class DaemonSessionClientTest {
         }
         assertEquals(List.of("one"), observed);
         assertEquals(List.of("0", "1"), cursors);
+    }
+
+    @Test
+    void sendsAdmissionEpochOnEverySseConnection() {
+        AtomicInteger subscriptions = new AtomicInteger();
+        List<String> cursors = new ArrayList<>();
+        List<String> epochs = new ArrayList<>();
+        server.createContext("/session/session-1/prompt", exchange ->
+                sendJson(exchange, 202,
+                        "{\"promptId\":\"prompt-1\",\"lastEventId\":0,"
+                                + "\"eventEpoch\":\"epoch-admission\"}"));
+        server.createContext("/session/session-1/events", exchange -> {
+            cursors.add(exchange.getRequestHeaders().getFirst("Last-Event-ID"));
+            epochs.add(exchange.getRequestHeaders()
+                    .getFirst("X-Qwen-Event-Epoch"));
+            if (subscriptions.incrementAndGet() == 1) {
+                sendSseWithEpoch(exchange, textEvent(1, "one"),
+                        "epoch-admission");
+            } else {
+                sendSseWithEpoch(exchange, terminalEvent(2),
+                        "epoch-admission");
+            }
+        });
+        server.createContext("/session/session-1/detach", noContent());
+
+        try (DaemonClient daemon = newClient();
+                DaemonSessionClient session = daemon.createSession()) {
+            PromptCall call = session.startPrompt(PromptRequest.text("go"),
+                    PromptObserver.NOOP);
+            PromptAcceptance acceptance = call.acceptanceFuture().join();
+            assertEquals("epoch-admission", acceptance.getEventEpoch());
+            assertEquals(PromptTerminal.Kind.COMPLETE,
+                    call.completionFuture().join().getKind());
+        }
+        assertEquals(List.of("0", "1"), cursors);
+        assertEquals(List.of("epoch-admission", "epoch-admission"), epochs);
+    }
+
+    @Test
+    void learnsEpochFromSseResponseAndSendsItOnReconnect() {
+        AtomicInteger subscriptions = new AtomicInteger();
+        List<String> epochs = new ArrayList<>();
+        server.createContext("/session/session-1/prompt", exchange ->
+                sendJson(exchange, 202,
+                        "{\"promptId\":\"prompt-1\",\"lastEventId\":0}"));
+        server.createContext("/session/session-1/events", exchange -> {
+            epochs.add(exchange.getRequestHeaders()
+                    .getFirst("X-Qwen-Event-Epoch"));
+            if (subscriptions.incrementAndGet() == 1) {
+                sendSseWithEpoch(exchange, textEvent(1, "one"),
+                        "epoch-learned");
+            } else {
+                sendSseWithEpoch(exchange, terminalEvent(2),
+                        "epoch-learned");
+            }
+        });
+        server.createContext("/session/session-1/detach", noContent());
+
+        try (DaemonClient daemon = newClient();
+                DaemonSessionClient session = daemon.createSession()) {
+            PromptCall call = session.startPrompt(PromptRequest.text("go"),
+                    PromptObserver.NOOP);
+            assertNull(call.acceptanceFuture().join().getEventEpoch());
+            assertEquals(PromptTerminal.Kind.COMPLETE,
+                    call.completionFuture().join().getKind());
+        }
+        assertEquals(2, epochs.size());
+        assertNull(epochs.get(0));
+        assertEquals("epoch-learned", epochs.get(1));
+    }
+
+    @Test
+    void retainsKnownEpochWhenSseResponseOmitsHeader() {
+        AtomicInteger subscriptions = new AtomicInteger();
+        List<String> epochs = new ArrayList<>();
+        server.createContext("/session/session-1/prompt", exchange ->
+                sendJson(exchange, 202,
+                        "{\"promptId\":\"prompt-1\",\"lastEventId\":0,"
+                                + "\"eventEpoch\":\"epoch-known\"}"));
+        server.createContext("/session/session-1/events", exchange -> {
+            epochs.add(exchange.getRequestHeaders()
+                    .getFirst("X-Qwen-Event-Epoch"));
+            if (subscriptions.incrementAndGet() == 1) {
+                sendSse(exchange, textEvent(1, "one"));
+            } else {
+                sendSse(exchange, terminalEvent(2));
+            }
+        });
+        server.createContext("/session/session-1/detach", noContent());
+
+        try (DaemonClient daemon = newClient();
+                DaemonSessionClient session = daemon.createSession()) {
+            assertEquals(PromptTerminal.Kind.COMPLETE,
+                    session.promptText("go").getTerminal().getKind());
+        }
+        assertEquals(List.of("epoch-known", "epoch-known"), epochs);
+    }
+
+    @Test
+    void preventsStaleCursorFromAcceptingNewEpochSuffix() {
+        AtomicReference<String> requestEpoch = new AtomicReference<>();
+        server.createContext("/session/session-1/prompt", exchange ->
+                sendJson(exchange, 202,
+                        "{\"promptId\":\"prompt-1\",\"lastEventId\":2,"
+                                + "\"eventEpoch\":\"epoch-old\"}"));
+        server.createContext("/session/session-1/events", exchange -> {
+            requestEpoch.set(exchange.getRequestHeaders()
+                    .getFirst("X-Qwen-Event-Epoch"));
+            String events = "epoch-old".equals(requestEpoch.get())
+                    ? "event: state_resync_required\ndata: {\"v\":1,"
+                            + "\"type\":\"state_resync_required\",\"data\":{"
+                            + "\"reason\":\"epoch_reset\","
+                            + "\"detail\":\"epoch_mismatch\"}}\n\n"
+                    : terminalEvent(3);
+            sendSseWithEpoch(exchange, events, "epoch-new");
+        });
+        server.createContext("/session/session-1/detach", noContent());
+
+        try (DaemonClient daemon = newClient();
+                DaemonSessionClient session = daemon.createSession()) {
+            PromptOutcomeIndeterminateException failure = assertThrows(
+                    PromptOutcomeIndeterminateException.class,
+                    () -> session.promptText("go"));
+            assertTrue(failure.getMessage().contains("event epoch changed"));
+        }
+        assertEquals("epoch-old", requestEpoch.get());
+    }
+
+    @Test
+    void failsClosedOnMalformedSseResponseEpoch() {
+        server.createContext("/session/session-1/prompt", exchange ->
+                sendJson(exchange, 202,
+                        "{\"promptId\":\"prompt-1\",\"lastEventId\":0}"));
+        server.createContext("/session/session-1/events", exchange ->
+                sendSseWithEpoch(exchange, terminalEvent(1), "invalid epoch"));
+        server.createContext("/session/session-1/detach", noContent());
+
+        try (DaemonClient daemon = newClient();
+                DaemonSessionClient session = daemon.createSession()) {
+            PromptOutcomeIndeterminateException failure = assertThrows(
+                    PromptOutcomeIndeterminateException.class,
+                    () -> session.promptText("go"));
+            assertTrue(failure.getMessage()
+                    .contains("X-Qwen-Event-Epoch must match"));
+        }
+    }
+
+    @Test
+    void failsClosedOnDuplicateSseResponseEpochHeaders() {
+        server.createContext("/session/session-1/prompt", exchange ->
+                sendJson(exchange, 202,
+                        "{\"promptId\":\"prompt-1\",\"lastEventId\":0}"));
+        server.createContext("/session/session-1/events", exchange -> {
+            byte[] bytes = ("retry: 0\n\n" + terminalEvent(1))
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.getResponseHeaders().set("Content-Type",
+                    "text/event-stream");
+            exchange.getResponseHeaders().add("X-Qwen-Event-Epoch", "epoch-a");
+            exchange.getResponseHeaders().add("X-Qwen-Event-Epoch", "epoch-b");
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        server.createContext("/session/session-1/detach", noContent());
+
+        try (DaemonClient daemon = newClient();
+                DaemonSessionClient session = daemon.createSession()) {
+            PromptOutcomeIndeterminateException failure = assertThrows(
+                    PromptOutcomeIndeterminateException.class,
+                    () -> session.promptText("go"));
+            assertTrue(failure.getMessage()
+                    .contains("multiple event epoch headers"));
+        }
+    }
+
+    @Test
+    void rejectsMalformedAdmissionEpochAsUnknownAdmission() {
+        server.createContext("/session/session-1/prompt", exchange ->
+                sendJson(exchange, 202,
+                        "{\"promptId\":\"prompt-1\",\"lastEventId\":0,"
+                                + "\"eventEpoch\":\"invalid epoch\"}"));
+        server.createContext("/session/session-1/detach", noContent());
+
+        try (DaemonClient daemon = newClient();
+                DaemonSessionClient session = daemon.createSession()) {
+            PromptAdmissionUnknownException failure = assertThrows(
+                    PromptAdmissionUnknownException.class,
+                    () -> session.promptText("go"));
+            assertInstanceOf(DaemonProtocolException.class, failure.getCause());
+        }
     }
 
     @Test
@@ -2522,6 +2733,76 @@ class DaemonSessionClientTest {
     }
 
     @Test
+    void compressedRetryableHttpPromptFailureIsAdmissionUnknownAndNotRetried() {
+        AtomicInteger prompts = new AtomicInteger();
+        server.createContext("/session/session-1/prompt", exchange -> {
+            prompts.incrementAndGet();
+            sendEncodedJson(exchange, 502, "gzip",
+                    "{\"error\":\"bad gateway\"}");
+        });
+        server.createContext("/session/session-1/detach", noContent());
+
+        try (DaemonClient daemon = newClient();
+                DaemonSessionClient session = daemon.createSession()) {
+            PromptCall call = session.startPrompt(PromptRequest.text("go"),
+                    PromptObserver.NOOP);
+            CompletionException failure = assertThrows(CompletionException.class,
+                    () -> call.acceptanceFuture().join());
+            PromptAdmissionUnknownException admissionFailure = assertInstanceOf(
+                    PromptAdmissionUnknownException.class, failure.getCause());
+            DaemonHttpException cause = assertInstanceOf(DaemonHttpException.class,
+                    admissionFailure.getCause());
+            assertEquals(502, cause.getStatusCode());
+            assertThrows(PromptAlreadyActiveException.class,
+                    () -> session.startPrompt(
+                            PromptRequest.text("unsafe-reuse"),
+                            PromptObserver.NOOP));
+        }
+        assertEquals(1, prompts.get());
+    }
+
+    @Test
+    void compressedPromptAdmissionIsOutcomeUnknown() {
+        server.createContext("/session/session-1/prompt", exchange ->
+                sendEncodedJson(exchange, 202, "gzip",
+                        "{\"promptId\":\"prompt-1\",\"lastEventId\":0}"));
+        server.createContext("/session/session-1/detach", noContent());
+
+        try (DaemonClient daemon = newClient();
+                DaemonSessionClient session = daemon.createSession()) {
+            PromptCall call = session.startPrompt(PromptRequest.text("go"),
+                    PromptObserver.NOOP);
+            CompletionException failure = assertThrows(CompletionException.class,
+                    () -> call.acceptanceFuture().join());
+            PromptAdmissionUnknownException admissionFailure = assertInstanceOf(
+                    PromptAdmissionUnknownException.class, failure.getCause());
+            assertInstanceOf(DaemonProtocolException.class,
+                    admissionFailure.getCause());
+        }
+    }
+
+    @Test
+    void compressedDefinitivePromptRejectionRemainsHttpError() {
+        server.createContext("/session/session-1/prompt", exchange ->
+                sendEncodedJson(exchange, 409, "gzip",
+                        "{\"error\":\"conflict\"}"));
+        server.createContext("/session/session-1/detach", noContent());
+
+        try (DaemonClient daemon = newClient();
+                DaemonSessionClient session = daemon.createSession()) {
+            PromptCall call = session.startPrompt(PromptRequest.text("go"),
+                    PromptObserver.NOOP);
+            CompletionException failure = assertThrows(CompletionException.class,
+                    () -> call.acceptanceFuture().join());
+            DaemonHttpException cause = assertInstanceOf(DaemonHttpException.class,
+                    failure.getCause());
+            assertEquals(409, cause.getStatusCode());
+            assertTrue(cause.getResponseBody().contains(
+                    "unsupported Content-Encoding"));
+        }
+    }
+
+    @Test
     void definitivePromptRejectionRemainsHttpError() {
         AtomicInteger prompts = new AtomicInteger();
         server.createContext("/session/session-1/prompt", exchange -> {
@@ -2612,10 +2893,28 @@ class DaemonSessionClientTest {
         exchange.close();
     }
 
+    private static void sendEncodedJson(HttpExchange exchange, int status,
+            String contentEncoding, String body) throws IOException {
+        byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
+        exchange.getResponseHeaders().set("Content-Type", "application/json");
+        exchange.getResponseHeaders().set("Content-Encoding", contentEncoding);
+        exchange.sendResponseHeaders(status, bytes.length);
+        exchange.getResponseBody().write(bytes);
+        exchange.close();
+    }
+
     private static void sendSse(HttpExchange exchange, String events)
             throws IOException {
+        sendSseWithEpoch(exchange, events, null);
+    }
+
+    private static void sendSseWithEpoch(HttpExchange exchange, String events,
+            String epoch) throws IOException {
         byte[] bytes = ("retry: 0\n\n" + events).getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+        if (epoch != null) {
+            exchange.getResponseHeaders().set("X-Qwen-Event-Epoch", epoch);
+        }
         exchange.sendResponseHeaders(200, bytes.length);
         exchange.getResponseBody().write(bytes);
         exchange.close();

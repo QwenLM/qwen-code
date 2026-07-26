@@ -5868,6 +5868,56 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('deduplicates repeated cancellation broadcasts while idle', async () => {
+      const events: BridgeEvent[] = [];
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const collecting = (async () => {
+        for await (const event of bridge.subscribeEvents(session.sessionId, {
+          signal: abort.signal,
+        })) {
+          if (event.type === 'prompt_cancelled') events.push(event);
+        }
+      })();
+
+      await bridge.cancelSession(session.sessionId);
+      await bridge.cancelSession(session.sessionId);
+      await vi.waitFor(() => expect(events).toHaveLength(1));
+
+      abort.abort();
+      await collecting;
+      await bridge.shutdown();
+    });
+
+    it('allows a new idle cancellation after another prompt starts', async () => {
+      const events: BridgeEvent[] = [];
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const abort = new AbortController();
+      const collecting = (async () => {
+        for await (const event of bridge.subscribeEvents(session.sessionId, {
+          signal: abort.signal,
+        })) {
+          if (event.type === 'prompt_cancelled') events.push(event);
+        }
+      })();
+
+      await bridge.cancelSession(session.sessionId);
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'reset idle cancel latch' }],
+      });
+      await bridge.cancelSession(session.sessionId);
+      await vi.waitFor(() => expect(events).toHaveLength(2));
+
+      abort.abort();
+      await collecting;
+      await bridge.shutdown();
+    });
+
     it('broadcasts prompt_cancelled to peers when the originator SSE aborts mid-prompt', async () => {
       // Cross-client sync: client disconnect (tab close / network drop /
       // laptop sleep) is the most common cancel trigger in production.

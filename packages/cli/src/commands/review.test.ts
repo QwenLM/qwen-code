@@ -44,6 +44,7 @@ describe('reviewCommand', () => {
       'capture-local',
       'plan-diff',
       'pr-context',
+      'comment-status',
       'load-rules',
       'agent-prompt',
       'build-test',

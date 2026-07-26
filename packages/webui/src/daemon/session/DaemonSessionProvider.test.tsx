@@ -17,6 +17,7 @@ import type {
   DaemonUiSessionActions,
   PromptResult,
 } from '@qwen-code/sdk/daemon';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import {
   DaemonSessionProvider,
   useDaemonActions,
@@ -9096,10 +9097,82 @@ describe('DaemonSessionProvider', () => {
     });
 
     expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledTimes(2);
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenNthCalledWith(
+      1,
+      session.sessionId,
+      {
+        beforeRecordId: 'record-2',
+        limit: 25,
+        clientId: session.clientId,
+      },
+    );
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenNthCalledWith(
+      2,
+      session.sessionId,
+      {
+        beforeRecordId: 'record-2',
+        limit: 25,
+        clientId: session.clientId,
+      },
+    );
     expect(
       blocks.map((block) => ('text' in block ? block.text : undefined)),
     ).toEqual(['older prompt', 'recent prompt']);
     expect(history?.hasMore).toBe(false);
+  });
+
+  it('latches a non-retryable transcript page failure', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const replayEvent = (id: number, text: string): DaemonEvent => ({
+      id,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text },
+          _meta: { 'qwen.session.recordId': `record-${id}` },
+        },
+      },
+    });
+    const session = createMockSession({
+      sessionId: 'session-forbidden-history-page',
+      historyHasMore: true,
+      replaySnapshot: {
+        compactedReplay: [replayEvent(2, 'recent prompt')],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage.mockRejectedValue(
+      new DaemonHttpError(403, undefined, 'Forbidden'),
+    );
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+    function Harness() {
+      history = useDaemonTranscriptHistory();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 25,
+    });
+    await act(async () => {
+      await expect(history?.loadMore()).rejects.toThrow('Forbidden');
+      await flushPromises();
+    });
+
+    expect(history?.paginationError).toBe(true);
+    expect(history?.hasMore).toBe(false);
+
+    await act(async () => {
+      await history?.loadMore();
+      await flushPromises();
+    });
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledTimes(1);
   });
 
   it('skips malformed older-page events and advances the cursor', async () => {
@@ -9265,11 +9338,8 @@ describe('DaemonSessionProvider', () => {
       blocks.map((block) => ('text' in block ? block.text : undefined)),
     ).toEqual(['recent prompt']);
     expect(history?.hasMore).toBe(false);
-    expect(notices.at(-1)).toMatchObject({
-      code: 'daemon.transcript_history.failed',
-      message: 'Failed to load earlier session history',
-      debugMessage: 'Replay conversion failed for this page',
-    });
+    expect(history?.paginationError).toBe(true);
+    expect(notices.at(-1)).toBeUndefined();
   });
 
   it('keeps an oversized initial replay intact and stops older pagination', async () => {

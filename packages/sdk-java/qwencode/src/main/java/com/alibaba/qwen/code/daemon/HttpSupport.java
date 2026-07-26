@@ -28,10 +28,26 @@ final class HttpSupport {
     }
 
     static Response consume(HttpResponse<Body> response, String operation) {
-        Body body = response.body();
-        byte[] bytes = body.getBytes();
         boolean success = response.statusCode() >= 200
                 && response.statusCode() < 300;
+        List<String> contentEncodings = response.headers()
+                .allValues("Content-Encoding");
+        if (contentEncodings.size() > 1
+                || (contentEncodings.size() == 1
+                        && !"identity".equalsIgnoreCase(
+                                contentEncodings.get(0).trim()))) {
+            String diagnostic = operation
+                    + " response used unsupported Content-Encoding: "
+                    + String.join(", ", contentEncodings);
+            if (!success) {
+                return new Response(response.statusCode(),
+                        "Response body unavailable: " + diagnostic);
+            }
+            throw new DaemonProtocolException(
+                    diagnostic);
+        }
+        Body body = response.body();
+        byte[] bytes = body.getBytes();
         if (body.isOverflow()) {
             if (success) {
                 throw new DaemonProtocolException("JSON response exceeds "

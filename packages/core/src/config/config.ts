@@ -53,7 +53,6 @@ import {
   StandardFileSystemService,
   type FileEncodingType,
 } from '../services/fileSystemService.js';
-import { GitWorktreeService } from '../services/gitWorktreeService.js';
 import { cleanupStaleAgentWorktrees } from '../services/worktreeCleanup.js';
 import {
   CronScheduler,
@@ -66,6 +65,7 @@ import {
   validateMemoryPressureConfig,
   type MemoryPressureConfig,
 } from '../services/memoryPressureMonitor.js';
+import { findGitRoot } from '../utils/gitUtils.js';
 
 // Tools — only lightweight imports; tool classes are lazy-loaded via dynamic import
 import {
@@ -107,6 +107,7 @@ import { SubagentManager } from '../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import { MonitorRegistry } from '../services/monitorRegistry.js';
+import { normalizeImageGenerationBaseUrl } from '../services/image-generation-service.js';
 import { BackgroundAgentResumeService } from '../agents/background-agent-resume.js';
 import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js';
 import { WorkflowRunRegistry } from '../agents/workflow-run-registry.js';
@@ -309,6 +310,22 @@ export interface ApprovalModeInfo {
   id: ApprovalMode;
   name: string;
   description: string;
+}
+
+type ManualPlanExitNoticeEventKind = 'clear' | 'manual-exit';
+
+interface ManualPlanExitNoticeEventState {
+  version: number;
+  kind: ManualPlanExitNoticeEventKind;
+}
+
+interface ManualPlanExitNoticeCursorState {
+  seenVersion: number;
+}
+
+export interface ManualPlanExitNotice {
+  version: number;
+  currentMode: ApprovalMode;
 }
 
 /**
@@ -847,6 +864,10 @@ export interface AgentsCollabSettings {
     /** Model selector for the built-in Explore subagent (default: inherit). */
     exploreModel?: string;
   };
+  /** Maps model grade names exposed to the Agent tool to model selectors. */
+  modelGrades?: Record<string, string>;
+  /** Optional whitelist of model grades exposed to the Agent tool. */
+  allowedGrades?: string[];
   /**
    * Global maximum number of background sub-agents running concurrently.
    * When the cap is reached, additional launches wait for a slot.
@@ -1044,6 +1065,8 @@ export interface ConfigParameters {
   artifactPublisher?: 'local' | 'host' | 'oss';
   artifactHost?: ArtifactHostConfig;
   artifactOss?: ArtifactOssConfig;
+  /** Image generation model selected through `/model --image`. */
+  imageModel?: string;
   /**
    * P5 T7: suppress the one-time `Workflow` tool usage-warning banner.
    * When `true`, the registry-side warning latch is bypassed and the
@@ -1287,6 +1310,12 @@ export interface ConfigParameters {
   ) => Promise<void>;
   /** Lifecycle handle for an external settings file watcher. Stopped during shutdown. */
   settingsWatcher?: { stopWatching(): void };
+}
+
+export interface ImageGenerationConfig {
+  model: string;
+  baseUrl: string;
+  apiKeyEnv: string;
 }
 
 function normalizeConfigOutputFormat(
@@ -1745,6 +1774,14 @@ export class Config {
   private mcpReconcilePromise: Promise<void> | undefined;
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
+  /**
+   * Volatile system-prompt layer: the managed auto-memory section
+   * (instructions + MEMORY.md indexes). Kept separate from `userMemory`
+   * (context files, stable in-session) because it is rewritten on every
+   * memory save — prompt assembly appends it last so a save invalidates
+   * the shortest possible cached prompt prefix.
+   */
+  private autoMemoryPrompt = '';
   private sdkMode: boolean;
   private geminiMdFileCount: number;
   private conditionalRulesRegistry: ConditionalRulesRegistry | undefined;
@@ -1752,6 +1789,13 @@ export class Config {
   private approvalMode: ApprovalMode;
   private prePlanMode?: ApprovalMode;
   private approvalModeRevision = 0;
+  private manualPlanExitNoticeEventState: ManualPlanExitNoticeEventState = {
+    version: 0,
+    kind: 'clear',
+  };
+  private manualPlanExitNoticeCursorState: ManualPlanExitNoticeCursorState = {
+    seenVersion: 0,
+  };
   private autoModeDenialState: AutoModeDenialState = createDenialState();
   private readonly accessibility: AccessibilitySettings;
   private readonly showResponseTokensPerSecond: boolean;
@@ -1892,6 +1936,7 @@ export class Config {
   private readonly webSearchSettings?: WebSearchSettings;
   private webSearchNoticeEmitted = false;
   private visionModel?: string;
+  private imageModel?: string;
   private readonly visionBridgeTimeoutMs: number | undefined;
   private readonly modelFallbacks: string[];
   private readonly disableAllHooks: boolean;
@@ -2309,6 +2354,7 @@ export class Config {
     this.fastModel = params.fastModel || undefined;
     this.webSearchSettings = params.webSearch;
     this.visionModel = params.visionModel || undefined;
+    this.imageModel = params.imageModel || undefined;
     // Guard: nothing validates settings.json on the load path, so this is the
     // only real gate. `AbortSignal.timeout()` requires an integer in
     // [0, 2^31-1] — a fractional or out-of-range value (which the number-typed
@@ -2792,8 +2838,7 @@ export class Config {
           // subdir, not the repo root) always early-returned and the
           // sweep was permanently a no-op. Fast-bail still happens, just
           // against the *correct* directory.
-          const probe = new GitWorktreeService(this.targetDir);
-          const root = (await probe.getRepoTopLevel()) ?? this.targetDir;
+          const root = findGitRoot(this.targetDir) ?? this.targetDir;
           const worktreesDir = path.join(root, '.qwen', 'worktrees');
           try {
             await fsPromises.access(worktreesDir);
@@ -3054,6 +3099,7 @@ export class Config {
     // Safe mode: skip all context file loading (QWEN.md, AGENTS.md, rules)
     if (this.isSafeMode()) {
       this.setUserMemory('');
+      this.autoMemoryPrompt = '';
       this.setGeminiMdFileCount(0);
       this.conditionalRulesRegistry = new ConditionalRulesRegistry(
         [],
@@ -3186,25 +3232,24 @@ export class Config {
       // there. When empty the prompt builder emits a "MEMORY.md is currently
       // empty" placeholder — the same shape the per-project layer has used
       // since day one — so the cost is one extra index header.
-      this.setUserMemory(
-        this.memoryManager.appendToUserMemory(
-          memoryContent,
-          getAutoMemoryRoot(this.getProjectRoot()),
-          managedAutoMemoryIndex,
-          {
-            memoryDir: getUserAutoMemoryRoot(),
-            indexContent: userAutoMemoryIndex,
-          },
-          teamMemoryEnabled
-            ? {
-                memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
-                indexContent: teamAutoMemoryIndex,
-              }
-            : undefined,
-        ),
+      this.setUserMemory(memoryContent);
+      this.autoMemoryPrompt = this.memoryManager.buildAutoMemoryPrompt(
+        getAutoMemoryRoot(this.getProjectRoot()),
+        managedAutoMemoryIndex,
+        {
+          memoryDir: getUserAutoMemoryRoot(),
+          indexContent: userAutoMemoryIndex,
+        },
+        teamMemoryEnabled
+          ? {
+              memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
+              indexContent: teamAutoMemoryIndex,
+            }
+          : undefined,
       );
     } else {
       this.setUserMemory(memoryContent);
+      this.autoMemoryPrompt = '';
     }
     this.setGeminiMdFileCount(fileCount);
     this.conditionalRulesRegistry = new ConditionalRulesRegistry(
@@ -3245,7 +3290,7 @@ export class Config {
     }
 
     return (
-      `Warning: Loaded QWEN.md/context instructions use about ` +
+      `Warning: Loaded always-on context (QWEN.md context files + auto-memory) uses about ` +
       `${estimatedTokens.toLocaleString()} tokens, more than ` +
       `${Math.round(MEMORY_CONTEXT_WARNING_RATIO * 100)}% of this ` +
       `model's ${contextWindowSize.toLocaleString()} token context window. ` +
@@ -3434,8 +3479,12 @@ export class Config {
    * and should be displayed to the user during startup.
    */
   getWarnings(): string[] {
+    // Both layers are always loaded into the system prompt, so the size
+    // estimate must cover context files and the auto-memory section alike.
     const memoryContextWarning = this.buildMemoryContextWarning(
-      this.getUserMemory(),
+      [this.getUserMemory(), this.autoMemoryPrompt]
+        .filter(Boolean)
+        .join('\n\n'),
     );
     return memoryContextWarning
       ? [...this.warnings, memoryContextWarning]
@@ -3678,7 +3727,12 @@ export class Config {
     const available = selector.authType
       ? this.getAllConfiguredModels([selector.authType])
       : this.getAllConfiguredModels();
-    if (!available.some((m) => m.id === selector.modelId)) {
+    if (
+      !available.some(
+        (model) =>
+          model.id === selector.modelId && !model.voiceOnly && !model.imageOnly,
+      )
+    ) {
       return undefined;
     }
 
@@ -3736,6 +3790,19 @@ export class Config {
    */
   setVisionModel(model: string | undefined): void {
     this.visionModel = model || undefined;
+  }
+
+  /**
+   * Update the image generation model and make the tool available immediately
+   * when the selected provider route is valid.
+   */
+  async setImageModel(model: string | undefined): Promise<void> {
+    this.imageModel = model || undefined;
+    if (!this.initialized || !this.isImageGenerationEnabled()) {
+      return;
+    }
+    await this.registerImageGenerationTool(this.toolRegistry);
+    await this.toolRegistry.ensureTool(ToolNames.IMAGE_GEN);
   }
 
   /**
@@ -3865,7 +3932,7 @@ export class Config {
       return undefined;
     }
     // Each guard below silently drops the pin (the hardest failure mode to
-    // debug, hence the warn): skip fast/voice-only models (a `settings.json`
+    // debug, hence the warn): skip selector-only models (a `settings.json`
     // pin can bypass the slash command's filter), and never route the bridge at
     // the primary entry itself (the text-only model the bridge works around) —
     // via the provider-aware identity check so a cross-provider namesake stays
@@ -3877,6 +3944,7 @@ export class Config {
         (!parsedSetting.baseUrl || m.baseUrl === parsedSetting.baseUrl) &&
         !m.fastOnly &&
         !m.voiceOnly &&
+        !m.imageOnly &&
         !this.isCurrentPrimaryModel(m),
     );
     if (routeMatches.length > 1) {
@@ -3889,7 +3957,7 @@ export class Config {
     if (!match) {
       this.debugLogger.warn(
         `vision model pin '${visionModelForLog}' did not match a usable configured model ` +
-          `(removed, mistyped, fast/voice-only, or the primary itself); falling back to auto-select`,
+          `(removed, mistyped, selector-only, or the primary itself); falling back to auto-select`,
       );
       return undefined;
     }
@@ -5202,6 +5270,15 @@ export class Config {
     return this.userMemory;
   }
 
+  /**
+   * The managed auto-memory section of the system prompt (volatile layer).
+   * Empty when managed memory is unavailable. Callers assembling a system
+   * prompt must append this after all stable/context content.
+   */
+  getAutoMemoryPrompt(): string {
+    return this.autoMemoryPrompt;
+  }
+
   getOutputLanguageFilePath(): string | undefined {
     return this.outputLanguageFilePath;
   }
@@ -5371,12 +5448,48 @@ export class Config {
     return this.approvalModeRevision;
   }
 
+  private getManualPlanExitNoticeEventState(): ManualPlanExitNoticeEventState {
+    if (
+      !Object.prototype.hasOwnProperty.call(
+        this,
+        'manualPlanExitNoticeEventState',
+      ) &&
+      Object.prototype.hasOwnProperty.call(this, 'approvalMode')
+    ) {
+      const inheritedEvent = this.manualPlanExitNoticeEventState;
+      this.manualPlanExitNoticeEventState = inheritedEvent
+        ? { ...inheritedEvent }
+        : { version: 0, kind: 'clear' };
+    }
+    return this.manualPlanExitNoticeEventState;
+  }
+
+  private getOwnManualPlanExitNoticeCursorState(): ManualPlanExitNoticeCursorState {
+    if (
+      !Object.prototype.hasOwnProperty.call(
+        this,
+        'manualPlanExitNoticeCursorState',
+      )
+    ) {
+      this.manualPlanExitNoticeCursorState = { seenVersion: 0 };
+    }
+    return this.manualPlanExitNoticeCursorState;
+  }
+
   setApprovalMode(
     mode: ApprovalMode,
-    /** @deprecated Model origin no longer changes plan-exit approval. */
-    options?: { enteredByModel?: boolean },
+    options?: {
+      /** @deprecated Model origin no longer changes plan-exit approval. */
+      enteredByModel?: boolean;
+      /**
+       * Set by ExitPlanModeTool for user/leader-approved plan exits. Every
+       * other PLAN → non-PLAN transition (Shift+Tab, /approval-mode, /plan,
+       * ACP setSessionMode, confirm-and-switch) is a manual exit the model
+       * was never told about, and queues a one-shot system reminder.
+       */
+      fromApprovedPlanExit?: boolean;
+    },
   ): void {
-    void options;
     if (
       !this.isTrustedFolder() &&
       mode !== ApprovalMode.DEFAULT &&
@@ -5403,10 +5516,22 @@ export class Config {
     }
     // Update all mode bookkeeping only after fallible transition work has
     // succeeded, so callers never observe a partially applied mode change.
+    let noticeEvent =
+      Config.prototype.getManualPlanExitNoticeEventState.call(this);
+    if (!Object.prototype.hasOwnProperty.call(this, 'approvalMode')) {
+      noticeEvent = { ...noticeEvent };
+      this.manualPlanExitNoticeEventState = noticeEvent;
+    }
     if (mode === ApprovalMode.PLAN && fromMode !== ApprovalMode.PLAN) {
       this.prePlanMode = fromMode;
+      noticeEvent.version++;
+      noticeEvent.kind = 'clear';
     } else if (mode !== ApprovalMode.PLAN && fromMode === ApprovalMode.PLAN) {
       this.prePlanMode = undefined;
+      noticeEvent.version++;
+      noticeEvent.kind = options?.fromApprovedPlanExit
+        ? 'clear'
+        : 'manual-exit';
     }
     // Any deliberate mode change invalidates the AUTO denialTracking signal.
     if (fromMode !== mode) {
@@ -5416,6 +5541,51 @@ export class Config {
     if (fromMode !== mode) {
       this.approvalModeRevision++;
     }
+  }
+
+  /**
+   * Claims the latest manual plan-exit notice for this conversation.
+   */
+  takePendingManualPlanExitNotice(): ManualPlanExitNotice | undefined {
+    const event = Config.prototype.getManualPlanExitNoticeEventState.call(this);
+    const cursor =
+      Config.prototype.getOwnManualPlanExitNoticeCursorState.call(this);
+    if (event.version <= cursor.seenVersion) {
+      return undefined;
+    }
+
+    cursor.seenVersion = event.version;
+    if (
+      event.kind !== 'manual-exit' ||
+      this.approvalMode === ApprovalMode.PLAN
+    ) {
+      return undefined;
+    }
+
+    return {
+      version: event.version,
+      currentMode: this.approvalMode,
+    };
+  }
+
+  restorePendingManualPlanExitNotice(version: number): void {
+    const event = Config.prototype.getManualPlanExitNoticeEventState.call(this);
+    const cursor =
+      Config.prototype.getOwnManualPlanExitNoticeCursorState.call(this);
+    if (
+      event.version === version &&
+      event.kind === 'manual-exit' &&
+      this.approvalMode !== ApprovalMode.PLAN &&
+      cursor.seenVersion === version
+    ) {
+      cursor.seenVersion = Math.max(0, version - 1);
+    }
+  }
+
+  consumePendingManualPlanExitNotice(): boolean {
+    return (
+      Config.prototype.takePendingManualPlanExitNotice.call(this) !== undefined
+    );
   }
 
   /**
@@ -5750,6 +5920,57 @@ export class Config {
 
   getArtifactOssConfig(): ArtifactOssConfig | undefined {
     return this.artifactOss;
+  }
+
+  resolveImageGenerationModel(
+    setting: string | undefined,
+  ): ImageGenerationConfig | undefined {
+    const parsedSetting = parseVisionModelSetting(setting);
+    if (!parsedSetting) return undefined;
+
+    let selector;
+    try {
+      selector = resolveModelId(parsedSetting.selector);
+    } catch {
+      return undefined;
+    }
+    if (!selector) return undefined;
+
+    const routeMatches = this.getAllConfiguredModels().filter(
+      (model) =>
+        model.imageOnly === true &&
+        !model.fastOnly &&
+        !model.voiceOnly &&
+        model.id === selector.modelId &&
+        (!selector.authType || model.authType === selector.authType) &&
+        (!parsedSetting.baseUrl || model.baseUrl === parsedSetting.baseUrl),
+    );
+    if (routeMatches.length !== 1) return undefined;
+
+    const match = routeMatches[0]!;
+    const apiKeyEnv = match.envKey?.trim();
+    const configuredBaseUrl = match.registryBaseUrl?.trim();
+    if (!apiKeyEnv || !configuredBaseUrl) return undefined;
+
+    const baseUrl = normalizeImageGenerationBaseUrl(
+      parsedSetting.baseUrl ?? configuredBaseUrl,
+    );
+    if (!baseUrl) return undefined;
+
+    return {
+      model: match.id,
+      baseUrl,
+      apiKeyEnv,
+    };
+  }
+
+  getImageGenerationConfig(): ImageGenerationConfig | undefined {
+    if (this.bareMode || this.safeMode) return undefined;
+    return this.resolveImageGenerationModel(this.imageModel);
+  }
+
+  isImageGenerationEnabled(): boolean {
+    return this.getImageGenerationConfig() !== undefined;
   }
 
   shouldAutoOpenArtifact(): boolean {
@@ -6774,6 +6995,35 @@ export class Config {
     return this.onPersistPermissionRuleCallback;
   }
 
+  private async registerImageGenerationTool(
+    registry: ToolRegistry,
+  ): Promise<void> {
+    if (
+      !this.isImageGenerationEnabled() ||
+      registry.getAllToolNames().includes(ToolNames.IMAGE_GEN)
+    ) {
+      return;
+    }
+    let enabled = true;
+    try {
+      enabled = this.permissionManager
+        ? await this.permissionManager.isToolEnabled(ToolNames.IMAGE_GEN)
+        : true;
+    } catch (error) {
+      this.debugLogger.warn(
+        `Failed to check permissions for tool "${ToolNames.IMAGE_GEN}", skipping registration:`,
+        error,
+      );
+      return;
+    }
+    if (!enabled) return;
+
+    registry.registerFactory(ToolNames.IMAGE_GEN, async () => {
+      const { ImageGenTool } = await import('../tools/image-gen.js');
+      return new ImageGenTool(this);
+    });
+  }
+
   async createToolRegistry(
     sendSdkMcpMessage?: SendSdkMcpMessage,
     options?: { skipDiscovery?: boolean; forSubAgent?: boolean },
@@ -7018,6 +7268,7 @@ export class Config {
         this.warnings.push(gate.notice);
       }
     }
+    await this.registerImageGenerationTool(registry);
     if (this.isArtifactEnabled()) {
       await registerLazy(ToolNames.ARTIFACT, async () => {
         const { ArtifactTool } = await import(

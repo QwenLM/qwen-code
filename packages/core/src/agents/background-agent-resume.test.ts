@@ -70,6 +70,7 @@ describe('BackgroundAgentResumeService', () => {
           ? {
               name: 'researcher',
               color: 'cyan',
+              model: undefined as string | undefined,
             }
           : null,
       ),
@@ -1439,14 +1440,20 @@ describe('BackgroundAgentResumeService', () => {
     });
 
     const { service, subagentManager } = createService();
+    subagentManager.loadSubagent.mockResolvedValue({
+      name: 'researcher',
+      color: 'cyan',
+      model: 'configured-model',
+    });
     subagentManager.createAgentHeadless = createAgentHeadless;
 
     const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
 
     expect(resumed).toBeDefined();
     expect(createAgentHeadless).toHaveBeenCalledTimes(1);
-    const [, overriddenConfig, createOptions] =
+    const [resumeConfig, overriddenConfig, createOptions] =
       createAgentHeadless.mock.calls[0]!;
+    expect(resumeConfig.model).toBe('inherit');
     expect(overriddenConfig.getApprovalMode()).toBe('auto-edit');
     expect(overriddenConfig.getBareMode()).toBe(true);
     expect(overriddenConfig.getSandbox()).toEqual({

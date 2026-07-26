@@ -45,6 +45,8 @@ import {
 } from './eventBus.js';
 import {
   normalizeCompactedReplayMaxBytes,
+  normalizeMaxJournalBytes,
+  normalizeMaxJournalEvents,
   TurnBoundaryCompactionEngine,
 } from './compactionEngine.js';
 import {
@@ -460,6 +462,8 @@ interface SessionEntry {
   sourceId?: string;
   /** Worktree isolation metadata, when created with worktree param. */
   worktree?: { slug: string; path: string; branch: string };
+  /** Branch metadata, when created with branch param. */
+  branch?: { name: string; baseBranch: string };
   channel: AcpChannel;
   connection: ClientSideConnection;
   /** Per-session event bus drives `GET /session/:id/events`. */
@@ -594,6 +598,8 @@ interface SessionEntry {
   retryAllowed: boolean;
   /** Prompt id whose `prompt_cancelled` event has already been broadcast. */
   cancelBroadcastPromptId?: string;
+  /** Whether an id-less idle cancellation has already been broadcast. */
+  cancelBroadcastWithoutPrompt?: boolean;
   /**
    * Count of times `spawnOrAttach` has returned `attached: true` for
    * this entry — i.e. a second-or-subsequent client claimed this
@@ -987,13 +993,18 @@ function broadcastPromptCancelledOnce(
   originatorClientId: string | undefined,
   reason?: 'forward_failed',
 ): void {
-  if (promptId !== undefined && entry.cancelBroadcastPromptId === promptId) {
+  if (
+    (promptId !== undefined && entry.cancelBroadcastPromptId === promptId) ||
+    (promptId === undefined && entry.cancelBroadcastWithoutPrompt === true)
+  ) {
     writeStderrLine(
-      `broadcastPromptCancelledOnce: suppressed duplicate cancel for session ${sessionId} prompt=${promptId}`,
+      `broadcastPromptCancelledOnce: suppressed duplicate cancel for session ${sessionId} prompt=${promptId ?? 'none'}`,
     );
     return;
   }
-  if (promptId !== undefined) {
+  if (promptId === undefined) {
+    entry.cancelBroadcastWithoutPrompt = true;
+  } else {
     entry.cancelBroadcastPromptId = promptId;
   }
   broadcastPromptCancelled(
@@ -1430,6 +1441,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   const compactedReplayMaxBytes = normalizeCompactedReplayMaxBytes(
     opts.compactedReplayMaxBytes,
   );
+  const maxJournalEvents = normalizeMaxJournalEvents(opts.maxJournalEvents);
+  const maxJournalBytes = normalizeMaxJournalBytes(opts.maxJournalBytes);
   const channelFactory = opts.channelFactory ?? defaultSpawnChannelFactory;
   // Close over a per-handle env-override snapshot. Calls to
   // `channelFactory` at spawn time receive this as the 2nd arg, so
@@ -1912,6 +1925,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ...(entry.turnError !== undefined ? { turnError: entry.turnError } : {}),
       pendingInteractions: [...entry.pendingInteractions.values()],
       ...(entry.worktree ? { worktree: entry.worktree } : {}),
+      ...(entry.branch ? { branch: entry.branch } : {}),
     };
   };
   // Pending + resolved permission state lives in
@@ -2527,6 +2541,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     sourceType?: string,
     sourceId?: string,
     worktree?: { slug: string; path: string; branch: string },
+    branch?: { name: string; baseBranch: string },
   ): Promise<BridgeSession> {
     // Get-or-create the daemon's single channel, then call
     // `connection.newSession()` on it. Sessions share the child's
@@ -2631,7 +2646,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         newSessionResp.sessionId,
         boundWorkspace,
         undefined,
-        { parentSessionId, sourceType, sourceId, worktree },
+        { parentSessionId, sourceType, sourceId, worktree, branch },
       );
       initializedSessionId = entry.sessionId;
       sessionRegistered = true;
@@ -2823,6 +2838,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ? { parentSessionPersisted: parentSessionPersisted === true }
           : {}),
         ...(entry.worktree ? { worktree: entry.worktree } : {}),
+        ...(entry.branch ? { branch: entry.branch } : {}),
       };
     } finally {
       ci.sessionSpawnsInFlight = Math.max(0, ci.sessionSpawnsInFlight - 1);
@@ -3577,7 +3593,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         if (published === undefined) {
           failureCount += 1;
           teeServeDebugLine(
-            `broadcastWorkspaceEvent: publish on session ${entry.sessionId} no-op (bus closed)`,
+            `broadcastWorkspaceEvent: publish on session ${entry.sessionId} no-op (bus closed or unserializable)`,
           );
         } else {
           successCount += 1;
@@ -3619,6 +3635,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       undefined,
       new TurnBoundaryCompactionEngine({
         maxReplayBytes: compactedReplayMaxBytes,
+        maxJournalEvents,
+        maxJournalBytes,
         onReplayWindowEviction: (eviction) => {
           teeServeDebugLine(
             `replay window evicted ${JSON.stringify(eviction)}`,
@@ -3799,6 +3817,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       sourceType?: string;
       sourceId?: string;
       worktree?: { slug: string; path: string; branch: string };
+      branch?: { name: string; baseBranch: string };
     } = {},
   ): SessionEntry => {
     const entry: SessionEntry = {
@@ -3811,6 +3830,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ...(options.sourceType ? { sourceType: options.sourceType } : {}),
       ...(options.sourceId !== undefined ? { sourceId: options.sourceId } : {}),
       ...(options.worktree ? { worktree: options.worktree } : {}),
+      ...(options.branch ? { branch: options.branch } : {}),
       channel: ci.channel,
       connection: ci.connection,
       events,
@@ -4825,6 +4845,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               : maxPendingPromptsPerSession,
           eventRingSize,
           compactedReplayMaxBytes,
+          maxJournalEvents,
+          maxJournalBytes,
           channelIdleTimeoutMs: resolvedChannelIdleTimeoutMs(),
           sessionIdleTimeoutMs,
         },
@@ -5128,6 +5150,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         source.sourceType,
         source.sourceId,
         req.worktree,
+        req.branch,
       );
       // Track in-flight spawns regardless of scope. Under `single`
       // this also serves the coalescing path above (a parallel
@@ -5439,6 +5462,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 })();
                 entry.promptActive = true;
                 entry.activePromptId = pendingEntry.promptId;
+                delete entry.cancelBroadcastWithoutPrompt;
                 delete entry.turnError;
                 activePromptCounter++;
                 entry.sessionLastSeenAt = Date.now();
@@ -6459,7 +6483,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           if (published === undefined) {
             failureCount += 1;
             teeServeDebugLine(
-              `publishWorkspaceEvent: publish on session ${entry.sessionId} no-op (bus closed)`,
+              `publishWorkspaceEvent: publish on session ${entry.sessionId} no-op (bus closed or unserializable)`,
             );
           } else {
             successCount += 1;

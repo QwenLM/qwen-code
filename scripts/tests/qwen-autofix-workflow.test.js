@@ -25,6 +25,14 @@ const sandboxImageResolverScript = readFileSync(
   '.github/scripts/resolve-sandbox-image.mjs',
   'utf8',
 );
+const reviewVerificationRunnerPath =
+  '.github/scripts/run-autofix-review-verification.sh';
+const reviewVerificationRunner = readFileSync(
+  reviewVerificationRunnerPath,
+  'utf8',
+);
+const autofixContractsScriptPath = '.github/scripts/check-autofix-contracts.sh';
+const autofixContractsScript = readFileSync(autofixContractsScriptPath, 'utf8');
 const autofixRunnerScriptPath = '.qwen/skills/autofix/scripts/run-agent.mjs';
 const checkBotCredentialsStep =
   workflow.match(
@@ -94,7 +102,15 @@ const triageAndAddressStep =
   )?.[0] ?? '';
 const prepareBranchAndFeedbackStep =
   workflow.match(
-    /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n[ ]{6}- name: 'Triage and address')/,
+    /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n[ ]{6}- name: 'Post autofix status comment')/,
+  )?.[0] ?? '';
+const postStatusCommentStep =
+  workflow.match(
+    /- name: 'Post autofix status comment'[\s\S]*?(?=\n[ ]{6}- name: 'Triage and address')/,
+  )?.[0] ?? '';
+const finalizeStatusCommentStep =
+  workflow.match(
+    /- name: 'Finalize autofix status comment'[\s\S]*?(?=\n[ ]{6}- name: '|$)/,
   )?.[0] ?? '';
 const resetAutofixWorkspaceSteps =
   workflow.match(
@@ -103,6 +119,10 @@ const resetAutofixWorkspaceSteps =
 const verificationGateSteps =
   workflow.match(/- name: 'Verification gate'[\s\S]*?(?=\n[ ]{6}- name: ')/g) ??
   [];
+const verificationGateBodies = [
+  verificationGateSteps[0] ?? '',
+  reviewVerificationRunner,
+];
 const resolveSandboxImageSteps =
   workflow.match(
     /- name: 'Resolve sandbox image'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
@@ -281,9 +301,12 @@ describe('qwen-autofix workflow', () => {
     // discards itself — no agent run, no marker, no comment.
     expect(prepareBranchAndFeedbackStep).toContain('LIVE_EVAL_WM');
     expect(prepareBranchAndFeedbackStep).toContain('stale duplicate target');
+    // Four gates, and both status-comment steps are among them: a discarded
+    // duplicate must neither announce a round it will never run nor rewrite
+    // the status the real round already finalised.
     expect(
       workflow.split("steps.prepare.outputs.stale != 'true'").length - 1,
-    ).toBe(2);
+    ).toBe(4);
     expect(reviewScanJob).toContain(
       'capture("^review-address \\\\((?<pr>[0-9]+),")',
     );
@@ -1031,202 +1054,6 @@ describe('qwen-autofix workflow', () => {
     // Spawn-heavy: each run() forks bash + a stubbed gh. The default 5s per-test
     // budget is tight for this many cases, so give it a comfortable margin.
   }, 20000);
-
-  it('auto-recovers a PR parked on a stale base: handoff head matches + behind main → update-branch + re-arm', () => {
-    const block = reviewScanJob.match(
-      /( {12}if \[\[ "\$\{N_REVIEWS\}" -eq 0[\s\S]*?\n {12}fi)\n\n {12}echo "🔎/,
-    )?.[1];
-    expect(block).toBeTruthy();
-    const script = block.replace(/^ {12}/gm, '');
-
-    const run = ({
-      handoffHead = 'live1',
-      liveHead = 'live1',
-      cmp = 'behind',
-      updateOk = true,
-    }) => {
-      const dir = mkdtempSync(join(tmpdir(), 'unpark-'));
-      const bin = join(dir, 'bin');
-      mkdirSync(bin);
-      writeFileSync(
-        join(bin, 'gh'),
-        [
-          '#!/usr/bin/env bash',
-          `echo "$*" >> ${JSON.stringify(join(dir, 'calls.log'))}`,
-          'for a in "$@"; do case "$a" in',
-          `  */compare/*) printf '%s' '${cmp}'; exit 0;;`,
-          `  */update-branch) exit ${updateOk ? 0 : 1};;`,
-          'esac; done',
-          'exit 0',
-        ].join('\n'),
-      );
-      chmodSync(join(bin, 'gh'), 0o755);
-      const out = execFileSync(
-        'bash',
-        [
-          '-c',
-          `set -uo pipefail\nfleet_row(){ :; }\nfor _ in x; do\n${script}\nprintf 'FELL_THROUGH'\ndone`,
-        ],
-        {
-          env: {
-            ...process.env,
-            PATH: `${bin}:${process.env.PATH}`,
-            REPO: 'o/r',
-            PR: '1',
-            N_REVIEWS: '0',
-            N_COMMENTS: '0',
-            N_ISSUE_COMMENTS: '0',
-            N_FAILED_CHECKS: '0',
-            N_RED_NOW: '0',
-            HAS_CONFLICT: 'false',
-            LIVE_HEAD: liveHead,
-            HANDOFF_HEAD: handoffHead,
-            EFF_WM: 'wm',
-            ROUND: '1',
-            EFF_MAX_ROUNDS: '100',
-          },
-          encoding: 'utf8',
-        },
-      );
-      const calls = existsSync(join(dir, 'calls.log'))
-        ? readFileSync(join(dir, 'calls.log'), 'utf8')
-        : '';
-      rmSync(dir, { recursive: true, force: true });
-      return {
-        unparked: /update-branch/.test(calls) && /autofix-rearm/.test(calls),
-        idle: out.includes('nothing new'),
-      };
-    };
-
-    // Parked on the CURRENT head (handoff head == live) and behind main → merge
-    // current main in and re-arm; the loop re-reads the feedback next scan.
-    expect(run({ cmp: 'behind' })).toEqual({ unparked: true, idle: false });
-    // 'diverged' (ahead AND behind) also merges main in.
-    expect(run({ cmp: 'diverged' })).toEqual({ unparked: true, idle: false });
-    // Up to date ('ahead') → not a stale base; a genuine parking stays for a
-    // human, no update, no re-arm.
-    expect(run({ cmp: 'ahead' })).toEqual({ unparked: false, idle: true });
-    // Handoff head != live head (a push landed after the parking) → the parking
-    // is cleared; do nothing (no compare-driven update).
-    expect(run({ handoffHead: 'old0', liveHead: 'live1' })).toEqual({
-      unparked: false,
-      idle: true,
-    });
-    // No handoff marker at all (a healthy "no changes needed" idle) → idle.
-    expect(run({ handoffHead: '', liveHead: 'live1' })).toEqual({
-      unparked: false,
-      idle: true,
-    });
-    // Behind but update-branch FAILS (PAT scope, or a race) → fail-safe: fall
-    // through to idle, never re-arm on an un-updated base.
-    expect(run({ cmp: 'behind', updateOk: false })).toEqual({
-      unparked: false,
-      idle: true,
-    });
-    // Both heads empty (API failures on both sides) → the -n guard must
-    // short-circuit; without this, "" == "" would enter the unpark block.
-    expect(run({ handoffHead: '', liveHead: '' })).toEqual({
-      unparked: false,
-      idle: true,
-    });
-  }, 20000);
-
-  it('marks a gate-rejection parking with a head-scoped handoff marker', () => {
-    // The could-not-address branch (a real fix rejected, PR up to date now) sets
-    // the flag; a crash/timeout handoff (no fix produced) must not.
-    expect(reviewAddressReportStep).toMatch(
-      /A human should take over this PR\."\n[\s\S]{0,500}?PARKED_STALE_CANDIDATE=true/,
-    );
-    // The report emits the head-scoped marker ONLY under that flag, so a
-    // crash/timeout parking is never treated as a stale-base candidate.
-    expect(reviewAddressReportStep).toMatch(
-      /if \[\[ "\$\{PARKED_STALE_CANDIDATE:-false\}" == 'true' \]\]; then\n\s*echo "<!-- autofix-handoff head=\$\{REPORT_HEAD\} -->"/,
-    );
-    // The scan parses HANDOFF_HEAD head-scoped, exactly like RED_HEAD.
-    expect(reviewScanJob).toContain(
-      'scan("<!-- autofix-handoff head=([0-9a-f]+) -->")',
-    );
-  });
-
-  it('parses HANDOFF_HEAD from issue comments: latest bot marker wins, non-bot and markerless ignored', () => {
-    const assignment = reviewScanJob.match(
-      / {12}HANDOFF_HEAD="\$\(jq -r[\s\S]*?ic\.json"\)"\n/,
-    )?.[0];
-    expect(assignment).toBeTruthy();
-    const script = assignment.replace(/^ {12}/gm, '');
-
-    const run = (comments) => {
-      const dir = mkdtempSync(join(tmpdir(), 'handoff-jq-'));
-      writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
-      const out = execFileSync(
-        'bash',
-        [
-          '-c',
-          `set -uo pipefail\nAUTOFIX_BOT='bot'\nWORKDIR=${JSON.stringify(dir)}\n${script}\nprintf '%s' "$HANDOFF_HEAD"`,
-        ],
-        { encoding: 'utf8' },
-      );
-      rmSync(dir, { recursive: true, force: true });
-      return out;
-    };
-
-    // No comments → empty.
-    expect(run([])).toBe('');
-    // Bot comment with a handoff marker → the sha.
-    expect(
-      run([
-        {
-          user: { login: 'bot' },
-          body: 'handoff <!-- autofix-handoff head=abc123 -->',
-          created_at: '2026-01-01T00:00:00Z',
-        },
-      ]),
-    ).toBe('abc123');
-    // Non-bot comment with the same marker → ignored.
-    expect(
-      run([
-        {
-          user: { login: 'human' },
-          body: '<!-- autofix-handoff head=abc123 -->',
-          created_at: '2026-01-01T00:00:00Z',
-        },
-      ]),
-    ).toBe('');
-    // Multiple bot markers → latest by created_at wins.
-    expect(
-      run([
-        {
-          user: { login: 'bot' },
-          body: '<!-- autofix-handoff head=aaa111 -->',
-          created_at: '2026-01-01T00:00:00Z',
-        },
-        {
-          user: { login: 'bot' },
-          body: '<!-- autofix-handoff head=bbb222 -->',
-          created_at: '2026-01-02T00:00:00Z',
-        },
-      ]),
-    ).toBe('bbb222');
-    // Bot comment without the marker → empty.
-    expect(
-      run([
-        {
-          user: { login: 'bot' },
-          body: 'just a regular comment',
-          created_at: '2026-01-01T00:00:00Z',
-        },
-      ]),
-    ).toBe('');
-    // Missing user.login field → no crash, empty.
-    expect(
-      run([
-        {
-          body: '<!-- autofix-handoff head=abc123 -->',
-          created_at: '2026-01-01T00:00:00Z',
-        },
-      ]),
-    ).toBe('');
-  });
 
   it('keeps a still-red check visible, but only once per head', () => {
     // A red check is a STATE, not the instant it turned red. Counting only
@@ -3380,6 +3207,10 @@ describe('qwen-autofix workflow', () => {
     const skill = readAutofixSkill();
     expect(skill).toContain('never');
     expect(skill).toContain('drop one silently');
+    // A third disposition beyond fix/decline: escalate a judgment that is the
+    // maintainer's to make, instead of silently deciding it.
+    expect(skill).toContain("Needs a maintainer's decision");
+    expect(skill).toContain('escalate when the');
   });
 
   it('requires the address path to run verification and record it as evidence', () => {
@@ -3398,6 +3229,12 @@ describe('qwen-autofix workflow', () => {
     expect(flat).toContain('## Verification');
     expect(flat).toContain('command you ran and its result');
     expect(flat).toContain('a bare "verified" is not acceptable');
+    // Simplicity First governs HOW findings are addressed against the additive
+    // ratchet of review rounds: the pre-commit self-audit rejects bloat, and a
+    // nit that would bloat the code is a decline, not an auto-implement.
+    expect(flat).toContain('Simplicity First');
+    expect(flat).toContain('added no bloat');
+    expect(flat).toContain('never a reason to bloat the code');
     // The rationale is structural, not etiquette: the gate re-runs the same
     // commands, so skipping them only moves the rejection later. Pin that
     // framing so the requirement is not softened back into "please verify".
@@ -4088,7 +3925,7 @@ describe('qwen-autofix workflow', () => {
 
   it('allows non-package fixes after deterministic verification', () => {
     expect(verificationGateSteps).toHaveLength(2);
-    for (const step of verificationGateSteps) {
+    for (const step of verificationGateBodies) {
       expect(step).toContain('npm run build');
       expect(step).toContain('npm run typecheck');
       expect(step).toContain('npm run lint');
@@ -4102,6 +3939,12 @@ describe('qwen-autofix workflow', () => {
       expect(step).toContain('bash "${RUNNER_TEMP}/check-settings-schema.sh"');
       expect(step).not.toContain(
         'bash .github/scripts/check-settings-schema.sh',
+      );
+      expect(step).toContain(
+        'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
+      );
+      expect(step).not.toContain(
+        'bash .github/scripts/check-autofix-contracts.sh',
       );
       // The owning-package resolver is likewise a shared script staged from the
       // trusted base, invoked (not inlined) so the two gates cannot drift into
@@ -4125,12 +3968,22 @@ describe('qwen-autofix workflow', () => {
         /cp \.github\/scripts\/check-settings-schema\.sh "\$\{RUNNER_TEMP\}\/check-settings-schema\.sh"/g,
       ) ?? [],
     ).toHaveLength(2);
+    expect(
+      workflow.match(
+        /cp \.github\/scripts\/check-autofix-contracts\.sh "\$\{RUNNER_TEMP\}\/check-autofix-contracts\.sh"/g,
+      ) ?? [],
+    ).toHaveLength(2);
     // The owning-package resolver is staged the same way, in the same steps.
     expect(
       workflow.match(
         /cp \.github\/scripts\/resolve-owning-packages\.sh "\$\{RUNNER_TEMP\}\/resolve-owning-packages\.sh"/g,
       ) ?? [],
     ).toHaveLength(2);
+    expect(
+      workflow.match(
+        /cp \.github\/scripts\/run-autofix-review-verification\.sh "\$\{RUNNER_TEMP\}\/run-autofix-review-verification\.sh"/g,
+      ) ?? [],
+    ).toHaveLength(1);
     // In the issue-autofix job the staging must happen BEFORE the verify gate's
     // `git checkout "${BRANCH}"` (first occurrence in the file is the issue
     // job's): the agent's commits can touch .github/scripts, so a post-checkout
@@ -4145,9 +3998,20 @@ describe('qwen-autofix workflow', () => {
     // In the review-address job the staging must happen BEFORE the branch switch
     // ("Prepare branch and feedback" exists only in that job; the job's staging
     // step is the last occurrence of the staging step name in the file).
-    expect(
-      workflow.lastIndexOf("- name: 'Stage trusted schema gate'"),
-    ).toBeLessThan(workflow.indexOf("- name: 'Prepare branch and feedback'"));
+    const reviewStagingAt = workflow.indexOf(
+      "- name: 'Stage trusted schema gate and agent runner'",
+    );
+    expect(reviewStagingAt).toBeGreaterThanOrEqual(0);
+    expect(reviewStagingAt).toBeLessThan(
+      workflow.indexOf("- name: 'Prepare branch and feedback'"),
+    );
+    const reviewRunnerCopyAt = workflow.indexOf(
+      'cp .github/scripts/run-autofix-review-verification.sh',
+    );
+    expect(reviewRunnerCopyAt).toBeGreaterThan(reviewStagingAt);
+    expect(reviewRunnerCopyAt).toBeLessThan(
+      workflow.indexOf("- name: 'Prepare branch and feedback'"),
+    );
     // The shared script mirrors CI's freshness gate: regenerate + `git status
     // --porcelain` (version-agnostic — the generator's --check was reverted from
     // main by #7031 and must NOT be relied on), with a generator-crash guard, and
@@ -4187,7 +4051,7 @@ describe('qwen-autofix workflow', () => {
     // must run BEFORE the no-op/unchanged return, so a stale-schema PR the agent
     // wrongly no-ops fails (outcome=failed) instead of being reported as evaluated
     // while CI stays red (the motivating bug).
-    const reviewVerifyGate = verificationGateSteps.find((s) =>
+    const reviewVerifyGate = verificationGateBodies.find((s) =>
       s.includes('outcome=noop'),
     );
     expect(reviewVerifyGate).toBeTruthy();
@@ -4201,6 +4065,96 @@ describe('qwen-autofix workflow', () => {
         'bash "${RUNNER_TEMP}/check-settings-schema.sh"',
       ),
     ).toBeLessThan(reviewVerifyGate.indexOf('outcome=noop'));
+    const reviewVerificationGateStep = verificationGateSteps[1];
+    expect(reviewVerificationGateStep).toContain(
+      'bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+    );
+    expect(reviewVerificationGateStep).not.toContain('npm run build');
+    expect(reviewVerificationGateStep).not.toContain(
+      'bash .github/scripts/run-autofix-review-verification.sh',
+    );
+    expect(
+      reviewVerifyGate.indexOf(
+        'bash "${RUNNER_TEMP}/check-autofix-contracts.sh"',
+      ),
+    ).toBeLessThan(reviewVerifyGate.indexOf('outcome=noop'));
+    expect(autofixContractsScript).toContain('npm run check-i18n');
+    expect(autofixContractsScript).toContain(
+      'packages/core/src/tools/tool-names.ts',
+    );
+    expect(autofixContractsScript).toContain(
+      'client/components/messages/toolFormatting.drift.test.ts',
+    );
+    expect(autofixContractsScript).toContain('outcome=failed');
+    expect(ciWorkflow).toContain("run: 'npm run check-i18n'");
+    expect(ciWorkflow).toContain('npm run test:ci');
+  });
+
+  it('runs cross-package autofix contracts only when their source changes', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-contracts-'));
+    const npmLog = join(dir, 'npm.log');
+    try {
+      writeFileSync(
+        join(dir, 'npm'),
+        [
+          '#!/usr/bin/env bash',
+          'printf \'%s\\n\' "$*" >> "${NPM_LOG}"',
+          'if [[ "$*" == "run check-i18n" ]]; then',
+          '  exit "${I18N_EXIT:-0}"',
+          'fi',
+          'exit "${DRIFT_EXIT:-0}"',
+          '',
+        ].join('\n'),
+      );
+      chmodSync(join(dir, 'npm'), 0o755);
+
+      const run = (changedFiles, extraEnv = {}) =>
+        spawnSync('bash', [resolve(autofixContractsScriptPath)], {
+          input: changedFiles,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            NPM_LOG: npmLog,
+            ...extraEnv,
+          },
+        });
+
+      expect(run('packages/core/src/config/config.ts\n').status).toBe(0);
+      expect(readFileSync(npmLog, 'utf8').trim().split('\n')).toEqual([
+        'run check-i18n',
+      ]);
+
+      writeFileSync(npmLog, '');
+      expect(run('packages/core/src/tools/tool-names.ts\n').status).toBe(0);
+      expect(readFileSync(npmLog, 'utf8').trim().split('\n')).toEqual([
+        'run check-i18n',
+        'run test --workspace packages/web-shell -- client/components/messages/toolFormatting.drift.test.ts',
+      ]);
+
+      writeFileSync(npmLog, '');
+      const output = join(dir, 'output');
+      expect(
+        run('packages/core/src/tools/tool-names.ts\n', {
+          GITHUB_OUTPUT: output,
+          I18N_EXIT: '1',
+        }).status,
+      ).toBe(1);
+      expect(readFileSync(npmLog, 'utf8').trim()).toBe('run check-i18n');
+      expect(readFileSync(output, 'utf8')).toContain('outcome=failed');
+
+      writeFileSync(npmLog, '');
+      writeFileSync(output, '');
+      expect(
+        run('packages/core/src/tools/tool-names.ts\n', {
+          GITHUB_OUTPUT: output,
+          DRIFT_EXIT: '1',
+        }).status,
+      ).toBe(1);
+      expect(readFileSync(output, 'utf8')).toContain('outcome=failed');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   it('passes model credentials directly to qwen subprocesses', () => {
@@ -4255,8 +4209,13 @@ describe('qwen-autofix workflow', () => {
     // AND both no-secret verification checkouts (convention: every host
     // checkout of an agent-writable branch severs hooks).
     expect(
-      workflow.split('git config core.hooksPath /dev/null').length - 1,
+      `${workflow}\n${reviewVerificationRunner}`.split(
+        'git config core.hooksPath /dev/null',
+      ).length - 1,
     ).toBe(5);
+    expect(reviewVerificationRunner).toMatch(
+      /git config core\.hooksPath \/dev\/null\ngit checkout "\$\{BRANCH\}"/,
+    );
     // …both pushes AND the prepare checkout (post-checkout hooks fire with
     // the PAT in env there); the agent step — no PAT, sandboxed tools —
     // re-points .husky itself so its commits still get checked.
@@ -4479,7 +4438,7 @@ describe('qwen-autofix workflow', () => {
     // 1 for a real diff but 128 on a bad ref — only 1 is a commit, so a git
     // error must not be misreported as a discarded commit. Drive the extracted
     // snippet with a stubbed git whose exit is scripted.
-    const snippet = verificationGateSteps[1].match(
+    const snippet = reviewVerificationRunner.match(
       /committed_rc=0[\s\S]*?committed=true[^\n]*\n\s*fi/,
     )?.[0];
     expect(snippet).toBeTruthy();
@@ -4520,7 +4479,7 @@ describe('qwen-autofix workflow', () => {
     // Neither gate carries an EXIT trap: the wording keys on committed, so an
     // outcome=failed-forcing trap (which would also fire on pre-commit
     // failures) must not creep back into either verify step.
-    for (const gate of verificationGateSteps) {
+    for (const gate of verificationGateBodies) {
       expect(gate).not.toMatch(/\btrap\b/);
     }
   });
@@ -4532,8 +4491,11 @@ describe('qwen-autofix workflow', () => {
     expect(reviewVerificationGateStep).toContain(
       "if: |-\n          ${{ always() && steps.prepare.outputs.stale != 'true' }}",
     );
-    expect(reviewVerificationGateStep).toContain('failure.md');
-    expect(reviewVerificationGateStep).toContain('outcome=failed');
+    expect(reviewVerificationGateStep).toContain(
+      'bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+    );
+    expect(reviewVerificationRunner).toContain('failure.md');
+    expect(reviewVerificationRunner).toContain('outcome=failed');
     expect(reviewAddressReportStep.length).toBeGreaterThan(0);
     expect(reviewAddressReportStep).toContain('GITHUB_STEP_SUMMARY');
     expect(reviewAddressReportStep).toContain(
@@ -4660,6 +4622,90 @@ describe('qwen-autofix workflow', () => {
         ),
       ),
     ).toBe(0);
+  });
+
+  it('announces a working round up front and closes the same status comment', () => {
+    // The whole point: the live run link reaches the thread BEFORE the
+    // 80-minute agent step, not after it. Without this the PR is silent from
+    // takeover until "Push and report", so a working round and a stuck one
+    // look identical.
+    expect(postStatusCommentStep.length).toBeGreaterThan(0);
+    expect(postStatusCommentStep).toContain('<!-- autofix-status -->');
+    expect(postStatusCommentStep).toContain(
+      'actions/runs/${{ github.run_id }}',
+    );
+    expect(postStatusCommentStep).toContain('Watch live progress');
+    // Announced only for a round that will really run, and never on a dry run.
+    expect(postStatusCommentStep).toContain(
+      "steps.prepare.outputs.stale != 'true'",
+    );
+    expect(postStatusCommentStep).toContain(
+      "needs.route.outputs.dry_run != 'true'",
+    );
+    // One comment per PR, EDITED each round: a new comment per round would
+    // stack up to MAX_ROUNDS of them on a managed PR.
+    expect(postStatusCommentStep).toContain('--method PATCH');
+    expect(postStatusCommentStep).toContain('contains($m)');
+    // Best-effort — a failed status post warns and continues, never costs a round.
+    expect(postStatusCommentStep).toContain('set -uo pipefail');
+    expect(postStatusCommentStep).toContain('continuing.');
+    expect(finalizeStatusCommentStep).toContain('set -uo pipefail');
+    expect(finalizeStatusCommentStep).toContain('continuing.');
+    // Repository convention for anything posted verbatim as a PR comment.
+    expect(postStatusCommentStep).toContain('<summary>中文说明</summary>');
+
+    // Runs on every ending (including a crashed agent) so no finished round
+    // leaves a live-looking "working" line behind.
+    expect(finalizeStatusCommentStep.length).toBeGreaterThan(0);
+    expect(finalizeStatusCommentStep).toContain('always()');
+    // ...but NOT for a discarded duplicate. The per-PR concurrency group runs
+    // it after the real round already finalised, so an ungated finalize would
+    // overwrite that round's "finished" with its own "ended without
+    // publishing" — reporting a successful round as a failed one.
+    expect(finalizeStatusCommentStep).toContain(
+      "steps.prepare.outputs.stale != 'true'",
+    );
+    expect(finalizeStatusCommentStep).toContain(
+      "needs.route.outputs.dry_run != 'true'",
+    );
+    expect(finalizeStatusCommentStep).toContain('<!-- autofix-status -->');
+    expect(finalizeStatusCommentStep).toContain('--method PATCH');
+    expect(finalizeStatusCommentStep).toContain('<summary>中文说明</summary>');
+    // PATCH-ONLY: a round that never announced (stale duplicate, dry run) must
+    // not gain a status comment at the end.
+    expect(finalizeStatusCommentStep).toContain('nothing to finalize');
+    expect(finalizeStatusCommentStep).not.toContain(
+      'gh api "repos/${REPO}/issues/${PR}/comments" -f body=',
+    );
+    // The announcement hands over the id it just wrote (both branches), so the
+    // finalize never repeats the paginated comment scan — one scan per round,
+    // not two, on a PR that can accumulate hundreds of comments over 100 rounds.
+    expect(postStatusCommentStep).toContain("id: 'post_status'");
+    expect(postStatusCommentStep).toContain(
+      'echo "comment_id=${STATUS_ID}" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(postStatusCommentStep).toContain("--jq '.id'");
+    expect(finalizeStatusCommentStep).toContain(
+      "STATUS_ID: '${{ steps.post_status.outputs.comment_id }}'",
+    );
+    expect(finalizeStatusCommentStep).not.toContain('--paginate');
+    // Both status messages number the round being PERFORMED, like every other
+    // message the loop posts. `effective_round` counts rounds already done and
+    // "Push and report" prints ROUND + 1, so using it raw made the status say
+    // "round 5 finished" in the same thread where the report said "round 6/100"
+    // — observed on #7724. Same round must not carry two numbers.
+    for (const statusStep of [
+      postStatusCommentStep,
+      finalizeStatusCommentStep,
+    ]) {
+      expect(statusStep).toContain('ROUND_DISPLAY="$((ROUND_DISPLAY + 1))"');
+      expect(statusStep).toContain('^[0-9]+$');
+    }
+    // Tells a round that published a report from one that died before it.
+    expect(finalizeStatusCommentStep).toContain("== 'fixed'");
+    expect(finalizeStatusCommentStep).toContain(
+      'ended without publishing a report',
+    );
   });
 
   it('renders the whole managed fleet into the run summary', () => {
@@ -5314,7 +5360,7 @@ describe('qwen-autofix workflow', () => {
     // The retry/advance split above is only sound while each real rejection
     // writes outcome=failed; an unwired check would read as a gate crash and be
     // retried instead of reported. Drive the extracted helper for real.
-    const gate = verificationGateSteps[1];
+    const gate = reviewVerificationRunner;
     // Each check runs through run_check, which tees its output to GATE_LOG and
     // calls reject_fix on failure - so the verdict is declared AND the reason
     // is captured for the retry.
@@ -5326,7 +5372,7 @@ describe('qwen-autofix workflow', () => {
     ]) {
       expect(gate).toContain(check);
     }
-    const helper = gate.match(/reject_fix\(\) \{\n[\s\S]*?\n {10}\}/)?.[0];
+    const helper = gate.match(/reject_fix\(\) \{\n[\s\S]*?\n\}/)?.[0];
     expect(helper).toBeTruthy();
     const dir = mkdtempSync(join(tmpdir(), 'reject-'));
     const out = join(dir, 'gh_output');
@@ -5688,7 +5734,7 @@ describe('qwen-autofix workflow', () => {
     // compiler output already spelled out: the gate rejected the commit, the
     // handoff showed only the agent's optimistic summary, and the next round
     // re-read the original review points with no idea why it had been refused.
-    const gate = verificationGateSteps[1];
+    const gate = reviewVerificationRunner;
     const prep =
       workflow.match(
         /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n {6}- name: )/,
@@ -5696,7 +5742,7 @@ describe('qwen-autofix workflow', () => {
 
     // 1. A failing check records WHY, not just THAT, it failed.
     const capture = gate.match(
-      /GATE_LOG="\$\{WORKDIR\}\/gate-output\.log"[\s\S]*?\n {10}\}\n {10}run_check\(\) \{[\s\S]*?\n {10}\}/,
+      /GATE_LOG="\$\{WORKDIR\}\/gate-output\.log"[\s\S]*?\n\}\nrun_check\(\) \{[\s\S]*?\n\}/,
     )?.[0];
     expect(capture).toBeTruthy();
     const dir = mkdtempSync(join(tmpdir(), 'gate-'));

@@ -36,7 +36,11 @@ import {
   SessionShellDisabledError,
   TotalSessionLimitExceededError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
-import { SessionService, Storage } from '@qwen-code/qwen-code-core';
+import {
+  SessionOrganizationService,
+  SessionService,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import {
   resetHomeEnvBootstrapForTesting,
   SettingScope,
@@ -64,6 +68,12 @@ import {
   mountWorkspaceMemoryRememberRoutes,
   WorkspaceRememberTaskLane,
 } from '../workspace-remember.js';
+import {
+  createSingleWorkspaceRegistry,
+  createWorkspaceGenerationGuard,
+  type WorkspaceGenerationGuard,
+  type WorkspaceRuntime,
+} from '../workspace-registry.js';
 import {
   MAX_TRUST_REASON_LENGTH,
   MAX_VOICE_MODEL_LENGTH,
@@ -899,6 +909,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     fsFactory?: WorkspaceFileSystemFactory;
     boundWorkspace?: string;
     daemonEnv?: Readonly<NodeJS.ProcessEnv>;
+    primaryTrusted?: boolean;
+    generationGuard?: WorkspaceGenerationGuard;
   }): Promise<void> {
     server.closeAllConnections?.();
     await new Promise<void>((r) => server.close(() => r()));
@@ -906,11 +918,29 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const boundWorkspace = opts.boundWorkspace ?? '/ws';
     const app = express();
     app.use(express.json());
+    const workspaceRegistry = opts.generationGuard
+      ? createSingleWorkspaceRegistry({
+          workspaceId: 'primary',
+          workspaceCwd: boundWorkspace,
+          primary: true,
+          trusted: opts.primaryTrusted ?? true,
+          env: { mode: 'parent-process', overlayKeys: [] },
+          bridge: bridge as unknown as WorkspaceRuntime['bridge'],
+          workspaceService: fakeWorkspace,
+          routeFileSystemFactory: (opts.fsFactory ??
+            {}) as WorkspaceFileSystemFactory,
+          clientMcpSenderRegistry:
+            {} as WorkspaceRuntime['clientMcpSenderRegistry'],
+          generationGuard: opts.generationGuard,
+        })
+      : undefined;
     mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
       boundWorkspace,
       workspace: fakeWorkspace,
       enabled: true,
       daemonEnv: opts.daemonEnv,
+      isPrimaryWorkspaceTrusted: () => opts.primaryTrusted ?? true,
+      workspaceRegistry,
       fsFactory: opts.fsFactory,
       sessionShellCommandEnabled: opts.sessionShellCommandEnabled,
       workspaceRememberLane: new WorkspaceRememberTaskLane(
@@ -6740,6 +6770,195 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   });
 
   describe('workspace methods', () => {
+    it('maps a closed runtime generation to a retryable RPC error', async () => {
+      const generationGuard = createWorkspaceGenerationGuard();
+      await restartServer({ generationGuard });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      generationGuard.close();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 592,
+        method: '_qwen/workspace/mcp',
+        params: {},
+      });
+
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        id: 592,
+        error: {
+          code: -32603,
+          data: {
+            errorKind: 'workspace_runtime_unavailable',
+            httpStatus: 503,
+            retryable: true,
+          },
+        },
+      });
+    });
+
+    it('rejects trusted-only methods after primary trust is revoked', async () => {
+      await restartServer({ primaryTrusted: false });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 59,
+        method: '_qwen/workspace/memory/write',
+        params: { content: 'blocked' },
+      });
+
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        error: {
+          data: {
+            errorKind: 'untrusted_workspace',
+            httpStatus: 403,
+          },
+        },
+      });
+    });
+
+    it.each([
+      [
+        '_qwen/workspace/session_groups/create',
+        { workspaceCwd: '/ws', name: 'Blocked', color: 'blue' },
+      ],
+      [
+        '_qwen/workspace/session_groups/update',
+        { workspaceCwd: '/ws', groupId: 'blocked', name: 'Blocked' },
+      ],
+      [
+        '_qwen/workspace/session_groups/delete',
+        { workspaceCwd: '/ws', groupId: 'blocked' },
+      ],
+    ])(
+      'rejects untrusted session group mutation %s',
+      async (method, params) => {
+        await restartServer({ primaryTrusted: false });
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 590,
+          method,
+          params,
+        });
+
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({
+          id: 590,
+          error: {
+            data: {
+              errorKind: 'untrusted_workspace',
+              httpStatus: 403,
+            },
+          },
+        });
+      },
+    );
+
+    it('rejects a sensitive response when its runtime generation closes in flight', async () => {
+      const generationGuard = createWorkspaceGenerationGuard();
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      let releaseRead!: () => void;
+      const readReleased = new Promise<void>((resolve) => {
+        releaseRead = resolve;
+      });
+      const statusSpy = vi
+        .spyOn(fakeWorkspace, 'getWorkspaceMcpStatus')
+        .mockImplementationOnce(async () => {
+          markStarted();
+          await readReleased;
+          return {
+            v: 1,
+            workspaceCwd: '/ws',
+            initialized: false,
+            servers: [],
+          };
+        });
+      await restartServer({ generationGuard });
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const reader = frameReader(stream);
+
+      const posting = post(connId, {
+        jsonrpc: '2.0',
+        id: 591,
+        method: '_qwen/workspace/mcp',
+        params: {},
+      });
+      await started;
+      generationGuard.close();
+      releaseRead();
+      await posting;
+
+      expect(await reader.next()).toMatchObject({
+        id: 591,
+        error: {
+          data: {
+            errorKind: 'workspace_runtime_unavailable',
+            httpStatus: 503,
+          },
+        },
+      });
+      reader.close();
+      statusSpy.mockRestore();
+    });
+
+    it('rejects a session group mutation when its generation closes in flight', async () => {
+      const generationGuard = createWorkspaceGenerationGuard();
+      const createSpy = vi
+        .spyOn(SessionOrganizationService.prototype, 'createGroup')
+        .mockImplementationOnce(async ({ name, color }) => {
+          generationGuard.close();
+          return {
+            id: 'stale-group',
+            name,
+            color,
+            order: 0,
+            createdAt: '2026-07-24T00:00:00.000Z',
+            updatedAt: '2026-07-24T00:00:00.000Z',
+          };
+        });
+      try {
+        await restartServer({ generationGuard });
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 593,
+          method: '_qwen/workspace/session_groups/create',
+          params: {
+            workspaceCwd: '/ws',
+            name: 'Stale',
+            color: 'blue',
+          },
+        });
+
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({
+          id: 593,
+          error: {
+            data: {
+              errorKind: 'workspace_runtime_unavailable',
+              httpStatus: 503,
+              retryable: true,
+            },
+          },
+        });
+      } finally {
+        createSpy.mockRestore();
+      }
+    });
+
     it('_qwen/workspace/tools returns tools', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
@@ -8101,6 +8320,55 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       const frames = await takeFrames(await streamRes, 1);
       expect(frames[0]).toMatchObject({ error: { code: -32602 } });
     });
+
+    it.each([
+      {
+        method: '_qwen/file/write',
+        params: { path: 'test.txt', content: 'new content' },
+      },
+      {
+        method: '_qwen/file/edit',
+        params: { path: 'test.txt', oldText: 'old', newText: 'new' },
+      },
+    ])(
+      '$method rejects success when its runtime generation closes in flight',
+      async ({ method, params }) => {
+        const generationGuard = createWorkspaceGenerationGuard();
+        const closeGeneration = async () => {
+          generationGuard.close();
+          return { writtenBytes: 3 };
+        };
+        await restartServer({
+          generationGuard,
+          fsFactory: makeFileFsFactory({
+            writeTextOverwrite: closeGeneration,
+            edit: closeGeneration,
+          }),
+        });
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 95,
+          method,
+          params,
+        });
+
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({
+          id: 95,
+          error: {
+            data: {
+              errorKind: 'workspace_runtime_unavailable',
+              httpStatus: 503,
+              retryable: true,
+            },
+          },
+        });
+      },
+    );
 
     it('_qwen/file/glob rejects missing pattern', async () => {
       const connId = await initialize();
