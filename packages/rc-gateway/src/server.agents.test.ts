@@ -29,7 +29,7 @@ afterEach(async () => {
   stub = undefined;
 });
 
-async function setup() {
+async function setup(subActorCap?: number) {
   stub = await startStubDaemon({ promptDelayMs: 2000 });
   const dir = await mkdtemp(join(tmpdir(), 'srv-agents-'));
   const store = await TokenStore.open(join(dir, 'tokens.json'));
@@ -49,6 +49,7 @@ async function setup() {
     pairing: new PairingService(),
     auditPath: join(dir, 'audit.log'),
     agents: { registry, costFor: () => 7777, promptAcceptWindowMs: 25 },
+    subActorCap,
   });
   server = await new Promise((resolve) => {
     const s = gw.app.listen(0, '127.0.0.1', () => resolve(s));
@@ -233,6 +234,80 @@ describe('sub-actor ban on the agent routes', () => {
     const cancel = await fetch(`${url}/rc/agents/${agentId}/cancel`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${writeTok}` },
+    });
+    expect(cancel.status).toBe(200);
+  });
+});
+
+// The 9 routes now sharing enforceSubActorRateLimit (2 pre-existing + 7 newly
+// mounted here) all draw from ONE per-sub-actor SubActorRateLimiter instance
+// (server.ts's subActorLimiter). A small injected cap makes the interaction
+// observable without 30 real requests (DEFAULT_SUB_ACTOR_CAP).
+describe('sub-actor rate limit on the agent routes', () => {
+  it('429s sub_actor_rate_limited on POST /rc/agents once a bridge sub-actor exceeds the cap', async () => {
+    const { url, bridgeTok } = await setup(1);
+    const spawnAs = () =>
+      fetch(`${url}/rc/agents`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${bridgeTok}`,
+          'Content-Type': 'application/json',
+          'X-RC-SubActor': 'telegram:alice',
+        },
+        body: JSON.stringify({ task: 't' }),
+      });
+    const first = await spawnAs();
+    expect(first.status).toBe(201);
+    const second = await spawnAs();
+    expect(second.status).toBe(429);
+    expect(((await second.json()) as { code: string }).code).toBe(
+      'sub_actor_rate_limited',
+    );
+  });
+
+  it('still cancels via POST /rc/agents/:id/cancel for a bridge sub-actor who has exhausted the rate budget (design intent: stopping is never rate-limited)', async () => {
+    const { url, writeTok, bridgeTok } = await setup(1);
+    // Spawn with a plain write token (uncapped) so the agent exists...
+    const spawn = await fetch(`${url}/rc/agents`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${writeTok}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ task: 't' }),
+    });
+    const { agentId } = (await spawn.json()) as { agentId: string };
+
+    // ...then exhaust telegram:bob's cap=1 budget on a rate-limited route.
+    const spend = await fetch(`${url}/rc/agents`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${bridgeTok}`,
+        'Content-Type': 'application/json',
+        'X-RC-SubActor': 'telegram:bob',
+      },
+      body: JSON.stringify({ task: 't' }),
+    });
+    expect(spend.status).toBe(201);
+    const overCap = await fetch(`${url}/rc/agents`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${bridgeTok}`,
+        'Content-Type': 'application/json',
+        'X-RC-SubActor': 'telegram:bob',
+      },
+      body: JSON.stringify({ task: 't' }),
+    });
+    expect(overCap.status).toBe(429); // confirms the budget is actually spent
+
+    // Cancel (never rate-limited by design) still succeeds for the SAME
+    // exhausted sub-actor.
+    const cancel = await fetch(`${url}/rc/agents/${agentId}/cancel`, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${bridgeTok}`,
+        'X-RC-SubActor': 'telegram:bob',
+      },
     });
     expect(cancel.status).toBe(200);
   });
