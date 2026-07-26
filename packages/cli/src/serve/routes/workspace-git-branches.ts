@@ -29,6 +29,8 @@ import {
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
 
+const GIT_ERROR_MESSAGE_MAX = 512;
+
 function resolveTrustedRuntime(
   registry: WorkspaceRegistry,
   req: Request,
@@ -44,33 +46,55 @@ function sendGitError(
   err: unknown,
   route: string,
   sendBridgeError: SendBridgeError,
+  cwd: string,
 ): void {
-  const msg = err instanceof Error ? err.message : String(err);
+  // Classify on the actual git output (stdout + stderr), not err.message,
+  // which embeds the full command line and would false-positive on flags
+  // like --set-upstream present in every push invocation.
+  let detail: string;
+  if (err && typeof err === 'object' && ('stdout' in err || 'stderr' in err)) {
+    const e = err as { stdout?: string; stderr?: string };
+    detail = `${e.stdout ?? ''}\n${e.stderr ?? ''}`;
+  } else {
+    detail = err instanceof Error ? err.message : String(err);
+  }
+
+  const sanitize = (raw: string): string =>
+    raw.split(cwd).join('<workspace>').slice(0, GIT_ERROR_MESSAGE_MAX);
+
   if (
-    /not a git repository/i.test(msg) ||
-    /could not resolve.*to a revision/i.test(msg)
+    /not a git repository/i.test(detail) ||
+    /invalid reference/i.test(detail)
   ) {
-    res.status(404).json({ error: 'not_a_git_repository', message: msg });
+    res
+      .status(404)
+      .json({ error: 'not_a_git_repository', message: sanitize(detail) });
     return;
   }
-  if (/dirty|uncommitted|would be overwritten/i.test(msg)) {
-    res.status(409).json({ error: 'dirty_working_tree', message: msg });
+  if (/dirty|uncommitted|would be overwritten/i.test(detail)) {
+    res
+      .status(409)
+      .json({ error: 'dirty_working_tree', message: sanitize(detail) });
     return;
   }
-  if (/already exists/i.test(msg)) {
-    res.status(409).json({ error: 'branch_already_exists', message: msg });
+  if (/already exists/i.test(detail)) {
+    res
+      .status(409)
+      .json({ error: 'branch_already_exists', message: sanitize(detail) });
     return;
   }
-  if (/nothing to commit/i.test(msg)) {
-    res.status(400).json({ error: 'nothing_to_commit', message: msg });
+  if (/nothing to commit/i.test(detail)) {
+    res
+      .status(400)
+      .json({ error: 'nothing_to_commit', message: sanitize(detail) });
     return;
   }
-  if (/detached HEAD/i.test(msg)) {
-    res.status(409).json({ error: 'detached_head', message: msg });
+  if (/detached HEAD/i.test(detail)) {
+    res.status(409).json({ error: 'detached_head', message: sanitize(detail) });
     return;
   }
-  if (/no upstream|set-upstream/i.test(msg)) {
-    res.status(400).json({ error: 'no_upstream', message: msg });
+  if (/no upstream/i.test(detail)) {
+    res.status(400).json({ error: 'no_upstream', message: sanitize(detail) });
     return;
   }
   sendBridgeError(res, err, { route });
@@ -96,7 +120,7 @@ async function handleBranches(
       detached: result.detached,
     });
   } catch (err) {
-    sendGitError(res, err, route, sendBridgeError);
+    sendGitError(res, err, route, sendBridgeError, cwd);
   }
 }
 
@@ -123,7 +147,7 @@ async function handleCheckout(
     const result = await gitCheckout(cwd, ref.trim());
     res.status(200).json(result);
   } catch (err) {
-    sendGitError(res, err, route, sendBridgeError);
+    sendGitError(res, err, route, sendBridgeError, cwd);
   }
 }
 
@@ -155,7 +179,9 @@ async function handleCreateBranch(
     return;
   }
   const startPoint =
-    typeof rawStartPoint === 'string' ? rawStartPoint : undefined;
+    typeof rawStartPoint === 'string'
+      ? rawStartPoint.trim() || undefined
+      : undefined;
   if (startPoint !== undefined && !isValidCheckoutRef(startPoint)) {
     res
       .status(400)
@@ -166,7 +192,7 @@ async function handleCreateBranch(
     const result = await gitCreateBranch(cwd, name, startPoint);
     res.status(200).json(result);
   } catch (err) {
-    sendGitError(res, err, route, sendBridgeError);
+    sendGitError(res, err, route, sendBridgeError, cwd);
   }
 }
 
@@ -200,7 +226,7 @@ async function handlePush(
     const result = await gitPush(cwd, { setUpstream, force });
     res.status(200).json(result);
   } catch (err) {
-    sendGitError(res, err, route, sendBridgeError);
+    sendGitError(res, err, route, sendBridgeError, cwd);
   }
 }
 
@@ -234,7 +260,7 @@ async function handlePull(
     const result = await gitPull(cwd, { rebase, fetchOnly });
     res.status(200).json(result);
   } catch (err) {
-    sendGitError(res, err, route, sendBridgeError);
+    sendGitError(res, err, route, sendBridgeError, cwd);
   }
 }
 
@@ -258,7 +284,7 @@ async function handleCommit(
     const result = await gitCommit(cwd, message.trim(), { all });
     res.status(200).json(result);
   } catch (err) {
-    sendGitError(res, err, route, sendBridgeError);
+    sendGitError(res, err, route, sendBridgeError, cwd);
   }
 }
 

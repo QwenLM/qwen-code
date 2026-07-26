@@ -37,8 +37,19 @@ function makeRepo(): string {
   return dir;
 }
 
+function makeBareRemote(): string {
+  const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitremote-'));
+  tmpRoots.push(remote);
+  git(remote, 'init', '-q', '--bare');
+  return remote;
+}
+
 function currentBranch(cwd: string): string {
   return git(cwd, 'symbolic-ref', '--short', 'HEAD').trim();
+}
+
+function headSha(cwd: string): string {
+  return git(cwd, 'rev-parse', 'HEAD').trim();
 }
 
 afterEach(() => {
@@ -183,6 +194,58 @@ describe('gitPush', () => {
       /detached HEAD/,
     );
   });
+
+  it('preserves an existing upstream instead of rewriting it', async () => {
+    const dir = makeRepo();
+    const remoteA = makeBareRemote();
+    const remoteB = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remoteA);
+    git(dir, 'remote', 'add', 'upstream', remoteB);
+    git(dir, 'push', '-q', 'upstream', 'HEAD');
+    // Set tracking to upstream, not origin.
+    const branch = currentBranch(dir);
+    git(dir, 'branch', '--set-upstream-to', `upstream/${branch}`, branch);
+
+    // Make a new commit so push has something to send.
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'second');
+
+    await gitPush(dir, { setUpstream: true });
+
+    // Tracking must still point at upstream, not origin.
+    const tracking = git(
+      dir,
+      'rev-parse',
+      '--abbrev-ref',
+      `${branch}@{u}`,
+    ).trim();
+    expect(tracking).toBe(`upstream/${branch}`);
+    // The commit must have landed in the upstream remote.
+    const upstreamLog = git(remoteB, 'log', '--oneline', '-1');
+    expect(upstreamLog).toContain('second');
+  });
+
+  it('resolves the sole configured remote when no upstream exists', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'myfork', remote);
+
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'second');
+
+    await gitPush(dir, { setUpstream: true });
+
+    const branch = currentBranch(dir);
+    const tracking = git(
+      dir,
+      'rev-parse',
+      '--abbrev-ref',
+      `${branch}@{u}`,
+    ).trim();
+    expect(tracking).toBe(`myfork/${branch}`);
+  });
 });
 
 describe('gitCommit', () => {
@@ -216,17 +279,34 @@ describe('gitCommit', () => {
 });
 
 describe('gitPull', () => {
-  it('fetch-only does not merge', async () => {
+  it('fetch-only does not merge a divergent remote commit', async () => {
     const dir = makeRepo();
-    // Create a bare "remote" and push to it so fetch has something to do.
-    const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitremote-'));
-    tmpRoots.push(remote);
-    git(remote, 'init', '-q', '--bare');
+    const remote = makeBareRemote();
     git(dir, 'remote', 'add', 'origin', remote);
     git(dir, 'push', '-q', 'origin', 'HEAD');
+
+    // Create a divergent commit on the remote via a second clone.
+    const clone = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitclone-'));
+    tmpRoots.push(clone);
+    git(clone, 'clone', '-q', remote, '.');
+    git(clone, 'config', 'user.email', 'other@example.com');
+    git(clone, 'config', 'user.name', 'Other');
+    git(clone, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    const headBefore = headSha(dir);
 
     const result = await gitPull(dir, { fetchOnly: true });
 
     expect(result.success).toBe(true);
+    // HEAD must not have advanced — fetch-only must not merge.
+    expect(headSha(dir)).toBe(headBefore);
+    // But the remote ref must have been fetched.
+    const branch = currentBranch(dir);
+    const fetched = git(dir, 'rev-parse', `origin/${branch}`).trim();
+    expect(fetched).not.toBe(headBefore);
   });
 });

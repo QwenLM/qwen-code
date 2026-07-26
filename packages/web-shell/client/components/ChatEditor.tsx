@@ -2130,10 +2130,15 @@ export const ChatEditor = memo(
                         onOpenDiff={onOpenGitDiff}
                         onOpenCommit={onOpenCommit}
                       >
-                        <span
-                          role="button"
-                          tabIndex={0}
-                          style={{ display: 'inline-flex' }}
+                        <button
+                          type="button"
+                          style={{
+                            display: 'inline-flex',
+                            background: 'none',
+                            border: 'none',
+                            padding: 0,
+                            cursor: 'pointer',
+                          }}
                         >
                           <GitBranchIndicator
                             branch={gitBranch}
@@ -2141,7 +2146,7 @@ export const ChatEditor = memo(
                             compact={!showGitBranchLabel}
                             worktree={gitWorktree}
                           />
-                        </span>
+                        </button>
                       </BranchPickerPopover>
                     ))}
                   {showModeAction && (

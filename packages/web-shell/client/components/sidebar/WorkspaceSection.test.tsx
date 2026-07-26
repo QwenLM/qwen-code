@@ -272,7 +272,8 @@ describe('WorkspaceSection git chip', () => {
     });
     // Clicking the chip opens the branch picker popover, not the diff dialog
     // directly. The diff dialog is accessible via "View Changes" inside the
-    // popover. We just verify the click doesn't throw.
+    // popover.
+    expect(button?.getAttribute('aria-expanded')).toBe('true');
   });
 
   it('hides the chip for an untrusted workspace and never queries git', async () => {

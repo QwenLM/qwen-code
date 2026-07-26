@@ -17,7 +17,6 @@ import { FolderClosedIcon, FolderOpenIcon } from 'lucide-react';
 import { GitBranchIndicator } from '../GitBranchIndicator';
 import { BranchPickerPopover } from '../BranchPickerPopover';
 import { SESSION_LIST_PAGE_SIZE } from '../../constants/sessions';
-import { useI18n } from '../../i18n';
 import {
   readWorkspaceCollapsedGroupIds,
   writeWorkspaceCollapsedGroupIds,
@@ -127,7 +126,6 @@ export function WorkspaceSection({
   onOpenGitDiff,
   onOpenCommit,
 }: WorkspaceSectionProps) {
-  const { t } = useI18n();
   const [sessions, setSessions] = useState<DaemonSessionSummary[]>([]);
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
   const [loadError, setLoadError] = useState(false);
@@ -370,7 +368,7 @@ export function WorkspaceSection({
             <button
               type="button"
               className={styles.gitPill}
-              aria-label={`${t('gitDiff.title')} — ${gitStatus.branch}`}
+              aria-label={`Git — ${gitStatus.branch}`}
             >
               <GitBranchIndicator
                 branch={gitStatus.branch}

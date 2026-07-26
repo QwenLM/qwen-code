@@ -845,6 +845,7 @@ async function handleDaemonRoute(
       scenario.gitDiff ?? {
         v: 1,
         workspaceCwd: scenario.workspaceCwd,
+        available: true,
         files: [
           {
             path: 'src/foo.ts',
