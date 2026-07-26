@@ -16,6 +16,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
+import { getGhHost, setGhHost } from './lib/gh.js';
 import {
   composeReview,
   composeReviewCommand,
@@ -23,6 +24,7 @@ import {
   verdictLine,
   type ComposeReviewInput,
   type ComposeReviewResult,
+  type PrBodyFetcher,
 } from './compose-review.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
@@ -30,6 +32,15 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLine: vi.fn(),
 }));
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+
+const ghMock = vi.hoisted(() => vi.fn((..._args: string[]) => ''));
+vi.mock('./lib/gh.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/gh.js')>();
+  return {
+    ...actual,
+    gh: ghMock,
+  };
+});
 
 const MODEL = 'test-model';
 
@@ -43,6 +54,7 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'compose-cov-'));
   ENV = { QWEN_CODE_PROJECT_DIR: dir, QWEN_CODE_SESSION_ID: 'S1' };
   mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
+  ghMock.mockClear();
 });
 
 afterEach(() => {
@@ -59,7 +71,13 @@ const DIFF = '/abs/diff.txt';
  * satisfies that one. A plan that requires nothing is not a plan any capture
  * command writes, and coverage now reads the roster out of it.
  */
-function plan(opts: { step45?: boolean; han?: boolean } = {}): string {
+function plan(
+  opts: {
+    step45?: boolean;
+    han?: boolean;
+    effort?: 'low' | 'medium' | 'high';
+  } = {},
+): string {
   const p = join(dir, 'plan.json');
   writeFileSync(
     p,
@@ -68,6 +86,9 @@ function plan(opts: { step45?: boolean; han?: boolean } = {}): string {
       // What fetch-pr records when the PR description contains Han
       // characters — the deterministic bilingual-body switch.
       ...(opts.han ? { prDescriptionHasHan: true } : {}),
+      // The effort the capturing command recorded — the roster and the
+      // reverse-audit floor both read it from here.
+      ...(opts.effort ? { effort: opts.effort } : {}),
       srcDiffLines: 5000,
       diffLines: 5000,
       files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
@@ -282,7 +303,7 @@ function blindPrompt(chunk: number): string {
  */
 function coveredPlan(
   step45Keys: string[] = ['verify', 'reverse-audit'],
-  planOpts: { han?: boolean } = {},
+  planOpts: { han?: boolean; effort?: 'low' | 'medium' | 'high' } = {},
 ): string {
   transcript('a1', goodPrompt(1), { toolCalls: 3 });
   transcript('a2', goodPrompt(2), { toolCalls: 2 });
@@ -815,6 +836,29 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     expect(written.event).toBe('COMMENT');
     expect(written.body).toContain('Suggestions are inline.');
     expect(written.body.endsWith(FOOTER)).toBe(true);
+  });
+
+  it('routes its gh calls via the PR host — --host reaches setGhHost', () => {
+    // The bilingual body-language recovery calls `gh pr view`; on GitHub Enterprise
+    // that call must hit the PR's host, or the composed body's language disagrees
+    // with what `submit` (which routes by host) posts. Drop the `setGhHost(host)`
+    // and this reddens.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-host-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    writeFileSync(inputPath, JSON.stringify({ modelId: MODEL }), 'utf8');
+    writeFileSync(commentsPath, '[]', 'utf8');
+    setGhHost(undefined);
+    try {
+      (composeReviewCommand.handler as (argv: unknown) => void)({
+        input: inputPath,
+        comments: commentsPath,
+        host: 'github.example.com',
+      });
+      expect(getGhHost()).toBe('github.example.com');
+    } finally {
+      setGhHost(undefined);
+    }
   });
 
   it('a drafted inline Critical reaches the verdict line — the report-only hole', () => {
@@ -1643,6 +1687,51 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     );
   });
 
+  it('does not require the reverse audit at medium effort — a by-design Comment cap, no FIX line', () => {
+    // The balanced tier skips Step 5 deliberately. A clean medium review still caps
+    // at Comment (it cannot certify the diff the way high does), but the reverse
+    // audit must NOT be flagged as a repairable gap: the FIX line telling the
+    // orchestrator to run it made the one mandated repair round rebuild the full
+    // high pipeline and escalate every medium review back to high.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      // verify ran; reverse audit absent BY DESIGN (plan records medium).
+      planPath: coveredPlan(['verify'], { effort: 'medium' }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    // The disclosure reads as by-design, not as a failure the author must chase.
+    expect(r.body).toContain(
+      'the balanced (medium) tier skips the second-look pass',
+    );
+    expect(r.body).not.toMatch(
+      /no auditor was launched with a prompt this skill builds/,
+    );
+    // And crucially: no reverse-audit FIX line, so nothing escalates medium to high.
+    expect(r.remediation.join(' ')).not.toContain('reverse audit:');
+  });
+
+  it('still requires the verifier at medium — an unverified blocker must not post', () => {
+    // Medium runs Step 4. A Critical it did not verify is still held back from
+    // becoming a public blocker, exactly as at high — but no reverse-audit
+    // remediation appears, because medium never owed it.
+    const r = composeReview({
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      planPath: coveredPlan([], { effort: 'medium' }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('criticals-unverified');
+    const fixes = r.remediation.join(' ');
+    expect(fixes).toContain('--role verify');
+    expect(fixes).not.toContain('--role reverse-audit');
+  });
+
   it('says one sentence when verify and the reverse audit failed the same way', () => {
     // #7268's posted body carried the two `rewritten` sentences back to back,
     // near-identical but for the tail. Both steps down the same way is one
@@ -2118,5 +2207,192 @@ describe('bilingual body — the PR author writes Chinese (prDescriptionHasHan)'
     expect(
       r.body.match(/old blocker at a\.ts:1 — still reachable\?/g) ?? [],
     ).toHaveLength(2);
+  });
+});
+
+/**
+ * The plan flag is the deterministic path; this is the recovery for when it is
+ * missing. `fetch-pr` always writes `prDescriptionHasHan`, but a `plan-diff`
+ * plan never does, and an orchestrator that improvises the pipeline can hand
+ * `compose-review` a plan that is not `fetch-pr`'s report — which is how a
+ * Chinese-authored PR (#7686) shipped an English-only review while the four
+ * bot reviews before it, off a proper plan, were bilingual. When the flag is
+ * absent but the plan still names the PR, the register is recovered from the
+ * live description, which the caller cannot forge.
+ */
+describe('bilingual body — recovered from the live PR when the plan omits the flag', () => {
+  /** A covered plan with a PR identity but no `prDescriptionHasHan`, its mtime
+   *  kept old so its transcripts still read as newer than it. */
+  function namedPlanWithoutFlag(): string {
+    const p = coveredPlan();
+    const parsed = JSON.parse(readFileSync(p, 'utf8'));
+    delete parsed.prDescriptionHasHan;
+    parsed.ownerRepo = 'QwenLM/qwen-code';
+    parsed.prNumber = '7686';
+    writeFileSync(p, JSON.stringify(parsed));
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    return p;
+  }
+
+  /** A fetcher that records its calls, so a test can prove it was NOT reached. */
+  function recordingFetcher(body: string): PrBodyFetcher & { calls: number } {
+    const fn = ((_ownerRepo: string, _prNumber: string) => {
+      fn.calls++;
+      return body;
+    }) as PrBodyFetcher & { calls: number };
+    fn.calls = 0;
+    return fn;
+  }
+
+  it('folds in Chinese when the recovered description contains Han', () => {
+    const fetch = recordingFetcher('这个 PR 懒加载首次使用的依赖。');
+    const r = composeReview({
+      suggestionsInline: 1,
+      planPath: namedPlanWithoutFlag(),
+      prBodyFetcher: fetch,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(fetch.calls).toBe(1);
+    // Both halves: the English rides above the fold, the Chinese inside it.
+    expect(r.body).toContain('<details>\n<summary>中文说明</summary>');
+    expect(r.body).toContain('Suggestions are inline.');
+    expect(r.body).toContain('建议见行内评论。');
+  });
+
+  it('stays English when the recovered description has no Han', () => {
+    const fetch = recordingFetcher(
+      'This PR lazy-loads first-use dependencies.',
+    );
+    const r = composeReview({
+      suggestionsInline: 1,
+      planPath: namedPlanWithoutFlag(),
+      prBodyFetcher: fetch,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(fetch.calls).toBe(1);
+    expect(r.body).not.toContain('<details>');
+    expect(r.body).not.toContain('中文');
+  });
+
+  it('honours a recorded false without fetching — the English author is settled', () => {
+    // A real fetch-pr report that fetched the body and found no Han. Re-reading
+    // the live PR on every English review would be waste, and the recorded
+    // snapshot is the answer.
+    const p = coveredPlan();
+    const parsed = JSON.parse(readFileSync(p, 'utf8'));
+    parsed.prDescriptionHasHan = false;
+    parsed.ownerRepo = 'QwenLM/qwen-code';
+    parsed.prNumber = '7686';
+    writeFileSync(p, JSON.stringify(parsed));
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    const fetch = recordingFetcher('这段中文绝不该被读到。');
+    const r = composeReview({
+      suggestionsInline: 1,
+      planPath: p,
+      prBodyFetcher: fetch,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(fetch.calls).toBe(0);
+    expect(r.body).not.toContain('<details>');
+  });
+
+  it('does not fetch when the plan carries no PR identity', () => {
+    const fetch = recordingFetcher('这段中文绝不该被读到。');
+    const r = composeReview({
+      suggestionsInline: 1,
+      planPath: coveredPlan(), // no ownerRepo/prNumber, no flag
+      prBodyFetcher: fetch,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(fetch.calls).toBe(0);
+    expect(r.body).not.toContain('<details>');
+  });
+
+  it('falls back to English when the fetch throws — language never takes the review down', () => {
+    const boom: PrBodyFetcher = () => {
+      throw new Error('gh unreachable');
+    };
+    const r = composeReview({
+      suggestionsInline: 1,
+      planPath: namedPlanWithoutFlag(),
+      prBodyFetcher: boom,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).not.toContain('<details>');
+    expect(r.body).not.toContain('中文');
+    expect(r.body).toContain('Suggestions are inline.');
+  });
+
+  it('the production reader calls gh pr view with the right args and parses the body', () => {
+    // All other tests in this block inject a fetcher, leaving fetchPrBodyViaGh —
+    // the only new production behaviour — unpinned. A wrong --json field, a
+    // dropped JSON.parse, or a body→bodyText slip would ship English-only reviews
+    // with CI clean. This test reddens under those mutants.
+    ghMock.mockReturnValue('{"body":"这个 PR 修复了双语渲染。"}');
+    const r = composeReview({
+      suggestionsInline: 1,
+      planPath: namedPlanWithoutFlag(),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(ghMock).toHaveBeenCalledWith(
+      'pr',
+      'view',
+      '7686',
+      '--repo',
+      'QwenLM/qwen-code',
+      '--json',
+      'body',
+    );
+    expect(r.body).toContain('<details>\n<summary>中文说明</summary>');
+  });
+
+  it('strips a model-supplied prBodyFetcher — it cannot suppress the Chinese fold', () => {
+    // The handler deletes prBodyFetcher from the input JSON (the same way it
+    // deletes env). Without that delete, "suppress" reaches bilingualFromPlan,
+    // is called as a function, throws, and the catch drops the fold — the exact
+    // regression this PR closes, through the alternate entry point.
+    ghMock.mockReturnValue('{"body":"这个 PR 修复了双语渲染。"}');
+    const handlerDir = mkdtempSync(join(tmpdir(), 'compose-fetcher-'));
+    try {
+      const planPath = join(handlerDir, 'plan.json');
+      const p = namedPlanWithoutFlag();
+      writeFileSync(planPath, readFileSync(p, 'utf8'));
+      const old = new Date(2020, 0, 1);
+      utimesSync(planPath, old, old);
+      const inputPath = join(handlerDir, 'in.json');
+      writeFileSync(
+        inputPath,
+        JSON.stringify({
+          planPath,
+          prBodyFetcher: 'suppress',
+          modelId: MODEL,
+        }),
+      );
+      const commentsPath = join(handlerDir, 'comments.json');
+      writeFileSync(commentsPath, '[]', 'utf8');
+      const outPath = join(handlerDir, 'out.json');
+      (composeReviewCommand.handler as (argv: unknown) => void)({
+        input: inputPath,
+        comments: commentsPath,
+        out: outPath,
+      });
+      const written = JSON.parse(
+        readFileSync(outPath, 'utf8'),
+      ) as ComposeReviewResult;
+      // If prBodyFetcher had NOT been stripped, "suppress" would throw and the
+      // fold would be absent. Its presence proves the handler stripped it.
+      expect(written.body).toContain('<details>\n<summary>中文说明</summary>');
+    } finally {
+      rmSync(handlerDir, { recursive: true, force: true });
+    }
   });
 });

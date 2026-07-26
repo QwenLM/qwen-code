@@ -93,6 +93,34 @@ describe('plan-diff', () => {
     expect(plan.worktreePath).toBeUndefined();
   });
 
+  it('records the effort the caller passed, so the roster reads it from the plan', () => {
+    // The effort belongs IN the plan, not in a flag to `requiredAgents`: the
+    // roster, check-coverage and compose-review then all read one value and
+    // cannot disagree, and no caller can shrink the roster by omitting a flag.
+    const diffPath = join(dir, 'local.diff');
+    const out = join(dir, 'plan.json');
+    writeFileSync(diffPath, makeDiff('src/a.ts', 60));
+    (planDiffCommand.handler as (a: unknown) => void)({
+      diff_path: diffPath,
+      out,
+      maxChunkLines: 400,
+      effort: 'medium',
+    });
+    expect(JSON.parse(readFileSync(out, 'utf8')).effort).toBe('medium');
+  });
+
+  it('omits effort when none is passed — the roster then keeps the full set', () => {
+    const diffPath = join(dir, 'local.diff');
+    const out = join(dir, 'plan.json');
+    writeFileSync(diffPath, makeDiff('src/a.ts', 60));
+    (planDiffCommand.handler as (a: unknown) => void)({
+      diff_path: diffPath,
+      out,
+      maxChunkLines: 400,
+    });
+    expect(JSON.parse(readFileSync(out, 'utf8')).effort).toBeUndefined();
+  });
+
   it('refuses half a PR identity — a roster cannot require an agent nobody can build', () => {
     const diffPath = join(dir, 'local.diff');
     const out = join(dir, 'plan.json');

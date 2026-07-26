@@ -243,10 +243,12 @@ describe('runForkedAgent (cache path)', () => {
       },
     );
 
+    const enableManualPlanExitNotices = vi.fn();
     vi.mocked(GeminiChat).mockImplementation(
       () =>
         ({
           sendMessageStream: mockSendMessageStream,
+          enableManualPlanExitNotices,
         }) as unknown as GeminiChat,
     );
 
@@ -275,6 +277,7 @@ describe('runForkedAgent (cache path)', () => {
     // to avoid polluting the main session's recordings
     expect(ctorArgs[3]).toBeUndefined(); // chatRecordingService
     expect(ctorArgs[4]).toBeUndefined(); // telemetryService
+    expect(enableManualPlanExitNotices).not.toHaveBeenCalled();
 
     // Verify sendMessageStream was called
     expect(capturedParams).not.toBeNull();

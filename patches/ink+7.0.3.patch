@@ -153,7 +153,7 @@ index cc849f0..25d6b33 100644
  //# sourceMappingURL=index.js.map
 \ No newline at end of file
 diff --git a/node_modules/ink/build/ink.js b/node_modules/ink/build/ink.js
-index ef659f3..c3fad13 100644
+index ef659f3..6e97480 100644
 --- a/node_modules/ink/build/ink.js
 +++ b/node_modules/ink/build/ink.js
 @@ -17,6 +17,7 @@ import { hideCursorEscape, showCursorEscape } from './cursor-helpers.js';
@@ -211,6 +211,14 @@ index ef659f3..c3fad13 100644
              this.writeBestEffort(this.options.stdout, hideCursorEscape);
          }
      }
+@@ -688,6 +706,7 @@ export default class Ink {
+         return this.nextRenderCommit.promise;
+     }
+     renderInteractiveFrame(output, outputHeight, staticOutput) {
++        this.log.setCursorPosition(this.cursorPosition);
+         const hasStaticOutput = staticOutput !== '';
+         const isTty = this.options.stdout.isTTY;
+         // Detect fullscreen: output fills or exceeds terminal height.
 diff --git a/node_modules/ink/build/output.d.ts b/node_modules/ink/build/output.d.ts
 index 0f4523f..a3ef634 100644
 --- a/node_modules/ink/build/output.d.ts

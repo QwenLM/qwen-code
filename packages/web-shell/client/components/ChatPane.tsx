@@ -590,6 +590,7 @@ export function ChatPane({
             hasOlderHistory={transcriptHistory.hasMore}
             loadingOlderHistory={transcriptHistory.loading}
             historyCapacityReached={transcriptHistory.capacityReached}
+            historyPaginationError={transcriptHistory.paginationError}
             onLoadOlderHistory={transcriptHistory.loadMore}
             transcriptBlockCount={blocks.length}
             transcriptActivity={store}
