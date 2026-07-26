@@ -324,7 +324,7 @@ describe('SubagentManager', () => {
         makeFakeConfig({
           agents: {
             modelGrades: { ' small ': 'fast', high: 'qwen-max' },
-            allowedGrades: ['small', 'high'],
+            allowedGrades: [' small ', 'high'],
           },
         }),
       );

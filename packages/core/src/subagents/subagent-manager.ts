@@ -182,7 +182,11 @@ export class SubagentManager {
           typeof model === 'string' &&
           model.trim() !== '' &&
           (allowedGrades === undefined ||
-            allowedGrades.includes(normalizedGrade))
+            allowedGrades.some(
+              (allowedGrade) =>
+                typeof allowedGrade === 'string' &&
+                allowedGrade.trim() === normalizedGrade,
+            ))
           ? [[normalizedGrade, model.trim()] as const]
           : [];
       }),
