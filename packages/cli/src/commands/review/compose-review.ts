@@ -31,6 +31,7 @@ import {
 } from './lib/coverage.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import { gh } from './lib/gh.js';
+import { isPositivePrNumber } from './lib/roster.js';
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
@@ -1061,16 +1062,6 @@ interface Bi {
   zh: string;
 }
 
-/** A positive PR number, as `fetch-pr`/`plan-diff` write it (a string) or a
- *  raw integer. `null`, `0`, `''` and non-numeric junk are 'no PR'. */
-function positivePrNumber(value: unknown): string | undefined {
-  if (typeof value === 'number')
-    return Number.isInteger(value) && value > 0 ? String(value) : undefined;
-  if (typeof value === 'string' && /^\d+$/.test(value) && Number(value) > 0)
-    return value;
-  return undefined;
-}
-
 /** The production reader: one `gh pr view` for the description body. */
 const fetchPrBodyViaGh: PrBodyFetcher = (ownerRepo, prNumber) => {
   const json = gh(
@@ -1129,7 +1120,9 @@ function bilingualFromPlan(
     typeof plan?.ownerRepo === 'string' && plan.ownerRepo
       ? plan.ownerRepo
       : undefined;
-  const prNumber = positivePrNumber(plan?.prNumber);
+  const prNumber = isPositivePrNumber(plan?.prNumber)
+    ? String(plan.prNumber)
+    : undefined;
   if (!ownerRepo || !prNumber) return false;
   try {
     return /\p{Script=Han}/u.test(fetchPrBody(ownerRepo, prNumber));
