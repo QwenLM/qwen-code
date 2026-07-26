@@ -15,6 +15,7 @@ import { computeBridgeHints } from '../bridges/hints.js';
 import { BRIDGE } from '../scopes.js';
 import { SessionWal } from '../wal.js';
 import type { WalFrame } from '../wal.js';
+import { isValidSessionId } from '../sessions/chatsPath.js';
 
 /** Per-session WAL instances, keyed by sessionId. */
 const walRegistry = new Map<string, SessionWal>();
@@ -49,6 +50,17 @@ export function createSessionEventsRoute(
 ): RequestHandler {
   return async (req, res) => {
     const sessionId = req.params.id;
+    // Reject a malformed/path-traversal-shaped id BEFORE any WAL path join
+    // (getWal/SessionWal joins the raw id into a file path) or daemon call —
+    // mirrors every sibling session route (fork.ts, rewind.ts, lineage.ts,
+    // idleToggle.ts). Unconditional (not gated on walDir being set) so this
+    // stays correct if a future deploy wires walDir where it's undefined today.
+    if (!isValidSessionId(sessionId)) {
+      res
+        .status(404)
+        .json({ error: 'Session not found', code: 'session_not_found' });
+      return;
+    }
     const actorTokenId = req.rcClient?.id;
     const shareId = req.rcClient?.shareId;
     const shareLabel = req.rcClient?.shareLabel;

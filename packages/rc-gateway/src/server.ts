@@ -634,6 +634,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     '/session/:id/end',
     requireScope(WRITE, audit),
     enforceSessionLock(audit),
+    subActorBan, // banned chat user → 403 (a stop request is never rate-limited)
     createSessionEndRoute(deps.daemon, audit),
   );
   app.post(
@@ -695,6 +696,8 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(WRITE, audit),
     recordActivity(workingDevice),
     enforceSessionLock(audit),
+    subActorBan, // banned chat user → 403 (before consuming rate budget)
+    subActorRateLimit, // bridge fan-in: cap forks per chat user
     createForkRoute(
       deps.daemon,
       async () => {
@@ -716,6 +719,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     '/session/:id/idle-suggest-toggle',
     requireScope(WRITE, audit),
     enforceSessionLock(audit),
+    subActorBan, // banned chat user → 403 (a preference toggle, not rate-limited)
     createIdleToggleRoute(idleToggles, idleStatusResolver, audit),
   );
   // GET the same path reports EFFECTIVE idle state (`/suggest status`). SESSION_READ
@@ -828,6 +832,8 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(WRITE, audit),
     recordActivity(workingDevice),
     enforceSessionLock(audit),
+    subActorBan, // banned chat user → 403 (before consuming rate budget)
+    subActorRateLimit, // bridge fan-in: cap command invocations per chat user
     createInvokeCommandRoute(deps.daemon, commandLoader, audit),
   );
   app.get(
@@ -1113,6 +1119,8 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     requireScope(WRITE, audit),
     recordActivity(workingDevice),
     enforceSessionLock(audit),
+    subActorBan, // banned chat user → 403 (before consuming rate budget)
+    subActorRateLimit, // bridge fan-in: cap approval-mode changes per chat user
     createApprovalModeRoute(deps.daemon, { audit }),
   );
 
@@ -1147,6 +1155,8 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       '/rc/agents',
       requireScope(WRITE, audit),
       recordActivity(workingDevice),
+      subActorBan, // banned chat user → 403 (before consuming rate budget)
+      subActorRateLimit, // bridge fan-in: cap agent spawns per chat user
       createSpawnAgentRoute(agentDeps),
     );
     app.get(
@@ -1163,12 +1173,15 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       '/rc/agents/:id/message',
       requireScope(WRITE, audit),
       recordActivity(workingDevice),
+      subActorBan, // banned chat user → 403 (before consuming rate budget)
+      subActorRateLimit, // bridge fan-in: cap agent messages per chat user
       createAgentMessageRoute(agentDeps),
     );
     app.post(
       '/rc/agents/:id/cancel',
       requireScope(WRITE, audit),
       recordActivity(workingDevice),
+      subActorBan, // banned chat user → 403 (a stop request is never rate-limited)
       createAgentCancelRoute(agentDeps),
     );
   }
@@ -1221,6 +1234,8 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       '/rc/reviews',
       requireScope(WRITE, audit),
       recordActivity(workingDevice),
+      subActorBan, // banned chat user → 403 (before consuming rate budget)
+      subActorRateLimit, // bridge fan-in: cap review triggers per chat user
       createTriggerReviewRoute(reviewDeps),
     );
     app.get(
@@ -1237,6 +1252,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       '/rc/reviews/:id/cancel',
       requireScope(WRITE, audit),
       recordActivity(workingDevice),
+      subActorBan, // banned chat user → 403 (a stop request is never rate-limited)
       createCancelReviewRoute(reviewDeps),
     );
   }
@@ -1260,6 +1276,8 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       '/rc/workflows',
       requireScope(WRITE, audit),
       recordActivity(workingDevice),
+      subActorBan, // banned chat user → 403 (before consuming rate budget)
+      subActorRateLimit, // bridge fan-in: cap workflow starts per chat user
       createStartWorkflowRoute(workflowDeps),
     );
     app.get(
@@ -1276,6 +1294,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       '/rc/workflows/:runId/cancel',
       requireScope(WRITE, audit),
       recordActivity(workingDevice),
+      subActorBan, // banned chat user → 403 (a stop request is never rate-limited)
       createCancelWorkflowRoute(workflowDeps),
     );
   }

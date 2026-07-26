@@ -156,9 +156,12 @@ describe('gateway app', () => {
     };
     expect(scopes).toEqual([SESSION_READ]);
 
-    const events = await fetch(`${url}/session/sess-1/events`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const events = await fetch(
+      `${url}/session/11111111111111111111111111111111/events`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+      },
+    );
     expect(events.status).toBe(200);
     const text = await events.text();
     expect(text).toContain('"text":"one"');
@@ -183,9 +186,12 @@ describe('gateway app', () => {
     expect([...scopes].sort()).toEqual(
       [BRIDGE, SESSION_READ, APPROVE, WRITE].sort(),
     );
-    const events = await fetch(`${url}/session/sess-1/events`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const events = await fetch(
+      `${url}/session/11111111111111111111111111111111/events`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+      },
+    );
     expect(events.status).toBe(200); // session:read satisfied by the bundle
   });
 
@@ -201,7 +207,9 @@ describe('gateway app', () => {
 
   it('401s the events route without a token', async () => {
     const { url } = await boot();
-    const res = await fetch(`${url}/session/sess-1/events`);
+    const res = await fetch(
+      `${url}/session/11111111111111111111111111111111/events`,
+    );
     expect(res.status).toBe(401);
   });
 
@@ -214,9 +222,12 @@ describe('gateway app', () => {
       body: JSON.stringify({ code, label: 'weak' }),
     });
     const { token } = (await redeem.json()) as { token: string };
-    const res = await fetch(`${url}/session/sess-1/events`, {
-      headers: { Authorization: `Bearer ${token}` },
-    });
+    const res = await fetch(
+      `${url}/session/11111111111111111111111111111111/events`,
+      {
+        headers: { Authorization: `Bearer ${token}` },
+      },
+    );
     expect(res.status).toBe(403);
   });
 
@@ -240,10 +251,13 @@ describe('gateway app', () => {
     const victim = (await victimRedeem.json()) as { id: string; token: string };
 
     const ac = new AbortController();
-    const stream = await fetch(`${url}/session/sess-1/events`, {
-      headers: { Authorization: `Bearer ${victim.token}` },
-      signal: ac.signal,
-    });
+    const stream = await fetch(
+      `${url}/session/11111111111111111111111111111111/events`,
+      {
+        headers: { Authorization: `Bearer ${victim.token}` },
+        signal: ac.signal,
+      },
+    );
     await stream.body!.getReader().read();
 
     const del = await fetch(`${url}/rc/tokens/${victim.id}`, {
@@ -268,7 +282,7 @@ describe('gateway app', () => {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ code, label: 'owner' }),
     });
-    await fetch(`${url}/session/sess-1/events`, {
+    await fetch(`${url}/session/11111111111111111111111111111111/events`, {
       headers: { Authorization: 'Bearer not-a-token' },
     });
 
