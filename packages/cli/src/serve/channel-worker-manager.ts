@@ -60,6 +60,7 @@ export class ChannelWorkerControlError extends Error {
     | 'channel_worker_start_failed'
     | 'channel_worker_stop_failed'
     | 'channel_worker_not_enabled'
+    | 'channel_runtime_owner_mismatch'
     | 'daemon_draining';
   readonly rolledBack?: boolean;
   readonly rollbackError?: string;
@@ -108,12 +109,22 @@ export interface ChannelWorkerManager {
   startInitial(selection: ServeChannelSelection): Promise<void>;
   setSelection(
     selection: ServeChannelSelection,
+    requiredOwner?: ChannelWorkerRequiredOwner,
   ): Promise<ChannelWorkerSetResult>;
+  setChannelEnabled(
+    owner: ChannelWorkerRequiredOwner,
+    enabled: boolean,
+  ): Promise<ChannelWorkerSetResult | ChannelWorkerStopResult>;
   stopSelection(): Promise<ChannelWorkerStopResult>;
   reload(): Promise<ChannelWorkerSnapshot>;
+  reloadWorkspace(
+    workspaceCwd: string,
+    name: string,
+  ): Promise<ChannelWorkerSnapshot>;
   state(): ChannelWorkerControlState;
   primarySnapshot(): ChannelWorkerSnapshot;
   snapshots(): ChannelWorkerGroupSnapshot[];
+  committedChannelNames(): string[];
   enqueueWebhookTask(
     task: ChannelWebhookTask,
   ): ReturnType<ChannelWorkerGroup['enqueueWebhookTask']>;
@@ -132,6 +143,11 @@ export interface ChannelWorkerManager {
   killAllSync(): void;
 }
 
+export interface ChannelWorkerRequiredOwner {
+  name: string;
+  workspaceCwd: string;
+}
+
 const DISABLED_SNAPSHOT: ChannelWorkerSnapshot = {
   enabled: false,
   state: 'disabled',
@@ -144,6 +160,15 @@ function cloneSelection(
   return selection.mode === 'all'
     ? { mode: 'all' }
     : { mode: 'names', names: [...selection.names] };
+}
+
+function cloneGroups(
+  groups: readonly ChannelWorkspaceGroup[],
+): ChannelWorkspaceGroup[] {
+  return groups.map((group) => ({
+    workspaceCwd: group.workspaceCwd,
+    selection: cloneSelection(group.selection),
+  }));
 }
 
 function selectionsEqual(
@@ -164,6 +189,31 @@ function isPartial(workers: readonly ChannelWorkerGroupSnapshot[]): boolean {
     const connected = new Set(worker.channels);
     return worker.requestedChannels.some((name) => !connected.has(name));
   });
+}
+
+function groupIncludesName(
+  group: ChannelWorkspaceGroup,
+  name: string,
+): boolean {
+  return group.selection.mode === 'all' || group.selection.names.includes(name);
+}
+
+function assertRequiredOwner(
+  targetGroups: readonly ChannelWorkspaceGroup[],
+  requiredOwner: ChannelWorkerRequiredOwner,
+): void {
+  const owners = targetGroups.filter((target) =>
+    groupIncludesName(target, requiredOwner.name),
+  );
+  if (
+    owners.length !== 1 ||
+    owners[0]!.workspaceCwd !== requiredOwner.workspaceCwd
+  ) {
+    throw new ChannelWorkerControlError(
+      'channel_runtime_owner_mismatch',
+      `Channel "${requiredOwner.name}" does not resolve to workspace "${requiredOwner.workspaceCwd}".`,
+    );
+  }
 }
 
 function errorMessage(error: unknown): string {
@@ -195,6 +245,7 @@ export function createChannelWorkerManager(
   opts: CreateChannelWorkerManagerOptions,
 ): ChannelWorkerManager {
   let committedSelection: ServeChannelSelection | undefined;
+  let committedGroups: ChannelWorkspaceGroup[] = [];
   let pendingSelection: ServeChannelSelection | undefined;
   let transition: ChannelWorkerControlTransition = 'idle';
   let group: ChannelWorkerGroup | undefined;
@@ -260,6 +311,7 @@ export function createChannelWorkerManager(
     groups: readonly ChannelWorkspaceGroup[],
   ) => {
     committedSelection = selection ? cloneSelection(selection) : undefined;
+    committedGroups = cloneGroups(groups);
     transition = 'idle';
     pendingSelection = undefined;
     opts.onCommittedSelection?.(committedSelection, groups);
@@ -295,6 +347,7 @@ export function createChannelWorkerManager(
   const applySelection = async (
     selection: ServeChannelSelection,
     initial: boolean,
+    resolvedGroups?: readonly ChannelWorkspaceGroup[],
   ): Promise<ChannelWorkerSetResult> => {
     if (hardKilled) throw drainingError();
     const enabling = !snapshot().enabled;
@@ -313,10 +366,9 @@ export function createChannelWorkerManager(
     setTransition(replacing ? 'reconciling' : 'starting', selection);
     let targetGroups: readonly ChannelWorkspaceGroup[];
     try {
-      targetGroups = await opts.resolveGroups(
-        selection,
-        initial ? 'initial' : 'set',
-      );
+      targetGroups =
+        resolvedGroups ??
+        (await opts.resolveGroups(selection, initial ? 'initial' : 'set'));
       if (hardKilled) throw drainingError();
       reserve(selection);
     } catch (error) {
@@ -412,6 +464,62 @@ export function createChannelWorkerManager(
     }
   };
 
+  const committedChannelNames = (): string[] => {
+    if (!committedSelection) return [];
+    if (committedSelection.mode === 'names') {
+      return [...committedSelection.names];
+    }
+    const names = new Set<string>();
+    for (const worker of group?.snapshots() ?? []) {
+      for (const name of worker.requestedChannels ?? worker.channels) {
+        names.add(name);
+      }
+    }
+    return [...names];
+  };
+
+  const assertCommittedOwner = (
+    requiredOwner: ChannelWorkerRequiredOwner,
+  ): void => {
+    const owners = (group?.snapshots() ?? []).filter(
+      (worker) =>
+        worker.adapters?.some(
+          (adapter) => adapter.name === requiredOwner.name,
+        ) ||
+        worker.requestedChannels?.includes(requiredOwner.name) ||
+        worker.channels.includes(requiredOwner.name),
+    );
+    if (
+      owners.length !== 1 ||
+      owners[0]!.workspaceCwd !== requiredOwner.workspaceCwd
+    ) {
+      throw new ChannelWorkerControlError(
+        'channel_runtime_owner_mismatch',
+        `Channel "${requiredOwner.name}" does not have one confirmed runtime owner in workspace "${requiredOwner.workspaceCwd}".`,
+      );
+    }
+  };
+
+  const stopSelectionNow = async (): Promise<ChannelWorkerStopResult> => {
+    const hadState = group !== undefined || leaseReserved;
+    if (!hadState) {
+      return { changed: false, state: snapshot() };
+    }
+    setTransition('stopping');
+    try {
+      if (group) {
+        await group.stop();
+        group = undefined;
+      }
+      release();
+    } catch (error) {
+      setTransition('idle');
+      throw classifyFailure(error, 'channel_worker_stop_failed');
+    }
+    commit(undefined, []);
+    return { changed: hadState, state: snapshot() };
+  };
+
   const manager: ChannelWorkerManager = {
     async startInitial(selection) {
       if (draining) throw drainingError();
@@ -419,35 +527,59 @@ export function createChannelWorkerManager(
         await applySelection(selection, true);
       });
     },
-    setSelection(selection) {
+    setSelection(selection, requiredOwner) {
       if (draining) {
         return Promise.reject(drainingError());
       }
-      return enqueue(() => applySelection(selection, false));
+      return enqueue(async () => {
+        if (!requiredOwner) return applySelection(selection, false);
+        const targetGroups = await opts.resolveGroups(selection, 'set');
+        assertRequiredOwner(targetGroups, requiredOwner);
+        if (hardKilled) throw drainingError();
+        return applySelection(selection, false, targetGroups);
+      });
+    },
+    setChannelEnabled(owner, enabled) {
+      if (draining) {
+        return Promise.reject(drainingError());
+      }
+      return enqueue(async () => {
+        const committedNames = committedChannelNames();
+        const currentlyEnabled = committedNames.includes(owner.name);
+        if (currentlyEnabled) assertCommittedOwner(owner);
+        if (enabled) {
+          if (currentlyEnabled) {
+            return {
+              changed: false,
+              replaced: false,
+              partial: isPartial(group?.snapshots() ?? []),
+              state: snapshot(),
+              created: false,
+            };
+          }
+          const selection: ServeChannelSelection = {
+            mode: 'names',
+            names: [...committedNames, owner.name],
+          };
+          const targetGroups = await opts.resolveGroups(selection, 'set');
+          assertRequiredOwner(targetGroups, owner);
+          if (hardKilled) throw drainingError();
+          return applySelection(selection, false, targetGroups);
+        }
+        if (!currentlyEnabled) {
+          return { changed: false, state: snapshot() };
+        }
+        const names = committedNames.filter((name) => name !== owner.name);
+        return names.length === 0
+          ? stopSelectionNow()
+          : applySelection({ mode: 'names', names }, false);
+      });
     },
     stopSelection() {
       if (draining) {
         return Promise.reject(drainingError());
       }
-      return enqueue(async () => {
-        const hadState = group !== undefined || leaseReserved;
-        if (!hadState) {
-          return { changed: false, state: snapshot() };
-        }
-        setTransition('stopping');
-        try {
-          if (group) {
-            await group.stop();
-            group = undefined;
-          }
-          release();
-        } catch (error) {
-          setTransition('idle');
-          throw classifyFailure(error, 'channel_worker_stop_failed');
-        }
-        commit(undefined, []);
-        return { changed: hadState, state: snapshot() };
-      });
+      return enqueue(stopSelectionNow);
     },
     reload() {
       if (draining) {
@@ -487,9 +619,75 @@ export function createChannelWorkerManager(
         );
       });
     },
+    reloadWorkspace(workspaceCwd, name) {
+      if (draining) {
+        return Promise.reject(drainingError());
+      }
+      return enqueue(async () => {
+        if (!group || !committedSelection) {
+          throw new ChannelWorkerControlError(
+            'channel_worker_not_enabled',
+            'This daemon has no channel worker to reload.',
+          );
+        }
+        setTransition('reconciling', committedSelection);
+        let targetGroups: readonly ChannelWorkspaceGroup[];
+        try {
+          targetGroups = await opts.resolveGroups(committedSelection, 'reload');
+          assertRequiredOwner(targetGroups, { name, workspaceCwd });
+          if (
+            targetGroups.filter(
+              (target) => target.workspaceCwd === workspaceCwd,
+            ).length !== 1 ||
+            committedGroups.filter(
+              (target) => target.workspaceCwd === workspaceCwd,
+            ).length !== 1
+          ) {
+            throw new ChannelWorkerControlError(
+              'channel_runtime_owner_mismatch',
+              `Workspace "${workspaceCwd}" does not own a committed channel worker.`,
+            );
+          }
+        } catch (error) {
+          setTransition('idle');
+          throw error;
+        }
+        if (hardKilled) throw drainingError();
+        try {
+          await group.reconcile(targetGroups, {
+            forceWorkspaceCwd: workspaceCwd,
+            onRollingBack: () =>
+              setTransition('rolling_back', committedSelection),
+          });
+        } catch (error) {
+          setTransition('idle');
+          throw classifyFailure(error, 'channel_worker_start_failed');
+        }
+        const targetGroup = targetGroups.find(
+          (target) => target.workspaceCwd === workspaceCwd,
+        )!;
+        const nextCommittedGroups = committedGroups.map((committedGroup) =>
+          committedGroup.workspaceCwd === workspaceCwd
+            ? targetGroup
+            : committedGroup,
+        );
+        commit(committedSelection, nextCommittedGroups);
+        const worker = group
+          .snapshots()
+          .find((snapshot) => snapshot.workspaceCwd === workspaceCwd);
+        if (!worker) {
+          throw new ChannelWorkerControlError(
+            'channel_runtime_owner_mismatch',
+            `Workspace "${workspaceCwd}" has no channel worker after reload.`,
+          );
+        }
+        return worker;
+      });
+    },
     state: snapshot,
     primarySnapshot: () => group?.primarySnapshot() ?? { ...DISABLED_SNAPSHOT },
     snapshots: () => group?.snapshots() ?? [],
+    committedChannelNames,
     enqueueWebhookTask(task) {
       if (!group || draining) {
         return Promise.reject(

@@ -100,7 +100,12 @@ gh api -X PATCH repos/$REPO/issues/comments/$COMMENT_ID -F body=@/tmp/triage-com
 ### For bugs with clear reproduction:
 
 1. Check safety — no untrusted code with write tokens or secrets.
-2. Use `tmux-real-user-testing` skill if available; otherwise tmux manually (runs in main working tree, not worktree):
+2. **Local invocation only** (no `GITHUB_EVENT_NAME`): drive the repro in tmux.
+   In unattended CI, skip this step — the SKILL.md static-review rule forbids
+   executing PR code (see SKILL.md Rules); do the static analysis of step 3
+   instead and state in the comment that the reproduction was not executed. Use
+   `tmux-real-user-testing` skill if available; otherwise tmux manually (runs in
+   main working tree, not worktree):
 
    ```bash
    S=triage-test-$(date +%H%M%S); mkdir -p "tmp/$S"

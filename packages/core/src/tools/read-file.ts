@@ -135,6 +135,12 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       Storage.getGlobalTempDir(),
       ...this.config.storage.getUserSkillsDirs(),
       Storage.getUserExtensionsDir(),
+      // Approved plans are persisted here (default ~/.qwen/plans, outside
+      // the workspace) and after approval nothing re-injects the plan text,
+      // so the saved file is the model's only recovery route — reading it
+      // back must not stall on a confirmation prompt. The dir holds only
+      // session plan files, never credentials or settings.
+      this.config.getPlansDir(),
     ];
 
     if (

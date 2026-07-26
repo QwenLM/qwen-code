@@ -26,7 +26,6 @@ import {
   SPAN_TOOL_BLOCKED_ON_USER,
   SPAN_TOOL_EXECUTION,
 } from './constants.js';
-import { clearDetailedSpanState } from './detailed-span-attributes.js';
 import { ApiRequestPhase, recordApiRequestBreakdown } from './metrics.js';
 import { isTelemetrySdkInitialized } from './sdk.js';
 import { getCurrentSessionId, setSessionContext } from './session-context.js';
@@ -366,6 +365,7 @@ function getSpanId(span: Span): string {
 }
 
 const SPAN_TEXT_MAX_CHARS = 1024;
+const TOOL_DESCRIPTION_MAX_CHARS = 4096;
 
 /**
  * Bound the size of error strings written to span attributes / status
@@ -381,13 +381,13 @@ const SPAN_TEXT_MAX_CHARS = 1024;
  * ~32KB), so we keep the simpler char-count bound rather than paying
  * the encoder cost on every endXSpan.
  */
-function truncateSpanText(s: string): string {
-  if (s.length <= SPAN_TEXT_MAX_CHARS) return s;
+function truncateSpanText(s: string, maxChars = SPAN_TEXT_MAX_CHARS): string {
+  if (s.length <= maxChars) return s;
   // Back up one code unit if the cut lands on a high surrogate so we
   // don't emit a lone surrogate followed by the sentinel — strict
   // OTLP/gRPC collectors reject span batches with invalid UTF-8
   // (a lone high surrogate encodes to an invalid byte sequence).
-  let end = SPAN_TEXT_MAX_CHARS;
+  let end = maxChars;
   const code = s.charCodeAt(end - 1);
   if (code >= 0xd800 && code <= 0xdbff) end--;
   return s.slice(0, end) + '…[truncated]';
@@ -826,6 +826,7 @@ export function endLLMRequestSpan(
 export function startToolSpan(
   toolName: string,
   attrs?: Record<string, string | number | boolean>,
+  description?: string,
 ): Span {
   if (!isTelemetrySdkInitialized()) {
     return NOOP_SPAN;
@@ -845,6 +846,14 @@ export function startToolSpan(
     'gen_ai.operation.name': 'execute_tool',
     'gen_ai.tool.name': toolName,
     'gen_ai.tool.type': 'function',
+    ...(description
+      ? {
+          'gen_ai.tool.description': truncateSpanText(
+            description,
+            TOOL_DESCRIPTION_MAX_CHARS,
+          ),
+        }
+      : {}),
   };
 
   const span = getTracer().startSpan(
@@ -1660,7 +1669,6 @@ export function clearSessionTracingForTesting(): void {
   subagentContext.enterWith(undefined);
   interactionSequence = 0;
   lastInteractionCtx = undefined;
-  clearDetailedSpanState();
   // Reach into session-context module to prevent cross-test leakage.
   setSessionContext(undefined);
 }

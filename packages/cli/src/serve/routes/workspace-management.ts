@@ -59,6 +59,10 @@ export interface WorkspaceManagementRouteDeps {
     options: { provenance: WorkspaceRuntimeProvenance },
   ) => Promise<WorkspaceRuntime>;
   managedScratchRoot?: ManagedScratchRoot;
+  validateWorkspaceRuntimeForPublication?: (
+    runtime: WorkspaceRuntime,
+  ) => Promise<WorkspaceRuntime>;
+  runWorkspaceTrustOperation?: <T>(operation: () => Promise<T>) => Promise<T>;
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
   getAcpHandle?: () => AcpHttpHandle | undefined;
   runtimeRemoval?: WorkspaceRuntimeRemovalController;
@@ -86,7 +90,7 @@ export interface WorkspaceRuntimeRemovalController {
   };
   disposeRuntime(
     runtime: WorkspaceRuntime,
-    reason?: 'daemon_shutdown' | 'workspace_removed',
+    reason?: 'daemon_shutdown' | 'workspace_removed' | 'trust_reconfigured',
   ): Promise<void>;
 }
 
@@ -104,6 +108,8 @@ export function registerWorkspaceManagementRoutes(
     safeBody,
     createWorkspaceRuntime,
     managedScratchRoot,
+    validateWorkspaceRuntimeForPublication,
+    runWorkspaceTrustOperation,
     workspaceRegistrationStore,
     getAcpHandle,
     runtimeRemoval,
@@ -701,6 +707,7 @@ export function registerWorkspaceManagementRoutes(
               await restorePersistedDisplayName(existingRuntime, canonical);
             }
           }
+          workspaceRegistry.syncRuntimeMetadata(existingRuntime);
           res.status(200).json({
             id: existingRuntime.workspaceId,
             cwd: existingRuntime.workspaceCwd,
@@ -784,7 +791,7 @@ export function registerWorkspaceManagementRoutes(
       operationStarted();
       let persistenceFailed = false;
       try {
-        const runtime = await createWorkspaceRuntime(canonical, {
+        let runtime = await createWorkspaceRuntime(canonical, {
           provenance: 'existing',
         });
         if (!persist && displayName !== undefined) {
@@ -830,19 +837,39 @@ export function registerWorkspaceManagementRoutes(
               throw err;
             }
           }
-          workspaceRegistry.add(runtime);
-          try {
-            await runtimeRemoval?.runtimeAdded?.(runtime);
-          } catch (err) {
-            try {
-              writeStderrLine(
-                `qwen serve: workspace runtime adapter notification failed after registry add: ${
-                  err instanceof Error ? err.message : String(err)
-                }`,
-              );
-            } catch {
-              // The runtime is registered; diagnostics are best-effort.
+          const publishRuntime = async () => {
+            if (validateWorkspaceRuntimeForPublication) {
+              runtime = await validateWorkspaceRuntimeForPublication(runtime);
             }
+            workspaceRegistry.add(runtime);
+            try {
+              await runtimeRemoval?.runtimeAdded?.(runtime);
+            } catch (err) {
+              try {
+                writeStderrLine(
+                  `qwen serve: workspace runtime adapter notification failed after registry add: ${
+                    err instanceof Error ? err.message : String(err)
+                  }`,
+                );
+              } catch {
+                // The runtime is registered; diagnostics are best-effort.
+              }
+            }
+          };
+          if (runWorkspaceTrustOperation) {
+            await runWorkspaceTrustOperation(publishRuntime);
+          } else {
+            await publishRuntime();
+          }
+          const requestTrustReconcile = (
+            req.app.locals as {
+              requestTrustReconcile?: () => Promise<void>;
+            }
+          ).requestTrustReconcile;
+          if (requestTrustReconcile) {
+            void requestTrustReconcile().catch(() => {
+              // The policy monitor reports reconciliation failures separately.
+            });
           }
         } catch (err) {
           if (persistedRecordAdded) {
@@ -1040,6 +1067,7 @@ export function registerWorkspaceManagementRoutes(
         } else {
           runtime.displayName = displayName;
         }
+        workspaceRegistry.syncRuntimeMetadata(runtime);
         res.status(200).json({
           id: runtime.workspaceId,
           cwd: runtime.workspaceCwd,
@@ -1138,7 +1166,9 @@ export function registerWorkspaceManagementRoutes(
       let registryDraining = false;
       let controllerDraining = false;
       let acpDraining = false;
+      let removalCommitted = false;
       const rollbackDrain = (): void => {
+        if (removalCommitted) return;
         if (acpDraining) {
           try {
             getAcpHandle?.()?.cancelWorkspaceDrain(runtime.workspaceId);
@@ -1163,15 +1193,25 @@ export function registerWorkspaceManagementRoutes(
           }
           registryDraining = false;
         }
+        const requestTrustReconcile = (
+          req.app.locals as {
+            requestTrustReconcile?: () => Promise<void>;
+          }
+        ).requestTrustReconcile;
+        if (requestTrustReconcile) {
+          void requestTrustReconcile().catch(() => {
+            // The policy monitor reports reconciliation failures separately.
+          });
+        }
+      };
+      const logCleanupFailure = (message: string): void => {
+        try {
+          writeStderrLine(message);
+        } catch {
+          // Cleanup must continue after the persistence commit point.
+        }
       };
       const convergeCommittedRemoval = async (): Promise<void> => {
-        const logCleanupFailure = (message: string): void => {
-          try {
-            writeStderrLine(message);
-          } catch {
-            // Cleanup must continue after the persistence commit point.
-          }
-        };
         try {
           getAcpHandle?.()?.commitWorkspaceRemoval(runtime.workspaceId);
         } catch (err) {
@@ -1292,6 +1332,16 @@ export function registerWorkspaceManagementRoutes(
 
         // Persistence is the commit point. Every cleanup step after it is
         // best-effort and logical removal must never roll back to active.
+        removalCommitted = true;
+        try {
+          workspaceRegistry.commitDrain(runtime);
+        } catch (err) {
+          logCleanupFailure(
+            `qwen serve: failed to commit workspace registry drain: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
         await convergeCommittedRemoval();
 
         res.status(200).json({
@@ -1476,6 +1526,7 @@ export function registerWorkspaceManagementRoutes(
           runtime.registrationIds = runtime.registrationIds.filter(
             (id) => id !== registrationId,
           );
+          workspaceRegistry.syncRuntimeMetadata(runtime);
         }
         res.json({
           removed: true,

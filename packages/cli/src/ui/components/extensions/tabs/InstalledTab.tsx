@@ -7,6 +7,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
+import { ICON } from '../../../constants.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 import { useTerminalSize } from '../../../hooks/useTerminalSize.js';
 import { keyMatchers, Command } from '../../../keyMatchers.js';
@@ -750,7 +751,7 @@ export const InstalledTab = ({
         const item = row.item;
         const globalIndex = indexByKey.get(item.key) ?? -1;
         const isSelected = globalIndex === selectedIndex;
-        const marker = isSelected ? '●' : ' ';
+        const marker = isSelected ? ICON.CIRCLE_FILLED : ' ';
         const isChild = item.kind === 'mcp' && !!item.parentExtension;
         const kindBadge =
           item.kind === 'mcp'
@@ -803,7 +804,7 @@ export const InstalledTab = ({
                 {item.name}
               </Text>
               {item.isFavorite ? (
-                <Text color={theme.status.warning}> ★</Text>
+                <Text color={theme.status.warning}> {ICON.STAR}</Text>
               ) : null}
             </Box>
             <Text color={isSelected ? theme.text.accent : theme.text.secondary}>
