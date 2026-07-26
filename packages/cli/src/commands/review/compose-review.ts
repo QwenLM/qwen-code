@@ -434,9 +434,10 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     // Step 4 (verify) and Step 5 (reverse audit) ran, and read their briefs?
     // `check-coverage` proves Step 3, but it runs at Step 3D — before these exist —
     // and their count is not in the plan, so its roster cannot reach them. This is
-    // the floor that does, and only `compose-review` asks it, which runs only at
-    // high effort — the only effort at which verify and reverse audit run at all.
-    // Reverse audit is required on every high-effort review; verify once the review
+    // the floor that does, and only `compose-review` asks it, which runs at high
+    // and medium effort. Reverse audit is required only at high; medium skips it by
+    // design, and `verificationGaps` caps a clean medium verdict at Comment instead
+    // of flagging it as missing. Verify runs at both, once the review
     // has non-deterministic findings to verify. Deterministic `[build]`/`[test]`
     // findings are pre-confirmed and skip verification by design, so they do not
     // demand a verifier — including a body Critical that carries their source tag.
