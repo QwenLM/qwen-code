@@ -8,7 +8,7 @@ import { createReadStream, type Stats } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { TextDecoder } from 'node:util';
 import { detectFileEncoding, readFileWithEncodingInfo } from './fileUtils.js';
-import { isUtf8CompatibleEncoding } from './iconvHelper.js';
+import { isUtf8CompatibleEncoding } from './encoding.js';
 import {
   DEFAULT_RANGE_READ_BYTES,
   TEXT_RANGE_FAST_PATH_MAX_SIZE,

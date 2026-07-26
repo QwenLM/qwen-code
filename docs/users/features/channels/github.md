@@ -72,6 +72,8 @@ On a **public repository**, setting `senderPolicy: "open"` allows **any GitHub u
 
 Always use `senderPolicy: "allowlist"` with explicit `allowedUsers` on public repos.
 
+Allowlist and pairing entries follow the **username**, not the immutable account ID. If an allowlisted user renames their GitHub account, remove the stale entry — GitHub releases the old username for anyone else to claim, and the new holder would inherit the allowlist/pairing authorization.
+
 ## Mention Detection
 
 The adapter detects mentions by scanning the **comment body** for `@bot-username` using a case-insensitive regex. It does NOT rely on GitHub's notification `reason` field, which is a sticky thread-level value that doesn't reflect per-comment mentions.
