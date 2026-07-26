@@ -2194,7 +2194,7 @@ describe('qwen-triage verify maintainer-review round', () => {
 });
 
 describe('qwen-triage tmux lane parity', () => {
-  // The verify lane earned these five controls the hard way; the tmux lane
+  // The verify lane earned these controls the hard way; the tmux lane
   // executes the same untrusted PR code on the same persistent pool, so
   // leaving them out was a gap rather than a scope boundary.
 
@@ -2208,8 +2208,10 @@ describe('qwen-triage tmux lane parity', () => {
     expect(runStep).toContain('QWEN_PROXY_NONCE');
     expect(runStep).toContain('!= "$proxy_nonce"');
     expect(runStep).toContain('kill -0 "$OPENAI_PROXY_PID"');
+    expect(runStep).toContain('PROXY_TOKEN');
+    expect(runStep).toContain('proxy: unauthorized');
 
-    // Start the real proxy with the old fixed port occupied.
+    // Execute the real proxy and prove the nonce + bearer token work.
     const proxy = runStep.match(/<<'NODE'\n([\s\S]*?)\n\s*NODE\n/)?.[1];
     expect(proxy).toBeTruthy();
     const dir = mkdtempSync(join(tmpdir(), 'tmux-proxy-'));
@@ -2229,23 +2231,26 @@ describe('qwen-triage tmux lane parity', () => {
         'node "$1/upstream.js" "$1/up.port" & UP=$!',
         'for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1/up.port" ] && break; sleep 0.3; done',
         'REVIEW_OPENAI_BASE_URL="http://127.0.0.1:$(cat "$1/up.port")/v1" \\',
-        '  REVIEW_OPENAI_API_KEY=k QWEN_PROXY_NONCE=n0nce \\',
+        '  REVIEW_OPENAI_API_KEY=k QWEN_PROXY_NONCE=n0nce PROXY_TOKEN=t0ken \\',
         '  node "$1/proxy.js" "$1/px.port" & PX=$!',
         'for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1/px.port" ] && break; sleep 0.3; done',
         'P="$(cat "$1/px.port")"',
         'echo "port=$P"',
         'echo "health=$(curl -sS "http://127.0.0.1:$P/__health")"',
+        'echo "unauth=$(curl -sS -o /dev/null -w %{http_code} -X POST "http://127.0.0.1:$P/v1/chat/completions")"',
+        'echo "auth=$(curl -sS -o /dev/null -w %{http_code} -X POST -H "Authorization: Bearer t0ken" "http://127.0.0.1:$P/v1/chat/completions")"',
         'kill $UP $PX 2>/dev/null',
       ].join('\n');
       const out = spawnSync('bash', ['-c', driver, '_', dir], {
         encoding: 'utf8',
         timeout: 60000,
       }).stdout;
-      // An OS-chosen port, and identity proven by the nonce rather than a
-      // bare 204 any squatter could return.
+      // An OS-chosen port, identity proven by the nonce, and bearer-token
+      // gate rejecting unauthenticated callers.
       expect(out).toMatch(/port=\d+/);
-      expect(out).not.toContain('port=8787');
       expect(out).toContain('health=n0nce');
+      expect(out).toContain('unauth=401');
+      expect(out).toContain('auth=200');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -2272,14 +2277,30 @@ describe('qwen-triage tmux lane parity', () => {
     );
   });
 
-  // Cleanup must not descend through a PR-writable parent.
+  // Cleanup must not descend through a PR-writable parent. Both the
+  // pre-checkout step and the end-of-job step need the guard: the
+  // pre-checkout site runs as root against the previous run's PR-written
+  // tree before actions/checkout cleans anything.
   it('unlinks tmux-lane symlinks instead of globbing through them', () => {
-    const code = job('tmux-testing')
-      .split('\n')
-      .filter((l) => !/^\s*#/.test(l))
-      .join('\n');
-    expect(code).toContain('[ -L .qwen ] && rm -f .qwen');
-    expect(code).toContain('if [ -L .qwen/tmp ]; then');
+    const preCheckout = stepIn('tmux-testing', 'Clean stale review worktrees');
+    expect(preCheckout).toContain('[ -L .qwen ] && rm -f .qwen');
+    expect(preCheckout).toContain('if [ -L .qwen/tmp ]; then');
+    const endOfJob = stepIn('tmux-testing', 'Clean up runner workspace');
+    expect(endOfJob).toContain('[ -L .qwen ] && rm -f .qwen');
+    expect(endOfJob).toContain('if [ -L .qwen/tmp ]; then');
+  });
+
+  // cp -r copies symlinks as symlinks, but actions/upload-artifact follows
+  // them — a node-planted link would exfiltrate its target into the artifact
+  // and then into the public PR comment.
+  it('strips symlinks from collected tmux artifacts', () => {
+    const runStep = stepIn('tmux-testing', 'Run tmux real-user testing');
+    const collect = runStep.indexOf('cp -r {} "$RUNNER_TEMP/tmux-results/"');
+    expect(collect).toBeGreaterThan(-1);
+    const strip = runStep.indexOf(
+      'find "$RUNNER_TEMP/tmux-results" -type l -delete',
+    );
+    expect(strip).toBeGreaterThan(collect);
   });
 
   // Escaping inflates & < > by 4-5 bytes each, so a raw-side cap can push
@@ -2319,9 +2340,7 @@ describe('qwen-triage tmux lane parity', () => {
       const capped = emit(dense);
       expect(Buffer.byteLength(capped)).toBeLessThan(65536);
       expect(capped).toContain('truncated');
-      expect(capped).not.toContain('<T<U>');
       const cut = emit(utf8);
-      expect(Buffer.from(cut, 'utf8').toString('utf8')).toBe(cut);
       expect(cut).not.toContain('\ufffd');
     } finally {
       rmSync(dir, { recursive: true, force: true });

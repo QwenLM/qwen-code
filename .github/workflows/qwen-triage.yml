@@ -987,7 +987,14 @@ jobs:
         run: |-
           set -uo pipefail
           [ -e .git ] || exit 0
-          rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
+          # Never descend through a PR-writable parent (same guard as the
+          # end-of-job cleanup and the verify lane's pre-checkout step).
+          [ -L .qwen ] && rm -f .qwen
+          if [ -L .qwen/tmp ]; then
+            rm -f .qwen/tmp
+          elif [ -d .qwen/tmp ]; then
+            rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
+          fi
           git worktree prune -v || true
 
       - name: 'Checkout PR merge ref'
@@ -1071,8 +1078,9 @@ jobs:
           # can plant a `tmp/<name>-tmux-<ts>/` directory holding a report.md
           # and a transcript. The collector below globs `*-tmux-*` and the
           # publisher takes the first match, so a planted dir can supply the
-          # comment's contents. Sweep after the last PR-controlled process and
-          # before the agent starts; from here only the agent writes them.
+          # comment's contents. Sweep the lifecycle-script plant channel; the
+          # runtime channel (PR code the agent launches concurrently) is
+          # bounded by the symlink strip after collection.
           find tmp -maxdepth 2 -type d -name '*-tmux-*' -exec rm -rf {} + 2>/dev/null || true
 
           # Bypass the runner proxy before launching qwen: the proxy cuts the
@@ -1153,10 +1161,12 @@ jobs:
             # squatter, and qwen would take its completions. Proven
             # exploitable on the verify lane; same defences here — ephemeral
             # port reported through a root-owned file, a per-run nonce the
-            # health endpoint must echo, and a liveness check on our PID.
+            # health endpoint must echo, a bearer token only the agent
+            # knows, and a liveness check on our PID.
             proxy_script="${RUNNER_TEMP:-/tmp}/qwen-openai-proxy-tmux.js"
             port_file="${RUNNER_TEMP:-/tmp}/qwen-openai-proxy-tmux.port"
             proxy_nonce="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+            proxy_token="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
             rm -f "$port_file"
             cat > "$proxy_script" <<'NODE'
           const http = require('node:http');
@@ -1167,7 +1177,8 @@ jobs:
           const baseUrl = process.env.REVIEW_OPENAI_BASE_URL;
           const apiKey = process.env.REVIEW_OPENAI_API_KEY;
           const nonce = process.env.QWEN_PROXY_NONCE;
-          if (!baseUrl || !apiKey || !portFile || !nonce) {
+          const token = process.env.PROXY_TOKEN;
+          if (!baseUrl || !apiKey || !portFile || !nonce || !token) {
             console.error('missing proxy configuration');
             process.exit(1);
           }
@@ -1201,6 +1212,14 @@ jobs:
               if (req.method !== 'POST' || !target.pathname.endsWith('/chat/completions')) {
                 res.writeHead(403, { 'content-type': 'text/plain' });
                 res.end('proxy: only POST /chat/completions is allowed\n');
+                return;
+              }
+
+              // Only the agent knows this run's token; anything else on the
+              // runner that finds the port cannot get the key used.
+              if (req.headers.authorization !== `Bearer ${token}`) {
+                res.writeHead(401, { 'content-type': 'text/plain' });
+                res.end('proxy: unauthorized\n');
                 return;
               }
 
@@ -1261,6 +1280,7 @@ jobs:
             REVIEW_OPENAI_API_KEY="$REVIEW_OPENAI_API_KEY" \
               REVIEW_OPENAI_BASE_URL="$REVIEW_OPENAI_BASE_URL" \
               QWEN_PROXY_NONCE="$proxy_nonce" \
+              PROXY_TOKEN="$proxy_token" \
               node "$proxy_script" "$port_file" &
             OPENAI_PROXY_PID=$!
             trap 'kill "$OPENAI_PROXY_PID" 2>/dev/null || true' EXIT
@@ -1322,7 +1342,7 @@ jobs:
             "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
             "GITHUB_TOKEN="
             "GH_TOKEN="
-            "OPENAI_API_KEY=qwen-loopback-proxy"
+            "OPENAI_API_KEY=$proxy_token"
             "OPENAI_BASE_URL=$LOCAL_OPENAI_BASE_URL"
             "NO_PROXY=${NO_PROXY:-}"
             "no_proxy=${no_proxy:-}"
@@ -1348,6 +1368,10 @@ jobs:
           # Collect the skill's narrative artifacts (report.md, readable logs)
           # from the workspace tmp/ into the upload dir.
           find tmp -maxdepth 2 -type d -name '*-tmux-*' -exec cp -r {} "$RUNNER_TEMP/tmux-results/" \; 2>/dev/null || true
+          # cp -r copies symlinks as symlinks (no deref), but
+          # actions/upload-artifact FOLLOWS them — a node-planted link would
+          # exfiltrate whatever it points at into the artifact. Drop links.
+          find "$RUNNER_TEMP/tmux-results" -type l -delete 2>/dev/null || true
 
           if [ "$EXIT_CODE" -eq 124 ]; then
             VERDICT='timeout'

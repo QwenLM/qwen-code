@@ -259,3 +259,46 @@ describe('qwen-triage: git exec-vector cleanup', () => {
     }
   });
 });
+
+describe('qwen-triage: tmux-lane security controls', () => {
+  const tmuxJob = doc.jobs['tmux-testing'];
+  assert.ok(tmuxJob, 'tmux-testing job must exist');
+  const tmuxSteps = tmuxJob.steps;
+  const findStep = (name) => tmuxSteps.find((s) => s.name === name);
+
+  it('pre-checkout cleanup guards against symlink escapes', () => {
+    const clean = findStep('Clean stale review worktrees');
+    assert.ok(clean, "'Clean stale review worktrees' step must exist");
+    assert.match(clean.run, /\[ -L \.qwen \] && rm -f \.qwen/);
+    assert.match(clean.run, /if \[ -L \.qwen\/tmp \]/);
+  });
+
+  it('end-of-job cleanup guards against symlink escapes', () => {
+    const clean = findStep('Clean up runner workspace');
+    assert.ok(clean, "'Clean up runner workspace' step must exist");
+    assert.match(clean.run, /\[ -L \.qwen \] && rm -f \.qwen/);
+    assert.match(clean.run, /if \[ -L \.qwen\/tmp \]/);
+  });
+
+  it('proxy uses an ephemeral port with nonce and bearer-token auth', () => {
+    const run = findStep('Run tmux real-user testing');
+    assert.ok(run, "'Run tmux real-user testing' step must exist");
+    assert.ok(!run.run.includes('proxy_port=8787'), 'must not hardcode port 8787');
+    assert.match(run.run, /server\.listen\(0, '127\.0\.0\.1'/);
+    assert.match(run.run, /QWEN_PROXY_NONCE/);
+    assert.match(run.run, /PROXY_TOKEN/);
+    assert.match(run.run, /proxy: unauthorized/);
+  });
+
+  it('strips symlinks from collected artifacts before upload', () => {
+    const run = findStep('Run tmux real-user testing');
+    assert.ok(run, "'Run tmux real-user testing' step must exist");
+    assert.match(run.run, /-type l -delete/);
+  });
+
+  it('runs the global install away from the checked-out tree', () => {
+    const install = findStep('Install tmux runner tools');
+    assert.ok(install, "'Install tmux runner tools' step must exist");
+    assert.match(install.run, /cd "\$\{RUNNER_TEMP:\?\}" && npm install -g/);
+  });
+});
