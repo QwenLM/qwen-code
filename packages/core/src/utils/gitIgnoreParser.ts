@@ -40,10 +40,18 @@ export class GitIgnoreParser implements GitIgnoreFilter {
       ? '.'
       : path.dirname(path.relative(this.projectRoot, patternsFilePath));
 
+    // Git strips a trailing CR, so that CRLF files work, and nothing else.
+    // Leading whitespace is part of the pattern, and trailing whitespace is
+    // stripped only when it is not backslash-escaped — both rules the `ignore`
+    // library already applies to the raw pattern text. `trim()` overrode them
+    // and inverted the match: a pattern ` leading.txt` stopped matching
+    // ` leading.txt` and started matching `leading.txt` instead. A comment is
+    // likewise a line whose FIRST character is `#`, so `  #foo` is a pattern to
+    // git rather than a comment, and testing the untrimmed line reproduces that.
     return content
       .split('\n')
-      .map((p) => p.trim())
-      .filter((p) => p !== '' && !p.startsWith('#'))
+      .map((p) => (p.endsWith('\r') ? p.slice(0, -1) : p))
+      .filter((p) => p.trim() !== '' && !p.startsWith('#'))
       .map((p) => {
         const isNegative = p.startsWith('!');
         if (isNegative) {

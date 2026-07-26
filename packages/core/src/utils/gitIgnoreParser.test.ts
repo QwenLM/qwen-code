@@ -240,4 +240,52 @@ src/*.tmp
       );
     });
   });
+
+  // Every expectation below was read off `git check-ignore` in a real
+  // repository rather than off the documentation.
+  describe('pattern whitespace', () => {
+    beforeEach(async () => {
+      await setupGitRepo();
+    });
+
+    it('keeps leading whitespace as part of the pattern', async () => {
+      await createTestFile('.gitignore', ' leading.txt\n');
+
+      // Both directions matter. `trim()` did not merely fail to ignore the
+      // right file, it ignored the wrong one instead, so an assertion on the
+      // first line alone would also pass for the broken implementation.
+      expect(parser.isIgnored(' leading.txt')).toBe(true);
+      expect(parser.isIgnored('leading.txt')).toBe(false);
+    });
+
+    it('still drops unescaped trailing whitespace', async () => {
+      await createTestFile('.gitignore', 'trail.txt   \n');
+
+      expect(parser.isIgnored('trail.txt')).toBe(true);
+    });
+
+    it('still skips blank and whitespace-only lines', async () => {
+      await createTestFile('.gitignore', '\n   \n\t\nkept.txt\n');
+
+      expect(parser.isIgnored('kept.txt')).toBe(true);
+      // A whitespace-only line must not survive as a pattern of its own.
+      expect(parser.isIgnored('other.txt')).toBe(false);
+    });
+
+    it('treats an indented # as a pattern rather than a comment', async () => {
+      // git honours `#` as a comment only as the first character of the line.
+      // Trimming first hid that: `  #hash.txt` was discarded as a comment.
+      await createTestFile('.gitignore', '  #hash.txt\n# real comment\n');
+
+      expect(parser.isIgnored('  #hash.txt')).toBe(true);
+      expect(parser.isIgnored('real comment')).toBe(false);
+    });
+
+    it('reads patterns from a CRLF .gitignore', async () => {
+      await createTestFile('.gitignore', 'crlf.txt\r\nsecond.txt\r\n');
+
+      expect(parser.isIgnored('crlf.txt')).toBe(true);
+      expect(parser.isIgnored('second.txt')).toBe(true);
+    });
+  });
 });
