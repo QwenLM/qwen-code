@@ -1009,81 +1009,10 @@ jobs:
                 done
           fi
 
-      - name: 'Flake detection'
-        id: 'flake'
-        if: |-
-          ${{ steps.decision.outputs.go_issue != '' }}
-        env:
-          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
-          ISSUE: '${{ steps.decision.outputs.go_issue }}'
-          DRY_RUN: '${{ needs.route.outputs.dry_run }}'
-        run: |-
-          set -euo pipefail
-          IS_FLAKE=false
-
-          # Only applies to auto-filed CI failure issues.
-          ISSUE_JSON="$(gh issue view "${ISSUE}" --repo "${REPO}" --json title,body 2>/dev/null || true)"
-          TITLE="$(jq -r '.title' <<< "${ISSUE_JSON}")"
-          if [[ "${TITLE}" != Main\ CI\ failed:* ]]; then
-            echo "Not a CI failure issue; skipping flake detection."
-            echo "is_flake=false" >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
-
-          # Extract the failed run ID from the issue body.
-          BODY="$(jq -r '.body' <<< "${ISSUE_JSON}")"
-          RUN_ID="$(grep -oP 'Run ID: \K[0-9]+' <<< "${BODY}" || true)"
-          if [[ -z "${RUN_ID}" ]]; then
-            echo "Could not extract run ID from issue body; proceeding normally."
-            echo "is_flake=false" >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
-
-          # Get authoritative metadata for the failed run.
-          RUN_JSON="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}" \
-            --jq '{name: .name, workflow_id: .workflow_id, branch: .head_branch, event: .event, conclusion: .conclusion, created: .created_at}' 2>/dev/null || true)"
-          if [[ -z "${RUN_JSON}" ]]; then
-            echo "Failed to fetch run ${RUN_ID}; proceeding normally."
-            echo "is_flake=false" >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
-          if [[ "$(jq -r '.branch' <<< "${RUN_JSON}")" != 'main' ||
-                "$(jq -r '.event' <<< "${RUN_JSON}")" != 'push' ||
-                "$(jq -r '.conclusion' <<< "${RUN_JSON}")" != 'failure' ]]; then
-            echo "Run ${RUN_ID} is not a failed main push; proceeding normally."
-            echo "is_flake=false" >> "${GITHUB_OUTPUT}"
-            exit 0
-          fi
-          WF_NAME="$(jq -r '.name' <<< "${RUN_JSON}")"
-          WF_ID="$(jq -r '.workflow_id' <<< "${RUN_JSON}")"
-          FAILED_AT="$(jq -r '.created' <<< "${RUN_JSON}")"
-
-          # Check if any subsequent run of the same workflow on main succeeded.
-          LATER_GREEN="$(gh api --method GET "repos/${REPO}/actions/workflows/${WF_ID}/runs" \
-            -F branch=main -F event=push -F status=success -F per_page=100 \
-            --jq "[.workflow_runs[] | select(.created_at > \"${FAILED_AT}\")] | length" \
-            2>/dev/null || echo "0")"
-
-          if [[ "${LATER_GREEN}" -gt 0 ]]; then
-            IS_FLAKE=true
-            echo "✅ Subsequent ${WF_NAME} run(s) on main succeeded — this is a flake."
-          fi
-
-          if [[ "${IS_FLAKE}" == "true" ]]; then
-            if [[ "${DRY_RUN}" != 'true' ]]; then
-              gh issue comment "${ISSUE}" --repo "${REPO}" --body "🤖 Closing as a transient CI flake — a subsequent \`${WF_NAME}\` run on \`main\` has already passed. No code fix needed."
-              gh issue close "${ISSUE}" --repo "${REPO}" --reason 'not planned'
-              gh issue edit "${ISSUE}" --repo "${REPO}" --add-label 'autofix/skip' 2>/dev/null || true
-            fi
-            echo "is_flake=true" >> "${GITHUB_OUTPUT}"
-          else
-            echo "is_flake=false" >> "${GITHUB_OUTPUT}"
-          fi
-
       - name: 'Claim issue'
         id: 'claim'
         if: |-
-          ${{ steps.decision.outputs.go_issue != '' && needs.route.outputs.dry_run != 'true' && steps.flake.outputs.is_flake != 'true' }}
+          ${{ steps.decision.outputs.go_issue != '' && needs.route.outputs.dry_run != 'true' }}
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
@@ -1116,7 +1045,7 @@ jobs:
       - name: 'Develop fix'
         id: 'develop'
         if: |-
-          ${{ steps.decision.outputs.go_issue != '' && steps.flake.outputs.is_flake != 'true' }}
+          ${{ steps.decision.outputs.go_issue != '' }}
         env:
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
@@ -1171,7 +1100,7 @@ jobs:
       - name: 'Verification gate'
         id: 'verify'
         if: |-
-          ${{ steps.decision.outputs.go_issue != '' && steps.flake.outputs.is_flake != 'true' }}
+          ${{ steps.decision.outputs.go_issue != '' }}
         env:
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
         run: |-
@@ -1289,7 +1218,7 @@ jobs:
       - name: 'Publish PR'
         id: 'publish'
         if: |-
-          ${{ steps.decision.outputs.go_issue != '' && needs.route.outputs.dry_run != 'true' && steps.flake.outputs.is_flake != 'true' }}
+          ${{ steps.decision.outputs.go_issue != '' && needs.route.outputs.dry_run != 'true' }}
         env:
           # CI_DEV_BOT_PAT opens the PR as the configured autofix bot. This is
           # required: the default GITHUB_TOKEN is

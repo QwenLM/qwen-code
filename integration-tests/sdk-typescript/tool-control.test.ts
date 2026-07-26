@@ -24,6 +24,7 @@ import {
   SDKTestHelper,
   extractText,
   findToolCalls,
+  findToolResult,
   findToolResults,
   assertSuccessfulCompletion,
   createSharedTestOptions,
@@ -42,7 +43,6 @@ const FAKE_SERVER_OPTIONS = IS_CONTAINER_SANDBOX
   ? { listenHost: '0.0.0.0' as const, baseUrlHost: 'host.docker.internal' }
   : undefined;
 
-/** Shared query options fragment for tests backed by a fake OpenAI server. */
 function fakeModelOptions(baseUrl: string) {
   return {
     model: 'fake-model',
@@ -371,29 +371,26 @@ describe('Tool Control Parameters (E2E)', () => {
         await helper.createFile('.env', 'SECRET=password');
         await helper.createFile('data.txt', 'public data');
 
-        const fakeServer = await startFakeOpenAIServer(
-          ({ requestIndex }) => {
-            if (requestIndex === 0) {
-              return {
-                toolCalls: [
-                  fakeToolCall(
-                    'read_file',
-                    { file_path: helper.getPath('.env') },
-                    'read-env',
-                  ),
-                  fakeToolCall(
-                    'read_file',
-                    { file_path: helper.getPath('data.txt') },
-                    'read-data',
-                  ),
-                ],
-              };
-            }
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('.env') },
+                  'read-env',
+                ),
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('data.txt') },
+                  'read-data',
+                ),
+              ],
+            };
+          }
 
-            return { content: 'Done.' };
-          },
-          FAKE_SERVER_OPTIONS,
-        );
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Read .env and data.txt.',
@@ -455,52 +452,59 @@ describe('Tool Control Parameters (E2E)', () => {
         await helper.createFile('src/app.ts', 'const app = "original";');
         await helper.createFile('readme.md', '# Readme');
 
-        const fakeServer = await startFakeOpenAIServer(
-          ({ requestIndex }) => {
-            if (requestIndex === 0) {
-              return {
-                toolCalls: [
-                  fakeToolCall(
-                    'read_file',
-                    { file_path: helper.getPath('src/app.ts') },
-                    'read-src',
-                  ),
-                  fakeToolCall(
-                    'read_file',
-                    { file_path: helper.getPath('readme.md') },
-                    'read-readme',
-                  ),
-                ],
-              };
-            }
-            if (requestIndex === 1) {
-              return {
-                toolCalls: [
-                  fakeToolCall(
-                    'edit',
-                    {
-                      file_path: helper.getPath('src/app.ts'),
-                      old_string: 'const app = "original";',
-                      new_string: 'const app = "original"; // touched',
-                    },
-                    'edit-src',
-                  ),
-                  fakeToolCall(
-                    'edit',
-                    {
-                      file_path: helper.getPath('readme.md'),
-                      old_string: '# Readme',
-                      new_string: '# Readme\n\nUpdated.',
-                    },
-                    'edit-readme',
-                  ),
-                ],
-              };
-            }
+        const fakeServer = await startFakeOpenAIServer(({ body }) => {
+          const transcript = JSON.stringify(body['messages'] ?? []);
+          if (
+            transcript.includes('edit-src') &&
+            transcript.includes('edit-readme')
+          ) {
             return { content: 'Done.' };
-          },
-          FAKE_SERVER_OPTIONS,
-        );
+          }
+          if (
+            transcript.includes('read-src') &&
+            transcript.includes('read-readme')
+          ) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'edit',
+                  {
+                    file_path: helper.getPath('src/app.ts'),
+                    old_string: 'const app = "original";',
+                    new_string: 'const app = "original"; // touched',
+                  },
+                  'edit-src',
+                ),
+                fakeToolCall(
+                  'edit',
+                  {
+                    file_path: helper.getPath('readme.md'),
+                    old_string: '# Readme',
+                    new_string: '# Readme\n\nUpdated.',
+                  },
+                  'edit-readme',
+                ),
+              ],
+            };
+          }
+          if (transcript.includes('Use the edit tool to modify')) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('src/app.ts') },
+                  'read-src',
+                ),
+                fakeToolCall(
+                  'read_file',
+                  { file_path: helper.getPath('readme.md') },
+                  'read-readme',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Use the edit tool to modify src/app.ts and readme.md.',
@@ -525,24 +529,15 @@ describe('Tool Control Parameters (E2E)', () => {
 
           assertSuccessfulCompletion(messages);
 
-          const editResults = findToolResults(messages, 'edit');
-
-          // src/app.ts edit must have been attempted and blocked
-          const srcEditResult = editResults.find(
-            (r) => r.toolUseId === 'edit-src',
-          );
-          expect(srcEditResult).toBeDefined();
-          expect(srcEditResult!.isError).toBe(true);
-          expect(srcEditResult!.content).toMatch(
-            /permission.*(?:declined|denied)|denied.*permission/i,
-          );
-
-          // readme.md edit should have succeeded
-          const readmeResult = editResults.find(
-            (r) => r.toolUseId === 'edit-readme',
-          );
-          expect(readmeResult).toBeDefined();
-          expect(readmeResult!.isError).toBe(false);
+          expect(findToolResult(messages, 'edit-src')).toMatchObject({
+            isError: true,
+            content: expect.stringMatching(
+              /permission.*(?:declined|denied)|denied.*permission/i,
+            ),
+          });
+          expect(findToolResult(messages, 'edit-readme')).toMatchObject({
+            isError: false,
+          });
 
           // src/app.ts should remain unchanged
           const srcContent = await helper.readFile('src/app.ts');
@@ -558,33 +553,30 @@ describe('Tool Control Parameters (E2E)', () => {
     it(
       'should block specific shell commands with prefix pattern',
       async () => {
-        const fakeServer = await startFakeOpenAIServer(
-          ({ requestIndex }) => {
-            if (requestIndex === 0) {
-              return {
-                toolCalls: [
-                  fakeToolCall(
-                    'run_shell_command',
-                    { command: 'echo hello' },
-                    'shell-echo',
-                  ),
-                  fakeToolCall(
-                    'run_shell_command',
-                    { command: 'rm file.txt' },
-                    'shell-rm',
-                  ),
-                  fakeToolCall(
-                    'run_shell_command',
-                    { command: 'ls' },
-                    'shell-ls',
-                  ),
-                ],
-              };
-            }
-            return { content: 'Done.' };
-          },
-          FAKE_SERVER_OPTIONS,
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'run_shell_command',
+                  { command: 'echo hello' },
+                  'shell-echo',
+                ),
+                fakeToolCall(
+                  'run_shell_command',
+                  { command: 'rm file.txt' },
+                  'shell-rm',
+                ),
+                fakeToolCall(
+                  'run_shell_command',
+                  { command: 'ls' },
+                  'shell-ls',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Run "echo hello", "rm file.txt", and "ls" commands.',
@@ -608,30 +600,18 @@ describe('Tool Control Parameters (E2E)', () => {
 
           assertSuccessfulCompletion(messages);
 
-          const shellResults = findToolResults(messages, 'run_shell_command');
-
-          // rm command must have been attempted and blocked
-          const rmResult = shellResults.find(
-            (r) => r.toolUseId === 'shell-rm',
-          );
-          expect(rmResult).toBeDefined();
-          expect(rmResult!.isError).toBe(true);
-          expect(rmResult!.content).toMatch(
-            /permission.*(?:declined|denied)|denied.*permission/i,
-          );
-
-          // echo and ls should have succeeded
-          const echoResult = shellResults.find(
-            (r) => r.toolUseId === 'shell-echo',
-          );
-          expect(echoResult).toBeDefined();
-          expect(echoResult!.isError).toBe(false);
-
-          const lsResult = shellResults.find(
-            (r) => r.toolUseId === 'shell-ls',
-          );
-          expect(lsResult).toBeDefined();
-          expect(lsResult!.isError).toBe(false);
+          expect(findToolResult(messages, 'shell-rm')).toMatchObject({
+            isError: true,
+            content: expect.stringMatching(
+              /permission.*(?:declined|denied)|denied.*permission/i,
+            ),
+          });
+          expect(findToolResult(messages, 'shell-echo')).toMatchObject({
+            isError: false,
+          });
+          expect(findToolResult(messages, 'shell-ls')).toMatchObject({
+            isError: false,
+          });
         } finally {
           await q.close();
           await fakeServer.close();
@@ -697,28 +677,25 @@ describe('Tool Control Parameters (E2E)', () => {
     it(
       'should allow specific shell commands with pattern matching',
       async () => {
-        const fakeServer = await startFakeOpenAIServer(
-          ({ requestIndex }) => {
-            if (requestIndex === 0) {
-              return {
-                toolCalls: [
-                  fakeToolCall(
-                    'run_shell_command',
-                    { command: 'echo hello' },
-                    'shell-echo',
-                  ),
-                  fakeToolCall(
-                    'run_shell_command',
-                    { command: 'ls -la' },
-                    'shell-ls',
-                  ),
-                ],
-              };
-            }
-            return { content: 'Done.' };
-          },
-          FAKE_SERVER_OPTIONS,
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'run_shell_command',
+                  { command: 'echo hello' },
+                  'shell-echo',
+                ),
+                fakeToolCall(
+                  'run_shell_command',
+                  { command: 'ls -la' },
+                  'shell-ls',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Run "echo hello" and "ls -la" commands.',
@@ -742,20 +719,12 @@ describe('Tool Control Parameters (E2E)', () => {
 
           assertSuccessfulCompletion(messages);
 
-          const shellResults = findToolResults(messages, 'run_shell_command');
-
-          // Both commands should have been auto-approved and executed
-          const echoResult = shellResults.find(
-            (r) => r.toolUseId === 'shell-echo',
-          );
-          expect(echoResult).toBeDefined();
-          expect(echoResult!.isError).toBe(false);
-
-          const lsResult = shellResults.find(
-            (r) => r.toolUseId === 'shell-ls',
-          );
-          expect(lsResult).toBeDefined();
-          expect(lsResult!.isError).toBe(false);
+          expect(findToolResult(messages, 'shell-echo')).toMatchObject({
+            isError: false,
+          });
+          expect(findToolResult(messages, 'shell-ls')).toMatchObject({
+            isError: false,
+          });
         } finally {
           await q.close();
           await fakeServer.close();
@@ -871,34 +840,31 @@ describe('Tool Control Parameters (E2E)', () => {
       'should auto-approve specific path patterns with allowedTools',
       async () => {
         const canUseToolCalls: string[] = [];
-        const fakeServer = await startFakeOpenAIServer(
-          ({ requestIndex }) => {
-            if (requestIndex === 0) {
-              return {
-                toolCalls: [
-                  fakeToolCall(
-                    'write_file',
-                    {
-                      file_path: helper.getPath('config.json'),
-                      content: '{"key": "value"}',
-                    },
-                    'write-json',
-                  ),
-                  fakeToolCall(
-                    'write_file',
-                    {
-                      file_path: helper.getPath('.env'),
-                      content: 'SECRET=secret',
-                    },
-                    'write-env',
-                  ),
-                ],
-              };
-            }
-            return { content: 'Done.' };
-          },
-          FAKE_SERVER_OPTIONS,
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: helper.getPath('config.json'),
+                    content: '{"key": "value"}',
+                  },
+                  'write-json',
+                ),
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: helper.getPath('.env'),
+                    content: 'SECRET=secret',
+                  },
+                  'write-env',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Write config.json and .env files.',
@@ -928,21 +894,16 @@ describe('Tool Control Parameters (E2E)', () => {
 
           assertSuccessfulCompletion(messages);
 
-          const writeResults = findToolResults(messages, 'write_file');
-          const jsonResult = writeResults.find(
-            (r) => r.toolUseId === 'write-json',
-          );
-          expect(jsonResult).toBeDefined();
-          expect(jsonResult!.isError).toBe(false);
+          expect(findToolResult(messages, 'write-json')).toMatchObject({
+            isError: false,
+          });
           expect(await helper.readFile('config.json')).toBe('{"key": "value"}');
 
-          const envResult = writeResults.find(
-            (r) => r.toolUseId === 'write-env',
-          );
-          expect(envResult).toBeDefined();
-          expect(envResult!.content).toContain(
-            '[Operation Cancelled] Reason: Non-allowed paths should trigger this',
-          );
+          expect(findToolResult(messages, 'write-env')).toMatchObject({
+            content: expect.stringContaining(
+              '[Operation Cancelled] Reason: Non-allowed paths should trigger this',
+            ),
+          });
           expect(helper.fileExists('.env')).toBe(false);
           expect(canUseToolCalls).toEqual(['write_file']);
         } finally {
@@ -957,28 +918,25 @@ describe('Tool Control Parameters (E2E)', () => {
       'should auto-approve specific shell commands with pattern matching',
       async () => {
         const canUseToolCalls: string[] = [];
-        const fakeServer = await startFakeOpenAIServer(
-          ({ requestIndex }) => {
-            if (requestIndex === 0) {
-              return {
-                toolCalls: [
-                  fakeToolCall(
-                    'run_shell_command',
-                    { command: 'echo test' },
-                    'shell-echo-test',
-                  ),
-                  fakeToolCall(
-                    'run_shell_command',
-                    { command: 'touch blocked.txt' },
-                    'shell-touch',
-                  ),
-                ],
-              };
-            }
-            return { content: 'Done.' };
-          },
-          FAKE_SERVER_OPTIONS,
-        );
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'run_shell_command',
+                  { command: 'echo test' },
+                  'shell-echo-test',
+                ),
+                fakeToolCall(
+                  'run_shell_command',
+                  { command: 'touch blocked.txt' },
+                  'shell-touch',
+                ),
+              ],
+            };
+          }
+          return { content: 'Done.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Run "echo test" and "touch blocked.txt" commands.',
@@ -1009,22 +967,14 @@ describe('Tool Control Parameters (E2E)', () => {
 
           assertSuccessfulCompletion(messages);
 
-          const shellResults = findToolResults(messages, 'run_shell_command');
-
-          // echo commands should be auto-approved and executed
-          const echoTestResult = shellResults.find(
-            (r) => r.toolUseId === 'shell-echo-test',
-          );
-          expect(echoTestResult).toBeDefined();
-          expect(echoTestResult!.isError).toBe(false);
-
-          const touchResult = shellResults.find(
-            (r) => r.toolUseId === 'shell-touch',
-          );
-          expect(touchResult).toBeDefined();
-          expect(touchResult!.content).toContain(
-            '[Operation Cancelled] Reason: Non-allowed tools should trigger this',
-          );
+          expect(findToolResult(messages, 'shell-echo-test')).toMatchObject({
+            isError: false,
+          });
+          expect(findToolResult(messages, 'shell-touch')).toMatchObject({
+            content: expect.stringContaining(
+              '[Operation Cancelled] Reason: Non-allowed tools should trigger this',
+            ),
+          });
           expect(helper.fileExists('blocked.txt')).toBe(false);
           expect(canUseToolCalls).toEqual(['run_shell_command']);
         } finally {
@@ -1269,22 +1219,19 @@ describe('Tool Control Parameters (E2E)', () => {
         await helper.createFile('test.txt', 'original');
 
         const canUseToolCalls: string[] = [];
-        const fakeServer = await startFakeOpenAIServer(
-          ({ requestIndex }) => {
-            if (requestIndex === 0) {
-              return {
-                toolCalls: [
-                  fakeToolCall('read_file', {
-                    file_path: helper.getPath('test.txt'),
-                  }),
-                ],
-              };
-            }
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall('read_file', {
+                  file_path: helper.getPath('test.txt'),
+                }),
+              ],
+            };
+          }
 
-            return { content: 'Plan: leave the file unchanged.' };
-          },
-          FAKE_SERVER_OPTIONS,
-        );
+          return { content: 'Plan: leave the file unchanged.' };
+        }, FAKE_SERVER_OPTIONS);
 
         const q = query({
           prompt: 'Read test.txt and write "modified" to it.',

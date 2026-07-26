@@ -22,9 +22,8 @@ COMMENT_ID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@/tmp/stage
 **Terminal gate exception:** if any terminal exit triggers (Stage 0 core
 module hard block, Stage 1a template failure, Stage 1b problem-does-not-exist,
 or Stage 1c direction escalation), submit exactly one `CHANGES_REQUESTED`
-review whose body starts with `<!-- qwen-triage terminal-review -->`, then
-stop. Do not also post or update a Stage 1 issue comment, and do not continue
-to Stage 2, Stage 3, or approval.
+review and stop. Do not also post or update a Stage 1 issue comment, and do not
+continue to Stage 2, Stage 3, or approval.
 
 **Re-runs:** if the triage runs again on the same PR, update each comment in place. **Resolve the comment id by its stage marker AT PATCH TIME — never from memory, list position, or an earlier stage's bookkeeping.** On a re-run the thread holds four or more bot comments whose list order is not the stage order, and a wrong id silently overwrites another stage's comment (observed on a real re-run: the stage=3 comment clobbered with stage=1 content mid-run). The author filter matters too — the marker is public text anyone can paste into a comment, and the bot PAT may be able to edit other users' comments:
 
@@ -50,7 +49,7 @@ PR). Only update issue comments, not PR reviews.
 ```bash
 # Check for existing terminal-exit review before re-submitting
 EXISTING=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
-  --jq '[.[] | select(.user.login=="qwen-code-ci-bot" and .state=="CHANGES_REQUESTED" and (.body | startswith("<!-- qwen-triage terminal-review -->")))] | length')
+  --jq '[.[] | select(.user.login=="qwen-code-ci-bot" and .state=="CHANGES_REQUESTED")] | length')
 # Only submit if no existing terminal review
 if [ "$EXISTING" -eq 0 ]; then gh pr review ... ; fi
 ```
@@ -97,7 +96,7 @@ Core infrastructure: files matching `packages/core/src/**`, `packages/*/src/auth
 **Tier 1 — Large-scope `refactor` changes to core → HARD BLOCK.** Applies to non-maintainer PRs only (skip this check if the author is a known maintainer). Hard-block on _size_, not breadth: if a core-path `refactor`-type PR (title starts with `refactor` — `refactor:`, `refactor(scope):`, `refactor(scope)!:`, case-insensitive) totals **500+ production logic lines** (additions + deletions, using the size calculation above) → reject immediately. No evaluation, no Stage 1.
 
 ```bash
-gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body $'<!-- qwen-triage terminal-review -->\n\nThis refactor touches core infrastructure at scale (N production lines). Core refactors of this size must be maintainer-initiated — please open an issue to discuss the design first.'
+gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body "This refactor touches core infrastructure at scale (N production lines). Core refactors of this size must be maintainer-initiated — please open an issue to discuss the design first."
 ```
 
 Then **stop**. This is a wall, not a guideline.
@@ -129,8 +128,6 @@ This is the most important stage — catch problems before anyone spends time re
 **1a. Template check:**
 
 PR body missing required headings from `.github/pull_request_template.md` (read from worktree) → request changes, @mention author, link the template, stop. This is the only public output for this terminal gate.
-The first line of `/tmp/pr-gate-template.md` must be
-`<!-- qwen-triage terminal-review -->`.
 
 ```bash
 gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/pr-gate-template.md
@@ -145,8 +142,6 @@ Before "is the direction right?", ask **"does this problem actually exist?"**
 
 ```bash
 cat > /tmp/stage-1b-reproduction.md <<'EOF'
-<!-- qwen-triage terminal-review -->
-
 <!-- qwen-triage stage=1b -->
 
 This PR addresses a theoretical concern — "could theoretically send X" — but

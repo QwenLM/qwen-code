@@ -295,7 +295,6 @@ jobs:
           else
             echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
           fi
-          echo "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       # The agent runs as one long step, but its output streams live to the
       # Actions log. Post a status comment up front carrying that run link so a
@@ -576,42 +575,6 @@ jobs:
             exit 1
           fi
           echo "Triage response received (${#RESPONSE} chars)."
-
-      - name: 'Verify triage output posted'
-        if: 'success()'
-        shell: 'bash'
-        env:
-          GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
-          NUMBER: '${{ steps.resolve.outputs.number }}'
-          STARTED_AT: '${{ steps.resolve.outputs.started_at }}'
-        run: |-
-          set -euo pipefail
-          # The agent posts stage=1 unless a terminal gate submits a review.
-          # A non-empty summary does not prove either one reached GitHub.
-          BOT_LOGIN="$(gh api user --jq '.login' 2>/dev/null || true)"
-          STAGE_FOUND="$(
-            gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
-              --method GET --paginate -F per_page=100 2>/dev/null |
-              jq -rs \
-                --arg bot "$BOT_LOGIN" \
-                --arg marker '<!-- qwen-triage stage=1 -->' \
-                --arg since "$STARTED_AT" \
-                '[.[][] | select(.user.login == $bot and .updated_at >= $since and (.body | startswith($marker)))] | length'
-          )" || STAGE_FOUND=0
-          REVIEW_FOUND="$(
-            gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER/reviews" \
-              --method GET --paginate -F per_page=100 2>/dev/null |
-              jq -rs \
-                --arg bot "$BOT_LOGIN" \
-                --arg marker '<!-- qwen-triage terminal-review -->' \
-                --arg since "$STARTED_AT" \
-                '[.[][] | select(.user.login == $bot and .state == "CHANGES_REQUESTED" and .submitted_at != null and .submitted_at >= $since and (.body | startswith($marker)))] | length'
-          )" || REVIEW_FOUND=0
-          if [[ "${STAGE_FOUND}" -eq 0 && "${REVIEW_FOUND}" -eq 0 ]]; then
-            echo "::warning title=Triage silent gap::Triage produced a summary but no stage comment or review was posted to #${NUMBER}. The agent may have failed at the posting step."
-          else
-            echo "Triage output verified (${STAGE_FOUND} stage comment(s), ${REVIEW_FOUND} review(s))."
-          fi
 
       - name: 'Notify silent triage re-run'
         if: >-
