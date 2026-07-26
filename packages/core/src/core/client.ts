@@ -49,9 +49,11 @@ const debugLogger = createDebugLogger('CLIENT');
 import { GeminiChat } from './geminiChat.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
+  assembleSystemPrompt,
   getArenaSystemReminder,
   getCoreSystemPrompt,
   getCustomSystemPrompt,
+  getManualPlanExitSystemReminder,
   getPlanModeSystemReminder,
   resolveInteractionMode,
 } from './prompts.js';
@@ -501,6 +503,22 @@ export class GeminiClient {
   }
 
   /**
+   * Fire-and-forget StopFailure hook for loop-detection early returns.
+   * Matches the detached pattern used by the CLI's API-error path
+   * (useGeminiStream.ts) — output and errors are ignored.
+   */
+  private fireLoopDetectedStopFailure(loopType: string | null): void {
+    if (this.config.getDisableAllHooks()) return;
+    const hookSystem = this.config.getHookSystem();
+    if (!hookSystem || !this.config.hasHooksForEvent('StopFailure')) return;
+    hookSystem
+      .fireStopFailureEvent('loop_detected', loopType ?? undefined)
+      .catch((err) => {
+        debugLogger.warn(`StopFailure hook failed: ${err}`);
+      });
+  }
+
+  /**
    * Walk-only accessor for the set of `functionResponse.id` strings in
    * raw history. Callers that only need the dedup id set (notably
    * `useGeminiStream.handleCompletedTools`) MUST prefer this over
@@ -864,27 +882,22 @@ export class GeminiClient {
   }
 
   private getMainSessionSystemInstruction(): string {
-    const userMemory = this.config.getUserMemory();
     const overrideSystemPrompt = this.config.getSystemPrompt();
-    const appendSystemPrompt = this.config.getAppendSystemPrompt();
-    const gitStatus = this.getCachedGitStatus();
-
-    if (overrideSystemPrompt) {
-      const base = getCustomSystemPrompt(
-        overrideSystemPrompt,
-        userMemory,
-        appendSystemPrompt,
-      );
-      return gitStatus ? base + '\n\n' + gitStatus : base;
-    }
-
-    const base = getCoreSystemPrompt(
-      userMemory,
-      this.config.getModel(),
-      appendSystemPrompt,
-      resolveInteractionMode(this.config),
-    );
-    return gitStatus ? base + '\n\n' + gitStatus : base;
+    const base = overrideSystemPrompt
+      ? getCustomSystemPrompt(overrideSystemPrompt)
+      : getCoreSystemPrompt(
+          undefined,
+          this.config.getModel(),
+          undefined,
+          resolveInteractionMode(this.config),
+        );
+    return assembleSystemPrompt({
+      base,
+      contextFiles: this.config.getUserMemory(),
+      appendPrompt: this.config.getAppendSystemPrompt(),
+      gitStatus: this.getCachedGitStatus(),
+      autoMemory: this.config.getAutoMemoryPrompt(),
+    });
   }
 
   async refreshStartupContextReminder(): Promise<void> {
@@ -2452,6 +2465,15 @@ export class GeminiClient {
                 this.config.getSdkMode(),
             ),
           );
+        } else if (this.config.consumePendingManualPlanExitNotice()) {
+          // One-shot counterpart to the reminder above: the model was told
+          // "plan mode is active" on every turn, so a manual exit
+          // (Shift+Tab, /approval-mode, /plan) needs an explicit signal —
+          // the reminder silently disappearing goes unnoticed and the
+          // model keeps calling exit_plan_mode (#7671).
+          systemReminders.push(
+            getManualPlanExitSystemReminder(this.config.getApprovalMode()),
+          );
         }
 
         // add arena system reminder if an arena session is active
@@ -2611,6 +2633,7 @@ export class GeminiClient {
             if (isTopLevelInteraction)
               endInteractionSpan('error', { errorMessage: 'loop detected' });
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+            this.fireLoopDetectedStopFailure(loopType);
             return turn;
           }
 
@@ -2642,6 +2665,7 @@ export class GeminiClient {
             // finally cleanup catches this, but cancel explicitly to match
             // the cleanup pattern at other early-return sites.
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+            this.fireLoopDetectedStopFailure(loopType);
             return turn;
           }
           // Update arena status on Finished events — stats are derived
@@ -3144,9 +3168,12 @@ export class GeminiClient {
     let currentAttemptModel: string = model;
 
     try {
-      const userMemory = this.config.getUserMemory();
       const finalSystemInstruction = generationConfig.systemInstruction
-        ? getCustomSystemPrompt(generationConfig.systemInstruction, userMemory)
+        ? assembleSystemPrompt({
+            base: getCustomSystemPrompt(generationConfig.systemInstruction),
+            contextFiles: this.config.getUserMemory(),
+            autoMemory: this.config.getAutoMemoryPrompt(),
+          })
         : this.getMainSessionSystemInstruction();
 
       const requestConfig: GenerateContentConfig = {

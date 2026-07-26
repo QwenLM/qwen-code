@@ -55,6 +55,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   artifact: 'Artifact',
   record_artifact: 'RecordArtifact',
   web_search: 'WebSearch',
+  image_gen: 'ImageGen',
   bash: 'Shell',
   shell: 'Shell Command',
   read: 'ReadFile',

@@ -1026,9 +1026,13 @@ export class ConnectionRegistry {
     };
   }
 
+  clear(): void {
+    for (const id of [...this.byId.keys()]) this.delete(id);
+  }
+
   dispose(): void {
     clearInterval(this.sweepTimer);
-    for (const id of [...this.byId.keys()]) this.delete(id);
+    this.clear();
   }
 
   private sweep(): void {

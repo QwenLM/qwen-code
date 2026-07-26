@@ -34,10 +34,15 @@ import type {
 } from './bridgeTypes.js';
 import { SERVE_CONTROL_EXT_METHODS } from './status.js';
 import type {
+  ChannelDeliveryErrorCode,
+  ChannelDeliveryHandler,
+  ChannelDeliveryHostResult,
+  ChannelDeliveryInfo,
   ClientMcpMessageSender,
   CreateSubSessionHandler,
 } from './bridgeOptions.js';
 import {
+  CHANNEL_DELIVERY_ERROR_CODES,
   MAX_SUB_SESSION_NAME_CHARS,
   MAX_SUB_SESSION_PROMPT_CHARS,
 } from './bridgeOptions.js';
@@ -63,6 +68,9 @@ import type {
 // Keep in sync with core `ToolNames.ARTIFACT`; acp-bridge avoids a runtime
 // import from core for this hot demux path.
 const PUBLISH_ARTIFACT_TOOL_NAME = 'artifact';
+const MAX_CHANNEL_DELIVERY_TEXT_CHARS = 100_000;
+const MAX_CHANNEL_DELIVERY_FIELD_CHARS = 2048;
+const MAX_CHANNEL_DELIVERY_ERROR_CHARS = 500;
 
 /**
  * Duck-type check for `FsError` from `cli/src/serve/fs/errors.ts`.
@@ -95,6 +103,43 @@ function isFsErrorShape(err: unknown): err is FsErrorShape {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isBoundedChannelDeliveryString(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.trim().length > 0 &&
+    value.length <= MAX_CHANNEL_DELIVERY_FIELD_CHARS
+  );
+}
+
+function isChannelDeliveryTarget(
+  value: unknown,
+): value is ChannelDeliveryInfo['target'] {
+  if (!isRecord(value)) return false;
+  return (
+    isBoundedChannelDeliveryString(value['channelName']) &&
+    (value['type'] === 'user' || value['type'] === 'chat') &&
+    isBoundedChannelDeliveryString(value['id']) &&
+    Object.keys(value).every(
+      (key) => key === 'channelName' || key === 'type' || key === 'id',
+    )
+  );
+}
+
+function normalizeChannelDeliveryHostResult(
+  value: ChannelDeliveryHostResult,
+): ChannelDeliveryHostResult {
+  if (value.status === 'delivered') return { status: 'delivered' };
+  if (value.status === 'skipped') return { status: 'skipped' };
+  const code = CHANNEL_DELIVERY_ERROR_CODES.has(value.code)
+    ? value.code
+    : 'channel_delivery_failed';
+  const error =
+    typeof value.error === 'string' && value.error.length > 0
+      ? value.error.slice(0, MAX_CHANNEL_DELIVERY_ERROR_CHARS)
+      : 'Channel delivery failed.';
+  return { status: 'failed', code: code as ChannelDeliveryErrorCode, error };
 }
 
 function pendingInteractionOptions(
@@ -636,6 +681,7 @@ export class BridgeClient implements Client {
     private readonly onWorkspaceGenerationEvent?: (
       event: BridgeWorkspaceGenerationNotificationEvent,
     ) => void,
+    private readonly onChannelDelivery?: ChannelDeliveryHandler,
   ) {}
 
   async requestPermission(
@@ -1022,6 +1068,9 @@ export class BridgeClient implements Client {
     if (method === SERVE_CONTROL_EXT_METHODS.createSubSession) {
       return this.handleCreateSubSession(params);
     }
+    if (method === SERVE_CONTROL_EXT_METHODS.channelDelivery) {
+      return this.handleChannelDelivery(params);
+    }
     if (method !== MID_TURN_QUEUE_DRAIN_METHOD) {
       throw RequestError.methodNotFound(method);
     }
@@ -1078,6 +1127,131 @@ export class BridgeClient implements Client {
       }
     }
     return { messages, hasQueuedPrompt };
+  }
+
+  private async handleChannelDelivery(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.onChannelDelivery) {
+      throw RequestError.methodNotFound(
+        SERVE_CONTROL_EXT_METHODS.channelDelivery,
+      );
+    }
+    const sessionId = params['sessionId'];
+    if (
+      typeof sessionId !== 'string' ||
+      sessionId.length === 0 ||
+      !this.ownsSession(sessionId)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        '`sessionId` must name a session owned by this connection',
+      );
+    }
+    const entry = this.resolveEntry(sessionId);
+    if (!entry) {
+      throw RequestError.invalidParams(undefined, 'Unknown `sessionId`');
+    }
+    const deliveryId = params['deliveryId'];
+    const source = params['source'];
+    const text = params['text'];
+    const rawTarget = params['target'];
+    if (
+      !isBoundedChannelDeliveryString(deliveryId) ||
+      (source !== 'prompt' && source !== 'scheduled') ||
+      typeof text !== 'string' ||
+      text.length > MAX_CHANNEL_DELIVERY_TEXT_CHARS ||
+      !isChannelDeliveryTarget(rawTarget)
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid channel delivery request',
+      );
+    }
+    const promptId = params['promptId'];
+    const taskId = params['taskId'];
+    const firedAt = params['firedAt'];
+    const allowedKeys =
+      source === 'prompt'
+        ? new Set([
+            'sessionId',
+            'deliveryId',
+            'source',
+            'target',
+            'text',
+            'promptId',
+          ])
+        : new Set([
+            'sessionId',
+            'deliveryId',
+            'source',
+            'target',
+            'text',
+            'taskId',
+            'firedAt',
+          ]);
+    const correlationValid =
+      source === 'prompt'
+        ? isBoundedChannelDeliveryString(promptId) && promptId === deliveryId
+        : isBoundedChannelDeliveryString(taskId) &&
+          typeof firedAt === 'number' &&
+          Number.isFinite(firedAt) &&
+          deliveryId === `${taskId}:${firedAt}`;
+    if (
+      !correlationValid ||
+      !Object.keys(params).every((key) => allowedKeys.has(key))
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid channel delivery correlation',
+      );
+    }
+
+    const info: ChannelDeliveryInfo = {
+      sessionId,
+      deliveryId,
+      source,
+      target: rawTarget,
+      text,
+      ...(source === 'prompt' ? { promptId: promptId as string } : {}),
+      ...(source === 'scheduled'
+        ? { taskId: taskId as string, firedAt: firedAt as number }
+        : {}),
+    };
+    let result: ChannelDeliveryHostResult;
+    try {
+      result = normalizeChannelDeliveryHostResult(
+        await this.onChannelDelivery(info),
+      );
+    } catch {
+      result = {
+        status: 'failed',
+        code: 'channel_delivery_failed',
+        error: 'Channel delivery failed.',
+      };
+    }
+    try {
+      entry.events.publish({
+        type: 'channel_delivery_result',
+        ...(source === 'prompt' ? { promptId: promptId as string } : {}),
+        data: {
+          sessionId,
+          deliveryId,
+          source,
+          status: result.status,
+          ...(source === 'prompt' ? { promptId: promptId as string } : {}),
+          ...(source === 'scheduled'
+            ? { taskId: taskId as string, firedAt: firedAt as number }
+            : {}),
+          ...(result.status === 'failed'
+            ? { code: result.code, error: result.error }
+            : {}),
+        },
+      });
+    } catch {
+      // Best-effort: delivery already completed.
+    }
+    return result;
   }
 
   /**

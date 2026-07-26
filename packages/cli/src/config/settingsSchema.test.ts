@@ -35,6 +35,7 @@ describe('SettingsSchema', () => {
         'advanced',
         'plansDirectory',
         'voiceModel',
+        'imageModel',
       ];
 
       expectedSettings.forEach((setting) => {
@@ -177,6 +178,16 @@ describe('SettingsSchema', () => {
       expect(voiceModel.default).toBe('');
       expect(voiceModel.requiresRestart).toBe(false);
       expect(voiceModel.showInDialog).toBe(false);
+    });
+
+    it('should define the image model setting', () => {
+      const imageModel = getSettingsSchema().imageModel;
+
+      expect(imageModel.type).toBe('string');
+      expect(imageModel.category).toBe('Model');
+      expect(imageModel.default).toBe('');
+      expect(imageModel.requiresRestart).toBe(false);
+      expect(imageModel.showInDialog).toBe(false);
     });
 
     it('should define the built-in Explore model setting', () => {
