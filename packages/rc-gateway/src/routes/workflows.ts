@@ -196,21 +196,40 @@ function finish(
   }
 }
 
-/** GET /rc/workflows — list (SESSION_READ scope). */
+/**
+ * GET /rc/workflows — list (SESSION_READ scope at the mount, which admits a
+ * session-locked SHARE token). add-link-share: a session-locked token gets
+ * `read` on `session_lock_id` ONLY and SHALL NOT access other sessions — this
+ * is a workspace-wide list, so a locked caller is confined here, in-handler
+ * (mirroring routes/search.ts's `req.rcClient.sessionLockId` confinement), to
+ * runs tied to its one session. A workflow run has no single `sessionId` of
+ * its own — it fans out to per-phase agent sessions — so the tie is "one of
+ * this run's agents backs the locked session" (`run.agents[].sessionId`).
+ * Fail-closed: a run with no agents yet (no determinable session tie) is
+ * excluded for a locked caller. A non-locked (owner/write) token is
+ * unaffected — full list, as before.
+ */
 export function createListWorkflowsRoute(
   deps: WorkflowRoutesDeps,
 ): RequestHandler {
-  return (_req, res) => {
-    const workflows = deps.runRegistry.list().map((run) => ({
-      runId: run.runId,
-      name: run.name,
-      status: run.status,
-      phase: run.phase,
-      agentCount: run.agents.length,
-      tokensSpent: run.tokensSpent,
-      startedAt: run.startedAt,
-      finishedAt: run.finishedAt,
-    }));
+  return (req, res) => {
+    const lock = req.rcClient?.sessionLockId;
+    const workflows = deps.runRegistry
+      .list()
+      .filter(
+        (run) =>
+          lock === undefined || run.agents.some((a) => a.sessionId === lock),
+      )
+      .map((run) => ({
+        runId: run.runId,
+        name: run.name,
+        status: run.status,
+        phase: run.phase,
+        agentCount: run.agents.length,
+        tokensSpent: run.tokensSpent,
+        startedAt: run.startedAt,
+        finishedAt: run.finishedAt,
+      }));
     res.status(200).json({ workflows });
   };
 }

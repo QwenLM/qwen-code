@@ -40,7 +40,15 @@ function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
   return { calls, record: async (e: AuditEntry) => void calls.push(e) };
 }
 
-async function setup(promptDelayMs = 50, extra?: Partial<WorkflowRoutesDeps>) {
+async function setup(
+  promptDelayMs = 50,
+  extra?: Partial<WorkflowRoutesDeps>,
+  client: {
+    id: string;
+    scopes: string[];
+    sessionLockId?: string;
+  } = { id: 'tk', scopes: ['write', 'session:read'] },
+) {
   stub = await startStubDaemon({ promptDelayMs });
   const dir = await mkdtemp(join(tmpdir(), 'wf-routes-'));
   const agentRegistry = await AgentRegistry.open(join(dir, 'agents.json'));
@@ -61,10 +69,7 @@ async function setup(promptDelayMs = 50, extra?: Partial<WorkflowRoutesDeps>) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    (req as { rcClient?: unknown }).rcClient = {
-      id: 'tk',
-      scopes: ['write', 'session:read'],
-    };
+    (req as { rcClient?: unknown }).rcClient = client;
     next();
   });
   app.post('/rc/workflows', createStartWorkflowRoute(deps));
@@ -230,6 +235,66 @@ describe('POST /rc/workflows { name } — guarded named resolution', () => {
     const body = (await res.json()) as { code: string; error: string };
     expect(body.code).toBe('invalid_workflow_script');
     expect(body.error).toContain('invalid resumeFromRunId');
+  });
+});
+
+describe('GET /rc/workflows (list)', () => {
+  it('session-locked share token: list confined to runs with an agent in the locked session; other runs never leak', async () => {
+    const { url, runRegistry } = await setup(50, undefined, {
+      id: 'tkn-share',
+      scopes: ['session:read', 'share'],
+      sessionLockId: 'S1',
+    });
+    // Run tied to the locked session via one of its agents.
+    const own = runRegistry.create({
+      runId: 'r-own',
+      name: 'own',
+      scriptHash: 'h1',
+    });
+    runRegistry.addAgent(own.runId, 'a1', 'S1');
+    // Unrelated run — must never leak.
+    const other = runRegistry.create({
+      runId: 'r-other',
+      name: 'other-secret',
+      scriptHash: 'h2',
+    });
+    runRegistry.addAgent(other.runId, 'a2', 'S2');
+    // A run with no agents at all — no determinable session tie, fail-closed
+    // exclude it for a locked caller.
+    runRegistry.create({ runId: 'r-empty', name: 'empty', scriptHash: 'h3' });
+
+    const res = await fetch(`${url}/rc/workflows`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      workflows: Array<{ runId: string }>;
+    };
+    expect(body.workflows.map((w) => w.runId)).toEqual([own.runId]);
+    expect(JSON.stringify(body)).not.toContain('other-secret');
+  });
+
+  it('non-locked owner token: list is unfiltered (all runs)', async () => {
+    const { url, runRegistry } = await setup();
+    const r1 = runRegistry.create({
+      runId: 'r-1',
+      name: 'one',
+      scriptHash: 'h1',
+    });
+    runRegistry.addAgent(r1.runId, 'a1', 'S1');
+    const r2 = runRegistry.create({
+      runId: 'r-2',
+      name: 'two',
+      scriptHash: 'h2',
+    });
+    runRegistry.addAgent(r2.runId, 'a2', 'S2');
+
+    const res = await fetch(`${url}/rc/workflows`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      workflows: Array<{ runId: string }>;
+    };
+    expect(body.workflows.map((w) => w.runId).sort()).toEqual(
+      [r1.runId, r2.runId].sort(),
+    );
   });
 });
 

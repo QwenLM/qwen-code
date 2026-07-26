@@ -199,7 +199,17 @@ export function createSpawnAgentRoute(deps: AgentRoutesDeps): RequestHandler {
   };
 }
 
-/** GET /rc/agents?status=&parent= — SESSION_READ scope at the mount. */
+/**
+ * GET /rc/agents?status=&parent= — SESSION_READ scope at the mount, which
+ * admits a session-locked SHARE token (add-link-share: "session-locked" gets
+ * `read` on `session_lock_id` ONLY and SHALL NOT access other sessions). This
+ * is a workspace-wide list, so — mirroring routes/search.ts's confinement of
+ * `sessionId` to `req.rcClient.sessionLockId` — a locked caller's results are
+ * confined here, in-handler, to records tied to its one session: either the
+ * agent's OWN session, or a session it was spawned FROM (`parentSessionId`).
+ * Fail-closed: a record with neither tie to the lock is excluded. A
+ * non-locked (owner/write) token is unaffected — full list, as before.
+ */
 export function createListAgentsRoute(deps: AgentRoutesDeps): RequestHandler {
   return (req, res) => {
     const statusRaw = req.query['status'];
@@ -215,8 +225,15 @@ export function createListAgentsRoute(deps: AgentRoutesDeps): RequestHandler {
     }
     const parentRaw = req.query['parent'];
     const parent = typeof parentRaw === 'string' ? parentRaw : undefined;
+    const lock = req.rcClient?.sessionLockId;
     const agents = deps.registry
       .list({ status, parent })
+      .filter(
+        (r) =>
+          lock === undefined ||
+          r.sessionId === lock ||
+          r.parentSessionId === lock,
+      )
       .map((r) => withCost(r, deps.costFor));
     res.status(200).json({ agents });
   };

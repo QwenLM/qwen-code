@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import { DaemonClient } from '@qwen-code/sdk';
 import { createGatewayApp } from '../server.js';
 import { TokenStore } from '../tokenStore.js';
+import { SHARE, SESSION_READ } from '../scopes.js';
 import { PairingService } from '../pairing.js';
 import { ReviewRegistry } from '../reviews/reviewRegistry.js';
 import type { ReviewPermissionBridge } from '../reviews/reviewPermissionBridge.js';
@@ -47,6 +48,7 @@ async function setup(
   registry: ReviewRegistry;
   bridge: ReturnType<typeof fakeBridge>;
   frames: OwnerEvent[];
+  store: TokenStore;
 }> {
   // Keep the review prompt in-flight past the accept window so the 202-accept
   // path is deterministic (never a race on an instant settle) — this ALSO
@@ -86,6 +88,7 @@ async function setup(
     registry,
     bridge,
     frames,
+    store,
   };
 }
 
@@ -475,6 +478,53 @@ describe('GET /rc/reviews, GET /rc/reviews/:id (list/detail)', () => {
     expect((await missing.json()) as { code: string }).toMatchObject({
       code: 'review_not_found',
     });
+  });
+
+  it('session-locked share token: list confined to its own session; other sessions (incl. review record) never leak', async () => {
+    const { url, registry, store, tokens } = await setup();
+    const own = await registry.register({
+      sessionId: 'S1',
+      target: { kind: 'local' },
+      comment: false,
+      autofix: false,
+      approvalLeg: 'vote',
+      triggeredByTokenId: 'owner',
+    });
+    await registry.register({
+      sessionId: 'S2',
+      target: { kind: 'path', path: 'SECRET-OTHER-SESSION' },
+      comment: false,
+      autofix: false,
+      approvalLeg: 'vote',
+      triggeredByTokenId: 'owner',
+    });
+
+    const share = await store.issueShare({
+      scopes: [SHARE, SESSION_READ],
+      label: 'share',
+      sessionLockId: 'S1',
+      ttlSec: 300,
+      parentId: 'owner',
+    });
+
+    const res = await fetch(`${url}/rc/reviews`, {
+      headers: { Authorization: `Bearer ${share.token}` },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      reviews: Array<{ reviewId: string }>;
+    };
+    expect(body.reviews.map((r) => r.reviewId)).toEqual([own.reviewId]);
+    expect(JSON.stringify(body)).not.toContain('SECRET-OTHER-SESSION');
+
+    // Non-locked owner token still sees the full list.
+    const ownerRes = await fetch(`${url}/rc/reviews`, {
+      headers: { Authorization: `Bearer ${tokens.owner}` },
+    });
+    const ownerBody = (await ownerRes.json()) as {
+      reviews: Array<{ reviewId: string }>;
+    };
+    expect(ownerBody.reviews).toHaveLength(2);
   });
 
   it('list with an invalid status filter → 400 invalid_status', async () => {

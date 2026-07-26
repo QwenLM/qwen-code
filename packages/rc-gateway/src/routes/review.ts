@@ -386,7 +386,16 @@ export function withReviewCost(
   return cost !== undefined ? { ...rec, costMicrocents: cost } : { ...rec };
 }
 
-/** GET /rc/reviews?status= — SESSION_READ scope at the mount. */
+/**
+ * GET /rc/reviews?status= — SESSION_READ scope at the mount, which admits a
+ * session-locked SHARE token. add-link-share: a session-locked token gets
+ * `read` on `session_lock_id` ONLY and SHALL NOT access other sessions — this
+ * is a workspace-wide list, so a locked caller is confined here, in-handler
+ * (mirroring routes/search.ts's `req.rcClient.sessionLockId` confinement), to
+ * reviews whose OWN `sessionId` (the dedicated daemon session the trigger saga
+ * created for the review) equals the lock. A non-locked (owner/write) token
+ * is unaffected — full list, as before.
+ */
 export function createListReviewsRoute(deps: ReviewRoutesDeps): RequestHandler {
   return (req, res) => {
     const statusRaw = req.query['status'];
@@ -400,8 +409,10 @@ export function createListReviewsRoute(deps: ReviewRoutesDeps): RequestHandler {
       }
       status = statusRaw as ReviewStatus;
     }
+    const lock = req.rcClient?.sessionLockId;
     const reviews = deps.registry
       .list({ status })
+      .filter((r) => lock === undefined || r.sessionId === lock)
       .map((r) => withReviewCost(r, deps.costFor));
     res.status(200).json({ reviews });
   };

@@ -41,7 +41,14 @@ function fakeAudit(): AuditRecorder & { calls: AuditEntry[] } {
   return { calls, record: async (e: AuditEntry) => void calls.push(e) };
 }
 
-async function setup(stubOpts: Parameters<typeof startStubDaemon>[0] = {}) {
+async function setup(
+  stubOpts: Parameters<typeof startStubDaemon>[0] = {},
+  client: {
+    id: string;
+    scopes: string[];
+    sessionLockId?: string;
+  } = { id: 'tkn-owner', scopes: ['write', 'session:read'] },
+) {
   stub = await startStubDaemon(stubOpts);
   const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
   const dir = await mkdtemp(join(tmpdir(), 'agents-route-'));
@@ -62,10 +69,7 @@ async function setup(stubOpts: Parameters<typeof startStubDaemon>[0] = {}) {
   const app = express();
   app.use(express.json());
   app.use((req, _res, next) => {
-    (req as { rcClient?: unknown }).rcClient = {
-      id: 'tkn-owner',
-      scopes: ['write', 'session:read'],
-    };
+    (req as { rcClient?: unknown }).rcClient = client;
     next();
   });
   app.post('/rc/agents', createSpawnAgentRoute(deps));
@@ -186,6 +190,72 @@ describe('GET /rc/agents + /rc/agents/:id', () => {
     const { url } = await setup();
     const res = await fetch(`${url}/rc/agents?status=zombie`);
     expect(res.status).toBe(400);
+  });
+
+  it('session-locked share token: list confined to the locked session only; other sessions (incl. task text) never leak', async () => {
+    const { url, registry } = await setup(
+      {},
+      {
+        id: 'tkn-share',
+        scopes: ['session:read', 'share'],
+        sessionLockId: 'S1',
+      },
+    );
+    // Own-session record: sessionId === lock.
+    const own = await registry.register({
+      sessionId: 'S1',
+      parentSessionId: null,
+      agentType: 'general',
+      task: 'S1 own task',
+      spawnedByTokenId: 'owner',
+    });
+    // Spawned-by-S1 record: parentSessionId === lock (own sessionId differs).
+    const child = await registry.register({
+      sessionId: 'S1-child',
+      parentSessionId: 'S1',
+      agentType: 'general',
+      task: 'S1 child task',
+      spawnedByTokenId: 'owner',
+    });
+    // Unrelated session's record — must never leak, not even its task text.
+    await registry.register({
+      sessionId: 'S2',
+      parentSessionId: null,
+      agentType: 'general',
+      task: 'S2 SECRET task text',
+      spawnedByTokenId: 'owner',
+    });
+
+    const res = await fetch(`${url}/rc/agents`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { agents: Array<{ agentId: string }> };
+    expect(body.agents.map((a) => a.agentId).sort()).toEqual(
+      [own.agentId, child.agentId].sort(),
+    );
+    expect(JSON.stringify(body)).not.toContain('S2 SECRET task text');
+  });
+
+  it('non-locked owner token: list is unfiltered (all sessions)', async () => {
+    const { url, registry } = await setup();
+    await registry.register({
+      sessionId: 'S1',
+      parentSessionId: null,
+      agentType: 'general',
+      task: 'S1 task',
+      spawnedByTokenId: 'owner',
+    });
+    await registry.register({
+      sessionId: 'S2',
+      parentSessionId: null,
+      agentType: 'general',
+      task: 'S2 task',
+      spawnedByTokenId: 'owner',
+    });
+
+    const res = await fetch(`${url}/rc/agents`);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { agents: Array<{ agentId: string }> };
+    expect(body.agents).toHaveLength(2);
   });
 });
 
