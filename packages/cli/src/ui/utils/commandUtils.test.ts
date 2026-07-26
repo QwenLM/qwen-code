@@ -880,6 +880,36 @@ describe('findSlashCommandTokens', () => {
     expect(tokens[1]).toMatchObject({ commandName: 'clear', valid: false });
   });
 
+  it('does not mark stackable skills valid after a non-skill prefix', () => {
+    const commands = [
+      {
+        name: 'clear',
+        description: 'Clear conversation',
+        kind: 'built-in' as const,
+        modelInvocable: false,
+        userInvocable: true,
+        hidden: false,
+      },
+      {
+        name: 'store-locally',
+        description: 'Store locally',
+        kind: 'skill' as const,
+        modelInvocable: false,
+        userInvocable: true,
+        hidden: false,
+      },
+    ] as Parameters<typeof findSlashCommandTokens>[1];
+
+    const tokens = findSlashCommandTokens('/clear /store-locally', commands);
+
+    expect(tokens).toHaveLength(2);
+    expect(tokens[0]).toMatchObject({ commandName: 'clear', valid: true });
+    expect(tokens[1]).toMatchObject({
+      commandName: 'store-locally',
+      valid: false,
+    });
+  });
+
   it('marks unknown token as invalid', () => {
     const tokens = findSlashCommandTokens('/usr/bin/something', mockCommands);
     // /usr matches nothing, so invalid

@@ -632,6 +632,68 @@ describe('useCommandCompletion', () => {
       },
     );
 
+    it('should exclude hidden and non-user-invocable skills from stacked skill completion candidates', async () => {
+      const firstSkill: SlashCommand = {
+        name: 'review',
+        description: 'Review changes',
+        kind: CommandKind.SKILL,
+        modelInvocable: true,
+      };
+      const visibleSkill: SlashCommand = {
+        name: 'store-locally',
+        description: 'Store locally',
+        kind: CommandKind.SKILL,
+        modelInvocable: false,
+      };
+      const hiddenSkill: SlashCommand = {
+        name: 'store-secret',
+        description: 'Hidden store skill',
+        kind: CommandKind.SKILL,
+        modelInvocable: false,
+        hidden: true,
+      };
+      const nonUserInvocableSkill: SlashCommand = {
+        name: 'store-internal',
+        description: 'Internal store skill',
+        kind: CommandKind.SKILL,
+        modelInvocable: false,
+        userInvocable: false,
+      };
+      const fileCommand: SlashCommand = {
+        name: 'store-notes',
+        description: 'Store notes',
+        kind: CommandKind.FILE,
+        modelInvocable: true,
+      };
+
+      renderHook(() =>
+        useCommandCompletion(
+          useTextBufferForTest('/review /sto'),
+          testRootDir,
+          [
+            firstSkill,
+            visibleSkill,
+            hiddenSkill,
+            nonUserInvocableSkill,
+            fileCommand,
+          ],
+          mockCommandContext,
+          false,
+          mockConfig,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(useSlashCompletion).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            enabled: true,
+            query: '/sto',
+            slashCommands: [firstSkill, visibleSkill],
+          }),
+        );
+      });
+    });
+
     it.each(['/stats /sto', '/unknown /sto', '/unknown\n/sto'])(
       'should not treat an invalid stacked prefix as mid-input completion: %s',
       async (input) => {

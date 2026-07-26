@@ -378,7 +378,7 @@ export function useCommandCompletion(
       const prefix = toCodePoints(buffer.text)
         .slice(0, midCmd.startPos)
         .join('');
-      if (prefix.trimStart().startsWith('/')) return null;
+      if (isSlashCommand(prefix.trimStart())) return null;
       const match = getBestSlashCommandMatch(
         midCmd.partialCommand,
         slashCommands,
