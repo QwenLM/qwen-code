@@ -233,6 +233,7 @@ Expect the three ends to be far apart. The declaration, the pass-through, and th
     brief: `You are **Agent 2: Security**. Review the diff for:
 
 - Injection — SQL, command, prototype pollution, code injection
+- **Argument / option injection into a subprocess — the sink \`execFile\`/\`spawn\` (no shell) does NOT close.** When user-controlled input reaches a subprocess as a **positional argument** — a \`git\`, \`gh\`, \`tar\`, \`ffmpeg\` … invocation built from request/config data — check whether that value can be reinterpreted as an **option or special token**. A value that starts with \`-\` becomes a flag (\`git log --output=<path>\` overwrites an arbitrary file as the daemon user; \`git checkout -f\` discards the working tree), and tokens like \`.\` / \`..\` become a pathspec (\`git checkout .\` silently drops unstaged changes). \`execFile\` stops *shell* injection but passes these straight through, so a no-shell spawn is not a clean bill of health. Flag every such positional; the fix is to validate the value (a ref/name allowlist, reject a leading \`-\`) **and** terminate the argv with \`--\` so nothing after it is read as an option or pathspec. Watch for the asymmetry too — one call site validates, its sibling does not.
 - XSS — stored, reflected, DOM-based
 - SSRF and path traversal
 - Authentication and authorization bypass
