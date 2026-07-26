@@ -6522,6 +6522,138 @@ describe('setApprovalMode with folder trust', () => {
       expect(config.consumePendingManualPlanExitNotice()).toBe(false);
     });
 
+    it('claims the latest non-plan mode and supports a matching restore', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      config.setApprovalMode(ApprovalMode.YOLO);
+
+      const notice = config.takePendingManualPlanExitNotice();
+      expect(notice).toEqual({
+        version: expect.any(Number),
+        currentMode: ApprovalMode.YOLO,
+      });
+      expect(config.takePendingManualPlanExitNotice()).toBeUndefined();
+
+      config.restorePendingManualPlanExitNotice(notice!.version);
+      expect(config.takePendingManualPlanExitNotice()).toEqual(notice);
+    });
+
+    it('ignores a restore after a newer mode event', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      const staleNotice = config.takePendingManualPlanExitNotice()!;
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.AUTO_EDIT);
+      config.restorePendingManualPlanExitNotice(staleNotice.version);
+
+      const currentNotice = config.takePendingManualPlanExitNotice();
+      expect(currentNotice?.version).toBeGreaterThan(staleNotice.version);
+      expect(currentNotice?.currentMode).toBe(ApprovalMode.AUTO_EDIT);
+      expect(config.takePendingManualPlanExitNotice()).toBeUndefined();
+    });
+
+    it('delivers the same inherited event once to each conversation', () => {
+      const parent = new Config(baseParams);
+      vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
+      const child = Object.create(parent) as Config;
+
+      parent.setApprovalMode(ApprovalMode.PLAN);
+      parent.setApprovalMode(ApprovalMode.DEFAULT);
+
+      const parentNotice = parent.takePendingManualPlanExitNotice();
+      const childNotice = child.takePendingManualPlanExitNotice();
+      expect(parentNotice).toEqual(childNotice);
+      expect(parent.takePendingManualPlanExitNotice()).toBeUndefined();
+      expect(child.takePendingManualPlanExitNotice()).toBeUndefined();
+    });
+
+    it('lets a newly created conversation claim the latest inherited event', () => {
+      const parent = new Config(baseParams);
+      vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
+
+      parent.setApprovalMode(ApprovalMode.PLAN);
+      parent.setApprovalMode(ApprovalMode.DEFAULT);
+      const parentNotice = parent.takePendingManualPlanExitNotice();
+      const child = Object.create(parent) as Config;
+
+      expect(child.takePendingManualPlanExitNotice()).toEqual(parentNotice);
+    });
+
+    it('copies the event when a child first owns its approval mode', () => {
+      const parent = new Config(baseParams);
+      vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
+      const child = Object.create(parent) as Config;
+
+      parent.setApprovalMode(ApprovalMode.PLAN);
+      parent.setApprovalMode(ApprovalMode.DEFAULT);
+      child.setApprovalMode(ApprovalMode.AUTO_EDIT);
+
+      expect(child.takePendingManualPlanExitNotice()?.currentMode).toBe(
+        ApprovalMode.AUTO_EDIT,
+      );
+
+      parent.setApprovalMode(ApprovalMode.PLAN);
+      parent.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(child.takePendingManualPlanExitNotice()).toBeUndefined();
+      expect(parent.takePendingManualPlanExitNotice()?.currentMode).toBe(
+        ApprovalMode.DEFAULT,
+      );
+
+      child.setApprovalMode(ApprovalMode.PLAN);
+      child.setApprovalMode(ApprovalMode.YOLO);
+      expect(child.takePendingManualPlanExitNotice()?.currentMode).toBe(
+        ApprovalMode.YOLO,
+      );
+      expect(parent.takePendingManualPlanExitNotice()).toBeUndefined();
+    });
+
+    it('isolates an inherited event when approval mode is owned directly', () => {
+      const parent = new Config(baseParams);
+      vi.spyOn(parent, 'isTrustedFolder').mockReturnValue(true);
+      parent.setApprovalMode(ApprovalMode.PLAN);
+      parent.setApprovalMode(ApprovalMode.DEFAULT);
+
+      const child = Object.create(parent) as Config;
+      Object.defineProperty(child, 'approvalMode', {
+        value: ApprovalMode.AUTO_EDIT,
+        writable: true,
+        configurable: true,
+      });
+
+      expect(child.takePendingManualPlanExitNotice()?.currentMode).toBe(
+        ApprovalMode.AUTO_EDIT,
+      );
+
+      parent.setApprovalMode(ApprovalMode.PLAN);
+      parent.setApprovalMode(ApprovalMode.DEFAULT);
+      expect(child.takePendingManualPlanExitNotice()).toBeUndefined();
+      expect(parent.takePendingManualPlanExitNotice()?.currentMode).toBe(
+        ApprovalMode.DEFAULT,
+      );
+    });
+
+    it('only exposes the latest event after rapid Plan round trips', () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.DEFAULT);
+      config.setApprovalMode(ApprovalMode.PLAN);
+      config.setApprovalMode(ApprovalMode.YOLO);
+
+      expect(config.takePendingManualPlanExitNotice()?.currentMode).toBe(
+        ApprovalMode.YOLO,
+      );
+      expect(config.takePendingManualPlanExitNotice()).toBeUndefined();
+    });
+
     it('records prePlanMode=yolo for a Shift+Tab cycle into plan mode', () => {
       const config = new Config(baseParams);
       vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);

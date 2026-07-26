@@ -102,7 +102,15 @@ const triageAndAddressStep =
   )?.[0] ?? '';
 const prepareBranchAndFeedbackStep =
   workflow.match(
-    /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n[ ]{6}- name: 'Triage and address')/,
+    /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n[ ]{6}- name: 'Post autofix status comment')/,
+  )?.[0] ?? '';
+const postStatusCommentStep =
+  workflow.match(
+    /- name: 'Post autofix status comment'[\s\S]*?(?=\n[ ]{6}- name: 'Triage and address')/,
+  )?.[0] ?? '';
+const finalizeStatusCommentStep =
+  workflow.match(
+    /- name: 'Finalize autofix status comment'[\s\S]*?(?=\n[ ]{6}- name: '|$)/,
   )?.[0] ?? '';
 const resetAutofixWorkspaceSteps =
   workflow.match(
@@ -293,9 +301,12 @@ describe('qwen-autofix workflow', () => {
     // discards itself — no agent run, no marker, no comment.
     expect(prepareBranchAndFeedbackStep).toContain('LIVE_EVAL_WM');
     expect(prepareBranchAndFeedbackStep).toContain('stale duplicate target');
+    // Four gates, and both status-comment steps are among them: a discarded
+    // duplicate must neither announce a round it will never run nor rewrite
+    // the status the real round already finalised.
     expect(
       workflow.split("steps.prepare.outputs.stale != 'true'").length - 1,
-    ).toBe(2);
+    ).toBe(4);
     expect(reviewScanJob).toContain(
       'capture("^review-address \\\\((?<pr>[0-9]+),")',
     );
@@ -4807,6 +4818,90 @@ describe('qwen-autofix workflow', () => {
         ),
       ),
     ).toBe(0);
+  });
+
+  it('announces a working round up front and closes the same status comment', () => {
+    // The whole point: the live run link reaches the thread BEFORE the
+    // 80-minute agent step, not after it. Without this the PR is silent from
+    // takeover until "Push and report", so a working round and a stuck one
+    // look identical.
+    expect(postStatusCommentStep.length).toBeGreaterThan(0);
+    expect(postStatusCommentStep).toContain('<!-- autofix-status -->');
+    expect(postStatusCommentStep).toContain(
+      'actions/runs/${{ github.run_id }}',
+    );
+    expect(postStatusCommentStep).toContain('Watch live progress');
+    // Announced only for a round that will really run, and never on a dry run.
+    expect(postStatusCommentStep).toContain(
+      "steps.prepare.outputs.stale != 'true'",
+    );
+    expect(postStatusCommentStep).toContain(
+      "needs.route.outputs.dry_run != 'true'",
+    );
+    // One comment per PR, EDITED each round: a new comment per round would
+    // stack up to MAX_ROUNDS of them on a managed PR.
+    expect(postStatusCommentStep).toContain('--method PATCH');
+    expect(postStatusCommentStep).toContain('contains($m)');
+    // Best-effort — a failed status post warns and continues, never costs a round.
+    expect(postStatusCommentStep).toContain('set -uo pipefail');
+    expect(postStatusCommentStep).toContain('continuing.');
+    expect(finalizeStatusCommentStep).toContain('set -uo pipefail');
+    expect(finalizeStatusCommentStep).toContain('continuing.');
+    // Repository convention for anything posted verbatim as a PR comment.
+    expect(postStatusCommentStep).toContain('<summary>中文说明</summary>');
+
+    // Runs on every ending (including a crashed agent) so no finished round
+    // leaves a live-looking "working" line behind.
+    expect(finalizeStatusCommentStep.length).toBeGreaterThan(0);
+    expect(finalizeStatusCommentStep).toContain('always()');
+    // ...but NOT for a discarded duplicate. The per-PR concurrency group runs
+    // it after the real round already finalised, so an ungated finalize would
+    // overwrite that round's "finished" with its own "ended without
+    // publishing" — reporting a successful round as a failed one.
+    expect(finalizeStatusCommentStep).toContain(
+      "steps.prepare.outputs.stale != 'true'",
+    );
+    expect(finalizeStatusCommentStep).toContain(
+      "needs.route.outputs.dry_run != 'true'",
+    );
+    expect(finalizeStatusCommentStep).toContain('<!-- autofix-status -->');
+    expect(finalizeStatusCommentStep).toContain('--method PATCH');
+    expect(finalizeStatusCommentStep).toContain('<summary>中文说明</summary>');
+    // PATCH-ONLY: a round that never announced (stale duplicate, dry run) must
+    // not gain a status comment at the end.
+    expect(finalizeStatusCommentStep).toContain('nothing to finalize');
+    expect(finalizeStatusCommentStep).not.toContain(
+      'gh api "repos/${REPO}/issues/${PR}/comments" -f body=',
+    );
+    // The announcement hands over the id it just wrote (both branches), so the
+    // finalize never repeats the paginated comment scan — one scan per round,
+    // not two, on a PR that can accumulate hundreds of comments over 100 rounds.
+    expect(postStatusCommentStep).toContain("id: 'post_status'");
+    expect(postStatusCommentStep).toContain(
+      'echo "comment_id=${STATUS_ID}" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(postStatusCommentStep).toContain("--jq '.id'");
+    expect(finalizeStatusCommentStep).toContain(
+      "STATUS_ID: '${{ steps.post_status.outputs.comment_id }}'",
+    );
+    expect(finalizeStatusCommentStep).not.toContain('--paginate');
+    // Both status messages number the round being PERFORMED, like every other
+    // message the loop posts. `effective_round` counts rounds already done and
+    // "Push and report" prints ROUND + 1, so using it raw made the status say
+    // "round 5 finished" in the same thread where the report said "round 6/100"
+    // — observed on #7724. Same round must not carry two numbers.
+    for (const statusStep of [
+      postStatusCommentStep,
+      finalizeStatusCommentStep,
+    ]) {
+      expect(statusStep).toContain('ROUND_DISPLAY="$((ROUND_DISPLAY + 1))"');
+      expect(statusStep).toContain('^[0-9]+$');
+    }
+    // Tells a round that published a report from one that died before it.
+    expect(finalizeStatusCommentStep).toContain("== 'fixed'");
+    expect(finalizeStatusCommentStep).toContain(
+      'ended without publishing a report',
+    );
   });
 
   it('renders the whole managed fleet into the run summary', () => {
