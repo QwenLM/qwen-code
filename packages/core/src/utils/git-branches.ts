@@ -52,7 +52,7 @@ const GIT_ENV_VARS_TO_CLEAR = [
   'GIT_INDEX_FILE',
 ];
 
-function gitEnv(): Record<string, string | undefined> {
+export function gitEnv(): Record<string, string | undefined> {
   const env = { ...process.env };
   for (const key of GIT_ENV_VARS_TO_CLEAR) {
     delete env[key];
@@ -104,18 +104,12 @@ export async function fetchGitBranches(
       'refs/tags/',
     ]).catch(() => ''),
     runGit(cwd, ['symbolic-ref', '--short', 'HEAD']).catch(() => ''),
-    execFileAsync(
-      'git',
-      ['reflog', 'show', '--format=%gs', `-${MAX_REFLOG_ENTRIES}`],
-      {
-        cwd,
-        timeout: GIT_TIMEOUT_MS,
-        maxBuffer: 10 * 1024 * 1024,
-        env: { ...gitEnv(), LC_ALL: 'C', LANG: 'C' },
-      },
-    )
-      .then(({ stdout }) => stdout)
-      .catch(() => ''),
+    runGit(cwd, [
+      'reflog',
+      'show',
+      '--format=%gs',
+      `-${MAX_REFLOG_ENTRIES}`,
+    ]).catch(() => ''),
   ]);
 
   const local = parseBranchLines(localRaw);

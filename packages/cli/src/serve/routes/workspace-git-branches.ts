@@ -279,6 +279,12 @@ async function handleCommit(
       .json({ error: 'missing_message', message: 'message is required' });
     return;
   }
+  if (body['all'] !== undefined && typeof body['all'] !== 'boolean') {
+    res
+      .status(400)
+      .json({ error: 'invalid_all', message: 'all must be a boolean' });
+    return;
+  }
   const all = body['all'] === true;
   try {
     const result = await gitCommit(cwd, message.trim(), { all });

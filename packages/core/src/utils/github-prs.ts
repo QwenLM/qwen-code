@@ -7,6 +7,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { findGitRoot } from './gitUtils.js';
+import { gitEnv } from './git-branches.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -326,7 +327,13 @@ export async function getDefaultBranch(cwd: string): Promise<string | null> {
     const { stdout } = await execFileAsync(
       'git',
       ['symbolic-ref', 'refs/remotes/origin/HEAD', '--short'],
-      { cwd: gitRoot, timeout: 5_000, encoding: 'utf8', windowsHide: true },
+      {
+        cwd: gitRoot,
+        timeout: 5_000,
+        encoding: 'utf8',
+        windowsHide: true,
+        env: gitEnv(),
+      },
     );
     const raw = stdout.trim();
     if (!raw) return null;

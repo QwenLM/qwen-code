@@ -221,6 +221,16 @@ export function GitDialog({
   };
 
   const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
+    if (isCommit) {
+      if (event.key === 'ArrowRight' || event.key === 'Home') {
+        event.preventDefault();
+        selectAndFocus(tabViews[0]);
+      } else if (event.key === 'ArrowLeft' || event.key === 'End') {
+        event.preventDefault();
+        selectAndFocus(tabViews[tabViews.length - 1]);
+      }
+      return;
+    }
     const index = tabViews.indexOf(clampedTab as (typeof tabViews)[number]);
     if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
       event.preventDefault();
@@ -260,6 +270,7 @@ export function GitDialog({
               type: 'success',
             });
           } catch (pushErr) {
+            setCommitMsg('');
             setCommitStatus({
               msg: t('gitCommit.commitSuccessPushFailed', {
                 sha: result.sha,
