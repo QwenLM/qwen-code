@@ -1100,8 +1100,14 @@ jobs:
           # publisher takes the first match, so a planted dir can supply the
           # comment's contents. Sweep the lifecycle-script plant channel; the
           # runtime channel (PR code the agent launches concurrently) is
-          # bounded by the symlink strip after collection.
-          find tmp -maxdepth 2 -type d -name '*-tmux-*' -exec rm -rf {} + 2>/dev/null || true
+          # bounded by the symlink strip after collection. Never descend
+          # through a PR-writable parent: lifecycle scripts can replace
+          # `tmp` with a symlink, and `find` would follow it as root.
+          if [ -L tmp ]; then
+            echo '::warning::tmp is a symlink; skipping pre-agent tmux sweep'
+          else
+            find tmp -maxdepth 2 -type d -name '*-tmux-*' -exec rm -rf {} + 2>/dev/null || true
+          fi
 
           # Bypass the runner proxy before launching qwen: the proxy cuts the
           # SSE stream to the model host, and qwen reads HTTP(S)_PROXY directly
@@ -1305,6 +1311,7 @@ jobs:
                 res.end();
               }
             } catch (error) {
+              clearTimeout(timer);
               // The message can carry resolved hosts, IPs and TLS detail.
               // The agent needs to know the call failed, not the topology.
               console.error('proxy upstream failure:', error);
@@ -1461,7 +1468,11 @@ jobs:
           elif [ -d .qwen/tmp ]; then
             rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
           fi
-          find tmp -maxdepth 2 -type d -name '*-tmux-*' -exec rm -rf {} + 2>/dev/null || true
+          if [ -L tmp ]; then
+            echo '::warning::tmp is a symlink; skipping end-of-job tmux sweep'
+          else
+            find tmp -maxdepth 2 -type d -name '*-tmux-*' -exec rm -rf {} + 2>/dev/null || true
+          fi
           git worktree prune -v || true
 
   # Post the tmux verdict back to the PR. Runs on a clean GitHub-hosted runner
@@ -2488,6 +2499,7 @@ jobs:
                 res.end();
               }
             } catch (error) {
+              clearTimeout(timer);
               // The message can carry resolved hosts, IPs and TLS detail.
               // The agent needs to know the call failed, not the topology.
               console.error('proxy upstream failure:', error);

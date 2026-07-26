@@ -2284,6 +2284,11 @@ describe('qwen-triage tmux lane parity', () => {
     expect(sweepAt).toBeGreaterThan(-1);
     // Before the proxy and the agent launch, after the build.
     expect(sweepAt).toBeLessThan(runStep.indexOf('start_openai_proxy'));
+    // The sweep must not descend through a PR-planted `tmp` symlink: the
+    // same root-owned escape the .qwen cleanup guards against.
+    const guardAt = runStep.indexOf('if [ -L tmp ]; then');
+    expect(guardAt).toBeGreaterThan(-1);
+    expect(guardAt).toBeLessThan(sweepAt);
   });
 
   // The global install must not read the previous PR's .npmrc: a --registry
