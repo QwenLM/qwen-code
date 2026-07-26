@@ -1884,6 +1884,21 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     expect(r.cappedBy).toContain('criticals-unverified');
   });
 
+  it('a [probe] finding is deterministic too — a run confirmed it, so it needs no separate verifier', () => {
+    // The verifier confirmed this by RUNNING a probe against the code; its
+    // evidence is an observed behaviour, so it is pre-confirmed like [build]/[test]
+    // and must not be softened for a missing verification it never owed.
+    const r = composeReview({
+      criticalsInline: 0,
+      bodyCriticals: ['[probe] sendShellCommand ran twice for one `!git push`'],
+      planPath: coveredPlan(['reverse-audit']), // verifier absent, none owed
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).not.toContain('criticals-unverified');
+  });
+
   it('a verified Request changes still blocks — the cap binds only when Step 4 is missing', () => {
     const r = composeReview({
       criticalsInline: 1,

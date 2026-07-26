@@ -299,14 +299,16 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
 
   // The Criticals a verifier must have ruled on before this review may post them
   // as blockers. Deterministic body findings are pre-confirmed and skip
-  // verification by design: `[build]`/`[test]` (Agent 7 ran the tool) and the
-  // gate's own findings (this function ran the linter). `[lint]` is NOT trusted as
-  // a tag — a model-written string containing it must not launder an unverified
-  // claim into a blocker — so provenance, not the marker, decides: subtract the
-  // gate's count, and every remaining body Critical is a claim Step 4 must confirm.
+  // verification by design: `[build]`/`[test]` (Agent 7 ran the tool), `[probe]`
+  // (the verifier confirmed it by *running* a probe — observed behaviour, not a
+  // re-reading), and the gate's own findings (this function ran the linter). But
+  // `[lint]` is NOT trusted as a tag — a model-written string containing it must
+  // not launder an unverified claim into a blocker — so for the gate, provenance
+  // decides: subtract its count, and every remaining body Critical (minus the
+  // trusted `[build]`/`[test]`/`[probe]` tags) is a claim Step 4 must confirm.
   const nonDeterministicBodyCriticals = Math.max(
     0,
-    bodyCriticals.filter((x) => !/\[(?:build|test)\]/i.test(x)).length -
+    bodyCriticals.filter((x) => !/\[(?:build|test|probe)\]/i.test(x)).length -
       gateCriticalCount,
   );
   const criticalsNeedingVerify =
