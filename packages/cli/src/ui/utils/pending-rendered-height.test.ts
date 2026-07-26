@@ -42,6 +42,13 @@ describe('splitMarkdownTableRow', () => {
       'c',
     ]);
   });
+
+  it('keeps pipes inside math that contains an escaped dollar', () => {
+    expect(splitMarkdownTableRow(String.raw`$x + \$5|y$ | c`)).toEqual([
+      String.raw`$x + \$5|y$`,
+      'c',
+    ]);
+  });
 });
 
 describe('estimateWrappedRows', () => {
