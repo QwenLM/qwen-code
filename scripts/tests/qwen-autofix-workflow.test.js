@@ -4845,6 +4845,8 @@ describe('qwen-autofix workflow', () => {
     // Best-effort — a failed status post warns and continues, never costs a round.
     expect(postStatusCommentStep).toContain('set -uo pipefail');
     expect(postStatusCommentStep).toContain('continuing.');
+    expect(finalizeStatusCommentStep).toContain('set -uo pipefail');
+    expect(finalizeStatusCommentStep).toContain('continuing.');
     // Repository convention for anything posted verbatim as a PR comment.
     expect(postStatusCommentStep).toContain('<summary>中文说明</summary>');
 
@@ -4858,6 +4860,9 @@ describe('qwen-autofix workflow', () => {
     // publishing" — reporting a successful round as a failed one.
     expect(finalizeStatusCommentStep).toContain(
       "steps.prepare.outputs.stale != 'true'",
+    );
+    expect(finalizeStatusCommentStep).toContain(
+      "needs.route.outputs.dry_run != 'true'",
     );
     expect(finalizeStatusCommentStep).toContain('<!-- autofix-status -->');
     expect(finalizeStatusCommentStep).toContain('--method PATCH');
