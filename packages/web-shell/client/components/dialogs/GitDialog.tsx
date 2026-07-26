@@ -222,12 +222,8 @@ export function GitDialog({
 
   const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (isCommit) {
-      if (event.key === 'ArrowRight' || event.key === 'Home') {
+      if (['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(event.key)) {
         event.preventDefault();
-        selectAndFocus(tabViews[0]);
-      } else if (event.key === 'ArrowLeft' || event.key === 'End') {
-        event.preventDefault();
-        selectAndFocus(tabViews[tabViews.length - 1]);
       }
       return;
     }
@@ -270,7 +266,6 @@ export function GitDialog({
               type: 'success',
             });
           } catch (pushErr) {
-            setCommitMsg('');
             setCommitStatus({
               msg: t('gitCommit.commitSuccessPushFailed', {
                 sha: result.sha,
@@ -681,7 +676,7 @@ export function GitDialog({
                   <button
                     type="button"
                     className={`${styles.commitBtn} ${styles.commitBtnPrimary}`}
-                    disabled={!prTitle.trim() || prBusy}
+                    disabled={!prTitle.trim() || prBusy || !!commitBusy}
                     onClick={() => void doCreatePr()}
                   >
                     {prBusy && (

@@ -2132,13 +2132,7 @@ export const ChatEditor = memo(
                       >
                         <button
                           type="button"
-                          style={{
-                            display: 'inline-flex',
-                            background: 'none',
-                            border: 'none',
-                            padding: 0,
-                            cursor: 'pointer',
-                          }}
+                          className={styles.gitBranchChipButton}
                         >
                           <GitBranchIndicator
                             branch={gitBranch}
