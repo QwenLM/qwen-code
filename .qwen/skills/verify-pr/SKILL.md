@@ -59,7 +59,9 @@ untrusted PR code, so it needs the same isolation CI provides**: a
 credential-free container or VM with no access to the host's SSH keys, cloud
 profiles, or `gh` token. Do not run it in an ordinary working copy on a
 maintainer's machine; if that isolation is unavailable, ask the maintainer to
-trigger the sandboxed `@qwen-code /verify` lane instead. ⚠️ That isolation and `gh` are mutually exclusive: `gh` refuses even
+trigger the sandboxed `@qwen-code /verify` lane instead.
+
+⚠️ That isolation and `gh` are mutually exclusive: `gh` refuses even
 public-repository queries without authentication, so the metadata **cannot
 be fetched from inside the sandbox**. Resolve it outside — `gh pr view <n>
 --repo <owner>/<repo> --json number,title,body,author,baseRefOid,headRefOid,commits`

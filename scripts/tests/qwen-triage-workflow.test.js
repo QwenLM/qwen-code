@@ -1594,7 +1594,12 @@ describe('qwen-triage verify round-3 hardening', () => {
     expect(prepare).not.toContain('classify_failure');
     expect(prepare).not.toContain('npm ERR! code');
     expect(prepare).toContain('echo "verdict=fail" >> "$GITHUB_OUTPUT"');
-    expect(prepare).not.toContain('verdict=infra-error');
+    // infra-error is allowed again, but ONLY behind the runner-owned
+    // registry probe — never derived from anything the build wrote.
+    const infra = prepare.indexOf('verdict=infra-error');
+    if (infra > -1) {
+      expect(prepare.slice(0, infra)).toContain('registry_unreachable');
+    }
   });
 
   // skipped / n-a upload no artifact, so their download always fails; their
@@ -1623,5 +1628,154 @@ describe('qwen-triage verify round-3 hardening', () => {
     expect(publish).toMatch(
       /if \[ -n "\$REPORT" \]; then\s+printf '%s\\n' '<!-- qwen-triage:verify-substantive -->'/,
     );
+  });
+});
+
+describe('qwen-triage verify maintainer-review round', () => {
+  // The bearer check is the load-bearing control on the model credential;
+  // asserting its presence is not the same as proving it rejects. Start the
+  // real proxy and issue real requests.
+  it('rejects unauthenticated calls to the model proxy', () => {
+    const runStep = stepIn('verify', 'Run verification agent');
+    const proxy = runStep.match(/<<'NODE'\n([\s\S]*?)\n\s*NODE\n/)?.[1];
+    expect(proxy).toBeTruthy();
+
+    const dir = mkdtempSync(join(tmpdir(), 'verify-proxy-'));
+    try {
+      writeFileSync(join(dir, 'proxy.js'), proxy.replace(/^ {10}/gm, ''));
+      writeFileSync(
+        join(dir, 'upstream.js'),
+        [
+          "const http = require('node:http');",
+          "const fs = require('node:fs');",
+          'const s = http.createServer((q, r) => {',
+          "  r.writeHead(200, { 'content-type': 'application/json' });",
+          '  r.end(JSON.stringify({ ok: true }));',
+          '});',
+          "s.listen(0, '127.0.0.1', () => fs.writeFileSync(process.argv[2], String(s.address().port)));",
+        ].join('\n'),
+      );
+      const driver = [
+        'set -u',
+        'node "$1/upstream.js" "$1/up.port" & UP=$!',
+        'for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1/up.port" ] && break; sleep 0.3; done',
+        'UPPORT="$(cat "$1/up.port")"',
+        'REVIEW_OPENAI_BASE_URL="http://127.0.0.1:$UPPORT/v1" REVIEW_OPENAI_API_KEY=realkey \\',
+        '  QWEN_PROXY_NONCE=nonce123 PROXY_TOKEN=tok456 node "$1/proxy.js" "$1/px.port" & PX=$!',
+        'for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1/px.port" ] && break; sleep 0.3; done',
+        'P="$(cat "$1/px.port")"',
+        'U="http://127.0.0.1:$P/v1/chat/completions"',
+        'echo "health=$(curl -sS "http://127.0.0.1:$P/__health")"',
+        'echo "noauth=$(curl -s -o /dev/null -w %{http_code} -X POST -d {} "$U")"',
+        'echo "wrong=$(curl -s -o /dev/null -w %{http_code} -X POST -H "authorization: Bearer nope" -d {} "$U")"',
+        'echo "right=$(curl -s -o /dev/null -w %{http_code} -X POST -H "authorization: Bearer tok456" -d {} "$U")"',
+        'echo "otherpath=$(curl -s -o /dev/null -w %{http_code} -X POST -H "authorization: Bearer tok456" -d {} "http://127.0.0.1:$P/v1/models")"',
+        'kill $UP $PX 2>/dev/null',
+      ].join('\n');
+      const out = spawnSync('bash', ['-c', driver, '_', dir], {
+        encoding: 'utf8',
+        timeout: 60000,
+      }).stdout;
+      // Identity, not just liveness.
+      expect(out).toContain('health=nonce123');
+      // The credential is unreachable without this run's bearer...
+      expect(out).toContain('noauth=401');
+      expect(out).toContain('wrong=401');
+      // ...and reachable with it, on the one allowed route.
+      expect(out).toContain('right=200');
+      expect(out).toContain('otherpath=403');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // A saturated concurrency group drops the third request with no job and
+  // therefore no comment; the always-hosted authorize job says so instead.
+  it('warns when the verify queue is already saturated', () => {
+    const notice = stepIn('authorize', 'Report saturated verify queue');
+    expect(notice).toContain('github.event.issue.pull_request');
+    expect(notice).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
+    const script = notice
+      .match(/run: \|-\n([\s\S]*)$/)?.[1]
+      .replace(/^ {10}/gm, '');
+
+    const dir = mkdtempSync(join(tmpdir(), 'verify-saturated-'));
+    try {
+      writeFileSync(
+        join(dir, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          'case "$*" in',
+          '  *workflows/qwen-triage.yml/runs*) echo "${FAKE_IN_FLIGHT:-0}" ;;',
+          '  *) for a in "$@"; do case "$a" in body=*) echo posted >> "$POSTED";; esac; done ;;',
+          'esac',
+          'exit 0',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      const posted = join(dir, 'posted');
+      const run = (inFlight) => {
+        writeFileSync(posted, '');
+        spawnSync('bash', ['-c', script], {
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            GH_TOKEN: 'x',
+            GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+            NUMBER: '7710',
+            RUN_ID: '99',
+            FAKE_IN_FLIGHT: inFlight,
+            POSTED: posted,
+          },
+        });
+        return readFileSync(posted, 'utf8').trim().length > 0;
+      };
+      // One in-flight run still leaves a pending slot; two do not.
+      expect(run('0')).toBe(false);
+      expect(run('1')).toBe(false);
+      expect(run('2')).toBe(true);
+      expect(run('5')).toBe(true);
+      // An API hiccup must not deny an otherwise-valid request.
+      expect(run('')).toBe(false);
+      expect(run('junk')).toBe(false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Registry reachability is the one signal about an install failure that
+  // PR code cannot write, so it is the only thing allowed to downgrade a
+  // failure to infrastructure.
+  it('only downgrades an install failure on a runner-owned signal', () => {
+    const prepare = stepIn('verify', 'Install and build PR app');
+    expect(prepare).toContain('registry_unreachable()');
+    expect(prepare).toContain(
+      'curl -sfI --max-time 20 https://registry.npmjs.org/',
+    );
+    // A build failure has no such signal and stays the tree's problem.
+    const build = prepare.slice(prepare.indexOf('${build_status:-0}'));
+    expect(build).toContain('echo "verdict=fail"');
+    expect(build).not.toContain('registry_unreachable');
+    // ...and the removed log heuristic must not creep back.
+    expect(prepare).not.toContain('npm ERR! code');
+  });
+
+  // The publisher does one download and one comment; without a bound it
+  // inherits the 360-minute default.
+  it('bounds the publisher job', () => {
+    const publish = job('publish-verify');
+    expect(publish).toMatch(/timeout-minutes: \d+/);
+    const minutes = Number(publish.match(/timeout-minutes: (\d+)/)?.[1]);
+    expect(minutes).toBeGreaterThan(0);
+    expect(minutes).toBeLessThanOrEqual(30);
+  });
+
+  // Upstream failure text can name resolved hosts and TLS detail; the agent
+  // only needs to know the call failed.
+  it('does not forward upstream error text to the agent', () => {
+    const runStep = stepIn('verify', 'Run verification agent');
+    expect(runStep).toContain("res.end('proxy error: upstream request failed");
+    expect(runStep).not.toContain('proxy error: ${error instanceof Error');
   });
 });

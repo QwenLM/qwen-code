@@ -234,6 +234,45 @@ jobs:
             -f content='eyes' > /dev/null ||
             echo "Failed to add verify acknowledgement reaction; continuing." >&2
 
+      # A GitHub concurrency group holds one running plus one pending job,
+      # so a third /verify while two are in flight is dropped with no job
+      # and therefore no comment. This job always runs on a hosted runner,
+      # so it is the only place that can say so. Best-effort: an API hiccup
+      # here must not deny an otherwise-valid request.
+      - name: 'Report saturated verify queue'
+        if: >-
+          steps.perm.outputs.should_run == 'true' &&
+          vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' &&
+          github.event_name == 'issue_comment' &&
+          github.event.issue.pull_request &&
+          (github.event.comment.body == '@qwen-code /verify' ||
+           startsWith(github.event.comment.body, '@qwen-code /verify '))
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          NUMBER: '${{ github.event.issue.number }}'
+          RUN_ID: '${{ github.run_id }}'
+        run: |-
+          set -uo pipefail
+          # Count this workflow's other in-flight runs for this PR. Two or
+          # more already queued/running means this request will be dropped
+          # by the concurrency group before it ever becomes a job.
+          IN_FLIGHT="$(
+            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/qwen-triage.yml/runs?event=issue_comment&per_page=100" \
+              --jq '[.workflow_runs[]
+                     | select(.status == "queued" or .status == "in_progress")
+                     | select((.id | tostring) != $ENV.RUN_ID)] | length' 2>/dev/null
+          )" || IN_FLIGHT=''
+          case "$IN_FLIGHT" in
+            ''|*[!0-9]*) exit 0 ;;
+          esac
+          [ "$IN_FLIGHT" -ge 2 ] || exit 0
+          printf -v BODY '%s\n\n%s' \
+            '**Sandboxed verification queued behind other runs** — a verification is already running for this repository with another queued behind it, and GitHub keeps only one pending run per pull request, so this request may be dropped. Re-comment `@qwen-code /verify` once the current run finishes.' \
+            '**沙箱验证排队已满** —— 已有一次验证在运行、另一次在排队，而 GitHub 每个 PR 只保留一个待运行任务，因此本次请求可能被丢弃。请在当前运行结束后重新评论 `@qwen-code /verify`。'
+          gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
+            -f body="$BODY" >/dev/null ||
+            echo "Failed to post saturated-queue notice; continuing." >&2
+
       # The verify job is ECS-only (it needs the container + the persistent
       # pool). When the maintainer kill switch is set, that job would queue
       # against a disabled pool forever, so say so here instead of leaving an
@@ -1955,12 +1994,8 @@ jobs:
           } > "$prepare_log" 2>&1
           set -e
 
-          # A failed install/build is only the PR's fault when it is
-          # deterministic and tree-attributable. Registry/proxy outages, a
-          # full disk, and OOM/signal kills are infrastructure — reporting
-          # those as a PR verdict tells the author their code is broken when
-          # it is not. Classify from the exit status and the log.
-          # No infra-vs-PR verdict is derivable here: BOTH inputs are
+          # No infra-vs-PR verdict is derivable from what this step sees:
+          # BOTH inputs are
           # PR-controlled. A lifecycle script can exit with a signal status,
           # and it can print any line the log heuristic looked for — so the
           # old classifier let a PR turn its own deterministic breakage into
@@ -1969,13 +2004,30 @@ jobs:
           # is therefore reported as `fail`; the comment offers re-running as
           # a possibility without asserting it, and a genuine infrastructure
           # incident shows up in the log the comment already embeds.
+          # The one signal the PR cannot write: ask the registry ourselves,
+          # as root, with the container's own resolver and no npm config in
+          # play. A reachable registry means a failed install is the tree's
+          # problem; an unreachable one is a runner-owned observation that
+          # this was infrastructure. It proves reachability NOW, not at the
+          # moment npm failed, so it is only ever used to downgrade a
+          # failure to infra-error — never to confirm one.
+          registry_unreachable() {
+            ! curl -sfI --max-time 20 https://registry.npmjs.org/ >/dev/null 2>&1
+          }
           if [ "${install_status:-0}" -ne 0 ]; then
-            echo "verdict=fail" >> "$GITHUB_OUTPUT"
+            if registry_unreachable; then
+              echo "verdict=infra-error" >> "$GITHUB_OUTPUT"
+              echo "::error::npm ci failed (exit ${install_status}) and the registry is unreachable from this runner; reporting infrastructure."
+            else
+              echo "verdict=fail" >> "$GITHUB_OUTPUT"
+              echo "::error::npm ci failed (exit ${install_status})."
+            fi
             echo "failure_phase=install" >> "$GITHUB_OUTPUT"
-            echo "::error::npm ci failed (exit ${install_status})."
             exit 0
           fi
           if [ "${build_status:-0}" -ne 0 ]; then
+            # A build failure has no comparable runner-owned signal, so it
+            # is always the tree's problem as far as this step can tell.
             echo "verdict=fail" >> "$GITHUB_OUTPUT"
             echo "failure_phase=build" >> "$GITHUB_OUTPUT"
             echo "::error::npm run build failed (exit ${build_status})."
@@ -2279,8 +2331,11 @@ jobs:
                 res.end();
               }
             } catch (error) {
+              // The message can carry resolved hosts, IPs and TLS detail.
+              // The agent needs to know the call failed, not the topology.
+              console.error('proxy upstream failure:', error);
               res.writeHead(502, { 'content-type': 'text/plain' });
-              res.end(`proxy error: ${error instanceof Error ? error.message : String(error)}\n`);
+              res.end('proxy error: upstream request failed\n');
             }
           });
 
@@ -2504,6 +2559,10 @@ jobs:
     concurrency:
       group: "${{ format('{0}-publish-verify-{1}', github.workflow, github.run_id) }}"
       cancel-in-progress: false
+    # Downloads one artifact and posts one comment; without this it would
+    # inherit the 360-minute default and a hung gh call could hold a hosted
+    # runner for six hours.
+    timeout-minutes: 10
     runs-on: 'ubuntu-latest'
     permissions:
       pull-requests: 'write'
@@ -2773,7 +2832,9 @@ jobs:
             # their code is broken when the workflow decided otherwise.
             {
               printf '%s\n\n' '<!-- qwen-triage:verify -->'
-              if [ "${VERDICT:-}" = 'infra-error' ]; then
+              # Reachable: the prepare step reports infra-error when the
+            # registry was unreachable from the runner at failure time.
+            if [ "${VERDICT:-}" = 'infra-error' ]; then
                 printf '**Sandboxed verification: infrastructure failure** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf '`%s` failed before any verification started, and the failure looks like an infrastructure incident (a signal/OOM kill, a full disk, or a registry/network error) rather than a problem with this PR. Re-running `@qwen-code /verify` is the fix.\n\n' "$PREPARE_COMMAND"
                 printf '`%s` 在验证开始前失败，且失败特征属于基础设施问题（信号/OOM、磁盘写满、镜像源或网络错误），而非本 PR 的代码问题。重新运行 `@qwen-code /verify` 即可。\n\n' "$PREPARE_COMMAND"
