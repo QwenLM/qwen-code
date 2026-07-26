@@ -974,9 +974,13 @@ export class BackgroundAgentResumeService {
           recovery.forkBootstrap!,
         );
       } else {
+        const resumeSubagentConfig =
+          launchModel && meta.persistedCliFlags?.authType
+            ? { ...target.subagentConfig!, model: 'inherit' }
+            : target.subagentConfig!;
         const result = await this.config
           .getSubagentManager()
-          .createAgentHeadless(target.subagentConfig!, bgConfig as Config, {
+          .createAgentHeadless(resumeSubagentConfig, bgConfig as Config, {
             eventEmitter: bgEventEmitter,
             promptConfigOverrides: {
               initialMessages: resumeHistory,

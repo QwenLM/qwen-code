@@ -245,6 +245,8 @@ describe('AgentTool', () => {
       listSubagents: vi.fn().mockResolvedValue(mockSubagents),
       loadSubagent: vi.fn(),
       createAgentHeadless: vi.fn(),
+      resolveModelGrade: vi.fn().mockReturnValue(undefined),
+      getAvailableModelGrades: vi.fn().mockReturnValue(new Map()),
       addChangeListener: vi.fn((listener: () => void) => {
         changeListeners.push(listener);
         return () => {
@@ -462,6 +464,49 @@ describe('AgentTool', () => {
       expect(properties.properties.subagent_type.enum).toBeUndefined();
     });
 
+    it('advertises model grades without exposing model selectors', async () => {
+      vi.mocked(mockSubagentManager.getAvailableModelGrades).mockReturnValue(
+        new Map([['small', 'fast']]),
+      );
+
+      await agentTool.refreshSubagents();
+
+      const properties = agentTool.schema.parametersJsonSchema as {
+        properties: {
+          model?: {
+            enum?: string[];
+            description?: string;
+          };
+        };
+      };
+      expect(properties.properties.model?.enum).toEqual(['small']);
+      expect(properties.properties.model?.description).toContain(
+        'explicit model keep their configured model',
+      );
+    });
+
+    it('removes the model property when grades become empty', async () => {
+      vi.mocked(mockSubagentManager.getAvailableModelGrades).mockReturnValue(
+        new Map([['small', 'fast']]),
+      );
+      await agentTool.refreshSubagents();
+
+      const withGrades = agentTool.schema.parametersJsonSchema as {
+        properties: { model?: { enum?: string[] } };
+      };
+      expect(withGrades.properties.model?.enum).toEqual(['small']);
+
+      vi.mocked(mockSubagentManager.getAvailableModelGrades).mockReturnValue(
+        new Map(),
+      );
+      await agentTool.refreshSubagents();
+
+      const withoutGrades = agentTool.schema.parametersJsonSchema as {
+        properties: { model?: { enum?: string[] } };
+      };
+      expect(withoutGrades.properties.model).toBeUndefined();
+    });
+
     it('declares the background default and foreground opt-out', () => {
       const properties = agentTool.schema.parametersJsonSchema as {
         properties: {
@@ -638,6 +683,52 @@ describe('AgentTool', () => {
       expect(result).toBe(
         'Parameter "subagent_type" must be a non-empty string.',
       );
+    });
+
+    it('rejects an empty model grade', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          model: '  ',
+        }),
+      ).toMatch(/model grade/i);
+    });
+
+    it('rejects an unknown model grade', () => {
+      vi.mocked(mockSubagentManager.getAvailableModelGrades).mockReturnValue(
+        new Map([['small', 'fast']]),
+      );
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          model: 'high',
+        }),
+      ).toBe('Unknown model grade "high". Available: small.');
+    });
+
+    it('rejects a model grade for fork agents', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          subagent_type: 'fork',
+          model: 'high',
+        }),
+      ).toMatch(/cannot be used with subagent_type "fork"/i);
+    });
+
+    it('rejects a model grade for named teammates', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate: vi.fn(),
+      } as never);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'helper',
+          model: 'high',
+        }),
+      ).toMatch(/not supported for a named teammate/i);
     });
 
     it.each(['all', '1', '12'] as const)(
@@ -1102,6 +1193,28 @@ describe('AgentTool', () => {
           planModeRequired: true,
         }),
       );
+    });
+
+    it('blocks a model grade if a team becomes active after validation', async () => {
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Search files',
+        prompt: 'Find the config',
+        name: 'searcher',
+        model: 'high',
+      });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(partToString(result.llmContent)).toMatch(
+        /not supported for a named teammate/i,
+      );
+      expect(spawnTeammate).not.toHaveBeenCalled();
     });
 
     it('rejects plan_mode_required direct execution from a subagent context', async () => {
@@ -4568,6 +4681,37 @@ describe('AgentTool', () => {
       );
       expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
       writeMetaSpy.mockRestore();
+    });
+
+    it('uses the resolved model grade for background slot selection and launch', async () => {
+      vi.mocked(mockSubagentManager.resolveModelGrade).mockReturnValue(
+        'mapped-model',
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+        model: 'high',
+      });
+      await invocation.execute();
+
+      expect(mockSubagentManager.resolveModelGrade).toHaveBeenCalledWith(
+        'high',
+        expect.objectContaining({ name: 'monitor' }),
+      );
+      expect(mockRegistry.tryReserveBackgroundSlot).toHaveBeenCalledWith(
+        'mapped-model',
+      );
+      expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'mapped-model' }),
+        expect.anything(),
+        expect.objectContaining({
+          modelConfigOverrides: { model: 'mapped-model' },
+        }),
+      );
     });
 
     it('does not persist the parent base URL for a cross-provider runtime', async () => {
