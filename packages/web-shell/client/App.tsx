@@ -1499,14 +1499,12 @@ export function App({
         ? connection.workspaceCwd
         : (lockedWorkspaceCwd ??
           selectedWorkspaceCwd ??
-          workspaces.find((entry) => entry.primary)?.cwd ??
-          workspace.capabilities?.workspaceCwd),
+          workspaces.find((entry) => entry.primary)?.cwd),
     [
       connection.sessionId,
       connection.workspaceCwd,
       lockedWorkspaceCwd,
       selectedWorkspaceCwd,
-      workspace.capabilities?.workspaceCwd,
       workspaces,
     ],
   );

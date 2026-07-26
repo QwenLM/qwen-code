@@ -2875,6 +2875,29 @@ describe('App session callbacks', () => {
     expect(qualifiedSetWorkspaceSetting).not.toHaveBeenCalled();
   });
 
+  it('keeps the legacy pre-session Voice fallback out of git status', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/workspace',
+      features: ['voice_transcribe'],
+    } as typeof mockWorkspace.capabilities;
+    const workspaceGit = vi.fn().mockResolvedValue({ branch: 'main' });
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit,
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+
+    renderApp();
+    await flush();
+
+    expect(testState.latestChatEditorProps?.voiceTarget).toMatchObject({
+      route: 'legacy-primary',
+      cwd: '/workspace',
+      streamPath: 'voice/stream',
+    });
+    expect(workspaceGit).not.toHaveBeenCalled();
+  });
+
   it('uses qualified providers and workspace settings for secondary Voice models', async () => {
     mockConnection.workspaceCwd = '/work/secondary';
     mockWorkspace.capabilities = {
