@@ -33,6 +33,15 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
 }));
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 
+const ghMock = vi.hoisted(() => vi.fn((..._args: string[]) => ''));
+vi.mock('./lib/gh.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./lib/gh.js')>();
+  return {
+    ...actual,
+    gh: ghMock,
+  };
+});
+
 const MODEL = 'test-model';
 
 // Coverage is read from the harness's transcripts on disk, so the fixtures build
@@ -45,6 +54,7 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'compose-cov-'));
   ENV = { QWEN_CODE_PROJECT_DIR: dir, QWEN_CODE_SESSION_ID: 'S1' };
   mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
+  ghMock.mockClear();
 });
 
 afterEach(() => {
@@ -2265,5 +2275,70 @@ describe('bilingual body — recovered from the live PR when the plan omits the 
     expect(r.body).not.toContain('<details>');
     expect(r.body).not.toContain('中文');
     expect(r.body).toContain('Suggestions are inline.');
+  });
+
+  it('the production reader calls gh pr view with the right args and parses the body', () => {
+    // All other tests in this block inject a fetcher, leaving fetchPrBodyViaGh —
+    // the only new production behaviour — unpinned. A wrong --json field, a
+    // dropped JSON.parse, or a body→bodyText slip would ship English-only reviews
+    // with CI clean. This test reddens under those mutants.
+    ghMock.mockReturnValue('{"body":"这个 PR 修复了双语渲染。"}');
+    const r = composeReview({
+      suggestionsInline: 1,
+      planPath: namedPlanWithoutFlag(),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(ghMock).toHaveBeenCalledWith(
+      'pr',
+      'view',
+      '7686',
+      '--repo',
+      'QwenLM/qwen-code',
+      '--json',
+      'body',
+    );
+    expect(r.body).toContain('<details>\n<summary>中文说明</summary>');
+  });
+
+  it('strips a model-supplied prBodyFetcher — it cannot suppress the Chinese fold', () => {
+    // The handler deletes prBodyFetcher from the input JSON (the same way it
+    // deletes env). Without that delete, "suppress" reaches bilingualFromPlan,
+    // is called as a function, throws, and the catch drops the fold — the exact
+    // regression this PR closes, through the alternate entry point.
+    ghMock.mockReturnValue('{"body":"这个 PR 修复了双语渲染。"}');
+    const handlerDir = mkdtempSync(join(tmpdir(), 'compose-fetcher-'));
+    try {
+      const planPath = join(handlerDir, 'plan.json');
+      const p = namedPlanWithoutFlag();
+      writeFileSync(planPath, readFileSync(p, 'utf8'));
+      const old = new Date(2020, 0, 1);
+      utimesSync(planPath, old, old);
+      const inputPath = join(handlerDir, 'in.json');
+      writeFileSync(
+        inputPath,
+        JSON.stringify({
+          planPath,
+          prBodyFetcher: 'suppress',
+          modelId: MODEL,
+        }),
+      );
+      const commentsPath = join(handlerDir, 'comments.json');
+      writeFileSync(commentsPath, '[]', 'utf8');
+      const outPath = join(handlerDir, 'out.json');
+      (composeReviewCommand.handler as (argv: unknown) => void)({
+        input: inputPath,
+        comments: commentsPath,
+        out: outPath,
+      });
+      const written = JSON.parse(
+        readFileSync(outPath, 'utf8'),
+      ) as ComposeReviewResult;
+      // If prBodyFetcher had NOT been stripped, "suppress" would throw and the
+      // fold would be absent. Its presence proves the handler stripped it.
+      expect(written.body).toContain('<details>\n<summary>中文说明</summary>');
+    } finally {
+      rmSync(handlerDir, { recursive: true, force: true });
+    }
   });
 });
