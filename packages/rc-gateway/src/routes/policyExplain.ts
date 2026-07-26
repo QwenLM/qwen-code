@@ -66,10 +66,16 @@ export function buildExplainContext(
 
   let operations: string[] | undefined;
   if (body.operation !== undefined) {
-    const raw = (
-      Array.isArray(body.operation) ? body.operation : [body.operation]
-    )
-      .flatMap((v) => (typeof v === 'string' ? v.split(',') : []))
+    const items = Array.isArray(body.operation)
+      ? body.operation
+      : [body.operation];
+    if (!items.every((v): v is string => typeof v === 'string')) {
+      throw new ExplainBodyError(
+        'operation must be a string or an array of strings',
+      );
+    }
+    const raw = items
+      .flatMap((v) => v.split(','))
       .map((v) => v.trim())
       .filter((v) => v.length > 0);
     for (const o of raw) {

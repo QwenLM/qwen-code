@@ -51,6 +51,18 @@ describe('buildExplainContext', () => {
       buildExplainContext({ tool: 'x', operation: 'fly' }, '/w'),
     ).toThrow(ExplainBodyError);
   });
+
+  it('rejects a non-string, non-array operation instead of silently dropping it', () => {
+    expect(() =>
+      buildExplainContext({ tool: 'x', operation: 42 }, '/w'),
+    ).toThrow(ExplainBodyError);
+  });
+
+  it('rejects an array operation containing a non-string element', () => {
+    expect(() =>
+      buildExplainContext({ tool: 'x', operation: ['read', 5] }, '/w'),
+    ).toThrow(ExplainBodyError);
+  });
 });
 
 const POLICY: Policy = {
@@ -117,6 +129,14 @@ describe('createPolicyExplainRoute', () => {
       actorTokenId: 't1',
       detail: { tool: 'write_file', decision: 'deny' },
     });
+    // exact detail shape: a matched deny rule contributes ONLY
+    // tool/decision/ruleId — no path/args/scope/tag ever sneak in.
+    const detail = (audited[0] as { detail: Record<string, unknown> }).detail;
+    expect(Object.keys(detail).sort()).toEqual(['decision', 'ruleId', 'tool']);
+    expect(detail).not.toHaveProperty('path');
+    expect(detail).not.toHaveProperty('args');
+    expect(detail).not.toHaveProperty('scope');
+    expect(detail).not.toHaveProperty('tag');
     // NEVER echoes the caller path
     expect(JSON.stringify(res.body)).not.toContain('/x');
   });
@@ -143,5 +163,37 @@ describe('createPolicyExplainRoute', () => {
     );
     expect(res.statusCode).toBe(503);
     expect((res.body as { code: string }).code).toBe('policy_unavailable');
+  });
+
+  it('400s with invalid_operation on an invalid operation enum value', async () => {
+    const h = createPolicyExplainRoute(access);
+    const res = fakeRes();
+    await h(
+      {
+        body: { tool: 'write_file', operation: 'fly' },
+        rcClient: { id: 't1' },
+      } as never,
+      res as never,
+      (() => {}) as never,
+    );
+    expect(res.statusCode).toBe(400);
+    expect((res.body as { code: string }).code).toBe('invalid_operation');
+  });
+
+  it('500s with policy_explain_failed when access.policy() throws', async () => {
+    const h = createPolicyExplainRoute({
+      ...access,
+      policy: () => {
+        throw new Error('boom');
+      },
+    });
+    const res = fakeRes();
+    await h(
+      { body: { tool: 'write_file' }, rcClient: { id: 't1' } } as never,
+      res as never,
+      (() => {}) as never,
+    );
+    expect(res.statusCode).toBe(500);
+    expect((res.body as { code: string }).code).toBe('policy_explain_failed');
   });
 });

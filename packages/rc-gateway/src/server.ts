@@ -1085,8 +1085,11 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
 
   // POST /policy/explain (P4) — gateway-global (no :id), OWNER-scoped,
   // read-only dry-run against the live policy. No session lock (not
-  // session-scoped) and no daemon call. Route not mounted when
-  // deps.policyExplain is absent (e.g. policy failed to load / dark wiring).
+  // session-scoped) and no daemon call. In production, cli.ts always
+  // supplies a static policyExplain bundle, so this route IS mounted; an
+  // unloaded/absent policy surfaces at request time as the route's own
+  // 503 policy_unavailable. This guard exists for other/test
+  // createGatewayApp call sites that omit the dep entirely.
   if (deps.policyExplain) {
     app.post(
       '/policy/explain',

@@ -39,6 +39,12 @@ const POLICY: Policy = {
       action: 'deny',
       reason: 'no writes',
     },
+    {
+      id: 'deny-etc',
+      match: { pathGlob: '**/passwd' },
+      action: 'deny',
+      reason: 'no reads of secrets',
+    },
   ],
 };
 
@@ -100,6 +106,29 @@ describe('POST /policy/explain (integration)', () => {
     expect(out.trace.length).toBeGreaterThan(0);
     // metadata safety: no field reflects the simulated path back
     expect(JSON.stringify(out)).not.toContain('/etc/secret-xyz');
+  });
+
+  it('a pathGlob-matched rule classifies the path but never echoes it', async () => {
+    const { owner, url } = await boot();
+    const securedPath = join(runtimeBase, 'secret', 'passwd');
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${owner}`,
+      },
+      body: JSON.stringify({ tool: 'read_file', path: securedPath }),
+    });
+    expect(r.status).toBe(200);
+    const out = (await r.json()) as {
+      decision: { action: string; ruleId?: string };
+      trace: unknown[];
+    };
+    expect(out.decision.action).toBe('deny');
+    expect(out.decision.ruleId).toBe('deny-etc');
+    // metadata safety: the path is classified (matched via pathGlob) but
+    // the sent path string is never echoed back in the response.
+    expect(JSON.stringify(out)).not.toContain(securedPath);
   });
 
   it('rejects a write-scope token with 403', async () => {
