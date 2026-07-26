@@ -5939,9 +5939,7 @@ describe('qwen-autofix workflow', () => {
     // not tell the finding had been read. Observed on #7731: five open threads,
     // every one of them answered nowhere but a separate summary comment.
     const lines = workflow.split('\n');
-    const i = lines.findIndex((l) =>
-      l.includes('comment-replies.json" ]] &&'),
-    );
+    const i = lines.findIndex((l) => l.includes('comment-replies.json" ]] &&'));
     const j = lines.findIndex(
       (l, k) => k > i && l.trim().startsWith('echo "🧵 replied on'),
     );
