@@ -1376,6 +1376,55 @@ describe('App shell command queueing', () => {
 
     expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
   });
+
+  it('stops draining remaining commands when the user cancels mid-drain', async () => {
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    let resolveFirst!: () => void;
+    const firstDone = new Promise<void>((r) => {
+      resolveFirst = r;
+    });
+    mockSessionActions.sendShellCommand
+      .mockReturnValueOnce(firstDone)
+      .mockResolvedValueOnce(undefined);
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onToast });
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!first');
+      testState.latestChatEditorProps?.onSubmit('!second');
+      await Promise.resolve();
+    });
+
+    // Go idle — drain starts and blocks on the pending first command.
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender({ onToast });
+    });
+    await flush();
+
+    expect(mockSessionActions.sendShellCommand).toHaveBeenCalledTimes(1);
+
+    // User presses Stop while the first command is still running.
+    await act(async () => {
+      testState.latestChatEditorProps?.onCancel?.();
+      await Promise.resolve();
+    });
+
+    // Resolve the first command — the second must NOT be dispatched.
+    await act(async () => {
+      resolveFirst();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.sendShellCommand).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith('first');
+  });
 });
 
 describe('App session callbacks', () => {

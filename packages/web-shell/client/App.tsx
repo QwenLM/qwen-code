@@ -2426,6 +2426,7 @@ export function App({
   const streamingState = useStreamingState();
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
   const queuedShellCommandsRef = useRef<string[]>([]);
+  const drainCancelledRef = useRef(false);
   const localStreamingStartedAtRef = useRef(Date.now());
   const previousStreamingStateRef =
     useRef<DaemonStreamingState>(streamingState);
@@ -3885,14 +3886,24 @@ export function App({
     const cmds = queuedShellCommandsRef.current;
     if (cmds.length === 0) return;
     queuedShellCommandsRef.current = [];
+    drainCancelledRef.current = false;
     const drainSessionId = connectionRef.current.sessionId;
     let cancelled = false;
     void (async () => {
-      for (const cmd of cmds) {
-        if (cancelled || connectionRef.current.sessionId !== drainSessionId)
+      for (let i = 0; i < cmds.length; i++) {
+        if (
+          drainCancelledRef.current ||
+          cancelled ||
+          connectionRef.current.sessionId !== drainSessionId
+        ) {
+          console.warn(
+            '[web-shell] dropping %d queued shell command(s)',
+            cmds.length - i,
+          );
           return;
+        }
         try {
-          await sessionActions.sendShellCommand(cmd);
+          await sessionActions.sendShellCommand(cmds[i]);
         } catch (error: unknown) {
           reportError(error, 'Failed to execute shell command');
         }
@@ -6019,6 +6030,7 @@ export function App({
 
   const handleCancel = useCallback(() => {
     queuedShellCommandsRef.current = [];
+    drainCancelledRef.current = true;
     sessionActions.cancel().catch((error: unknown) => {
       reportError(error, 'Failed to cancel request');
     });
