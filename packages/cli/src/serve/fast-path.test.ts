@@ -652,6 +652,8 @@ describe('serve fast path argument parsing', () => {
         'compacted-replay-max-bytes',
         ['--compacted-replay-max-bytes', '4194304'],
       ],
+      ['max-journal-events', ['--max-journal-events', '10000']],
+      ['max-journal-bytes', ['--max-journal-bytes', '8388608']],
       ['workspace', ['--workspace', process.cwd()]],
       ['require-auth', ['--require-auth']],
       ['enable-session-shell', ['--enable-session-shell']],

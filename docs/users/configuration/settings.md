@@ -494,9 +494,13 @@ execute when typed.
 
 Controls which [Skills](../features/skills) are exposed to the model.
 
-| Setting           | Type             | Description                                                                                                                                                                                                                                                                                 | Default     |
-| ----------------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| `skills.disabled` | array of strings | Skill names to hide. Matched case-insensitively against the skill name. Hidden skills do not appear in `<available_skills>` or as `/<name>` slash commands. **Merged as a union** across user/project/system scopes, so a project cannot remove entries defined in user or system settings. | `undefined` |
+| Setting                  | Type             | Description                                                                                                                                                                                                                                             | Default     |
+| ------------------------ | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| `skills.disabled`        | array of strings | Hard-disabled skill names. Matched case-insensitively and **merged as a union** across settings scopes, so project settings cannot override a user or system entry. Hidden skills do not appear in `<available_skills>` or as `/<name>` slash commands. | `undefined` |
+| `skills.defaultDisabled` | array of strings | Skill names that start disabled but can be opted into through `skills.enabled`. Matched case-insensitively and merged as a union across settings scopes.                                                                                                | `undefined` |
+| `skills.enabled`         | array of strings | Explicit opt-ins that override matching `skills.defaultDisabled` entries. Matched case-insensitively and merged as a union across settings scopes. This setting cannot override `skills.disabled`.                                                      | `undefined` |
+
+The precedence is `skills.disabled` > `skills.enabled` > `skills.defaultDisabled`. For example, a user can put a skill in `defaultDisabled` and a project can add the same name to `enabled`; a hard `disabled` entry at any scope still wins.
 
 #### mcp
 
