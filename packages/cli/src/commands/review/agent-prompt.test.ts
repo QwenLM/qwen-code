@@ -1790,6 +1790,21 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).not.toMatch(/If you find no issues, say/i);
   });
 
+  it('carries the mutation-testing lens into Agent 5, equivalent-mutant escape hatch included', () => {
+    // The all-role test above proves every brief gets the diff and the format; it
+    // cannot see whether a *specific* lens reached its role. If prompt assembly
+    // ever drops or misassigns the equivalent-mutant paragraph, that test stays
+    // green while Agent 5 again flags unobservable mutations as coverage gaps.
+    const p = buildRoleBrief(PLAN, '5');
+    expect(p).toContain('Mutation-test the tests that matter');
+    expect(p).toContain('equivalent mutant');
+    // The discriminating-input requirement is what keeps the escape hatch from
+    // waving through a genuinely vacuous test.
+    expect(p).toContain('the input that makes it observable');
+    // And the lens must not bleed into a sibling dimension's brief.
+    expect(buildRoleBrief(PLAN, '2')).not.toContain('equivalent mutant');
+  });
+
   it('gives Agent 7 no diff — its evidence is the commands it ran', () => {
     // It runs the build. Requiring it to open the diff would be requiring a thing
     // its job does not involve, and reporting it "blind" for not doing so would
