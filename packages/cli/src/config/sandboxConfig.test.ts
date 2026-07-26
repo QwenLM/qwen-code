@@ -108,6 +108,29 @@ describe('loadSandboxConfig sandbox command selection', () => {
     );
   });
 
+  it('does not blame QWEN_SANDBOX when --sandbox enabled the auto-detect path', async () => {
+    installed('docker');
+    probes({ docker: daemonDown() });
+
+    const failure = await loadSandboxConfig({}, { sandbox: true }).catch(
+      (error: Error) => error,
+    );
+
+    expect((failure as Error).message).toContain("'docker' is installed");
+    expect((failure as Error).message).toContain('--sandbox');
+    expect((failure as Error).message).not.toContain('QWEN_SANDBOX is true');
+  });
+
+  it('says QWEN_SANDBOX is true when the env var enabled the sandbox', async () => {
+    process.env['QWEN_SANDBOX'] = 'true';
+    installed('docker');
+    probes({ docker: daemonDown() });
+
+    await expect(loadSandboxConfig({}, {})).rejects.toThrow(
+      /QWEN_SANDBOX is true and 'docker' is installed but cannot run/,
+    );
+  });
+
   it('keeps the generic message when nothing is installed at all', async () => {
     installed();
     probes({});

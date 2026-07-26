@@ -29,7 +29,10 @@ function isSandboxCommand(value: string): value is SandboxConfig['command'] {
   return (VALID_SANDBOX_COMMANDS as readonly string[]).includes(value);
 }
 
-const SANDBOX_PROBE_TIMEOUT_MS = 10_000;
+// A healthy `docker version` answers in roughly 200-500ms, so this is already
+// an order of magnitude of headroom. Probes run sequentially, so the ceiling is
+// paid once per wedged runtime — keeping it tight matters for startup.
+const SANDBOX_PROBE_TIMEOUT_MS = 5_000;
 
 /**
  * Confirms that a sandbox command can actually run, not merely that it is on
@@ -155,17 +158,26 @@ function getSandboxCommand(
 
   // throw an error if user requested sandbox but no command was found
   if (sandbox === true) {
+    // Sandboxing can be switched on by the env var, by --sandbox, or by
+    // settings, so these messages name the env var only when it was the one
+    // that enabled it — same reasoning as sandboxSource above.
+    const enabledLabel = sandboxSource
+      ? 'QWEN_SANDBOX is true'
+      : 'Sandbox is enabled';
+    const specifyHint = sandboxSource
+      ? 'specify command in QWEN_SANDBOX'
+      : 'specify command via --sandbox or QWEN_SANDBOX';
     // Report the runtime that actually broke rather than a generic
     // "nothing installed", which would send the user down the wrong path.
     if (firstFailure) {
       throw new FatalSandboxError(
-        `QWEN_SANDBOX is true and '${firstFailure.command}' is installed but cannot run: ` +
-          `${firstFailure.detail}; start it, install another runtime, or specify command in QWEN_SANDBOX`,
+        `${enabledLabel} and '${firstFailure.command}' is installed but cannot run: ` +
+          `${firstFailure.detail}; start it, install another runtime, or ${specifyHint}`,
       );
     }
     throw new FatalSandboxError(
-      'QWEN_SANDBOX is true but failed to determine command for sandbox; ' +
-        'install docker or podman or specify command in QWEN_SANDBOX',
+      `${enabledLabel} but failed to determine command for sandbox; ` +
+        `install docker or podman or ${specifyHint}`,
     );
   }
 
