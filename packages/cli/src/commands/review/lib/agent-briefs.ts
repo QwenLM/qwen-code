@@ -286,7 +286,15 @@ Expect the three ends to be far apart. The declaration, the pass-through, and th
 - Do the assertions actually verify *behaviour*, or only that the code ran without throwing?
 - Are integration boundaries tested, not just the unit-level happy path?
 
-**Do not complain about "low coverage" abstractly.** Point to a specific code path in the diff that lacks a test and say what scenario is uncovered. And keep the severity honest: a missing test is a **Suggestion**. If a missing test would let a specific incorrect behaviour ship, report **that behaviour** as the Critical and cite the missing test as your evidence — naming the bug is the work, naming the gap is not.`,
+**Do not complain about "low coverage" abstractly.** Point to a specific code path in the diff that lacks a test and say what scenario is uncovered. And keep the severity honest: a missing test is a **Suggestion**. If a missing test would let a specific incorrect behaviour ship, report **that behaviour** as the Critical and cite the missing test as your evidence — naming the bug is the work, naming the gap is not.
+
+**Mutation-test the tests that matter — a test that exists is not the same as a test that would catch the bug.** For any test this diff adds or changes to pin a specific value or behaviour, name the one-line mutation to the *code under test* (or to the test's own value extraction) that *should* make it fail; if no plausible mutation does, the test is **vacuous** — it passes whether the code is right or wrong. The recurring shapes to check for:
+
+- both sides of the assertion are computed the same way, so they move together — e.g. \`expect(extract(a)).toBe(extract(b))\` where a loose or unanchored \`extract\` returns \`undefined\` on both, i.e. \`expect(undefined).toBe(undefined)\`; **pin the literal** instead;
+- the assertion reads only the *first* of several sites the changed behaviour spans, so drift in a later site passes green;
+- an \`expect(x).toBe(x)\` / round-trip tautology, or a "does not throw" assertion for code whose bug would be a *wrong value*, not a throw.
+
+A vacuous test is a **Suggestion** on its own. But when it is the **only** test guarding a behaviour this diff changes, it is a **Critical**: a green-no-matter-what test blesses the exact regression it was written to catch, and that is worse than no test, because it reads as coverage.`,
   },
 
   '6a': {
@@ -378,7 +386,8 @@ Use \`Source: [build]\` or \`Source: [test]\`, never \`[review]\`.`,
 
 - **Map each behavioural change in the production code to the test that exercises it**, wherever that test lives.
 - **Flag behaviour/test pairs split across territories** — the change in one place, its only test weakened or deleted in another. That pairing is invisible to both of the agents who own those halves, which is the entire reason you exist.
-- Otherwise apply Agent 5's rules: name the specific untested scenario, never "coverage is low". A missing test is a **Suggestion**. **A test weakened, disabled, or deleted _in this diff_ so that new behaviour passes is Critical** — as is a test that asserts the opposite of the intended behaviour, because it will bless the very regression it was written to catch.`,
+- Otherwise apply Agent 5's rules: name the specific untested scenario, never "coverage is low". A missing test is a **Suggestion**. **A test weakened, disabled, or deleted _in this diff_ so that new behaviour passes is Critical** — as is a test that asserts the opposite of the intended behaviour, because it will bless the very regression it was written to catch.
+- **Mutation-test the pairing, do not just confirm it exists:** for the test you paired to a change, name the mutation that should turn it red; a test that stays green under that mutation — both sides of its assertion move together (\`expect(undefined).toBe(undefined)\`), or it reads only the first of the sites the change spans — is **vacuous**, and a vacuous test that is the sole guard for a behaviour this diff changes is a **Critical**, not coverage.`,
   },
 
   'invariant-a': {
