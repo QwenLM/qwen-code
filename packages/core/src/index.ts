@@ -259,7 +259,10 @@ export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';
 export * from './services/fileSystemService.js';
-export { decodeBufferWithEncodingInfo } from './utils/fileUtils.js';
+export {
+  decodeBufferWithEncodingInfo,
+  encodeTextFileContent,
+} from './utils/sync-file-encoding.js';
 export * from './services/gitWorktreeService.js';
 export { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from './services/loopDetectionService.js';
 export * from './services/visionBridge/vision-bridge-service.js';
