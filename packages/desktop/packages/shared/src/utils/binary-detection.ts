@@ -287,10 +287,17 @@ export function extractBase64Binary(text: string): Base64ExtractionResult | null
 
 /** Format bytes to human-readable string. */
 export function formatBytes(bytes: number): string {
-  if (bytes === 0) return '0 B';
+  // Byte counts below 1 (0, sub-byte fractions, and — defensively — negatives
+  // or NaN) have no meaningful unit; render them as "0 B" rather than "undefined".
+  if (!Number.isFinite(bytes) || bytes < 1) return '0 B';
   const k = 1024;
-  const sizes = ['B', 'KB', 'MB', 'GB'];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  const sizes = ['B', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB'];
+  // Clamp the exponent to the last unit so a very large input (e.g. a remote
+  // Content-Length reporting terabytes) never indexes past the array.
+  const i = Math.min(
+    Math.floor(Math.log(bytes) / Math.log(k)),
+    sizes.length - 1,
+  );
   const size = bytes / Math.pow(k, i);
   return `${size.toFixed(i > 0 ? 1 : 0)} ${sizes[i]}`;
 }

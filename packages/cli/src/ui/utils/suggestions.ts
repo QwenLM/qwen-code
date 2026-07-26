@@ -10,6 +10,9 @@ import type {
   ExecutionMode,
 } from '../commands/types.js';
 
+/** Grouping category for the tabbed `@` completion UI. */
+export type SuggestionCategory = 'file' | 'session' | 'mcp' | 'extension';
+
 export interface Suggestion {
   label: string;
   value: string;
@@ -24,6 +27,8 @@ export interface Suggestion {
   matchedAlias?: string;
   supportedModes?: ExecutionMode[];
   modelInvocable?: boolean;
+  /** Grouping category for the tabbed `@` completion UI. Defaults to 'file'. */
+  category?: SuggestionCategory;
   /** Whether the suggestion represents a directory path. When true, handleAutocomplete should NOT append a trailing space so the user can continue tab-completing deeper into the directory tree. */
   isDirectory?: boolean;
   /**

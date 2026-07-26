@@ -198,6 +198,7 @@ import {
   buildDisabledSkillNamesProvider,
   loadCliConfig,
 } from '../config/config.js';
+import { resolveSkillSettings } from '../config/skill-settings.js';
 import {
   createWorkspaceMemoryExtractionErrorLogger,
   shouldSuppressRememberErrorDetails,
@@ -542,6 +543,9 @@ function buildAcpLocalReadRoots(config: Config): string[] {
     getUserAutoMemoryRoot(),
     ...config.storage.getUserSkillsDirs(),
     Storage.getUserExtensionsDir(),
+    // Saved plan files (see ReadFileTool.getDefaultPermission for why the
+    // plans dir must be readable without a confirmation prompt).
+    config.getPlansDir(),
     ...defaultAcpOnlyLocalReadRoots(),
     ...parseAcpLocalReadRootsEnv(),
   ];
@@ -5442,7 +5446,22 @@ class QwenAgent implements Agent {
     }
 
     try {
-      const disabled = config.getDisabledSkillNames();
+      const resolved = resolveSkillSettings(
+        loadSettings(this.workspaceCwd(config), {
+          consumeCorruptionEnvVars: false,
+          skipLoadEnvironment: true,
+        }),
+      );
+      const disablements = new Map(
+        Array.from(config.getDisabledSkillNames(), (name) => {
+          const normalizedName = name.trim().toLowerCase();
+          return [
+            normalizedName,
+            resolved.disablements.get(normalizedName) ??
+              ({ reason: 'hard' } as const),
+          ] as const;
+        }),
+      );
       try {
         await config.getExtensionManager().refreshCache();
       } catch (error) {
@@ -5458,7 +5477,7 @@ class QwenAgent implements Agent {
       const skillsByKey = new Map(
         skills.map((skill) => [
           `${skill.level}:${skill.extensionName ?? ''}:${skill.name}`,
-          mapSkillConfigToStatus(skill, disabled, {
+          mapSkillConfigToStatus(skill, disablements, {
             disabled: isInactiveExtensionSkill(skill, inactiveSkillRefs),
           }),
         ]),
@@ -5482,7 +5501,7 @@ class QwenAgent implements Agent {
                 level: 'extension',
                 extensionName,
               },
-              disabled,
+              disablements,
               { disabled: true },
             ),
           );
@@ -5855,7 +5874,9 @@ class QwenAgent implements Agent {
 
   private buildProvidersPreflightCell(config: Config): ServePreflightCell {
     try {
-      const models = config.getAllConfiguredModels();
+      const models = config
+        .getAllConfiguredModels()
+        .filter((model) => !model.imageOnly);
       const authType = config.getAuthType?.();
       if (models.length === 0) {
         // `authType` set but zero models = the next `POST /session` will

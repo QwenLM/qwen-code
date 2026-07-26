@@ -16,6 +16,7 @@ import {
 type TelemetryRecord = {
   name?: string;
   attributes?: Record<string, unknown>;
+  events?: Array<{ name?: string }>;
 };
 
 const SKIP =
@@ -93,7 +94,18 @@ describeLocal('GenAI telemetry fields', () => {
           }
         : {
             model: 'provider-model-final',
-            content: 'Tool completed.',
+            choices: [
+              {
+                index: 0,
+                contentChunks: ['Tool ', 'completed.'],
+                finishReason: 'stop',
+              },
+              {
+                index: 1,
+                content: 'Alternative final answer.',
+                finishReason: 'stop',
+              },
+            ],
             usage: {
               prompt_tokens: 30,
               completion_tokens: 5,
@@ -140,6 +152,7 @@ describeLocal('GenAI telemetry fields', () => {
       https_proxy: undefined,
       all_proxy: undefined,
       DASHSCOPE_PROXY_BASE_URL: undefined,
+      QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES: 'true',
     });
 
     try {
@@ -172,7 +185,7 @@ describeLocal('GenAI telemetry fields', () => {
       'gen_ai.request.presence_penalty': 0.2,
       'gen_ai.request.stop_sequences': ['END', 'DONE'],
       'gen_ai.response.model': 'provider-model-tool',
-      'gen_ai.response.finish_reasons': ['STOP'],
+      'gen_ai.response.finish_reasons': ['tool_calls'],
       'gen_ai.usage.input_tokens': 20,
       'gen_ai.usage.output_tokens': 4,
       'gen_ai.usage.cache_read.input_tokens': 3,
@@ -188,7 +201,7 @@ describeLocal('GenAI telemetry fields', () => {
       'gen_ai.request.presence_penalty': 0.2,
       'gen_ai.request.stop_sequences': ['END', 'DONE'],
       'gen_ai.response.model': 'provider-model-final',
-      'gen_ai.response.finish_reasons': ['STOP'],
+      'gen_ai.response.finish_reasons': ['stop', 'stop'],
       'gen_ai.usage.input_tokens': 30,
       'gen_ai.usage.output_tokens': 5,
     });
@@ -196,6 +209,85 @@ describeLocal('GenAI telemetry fields', () => {
       secondLlm['gen_ai.conversation.id'],
     );
     expect(firstLlm['gen_ai.conversation.id']).toEqual(expect.any(String));
+
+    const firstRequest = server.requests[0]!.body;
+    const firstInput = JSON.parse(
+      firstLlm['gen_ai.input.messages'] as string,
+    ) as Array<Record<string, unknown>>;
+    const secondInput = JSON.parse(
+      secondLlm['gen_ai.input.messages'] as string,
+    ) as Array<Record<string, unknown>>;
+    expect(firstInput.map((message) => message['role'])).toEqual(
+      (firstRequest['messages'] as Array<Record<string, unknown>>).map(
+        (message) => message['role'],
+      ),
+    );
+    expect(
+      JSON.stringify(firstInput).includes(
+        'Run the requested tool and then report completion.',
+      ),
+    ).toBe(true);
+    expect(
+      secondInput.some(
+        (message) =>
+          message['role'] === 'tool' &&
+          JSON.stringify(message).includes('provider-call-123'),
+      ),
+    ).toBe(true);
+    expect(secondInput.length).toBeGreaterThan(firstInput.length);
+    expect(firstLlm).not.toHaveProperty('gen_ai.system_instructions');
+    expect(secondLlm).not.toHaveProperty('gen_ai.system_instructions');
+
+    const rawTools = firstRequest['tools'] as Array<{
+      type: string;
+      function: {
+        name: string;
+        description?: string;
+        parameters?: object;
+      };
+    }>;
+    const toolDefinitions = JSON.parse(
+      firstLlm['gen_ai.tool.definitions'] as string,
+    ) as Array<Record<string, unknown>>;
+    expect(toolDefinitions).toEqual(
+      rawTools.map((tool) => ({
+        type: tool.type,
+        name: tool.function.name,
+        ...(tool.function.description !== undefined
+          ? { description: tool.function.description }
+          : {}),
+        ...(tool.function.parameters !== undefined
+          ? { parameters: tool.function.parameters }
+          : {}),
+      })),
+    );
+
+    expect(JSON.parse(firstLlm['gen_ai.output.messages'] as string)).toEqual([
+      {
+        role: 'assistant',
+        parts: [
+          {
+            type: 'tool_call',
+            id: 'provider-call-123',
+            name: 'run_shell_command',
+            arguments: { command: 'pwd' },
+          },
+        ],
+        finish_reason: 'tool_calls',
+      },
+    ]);
+    expect(JSON.parse(secondLlm['gen_ai.output.messages'] as string)).toEqual([
+      {
+        role: 'assistant',
+        parts: [{ type: 'text', content: 'Tool completed.' }],
+        finish_reason: 'stop',
+      },
+      {
+        role: 'assistant',
+        parts: [{ type: 'text', content: 'Alternative final answer.' }],
+        finish_reason: 'stop',
+      },
+    ]);
 
     for (const attributes of [firstLlm, secondLlm]) {
       expect(attributes).not.toHaveProperty('qwen-code.model');
@@ -215,7 +307,14 @@ describeLocal('GenAI telemetry fields', () => {
       expect(attributes).not.toHaveProperty('frequency_penalty');
       expect(attributes).not.toHaveProperty('presence_penalty');
       expect(attributes).not.toHaveProperty('stop_sequences');
+      expect(attributes).not.toHaveProperty('system_prompt');
+      expect(attributes).not.toHaveProperty('tools');
+      expect(attributes).not.toHaveProperty('tools_count');
+      expect(attributes).not.toHaveProperty('response.model_output');
     }
+    expect(records.flatMap((record) => record.events ?? [])).not.toContainEqual(
+      expect.objectContaining({ name: 'tool_schema' }),
+    );
 
     expect(server.requests).toHaveLength(2);
     for (const { body } of server.requests) {
@@ -242,19 +341,50 @@ describeLocal('GenAI telemetry fields', () => {
       'gen_ai.tool.call.id': 'provider-call-123',
       'tool.call_id': 'provider-call-123',
     });
+    expect(toolSpan?.attributes?.['gen_ai.tool.description']).toEqual(
+      expect.any(String),
+    );
+    expect(
+      JSON.parse(
+        toolSpan?.attributes?.['gen_ai.tool.call.arguments'] as string,
+      ),
+    ).toEqual({ command: 'pwd' });
+    expect(
+      JSON.parse(toolSpan?.attributes?.['gen_ai.tool.call.result'] as string),
+    ).toMatchObject({ output: expect.any(String) });
     expect(toolSpan?.attributes).not.toHaveProperty('tool.name');
+    expect(toolSpan?.attributes).not.toHaveProperty('tool_input');
+    expect(toolSpan?.attributes).not.toHaveProperty('tool_result');
   });
 
-  it('omits the default choice count from the exported span', async () => {
-    server = await startFakeOpenAIServer(() => ({
-      model: 'provider-model',
-      content: 'Done.',
-      usage: {
-        prompt_tokens: 10,
-        completion_tokens: 2,
-        total_tokens: 12,
-      },
-    }));
+  it('omits the default choice count and sensitive tool payloads', async () => {
+    server = await startFakeOpenAIServer(({ requestIndex }) =>
+      requestIndex === 0
+        ? {
+            model: 'provider-model-tool',
+            toolCalls: [
+              fakeToolCall(
+                'run_shell_command',
+                { command: 'pwd' },
+                'provider-call-sensitive-off',
+              ),
+            ],
+            usage: {
+              prompt_tokens: 10,
+              completion_tokens: 2,
+              total_tokens: 12,
+            },
+          }
+        : {
+            model: 'provider-model-final',
+            content: 'Done.',
+            usage: {
+              prompt_tokens: 15,
+              completion_tokens: 2,
+              total_tokens: 17,
+            },
+          },
+    );
 
     rig = new TestRig();
     rig.setup('gen-ai-default-choice-count', {
@@ -286,10 +416,15 @@ describeLocal('GenAI telemetry fields', () => {
       https_proxy: undefined,
       all_proxy: undefined,
       DASHSCOPE_PROXY_BASE_URL: undefined,
+      QWEN_TELEMETRY_INCLUDE_SENSITIVE_SPAN_ATTRIBUTES: 'false',
     });
 
     try {
-      await rig.run('Reply with done.', '--output-format', 'json');
+      await rig.run(
+        'Run the requested tool and reply with done.',
+        '--output-format',
+        'json',
+      );
     } finally {
       restoreEnvironment();
     }
@@ -308,6 +443,24 @@ describeLocal('GenAI telemetry fields', () => {
       expect(llmSpan.attributes).not.toHaveProperty(
         'gen_ai.request.choice.count',
       );
+      expect(llmSpan.attributes).not.toHaveProperty('gen_ai.input.messages');
+      expect(llmSpan.attributes).not.toHaveProperty('gen_ai.output.messages');
+      expect(llmSpan.attributes).not.toHaveProperty(
+        'gen_ai.system_instructions',
+      );
+      expect(llmSpan.attributes).not.toHaveProperty('gen_ai.tool.definitions');
     }
+    const toolSpan = records.find(
+      (record) =>
+        record.name === 'qwen-code.tool' &&
+        record.attributes?.['gen_ai.tool.name'] === 'run_shell_command',
+    );
+    expect(toolSpan?.attributes?.['gen_ai.tool.description']).toEqual(
+      expect.any(String),
+    );
+    expect(toolSpan?.attributes).not.toHaveProperty(
+      'gen_ai.tool.call.arguments',
+    );
+    expect(toolSpan?.attributes).not.toHaveProperty('gen_ai.tool.call.result');
   });
 });
