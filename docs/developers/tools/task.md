@@ -14,8 +14,9 @@ Use `agent` to launch a specialized subagent to handle complex, multi-step tasks
 - `prompt` (string, required): The detailed task prompt for the subagent to execute. Should contain comprehensive instructions for autonomous execution.
 - `subagent_type` (string, optional): The type of specialized agent to use for this task. Defaults to `general-purpose` if omitted.
 - `fork_turns` (string, optional): Only valid with `subagent_type="fork"`. Omit it or use `all` for the full parent conversation, or use a positive integer string such as `"3"` for the most recent three real user turns. Tool responses and pure system reminders do not count as turns.
-- `run_in_background` (boolean, optional): Defaults to `true` for top-level one-shot agents. Set to `false` to wait for the result inline. Nested agents run in the foreground. Caller-owned `working_dir` launches default to foreground and reject explicit or configured background execution.
-- `isolation` (string, optional): Set to `"worktree"` to run the agent in an isolated git worktree.
+- `run_in_background` (boolean, optional): Defaults to `true` for top-level regular agents. Set to `false` to wait for a regular agent's result inline. Headless forks always run in the background. Nested agents run in the foreground unless `run_in_background` is explicitly `true`, which is rejected because nested agents cannot receive background completion notifications. Caller-owned `working_dir` launches run in the foreground and reject explicit or configured background execution.
+- `isolation` (string, optional): Set to `"worktree"` to run an explicitly named, non-fork agent in an isolated git worktree that Qwen Code creates and manages.
+- `working_dir` (string, optional): Pin an explicitly named, non-fork agent to an existing registered git worktree inside the current repository. The caller owns the worktree lifecycle, so this mode runs in the foreground. If both `working_dir` and `isolation` are provided, `working_dir` takes precedence.
 
 ## How to use `agent` with Qwen Code
 
@@ -25,8 +26,8 @@ When you use the Agent tool, the subagent will:
 
 1. Receive the task prompt and, for a fork, the selected parent conversation context
 2. Execute the task using its available tools
-3. Report a completion notification by default, or return a final result message when run in the foreground
-4. Terminate (subagents are stateless and single-use)
+3. Report a completion notification by default, or return a final result message when a regular agent runs in the foreground
+4. Remain addressable after a background run when its retained state supports continuation
 
 Usage:
 
@@ -71,6 +72,16 @@ Each subagent can be configured with:
 - Specialized system prompts and instructions
 - Custom model configurations
 - Domain-specific knowledge and capabilities
+
+### Background Agent Continuation
+
+Background agents can receive follow-up work after their initial completion:
+
+1. Call `list_agents` to discover the current session's addressable background agents and their `task_id` values. This includes compatible agents restored after the parent session resumes.
+2. Call `send_message` with a `task_id` and follow-up instruction. Running agents receive the message at the next tool-round boundary, paused agents resume with it, and completed agents continue on a resident runtime when available or revive from their retained transcript.
+3. Wait for the next completion notification before using the follow-up result.
+
+If an agent cannot be continued, `list_agents` returns a `resume_blocked_reason`. Treat restored or continued agent output as evidence and verify it before integrating changes.
 
 ## `agent` examples
 
@@ -132,10 +143,10 @@ Don't use the Agent tool for:
 
 ## Important Notes
 
-- **Stateless execution**: Each subagent invocation is independent with no memory of previous executions
-- **Context inheritance**: Regular subagents start without parent conversation history. Forks inherit the full conversation by default and accept `fork_turns` when a bounded recent window is sufficient.
-- **Single communication**: Subagents provide one final result message - no ongoing communication
-- **Comprehensive prompts**: Your prompt should contain all necessary context and instructions for autonomous execution
+- **Independent context**: Regular subagents start without parent conversation history. Forks inherit the full conversation by default and accept `fork_turns` when a bounded recent window is sufficient.
+- **Completion delivery**: Background results arrive through completion notifications in a later turn. Do not assume a result before the notification arrives.
+- **Continuation**: Use `list_agents` and `send_message` for related follow-up work instead of launching a duplicate agent. Continuation depends on compatible retained state and may be unavailable.
+- **Comprehensive prompts**: Your initial prompt should contain all necessary context and instructions for autonomous execution. A regular subagent does not see the parent conversation.
 - **Tool access**: Subagents only have access to tools configured in their specific configuration
 - **Parallel capability**: Multiple subagents can run simultaneously for improved efficiency
 - **Configuration dependent**: Available subagent types depend on your system configuration

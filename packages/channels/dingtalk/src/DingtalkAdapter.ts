@@ -534,6 +534,16 @@ export class DingtalkChannel extends ChannelBase {
     );
   }
 
+  protected override supportsProactiveDeliveryTarget(
+    target: SessionTarget,
+  ): boolean {
+    return (
+      typeof target.isGroup === 'boolean' &&
+      target.threadId === undefined &&
+      this.isStableTargetId(target.chatId)
+    );
+  }
+
   protected override supportsProactiveWebhookTarget(
     target: SessionTarget,
   ): boolean {

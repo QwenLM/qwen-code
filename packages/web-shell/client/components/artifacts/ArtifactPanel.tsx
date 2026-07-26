@@ -183,7 +183,7 @@ export function ArtifactPanel({
                     <TabScheduledTaskIcon />
                   )}
                 </span>
-                {tab.title}
+                <span className={styles.tabTitle}>{tab.title}</span>
               </button>
               <button
                 type="button"

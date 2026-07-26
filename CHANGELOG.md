@@ -12,6 +12,175 @@ are listed; nightly and preview pre-releases are intentionally omitted.
 > [GitHub Releases](https://github.com/QwenLM/qwen-code/releases). Do not edit it
 > by hand — run `npm run changelog` to regenerate.
 
+## [0.21.0](https://github.com/QwenLM/qwen-code/releases/tag/v0.21.0) - 2026-07-24
+
+### Highlights
+
+_See the complete change list below._
+
+### Breaking Changes
+
+No known breaking changes.
+
+### Complete Change List
+
+#### Features
+
+- feat(web-shell): add workspace selector button with add/switch dropdown in composer toolbar ([#7390](https://github.com/QwenLM/qwen-code/pull/7390)) by @water-in-stone
+- feat(web-shell): show subagent sessions in detail panel ([#7380](https://github.com/QwenLM/qwen-code/pull/7380)) by @ytahdn
+- feat(web-shell): add rendered file previews ([#7467](https://github.com/QwenLM/qwen-code/pull/7467)) by @ytahdn
+- feat(core): add memory recall delivery telemetry ([#7393](https://github.com/QwenLM/qwen-code/pull/7393)) by @ZijianZhang989
+- feat(core): keep completed background agents resident ([#7426](https://github.com/QwenLM/qwen-code/pull/7426)) by @DragonnZhang
+- feat(serve): support forced MCP reconnects ([#7488](https://github.com/QwenLM/qwen-code/pull/7488)) by @BZ-D
+- feat(prompts): allow overriding core identity via QWEN_SYSTEM_IDENTITY_MD ([#7478](https://github.com/QwenLM/qwen-code/pull/7478)) by @zjgzx1988
+- feat(autofix): stop a PR that fails to push for N rounds in a row ([#7482](https://github.com/QwenLM/qwen-code/pull/7482)) by @wenshao
+- feat(core): restore background agent roster ([#7459](https://github.com/QwenLM/qwen-code/pull/7459)) by @DragonnZhang
+- feat(cli): support custom skill directories via settings ([#7395](https://github.com/QwenLM/qwen-code/pull/7395)) by @qwen-code-dev-bot
+- feat(cli): preserve semantic text when copying VP selections ([#7286](https://github.com/QwenLM/qwen-code/pull/7286)) by @chiga0
+- feat(web-shell): add selective Shadow DOM isolation ([#7551](https://github.com/QwenLM/qwen-code/pull/7551)) by @ytahdn
+- feat(web-shell): add renderChatHeader slot for custom session header ([#7553](https://github.com/QwenLM/qwen-code/pull/7553)) by @yuanyuanAli
+- feat(serve): add workspace-level generation ([#7552](https://github.com/QwenLM/qwen-code/pull/7552)) by @ytahdn
+- feat(serve): persist workspace channel configuration ([#7514](https://github.com/QwenLM/qwen-code/pull/7514)) by @qqqys
+- feat(core): propagate trusted daemon invocation context ([#7279](https://github.com/QwenLM/qwen-code/pull/7279)) by @callmeYe
+- feat(cli): post the review body bilingually when the PR description is Chinese ([#7564](https://github.com/QwenLM/qwen-code/pull/7564)) by @wenshao
+- feat(autofix): auto-rerun a check that died on infrastructure, once ([#7562](https://github.com/QwenLM/qwen-code/pull/7562)) by @wenshao
+- feat(core): Align GenAI telemetry with ARMS ([#7536](https://github.com/QwenLM/qwen-code/pull/7536)) by @doudouOUC
+- feat(web-shell): add workspace agent management ([#7572](https://github.com/QwenLM/qwen-code/pull/7572)) by @ytahdn
+- feat(autofix): update a stale base when the gate rejects a behind-main fix ([#7595](https://github.com/QwenLM/qwen-code/pull/7595)) by @wenshao
+- feat(sdk-java): Add daemon transport ([#7463](https://github.com/QwenLM/qwen-code/pull/7463)) by @doudouOUC
+- feat(autofix): auto-update a PR red only from a stale, since-fixed base ([#7554](https://github.com/QwenLM/qwen-code/pull/7554)) by @wenshao
+- feat(autofix): auto-recover a PR parked on a stale base ([#7602](https://github.com/QwenLM/qwen-code/pull/7602)) by @wenshao
+- feat(core): add Goal v3 state protocol ([#7517](https://github.com/QwenLM/qwen-code/pull/7517)) by @qqqys
+- feat(daemon): add explicit channel delivery ([#7388](https://github.com/QwenLM/qwen-code/pull/7388)) by @BenGuanRan
+- feat(serve): scope channel lifecycle to workspace runtimes ([#7577](https://github.com/QwenLM/qwen-code/pull/7577)) by @qqqys
+- feat(cli): add usage statistics environment override ([#7579](https://github.com/QwenLM/qwen-code/pull/7579)) by @tanzhenxin
+- feat(core): emit OAuth login URL as a single OSC 8 hyperlink ([#7255](https://github.com/QwenLM/qwen-code/pull/7255)) by @chinesepowered
+- feat(web-shell): add git mode selector for new session creation ([#7471](https://github.com/QwenLM/qwen-code/pull/7471)) by @wenshao
+- feat(cli): support native video input in /learn ([#7497](https://github.com/QwenLM/qwen-code/pull/7497)) by @LaZzyMan
+- feat(core): Align GenAI request telemetry with ARMS ([#7635](https://github.com/QwenLM/qwen-code/pull/7635)) by @doudouOUC
+- feat(cli): reference prior sessions via @ and add completion tabs ([#7302](https://github.com/QwenLM/qwen-code/pull/7302)) by @LaZzyMan
+- feat(review): follow the session output language for runtime task names ([#7653](https://github.com/QwenLM/qwen-code/pull/7653)) by @wenshao
+- feat(channels): run loops in daemon workers ([#7641](https://github.com/QwenLM/qwen-code/pull/7641)) by @qqqys
+- feat(core): add configurable image generation models ([#7607](https://github.com/QwenLM/qwen-code/pull/7607)) by @qqqys
+- feat(core): add bounded Goal evidence verification ([#7639](https://github.com/QwenLM/qwen-code/pull/7639)) by @qqqys
+
+#### Bug Fixes
+
+- fix(autofix): keep a still-red check visible until its head is judged ([#7438](https://github.com/QwenLM/qwen-code/pull/7438)) by @wenshao
+- fix: normalize empty working_dir to unset when isolation:worktree is set on AgentTool ([#7403](https://github.com/QwenLM/qwen-code/pull/7403)) by @mvanhorn
+- fix(core): Advertise completed task revival ([#7454](https://github.com/QwenLM/qwen-code/pull/7454)) by @DragonnZhang
+- fix(cli): narrow update-check error classification ([#7431](https://github.com/QwenLM/qwen-code/pull/7431)) by @yiliang114
+- fix(web-shell): isolate component styles from host CSS ([#7466](https://github.com/QwenLM/qwen-code/pull/7466)) by @ytahdn
+- fix(web-shell): polish embedded shell interactions ([#7477](https://github.com/QwenLM/qwen-code/pull/7477)) by @ytahdn
+- fix(release): exclude mobile-mcp from core version bump ([#7474](https://github.com/QwenLM/qwen-code/pull/7474)) by @yiliang114
+- fix(ci): inject actual model name into triage signature ([#7475](https://github.com/QwenLM/qwen-code/pull/7475)) by @yiliang114
+- fix(core): align stepped day fields with Vixie cron semantics ([#7464](https://github.com/QwenLM/qwen-code/pull/7464)) by @destire-mio
+- fix(acp-bridge): close prompt-terminal follow-ups from the PR #7400 self-review ([#7453](https://github.com/QwenLM/qwen-code/pull/7453)) by @doudouOUC
+- fix(core): strip Qwen-internal daemon secrets from agent-spawned child env ([#7256](https://github.com/QwenLM/qwen-code/pull/7256)) by @chinesepowered
+- fix(cli): insert newline on Shift+Enter and stop streaming thinking-block flicker ([#7397](https://github.com/QwenLM/qwen-code/pull/7397)) by @chiga0
+- fix(web-shell): open singleton subagent details ([#7495](https://github.com/QwenLM/qwen-code/pull/7495)) by @ytahdn
+- fix(web-shell): avoid redundant Git status requests ([#7496](https://github.com/QwenLM/qwen-code/pull/7496)) by @ytahdn
+- fix(agent): ignore empty working_dir placeholders ([#7343](https://github.com/QwenLM/qwen-code/pull/7343)) by @Truraly
+- fix(cli): yield to single-slot background agents ([#7258](https://github.com/QwenLM/qwen-code/pull/7258)) by @hogeheer499-commits
+- fix(core): add image modality support for qwen3.8-max and kimi-k3 models ([#7491](https://github.com/QwenLM/qwen-code/pull/7491)) by @yiliang114
+- fix(dingtalk): preserve non-bot mention context ([#7473](https://github.com/QwenLM/qwen-code/pull/7473)) by @qwen-code-dev-bot
+- fix(core): harden the usage salvage around session deletion ([#7425](https://github.com/QwenLM/qwen-code/pull/7425)) by @zjunothing
+- fix(core): make fork subagents discoverable ([#7460](https://github.com/QwenLM/qwen-code/pull/7460)) by @DragonnZhang
+- fix(ci): autofix route checks existing labels on non-trigger label events ([#7481](https://github.com/QwenLM/qwen-code/pull/7481)) by @yiliang114
+- fix(vscode): use file picker image paths for vision input ([#7493](https://github.com/QwenLM/qwen-code/pull/7493)) by @yiliang114
+- fix(cli): open the actual serve fallback port ([#7501](https://github.com/QwenLM/qwen-code/pull/7501)) by @yiliang114
+- fix(ci): don't let one failing scenario sink the whole visual preview ([#7511](https://github.com/QwenLM/qwen-code/pull/7511)) by @wenshao
+- fix(cli): say review coverage gaps in the author's units, not chunk ids ([#7550](https://github.com/QwenLM/qwen-code/pull/7550)) by @wenshao
+- fix(autofix): retry a skipped-Prepare instead of stranding the PR terminal ([#7490](https://github.com/QwenLM/qwen-code/pull/7490)) by @wenshao
+- fix(cli): keep role codenames and brief paths out of the posted review body ([#7560](https://github.com/QwenLM/qwen-code/pull/7560)) by @wenshao
+- fix(autofix): retry an agent timeout instead of advancing past its feedback ([#7563](https://github.com/QwenLM/qwen-code/pull/7563)) by @wenshao
+- fix(web-shell): expose managedId in artifact open requests ([#7570](https://github.com/QwenLM/qwen-code/pull/7570)) by @ytahdn
+- fix(sdk-python): require canonical form in validate_session_id ([#7532](https://github.com/QwenLM/qwen-code/pull/7532)) by @chinesepowered
+- fix(web-shell): sync background agent status ([#7561](https://github.com/QwenLM/qwen-code/pull/7561)) by @ytahdn
+- fix(feishu): await stream cancels in media download teardown ([#7465](https://github.com/QwenLM/qwen-code/pull/7465)) by @chinesepowered
+- fix(autofix): make the review-address report comment fully bilingual ([#7569](https://github.com/QwenLM/qwen-code/pull/7569)) by @wenshao
+- fix(serve): detect stale SSE cursors across daemon restarts via epoch token; preserve turn attribution and surface compaction failures in replay ([#7458](https://github.com/QwenLM/qwen-code/pull/7458)) by @doudouOUC
+- fix(serve): avoid TOCTOU race dropping live sessions from list response ([#7556](https://github.com/QwenLM/qwen-code/pull/7556)) by @yiliang114 with @Copilot
+- fix(cli): prevent monitor notifications after task_stop ([#7573](https://github.com/QwenLM/qwen-code/pull/7573)) by @yiliang114
+- Fix(cli): use npm view for update check instead of update-notifier (#7515) ([#7528](https://github.com/QwenLM/qwen-code/pull/7528)) by @dtometzki
+- fix(core): avoid empty transcript history pages ([#7582](https://github.com/QwenLM/qwen-code/pull/7582)) by @ytahdn
+- fix(cli): surface unhandled rejections and render errors instead of swallowing them ([#7406](https://github.com/QwenLM/qwen-code/pull/7406)) by @chiga0
+- fix(web-shell): isolate slash command plugin pages ([#7581](https://github.com/QwenLM/qwen-code/pull/7581)) by @ytahdn
+- fix(sdk-python): validate max_tool_calls and max_subagent_depth as integers ([#7548](https://github.com/QwenLM/qwen-code/pull/7548)) by @chinesepowered
+- fix(cli): correct queued message display style and ordering ([#7381](https://github.com/QwenLM/qwen-code/pull/7381)) by @chiga0
+- fix(core): persist usage for tool-only subagent rounds ([#7557](https://github.com/QwenLM/qwen-code/pull/7557)) by @DragonnZhang
+- fix(core): retry requests when providers require thinking ([#7534](https://github.com/QwenLM/qwen-code/pull/7534)) by @yiliang114
+- fix(core): record auto-memory index reads in FileReadCache ([#7468](https://github.com/QwenLM/qwen-code/pull/7468)) by @han-dreamer
+- fix(web-shell): initialize workspace selector from ID ([#7518](https://github.com/QwenLM/qwen-code/pull/7518)) by @patrick-andstar
+- fix(core): reject nested background requests ([#7593](https://github.com/QwenLM/qwen-code/pull/7593)) by @patrick-andstar
+- fix(web-shell): prevent React measure detail OOM ([#7596](https://github.com/QwenLM/qwen-code/pull/7596)) by @ytahdn
+- fix(core): jsonl write([]) should leave an empty file, not a stray newline ([#7533](https://github.com/QwenLM/qwen-code/pull/7533)) by @chinesepowered
+- fix(core): strip daemon secrets from hook and tool-discovery child env ([#7527](https://github.com/QwenLM/qwen-code/pull/7527)) by @chinesepowered
+- fix(core): preserve disabled reasoning effort ([#7541](https://github.com/QwenLM/qwen-code/pull/7541)) by @WladmirJunior
+- fix(web-shell): render a plain textarea composer on touch devices ([#7587](https://github.com/QwenLM/qwen-code/pull/7587)) by @ComplexSimply
+- fix(core): treat backslash as literal inside single quotes in splitCommands ([#7526](https://github.com/QwenLM/qwen-code/pull/7526)) by @chinesepowered
+- fix(cli): stop treating version-manager npm shims as npm-cli.js ([#7545](https://github.com/QwenLM/qwen-code/pull/7545)) by @nerdalytics
+- fix(core,cli): isolate teammate leader turns from agent context ([#7576](https://github.com/QwenLM/qwen-code/pull/7576)) by @yiliang114
+- fix(sdk-java): let a terminal continuation start the next prompt ([#7615](https://github.com/QwenLM/qwen-code/pull/7615)) by @wenshao
+- fix(channels): route Telegram replies to forum topics ([#7612](https://github.com/QwenLM/qwen-code/pull/7612)) by @hogeheer499-commits
+- fix(acp): hide discontinued OAuth model for other auth types ([#7522](https://github.com/QwenLM/qwen-code/pull/7522)) by @hogeheer499-commits
+- fix(channels): stop dropping multi-task messages when a channel memory is saved ([#7608](https://github.com/QwenLM/qwen-code/pull/7608)) by @zjunothing
+- fix(channels): ignore idle ACP cancellation errors ([#7598](https://github.com/QwenLM/qwen-code/pull/7598)) by @patrick-andstar
+- fix(cli): optimize large paste performance and add progress indicator ([#6506](https://github.com/QwenLM/qwen-code/pull/6506)) by @LaZzyMan
+- fix(mcp): use a dedicated undici fetch for Streamable HTTP transports ([#7195](https://github.com/QwenLM/qwen-code/pull/7195)) by @zjunothing
+- fix(daemon): address epoch cursor review follow-ups ([#7619](https://github.com/QwenLM/qwen-code/pull/7619)) by @doudouOUC
+- fix(sdk-java): Harden daemon transport reliability ([#7603](https://github.com/QwenLM/qwen-code/pull/7603)) by @doudouOUC
+- fix(acp-bridge): resource hardening for the session event pipeline (DAEMON-009/010/011) ([#7622](https://github.com/QwenLM/qwen-code/pull/7622)) by @doudouOUC
+- fix(cli): clean orphaned managed npm update artifacts ([#7539](https://github.com/QwenLM/qwen-code/pull/7539)) by @patrick-andstar
+- fix(web-shell): honor locked workspace session actions ([#7629](https://github.com/QwenLM/qwen-code/pull/7629)) by @dreamWB
+- fix(core): Preserve usage after empty OpenAI stream frames ([#7650](https://github.com/QwenLM/qwen-code/pull/7650)) by @doudouOUC
+- fix(triage): make unattended PR review static — read CI via API, never run PR code ([#7646](https://github.com/QwenLM/qwen-code/pull/7646)) by @wenshao
+- fix(triage): actually restrict the CI review agent's tools ([#7647](https://github.com/QwenLM/qwen-code/pull/7647)) by @wenshao
+- fix(cli): align all TUI icon columns to a uniform 2-col width ([#7633](https://github.com/QwenLM/qwen-code/pull/7633)) by @chiga0
+- fix(web-shell): show full session names on hover ([#7662](https://github.com/QwenLM/qwen-code/pull/7662)) by @wenshao
+- fix(web-shell): keep git mode popover open when picking branch/worktree ([#7668](https://github.com/QwenLM/qwen-code/pull/7668)) by @wenshao
+
+#### Performance
+
+- perf(startup): Load undici lazily behind package-local dynamic imports ([#7455](https://github.com/QwenLM/qwen-code/pull/7455)) by @doudouOUC
+- perf(web-shell): optimize long session rendering ([#7408](https://github.com/QwenLM/qwen-code/pull/7408)) by @ytahdn
+- perf(startup): lazy-load Google GenAI SDK on first use ([#7512](https://github.com/QwenLM/qwen-code/pull/7512)) by @doudouOUC
+- perf(cli): Defer ACP telemetry initialization ([#7558](https://github.com/QwenLM/qwen-code/pull/7558)) by @doudouOUC
+- perf(cli): Propagate compile cache to ACP children ([#7594](https://github.com/QwenLM/qwen-code/pull/7594)) by @doudouOUC
+
+#### Documentation
+
+- docs(core): align JSDoc @param names with actual function signatures ([#7492](https://github.com/QwenLM/qwen-code/pull/7492)) by @ovochouovo
+- docs(autofix): require evidenced pre-commit verification, not a bare "verified" ([#7486](https://github.com/QwenLM/qwen-code/pull/7486)) by @wenshao
+- docs: refresh subagent lifecycle guidance ([#7624](https://github.com/QwenLM/qwen-code/pull/7624)) by @wenshao
+- docs(autofix): apply Simplicity First when addressing review feedback ([#7643](https://github.com/QwenLM/qwen-code/pull/7643)) by @wenshao
+- docs(autofix): let the agent escalate a maintainer's decision, not decide it ([#7636](https://github.com/QwenLM/qwen-code/pull/7636)) by @wenshao
+- docs(triage): scale PR verification to the change, add real-run depth ([#7648](https://github.com/QwenLM/qwen-code/pull/7648)) by @wenshao
+
+#### Internal Changes
+
+- test(telemetry): Cover daemon metrics init ordering and document metricReader asymmetry ([#7456](https://github.com/QwenLM/qwen-code/pull/7456)) by @doudouOUC
+- test(core): Cover Shell truncation without an artifact ([#7470](https://github.com/QwenLM/qwen-code/pull/7470)) by @doudouOUC
+- test(core): stub the registry methods agent.ts actually calls ([#7538](https://github.com/QwenLM/qwen-code/pull/7538)) by @chinesepowered
+- test(autofix): single-source the infra-signature list from the workflow ([#7565](https://github.com/QwenLM/qwen-code/pull/7565)) by @wenshao
+- test: deflake write_file content assertion in tool-control E2E test ([#7613](https://github.com/QwenLM/qwen-code/pull/7613)) by @yiliang114 with @Copilot
+- test(sdk-java): widen the SSE idle-watchdog margins in the slow-line test ([#7617](https://github.com/QwenLM/qwen-code/pull/7617)) by @wenshao
+- test(core): pin the archived-copy usage salvage in the conflict deletion test ([#7604](https://github.com/QwenLM/qwen-code/pull/7604)) by @zjunothing
+- test(triage): regression-guard the triage workflow, and make the git cleanup an allowlist ([#7660](https://github.com/QwenLM/qwen-code/pull/7660)) by @wenshao
+
+### New Contributors
+
+- @ovochouovo made their first contribution in [#7492](https://github.com/QwenLM/qwen-code/pull/7492)
+- @Truraly made their first contribution in [#7343](https://github.com/QwenLM/qwen-code/pull/7343)
+- @zjgzx1988 made their first contribution in [#7478](https://github.com/QwenLM/qwen-code/pull/7478)
+- @hogeheer499-commits made their first contribution in [#7258](https://github.com/QwenLM/qwen-code/pull/7258)
+- @dtometzki made their first contribution in [#7528](https://github.com/QwenLM/qwen-code/pull/7528)
+- @patrick-andstar made their first contribution in [#7518](https://github.com/QwenLM/qwen-code/pull/7518)
+- @WladmirJunior made their first contribution in [#7541](https://github.com/QwenLM/qwen-code/pull/7541)
+- @nerdalytics made their first contribution in [#7545](https://github.com/QwenLM/qwen-code/pull/7545)
+
+**Full Changelog**: https://github.com/QwenLM/qwen-code/compare/v0.20.1...v0.21.0
+
 ## [0.20.1](https://github.com/QwenLM/qwen-code/releases/tag/v0.20.1) - 2026-07-21
 
 ### Highlights

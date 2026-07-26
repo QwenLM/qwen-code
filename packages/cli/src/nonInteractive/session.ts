@@ -598,6 +598,19 @@ class Session {
   ): Promise<void> {
     await this.waitForInitialization();
 
+    batch = batch.filter((item) => {
+      if (item.sdkNotification.status !== 'running') {
+        return true;
+      }
+      return (
+        this.config.getMonitorRegistry().get(item.sdkNotification.task_id)
+          ?.status !== 'cancelled'
+      );
+    });
+    if (batch.length === 0) {
+      return;
+    }
+
     for (const item of batch) {
       this.outputAdapter.emitUserMessage([{ text: item.displayText }]);
       this.outputAdapter.emitSystemMessage(

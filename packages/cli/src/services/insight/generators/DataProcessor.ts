@@ -35,6 +35,7 @@ import {
   type Config,
   type ChatRecord,
 } from '@qwen-code/qwen-code-core';
+import { dayKey, hourOfDay, parseDayKey, todayKey } from '../dates.js';
 
 const logger = createDebugLogger('DataProcessor');
 
@@ -203,11 +204,6 @@ function normalizeSessionFacet(
 
 export class DataProcessor {
   constructor(private config: Config) {}
-
-  // Helper function to format date as YYYY-MM-DD
-  private formatDate(date: Date): string {
-    return date.toISOString().split('T')[0];
-  }
 
   // Format chat records for LLM analysis
   private formatRecordsForAnalysis(records: ChatRecord[]): string {
@@ -400,21 +396,24 @@ export class DataProcessor {
       return { currentStreak: 0, longestStreak: 0, dates: [] };
     }
 
-    // Convert string dates to Date objects and sort them
-    const dateObjects = dates.map((dateStr) => new Date(dateStr));
+    // Day keys parse to local midnight (see parseDayKey) — the previous
+    // `new Date(key)` parse produced UTC midnight, which the local
+    // normalization then shifted to the previous day in negative-offset
+    // timezones, making the today/yesterday comparison off by one.
+    const dateObjects = dates.map((dateStr) => parseDayKey(dateStr));
     dateObjects.sort((a, b) => a.getTime() - b.getTime());
 
     let currentStreak = 1;
     let maxStreak = 1;
-    let currentDate = new Date(dateObjects[0]);
-    currentDate.setHours(0, 0, 0, 0); // Normalize to start of day
+    let currentDate = dateObjects[0];
 
     for (let i = 1; i < dateObjects.length; i++) {
-      const nextDate = new Date(dateObjects[i]);
-      nextDate.setHours(0, 0, 0, 0); // Normalize to start of day
+      const nextDate = dateObjects[i];
 
-      // Calculate difference in days
-      const diffDays = Math.floor(
+      // Round, not floor: local midnights straddling a DST change are
+      // 23 or 25 hours apart, and floor would misread the 23-hour day
+      // as "same day".
+      const diffDays = Math.round(
         (nextDate.getTime() - currentDate.getTime()) / (1000 * 60 * 60 * 24),
       );
 
@@ -431,17 +430,19 @@ export class DataProcessor {
       currentDate = nextDate;
     }
 
-    // Check if the streak is still ongoing (if last activity was yesterday or today)
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
+    // `currentStreak` means "the streak ending today or yesterday"
+    // (#6835): a run that ended earlier is history, not a current
+    // streak — without this reset, a user inactive for months still
+    // saw a non-zero current streak.
+    const today = parseDayKey(todayKey());
     const yesterday = new Date(today);
     yesterday.setDate(yesterday.getDate() - 1);
 
     if (
-      currentDate.getTime() === today.getTime() ||
-      currentDate.getTime() === yesterday.getTime()
+      currentDate.getTime() !== today.getTime() &&
+      currentDate.getTime() !== yesterday.getTime()
     ) {
-      // The streak might still be active, so we don't reset it
+      currentStreak = 0;
     }
 
     return {
@@ -1054,8 +1055,11 @@ None captured`;
           // Process each record
           for (const record of records) {
             const timestamp = new Date(record.timestamp);
-            const dateKey = this.formatDate(timestamp);
-            const hour = timestamp.getHours();
+            // Same local basis for the day key and the hour bucket — the
+            // previous UTC day key put this record's activity on a
+            // different "day" than its own active-hours bucket (#6835).
+            const dateKey = dayKey(timestamp);
+            const hour = hourOfDay(timestamp);
 
             // Count user messages and slash commands (actual user interactions)
             const isUserMessage = record.type === 'user';
@@ -1170,7 +1174,7 @@ None captured`;
 
       if (durationMinutes > longestWorkDuration) {
         longestWorkDuration = durationMinutes;
-        longestWorkDate = this.formatDate(start);
+        longestWorkDate = dayKey(start);
       }
     }
 

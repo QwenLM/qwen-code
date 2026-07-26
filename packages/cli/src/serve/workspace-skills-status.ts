@@ -37,10 +37,15 @@ import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
 import { loadSettings } from '../config/settings.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { mapSkillConfigToStatus } from './workspace-skills-mapping.js';
+import { resolveSkillSettings } from '../config/skill-settings.js';
 
 export interface WorkspaceSkillsStatusProvider {
   (workspaceCwd: string): Promise<ServeWorkspaceSkillsStatus>;
   invalidate?(workspaceCwd: string): void;
+}
+
+export interface WorkspaceSkillsStatusProviderOptions {
+  workspaceTrusted?: boolean;
 }
 
 /**
@@ -57,7 +62,9 @@ type SkillManagerConfigShim = Pick<
   'isSafeMode' | 'getBareMode' | 'getProjectRoot' | 'getActiveExtensions'
 >;
 
-export function createWorkspaceSkillsStatusProvider(): WorkspaceSkillsStatusProvider {
+export function createWorkspaceSkillsStatusProvider(
+  options: WorkspaceSkillsStatusProviderOptions = {},
+): WorkspaceSkillsStatusProvider {
   // Reuse one SkillManager per workspace so repeat queries hit its in-memory
   // skills cache instead of re-scanning (and re-parsing frontmatter / compiling
   // globs for) every level on each call. This is a best-effort pre-child
@@ -69,6 +76,7 @@ export function createWorkspaceSkillsStatusProvider(): WorkspaceSkillsStatusProv
     buildWorkspaceSkillsStatus(
       workspaceCwd,
       managers,
+      options.workspaceTrusted ?? true,
     )) as WorkspaceSkillsStatusProvider;
   provider.invalidate = (workspaceCwd) => managers.delete(workspaceCwd);
   return provider;
@@ -77,6 +85,7 @@ export function createWorkspaceSkillsStatusProvider(): WorkspaceSkillsStatusProv
 async function buildWorkspaceSkillsStatus(
   workspaceCwd: string,
   managers: Map<string, SkillManager>,
+  workspaceTrusted: boolean,
 ): Promise<ServeWorkspaceSkillsStatus> {
   try {
     let skillManager = managers.get(workspaceCwd);
@@ -85,7 +94,7 @@ async function buildWorkspaceSkillsStatus(
         // Honor the safe-mode env the same way `Config` does when no explicit
         // flag is passed, so an operator running in safe mode gets the same
         // bundled-only listing the child would produce.
-        isSafeMode: () => isSafeModeEnv(),
+        isSafeMode: () => !workspaceTrusted || isSafeModeEnv(),
         // Bare mode is the interactive `--bare` CLI flag; the daemon never runs
         // bare, so it is always off here.
         getBareMode: () => false,
@@ -97,13 +106,22 @@ async function buildWorkspaceSkillsStatus(
       skillManager = new SkillManager(shim as Config);
       managers.set(workspaceCwd, skillManager);
     }
-    const disabled = readDisabledSkillNames(workspaceCwd);
+    const disablements = resolveSkillSettings(
+      loadSettings(workspaceCwd, {
+        consumeCorruptionEnvVars: false,
+        skipLoadEnvironment: !workspaceTrusted,
+        skipWorkspaceSettings: !workspaceTrusted,
+        workspaceTrusted,
+      }),
+    ).disablements;
     const skills = await skillManager.listSkills();
     return {
       v: STATUS_SCHEMA_VERSION,
       workspaceCwd,
       initialized: true,
-      skills: skills.map((skill) => mapSkillConfigToStatus(skill, disabled)),
+      skills: skills.map((skill) =>
+        mapSkillConfigToStatus(skill, disablements),
+      ),
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -124,15 +142,4 @@ async function buildWorkspaceSkillsStatus(
       ],
     };
   }
-}
-
-function readDisabledSkillNames(workspaceCwd: string): ReadonlySet<string> {
-  const raw = loadSettings(workspaceCwd, false).merged.skills?.disabled;
-  if (!Array.isArray(raw)) return new Set();
-  return new Set(
-    raw
-      .filter((name): name is string => typeof name === 'string')
-      .map((name) => name.trim().toLowerCase())
-      .filter(Boolean),
-  );
 }

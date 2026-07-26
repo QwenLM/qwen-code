@@ -66,6 +66,7 @@ export type TurnOutputOpenRequest =
       title: string;
       turnId: string;
       artifactId: string;
+      managedId?: string;
       artifact: DaemonSessionArtifact;
       workspaceActions?: DaemonWorkspaceActions;
       previewContent?: string;
@@ -154,6 +155,7 @@ function TurnOutputsComponent({
         title: artifact.title ?? 'Artifact',
         turnId,
         artifactId: artifact.id,
+        ...(artifact.managedId ? { managedId: artifact.managedId } : {}),
         artifact,
         ...(previewContent !== undefined ? { previewContent } : {}),
       });

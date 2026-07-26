@@ -1348,6 +1348,11 @@ describe('an agent that paged its chunk still read it', () => {
   });
 });
 
+/** The old rendered shape, for the regex assertions: structural gaps, joined. */
+const gapText = (r: {
+  gaps: Array<{ subject: string; reason: string }>;
+}): string => r.gaps.map((g) => `${g.subject} — ${g.reason}`).join(' ');
+
 describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', () => {
   // A Step 4/5 agent as a real run leaves it: the CLI's record of the prompt it
   // built (`agent-prompt --role <role>`), the brief that prompt points at, and the
@@ -1427,7 +1432,7 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
 
     const r = verificationGaps(p, { postsFindings: true }, ENV);
     expect(r.ok).toBe(false);
-    expect(r.gaps.join(' ')).toMatch(/verification — /);
+    expect(gapText(r)).toMatch(/verification — /);
 
     // The compliant launch — the full printed prompt — clears it.
     transcript('v-full', full, { calls: 2, opens: [brief] });
@@ -1468,7 +1473,7 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     const p = plan(); // no reverse-audit fixture: the step was skipped
     const r = verificationGaps(p, { postsFindings: false }, ENV);
     expect(r.ok).toBe(false);
-    const gap = r.gaps.join(' ');
+    const gap = gapText(r);
     expect(gap).toMatch(
       /reverse audit — no auditor was launched with a prompt this skill builds/,
     );
@@ -1490,7 +1495,7 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     step45(p, 'reverse-audit', { rewritten: true });
     const r = verificationGaps(p, { postsFindings: false }, ENV);
     expect(r.ok).toBe(false);
-    const gap = r.gaps.join(' ');
+    const gap = gapText(r);
     // It says what happened — the auditor ran AND opened its brief (that is how
     // this shape is even detected, and a text denying it publishes a false
     // mechanism) …
@@ -1527,7 +1532,7 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     step45(p, 'reverse-audit');
     step45(p, 'verify', { rewritten: true });
     const r = verificationGaps(p, { postsFindings: true }, ENV);
-    const gap = r.gaps.join(' ');
+    const gap = gapText(r);
     expect(gap).toMatch(/a verifier ran and opened its brief/);
     expect(gap).toMatch(/no agent was launched with the prompt the CLI built/);
     expect(gap).not.toMatch(/no verifier ran/);
@@ -1546,7 +1551,7 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     step45(p, 'reverse-audit', { opensBrief: false });
     const r = verificationGaps(p, { postsFindings: false }, ENV);
     expect(r.ok).toBe(false);
-    expect(r.gaps.join(' ')).toMatch(
+    expect(gapText(r)).toMatch(
       /reverse audit — it was launched with the built prompt but never opened its brief/,
     );
   });
@@ -1556,7 +1561,7 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     step45(p, 'reverse-audit', { launch: false });
     const r = verificationGaps(p, { postsFindings: false }, ENV);
     expect(r.ok).toBe(false);
-    expect(r.gaps.join(' ')).toMatch(
+    expect(gapText(r)).toMatch(
       /reverse audit — its prompt was built, but no agent was launched with it/,
     );
   });
@@ -1565,7 +1570,7 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     const p = plan();
     step45(p, 'reverse-audit--chunk-1');
     const r = verificationGaps(p, { postsFindings: false }, ENV);
-    expect(r.gaps.join(' ')).not.toMatch(/reverse audit/);
+    expect(gapText(r)).not.toMatch(/reverse audit/);
   });
 
   it('requires a verifier when the review posts findings', () => {
@@ -1573,16 +1578,14 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     step45(p, 'reverse-audit'); // isolate the verify gap
     const r = verificationGaps(p, { postsFindings: true }, ENV);
     expect(r.ok).toBe(false);
-    expect(r.gaps.join(' ')).toMatch(
-      /verification — the review posts findings/,
-    );
+    expect(gapText(r)).toMatch(/verification — the review posts findings/);
   });
 
   it('does not require a verifier when the review confirmed nothing', () => {
     const p = plan();
     step45(p, 'reverse-audit');
     const r = verificationGaps(p, { postsFindings: false }, ENV);
-    expect(r.gaps.join(' ')).not.toMatch(/verification/);
+    expect(gapText(r)).not.toMatch(/verification/);
   });
 
   it('flags a verifier built but whose agent never opened its brief', () => {
@@ -1590,7 +1593,7 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     step45(p, 'reverse-audit');
     step45(p, 'verify', { opensBrief: false });
     const r = verificationGaps(p, { postsFindings: true }, ENV);
-    expect(r.gaps.join(' ')).toMatch(
+    expect(gapText(r)).toMatch(
       /verification — it was launched with the built prompt but never opened its brief/,
     );
   });
@@ -1603,8 +1606,59 @@ describe('verificationGaps — Step 4 and Step 5 ran, and read their briefs', ()
     step45(p, 'reverse-audit');
     step45(p, 'verify', { launch: false });
     const r = verificationGaps(p, { postsFindings: true }, ENV);
-    expect(r.gaps.join(' ')).toMatch(
+    expect(gapText(r)).toMatch(
       /verification — its prompt was built, but no agent was launched with it/,
     );
+  });
+
+  it('merges both steps into one gap when they failed the same way', () => {
+    // #7268: the posted body carried the verify and reverse-audit `rewritten`
+    // sentences back to back, near-identical but for the tail. One shape, one
+    // sentence, two subjects — and still both consequences and both honesty
+    // limits (each demonstrably RAN and opened its brief).
+    const p = plan();
+    step45(p, 'reverse-audit', { rewritten: true });
+    step45(p, 'verify', { rewritten: true });
+    const r = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(r.ok).toBe(false);
+    expect(r.gaps).toHaveLength(1);
+    const gap = r.gaps[0];
+    expect(gap.subject).toBe('verification and reverse audit');
+    expect(gap.subjectZh).toBe('验证与反向审计');
+    expect(gap.reasonZh).toContain('手写');
+    expect(gap.reason).toMatch(/each ran and opened its brief/);
+    expect(gap.reason).toMatch(/written by hand/);
+    expect(gap.reason).toMatch(/cannot be counted as verified/);
+    // The remediation stays per-role: the two rebuild commands differ.
+    const fix = r.remediation.join(' ');
+    expect(fix).toContain('--role reverse-audit');
+    expect(fix).toContain('--role verify');
+    expect(r.unverifiedFindings).toBe(true);
+  });
+
+  it('keeps two precise gaps when the steps failed differently', () => {
+    // Mixed shapes have different mechanisms and different fixes; a sentence
+    // vague enough to cover both would misname one of them.
+    const p = plan();
+    step45(p, 'reverse-audit', { rewritten: true });
+    step45(p, 'verify', { launch: false });
+    const r = verificationGaps(p, { postsFindings: true }, ENV);
+    expect(r.gaps).toHaveLength(2);
+    expect(gapText(r)).toMatch(
+      /reverse audit — an auditor ran and opened its brief/,
+    );
+    expect(gapText(r)).toMatch(
+      /verification — its prompt was built, but no agent was launched with it/,
+    );
+    expect(gapText(r)).not.toMatch(/verification and reverse audit/);
+  });
+
+  it('does not merge when the review posts no findings — verify was never owed', () => {
+    // A zero-finding review with the reverse audit skipped keeps the solo
+    // reverse-audit text: there is no verify failure to share a sentence with.
+    const p = plan(); // neither step on record
+    const r = verificationGaps(p, { postsFindings: false }, ENV);
+    expect(r.gaps).toHaveLength(1);
+    expect(r.gaps[0].subject).toBe('reverse audit');
   });
 });

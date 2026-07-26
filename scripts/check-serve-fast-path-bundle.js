@@ -213,6 +213,15 @@ const FORBIDDEN_ACP_PACKAGES = [
   // candidate 4); a static re-import anywhere in the ACP closure would pull
   // ~1 MiB per bundled copy back into every cold start.
   { label: 'undici vendor package', packageName: 'undici' },
+  // Provider implementations and MCP discovery load the Google GenAI SDK on
+  // first use (issue #7264 candidate 3). Keep the SDK out of the ACP bootstrap
+  // closure.
+  { label: 'Google GenAI SDK', packageName: '@google/genai' },
+  // Encoding tables, terminal emulation, and git orchestration load at their
+  // first real use (issue #7264 candidate 5).
+  { label: 'iconv-lite encoding tables', packageName: 'iconv-lite' },
+  { label: 'xterm headless runtime', packageName: '@xterm/headless' },
+  { label: 'simple-git runtime', packageName: 'simple-git' },
 ];
 
 export function normalizeMetafilePath(filePath) {
