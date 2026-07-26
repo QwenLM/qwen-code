@@ -722,6 +722,7 @@ describe('AppContainer State Management', () => {
 
     it('fails closed without crashing when follow-up suggestion gate config lookup fails', async () => {
       vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
       const getHistoryTail = vi.fn().mockReturnValue([]);
       vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
         initialize: vi.fn().mockResolvedValue(undefined),
