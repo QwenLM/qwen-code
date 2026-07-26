@@ -233,11 +233,22 @@ describe('qwen-triage tmux workflow', () => {
   it('posts an early live-progress status comment and finalizes the same one', () => {
     const statusStep = step('Post triage status comment');
     // Announced up front (before the long agent step) with the live run link.
-    expect(statusStep).toContain('<!-- qwen-triage stage=status -->');
+    expect(statusStep).toContain("MARKER='<!-- qwen-triage lifecycle -->'");
+    expect(statusStep).toContain(
+      "LEGACY_MARKER='<!-- qwen-triage stage=status -->'",
+    );
     expect(statusStep).toContain('actions/runs/${{ github.run_id }}');
     expect(statusStep).toContain('watch live progress');
     // Upsert by marker so a re-run reuses the one comment instead of stacking.
-    expect(statusStep).toContain('contains($m)');
+    // startswith (not contains) prevents matching a comment that merely quotes
+    // the marker; the bot-author filter prevents matching a human's comment.
+    expect(statusStep).toContain("gh api user --jq '.login'");
+    expect(statusStep).toContain(
+      'Cannot resolve bot identity; skipping status comment upsert.',
+    );
+    expect(statusStep).toContain('select(.user.login == $bot)');
+    expect(statusStep).toContain('startswith($m)');
+    expect(statusStep).not.toContain('contains($m)');
     expect(statusStep).toContain('--method PATCH');
     // Best-effort: a failed status post warns and continues, never fails triage.
     expect(statusStep).toContain('set -uo pipefail');
@@ -245,9 +256,20 @@ describe('qwen-triage tmux workflow', () => {
 
     const finalizeStep = step('Finalize triage status comment');
     // Runs on both outcomes and edits the SAME marker comment (no second post).
-    expect(finalizeStep).toContain('<!-- qwen-triage stage=status -->');
+    expect(finalizeStep).toContain(
+      "MARKER='<!-- qwen-triage lifecycle -->'",
+    );
+    expect(finalizeStep).toContain(
+      "LEGACY_MARKER='<!-- qwen-triage stage=status -->'",
+    );
     expect(finalizeStep).toContain('success() || failure()');
     expect(finalizeStep).toContain('steps.triage.outcome');
+    expect(finalizeStep).toContain(
+      'Cannot resolve bot identity; skipping final status comment upsert.',
+    );
+    expect(finalizeStep).toContain('select(.user.login == $bot)');
+    expect(finalizeStep).toContain('startswith($m)');
+    expect(finalizeStep).not.toContain('contains($m)');
     expect(finalizeStep).toContain('--method PATCH');
     expect(finalizeStep).toContain('Qwen Triage finished');
     expect(finalizeStep).toContain('ended early');
