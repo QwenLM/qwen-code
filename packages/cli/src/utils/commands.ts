@@ -48,7 +48,7 @@ export const isValidStackedSkillPrefix = (
   if (tokens.length >= MAX_STACKED_SKILLS) return false;
 
   return tokens.every((token) => {
-    if (!token.startsWith('/') || token.length === 1) return false;
+    if (!token.startsWith('/')) return false;
     const command = findCommandByName(token.slice(1), commands);
     return command !== undefined && isStackedSkillCompletableCommand(command);
   });

@@ -7,6 +7,10 @@
 import type { SpawnOptions } from 'node:child_process';
 import { spawn } from 'node:child_process';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  isStackedSkillCompletableCommand,
+  isValidStackedSkillPrefix,
+} from '../../utils/commands.js';
 import type { SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 import { writeOsc52 } from './clipboardUtils.js';
@@ -342,8 +346,9 @@ export type SlashCommandToken = {
   commandName: string;
   /**
    * Whether the token corresponds to a known command.
-   * Mid-input tokens are only valid when they match a model-invocable command.
-   * Line-start tokens are valid for all interactive commands.
+   * Line-start tokens are valid for all interactive commands. Mid-input tokens
+   * are valid when they match a model-invocable command, or when they are
+   * stackable skills following an existing stacked-skill prefix.
    */
   valid: boolean;
 };
@@ -357,7 +362,7 @@ const SLASH_TOKEN_RE = /(?:^|(?<=\s))\/([a-zA-Z][a-zA-Z0-9:_-]*)/g;
  * - Tokens at position 0 are valid if they match any command.
  * - Mid-input tokens (preceded by whitespace) are valid only if they match a
  *   `modelInvocable` command, since built-in commands typed mid-text won't be
- *   executed.
+ *   executed, or if they continue a valid stacked-skill prefix.
  */
 export function findSlashCommandTokens(
   text: string,
@@ -395,8 +400,13 @@ export function findSlashCommandTokens(
         // Line-start: valid if command is user-invocable (interactive)
         valid = cmd.userInvocable !== false && !cmd.hidden;
       } else {
-        // Mid-input: only valid if model-invocable
-        valid = cmd.modelInvocable === true;
+        // Mid-input: valid if model-invocable, or if this token continues a
+        // valid stacked skill invocation.
+        const prefix = text.slice(0, start);
+        valid =
+          cmd.modelInvocable === true ||
+          (isStackedSkillCompletableCommand(cmd) &&
+            isValidStackedSkillPrefix(prefix, commands));
       }
     }
 

@@ -814,6 +814,72 @@ describe('findSlashCommandTokens', () => {
     expect(tokens[0]).toMatchObject({ commandName: 'clear', valid: false });
   });
 
+  it('marks same-line stacked skill tokens as valid even when the later skill is not model-invocable', () => {
+    const commands = [
+      {
+        name: 'review-skill',
+        description: 'Review code',
+        kind: 'skill' as const,
+        modelInvocable: true,
+        userInvocable: true,
+        hidden: false,
+      },
+      {
+        name: 'store-locally',
+        description: 'Store locally',
+        kind: 'skill' as const,
+        modelInvocable: false,
+        userInvocable: true,
+        hidden: false,
+      },
+    ] as Parameters<typeof findSlashCommandTokens>[1];
+
+    const tokens = findSlashCommandTokens(
+      '/review-skill /store-locally',
+      commands,
+    );
+
+    expect(tokens).toHaveLength(2);
+    expect(tokens[0]).toMatchObject({
+      commandName: 'review-skill',
+      valid: true,
+    });
+    expect(tokens[1]).toMatchObject({
+      commandName: 'store-locally',
+      valid: true,
+    });
+  });
+
+  it('does not mark non-skill tokens valid after a stacked skill prefix', () => {
+    const commands = [
+      {
+        name: 'review-skill',
+        description: 'Review code',
+        kind: 'skill' as const,
+        modelInvocable: true,
+        userInvocable: true,
+        hidden: false,
+      },
+      {
+        name: 'clear',
+        description: 'Clear conversation',
+        kind: 'built-in' as const,
+        modelInvocable: false,
+        userInvocable: true,
+        hidden: false,
+      },
+    ] as Parameters<typeof findSlashCommandTokens>[1];
+
+    const tokens = findSlashCommandTokens('/review-skill /clear', commands);
+
+    expect(tokens).toHaveLength(2);
+    expect(tokens[0]).toMatchObject({
+      commandName: 'review-skill',
+      valid: true,
+    });
+    expect(tokens[1]).toMatchObject({ commandName: 'clear', valid: false });
+  });
+
   it('marks unknown token as invalid', () => {
     const tokens = findSlashCommandTokens('/usr/bin/something', mockCommands);
     // /usr matches nothing, so invalid

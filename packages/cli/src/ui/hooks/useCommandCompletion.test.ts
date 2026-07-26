@@ -679,6 +679,45 @@ describe('useCommandCompletion', () => {
       },
     );
 
+    it.each(['/tmp/foo.txt please /sto', '// note /sto'])(
+      'should treat non-command slash-led prefixes as regular mid-input completion: %s',
+      async (input) => {
+        const skillCommand: SlashCommand = {
+          name: 'store-rules',
+          description: 'Store rules',
+          kind: CommandKind.SKILL,
+          modelInvocable: true,
+        };
+
+        setupMocks({
+          slashSuggestions: [{ label: 'store-rules', value: 'store-rules' }],
+        });
+
+        const { result } = renderHook(() =>
+          useCommandCompletion(
+            useTextBufferForTest(input),
+            testRootDir,
+            [skillCommand],
+            mockCommandContext,
+            false,
+            mockConfig,
+          ),
+        );
+
+        await waitFor(() => {
+          expect(result.current.showSuggestions).toBe(true);
+        });
+
+        expect(useSlashCompletion).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            enabled: true,
+            query: '/sto',
+            slashCommands: [skillCommand],
+          }),
+        );
+      },
+    );
+
     it('should keep an indented first command in line-start completion', async () => {
       const skillCommand: SlashCommand = {
         name: 'front-end-store-rules',
@@ -705,6 +744,8 @@ describe('useCommandCompletion', () => {
       );
 
       await waitFor(() => {
+        // This pins routing to the existing line-start path. The real slash
+        // completion may still decide whether an indented query has candidates.
         expect(useSlashCompletion).toHaveBeenLastCalledWith(
           expect.objectContaining({
             enabled: true,

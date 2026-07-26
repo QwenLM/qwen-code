@@ -167,7 +167,7 @@ export function useCommandCompletion(
       const isStackedSkill =
         !isInitialCommandOnFirstLine &&
         isValidStackedSkillPrefix(prefix, slashCommands);
-      const isSlashLedInput = prefix.trimStart().startsWith('/');
+      const isSlashLedInput = isSlashCommand(prefix.trimStart());
       const isRegularMidInput =
         !isInitialCommandOnFirstLine && !isSlashLedInput;
       if (
