@@ -2966,6 +2966,12 @@ jobs:
           set -uo pipefail
           MARKER='<!-- autofix-status -->'
           ROUND_DISPLAY="${EFFECTIVE_ROUND:-${ROUND}}"
+          # ROUND counts rounds already DONE; every other message numbers the
+          # round being performed (the report posts ROUND + 1). Match it, or
+          # the same round carries two different numbers in one thread.
+          if [[ "${ROUND_DISPLAY}" =~ ^[0-9]+$ ]]; then
+            ROUND_DISPLAY="$((ROUND_DISPLAY + 1))"
+          fi
           BODY="$(printf '%s\n\n🔄 **AutoFix is working on this PR** — round %s/%s. [Watch live progress](%s); this round posts its report here when it finishes.\n\n<details>\n<summary>中文说明</summary>\n\n🔄 **AutoFix 正在处理此 PR** —— 第 %s/%s 轮。[查看实时进度](%s)；本轮结束后会在此发布报告。\n\n</details>' \
             "${MARKER}" "${ROUND_DISPLAY}" "${MAX_ROUNDS}" "${RUN_URL}" \
             "${ROUND_DISPLAY}" "${MAX_ROUNDS}" "${RUN_URL}")"
@@ -3747,6 +3753,12 @@ jobs:
             exit 0
           fi
           ROUND_DISPLAY="${EFFECTIVE_ROUND:-${ROUND}}"
+          # ROUND counts rounds already DONE; every other message numbers the
+          # round being performed (the report posts ROUND + 1). Match it, or
+          # the same round carries two different numbers in one thread.
+          if [[ "${ROUND_DISPLAY}" =~ ^[0-9]+$ ]]; then
+            ROUND_DISPLAY="$((ROUND_DISPLAY + 1))"
+          fi
           # 'fixed'/'noop' are the two outcomes that published a round report;
           # anything else means the round stopped before publishing one.
           if [[ "${OUTCOME:-}" == 'fixed' || "${OUTCOME:-}" == 'noop' ]]; then

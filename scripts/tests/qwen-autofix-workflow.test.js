@@ -4885,6 +4885,18 @@ describe('qwen-autofix workflow', () => {
       "STATUS_ID: '${{ steps.post_status.outputs.comment_id }}'",
     );
     expect(finalizeStatusCommentStep).not.toContain('--paginate');
+    // Both status messages number the round being PERFORMED, like every other
+    // message the loop posts. `effective_round` counts rounds already done and
+    // "Push and report" prints ROUND + 1, so using it raw made the status say
+    // "round 5 finished" in the same thread where the report said "round 6/100"
+    // — observed on #7724. Same round must not carry two numbers.
+    for (const statusStep of [
+      postStatusCommentStep,
+      finalizeStatusCommentStep,
+    ]) {
+      expect(statusStep).toContain('ROUND_DISPLAY="$((ROUND_DISPLAY + 1))"');
+      expect(statusStep).toContain('^[0-9]+$');
+    }
     // Tells a round that published a report from one that died before it.
     expect(finalizeStatusCommentStep).toContain("== 'fixed'");
     expect(finalizeStatusCommentStep).toContain(

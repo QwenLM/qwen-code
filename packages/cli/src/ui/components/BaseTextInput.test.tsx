@@ -144,18 +144,6 @@ describe('BaseTextInput', () => {
     expect(buffer.handleInput).toHaveBeenCalledWith(typedKey);
   });
 
-  it('clears the physical cursor position on unmount', () => {
-    const buffer = createBuffer();
-    const { unmount } = render(
-      <BaseTextInput buffer={buffer} onSubmit={vi.fn()} />,
-    );
-
-    mockSetCursorPosition.mockClear();
-    unmount();
-
-    expect(mockSetCursorPosition).toHaveBeenCalledWith(undefined);
-  });
-
   it('hides the physical cursor when showCursor is false', () => {
     const buffer = createBuffer();
 
@@ -164,6 +152,18 @@ describe('BaseTextInput', () => {
     );
 
     expect(mockSetCursorPosition).toHaveBeenCalledWith(undefined);
+  });
+
+  it('leaves cursor cleanup to the useCursor hook', () => {
+    const buffer = createBuffer();
+    const { unmount } = render(
+      <BaseTextInput buffer={buffer} onSubmit={vi.fn()} />,
+    );
+
+    mockSetCursorPosition.mockClear();
+    unmount();
+
+    expect(mockSetCursorPosition).not.toHaveBeenCalled();
   });
 
   it('positions the physical cursor from absolute Ink DOM position', () => {
