@@ -62,9 +62,13 @@ class DaemonServeE2ETest {
                 }
             };
 
-            PromptTerminal terminal = session.startPrompt(PromptRequest.text(
+            PromptCall call = session.startPrompt(PromptRequest.text(
                     "Create the requested test file, then report completion."),
-                    observer).completionFuture()
+                    observer);
+            PromptAcceptance acceptance = call.acceptanceFuture()
+                    .orTimeout(5, TimeUnit.SECONDS).join();
+            assertTrue(acceptance.getEventEpoch() != null);
+            PromptTerminal terminal = call.completionFuture()
                     .orTimeout(30, TimeUnit.SECONDS).join();
             assertEquals(PromptTerminal.Kind.COMPLETE, terminal.getKind());
             assertTrue(text.toString().contains(expectedText));

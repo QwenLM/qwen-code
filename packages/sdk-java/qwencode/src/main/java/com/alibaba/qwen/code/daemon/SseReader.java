@@ -14,6 +14,7 @@ final class SseReader {
     private final BufferedInputStream input;
     private final int maximumFrameBytes;
     private Long retryMillis;
+    private boolean firstLine = true;
 
     SseReader(InputStream input, int maximumFrameBytes, Runnable activity) {
         this.input = new BufferedInputStream(new ActivityInputStream(input, activity));
@@ -27,16 +28,22 @@ final class SseReader {
         boolean hasData = false;
         int frameBytes = 0;
         while (true) {
-            byte[] line = readLine();
+            Line line = readLine();
             if (line == null) {
                 return null;
             }
-            frameBytes += line.length + 1;
+            frameBytes += line.wireBytes;
             if (frameBytes > maximumFrameBytes) {
                 throw new DaemonProtocolException("SSE frame exceeds "
                         + maximumFrameBytes + " bytes");
             }
-            String decoded = decode(line);
+            String decoded = decode(line.bytes);
+            if (firstLine) {
+                firstLine = false;
+                if (decoded.startsWith("\uFEFF")) {
+                    decoded = decoded.substring(1);
+                }
+            }
             if (decoded.isEmpty()) {
                 if (!hasData) {
                     event = null;
@@ -115,28 +122,40 @@ final class SseReader {
         }
     }
 
-    private byte[] readLine() throws IOException {
+    private Line readLine() throws IOException {
         ByteArrayOutputStream line = new ByteArrayOutputStream();
         while (true) {
             int next = input.read();
             if (next < 0) {
                 return null;
             }
-            if (next == '\n') {
-                byte[] bytes = line.toByteArray();
-                if (bytes.length > 0 && bytes[bytes.length - 1] == '\r') {
-                    byte[] withoutCarriageReturn = new byte[bytes.length - 1];
-                    System.arraycopy(bytes, 0, withoutCarriageReturn, 0,
-                            withoutCarriageReturn.length);
-                    return withoutCarriageReturn;
+            if (next == '\r') {
+                input.mark(1);
+                int following = input.read();
+                if (following >= 0 && following != '\n') {
+                    input.reset();
                 }
-                return bytes;
+                return new Line(line.toByteArray(), line.size()
+                        + (following == '\n' ? 2 : 1));
+            }
+            if (next == '\n') {
+                return new Line(line.toByteArray(), line.size() + 1);
             }
             line.write(next);
             if (line.size() > maximumFrameBytes) {
                 throw new DaemonProtocolException("SSE line exceeds "
                         + maximumFrameBytes + " bytes");
             }
+        }
+    }
+
+    private static final class Line {
+        private final byte[] bytes;
+        private final int wireBytes;
+
+        Line(byte[] bytes, int wireBytes) {
+            this.bytes = bytes;
+            this.wireBytes = wireBytes;
         }
     }
 
@@ -152,7 +171,7 @@ final class SseReader {
     }
 
     private static Long parseId(String value) {
-        if (value.isEmpty() || !value.chars().allMatch(Character::isDigit)) {
+        if (value.isEmpty() || !isAsciiDigits(value)) {
             throw new DaemonProtocolException("SSE id must be a positive integer");
         }
         try {
@@ -174,7 +193,7 @@ final class SseReader {
         if (value.isEmpty()) {
             return null;
         }
-        if (!value.chars().allMatch(Character::isDigit)) {
+        if (!isAsciiDigits(value)) {
             throw new DaemonProtocolException("SSE retry must be a non-negative integer");
         }
         try {
@@ -182,6 +201,11 @@ final class SseReader {
         } catch (NumberFormatException e) {
             throw new DaemonProtocolException("SSE retry is outside the long range", e);
         }
+    }
+
+    private static boolean isAsciiDigits(String value) {
+        return value.chars().allMatch(character ->
+                character >= '0' && character <= '9');
     }
 
     static final class Frame {

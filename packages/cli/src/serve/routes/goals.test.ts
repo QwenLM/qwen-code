@@ -17,7 +17,12 @@ import type {
   BridgeSessionSummary,
 } from '@qwen-code/acp-bridge';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import { registerGoalsRoutes, type GoalsSessionBridge } from './goals.js';
+import { createWorkspaceGenerationGuard } from '../workspace-registry.js';
+import {
+  registerGoalsRoutes,
+  type GoalsSessionBridge,
+  type RegisterGoalsRoutesDeps,
+} from './goals.js';
 
 const WORKSPACE = '/w';
 
@@ -42,9 +47,12 @@ const activeGoal = (
 
 const noGoal: BridgeSessionGoal = { active: null };
 
-function makeApp(bridge: GoalsSessionBridge) {
+function makeApp(
+  bridge: GoalsSessionBridge,
+  overrides: Partial<RegisterGoalsRoutesDeps> = {},
+) {
   const app = express();
-  registerGoalsRoutes(app, { boundWorkspace: WORKSPACE, bridge });
+  registerGoalsRoutes(app, { boundWorkspace: WORKSPACE, bridge, ...overrides });
   return app;
 }
 
@@ -59,6 +67,52 @@ describe('GET /goals', () => {
 
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ v: 1, goals: [], droppedCount: 0 });
+  });
+
+  it('rejects reads when the live primary workspace is untrusted', async () => {
+    const listWorkspaceSessions = vi.fn(() => []);
+    const app = makeApp(
+      {
+        listWorkspaceSessions,
+        getSessionGoal: async () => noGoal,
+      },
+      { isWorkspaceTrusted: () => false },
+    );
+
+    const res = await request(app).get('/goals');
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('untrusted_workspace');
+    expect(listWorkspaceSessions).not.toHaveBeenCalled();
+  });
+
+  it('does not return goals after the captured generation closes', async () => {
+    let releaseGoal!: (goal: BridgeSessionGoal) => void;
+    const pendingGoal = new Promise<BridgeSessionGoal>((resolve) => {
+      releaseGoal = resolve;
+    });
+    const generationGuard = createWorkspaceGenerationGuard();
+    const getSessionGoal = vi.fn(() => pendingGoal);
+    const app = makeApp(
+      {
+        listWorkspaceSessions: () => [summary('s1')],
+        getSessionGoal,
+      },
+      {
+        captureGenerationAssertion: () => () => generationGuard.assertOpen(),
+      },
+    );
+
+    const response = request(app)
+      .get('/goals')
+      .then((result) => result);
+    await vi.waitFor(() => expect(getSessionGoal).toHaveBeenCalledOnce());
+    generationGuard.close();
+    releaseGoal(activeGoal('stale goal'));
+    const res = await response;
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
   });
 
   it('projects each active goal onto its session, newest first', async () => {

@@ -13,6 +13,10 @@ import { TABLE_MAX_ROW_LINES as MAX_ROW_LINES } from './pending-rendered-height.
 import { theme } from '../semantic-colors.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import {
+  INLINE_CODE_SPAN_PATTERN_SOURCE,
+  INLINE_MATH_PATTERN_SOURCE,
+} from './inline-math.js';
+import {
   MD_LINK_CAPTURE,
   MD_LINK_PATTERN,
   isSafeOscScheme,
@@ -42,17 +46,14 @@ const ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH = 24;
 /** Safety margin to account for terminal resize races */
 const SAFETY_MARGIN = 4;
 
-const INLINE_MATH_MAX_CHARS = 1024;
-
-const INLINE_MATH_PATTERN = String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])`;
 const INLINE_MARKDOWN_REGEX = new RegExp(
   String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
-    String.raw`\`+.+?\`+|<u>.*?<\/u>|https?:\/\/\S+)`,
+    String.raw`${INLINE_CODE_SPAN_PATTERN_SOURCE}|<u>.*?<\/u>|https?:\/\/\S+)`,
   'g',
 );
 const INLINE_MARKDOWN_WITH_MATH_REGEX = new RegExp(
   String.raw`(\*\*.*?\*\*|\*.*?\*|_.*?_|~~.*?~~|${MD_LINK_PATTERN}|` +
-    String.raw`\`+.+?\`+|${INLINE_MATH_PATTERN}|<u>.*?<\/u>|https?:\/\/\S+)`,
+    String.raw`${INLINE_CODE_SPAN_PATTERN_SOURCE}|${INLINE_MATH_PATTERN_SOURCE}|<u>.*?<\/u>|https?:\/\/\S+)`,
   'g',
 );
 

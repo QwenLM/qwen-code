@@ -279,6 +279,68 @@ export function getOrCreateSharedDispatcher(
   return dispatcher;
 }
 
+let resolvedProxyUrlForRuntimeFetch: string | undefined;
+
+/**
+ * Records the explicit proxy URL (`--proxy` / `settings.proxy`, resolved by
+ * `Config.getProxy()`) at the moment the config installs the process-wide
+ * proxy dispatcher. Paths without a Config reference — the MCP transport
+ * fetch below — read it back so an explicitly configured proxy is honored
+ * even off the global dispatcher.
+ */
+export function setResolvedProxyUrlForRuntimeFetch(
+  proxyUrl: string | undefined,
+): void {
+  resolvedProxyUrlForRuntimeFetch = proxyUrl || undefined;
+}
+
+/**
+ * Cached dispatcher for the MCP streamable HTTP fetch (#7147/#7195): the MCP
+ * transport pins undici's own fetch with a dedicated dispatcher (Node's
+ * bundled fetch stalls same-origin POSTs behind the transport's standalone
+ * SSE stream), and that dispatcher must still honor proxies:
+ *
+ * - With an explicit `--proxy`/settings proxy (recorded via
+ *   {@link setResolvedProxyUrlForRuntimeFetch}) it reuses the same cached
+ *   proxy-aware dispatcher as the LLM path (`getOrCreateSharedDispatcher`),
+ *   so MCP and LLM traffic share one pool and one timeout policy.
+ * - Otherwise it uses a cached `EnvHttpProxyAgent` with no explicit URL,
+ *   which honors `HTTP(S)_PROXY`/`NO_PROXY` from the environment and
+ *   dispatches directly when none are set — with the same disabled
+ *   header/body timeouts (a standalone SSE stream legitimately idles past
+ *   undici's 300s defaults).
+ */
+export function getOrCreateMcpDispatcher(
+  insecure: boolean = isTlsVerificationDisabled(),
+): Dispatcher {
+  if (resolvedProxyUrlForRuntimeFetch) {
+    return getOrCreateSharedDispatcher(
+      resolvedProxyUrlForRuntimeFetch,
+      insecure,
+    );
+  }
+  const cacheKey = insecure ? '__env_proxy__#insecure' : '__env_proxy__';
+  const cached = dispatcherCache.get(cacheKey);
+  if (cached) {
+    return cached;
+  }
+  const { EnvHttpProxyAgent } = requireUndici();
+  const dispatcher = new EnvHttpProxyAgent({
+    headersTimeout: 0,
+    bodyTimeout: 0,
+    keepAliveTimeout: 60_000,
+    ...(insecure
+      ? {
+          connect: { rejectUnauthorized: false },
+          requestTls: { rejectUnauthorized: false },
+          proxyTls: { rejectUnauthorized: false },
+        }
+      : {}),
+  });
+  dispatcherCache.set(cacheKey, dispatcher);
+  return dispatcher;
+}
+
 /**
  * Reset the dispatcher cache (for testing only)
  * @internal
@@ -286,6 +348,7 @@ export function getOrCreateSharedDispatcher(
 export function resetDispatcherCache(): void {
   dispatcherCache.clear();
   proxyFailureCounts.clear();
+  resolvedProxyUrlForRuntimeFetch = undefined;
 }
 
 /**

@@ -105,6 +105,7 @@ describe('useCompletion', () => {
       expect(result.current.isPerfectMatch).toBe(false);
       expect(result.current.activeSuggestionIndex).toBe(-1);
       expect(result.current.visibleStartIndex).toBe(0);
+      expect(result.current.activeCategory).toBe('all');
     });
 
     it('does NOT reset skipNextClearRef, preserving the fix for Enter-accept', () => {
@@ -231,6 +232,155 @@ describe('useCompletion', () => {
         result.current.navigateDown();
       });
       expect(result.current.activeSuggestionIndex).toBe(0);
+    });
+  });
+
+  describe('category tabs', () => {
+    const mixed = [
+      { label: 'a.ts', value: 'a.ts', category: 'file' as const },
+      { label: 'S', value: 'session:1', category: 'session' as const },
+    ];
+
+    it('derives availableCategories from present categories', () => {
+      const { result } = renderHook(() => useCompletion());
+      act(() => {
+        result.current.setSuggestions(mixed);
+      });
+      expect(result.current.availableCategories).toEqual([
+        'all',
+        'file',
+        'session',
+      ]);
+      expect(result.current.activeCategory).toBe('all');
+    });
+
+    it('keeps a single "all" tab for a single-category set', () => {
+      const { result } = renderHook(() => useCompletion());
+      act(() => {
+        result.current.setSuggestions([mixed[0]]);
+      });
+      expect(result.current.availableCategories).toEqual(['all']);
+    });
+
+    it('cycles the active category and resets the active index', () => {
+      const { result } = renderHook(() => useCompletion());
+      act(() => {
+        result.current.setSuggestions(mixed);
+      });
+      act(() => result.current.switchCategory(1));
+      expect(result.current.activeCategory).toBe('file');
+      expect(result.current.activeSuggestionIndex).toBe(0);
+    });
+
+    it('cycles backwards with direction -1 and wraps from all to last', () => {
+      const { result } = renderHook(() => useCompletion());
+      act(() => {
+        result.current.setSuggestions(mixed);
+      });
+      // availableCategories = ['all', 'file', 'session']
+      act(() => result.current.switchCategory(-1)); // 'all' -> 'session' (wrap)
+      expect(result.current.activeCategory).toBe('session');
+      expect(result.current.activeSuggestionIndex).toBe(0);
+    });
+
+    it('wraps around backwards through all categories', () => {
+      const { result } = renderHook(() => useCompletion());
+      act(() => {
+        result.current.setSuggestions(mixed);
+      });
+      act(() => result.current.switchCategory(-1)); // 'all' -> 'session'
+      expect(result.current.activeCategory).toBe('session');
+      act(() => result.current.switchCategory(-1)); // 'session' -> 'file'
+      expect(result.current.activeCategory).toBe('file');
+      act(() => result.current.switchCategory(-1)); // 'file' -> 'all'
+      expect(result.current.activeCategory).toBe('all');
+    });
+
+    it('filters the exposed suggestions to the active category', () => {
+      const { result } = renderHook(() => useCompletion());
+      act(() => {
+        result.current.setSuggestions(mixed);
+      });
+      act(() => result.current.switchCategory(1)); // → file
+      expect(result.current.suggestions).toEqual([mixed[0]]);
+      act(() => result.current.switchCategory(1)); // → session
+      expect(result.current.suggestions).toEqual([mixed[1]]);
+    });
+
+    it('falls back to "all" when the active tab disappears', () => {
+      const { result } = renderHook(() => useCompletion());
+      act(() => {
+        result.current.setSuggestions(mixed);
+      });
+      act(() => result.current.switchCategory(2 as 1)); // → session
+      expect(result.current.activeCategory).toBe('session');
+      act(() => {
+        // new set no longer has a session category
+        result.current.setSuggestions([mixed[0]]);
+      });
+      expect(result.current.activeCategory).toBe('all');
+    });
+
+    it('resets activeSuggestionIndex and visibleStartIndex when the active tab disappears', () => {
+      const { result } = renderHook(() => useCompletion());
+      act(() => {
+        result.current.setSuggestions(mixed);
+      });
+      act(() => result.current.switchCategory(2 as 1)); // → session
+      act(() => {
+        result.current.setActiveSuggestionIndex(3);
+        result.current.setVisibleStartIndex(2);
+      });
+      expect(result.current.activeSuggestionIndex).toBe(3);
+      expect(result.current.visibleStartIndex).toBe(2);
+
+      act(() => {
+        result.current.setSuggestions([mixed[0]]);
+      });
+      expect(result.current.activeCategory).toBe('all');
+      expect(result.current.activeSuggestionIndex).toBe(0);
+      expect(result.current.visibleStartIndex).toBe(0);
+    });
+
+    it('clamps activeSuggestionIndex when the suggestion list shrinks', () => {
+      const { result } = renderHook(() => useCompletion());
+      act(() => {
+        result.current.setSuggestions([
+          { label: 'a', value: 'a', category: 'file' as const },
+          { label: 'b', value: 'b', category: 'file' as const },
+          { label: 'c', value: 'c', category: 'file' as const },
+        ]);
+        result.current.setActiveSuggestionIndex(2);
+      });
+      expect(result.current.activeSuggestionIndex).toBe(2);
+
+      act(() => {
+        result.current.setSuggestions([
+          { label: 'a', value: 'a', category: 'file' as const },
+        ]);
+      });
+      expect(result.current.activeSuggestionIndex).toBe(0);
+    });
+
+    it('clamps visibleStartIndex when the suggestion list shrinks', () => {
+      const { result } = renderHook(() => useCompletion());
+      const many = Array.from({ length: 12 }, (_, i) => ({
+        label: `f${i}`,
+        value: `f${i}`,
+        category: 'file' as const,
+      }));
+      act(() => {
+        result.current.setSuggestions(many);
+        result.current.setVisibleStartIndex(8);
+        result.current.setActiveSuggestionIndex(10);
+      });
+      expect(result.current.visibleStartIndex).toBe(8);
+
+      act(() => {
+        result.current.setSuggestions(many.slice(0, 2));
+      });
+      expect(result.current.activeSuggestionIndex).toBe(1);
+      expect(result.current.visibleStartIndex).toBe(0);
     });
   });
 });

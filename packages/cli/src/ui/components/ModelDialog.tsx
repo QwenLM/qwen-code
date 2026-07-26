@@ -116,6 +116,7 @@ interface ModelDialogProps {
   isFastModelMode?: boolean;
   isVoiceModelMode?: boolean;
   isVisionModelMode?: boolean;
+  isImageModelMode?: boolean;
   /** Override which settings scope to persist the selection to. */
   persistScope?: 'workspace' | 'user';
   /** Persist main model selections as the default for future sessions. */
@@ -293,6 +294,7 @@ export function ModelDialog({
   isFastModelMode,
   isVoiceModelMode,
   isVisionModelMode,
+  isImageModelMode,
   persistScope,
   persistDefault = false,
   availableTerminalHeight,
@@ -311,15 +313,26 @@ export function ModelDialog({
     const allModels = config ? config.getAllConfiguredModels() : [];
 
     // Separate runtime models from registry models
-    const runtimeModels = allModels.filter((m) => m.isRuntimeModel);
-    const registryModels = allModels.filter(
-      (m) =>
+    const runtimeModels = isImageModelMode
+      ? []
+      : allModels.filter((m) => m.isRuntimeModel);
+    const registryModels = allModels.filter((m) => {
+      const imageModelSelector = encodeVisionModelSelector(
+        buildModelSelectionKey(m.authType, m.id, m.baseUrl),
+      );
+      const isSelectableImageModel = isImageModelMode
+        ? m.imageOnly === true &&
+          config?.resolveImageGenerationModel(imageModelSelector) !== undefined
+        : m.imageOnly !== true;
+      return (
         !m.isRuntimeModel &&
         (m.authType !== AuthType.QWEN_OAUTH ||
           authType === AuthType.QWEN_OAUTH) &&
+        isSelectableImageModel &&
         (isFastModelMode || !m.fastOnly) &&
-        (isVoiceModelMode || !m.voiceOnly),
-    );
+        (isVoiceModelMode || !m.voiceOnly)
+      );
+    });
 
     // Group registry models by authType
     const modelsByAuthTypeMap = new Map<AuthType, CoreAvailableModel[]>();
@@ -372,7 +385,7 @@ export function ModelDialog({
     }
 
     return result;
-  }, [authType, config, isFastModelMode, isVoiceModelMode]);
+  }, [authType, config, isFastModelMode, isImageModelMode, isVoiceModelMode]);
 
   const MODEL_OPTIONS = useMemo(
     () =>
@@ -471,7 +484,9 @@ export function ModelDialog({
   const visionModelSetting = settings?.merged?.visionModel as
     | string
     | undefined;
+  const imageModelSetting = settings?.merged?.imageModel as string | undefined;
   const parsedVisionModelValue = parseVisionModelSetting(visionModelSetting);
+  const parsedImageModelValue = parseVisionModelSetting(imageModelSetting);
   const parsedFastModelSetting = useMemo(() => {
     if (!isFastModelMode) return undefined;
     try {
@@ -488,17 +503,27 @@ export function ModelDialog({
       return undefined;
     }
   }, [parsedVisionModelValue?.selector, isVisionModelMode]);
+  const parsedImageModelSetting = useMemo(() => {
+    if (!isImageModelMode) return undefined;
+    try {
+      return resolveModelId(parsedImageModelValue?.selector);
+    } catch {
+      return undefined;
+    }
+  }, [parsedImageModelValue?.selector, isImageModelMode]);
   const preferredModelId =
     isFastModelMode && parsedFastModelSetting
       ? parsedFastModelSetting.modelId
       : isVisionModelMode && parsedVisionModelSetting
         ? parsedVisionModelSetting.modelId
-        : config?.getModel() || MAINLINE_CODER_MODEL;
+        : isImageModelMode && parsedImageModelSetting
+          ? parsedImageModelSetting.modelId
+          : config?.getModel() || MAINLINE_CODER_MODEL;
   // Check if current model is a runtime model
   // Runtime snapshot ID is already in $runtime|${authType}|${modelId} format
   const activeRuntimeSnapshot =
-    isFastModelMode || isVoiceModelMode || isVisionModelMode
-      ? undefined // fast/voice/vision models are never runtime model selections
+    isFastModelMode || isVoiceModelMode || isVisionModelMode || isImageModelMode
+      ? undefined
       : config?.getActiveRuntimeModelSnapshot?.();
   const currentBaseUrl = config
     ?.getModelsConfig()
@@ -547,6 +572,23 @@ export function ModelDialog({
               matchesVisionModelBaseUrl(model),
           )
       : undefined;
+  const preferredImageModelEntry =
+    isImageModelMode && parsedImageModelSetting
+      ? parsedImageModelSetting.authType
+        ? availableModelEntries.find(
+            ({ authType: t2, model }) =>
+              t2 === parsedImageModelSetting.authType &&
+              model.id === parsedImageModelSetting.modelId &&
+              (!parsedImageModelValue?.baseUrl ||
+                model.baseUrl === parsedImageModelValue.baseUrl),
+          )
+        : availableModelEntries.find(
+            ({ model }) =>
+              model.id === parsedImageModelSetting.modelId &&
+              (!parsedImageModelValue?.baseUrl ||
+                model.baseUrl === parsedImageModelValue.baseUrl),
+          )
+      : undefined;
   const preferredKey = activeRuntimeSnapshot
     ? activeRuntimeSnapshot.id
     : preferredVoiceModelEntry
@@ -561,22 +603,35 @@ export function ModelDialog({
             preferredVisionModelEntry.model.id,
             preferredVisionModelEntry.model.baseUrl,
           )
-        : preferredFastModelEntry
+        : preferredImageModelEntry
           ? buildModelSelectionKey(
-              preferredFastModelEntry.authType,
-              preferredFastModelEntry.model.id,
-              preferredFastModelEntry.model.baseUrl,
+              preferredImageModelEntry.authType,
+              preferredImageModelEntry.model.id,
+              preferredImageModelEntry.model.baseUrl,
             )
-          : authType
-            ? buildModelSelectionKey(authType, preferredModelId, currentBaseUrl)
-            : '';
+          : preferredFastModelEntry
+            ? buildModelSelectionKey(
+                preferredFastModelEntry.authType,
+                preferredFastModelEntry.model.id,
+                preferredFastModelEntry.model.baseUrl,
+              )
+            : authType
+              ? buildModelSelectionKey(
+                  authType,
+                  preferredModelId,
+                  currentBaseUrl,
+                )
+              : '';
 
   useKeypress(
     (key) => {
       if (
         key.name === 'escape' ||
         (key.name === 'left' &&
-          (isFastModelMode || isVoiceModelMode || isVisionModelMode))
+          (isFastModelMode ||
+            isVoiceModelMode ||
+            isVisionModelMode ||
+            isImageModelMode))
       ) {
         onClose();
       }
@@ -739,6 +794,43 @@ export function ModelDialog({
         return;
       }
 
+      if (isImageModelMode) {
+        if (!selectedEntry || !config) {
+          setErrorMessage(t('Selected image model is unavailable.'));
+          return;
+        }
+        const imageModel = encodeVisionModelSelector(selected);
+        const imageModelDisplay =
+          parseVisionModelSetting(imageModel)?.selector ?? imageModel;
+        if (!config.resolveImageGenerationModel(imageModel)) {
+          setErrorMessage(
+            t(
+              "'{{model}}' must declare a valid HTTPS baseUrl and credential environment variable.",
+              { model: imageModelDisplay },
+            ),
+          );
+          return;
+        }
+        const scope = resolvePersistScope(settings, persistScope);
+        settings.setValue(scope, 'imageModel', imageModel);
+        await config.setImageModel(imageModel);
+        const scopeSuffix =
+          persistScope === 'workspace'
+            ? t(' (this project)')
+            : persistScope === 'user'
+              ? t(' (global)')
+              : '';
+        uiState?.historyManager.addItem(
+          {
+            type: 'success',
+            text: `${t('Image Model')}: ${imageModelDisplay}${scopeSuffix}`,
+          },
+          Date.now(),
+        );
+        onClose();
+        return;
+      }
+
       // Block selection of discontinued qwen-oauth models
       // (only block non-runtime OAuth; runtime OAuth models from existing
       //  cached tokens are still allowed to work until the server rejects them)
@@ -857,6 +949,7 @@ export function ModelDialog({
       isFastModelMode,
       isVoiceModelMode,
       isVisionModelMode,
+      isImageModelMode,
       availableModelEntries,
       persistScope,
       persistDefault,
@@ -878,11 +971,13 @@ export function ModelDialog({
           ? t('Select Voice Model')
           : isVisionModelMode
             ? t('Select Vision Model')
-            : isFastModelMode
-              ? t('Select Fast Model')
-              : persistDefault
-                ? t('Set Default Model')
-                : t('Select Model')) +
+            : isImageModelMode
+              ? t('Select Image Model')
+              : isFastModelMode
+                ? t('Select Fast Model')
+                : persistDefault
+                  ? t('Set Default Model')
+                  : t('Select Model')) +
           (persistScope === 'workspace'
             ? t(' (this project)')
             : persistScope === 'user'

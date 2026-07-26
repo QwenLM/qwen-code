@@ -1071,6 +1071,29 @@ describe('loadCliConfig', () => {
     expect(process.env['QWEN_DEBUG_LOG_FILE']).toBeUndefined();
   });
 
+  describe('usage statistics', () => {
+    it.each<[string, string | undefined, boolean | undefined, boolean]>([
+      ['defaults to enabled', undefined, undefined, true],
+      ['uses a disabled setting', undefined, false, false],
+      ['lets true override a disabled setting', 'true', false, true],
+      ['lets 1 override a disabled setting', '1', false, true],
+      ['lets false override an enabled setting', 'false', true, false],
+      ['lets 0 override an enabled setting', '0', true, false],
+    ])('%s', async (_name, envValue, settingValue, expected) => {
+      vi.stubEnv('QWEN_USAGE_STATISTICS_ENABLED', envValue);
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const settings: Settings =
+        settingValue === undefined
+          ? {}
+          : { privacy: { usageStatisticsEnabled: settingValue } };
+
+      const config = await loadCliConfig(settings, argv);
+
+      expect(config.getUsageStatisticsEnabled()).toBe(expected);
+    });
+  });
+
   it('should use configured context file name when settings.context.fileName is set', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -1300,6 +1323,24 @@ describe('loadCliConfig', () => {
     expect(mockConfigConstructorParams).toHaveBeenCalledWith(
       expect.objectContaining({
         artifactEnabled: false,
+      }),
+    );
+  });
+
+  it('should propagate the image model selection', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig(
+      {
+        imageModel: 'openai:qwen-image-2.0\0https://images.example.com/api/v1',
+      },
+      argv,
+    );
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        imageModel: 'openai:qwen-image-2.0\0https://images.example.com/api/v1',
       }),
     );
   });

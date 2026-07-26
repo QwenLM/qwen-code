@@ -273,6 +273,32 @@ export class ExtensionStore {
     const legacy = await this.readLegacyProjection();
     if (existing) {
       let changed = false;
+      // An id-formula change (e.g. #7568 added the plugin name to the hash)
+      // leaves installed extensions pointing at ids the store has never
+      // seen. Without this re-key, the blocks below would mint a fresh
+      // default policy under the new id — resetting activation state — and
+      // strand the old policy as an orphan that later trips the
+      // name-conflict guard on update/uninstall. Names are unique in the
+      // store (enforced case-insensitively on every commit), so a loaded
+      // identity whose id is unknown safely claims the policy stored under
+      // its name, provided no loaded extension still owns that entry.
+      const loadedIds = new Set(extensions.map((identity) => identity.id));
+      for (const identity of extensions) {
+        assertIdentity(identity);
+        if (existing.extensions[identity.id]) continue;
+        const staleEntry = Object.entries(existing.extensions).find(
+          ([id, policy]) =>
+            !loadedIds.has(id) &&
+            policy.name.toLowerCase() === identity.name.toLowerCase(),
+        );
+        if (staleEntry) {
+          const [staleId, policy] = staleEntry;
+          delete existing.extensions[staleId];
+          policy.name = identity.name;
+          existing.extensions[identity.id] = policy;
+          changed = true;
+        }
+      }
       if (existing.legacyProjectionHash !== projectionHash(legacy)) {
         if (!(await this.legacyProjectionIsNewerThanState())) {
           try {

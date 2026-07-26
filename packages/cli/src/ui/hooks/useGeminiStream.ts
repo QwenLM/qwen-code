@@ -2942,6 +2942,15 @@ export const useGeminiStream = (
           // a new conversation turn (cleared in submitQuery).
           if (retryCountdownTimerRef.current) {
             clearRetryCountdown();
+          } else if (
+            pendingRetryErrorItemRef.current &&
+            !lastPromptErroredRef.current
+          ) {
+            // A countdown-originated error item lingers after the timer
+            // expired and the retry succeeded. Clear it so it does not
+            // stay on screen. Terminal errors (handleErrorEvent) set
+            // lastPromptErroredRef and are intentionally left visible.
+            clearRetryCountdown();
           }
           const loopDetected = loopDetectedRef.current;
           if (loopDetected) {

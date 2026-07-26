@@ -14,7 +14,7 @@ Subagents are independent AI assistants that:
 
 ## Fork Subagent
 
-In addition to named subagents, Qwen Code supports **forking** — selected explicitly with `subagent_type: "fork"` (available in interactive sessions). A fork inherits the parent's full conversation context and runs detached in the background. Omitting `subagent_type` does **not** fork; it launches the general-purpose subagent. Top-level named subagents run in the background by default and deliver their results through completion notifications. Set `run_in_background: false` when the current turn must wait for the result inline.
+In addition to named subagents, Qwen Code supports **forking** — selected explicitly with `subagent_type: "fork"`. A fork inherits the parent's full conversation context and normally runs detached in the background. Forks work in both interactive and headless sessions; headless forks always use the background path. Omitting `subagent_type` does **not** fork; it launches the general-purpose subagent. Top-level named subagents run in the background by default and deliver their results through completion notifications. Set `run_in_background: false` when the current turn must wait for a regular subagent's result inline.
 
 ## Fork Context with `fork_turns`
 
@@ -50,9 +50,8 @@ All forks share the parent's exact API request prefix (system prompt, tools, con
 
 Fork children cannot create further forks. This is enforced at runtime — if a fork attempts to spawn another fork, it receives an error instructing it to execute tasks directly.
 
-### Current Limitations
+### Current Limitation
 
-- **No result feedback**: Fork results are reflected in the UI progress display but are not automatically fed back into the main conversation. The parent AI sees a placeholder message and cannot act on the fork's output.
 - **No worktree isolation**: Forks share the parent's working directory. Concurrent file modifications from multiple forks may conflict.
 
 ## Key Benefits
@@ -68,9 +67,28 @@ Fork children cannot create further forks. This is enforced at runtime — if a 
 ## How Subagents Work
 
 1. **Configuration**: You create Subagents configurations that define their behavior, tools, and system prompts
-2. **Delegation**: The main AI can automatically delegate tasks to appropriate Subagents — or fork itself (`subagent_type: "fork"`) when it wants to inherit the full conversation context and discard the intermediate output
+2. **Delegation**: The main AI can automatically delegate tasks to appropriate Subagents — or fork itself (`subagent_type: "fork"`) when it needs the parent conversation context
 3. **Execution**: Subagents work independently, using their configured tools to complete tasks
-4. **Results**: Background runs notify the main conversation when they finish; foreground opt-outs return results inline
+4. **Results**: Background runs send a completion notification containing the result to the main conversation; foreground regular subagents return results inline
+5. **Continuation**: The main AI can use `list_agents` to find background agents and `send_message` to continue a running, paused, or completed agent
+
+## Background Agent Continuation
+
+Top-level regular subagents run in the background by default. After a background agent finishes, Qwen Code keeps enough state to continue related work without launching a duplicate agent:
+
+- `list_agents` returns the addressable background agents in the current session, including compatible agents restored with a resumed session. Each entry includes a `task_id`, status, and whether it can receive a message.
+- `send_message` with that `task_id` queues a message for a running agent, resumes a paused agent, or continues a completed agent. Completed agents reuse their resident runtime when available and otherwise revive from their retained transcript.
+- A continued agent reports its next result through another completion notification.
+
+When a session is restored, compatible background agents are added back to the session roster. A task can be visible but not continuable when its retained state is missing or incompatible; `list_agents` reports the reason in that case.
+
+Use continuation for related follow-up work. Launch a new agent when the task is unrelated or the previous agent cannot be resumed.
+
+## Agent Working Directory
+
+For a named regular subagent, `working_dir` pins the agent to an existing git worktree in the current repository. Relative paths resolve from the current directory, and the worktree must already be registered with git and live inside the repository.
+
+A `working_dir` launch runs in the foreground because Qwen Code does not own that worktree's lifecycle. It cannot be combined with `subagent_type: "fork"` or background execution. If both `working_dir` and `isolation: "worktree"` are supplied, Qwen Code reuses the caller-owned worktree instead of creating another one.
 
 ## Getting Started
 

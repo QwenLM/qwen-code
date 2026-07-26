@@ -238,7 +238,11 @@ export {
 } from './services/chatCompressionService.js';
 export * from './services/chatRecordingService.js';
 export * from './services/cronScheduler.js';
-export type { DurableCronTask, CronTaskRun } from './services/cronTasksFile.js';
+export type {
+  CronTaskDelivery,
+  DurableCronTask,
+  CronTaskRun,
+} from './services/cronTasksFile.js';
 export {
   readCronTasks,
   updateCronTasks,
@@ -248,12 +252,17 @@ export {
   appendCronRun,
   taskHasLegacyCondition,
   MAX_TASK_RUNS,
+  MAX_CHANNEL_DELIVERY_NAME_LENGTH,
+  MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH,
 } from './services/cronTasksFile.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';
 export * from './services/fileReadCache.js';
 export * from './services/fileSystemService.js';
-export { decodeBufferWithEncodingInfo } from './utils/fileUtils.js';
+export {
+  decodeBufferWithEncodingInfo,
+  encodeTextFileContent,
+} from './utils/sync-file-encoding.js';
 export * from './services/gitWorktreeService.js';
 export { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from './services/loopDetectionService.js';
 export * from './services/visionBridge/vision-bridge-service.js';
@@ -261,6 +270,7 @@ export * from './services/visionBridge/image-part-utils.js';
 export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
+export * from './services/session-reference-service.js';
 export * from './services/sessionService.js';
 export * from './services/session-writer-lease.js';
 export {
@@ -505,6 +515,7 @@ export * from './utils/gitDiff.js';
 export * from './utils/gitDirect.js';
 export * from './utils/gitIgnoreParser.js';
 export * from './utils/gitUtils.js';
+export * from './utils/github-prs.js';
 export * from './utils/ignorePatterns.js';
 export * from './utils/invocation-context.js';
 export {
@@ -524,6 +535,7 @@ export {
   openaiLogger,
   resolveOpenAILogDir,
 } from './utils/openaiLogger.js';
+export * from './utils/osc8.js';
 export * from './utils/partUtils.js';
 export * from './utils/sessionStorageUtils.js';
 export * from './utils/pathReader.js';

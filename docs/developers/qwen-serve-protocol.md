@@ -187,7 +187,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'permission_mediation', 'prompt_absolute_deadline', 'writer_idle_timeout',
  'non_blocking_prompt', 'session_language', 'session_rewind',
  'workspace_hooks', 'session_hooks', 'workspace_extensions',
- 'session_branch', 'rate_limit', 'workspace_reload',
+ 'session_branch', 'rate_limit', 'workspace_reload', 'channel_delivery',
  'multi_workspace_sessions', 'multi_workspace_session_rewind',
  'multi_workspace_session_shell', 'persistent_workspace_registration',
  'workspace_display_name',
@@ -435,8 +435,10 @@ operator diagnostic snapshot documented below.
 | `workspace_generation`              | workspace-scoped generation helpers are available.                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `rate_limit`                        | `--rate-limit` / `QWEN_SERVE_RATE_LIMIT=1` / `ServeOptions.rateLimit` is enabled.                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `workspace_reload`                  | workspace reload support is available in the embedded route configuration.                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| `workspace_trust_hot_reload`        | workspace trust policy monitoring and runtime-generation reconciliation are wired, so trust changes take effect without restarting the daemon and v2 trust status reports convergence.                                                                                                                                                                                                                                                                                                                          |
 | `channel_reload`                    | a daemon-managed channel worker manager is enabled and can reload its current selection.                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `channel_control`                   | daemon-managed channel worker runtime control is wired.                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `channel_management`                | workspace-scoped Channel settings, lifecycle, and pairing management are wired.                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `multi_workspace_sessions`          | more than one workspace runtime is registered, so session creation can select a trusted runtime by cwd.                                                                                                                                                                                                                                                                                                                                                                                                         |
 | `multi_workspace_session_rewind`    | more than one workspace runtime is registered; singular live-session rewind routes resolve the owning runtime.                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `multi_workspace_session_shell`     | more than one workspace runtime is registered and session shell execution is explicitly enabled; singular REST shell resolves the owning runtime.                                                                                                                                                                                                                                                                                                                                                               |
@@ -747,6 +749,134 @@ top-level `channels` (union) and `workerPid` (primary) stay populated for older
 readers; single-workspace daemons keep the original single-worker shape. Worker
 stdout/stderr are forwarded into the daemon log with bearer tokens, sensitive
 worker environment values, and proxy URL credentials redacted.
+
+### Workspace Channel management
+
+The `channel_management` capability advertises workspace-scoped Channel
+configuration and runtime management. The singular `/workspace` routes target
+the primary runtime. `/workspaces/:workspace` resolves the exact registered,
+trusted runtime and never falls back to the primary runtime.
+
+Read-only discovery uses:
+
+- `GET /workspace/channel-types`
+- `GET /workspace/channels`
+- `GET /workspaces/:workspace/channel-types`
+- `GET /workspaces/:workspace/channels`
+
+The catalog marks the types supported by this management API with
+`manageable: true`. Instance snapshots include a revision, redacted secret
+presence metadata, startup state, and runtime state; literal secrets are never
+returned. Channel snapshots use `Cache-Control: no-store`.
+
+Configuration writes use optimistic concurrency and the strict bearer-token
+gate:
+
+- `PUT /workspace/channels/:name`
+- `DELETE /workspace/channels/:name`
+- `PUT /workspace/channels/:name/startup`
+- the equivalent `/workspaces/:workspace/...` routes
+
+Each settings mutation includes `expectedRevision`. Upsert requests contain a
+`config` object and may contain explicit secret operations: `preserve`,
+`replace`, or `clear`. A Channel config cannot select a working directory
+outside the resolved workspace.
+
+Runtime actions are strict-gated `POST` requests to
+`.../channels/:name/start`, `stop`, or `restart`. They operate only on the
+worker owned by the resolved workspace.
+
+Pairing management is available only for instances configured with the
+`pairing` sender policy:
+
+- `GET .../channels/:name/pairing-requests`
+- `POST .../channels/:name/pairing-requests/approve` with `{ "code": "..." }`
+
+Both pairing routes require a bearer token and use `Cache-Control: no-store`.
+Approval is scoped to the selected Channel instance and workspace.
+
+### Channel delivery and Notify
+
+`channel_delivery` advertises immediate, best-effort delivery support. It is a
+protocol capability, not a worker health signal. Delivery never starts a
+missing worker, falls back to another workspace, retries, persists an outbox,
+or replays historical notifications.
+
+Direct Notify bypasses Agent and Session and waits for one send attempt:
+
+```http
+POST /workspace/notify
+POST /workspaces/:workspace/notify
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "text": "service unavailable",
+  "delivery": {
+    "kind": "channel",
+    "target": {
+      "channelName": "dingtalk",
+      "type": "user",
+      "id": "platform-user-id"
+    }
+  }
+}
+```
+
+Both routes use the strict mutation gate. The qualified route resolves only a
+registered, trusted workspace. Success is `200 {delivered:true,deliveryId}`.
+`delivered:true` means the Channel send Promise resolved; it does not prove
+provider acceptance, user receipt, or a read receipt. Provider-specific
+response validation and consistent error-reason semantics across IM adapters
+are outside this V1 contract.
+Errors are `400 channel_delivery_invalid`, `503 channel_worker_unavailable` or
+`channel_delivery_queue_full`, `504 channel_delivery_timeout`, and `502
+channel_delivery_rejected` or `channel_delivery_failed`. A timeout has an
+unknown outcome and is not retried.
+There is intentionally no separate connectivity-test endpoint: a normal
+Notify call is the end-to-end test.
+
+The replayable result event contains only correlation and sanitized status:
+
+```json
+{
+  "type": "channel_delivery_result",
+  "promptId": "prompt-1",
+  "data": {
+    "sessionId": "session-1",
+    "deliveryId": "prompt-1",
+    "source": "prompt",
+    "status": "failed",
+    "promptId": "prompt-1",
+    "code": "channel_worker_unavailable",
+    "error": "Channel worker is not running."
+  }
+}
+```
+
+An empty successful Prompt final omits error fields:
+
+```json
+{
+  "type": "channel_delivery_result",
+  "promptId": "prompt-1",
+  "data": {
+    "sessionId": "session-1",
+    "deliveryId": "prompt-1",
+    "source": "prompt",
+    "status": "skipped",
+    "promptId": "prompt-1"
+  }
+}
+```
+
+`source` is `prompt` or `scheduled`; `status` is `delivered`, `failed`, or
+`skipped`. `skipped` means the eligible turn completed successfully but its
+last tool-free assistant response block was empty or whitespace-only. The
+daemon consumes the delivery authorization and publishes the event without
+resolving a Channel Worker. Scheduled correlation uses `taskId` and `firedAt`.
+The event never contains target IDs, message text, credentials, or webhook
+secrets.
 
 Security: the response never includes bearer tokens, client ids, full ACP
 connection ids, device-flow user codes, or verification URLs. Both detail
@@ -1798,7 +1928,7 @@ Response:
 
 `attached: true` means the session was already live (either from a prior `session/load`/`session/resume`, or because a coalesced concurrent caller raced just ahead).
 
-**History replay over SSE.** While `loadSession` is in flight on the agent side, the agent may emit `session_update` notifications for persisted turns, or return bulk replay updates in the response metadata. The daemon seeds those events into the session's bounded replay snapshot window before the route response returns. For live sessions, `POST /session/:id/load` only promises that bounded window (`compactedReplay`, `liveJournal`, `lastEventId`), not the full transcript. The window is byte-capped by `--compacted-replay-max-bytes` (default 4 MiB, maximum 256 MiB); if older replay entries were dropped, `compactedReplay[0]` is an id-less `history_truncated` marker. Clients should render that marker as status and continue applying retained events. Full persisted transcript access is exposed separately through `GET /session/:id/transcript`.
+**History replay over SSE.** While `loadSession` is in flight on the agent side, the agent may emit `session_update` notifications for persisted turns, or return bulk replay updates in the response metadata. The daemon seeds those events into the session's bounded replay snapshot window before the route response returns. For live sessions, `POST /session/:id/load` only promises that bounded window (`compactedReplay`, `liveJournal`, `lastEventId`), not the full transcript. The window is byte-capped by `--compacted-replay-max-bytes` (default 4 MiB, maximum 256 MiB); if older replay entries were dropped, `compactedReplay[0]` is an id-less `history_truncated` marker. The in-flight `liveJournal` is separately capped by `--max-journal-events` (default 10 000) and `--max-journal-bytes` (default 8 MiB); when exceeded, the oldest journal entries are dropped and a `history_truncated` marker with `scope: 'live_journal'` is prepended. Clients should render that marker as status and continue applying retained events. Full persisted transcript access is exposed separately through `GET /session/:id/transcript`.
 
 **Errors:**
 
@@ -2118,33 +2248,49 @@ Request:
 
 ```json
 {
-  "prompt": [{ "type": "text", "text": "What does src/main.ts do?" }]
+  "prompt": [{ "type": "text", "text": "What does src/main.ts do?" }],
+  "delivery": {
+    "kind": "channel",
+    "target": {
+      "channelName": "dingtalk",
+      "type": "user",
+      "id": "platform-user-id"
+    }
+  }
 }
 ```
+
+`delivery` is optional and requires the `channel_delivery` capability. The
+daemon still returns `202 {promptId,lastEventId}` when the prompt is admitted.
+After a successful `end_turn`, the session submits the visible final text to
+the exact workspace's already-running Channel Worker. The payload is only the
+last tool-free assistant response block; tool-call preambles, inter-tool
+narration, superseded retries, and earlier automatic-continuation blocks are
+excluded. An empty or whitespace-only final still produces a correlated
+`channel_delivery_result` with `status: "skipped"` after authorization is
+consumed, but it does not contact a worker. Delivery success or failure arrives
+later through the same replayable event and never changes `turn_complete` into
+`turn_error`. Cancellation, Agent failure, and token-limit termination do not
+send or publish a delivery result.
 
 Validation: `prompt` must be a non-empty array of objects. Other failures return `400` before reaching the bridge.
 
 Response:
 
 ```json
-{ "stopReason": "end_turn" }
+{ "promptId": "session-id########1", "lastEventId": 42 }
 ```
 
-Other stop reasons: `cancelled`, `max_tokens`, `error`, `length` (per ACP spec).
+The `202` response acknowledges admission, not Agent completion. Observe the
+session SSE stream after `lastEventId` and correlate `turn_complete` or
+`turn_error` by `promptId`. `turn_complete.data.stopReason` may be `end_turn`,
+`cancelled`, `max_tokens`, `error`, or `length`.
 
 If the HTTP client disconnects mid-prompt, the daemon sends an ACP `cancel` notification to the agent, which winds the prompt down with `stopReason: "cancelled"`.
 
-> **Stage 1 limitation — no server-side prompt timeout.** The bridge
-> only races the agent's `prompt()` against `transportClosedReject`
-> (the agent child crashing) and the caller's HTTP-disconnect
-> AbortSignal. A wedged-but-alive agent (e.g. a model call that
-> hangs) blocks the per-session FIFO until the HTTP client times out
-> on its end and disconnects. Long-running prompts are legitimate
-> (deep research, large-codebase analysis) so a default deadline is
-> deliberately not set; Stage 2 will expose a configurable
-> `promptTimeoutMs` opt-in. Until then, callers should set their own
-> client-side timeout and disconnect (or call
-> `POST /session/:id/cancel`) on expiry.
+When `prompt_absolute_deadline` is advertised, `deadlineMs` may shorten the
+configured server deadline. Expiry emits a correlated `turn_error` with
+`errorKind: "prompt_deadline_exceeded"`.
 
 ### `POST /session/:id/cancel`
 
@@ -2411,9 +2557,9 @@ SSE event (workspace-scoped): `tool_toggled` with `{toolName, enabled, originato
 
 Capability tag: `workspace_skill_toggle`. The workspace-qualified form is `POST /workspaces/:workspace/skills/:name/enable`.
 
-Toggle a loaded, user-invocable skill through the workspace `skills.disabled` list, matching the CLI `/skills` panel's Space-key behavior. Lookup is case-insensitive, while persistence and the response use the skill's canonical name. Existing disabled entries for skills that are no longer loaded are preserved, and duplicate/case-variant entries for the target are collapsed. A disable entry inherited from system defaults, user, or system scope locks the skill: workspace scope cannot override the merged union.
+Toggle a loaded, user-invocable skill through the workspace skill settings, matching the CLI `/skills` panel's Space-key behavior. Lookup is case-insensitive, while persistence and the response use the skill's canonical name. Enabling a `skills.defaultDisabled` skill adds a workspace `skills.enabled` opt-in; disabling removes that opt-in and adds a workspace `skills.disabled` entry. Existing entries for skills that are no longer loaded are preserved, and duplicate/case-variant entries for the target are collapsed. A hard-disable entry inherited from system defaults, user, or system scope locks the skill: workspace scope cannot override it.
 
-This is different from the ACP `qwen/skills/setEnabled` managed-skill operation and the `disable-model-invocation` frontmatter field. `skills.disabled` removes the skill from slash-command/model availability and rejects later skill execution. `disable-model-invocation: true` keeps direct user invocation available and only hides the skill from model invocation.
+This is different from the ACP `qwen/skills/setEnabled` managed-skill operation and the `disable-model-invocation` frontmatter field. Effective skill availability follows `skills.disabled` > `skills.enabled` > `skills.defaultDisabled`. Both hard and default disables remove the skill from slash-command/model availability and reject later skill execution. `disable-model-invocation: true` keeps direct user invocation available and only hides the skill from model invocation.
 
 Request:
 
@@ -2444,7 +2590,7 @@ Errors:
 - `404 {code: 'skill_not_found'}` — no loaded skill matches the name.
 - `409 {code: 'skill_not_toggleable', reason: 'not_user_invocable' | 'inactive_extension' | 'locked', lockedScope?: 'system' | 'user' | 'systemDefaults'}` — the CLI panel would not allow the target to be toggled. `lockedScope` is present only when `reason` is `locked`.
 
-The mutation reuses the workspace-scoped `settings_changed` event with `key: 'skills.disabled'`; it does not add a new event type.
+The mutation reuses the workspace-scoped `settings_changed` event for each changed key (`skills.disabled` and/or `skills.enabled`); it does not add a new event type. Workspace skill status cells include optional `disabledReason: 'hard' | 'default' | 'inactive_extension'` and `lockedScope: 'system' | 'user' | 'systemDefaults'` fields.
 
 #### `POST /workspace/init`
 
