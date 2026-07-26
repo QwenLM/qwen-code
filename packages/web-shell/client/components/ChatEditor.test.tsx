@@ -35,35 +35,48 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
     ...actual,
     useWorkspace: () => ({
       client: {
+        workspaceGitBranches: vi.fn().mockResolvedValue({
+          v: 1,
+          local: [],
+          remote: [],
+          tags: [],
+          recent: [],
+          head: 'main',
+          detached: false,
+        }),
+        workspaceGitCheckout: vi.fn().mockResolvedValue(undefined),
+        workspaceGitCreateBranch: vi.fn().mockResolvedValue(undefined),
+        workspaceGitPush: vi
+          .fn()
+          .mockResolvedValue({ success: true, output: '' }),
+        workspaceGitPull: vi
+          .fn()
+          .mockResolvedValue({ success: true, output: '' }),
         workspaceByCwd: () => ({
-          workspaceGit: vi
-            .fn()
-            .mockResolvedValue({
-              v: 2,
-              branch: 'main',
-              detached: false,
-              staged: 0,
-              unstaged: 0,
-              untracked: 0,
-              conflicted: 0,
-              hasUpstream: false,
-              ahead: 0,
-              behind: 0,
-              stashCount: 0,
-              operation: null,
-              computedAt: 0,
-            }),
-          workspaceGitBranches: vi
-            .fn()
-            .mockResolvedValue({
-              v: 1,
-              local: [],
-              remote: [],
-              tags: [],
-              recent: [],
-              head: 'main',
-              detached: false,
-            }),
+          workspaceGit: vi.fn().mockResolvedValue({
+            v: 2,
+            branch: 'main',
+            detached: false,
+            staged: 0,
+            unstaged: 0,
+            untracked: 0,
+            conflicted: 0,
+            hasUpstream: false,
+            ahead: 0,
+            behind: 0,
+            stashCount: 0,
+            operation: null,
+            computedAt: 0,
+          }),
+          workspaceGitBranches: vi.fn().mockResolvedValue({
+            v: 1,
+            local: [],
+            remote: [],
+            tags: [],
+            recent: [],
+            head: 'main',
+            detached: false,
+          }),
           listWorkspaceSessions: vi.fn().mockResolvedValue([]),
         }),
       },

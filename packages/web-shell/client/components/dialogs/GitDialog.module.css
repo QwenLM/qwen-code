@@ -229,6 +229,10 @@
   background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
 }
 
+.prBodyTabActive:hover {
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.1));
+}
+
 .prBodyTabActive {
   color: var(--foreground, #e0e0e0);
   background: var(--subtle-bg, rgba(128, 128, 128, 0.1));

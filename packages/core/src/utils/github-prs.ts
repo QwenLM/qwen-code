@@ -325,7 +325,7 @@ export async function getDefaultBranch(cwd: string): Promise<string | null> {
     const { stdout } = await execFileAsync(
       'git',
       ['symbolic-ref', 'refs/remotes/origin/HEAD', '--short'],
-      { cwd: gitRoot, timeout: 5_000, encoding: 'utf8' },
+      { cwd: gitRoot, timeout: 5_000, encoding: 'utf8', windowsHide: true },
     );
     return stdout.trim() || 'origin/main';
   } catch {

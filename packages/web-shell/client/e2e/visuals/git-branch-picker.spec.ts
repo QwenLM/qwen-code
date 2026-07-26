@@ -12,13 +12,12 @@ import {
   userTextEvent,
 } from '../utils/mockDaemon';
 import {
+  captureScreenshot,
   gotoSession,
   installScenario,
   resolveBaseURL,
   VISUAL_VIEWPORT,
 } from './harness';
-
-const OUT = '/Users/wenshao/git/qwen-code/.qwen/pr-screenshots';
 
 test.use({ viewport: { ...VISUAL_VIEWPORT } });
 
@@ -72,10 +71,7 @@ test('branch picker, commit dialog, create PR form', async ({
   await page.waitForTimeout(1500);
 
   // Screenshot 1: Branch picker popover
-  await page.screenshot({
-    path: `${OUT}/01-branch-picker.png`,
-    animations: 'disabled',
-  });
+  await captureScreenshot(page, '01-branch-picker');
 
   // Click "Commit" action in the picker
   const commitAction = page.locator('button:has-text("Commit")').first();
@@ -84,10 +80,7 @@ test('branch picker, commit dialog, create PR form', async ({
   await page.waitForTimeout(2000);
 
   // Screenshot 2: Commit dialog
-  await page.screenshot({
-    path: `${OUT}/02-commit-dialog.png`,
-    animations: 'disabled',
-  });
+  await captureScreenshot(page, '02-commit-dialog');
 
   // Click "Create Pull Request" button
   const createPrBtn = page
@@ -95,14 +88,10 @@ test('branch picker, commit dialog, create PR form', async ({
       'button:has-text("Create Pull Request"), button:has-text("Create PR")',
     )
     .first();
-  if (await createPrBtn.isVisible({ timeout: 3000 })) {
-    await createPrBtn.click();
-    await page.waitForTimeout(2000);
+  await expect(createPrBtn).toBeVisible({ timeout: 3000 });
+  await createPrBtn.click();
+  await page.waitForTimeout(2000);
 
-    // Screenshot 3: Create PR form
-    await page.screenshot({
-      path: `${OUT}/03-create-pr-form.png`,
-      animations: 'disabled',
-    });
-  }
+  // Screenshot 3: Create PR form
+  await captureScreenshot(page, '03-create-pr-form');
 });

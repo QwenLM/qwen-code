@@ -73,6 +73,7 @@ export function GitDialog({
   const [commitMsg, setCommitMsg] = useState('');
   const [commitBusy, setCommitBusy] = useState<'commit' | 'push' | null>(null);
   const [generating, setGenerating] = useState(false);
+  const [genFailed, setGenFailed] = useState(false);
   const [prFormOpen, setPrFormOpen] = useState(false);
   const [prTitle, setPrTitle] = useState('');
   const [prBody, setPrBody] = useState('');
@@ -132,6 +133,7 @@ export function GitDialog({
     const abort = new AbortController();
     genAbortRef.current = abort;
     setGenerating(true);
+    setGenFailed(false);
     setCommitMsg('');
 
     const resolveSession = resolveSessionRef.current
@@ -175,7 +177,7 @@ export function GitDialog({
         });
       })
       .catch(() => {
-        // Diff fetch or btw failed — leave textarea empty.
+        if (!abort.signal.aborted) setGenFailed(true);
       })
       .finally(() => {
         if (!abort.signal.aborted) setGenerating(false);
@@ -234,19 +236,29 @@ export function GitDialog({
         const result = await ws.workspaceGitCommit(commitMsg.trim(), {
           all: true,
         });
+        setCommitMsg('');
         if (andPush) {
-          await ws.workspaceGitPush({ setUpstream: true });
-          setCommitStatus({
-            msg: t('gitCommit.commitPushSuccess', { sha: result.sha }),
-            type: 'success',
-          });
+          try {
+            await ws.workspaceGitPush({ setUpstream: true });
+            setCommitStatus({
+              msg: t('gitCommit.commitPushSuccess', { sha: result.sha }),
+              type: 'success',
+            });
+          } catch (pushErr) {
+            setCommitStatus({
+              msg:
+                t('gitCommit.commitSuccess', { sha: result.sha }) +
+                ' — push failed: ' +
+                (pushErr instanceof Error ? pushErr.message : String(pushErr)),
+              type: 'error',
+            });
+          }
         } else {
           setCommitStatus({
             msg: t('gitCommit.commitSuccess', { sha: result.sha }),
             type: 'success',
           });
         }
-        setCommitMsg('');
       } catch (err) {
         setCommitStatus({
           msg: err instanceof Error ? err.message : String(err),
@@ -508,7 +520,9 @@ export function GitDialog({
               placeholder={
                 generating
                   ? t('gitCommit.generating')
-                  : t('gitCommit.messagePlaceholder')
+                  : genFailed
+                    ? t('gitCommit.genFailed')
+                    : t('gitCommit.messagePlaceholder')
               }
               value={commitMsg}
               disabled={generating}

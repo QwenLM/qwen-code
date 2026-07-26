@@ -230,10 +230,14 @@ export function BranchPickerPopover({
     t('branchPicker.action.push').toLowerCase().includes(q) ||
     t('branchPicker.action.commit').toLowerCase().includes(q) ||
     t('branchPicker.action.newBranch').toLowerCase().includes(q) ||
-    t('branchPicker.action.checkoutRef').toLowerCase().includes(q);
+    t('branchPicker.action.checkoutRef').toLowerCase().includes(q) ||
+    t('branchPicker.action.viewChanges').toLowerCase().includes(q);
 
-  const toggleSection = (key: SectionKey) =>
-    setCollapsed((prev) => ({ ...prev, [key]: !prev[key] }));
+  const toggleSection = useCallback(
+    (key: SectionKey) =>
+      setCollapsed((prev) => ({ ...prev, [key]: !prev[key] })),
+    [],
+  );
 
   return (
     <Popover open={open} onOpenChange={onOpenChange}>

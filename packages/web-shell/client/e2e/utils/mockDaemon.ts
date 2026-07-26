@@ -909,7 +909,7 @@ async function handleDaemonRoute(
       path,
     )
   ) {
-    const action = path.split('/').pop();
+    const action = path.replace(/\/$/, '').split('/').pop();
     if (action === 'commit') {
       await json(route, { sha: 'abc1234', subject: 'test commit' });
     } else if (action === 'checkout' || action === 'branch') {

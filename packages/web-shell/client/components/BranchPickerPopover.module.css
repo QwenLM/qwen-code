@@ -30,6 +30,10 @@
   padding: 2px 0;
 }
 
+.searchInput:focus-visible {
+  border-bottom: 1px solid var(--primary, #60a5fa);
+}
+
 .searchInput::placeholder {
   color: var(--muted-foreground, #888);
 }
@@ -178,12 +182,6 @@
 
 .actionLabel {
   flex: 1;
-}
-
-.actionShortcut {
-  font-size: 11px;
-  color: var(--muted-foreground, #666);
-  font-family: 'JetBrains Mono', monospace;
 }
 
 .inlineInput {
