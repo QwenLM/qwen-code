@@ -233,6 +233,13 @@ export function BranchPickerPopover({
         side="bottom"
         align="start"
         sideOffset={4}
+        // The content is portaled out of the composer, but React synthetic
+        // clicks still bubble through the React tree to the composer
+        // surface's onClick, which calls core.focus() and steals focus out
+        // of the popover — Radix then dismisses it via focus-outside.
+        // Stop the bubble so clicks inside keep focus in the popover
+        // (mirrors the GitModePopover / ToolbarPopover pattern).
+        onClick={(e) => e.stopPropagation()}
         onPointerDownOutside={(e) => {
           if (contentRef.current?.contains(e.target as Node)) {
             e.preventDefault();
