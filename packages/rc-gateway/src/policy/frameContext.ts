@@ -167,6 +167,19 @@ function applyCd(target: string, runningCwd: string): string {
  * touches that path. See frameContext.test.ts's "tracks a `cd` across
  * compound subcommands" case for the exploit this closes.
  *
+ * Whenever a `cd` moves the running cwd away from the original static `cwd`,
+ * paths are resolved against BOTH: the running (cd-aware) cwd, which is
+ * correct for the common sequential `cd X && <cmd> <relpath>` shape this
+ * fix targets, AND the original static `cwd`, which stays a candidate as a
+ * fail-closed fallback. That fallback matters because `applyCd` can't
+ * always compute the real post-`cd` directory (an unresolvable target —
+ * `cd $DIR`, `cd "$(pwd)"` — makes `runningCwd` a best-effort guess, and
+ * `splitCompoundCommand` also splits on `|`, which runs its left side in a
+ * subshell whose `cd` never actually affects the rest of the pipeline).
+ * Keeping the static-cwd candidate too means this enrichment can only ever
+ * ADD a correct candidate, never silently drop one that a pre-fix deny rule
+ * already matched.
+ *
  * RESIDUAL: the daemon's own local enforcement
  * (`packages/core/src/permissions/permission-manager.ts`,
  * `evaluateCompoundCommand`/`evaluateSingle`) has this SAME single-static-cwd
@@ -188,12 +201,16 @@ function shellEnrichment(
       if (cdTarget !== undefined) {
         runningCwd = applyCd(cdTarget, runningCwd);
       }
-      for (const op of extractShellOperations(simple, runningCwd)) {
-        if (typeof op.filePath === 'string' && op.filePath.length > 0) {
-          paths.push(op.filePath);
+      const cwdsToResolve =
+        runningCwd === cwd ? [runningCwd] : [runningCwd, cwd];
+      for (const resolveCwd of cwdsToResolve) {
+        for (const op of extractShellOperations(simple, resolveCwd)) {
+          if (typeof op.filePath === 'string' && op.filePath.length > 0) {
+            paths.push(op.filePath);
+          }
+          const mapped = operationForVirtualTool(op.virtualTool);
+          if (mapped) operations.push(mapped);
         }
-        const mapped = operationForVirtualTool(op.virtualTool);
-        if (mapped) operations.push(mapped);
       }
     }
   } catch {

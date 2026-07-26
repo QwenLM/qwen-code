@@ -170,4 +170,21 @@ describe('frameToContext — shell enrichment', () => {
     expect(ctx.paths).toContain('/proj/sub/.env');
     expect(ctx.paths.some((p) => p.endsWith('.env'))).toBe(true);
   });
+
+  // Monotonicity guard: when the `cd` target can't be statically resolved
+  // (a shell variable here), the running cwd becomes a best-effort guess
+  // rather than the real post-cd directory. The fix must still keep the
+  // ORIGINAL static-cwd candidate around so a deny rule that already
+  // matched pre-fix (anchored on the static cwd) keeps matching — the
+  // enrichment must only ever ADD candidates, never drop one silently.
+  it('keeps the static-cwd candidate when the cd target is not statically resolvable (e.g. a shell variable)', () => {
+    const ctx = frameToContext(
+      frame('execute', {
+        command: 'cd $DIR && cat secrets/creds.txt',
+        directory: '/proj',
+      }),
+      { projectRoot: '/proj' },
+    );
+    expect(ctx.paths).toContain('/proj/secrets/creds.txt');
+  });
 });
