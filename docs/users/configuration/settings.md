@@ -358,9 +358,11 @@ See [Memory](../features/memory) for details on how auto-memory works and how to
 
 #### agents
 
-| Setting                       | Type   | Description                                                                                                                                                                                                                                               | Default   |
-| ----------------------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------- |
-| `agents.builtin.exploreModel` | string | Model selector for the built-in Explore subagent. Use `inherit` for the main session model, `fast` for `fastModel`, a model ID, or an `authType:model-id` selector. A custom same-name Explore agent keeps its own model configuration. Requires restart. | `inherit` |
+| Setting                       | Type             | Description                                                                                                                                                                                                                                               | Default     |
+| ----------------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------- |
+| `agents.builtin.exploreModel` | string           | Model selector for the built-in Explore subagent. Use `inherit` for the main session model, `fast` for `fastModel`, a model ID, or an `authType:model-id` selector. A custom same-name Explore agent keeps its own model configuration. Requires restart. | `inherit`   |
+| `agents.modelGrades`          | object           | Maps semantic grade names exposed to the Agent tool to model selectors. Requires restart.                                                                                                                                                                 | `undefined` |
+| `agents.allowedGrades`        | array of strings | Optional whitelist of configured model grades the Agent tool may use. Requires restart.                                                                                                                                                                   | `undefined` |
 
 #### permissions
 

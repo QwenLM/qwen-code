@@ -30,10 +30,10 @@ The effective model selector uses this priority:
 3. The built-in Explore model setting
 4. The inherited parent model
 
-Unknown or disallowed grades are ignored so existing fallback behavior is
-preserved. Forks reject the parameter because they must inherit the parent's
-model and prompt cache. Named team teammates also reject it because their
-backend model override accepts concrete model IDs rather than grade selectors.
+Unknown or disallowed grades are rejected. Forks reject the parameter because
+they must inherit the parent's model and prompt cache. Named team teammates
+also reject it because their backend model override accepts concrete model IDs
+rather than grade selectors.
 
 Only configured, allowed grade names are included in the dynamic tool schema.
 Concrete model selectors remain private to user settings.
