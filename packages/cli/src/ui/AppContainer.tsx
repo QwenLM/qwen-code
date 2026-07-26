@@ -2726,7 +2726,7 @@ export const AppContainer = (props: AppContainerProps) => {
     debugLogger.debug(
       `Follow-up suggestion gate failed: ${getErrorMessage(err)}`,
     );
-    followupSuggestionDecision = { enabled: true };
+    followupSuggestionDecision = { enabled: false };
   }
   const followupSuggestionsEnabled = followupSuggestionDecision.enabled;
 
