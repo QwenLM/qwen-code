@@ -37,6 +37,7 @@ import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
 import { loadSettings } from '../config/settings.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { mapSkillConfigToStatus } from './workspace-skills-mapping.js';
+import { resolveSkillSettings } from '../config/skill-settings.js';
 
 export interface WorkspaceSkillsStatusProvider {
   (workspaceCwd: string): Promise<ServeWorkspaceSkillsStatus>;
@@ -105,13 +106,22 @@ async function buildWorkspaceSkillsStatus(
       skillManager = new SkillManager(shim as Config);
       managers.set(workspaceCwd, skillManager);
     }
-    const disabled = readDisabledSkillNames(workspaceCwd, workspaceTrusted);
+    const disablements = resolveSkillSettings(
+      loadSettings(workspaceCwd, {
+        consumeCorruptionEnvVars: false,
+        skipLoadEnvironment: !workspaceTrusted,
+        skipWorkspaceSettings: !workspaceTrusted,
+        workspaceTrusted,
+      }),
+    ).disablements;
     const skills = await skillManager.listSkills();
     return {
       v: STATUS_SCHEMA_VERSION,
       workspaceCwd,
       initialized: true,
-      skills: skills.map((skill) => mapSkillConfigToStatus(skill, disabled)),
+      skills: skills.map((skill) =>
+        mapSkillConfigToStatus(skill, disablements),
+      ),
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -132,23 +142,4 @@ async function buildWorkspaceSkillsStatus(
       ],
     };
   }
-}
-
-function readDisabledSkillNames(
-  workspaceCwd: string,
-  workspaceTrusted: boolean,
-): ReadonlySet<string> {
-  const raw = loadSettings(workspaceCwd, {
-    consumeCorruptionEnvVars: false,
-    skipLoadEnvironment: !workspaceTrusted,
-    skipWorkspaceSettings: !workspaceTrusted,
-    workspaceTrusted,
-  }).merged.skills?.disabled;
-  if (!Array.isArray(raw)) return new Set();
-  return new Set(
-    raw
-      .filter((name): name is string => typeof name === 'string')
-      .map((name) => name.trim().toLowerCase())
-      .filter(Boolean),
-  );
 }
