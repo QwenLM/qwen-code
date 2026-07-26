@@ -31,6 +31,7 @@ import { PromptHookRunner } from './promptHookRunner.js';
 import { AsyncHookRegistry, generateHookId } from './asyncHookRegistry.js';
 import type { Config } from '../config/config.js';
 import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
+import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
@@ -584,7 +585,9 @@ export class HookRunner {
       );
 
       const env = {
-        ...process.env,
+        // Hook commands are child processes launched on the agent's behalf,
+        // so they must not inherit Qwen-internal daemon secrets.
+        ...sanitizeChildEnv(process.env),
         GEMINI_PROJECT_DIR: input.cwd,
         CLAUDE_PROJECT_DIR: input.cwd, // For compatibility
         QWEN_PROJECT_DIR: input.cwd, // For Qwen Code compatibility

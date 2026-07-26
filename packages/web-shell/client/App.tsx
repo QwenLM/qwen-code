@@ -39,7 +39,8 @@ import type {
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
-import { GitForkIcon, XIcon } from 'lucide-react';
+
+import { type SessionGitIntent } from './components/GitModePopover';
 import { SESSION_TRANSCRIPT_PAGINATION_FEATURE } from './constants/sessions';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
@@ -71,10 +72,7 @@ import {
   type ModelDialogMode,
 } from './components/dialogs/ModelDialog';
 import { ModelFallbacksDialog } from './components/dialogs/ModelFallbacksDialog';
-import {
-  AgentsMessage,
-  type AgentsInitialMode,
-} from './components/messages/AgentsMessage';
+import { AgentsManagerPage } from './components/agents/AgentsManagerPage';
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
@@ -134,6 +132,7 @@ import { RewindDialog } from './components/dialogs/RewindDialog';
 import { AddWorkspaceDialog } from './components/dialogs/AddWorkspaceDialog';
 import { Button } from './components/ui/button';
 import {
+  isPluginShadowPanel,
   installWebShellShadowStyles,
   resolveWebShellShadowDom,
   type WebShellShadowDom,
@@ -578,8 +577,6 @@ export interface WebShellProps {
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   /** Custom renderer for the welcome header. Receives version, cwd, model, and mode. */
   renderWelcomeHeader?: WelcomeHeaderRenderer;
-  /** Show the worktree-isolation action in the empty welcome state. Defaults to false. */
-  showWorktreeToggle?: boolean;
   /** Custom renderer shown below the chat composer in the empty welcome state. */
   renderWelcomeFooter?: WelcomeFooterRenderer;
   /**
@@ -658,6 +655,7 @@ export interface WebShellProps {
 }
 
 interface AppProps extends WebShellProps {
+  initialSelectedWorkspaceCwd?: string;
   lockedWorkspaceCwd?: string;
   lockedWorkspaceCapability?: DaemonWorkspaceCapability;
   restartSseOnPrompt?: boolean;
@@ -670,9 +668,11 @@ type SessionActionsWithCreate = {
     approvalMode?: string;
     sourceType?: string;
     worktree?: { slug?: string };
+    branch?: { name: string };
   }) => Promise<{
     sessionId: string;
     worktree?: { slug: string; path: string; branch: string };
+    branch?: { name: string; baseBranch: string };
   }>;
   attachSession: () => Promise<void>;
   clearSession: () => Promise<void>;
@@ -1073,7 +1073,6 @@ export function App({
   composerTagIcons,
   renderToolHeaderExtra,
   renderWelcomeHeader,
-  showWorktreeToggle = false,
   renderWelcomeFooter,
   mobileWelcomeFooterMiddle = false,
   parseUserMessageContent,
@@ -1114,6 +1113,7 @@ export function App({
   onSubmitBefore,
   restartSseOnPrompt,
   historyPageSize,
+  initialSelectedWorkspaceCwd,
   lockedWorkspaceCwd,
   lockedWorkspaceCapability,
 }: AppProps = {}) {
@@ -1374,6 +1374,8 @@ export function App({
   const workspaceDisplayNameSupported =
     workspace.capabilities?.features?.includes('workspace_display_name') ===
     true;
+  const gitHubPrsSupported =
+    workspace.capabilities?.features?.includes('workspace_github_prs') === true;
   const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(false);
   const [workspaceMutationBusy, setWorkspaceMutationBusy] = useState(false);
   const workspaceMutationTokenRef = useRef<symbol | null>(null);
@@ -1394,7 +1396,7 @@ export function App({
   // so the ensureSessionForPrompt callback must read the latest value.
   const [selectedWorkspaceCwd, setSelectedWorkspaceCwd] = useState<
     string | undefined
-  >(undefined);
+  >(initialSelectedWorkspaceCwd);
   const selectedWorkspaceCwdRef = useRef(selectedWorkspaceCwd);
   selectedWorkspaceCwdRef.current = selectedWorkspaceCwd;
   const [selectedWorkspaceGitStatus, setSelectedWorkspaceGitStatus] = useState<
@@ -1419,6 +1421,10 @@ export function App({
   const [sessionWorktree, setSessionWorktree] = useState<
     { slug: string; path: string; branch: string } | undefined
   >(undefined);
+  /** Branch metadata for the current session (set after creation with branch mode). */
+  const [sessionBranch, setSessionBranch] = useState<
+    { name: string; baseBranch: string } | undefined
+  >(undefined);
   // Tracks the session id from the latest effect run. In-flight fetches
   // compare their captured sid against this ref on resolve: a match means
   // the response is still relevant and may set OR clear the worktree state;
@@ -1435,6 +1441,7 @@ export function App({
     worktreeSessionIdRef.current = sid;
     if (!sid) {
       setSessionWorktree(undefined);
+      setSessionBranch(undefined);
       return;
     }
     workspace.client
@@ -1442,11 +1449,13 @@ export function App({
       .then((summary) => {
         if (worktreeSessionIdRef.current === sid) {
           setSessionWorktree(summary.worktree);
+          setSessionBranch(summary.branch);
         }
       })
       .catch(() => {
         if (worktreeSessionIdRef.current === sid) {
           setSessionWorktree(undefined);
+          setSessionBranch(undefined);
         }
       });
   }, [connection.sessionId, workspace.client]);
@@ -1485,20 +1494,41 @@ export function App({
     }
     let cancelled = false;
     const fetchStatus = () => {
-      void workspace.client
-        .workspaceByCwd(activeWorkspaceCwd)
-        .workspaceGit(sessionWorktree?.path)
-        .then((git) => {
-          if (!cancelled) setSelectedWorkspaceGitStatus(git);
+      const git = workspace.client.workspaceByCwd(activeWorkspaceCwd);
+      // Fast path: last-known cache (branch-only on a cold start) paints the
+      // chip immediately.
+      void git
+        .workspaceGit({ cwd: sessionWorktree?.path })
+        .then((status) => {
+          if (!cancelled) setSelectedWorkspaceGitStatus(status);
         })
         .catch(() => {
           if (!cancelled) setSelectedWorkspaceGitStatus(undefined);
         });
+      // Fresh path: resolves when the daemon's recomputation lands, so the
+      // enriched counters fill in without depending on SSE — the
+      // `git_status_changed` push only flows on a per-session event stream,
+      // which doesn't exist before the first prompt (deferred connect).
+      // Daemon-side in-flight dedup shares one `git status` computation
+      // across both requests. Worktree `?cwd=` reads always compute
+      // directly, so a second request would be a duplicate there.
+      if (!sessionWorktree) {
+        void git
+          .workspaceGit({ wait: true })
+          .then((status) => {
+            if (!cancelled) setSelectedWorkspaceGitStatus(status);
+          })
+          .catch((err) => {
+            console.warn('[web-shell] git status fresh path failed:', err);
+          });
+      }
     };
     fetchStatus();
-    // The enriched working-tree summary isn't pushed over SSE, so refresh it on
-    // focus and on a slow poll for the active workspace only. A live branch
-    // change re-runs this effect via the connection.gitBranch dependency.
+    // Refresh triggers stay on focus and on a slow poll for the active
+    // workspace only. A live branch change re-runs this effect via the
+    // connection.gitBranch dependency. With an active session the daemon's
+    // `git_status_changed` push (mirrored by the effect below) additionally
+    // covers realtime updates between polls.
     const onFocus = () => fetchStatus();
     window.addEventListener('focus', onFocus);
     const poll = window.setInterval(() => {
@@ -1515,6 +1545,17 @@ export function App({
     workspace.client,
     sessionWorktree,
   ]);
+  // Mirror the daemon's `git_status_changed` push (surfaced as
+  // connection.gitStatus by the session provider) into the chip state so the
+  // enriched counters fill in right after the branch-only first paint.
+  // Worktree sessions bypass the daemon cache/SSE path — their status comes
+  // from the ?cwd= fetch above.
+  useEffect(() => {
+    const status = connection.gitStatus;
+    if (!status || sessionWorktree) return;
+    if (status.workspaceCwd !== activeWorkspaceCwd) return;
+    setSelectedWorkspaceGitStatus(status);
+  }, [connection.gitStatus, activeWorkspaceCwd, sessionWorktree]);
   const onToastRef = useRef(onToast);
   onToastRef.current = onToast;
   const toastIdRef = useRef(0);
@@ -2469,7 +2510,7 @@ export function App({
   // it — the composer git chip / `/diff` (current workspace) or a sidebar
   // folder's git chip (that workspace) — so each can target its own repo.
   const [gitDialog, setGitDialog] = useState<
-    { workspaceCwd: string; view: GitDialogView } | undefined
+    { workspaceCwd: string; gitCwd?: string; view: GitDialogView } | undefined
   >(undefined);
   // Main content view. The scheduled-tasks page replaces the chat pane inline
   // (not a modal overlay), mirroring the reference design; creating or opening
@@ -2499,6 +2540,7 @@ export function App({
     | 'mcp'
     | 'skills'
     | 'plugins'
+    | 'agents'
     | null
   >(null);
   const closePanel = useCallback(() => setActivePanel(null), []);
@@ -2527,7 +2569,8 @@ export function App({
         | 'extensions'
         | 'mcp'
         | 'skills'
-        | 'plugins',
+        | 'plugins'
+        | 'agents',
     ) => {
       setMainView('chat');
       setActivePanel(panel);
@@ -2930,8 +2973,9 @@ export function App({
   const [memoryAddScope, setMemoryAddScope] = useState<'workspace' | 'global'>(
     'workspace',
   );
-  const [agentsDialogMode, setAgentsDialogMode] =
-    useState<AgentsInitialMode | null>(null);
+  const [agentsCreateScope, setAgentsCreateScope] = useState<
+    'workspace' | 'global' | null
+  >(null);
   const [escapeHintVisible, setEscapeHintVisible] = useState(false);
   // Whether the first Esc has armed a stream cancellation; the composer's send
   // button shows an "Esc again to stop" affordance while true.
@@ -2969,10 +3013,14 @@ export function App({
   const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
   const createSessionPromiseRef = useRef<Promise<void> | null>(null);
   const preparingSessionIdRef = useRef<string | null>(null);
-  /** Worktree request for the next lazily-created session. */
-  const pendingWorktreeRef = useRef<{ slug?: string } | undefined>(undefined);
-  /** Render-visible mirror of pendingWorktreeRef for the empty-state badge. */
-  const [worktreePending, setWorktreePending] = useState(false);
+  /** Git mode intent for the next lazily-created session (branch or worktree). */
+  const [gitModeIntent, setGitModeIntent] = useState<SessionGitIntent>({
+    mode: 'current',
+  });
+  const gitModeIntentRef = useRef(gitModeIntent);
+  useEffect(() => {
+    gitModeIntentRef.current = gitModeIntent;
+  }, [gitModeIntent]);
   const newSessionSuggestionSubmitTokenRef = useRef(0);
   const pendingNewSessionSuggestionSubmitRef = useRef<{
     token: number;
@@ -3040,7 +3088,14 @@ export function App({
         modeId,
         workspaceCwd:
           lockedWorkspaceCwd ?? acceptedWorkspaceCwd ?? primaryWorkspaceCwd,
-        worktree: pendingWorktreeRef.current,
+        worktree:
+          gitModeIntentRef.current.mode === 'worktree'
+            ? { slug: gitModeIntentRef.current.slug }
+            : undefined,
+        branch:
+          gitModeIntentRef.current.mode === 'branch'
+            ? { name: gitModeIntentRef.current.name }
+            : undefined,
         onSessionCreated: onSessionCreatedRef.current,
         onSessionAllocated: (sessionId) => {
           preparingSessionIdRef.current = sessionId;
@@ -3050,11 +3105,13 @@ export function App({
         if (result.worktree) {
           setSessionWorktree(result.worktree);
         }
+        if (result.branch) {
+          setSessionBranch(result.branch);
+        }
         // Clear the pending intent only on success. On failure the
-        // welcome badge stays visible so the user knows the isolation
-        // intent was not fulfilled and can retry.
-        pendingWorktreeRef.current = undefined;
-        setWorktreePending(false);
+        // composer chip stays in the selected mode so the user knows
+        // the intent was not fulfilled and can retry.
+        setGitModeIntent({ mode: 'current' });
       });
       // One-shot: the picker targets only the *next* new session, so clear
       // it after creation. The next new chat defaults back to the primary
@@ -3215,6 +3272,16 @@ export function App({
   // git-status effect targets (computed once above), so the chip and the
   // dialog always target the same repo.
   const gitDiffWorkspaceCwd = activeWorkspaceCwd;
+  const gitModeEligible = Boolean(
+    !connection.sessionId &&
+      workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)?.trusted &&
+      selectedWorkspaceGitStatus?.branch,
+  );
+  useEffect(() => {
+    if (!gitModeEligible) {
+      setGitModeIntent({ mode: 'current' });
+    }
+  }, [gitModeEligible]);
   const dialogOpen =
     showResumeDialog ||
     showDeleteDialog ||
@@ -3228,7 +3295,6 @@ export function App({
     showApprovalModeDialog ||
     tasksDialogMessage !== null ||
     mcpDialogMessage !== null ||
-    agentsDialogMode !== null ||
     showMemoryDialog ||
     showAuthDialog ||
     showAddWorkspaceDialog ||
@@ -4146,10 +4212,9 @@ export function App({
       const targetWorkspaceCwd = lockedWorkspaceCwd ?? workspaceCwd;
       selectedWorkspaceCwdRef.current = targetWorkspaceCwd;
       setSelectedWorkspaceCwd(targetWorkspaceCwd);
-      // Starting a fresh chat drops any pending worktree intent set from the
-      // empty-state toggle, so it never leaks into the next created session.
-      pendingWorktreeRef.current = undefined;
-      setWorktreePending(false);
+      // Starting a fresh chat drops any pending git mode intent so it never
+      // leaks into the next created session.
+      setGitModeIntent({ mode: 'current' });
       // Close the drawer before awaiting so a failed createSession() doesn't leave
       // it stuck open with the page scroll still locked, matching loadSidebarSession.
       closeMobileDrawer();
@@ -4168,8 +4233,9 @@ export function App({
           reloadLoadedSkills(targetWorkspaceCwd),
         ]);
         // Clear after successful clearSession — if it rejects, the old
-        // session's worktree state is preserved.
+        // session's worktree/branch state is preserved.
         setSessionWorktree(undefined);
+        setSessionBranch(undefined);
         return true;
       } catch (error) {
         if (composerFocusRequestRef.current === focusRequest) {
@@ -4561,9 +4627,9 @@ export function App({
     async (sessionId: string, workspaceCwd?: string) => {
       composerFocusRequestRef.current += 1;
       setSidebarSwitchingSessionId(sessionId);
-      pendingWorktreeRef.current = undefined;
-      setWorktreePending(false);
+      setGitModeIntent({ mode: 'current' });
       setSessionWorktree(undefined);
+      setSessionBranch(undefined);
       // Close the drawer before awaiting the load; the transcript clears
       // immediately and shows its loading skeleton for the selected session.
       closeMobileDrawer();
@@ -4998,7 +5064,11 @@ export function App({
               pushToast('info', t('localCommand.diffNoWorkspace'));
               return true;
             }
-            setGitDialog({ workspaceCwd: gitDiffWorkspaceCwd, view: 'diff' });
+            setGitDialog({
+              workspaceCwd: gitDiffWorkspaceCwd,
+              gitCwd: sessionWorktree?.path,
+              view: 'diff',
+            });
             return true;
           }
           if (cmd === 'log') {
@@ -5006,7 +5076,23 @@ export function App({
               pushToast('info', t('localCommand.logNoWorkspace'));
               return true;
             }
-            setGitDialog({ workspaceCwd: gitDiffWorkspaceCwd, view: 'log' });
+            setGitDialog({
+              workspaceCwd: gitDiffWorkspaceCwd,
+              gitCwd: sessionWorktree?.path,
+              view: 'log',
+            });
+            return true;
+          }
+          if (cmd === 'prs') {
+            if (!gitDiffWorkspaceCwd) {
+              pushToast('info', t('localCommand.prsNoWorkspace'));
+              return true;
+            }
+            if (!gitHubPrsSupported) {
+              pushToast('info', t('localCommand.prsUnsupported'));
+              return true;
+            }
+            setGitDialog({ workspaceCwd: gitDiffWorkspaceCwd, view: 'prs' });
             return true;
           }
           if (cmd === 'tasks') {
@@ -5414,23 +5500,22 @@ export function App({
           }
           if (cmd === 'agents') {
             const subCommand = text.slice(match[0].length).trim().toLowerCase();
-            let agentsMode: AgentsInitialMode = 'menu';
             if (subCommand === 'create') {
-              agentsMode = 'create';
+              setAgentsCreateScope('global');
             } else if (
               subCommand === 'create user' ||
               subCommand === 'create global'
             ) {
-              agentsMode = 'create-user';
+              setAgentsCreateScope('global');
             } else if (
               subCommand === 'create project' ||
               subCommand === 'create workspace'
             ) {
-              agentsMode = 'create-project';
-            } else if (subCommand === 'manage') {
-              agentsMode = 'manage';
+              setAgentsCreateScope('workspace');
+            } else {
+              setAgentsCreateScope(null);
             }
-            setAgentsDialogMode(agentsMode);
+            openPanel('agents');
             return true;
           }
           if (cmd === 'extensions') {
@@ -5809,6 +5894,8 @@ export function App({
       openGoals,
       createNewSession,
       gitDiffWorkspaceCwd,
+      sessionWorktree,
+      gitHubPrsSupported,
       handleBusyGoalClear,
       handleGoalSlashCommand,
       handleThemeChange,
@@ -6382,42 +6469,6 @@ export function App({
     ],
   );
 
-  // The empty-state toggle is offered only when the workspace the next
-  // session would land in is trusted and is a git repository — the daemon
-  // rejects worktree creation otherwise. Mirrors the sidebar entry's gating.
-  const worktreeToggleEligible = Boolean(
-    showWorktreeToggle &&
-      workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)?.trusted &&
-      selectedWorkspaceGitStatus?.branch,
-  );
-  const worktreeToggleRef = useRef<HTMLButtonElement>(null);
-  const worktreeCancelRef = useRef<HTMLButtonElement>(null);
-  const worktreeFocusTarget = useRef<'cancel' | 'toggle' | null>(null);
-  const handleEnableWorktree = useCallback(() => {
-    pendingWorktreeRef.current = {};
-    setWorktreePending(true);
-    worktreeFocusTarget.current = 'cancel';
-  }, []);
-  const handleCancelWorktree = useCallback(() => {
-    pendingWorktreeRef.current = undefined;
-    setWorktreePending(false);
-    worktreeFocusTarget.current = 'toggle';
-  }, []);
-  useEffect(() => {
-    if (showWorktreeToggle) return;
-    pendingWorktreeRef.current = undefined;
-    setWorktreePending(false);
-  }, [showWorktreeToggle]);
-  useEffect(() => {
-    if (!worktreeFocusTarget.current) return;
-    const target = worktreeFocusTarget.current;
-    worktreeFocusTarget.current = null;
-    if (target === 'cancel') {
-      worktreeCancelRef.current?.focus();
-    } else {
-      worktreeToggleRef.current?.focus();
-    }
-  }, [worktreePending]);
   const welcomeHeader = useMemo(
     () => (
       <>
@@ -6426,65 +6477,9 @@ export function App({
         ) : (
           <WelcomeHeader {...welcomeHeaderProps} />
         )}
-        {showWorktreeToggle && worktreePending ? (
-          <div className={styles.worktreeWelcomeBadge}>
-            <span className={styles.worktreeBadgeIcon}>
-              <GitForkIcon size={18} strokeWidth={1.8} />
-            </span>
-            <span className={styles.worktreeBadgeText}>
-              <span className={styles.worktreeWelcomeTitle}>
-                {t('worktree.welcomeTitle')}
-              </span>
-              <span className={styles.worktreeWelcomeDesc}>
-                {t('worktree.welcomeDesc')}
-              </span>
-            </span>
-            <button
-              ref={worktreeCancelRef}
-              type="button"
-              className={styles.worktreeWelcomeCancel}
-              aria-label={t('worktree.cancel')}
-              data-testid="worktree-welcome-cancel"
-              onClick={handleCancelWorktree}
-            >
-              <XIcon size={14} strokeWidth={2} />
-            </button>
-          </div>
-        ) : (
-          worktreeToggleEligible && (
-            <button
-              ref={worktreeToggleRef}
-              type="button"
-              className={styles.worktreeWelcomeToggle}
-              data-testid="worktree-welcome-toggle"
-              onClick={handleEnableWorktree}
-            >
-              <span className={styles.worktreeToggleIcon}>
-                <GitForkIcon size={16} strokeWidth={1.8} />
-              </span>
-              <span className={styles.worktreeToggleText}>
-                <span className={styles.worktreeToggleLabel}>
-                  {t('worktree.welcomeTitle')}
-                </span>
-                <span className={styles.worktreeToggleHint}>
-                  {t('worktree.toggleHint')}
-                </span>
-              </span>
-            </button>
-          )
-        )}
       </>
     ),
-    [
-      renderWelcomeHeader,
-      showWorktreeToggle,
-      welcomeHeaderProps,
-      worktreePending,
-      worktreeToggleEligible,
-      handleEnableWorktree,
-      handleCancelWorktree,
-      t,
-    ],
+    [renderWelcomeHeader, welcomeHeaderProps],
   );
   const welcomeFooter = useMemo(
     () => renderWelcomeFooter?.(welcomeHeaderProps),
@@ -6752,8 +6747,9 @@ export function App({
           )}
           {gitDialog && (
             <GitDialog
-              key={`${gitDialog.workspaceCwd}:${gitDialog.view}`}
+              key={`${gitDialog.workspaceCwd}:${gitDialog.gitCwd ?? ''}:${gitDialog.view}`}
               workspaceCwd={gitDialog.workspaceCwd}
+              gitCwd={gitDialog.gitCwd}
               initialView={gitDialog.view}
               onClose={() => setGitDialog(undefined)}
             />
@@ -6769,26 +6765,6 @@ export function App({
                 embedded
                 manageActiveEvent={false}
                 onClose={() => setTasksDialogMessage(null)}
-              />
-            </DialogShell>
-          )}
-          {agentsDialogMode && (
-            <DialogShell
-              title={
-                agentsDialogMode === 'manage'
-                  ? t('agent.manage')
-                  : agentsDialogMode === 'menu'
-                    ? t('agents.title')
-                    : t('agent.create')
-              }
-              size="lg"
-              onClose={() => setAgentsDialogMode(null)}
-            >
-              <AgentsMessage
-                mode={agentsDialogMode}
-                embedded
-                onMessage={(text) => store.dispatch([{ type: 'status', text }])}
-                onClose={() => setAgentsDialogMode(null)}
               />
             </DialogShell>
           )}
@@ -7149,6 +7125,8 @@ export function App({
                           ? t('mcp.title')
                           : activePanel === 'skills'
                             ? t('skills.title')
+                          : activePanel === 'agents'
+                              ? t('agents.title')
                           : activePanel === 'plugins'
                               ? t('plugins.title')
                               : t('sessionsOverview.title')
@@ -7157,6 +7135,7 @@ export function App({
                   {activePanel !== 'extensions' &&
                     activePanel !== 'mcp' &&
                     activePanel !== 'skills' &&
+                    activePanel !== 'agents' &&
                     activePanel !== 'plugins' && (
                     <div className={styles.panelHeader}>
                     <button
@@ -7189,7 +7168,32 @@ export function App({
                     </div>
                   )}
                   <div className={styles.panelBody} key={activePanel}>
-                    {activePanel === 'settings' ? (
+                    <ShadowDomBoundary
+                      enabled={
+                        shadowDomOptions.plugins &&
+                        isPluginShadowPanel(activePanel)
+                      }
+                      language={selectedLanguage}
+                      themeClassName={[
+                        selectedTheme === WebShellThemeId.Light
+                          ? styles.themeLight
+                          : styles.themeDark,
+                        selectedTheme === WebShellThemeId.Dark
+                          ? 'dark'
+                          : undefined,
+                      ]
+                        .filter(Boolean)
+                        .join(' ')}
+                      styles={shadowDomOptions.styles}
+                      initialFocusRef={
+                        activePanel === 'plugins'
+                          ? pluginTabRef
+                          : activePanel === 'extensions'
+                            ? panelHeadingRef
+                            : undefined
+                      }
+                    >
+                      {activePanel === 'settings' ? (
                       <SettingsMessage
                         settingsState={workspaceSettingsState}
                         embedded
@@ -7276,38 +7280,29 @@ export function App({
                         onClose={closePanel}
                         onUseSkill={handleUseSkill}
                       />
+                    ) : activePanel === 'agents' ? (
+                      <AgentsManagerPage
+                        onClose={() => {
+                          setAgentsCreateScope(null);
+                          closePanel();
+                        }}
+                        initialCreateScope={agentsCreateScope}
+                      />
                     ) : activePanel === 'plugins' ? (
-                      <ShadowDomBoundary
-                        enabled={shadowDomOptions.plugins}
-                        language={selectedLanguage}
-                        themeClassName={[
-                          selectedTheme === WebShellThemeId.Light
-                            ? styles.themeLight
-                            : styles.themeDark,
-                          selectedTheme === WebShellThemeId.Dark
-                            ? 'dark'
-                            : undefined,
-                        ]
-                          .filter(Boolean)
-                          .join(' ')}
-                        styles={shadowDomOptions.styles}
+                      <PluginManagerPage
+                        mcpMessage={mcpDialogMessage}
+                        loadMcpMessage={async () => {
+                          try {
+                            await loadMcpManagerMessage();
+                          } catch (error) {
+                            reportError(error, 'Failed to load MCP status');
+                            throw error;
+                          }
+                        }}
+                        onClose={closePanel}
+                        onUseSkill={handleUseSkill}
                         initialFocusRef={pluginTabRef}
-                      >
-                        <PluginManagerPage
-                          mcpMessage={mcpDialogMessage}
-                          loadMcpMessage={async () => {
-                            try {
-                              await loadMcpManagerMessage();
-                            } catch (error) {
-                              reportError(error, 'Failed to load MCP status');
-                              throw error;
-                            }
-                          }}
-                          onClose={closePanel}
-                          onUseSkill={handleUseSkill}
-                          initialFocusRef={pluginTabRef}
-                        />
-                      </ShadowDomBoundary>
+                      />
                     ) : (
                       <SessionOverviewPanel
                         onOpenSession={handleOpenSessionFromOverview}
@@ -7316,6 +7311,7 @@ export function App({
                         workspaceCwd={lockedWorkspaceCwd}
                       />
                     )}
+                    </ShadowDomBoundary>
                   </div>
                 </section>
               )}
@@ -7922,18 +7918,24 @@ export function App({
                             sessionWorktree
                               ? (selectedWorkspaceGitStatus?.branch ??
                                 sessionWorktree.branch)
-                              : (connection.sessionId
-                                ? connection.gitBranch
-                                : (selectedWorkspaceGitStatus?.branch ??
-                                  undefined))
+                              : sessionBranch
+                                ? (selectedWorkspaceGitStatus?.branch ??
+                                  sessionBranch.name)
+                                : (connection.sessionId
+                                  ? connection.gitBranch
+                                  : (selectedWorkspaceGitStatus?.branch ??
+                                    undefined))
                           }
                           gitWorktree={Boolean(sessionWorktree)}
+                          gitModeIntent={gitModeEligible ? gitModeIntent : undefined}
+                          onGitModeIntentChange={gitModeEligible ? setGitModeIntent : undefined}
                           gitStatus={selectedWorkspaceGitStatus}
                           onOpenGitDiff={
-                            gitDiffWorkspaceCwd && !sessionWorktree
+                            gitDiffWorkspaceCwd
                               ? () =>
                                   setGitDialog({
                                     workspaceCwd: gitDiffWorkspaceCwd,
+                                    gitCwd: sessionWorktree?.path,
                                     view: 'diff',
                                   })
                               : undefined

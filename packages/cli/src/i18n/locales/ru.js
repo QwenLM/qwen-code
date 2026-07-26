@@ -62,6 +62,7 @@ export default {
     'Подключение к MCP servers... ({{connected}}/{{total}})',
   'Type your message or @path/to/file': 'Введите сообщение или @путь/к/файлу',
   '? for shortcuts': '? — горячие клавиши',
+  'Pasting…': 'Вставка…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Нажмите 'i' для режима ВСТАВКА и 'Esc' для ОБЫЧНОГО режима.",
   'Cancel operation / Clear input (double press)':
@@ -1393,6 +1394,11 @@ export default {
   reviewed: 'проверено',
   'Code Changes:': 'Изменения кода:',
   Performance: 'Производительность',
+  'Generation Metrics': 'Метрики генерации',
+  'Latest Request': 'Последний запрос',
+  'Generation Time': 'Время генерации',
+  'Average TTFT': 'Среднее TTFT',
+  'Session TPS': 'TPS сеанса',
   'Wall Time:': 'Общее время:',
   'Agent Active:': 'Активность агента:',
   'API Time:': 'Время API:',

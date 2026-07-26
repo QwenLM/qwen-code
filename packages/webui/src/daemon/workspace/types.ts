@@ -13,6 +13,13 @@ import type {
   DaemonAuthProviderInstallResult,
   DaemonAuthStatusSnapshot,
   DaemonCapabilities,
+  DaemonChannelMutationResult,
+  DaemonChannelPairingApprovalResult,
+  DaemonChannelPairingRequestsSnapshot,
+  DaemonChannelsSnapshot,
+  DaemonChannelStartupRequest,
+  DaemonChannelTypeCatalog,
+  DaemonChannelUpsertRequest,
   DaemonClient,
   DaemonCreateAgentRequest,
   DaemonWorkspaceGenerationEvent,
@@ -39,6 +46,7 @@ import type {
   DaemonUpdateAgentRequest,
   DaemonWorkspaceAgentDetail,
   DaemonWorkspaceAgentsStatus,
+  DaemonWorkspaceAcpPreheatResult,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceExtensionsStatus,
   DaemonWorkspaceFile,
@@ -84,6 +92,7 @@ import type {
   DaemonUsageRange,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
+  DaemonRevisionRequest,
 } from '@qwen-code/sdk/daemon';
 
 // ── Resource Hook Types (shared by workspace hooks) ────────────────
@@ -179,6 +188,19 @@ export interface DaemonGlobOptions {
 
 export interface DaemonGlobResult {
   matches: string[];
+}
+
+export interface DaemonChannelsResource {
+  catalog: DaemonChannelTypeCatalog;
+  snapshot: DaemonChannelsSnapshot;
+}
+
+export interface DaemonChannelPairingActions {
+  list(name: string): Promise<DaemonChannelPairingRequestsSnapshot>;
+  approve(
+    name: string,
+    code: string,
+  ): Promise<DaemonChannelPairingApprovalResult>;
 }
 
 // ── Scheduled Tasks (durable cron, server-only) ─────────────────────
@@ -351,6 +373,25 @@ export interface DaemonWorkspaceActions {
   /** Restore an archived session to the active directory. Idempotent. */
   unarchiveSession(sessionId: string): Promise<boolean>;
 
+  // Channels
+  loadChannels(): Promise<DaemonChannelsResource>;
+  upsertChannel(
+    name: string,
+    request: DaemonChannelUpsertRequest,
+  ): Promise<DaemonChannelMutationResult>;
+  removeChannel(
+    name: string,
+    request: DaemonRevisionRequest,
+  ): Promise<DaemonChannelMutationResult>;
+  setChannelStartup(
+    name: string,
+    request: DaemonChannelStartupRequest,
+  ): Promise<DaemonChannelMutationResult>;
+  startChannel(name: string): Promise<DaemonChannelMutationResult>;
+  stopChannel(name: string): Promise<DaemonChannelMutationResult>;
+  restartChannel(name: string): Promise<DaemonChannelMutationResult>;
+  channelPairing: DaemonChannelPairingActions;
+
   // MCP
   loadMcpStatus(): Promise<DaemonWorkspaceMcpStatus>;
   initializeMcp(): Promise<DaemonWorkspaceMcpInitializeResult>;
@@ -398,6 +439,7 @@ export interface DaemonWorkspaceActions {
   loadExtensionsStatus(): Promise<DaemonWorkspaceExtensionsStatus>;
 
   // Tools
+  preheatAcp(timeoutMs?: number): Promise<DaemonWorkspaceAcpPreheatResult>;
   loadToolsStatus(): Promise<DaemonWorkspaceToolsStatus>;
   setWorkspaceToolEnabled(toolName: string, enabled: boolean): Promise<unknown>;
 
@@ -424,7 +466,10 @@ export interface DaemonWorkspaceActions {
 
   // Agents (CRUD)
   listAgents(): Promise<DaemonWorkspaceAgentsStatus>;
-  getAgent(agentType: string): Promise<DaemonWorkspaceAgentDetail>;
+  getAgent(
+    agentType: string,
+    scope?: 'workspace' | 'global',
+  ): Promise<DaemonWorkspaceAgentDetail>;
   createAgent(
     req: DaemonCreateAgentRequest,
   ): Promise<DaemonAgentMutationResult>;

@@ -35,6 +35,7 @@ import { pathToFileURL } from 'node:url';
 import { SkillTool } from '../tools/skill.js';
 import { StructuredToolError } from '../tools/priorReadEnforcement.js';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
+import { ExitPlanModeTool } from '../tools/exitPlanMode.js';
 import type {
   CompletedToolCall,
   ExecutingToolCall,
@@ -211,8 +212,16 @@ function createMockToolSpan(
 
 vi.mock('../telemetry/session-tracing.js', () => ({
   startToolSpan: vi.fn(
-    (name: string, attrs?: Record<string, string | number | boolean>) =>
-      createMockToolSpan(`tool.${name}`, { tool_name: name, ...attrs }),
+    (
+      name: string,
+      attrs?: Record<string, string | number | boolean>,
+      description?: string,
+    ) =>
+      createMockToolSpan(`tool.${name}`, {
+        tool_name: name,
+        ...attrs,
+        ...(description ? { 'gen_ai.tool.description': description } : {}),
+      }),
   ),
   endToolSpan: vi.fn(
     (
@@ -1169,6 +1178,120 @@ describe('CoreToolScheduler', () => {
     );
     await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
     expect(execute).toHaveBeenCalledWith({ plan: 'Original plan' });
+  });
+
+  it('returns guidance error through the scheduler when a PM ask rule hits exit_plan_mode outside plan mode (#7671)', async () => {
+    const exitPlanConfig = {
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getApprovalModeRevision: () => 7,
+      getPrePlanMode: () => ApprovalMode.DEFAULT,
+      setApprovalMode: vi.fn(),
+      savePlan: vi.fn(),
+      getTeamManager: () => undefined,
+    } as unknown as Config;
+    const realTool = new ExitPlanModeTool(exitPlanConfig);
+    const permissionManager = {
+      isToolEnabled: vi.fn().mockResolvedValue(true),
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      evaluate: vi.fn().mockResolvedValue('ask'),
+      hasMatchingAskRule: vi.fn().mockReturnValue(true),
+      findMatchingDenyRule: vi.fn(),
+    };
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([
+        [ToolNames.EXIT_PLAN_MODE, realTool as unknown as MockTool],
+      ]),
+      approvalMode: ApprovalMode.DEFAULT,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+    });
+    Object.assign(
+      (scheduler as unknown as { config: Record<string, unknown> }).config,
+      {
+        getPermissionManager: () => permissionManager,
+        getTargetDir: () => '/repo',
+        getConditionalRulesRegistry: () => undefined,
+        getSkillManager: () => undefined,
+      },
+    );
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'pm-ask-exit-plan',
+          name: ToolNames.EXIT_PLAN_MODE,
+          args: { plan: 'My plan' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-pm-ask-exit-plan',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as CompletedToolCall[];
+    expect(completedCalls[0].status).toBe('error');
+    const errorJson = JSON.stringify(completedCalls[0].response);
+    expect(errorJson).toContain('not in plan mode');
+    expect(errorJson).toContain('Do not call exit_plan_mode again');
+  });
+
+  it('returns guidance error through the scheduler on Plan-to-non-Plan timing boundary (#7671)', async () => {
+    // Simulate: permission evaluation sees PLAN (requiresUserInteraction
+    // returns true, forcing ask), then mode switches before
+    // getConfirmationDetails is called.
+    let approvalModeCallCount = 0;
+    const exitPlanConfig = {
+      getApprovalMode: () => {
+        approvalModeCallCount++;
+        // The first call is requiresUserInteraction() during
+        // evaluatePermissionFlow; subsequent calls (inside
+        // getConfirmationDetails) see DEFAULT.
+        return approvalModeCallCount <= 1
+          ? ApprovalMode.PLAN
+          : ApprovalMode.DEFAULT;
+      },
+      getApprovalModeRevision: () => 7,
+      getPrePlanMode: () => ApprovalMode.DEFAULT,
+      setApprovalMode: vi.fn(),
+      savePlan: vi.fn(),
+      getTeamManager: () => undefined,
+    } as unknown as Config;
+    const realTool = new ExitPlanModeTool(exitPlanConfig);
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: new Map([
+        [ToolNames.EXIT_PLAN_MODE, realTool as unknown as MockTool],
+      ]),
+      approvalMode: ApprovalMode.PLAN,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'timing-boundary-exit-plan',
+          name: ToolNames.EXIT_PLAN_MODE,
+          args: { plan: 'My plan' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-timing-boundary-exit-plan',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as CompletedToolCall[];
+    expect(completedCalls[0].status).toBe('error');
+    const errorJson = JSON.stringify(completedCalls[0].response);
+    expect(errorJson).toContain('not in plan mode');
+    expect(errorJson).toContain('Do not call exit_plan_mode again');
   });
 
   it('does not let AUTO_EDIT approve an interaction-required info tool', async () => {
@@ -8832,6 +8955,46 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(fallbackSpan.attributes['gen_ai.tool.call.id']).toBe('span-call');
   });
 
+  it('records static description and final successful arguments/result', async () => {
+    mockTelemetrySdkState.initialized = true;
+    const { spanRecord } = await runSingleTool({
+      includeSensitiveSpanAttributes: true,
+    });
+
+    expect(spanRecord.attributes['gen_ai.tool.description']).toBe('mockTool');
+    expect(
+      JSON.parse(
+        spanRecord.spanAttributes['gen_ai.tool.call.arguments'] as string,
+      ),
+    ).toEqual({ input: '/secret/path' });
+    expect(
+      JSON.parse(
+        spanRecord.spanAttributes['gen_ai.tool.call.result'] as string,
+      ),
+    ).toEqual({ output: 'ok' });
+    expect(spanRecord.spanAttributes).not.toHaveProperty('tool_input');
+    expect(spanRecord.spanAttributes).not.toHaveProperty('tool_result');
+  });
+
+  it('keeps executed arguments but omits result for soft errors', async () => {
+    mockTelemetrySdkState.initialized = true;
+    const { spanRecord } = await runSingleTool({
+      includeSensitiveSpanAttributes: true,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'failed',
+        returnDisplay: 'failed',
+        error: { message: 'failed', type: ToolErrorType.EXECUTION_FAILED },
+      }),
+    });
+
+    expect(
+      spanRecord.spanAttributes['gen_ai.tool.call.arguments'],
+    ).toBeDefined();
+    expect(
+      spanRecord.spanAttributes['gen_ai.tool.call.result'],
+    ).toBeUndefined();
+  });
+
   it('acquires the sleep inhibitor around actual tool execution', async () => {
     mockAcquireSleepInhibitor.mockClear();
     mockSleepInhibitorRelease.mockClear();
@@ -9412,14 +9575,12 @@ describe('CoreToolScheduler telemetry spans', () => {
 
     expect(completedCalls[0].status).toBe('success');
     expect(spanRecord.ended).toBe(true);
-    expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
-      'Failed to add tool input span attributes:',
-      expect.any(TypeError),
-    );
-    expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
-      'Failed to add tool result span attributes:',
-      expect.any(TypeError),
-    );
+    expect(
+      spanRecord.spanAttributes['gen_ai.tool.call.arguments'],
+    ).toBeUndefined();
+    expect(
+      spanRecord.spanAttributes['gen_ai.tool.call.result'],
+    ).toBeUndefined();
   });
 
   it('marks successful tool calls with OK status via endToolSpan', async () => {

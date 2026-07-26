@@ -181,6 +181,7 @@ Stack trace:
 ${reason.stack}`
         : ''
     }`;
+    debugLogger.error(errorMessage);
     appEvents.emit(AppEvent.LogError, errorMessage);
     if (!unhandledRejectionOccurred) {
       unhandledRejectionOccurred = true;

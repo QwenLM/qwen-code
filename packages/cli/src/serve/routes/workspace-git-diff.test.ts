@@ -14,6 +14,7 @@ import {
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { sendBridgeError } from '../server/error-response.js';
 import {
+  createWorkspaceGenerationGuard,
   createWorkspaceRegistry,
   type WorkspaceRegistry,
   type WorkspaceRuntime,
@@ -155,6 +156,38 @@ describe('workspace Git diff routes', () => {
 
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({ available: false, files: [] });
+  });
+
+  it('rejects legacy reads when the live primary workspace is untrusted', async () => {
+    const app = express();
+    registerWorkspaceGitDiffRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+      isWorkspaceTrusted: () => false,
+    });
+
+    const response = await request(app).get('/workspace/git/diff');
+
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe('untrusted_workspace');
+    expect(fetchGitDiffMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects legacy reads captured from a closed generation', async () => {
+    const generationGuard = createWorkspaceGenerationGuard();
+    generationGuard.close();
+    const app = express();
+    registerWorkspaceGitDiffRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+      captureGenerationAssertion: () => () => generationGuard.assertOpen(),
+    });
+
+    const response = await request(app).get('/workspace/git/diff');
+
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('workspace_runtime_unavailable');
+    expect(fetchGitDiffMock).not.toHaveBeenCalled();
   });
 
   it('returns single-file hunks for the bound workspace', async () => {
@@ -350,6 +383,38 @@ describe('workspace Git diff routes', () => {
     expect(response.status).toBe(403);
     expect(response.body.code).toBe('untrusted_workspace');
     expect(fetchGitDiffMock).not.toHaveBeenCalled();
+  });
+
+  it('does not return a diff after the selected generation closes', async () => {
+    let releaseDiff!: (value: Awaited<ReturnType<typeof fetchGitDiff>>) => void;
+    const pendingDiff = new Promise<Awaited<ReturnType<typeof fetchGitDiff>>>(
+      (resolve) => {
+        releaseDiff = resolve;
+      },
+    );
+    fetchGitDiffMock.mockReturnValue(pendingDiff);
+    const generationGuard = createWorkspaceGenerationGuard();
+    const primary = runtime('primary', '/work/main', true);
+    const secondary = {
+      ...runtime('secondary', '/work/secondary', true),
+      generationGuard,
+    };
+    const app = express();
+    registerWorkspaceQualifiedGitDiffRoutes(app, {
+      workspaceRegistry: registry([primary, secondary]),
+      sendBridgeError,
+    });
+
+    const response = request(app)
+      .get('/workspaces/secondary/git/diff')
+      .then((result) => result);
+    await vi.waitFor(() => expect(fetchGitDiffMock).toHaveBeenCalledOnce());
+    generationGuard.close();
+    releaseDiff(null);
+    const result = await response;
+
+    expect(result.status).toBe(503);
+    expect(result.body.code).toBe('workspace_runtime_unavailable');
   });
 
   it('rejects an untrusted workspace on the single-file endpoint too', async () => {

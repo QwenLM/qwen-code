@@ -131,6 +131,9 @@ describe('Session.pendingWorktreeNotice', () => {
       getFileFilteringRespectGitIgnore: vi.fn().mockReturnValue(true),
       getEnableRecursiveFileSearch: vi.fn().mockReturnValue(false),
       getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      // The prompt turn's finally sweeps review-worktree leases against the
+      // project root (see Session.review-lease.test.ts).
+      getProjectRoot: vi.fn().mockReturnValue('/tmp'),
       getDebugMode: vi.fn().mockReturnValue(false),
       getAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
       isCronEnabled: vi.fn().mockReturnValue(false),

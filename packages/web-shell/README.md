@@ -68,7 +68,8 @@ import customShadowStyles from './web-shell-shadow.css?inline';
 />;
 ```
 
-- `plugins` 只隔离插件管理页面主体。
+- `plugins` 隔离所有插件管理页面主体，包括统一的 Plugins 页面，以及
+  `/extensions`、`/mcp`、`/skills` 等兼容入口打开的页面。
 - `portals` 统一隔离 Web Shell 的所有弹窗层，包括 Dialog、Drawer、Popover、
   DropdownMenu、Select 和 Tooltip；插件页面发起的弹窗也由这个开关管理。
 - `styles` 会追加到每个启用的 ShadowRoot，供 render props 等业务自定义内容继续

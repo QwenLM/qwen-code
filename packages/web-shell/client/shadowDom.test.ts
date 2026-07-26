@@ -1,9 +1,26 @@
 // @vitest-environment jsdom
 import { describe, expect, it } from 'vitest';
 import {
+  isPluginShadowPanel,
   installWebShellShadowStyles,
   resolveWebShellShadowDom,
 } from './shadowDom';
+
+describe('isPluginShadowPanel', () => {
+  it.each(['plugins', 'extensions', 'mcp', 'skills', 'agents'])(
+    'includes the %s management surface',
+    (panel) => {
+      expect(isPluginShadowPanel(panel)).toBe(true);
+    },
+  );
+
+  it.each([null, 'settings', 'status', 'sessions'])(
+    'excludes the %s non-plugin surface',
+    (panel) => {
+      expect(isPluginShadowPanel(panel)).toBe(false);
+    },
+  );
+});
 
 describe('resolveWebShellShadowDom', () => {
   it('keeps Shadow DOM disabled by default', () => {

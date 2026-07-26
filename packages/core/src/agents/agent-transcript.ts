@@ -458,18 +458,16 @@ export function attachJsonlTranscriptWriter(
   };
 
   const onRoundText = (event: AgentRoundTextEvent) => {
-    if (!event.text && !event.thoughtText) return;
+    const parts = [
+      ...(event.thoughtText
+        ? [{ text: event.thoughtText, thought: true }]
+        : []),
+      ...(event.text ? [{ text: event.text }] : []),
+    ];
+    if (parts.length === 0 && !event.usageMetadata) return;
     append({
       ...baseFields('assistant'),
-      message: {
-        role: 'model',
-        parts: [
-          ...(event.thoughtText
-            ? [{ text: event.thoughtText, thought: true }]
-            : []),
-          ...(event.text ? [{ text: event.text }] : []),
-        ],
-      },
+      message: { role: 'model', parts },
       usageMetadata: event.usageMetadata,
       agentRunId: event.runId ?? streamRunId,
       agentRound: event.round,

@@ -49,9 +49,11 @@ const debugLogger = createDebugLogger('CLIENT');
 import { GeminiChat } from './geminiChat.js';
 import { getRecentGitStatus } from '../utils/gitUtils.js';
 import {
+  assembleSystemPrompt,
   getArenaSystemReminder,
   getCoreSystemPrompt,
   getCustomSystemPrompt,
+  getManualPlanExitSystemReminder,
   getPlanModeSystemReminder,
   resolveInteractionMode,
 } from './prompts.js';
@@ -249,6 +251,7 @@ export class GeminiClient {
   private cachedGitStatus: string | null | undefined;
   private readonly surfacedRelevantAutoMemoryPaths = new Set<string>();
   private shutdownRequested = false;
+  private readonly settledSteerInputs = new WeakSet<SteerInput>();
 
   private readonly loopDetector: LoopDetectionService;
   private lastPromptId: string | undefined = undefined;
@@ -497,6 +500,22 @@ export class GeminiClient {
       return text || undefined;
     }
     return undefined;
+  }
+
+  /**
+   * Fire-and-forget StopFailure hook for loop-detection early returns.
+   * Matches the detached pattern used by the CLI's API-error path
+   * (useGeminiStream.ts) — output and errors are ignored.
+   */
+  private fireLoopDetectedStopFailure(loopType: string | null): void {
+    if (this.config.getDisableAllHooks()) return;
+    const hookSystem = this.config.getHookSystem();
+    if (!hookSystem || !this.config.hasHooksForEvent('StopFailure')) return;
+    hookSystem
+      .fireStopFailureEvent('loop_detected', loopType ?? undefined)
+      .catch((err) => {
+        debugLogger.warn(`StopFailure hook failed: ${err}`);
+      });
   }
 
   /**
@@ -863,27 +882,22 @@ export class GeminiClient {
   }
 
   private getMainSessionSystemInstruction(): string {
-    const userMemory = this.config.getUserMemory();
     const overrideSystemPrompt = this.config.getSystemPrompt();
-    const appendSystemPrompt = this.config.getAppendSystemPrompt();
-    const gitStatus = this.getCachedGitStatus();
-
-    if (overrideSystemPrompt) {
-      const base = getCustomSystemPrompt(
-        overrideSystemPrompt,
-        userMemory,
-        appendSystemPrompt,
-      );
-      return gitStatus ? base + '\n\n' + gitStatus : base;
-    }
-
-    const base = getCoreSystemPrompt(
-      userMemory,
-      this.config.getModel(),
-      appendSystemPrompt,
-      resolveInteractionMode(this.config),
-    );
-    return gitStatus ? base + '\n\n' + gitStatus : base;
+    const base = overrideSystemPrompt
+      ? getCustomSystemPrompt(overrideSystemPrompt)
+      : getCoreSystemPrompt(
+          undefined,
+          this.config.getModel(),
+          undefined,
+          resolveInteractionMode(this.config),
+        );
+    return assembleSystemPrompt({
+      base,
+      contextFiles: this.config.getUserMemory(),
+      appendPrompt: this.config.getAppendSystemPrompt(),
+      gitStatus: this.getCachedGitStatus(),
+      autoMemory: this.config.getAutoMemoryPrompt(),
+    });
   }
 
   async refreshStartupContextReminder(): Promise<void> {
@@ -1925,7 +1939,8 @@ export class GeminiClient {
       steerInput: SteerInput | undefined,
       pushCountBefore: number,
     ) => {
-      if (!steerInput) return;
+      if (!steerInput || this.settledSteerInputs.has(steerInput)) return;
+      this.settledSteerInputs.add(steerInput);
       try {
         if (currentPushCount() > pushCountBefore) {
           steerInput.accept();
@@ -2450,6 +2465,15 @@ export class GeminiClient {
                 this.config.getSdkMode(),
             ),
           );
+        } else if (this.config.consumePendingManualPlanExitNotice()) {
+          // One-shot counterpart to the reminder above: the model was told
+          // "plan mode is active" on every turn, so a manual exit
+          // (Shift+Tab, /approval-mode, /plan) needs an explicit signal —
+          // the reminder silently disappearing goes unnoticed and the
+          // model keeps calling exit_plan_mode (#7671).
+          systemReminders.push(
+            getManualPlanExitSystemReminder(this.config.getApprovalMode()),
+          );
         }
 
         // add arena system reminder if an arena session is active
@@ -2553,9 +2577,20 @@ export class GeminiClient {
 
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
+      let steerInputSettled = false;
       let hasToolCalls = false;
       try {
         for await (const event of resultStream) {
+          if (!steerInputSettled) {
+            // Settle the attached steer input as soon as the first stream
+            // event arrives — the user-content push has landed by now.
+            // Settling here (before model-response events are committed to
+            // UI history) ensures the queued user message renders above the
+            // model's reply.  The outer finally re-runs settleSteerInput
+            // as a no-op thanks to the settledSteerInputs guard.
+            settleSteerInput(attachedSteerInput, attachedSteerPushCount);
+            steerInputSettled = true;
+          }
           if (event.type === GeminiEventType.ToolCallRequest) {
             hasToolCalls = true;
           } else if (
@@ -2598,6 +2633,7 @@ export class GeminiClient {
             if (isTopLevelInteraction)
               endInteractionSpan('error', { errorMessage: 'loop detected' });
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+            this.fireLoopDetectedStopFailure(loopType);
             return turn;
           }
 
@@ -2629,6 +2665,7 @@ export class GeminiClient {
             // finally cleanup catches this, but cancel explicitly to match
             // the cleanup pattern at other early-return sites.
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+            this.fireLoopDetectedStopFailure(loopType);
             return turn;
           }
           // Update arena status on Finished events — stats are derived
@@ -2725,7 +2762,7 @@ export class GeminiClient {
               {
                 ...options,
                 type: SendMessageType.Steer,
-                steerInput: undefined,
+                steerInput,
               },
               steerTurnBudget,
             );
@@ -2948,6 +2985,7 @@ export class GeminiClient {
                 type: SendMessageType.Hook,
                 modelOverride: options?.modelOverride,
                 getSteerInput: options?.getSteerInput,
+                steerInput: pendingSteer,
                 stopHookState: discardGoalContinuation
                   ? undefined
                   : {
@@ -3049,7 +3087,7 @@ export class GeminiClient {
                 type: pendingSteer
                   ? SendMessageType.Steer
                   : SendMessageType.Hook,
-                steerInput: undefined,
+                steerInput: pendingSteer,
               },
               continueTurnBudget,
             );
@@ -3130,9 +3168,12 @@ export class GeminiClient {
     let currentAttemptModel: string = model;
 
     try {
-      const userMemory = this.config.getUserMemory();
       const finalSystemInstruction = generationConfig.systemInstruction
-        ? getCustomSystemPrompt(generationConfig.systemInstruction, userMemory)
+        ? assembleSystemPrompt({
+            base: getCustomSystemPrompt(generationConfig.systemInstruction),
+            contextFiles: this.config.getUserMemory(),
+            autoMemory: this.config.getAutoMemoryPrompt(),
+          })
         : this.getMainSessionSystemInstruction();
 
       const requestConfig: GenerateContentConfig = {

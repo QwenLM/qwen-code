@@ -27,6 +27,7 @@ try {
   // Ignore stale or user-provided junk; normal argv is still usable.
 }
 delete process.env['QWEN_CODE_RELAUNCH_ARGS'];
+delete process.env['QWEN_CODE_PENDING_COMPILE_CACHE'];
 
 function hasFlag(flag, alias) {
   for (const arg of cliArgs) {
@@ -282,7 +283,15 @@ if (isTopLevelVersion) {
 
 if (isInProcessFastPath()) {
   const { default: module } = await import('node:module');
-  module.enableCompileCache?.();
+  const compileCache = module.enableCompileCache?.();
+  if (
+    cliArgs[0] === 'serve' &&
+    !process.env['NODE_COMPILE_CACHE'] &&
+    compileCache?.status === module.constants?.compileCacheStatus?.ENABLED &&
+    compileCache?.directory
+  ) {
+    process.env['QWEN_CODE_PENDING_COMPILE_CACHE'] = compileCache.directory;
+  }
   process.argv[1] = cliPath;
   await import(pathToFileURL(cliPath).href);
 } else {

@@ -14,7 +14,11 @@ import { normalizeServeChannelSelection } from '../serve/channel-selection.js';
 // handler below so it only loads when the user actually runs `qwen serve`.
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { DEFAULT_RING_SIZE } from '@qwen-code/acp-bridge/eventBus';
-import { DEFAULT_COMPACTED_REPLAY_MAX_BYTES } from '@qwen-code/acp-bridge/replayWindowLimits';
+import {
+  DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
+  DEFAULT_MAX_JOURNAL_BYTES,
+  DEFAULT_MAX_JOURNAL_EVENTS,
+} from '@qwen-code/acp-bridge/replayWindowLimits';
 import {
   ApprovalMode,
   MCP_BUDGET_WARN_FRACTION,
@@ -102,6 +106,8 @@ interface ServeArgs {
   'max-connections': number;
   'event-ring-size': number;
   'compacted-replay-max-bytes': number;
+  'max-journal-events': number;
+  'max-journal-bytes': number;
   workspace?: string | string[];
   'require-auth': boolean;
   'enable-session-shell': boolean;
@@ -276,6 +282,22 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           '`POST /session/:id/load` late attaches. Larger = more recent ' +
           'history in load snapshots at higher heap cost. Must be a positive ' +
           'safe integer no larger than 256 MiB.',
+      })
+      .option('max-journal-events', {
+        type: 'number',
+        default: DEFAULT_MAX_JOURNAL_EVENTS,
+        description:
+          'Per-session cap on raw events retained in the in-flight live ' +
+          'journal (current unfinished turn). When exceeded, the oldest ' +
+          'entries are dropped. Must be a positive safe integer.',
+      })
+      .option('max-journal-bytes', {
+        type: 'number',
+        default: DEFAULT_MAX_JOURNAL_BYTES,
+        description:
+          'Per-session byte cap on the in-flight live journal. When ' +
+          'exceeded, the oldest entries are dropped (at least one is ' +
+          'always kept). Must be a positive safe integer.',
       })
       .option('http-bridge', {
         type: 'boolean',
@@ -572,6 +594,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         maxConnections: argv['max-connections'],
         eventRingSize: argv['event-ring-size'],
         compactedReplayMaxBytes: argv['compacted-replay-max-bytes'],
+        maxJournalEvents: argv['max-journal-events'],
+        maxJournalBytes: argv['max-journal-bytes'],
         workspace: argv.workspace,
         requireAuth: argv['require-auth'],
         enableSessionShell: argv['enable-session-shell'],

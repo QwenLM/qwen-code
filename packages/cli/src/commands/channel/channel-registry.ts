@@ -23,6 +23,7 @@ function ensureBuiltins(): Promise<void> {
         { name: 'wecom', promise: import('@qwen-code/channel-wecom') },
         { name: 'feishu', promise: import('@qwen-code/channel-feishu') },
         { name: 'qqbot', promise: import('@qwen-code/channel-qqbot') },
+        { name: 'github', promise: import('@qwen-code/channel-github') },
       ];
 
       const results = await Promise.allSettled(labelled.map((l) => l.promise));
