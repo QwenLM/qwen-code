@@ -50,13 +50,13 @@ export function useDaemonChannels(options: DaemonResourceOptions = {}) {
 
   useEffect(() => {
     const workspaceChanged = previousWorkspaceRef.current !== workspaceCwd;
-    previousWorkspaceRef.current = workspaceCwd;
     if (
       !enabled ||
       (options.autoLoad !== true && !(workspaceChanged && requestedRef.current))
     ) {
       return;
     }
+    previousWorkspaceRef.current = workspaceCwd;
     void reload();
   }, [enabled, options.autoLoad, reload, workspaceCwd]);
 

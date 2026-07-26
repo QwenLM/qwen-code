@@ -266,6 +266,33 @@ describe('useDaemonChannels', () => {
     expect(Object.keys(result?.channels ?? {})).toEqual(['bot-b']);
   });
 
+  it('reloads a workspace changed while the hook was disabled', async () => {
+    actions.loadChannels
+      .mockResolvedValueOnce(channelData('bot-a'))
+      .mockResolvedValueOnce(channelData('bot-b'));
+    let enabled = true;
+    let result: ReturnType<typeof useDaemonChannels> | undefined;
+
+    function TestComponent() {
+      result = useDaemonChannels({ enabled });
+      return null;
+    }
+
+    await act(async () => root.render((<TestComponent />) as ReactNode));
+    await act(async () => {
+      await result?.reload();
+    });
+
+    enabled = false;
+    context.current = { workspaceCwd: '/workspace-b' };
+    await act(async () => root.render((<TestComponent />) as ReactNode));
+    enabled = true;
+    await act(async () => root.render((<TestComponent />) as ReactNode));
+
+    expect(actions.loadChannels).toHaveBeenCalledTimes(2);
+    expect(Object.keys(result?.channels ?? {})).toEqual(['bot-b']);
+  });
+
   it('exposes pairing operations without reloading Channel settings', async () => {
     const pairing = { requests: [] };
     const approval = {

@@ -153,6 +153,69 @@ describe('workspace actions', () => {
     expect(remove).toHaveBeenCalledWith({ timeoutMs: 0 });
   });
 
+  it('does not preempt SDK timeouts for channel mutations', async () => {
+    vi.useFakeTimers();
+    let resolveUpsert!: () => void;
+    let resolveApproval!: () => void;
+    const upsertWorkspaceChannel = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveUpsert = resolve;
+        }),
+    );
+    const approveWorkspaceChannelPairing = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveApproval = resolve;
+        }),
+    );
+    const actions = createDaemonWorkspaceActions({
+      getClient: () =>
+        ({
+          workspaceByCwd: () => ({
+            upsertWorkspaceChannel,
+            approveWorkspaceChannelPairing,
+          }),
+        }) as never,
+      getWorkspaceCwd: () => '/workspace',
+      baseUrl: 'http://daemon',
+    });
+    let upsertStatus = 'pending';
+    let approvalStatus = 'pending';
+    const upsert = actions
+      .upsertChannel('bot', {
+        expectedRevision: '1',
+        config: { type: 'dingtalk' },
+      })
+      .then(
+        () => {
+          upsertStatus = 'resolved';
+        },
+        () => {
+          upsertStatus = 'rejected';
+        },
+      );
+    const approval = actions.channelPairing.approve('bot', 'ABCDEFGH').then(
+      () => {
+        approvalStatus = 'resolved';
+      },
+      () => {
+        approvalStatus = 'rejected';
+      },
+    );
+
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+
+    expect(upsertStatus).toBe('pending');
+    expect(approvalStatus).toBe('pending');
+
+    resolveUpsert();
+    resolveApproval();
+    await Promise.all([upsert, approval]);
+    expect(upsertStatus).toBe('resolved');
+    expect(approvalStatus).toBe('resolved');
+  });
+
   it('loads active extension operations from the daemon client', async () => {
     const activeExtensionOperations = vi
       .fn()

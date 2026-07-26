@@ -16,7 +16,6 @@ import type {
 } from './types.js';
 
 const AGENT_GENERATE_TIMEOUT_MS = 330_000;
-const CHANNEL_ACTION_TIMEOUT_MS = 5 * 60_000;
 
 export interface CreateDaemonWorkspaceActionsArgs {
   getClient: () => DaemonClient | undefined;
@@ -176,11 +175,7 @@ export function createDaemonWorkspaceActions({
         getWorkspaceCwd,
         'Update channel failed',
       );
-      return withActionTimeout(
-        workspace.upsertWorkspaceChannel(name, request),
-        'Update channel timed out',
-        CHANNEL_ACTION_TIMEOUT_MS,
-      );
+      return workspace.upsertWorkspaceChannel(name, request);
     },
 
     async removeChannel(name, request) {
@@ -189,11 +184,7 @@ export function createDaemonWorkspaceActions({
         getWorkspaceCwd,
         'Remove channel failed',
       );
-      return withActionTimeout(
-        workspace.deleteWorkspaceChannel(name, request),
-        'Remove channel timed out',
-        CHANNEL_ACTION_TIMEOUT_MS,
-      );
+      return workspace.deleteWorkspaceChannel(name, request);
     },
 
     async setChannelStartup(name, request) {
@@ -202,11 +193,7 @@ export function createDaemonWorkspaceActions({
         getWorkspaceCwd,
         'Update channel startup failed',
       );
-      return withActionTimeout(
-        workspace.setWorkspaceChannelStartup(name, request),
-        'Update channel startup timed out',
-        CHANNEL_ACTION_TIMEOUT_MS,
-      );
+      return workspace.setWorkspaceChannelStartup(name, request);
     },
 
     async startChannel(name) {
@@ -215,11 +202,7 @@ export function createDaemonWorkspaceActions({
         getWorkspaceCwd,
         'Start channel failed',
       );
-      return withActionTimeout(
-        workspace.startWorkspaceChannel(name),
-        'Start channel timed out',
-        CHANNEL_ACTION_TIMEOUT_MS,
-      );
+      return workspace.startWorkspaceChannel(name);
     },
 
     async stopChannel(name) {
@@ -228,11 +211,7 @@ export function createDaemonWorkspaceActions({
         getWorkspaceCwd,
         'Stop channel failed',
       );
-      return withActionTimeout(
-        workspace.stopWorkspaceChannel(name),
-        'Stop channel timed out',
-        CHANNEL_ACTION_TIMEOUT_MS,
-      );
+      return workspace.stopWorkspaceChannel(name);
     },
 
     async restartChannel(name) {
@@ -241,11 +220,7 @@ export function createDaemonWorkspaceActions({
         getWorkspaceCwd,
         'Restart channel failed',
       );
-      return withActionTimeout(
-        workspace.restartWorkspaceChannel(name),
-        'Restart channel timed out',
-        CHANNEL_ACTION_TIMEOUT_MS,
-      );
+      return workspace.restartWorkspaceChannel(name);
     },
 
     channelPairing: {
@@ -267,10 +242,7 @@ export function createDaemonWorkspaceActions({
           getWorkspaceCwd,
           'Approve channel pairing failed',
         );
-        return withActionTimeout(
-          workspace.approveWorkspaceChannelPairing(name, { code }),
-          'Approve channel pairing timed out',
-        );
+        return workspace.approveWorkspaceChannelPairing(name, { code });
       },
     },
 
