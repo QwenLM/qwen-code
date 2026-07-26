@@ -25,6 +25,7 @@
 // roster that gets shrunk.
 
 import type { RoleId } from './agent-briefs.js';
+import { pathTool } from '../script-lint.js';
 
 /**
  * How this review's diff was captured — which decides what can be asked of it.
@@ -123,6 +124,22 @@ function isPositivePrNumber(value: unknown): boolean {
   return false;
 }
 
+/**
+ * Does the diff touch a file a linter owns by path — a shell script, a workflow,
+ * a Dockerfile? Detected by path alone (`pathTool`), the same detector the command
+ * uses, because here only the plan's file paths are in hand, not the files. A
+ * shebang-only extensionless script does not trip this — the roster cannot read it
+ * — but if any script-lint agent runs, the command still lints it; the roster only
+ * decides whether to *require* the agent, and it requires it whenever the diff
+ * carries something a lint would name.
+ */
+function hasExecutableScript(plan: RosterPlan): boolean {
+  const files = Array.isArray(plan.files) ? plan.files : [];
+  return files.some(
+    (f) => typeof f?.path === 'string' && pathTool(f.path) !== null,
+  );
+}
+
 /** Source files rewritten heavily enough that the diff is the wrong frame. */
 function heavyFiles(plan: RosterPlan): string[] {
   const files = Array.isArray(plan.files) ? plan.files : [];
@@ -207,6 +224,14 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   if (mode !== 'diff-only') {
     add('1c');
     add('7');
+    // Script Lint reads the changed files from the tree, so — like Build & Test —
+    // it needs one: a `diff-only` review has no worktree to lint. And it is only
+    // required when the diff actually carries an executable script; a pure-TS PR
+    // has nothing for it to check, and requiring it there would exit-3 every such
+    // review over an agent with no job. The command still runs harmlessly on a
+    // diff with no scripts (it reports "nothing to lint"), but the *requirement*
+    // is scoped to when there is something to find.
+    if (hasExecutableScript(plan)) add('script-lint');
   }
 
   // A largely-rewritten file is not reviewable as a diff: the two ends of an

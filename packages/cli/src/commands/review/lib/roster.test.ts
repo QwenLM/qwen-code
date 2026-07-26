@@ -160,6 +160,55 @@ describe('requiredAgents — Step 3A', () => {
   });
 });
 
+describe('requiredAgents — the executable-script lint', () => {
+  // The requirement is scoped to a diff that actually carries a script a linter
+  // owns, detected by path — otherwise a pure-TS PR would exit-3 over an agent
+  // with nothing to check. It is the same `pathTool` the command dispatches on, so
+  // the roster and the command cannot disagree about what counts.
+  it.each([
+    ['deploy.sh', true],
+    ['scripts/build.bash', true],
+    ['.github/workflows/ci.yml', true],
+    ['Dockerfile', true],
+    ['docker/api.Dockerfile', true],
+    ['src/pay.ts', false], // production TS: nothing a shell linter owns
+    ['README.md', false],
+    ['config.yml', false], // yaml, but not a workflow
+  ])('a diff touching %s requires script-lint: %s', (path, required) => {
+    const plan = {
+      ...PR,
+      files: [{ path, kind: 'source', removedLines: 0, heavy: false }],
+    };
+    expect(keys(plan).includes('script-lint')).toBe(required);
+  });
+
+  it('requires it when any one file among many is an executable script', () => {
+    const plan = {
+      ...PR,
+      files: [
+        { path: 'src/a.ts', kind: 'source' },
+        { path: 'src/b.ts', kind: 'source' },
+        { path: '.husky/pre-commit.sh', kind: 'source' },
+      ],
+    };
+    expect(keys(plan)).toContain('script-lint');
+  });
+
+  it('does NOT require it on a diff-only review — there is no tree to lint', () => {
+    // Like Build & Test, it reads the changed files from a worktree; a cross-repo
+    // lightweight review has none, so requiring it would fail a review for not
+    // doing something it cannot.
+    const light = {
+      ...PR,
+      worktreePath: undefined,
+      prNumber: undefined,
+      files: [{ path: 'deploy.sh', kind: 'source' }],
+    };
+    expect(reviewMode(light)).toBe('diff-only');
+    expect(keys(light)).not.toContain('script-lint');
+  });
+});
+
 describe('requiredAgents — Step 3B', () => {
   const BIG = {
     ...PR,

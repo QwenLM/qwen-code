@@ -1887,6 +1887,45 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('timeout: 600000');
   });
 
+  it('gives Script Lint no diff — its evidence is what the linters say', () => {
+    const p = buildRoleBrief(PR_PLAN, 'script-lint');
+    expect(p).not.toContain(PLAN.diffPathAbsolute);
+    expect(p).toContain('Source: [build]');
+  });
+
+  it('hands Script Lint the script-lint command with absolute --plan/--worktree/--out', () => {
+    const p = buildRoleBrief(PR_PLAN, 'script-lint', {
+      planPath: '/abs/tmp/plan.json',
+    });
+    expect(p).toContain('"${QWEN_CODE_CLI:-qwen}" review script-lint');
+    expect(p).toContain('--plan /abs/tmp/plan.json');
+    expect(p).toMatch(/--worktree \/[^\s]*review-pr-6766/);
+    expect(p).not.toMatch(/--plan \.qwen/);
+    expect(p).toContain('--out /abs/tmp/qwen-review-pr-6766-script-lint.json');
+    // Same PATH-skew guard as build-test: no bare executable `qwen`.
+    expect(p).not.toMatch(/^qwen review /m);
+  });
+
+  it('never emits a literal "undefined" in the script-lint --out filename', () => {
+    const noPr = { ...PR_PLAN };
+    delete (noPr as { prNumber?: unknown }).prNumber;
+    const p = buildRoleBrief(noPr, 'script-lint', {
+      planPath: '/abs/tmp/plan.json',
+    });
+    expect(p).not.toContain('undefined');
+    expect(p).toContain('--out /abs/tmp/qwen-review-script-lint.json');
+  });
+
+  it('emits NO script-lint block in PR mode when the worktree is missing', () => {
+    // Same tree-safety rule as build-test: a PR-mode report with no worktree must
+    // not fall back to the user's own checkout.
+    const prNoWt = { ...PLAN, prNumber: '42', ownerRepo: 'o/r' };
+    const p = buildRoleBrief(prNoWt, 'script-lint', {
+      planPath: '/abs/tmp/plan.json',
+    });
+    expect(p).not.toMatch(/review script-lint \\/);
+  });
+
   it('welds the PR into Agent 0 — a bare `gh pr view` judges the wrong issue', () => {
     const p = buildRoleBrief(PR_PLAN, '0', {
       planPath: '/x/qwen-review-pr-6766-fetch.json',

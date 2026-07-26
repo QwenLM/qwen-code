@@ -52,7 +52,7 @@ export const reviewCommand: CommandModule = {
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: parse-args, fetch-pr, capture-local, plan-diff, pr-context, comment-status, load-rules, agent-prompt, build-test, resolve-anchors, check-coverage, presubmit, test-efficacy, compose-review, submit, or cleanup.',
+        'Specify a subcommand: parse-args, fetch-pr, capture-local, plan-diff, pr-context, comment-status, load-rules, agent-prompt, build-test, script-lint, resolve-anchors, check-coverage, presubmit, test-efficacy, compose-review, submit, or cleanup.',
       )
       .version(false),
   handler: () => {

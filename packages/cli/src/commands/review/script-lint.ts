@@ -81,8 +81,15 @@ interface PlanFile {
   hunks?: Array<{ newStart?: unknown; newEnd?: unknown }>;
 }
 
-/** Which linter owns a path, or null when it is not executable code we check. */
-export function toolFor(path: string, firstLine: string): LintTool | null {
+/**
+ * Which linter owns a path by its **name alone** — no file contents needed.
+ *
+ * Split out from `toolFor` because the roster (`lib/roster.ts`) must decide
+ * whether to require the script-lint agent knowing only the plan's file paths,
+ * not the files themselves. One detector, so the roster and the command cannot
+ * disagree about what counts as an executable script.
+ */
+export function pathTool(path: string): LintTool | null {
   const p = path.toLowerCase();
   const base = basename(p);
   if (/(^|\/)\.github\/workflows\/.+\.ya?ml$/.test(p)) {
@@ -96,7 +103,15 @@ export function toolFor(path: string, firstLine: string): LintTool | null {
     return 'hadolint';
   }
   if (p.endsWith('.sh') || p.endsWith('.bash')) return 'shellcheck';
-  // Extensionless scripts and git hooks: decide on the shebang.
+  return null;
+}
+
+/** Which linter owns a path, or null when it is not executable code we check.
+ *  A name match wins; otherwise an extensionless script is decided by its shebang
+ *  (a git hook, a CI helper) — which is why this one needs the file's first line. */
+export function toolFor(path: string, firstLine: string): LintTool | null {
+  const byPath = pathTool(path);
+  if (byPath) return byPath;
   if (/^#!.*\b(sh|bash|dash|ksh)\b/.test(firstLine)) return 'shellcheck';
   return null;
 }
