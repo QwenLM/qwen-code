@@ -1803,6 +1803,15 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('the input that makes it observable');
     // And the lens must not bleed into a sibling dimension's brief.
     expect(buildRoleBrief(PLAN, '2')).not.toContain('equivalent mutant');
+    // Severity must align with the shared ladder: a vacuous test is a Suggestion,
+    // escalated only by naming the concrete incorrect behaviour it lets ship —
+    // never Critical merely for being the sole guard, which would grade the same
+    // inert test above Agent 7's efficacy probe (a Suggestion) and inflate the
+    // verdict. This pins the semantic the "words Critical and Suggestion exist"
+    // check could not see.
+    expect(p).toContain('A vacuous test is a **Suggestion**');
+    expect(p).toContain('report **that behaviour** as the Critical');
+    expect(p).not.toContain('is a **Critical**: a green-no-matter-what');
   });
 
   it('gives Agent 7 no diff — its evidence is the commands it ran', () => {
