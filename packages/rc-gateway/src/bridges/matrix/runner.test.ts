@@ -9,7 +9,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MatrixRoomStore } from './roomStore.js';
-import { MatrixBridge } from './runner.js';
+import { MatrixBridge, MATRIX_INVITE_AUTOJOIN_CAP } from './runner.js';
 import { ENCRYPTED_ROOM_NOTICE } from './dispatch.js';
 import { initialMatrixHealthState, type MatrixHealthState } from './health.js';
 import type { BridgeClient } from '../client.js';
@@ -252,6 +252,42 @@ describe('MatrixBridge runner — sync loop', () => {
     ]);
     await h.bridge.start(h.ac.signal);
     expect(h.joined).toEqual(['!new:h']);
+  });
+
+  /** Builds a `/sync` invite payload for the given room ids (bot MXID matches `harness`). */
+  function inviteBatch(roomIds: string[], next_batch: string) {
+    const invite: Record<string, unknown> = {};
+    for (const roomId of roomIds) {
+      invite[roomId] = {
+        invite_state: {
+          events: [
+            {
+              type: 'm.room.member',
+              state_key: '@qwenbot:home.example.com',
+              content: { membership: 'invite' },
+            },
+          ],
+        },
+      };
+    }
+    return { next_batch, rooms: { invite } };
+  }
+
+  it('rate-limits invite auto-join: a burst beyond the cap only joins up to the cap, excess declined', async () => {
+    const roomIds = Array.from(
+      { length: MATRIX_INVITE_AUTOJOIN_CAP + 5 },
+      (_, i) => `!flood${i}:h`,
+    );
+    const h = harness([inviteBatch(roomIds, 's1')]);
+    await h.bridge.start(h.ac.signal);
+    // Exactly the first CAP invites are joined, in order; the excess 5 are declined.
+    expect(h.joined).toEqual(roomIds.slice(0, MATRIX_INVITE_AUTOJOIN_CAP));
+  });
+
+  it('a single invite under the cap still joins (binding path intact)', async () => {
+    const h = harness([inviteBatch(['!solo:h'], 's1')]);
+    await h.bridge.start(h.ac.signal);
+    expect(h.joined).toEqual(['!solo:h']);
   });
 
   it('posts the encryption notice exactly once for an encrypted room', async () => {

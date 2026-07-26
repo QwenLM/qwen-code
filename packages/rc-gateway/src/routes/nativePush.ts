@@ -14,6 +14,35 @@ function isNonEmptyString(v: unknown): v is string {
 }
 
 /**
+ * Defense-in-depth bounds for registration fields BEFORE `deviceToken` is
+ * embedded into the outbound APNs HTTP/2 `:path` (apnsSender.ts's
+ * `/3/device/<deviceToken>`). APNs device tokens are hex; the classic length
+ * is 64 chars (32 bytes) but newer tokens can run longer, so the ceiling here
+ * (200) is generous — comfortably above any real token — while still
+ * rejecting control characters, path-injection attempts, and absurd lengths
+ * from reaching the outbound request line. `bundleId`/`shellVersion` get a
+ * reverse-DNS-ish / dotted-version charset and a bounded length for the same
+ * reason (they flow into the `apns-topic` header and the stored record).
+ */
+const DEVICE_TOKEN_RE = /^[0-9a-fA-F]{64,200}$/;
+const BUNDLE_ID_MAX = 255;
+const BUNDLE_ID_RE = /^[A-Za-z0-9.-]+$/;
+const SHELL_VERSION_MAX = 64;
+const SHELL_VERSION_RE = /^[A-Za-z0-9._+-]+$/;
+
+function isValidDeviceToken(v: string): boolean {
+  return DEVICE_TOKEN_RE.test(v);
+}
+
+function isValidBundleId(v: string): boolean {
+  return v.length <= BUNDLE_ID_MAX && BUNDLE_ID_RE.test(v);
+}
+
+function isValidShellVersion(v: string): boolean {
+  return v.length <= SHELL_VERSION_MAX && SHELL_VERSION_RE.test(v);
+}
+
+/**
  * APNs registration routes (add-native-mobile-shells "APNs subscription
  * registration"), mounted at /rc/native-push/apns so paths are /register and
  * /register/:id. Any authenticated token may register its own device token;
@@ -35,7 +64,10 @@ export function createNativePushRouter(
     if (
       !isNonEmptyString(body.deviceToken) ||
       !isNonEmptyString(body.bundleId) ||
-      !isNonEmptyString(body.shellVersion)
+      !isNonEmptyString(body.shellVersion) ||
+      !isValidDeviceToken(body.deviceToken) ||
+      !isValidBundleId(body.bundleId) ||
+      !isValidShellVersion(body.shellVersion)
     ) {
       res.status(400).json({
         error: 'Invalid registration',

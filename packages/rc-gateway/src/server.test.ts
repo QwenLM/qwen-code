@@ -1471,7 +1471,7 @@ describe('APNs registration auth floor (native-mobile-shells)', () => {
     return ((await r.json()) as { token: string }).token;
   }
   const body = {
-    deviceToken: 'dt',
+    deviceToken: '0123456789abcdef'.repeat(4), // realistic 64-hex APNs token
     bundleId: 'dev.qwen.rc',
     shellVersion: '1.0.0',
   };
@@ -1569,7 +1569,7 @@ describe('APNs token-revoke cascade (native-mobile-shells)', () => {
         Authorization: `Bearer ${victimRes.token}`,
       },
       body: JSON.stringify({
-        deviceToken: 'dt',
+        deviceToken: '0123456789abcdef'.repeat(4),
         bundleId: 'dev.qwen.rc',
         shellVersion: '1.0.0',
       }),
@@ -1635,7 +1635,7 @@ describe('APNs token-revoke cascade (native-mobile-shells)', () => {
         Authorization: `Bearer ${approverToken}`,
       },
       body: JSON.stringify({
-        deviceToken: 'dt-approver',
+        deviceToken: 'abcdef0123456789'.repeat(4), // realistic 64-hex token
         bundleId: 'dev.qwen.rc',
         shellVersion: '1.0.0',
       }),
@@ -1652,7 +1652,7 @@ describe('APNs token-revoke cascade (native-mobile-shells)', () => {
 
     expect(posts).toHaveLength(1);
     expect(posts[0]).toMatchObject({
-      deviceToken: 'dt-approver',
+      deviceToken: 'abcdef0123456789'.repeat(4),
       topic: 'dev.qwen.rc',
       jwt: 'fake-jwt',
     });

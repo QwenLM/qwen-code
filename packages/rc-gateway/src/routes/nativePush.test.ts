@@ -41,8 +41,11 @@ afterEach(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+// A realistic APNs device token: 64 hex chars (32-byte classic token).
+const REALISTIC_DEVICE_TOKEN = '0123456789abcdef'.repeat(4);
+
 const reg = (over = {}) => ({
-  deviceToken: 'deadbeef',
+  deviceToken: REALISTIC_DEVICE_TOKEN,
   bundleId: 'dev.qwen.rc',
   shellVersion: '1.0.0',
   ...over,
@@ -89,6 +92,82 @@ describe('POST /rc/native-push/apns/register', () => {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ deviceToken: 'x' }),
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it('accepts a realistic 64-hex-char device token (does not over-reject a real APNs token)', async () => {
+    const base = await mount({ id: 'tkn_a', scopes: ['session:read'] });
+    const r = await fetch(`${base}/rc/native-push/apns/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(reg()),
+    });
+    expect(r.status).toBe(201);
+  });
+
+  it('400s a deviceToken that is not hex (charset guard before it reaches the APNs :path)', async () => {
+    const base = await mount({ id: 'tkn_a', scopes: ['session:read'] });
+    const r = await fetch(`${base}/rc/native-push/apns/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(
+        reg({ deviceToken: 'not-a-hex-token'.padEnd(64, 'z') }),
+      ),
+    });
+    expect(r.status).toBe(400);
+    const body = (await r.json()) as { code?: string };
+    expect(body.code).toBe('invalid_registration');
+  });
+
+  it('400s a deviceToken with control/injection characters (e.g. CRLF toward the :path)', async () => {
+    const base = await mount({ id: 'tkn_a', scopes: ['session:read'] });
+    const r = await fetch(`${base}/rc/native-push/apns/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(
+        reg({ deviceToken: `${REALISTIC_DEVICE_TOKEN}\r\n:evil-path` }),
+      ),
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it('400s an absurdly long deviceToken', async () => {
+    const base = await mount({ id: 'tkn_a', scopes: ['session:read'] });
+    const r = await fetch(`${base}/rc/native-push/apns/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(reg({ deviceToken: 'a'.repeat(500) })),
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it('400s a bundleId with a control character', async () => {
+    const base = await mount({ id: 'tkn_a', scopes: ['session:read'] });
+    const r = await fetch(`${base}/rc/native-push/apns/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(reg({ bundleId: 'dev.qwen.rc\r\nInjected: 1' })),
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it('400s an overlong bundleId', async () => {
+    const base = await mount({ id: 'tkn_a', scopes: ['session:read'] });
+    const r = await fetch(`${base}/rc/native-push/apns/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(reg({ bundleId: 'a'.repeat(300) })),
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it('400s a shellVersion with an unsafe character', async () => {
+    const base = await mount({ id: 'tkn_a', scopes: ['session:read'] });
+    const r = await fetch(`${base}/rc/native-push/apns/register`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(reg({ shellVersion: '1.0.0 <script>' })),
     });
     expect(r.status).toBe(400);
   });

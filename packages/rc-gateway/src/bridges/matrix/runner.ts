@@ -31,6 +31,7 @@ import {
   tracksReactions,
 } from './render.js';
 import type { MatrixHealthState } from './health.js';
+import { SubActorRateLimiter } from '../subActorRateLimiter.js';
 
 /** The inbound Matrix surface the runner needs (subset of MatrixRestApi). */
 export interface MatrixInbound extends MatrixResponder {
@@ -90,6 +91,35 @@ export interface MatrixBridgeConfig {
 const RECONNECT_INITIAL_MS = 1000;
 const RECONNECT_MAX_MS = 30_000;
 
+/**
+ * Cap on room-invite auto-joins the bot will accept within the rolling window
+ * (reuses {@link SubActorRateLimiter}'s default 60 s window). Anyone can invite
+ * the bot to arbitrary rooms with no allowlist gate, so an unbounded auto-join
+ * is a DoS/probing surface (the bot joining — and thus syncing state for —
+ * unboundedly many rooms). Binding a session still requires an operator-minted
+ * token posted IN the room, so this bounds probing/DoS, not session
+ * compromise. Declining an invite is always safe (fail-safe): a legitimate
+ * operator can just re-invite once the window rolls over.
+ *
+ * ACCEPTED TRADEOFF: the bucket is GLOBAL (one bot-wide counter, see
+ * {@link MATRIX_INVITE_AUTOJOIN_KEY}), not per-inviter — `invite_state` does
+ * not expose a trustworthy inviter identity to key on. A sustained attacker
+ * who spends the full cap every window can therefore starve a legitimate
+ * operator's invite for as long as the flood continues (re-invite-on-cooldown
+ * only helps once the flood stops). 20/60s is chosen to comfortably clear any
+ * plausible legitimate invite burst (operators bind sessions one room at a
+ * time) while still being a real ceiling against a flood; it is not a
+ * fairness mechanism between a flooder and a legitimate inviter racing the
+ * same window.
+ */
+export const MATRIX_INVITE_AUTOJOIN_CAP = 20;
+/**
+ * Single global bucket key for the invite auto-join limiter: `invite_state`
+ * exposes the bot's own membership event, not a reliable per-inviter identity,
+ * so the bound is bot-wide (total auto-joins per window), not per-sender.
+ */
+const MATRIX_INVITE_AUTOJOIN_KEY = '__matrix_invite_autojoin__';
+
 /** Where a rendered permission_request landed (for the resolve edit). */
 interface SentRequest {
   roomId: string;
@@ -129,6 +159,8 @@ export class MatrixBridge {
   private readonly deeplinkGuidanceSent = new Set<string>();
   /** Streams agent prose into rooms (buffer + m.thread on long streams). */
   private readonly stream: MatrixStreamRouter;
+  /** Bounds room-invite auto-joins per rolling window (DoS/probing guard). */
+  private readonly inviteLimiter = new SubActorRateLimiter();
   private readonly ctx: RoomStateCtx;
   private readonly log: (msg: string) => void;
   /** The run signal, stored so decrypted-path dispatch can reconcile subscriptions. */
@@ -308,6 +340,17 @@ export class MatrixBridge {
       if (this.cfg.health) this.cfg.health.homeserverReachable = true;
 
       for (const roomId of ex.invites) {
+        const { allowed } = this.inviteLimiter.tryConsume(
+          MATRIX_INVITE_AUTOJOIN_KEY,
+          MATRIX_INVITE_AUTOJOIN_CAP,
+          Date.now(),
+        );
+        if (!allowed) {
+          this.log(
+            `matrix bridge: declined invite to ${roomId} (auto-join rate limit exceeded)`,
+          );
+          continue;
+        }
         await this.cfg.rest.joinRoom(roomId);
         this.log(`matrix bridge: joined room ${roomId}`);
       }
