@@ -271,12 +271,13 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   let coveredChunks: number[] = [];
 
   // The Criticals a verifier must have ruled on before this review may post
-  // them as blockers. Deterministic `[build]`/`[test]` body findings are
-  // pre-confirmed and skip verification by design; every other Critical —
-  // anchored or body — is a claim, and a claim is confirmed by Step 4 or it
-  // is not confirmed at all.
+  // them as blockers. Deterministic `[build]`/`[test]`/`[probe]` body findings
+  // are pre-confirmed and skip verification by design — `[probe]` is a finding
+  // the verifier confirmed by *running* a probe against the code, so its evidence
+  // is an observed behaviour, not a re-reading; every other Critical — anchored or
+  // body — is a claim, and a claim is confirmed by Step 4 or it is not at all.
   const nonDeterministicBodyCriticals = bodyCriticals.filter(
-    (x) => !/\[(?:build|test)\]/i.test(x),
+    (x) => !/\[(?:build|test|probe)\]/i.test(x),
   ).length;
   const criticalsNeedingVerify =
     criticalsInline + nonDeterministicBodyCriticals;
