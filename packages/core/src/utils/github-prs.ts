@@ -278,6 +278,7 @@ function runGhPrCreate(
         maxBuffer: GH_MAX_BUFFER,
         windowsHide: true,
         encoding: 'utf8',
+        env: gitEnv(),
       },
       (error, stdout) => {
         if (error) reject(error);

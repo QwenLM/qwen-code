@@ -492,7 +492,9 @@ export function BranchPickerPopover({
                       <div key={remote}>
                         <div className={styles.remoteGroupLabel}>{remote}</div>
                         {branches.map((b) => {
-                          const localName = b.name.slice(remote.length + 1);
+                          const slash = b.name.indexOf('/');
+                          const localName =
+                            slash > 0 ? b.name.slice(slash + 1) : b.name;
                           return (
                             <BranchItem
                               key={b.name}

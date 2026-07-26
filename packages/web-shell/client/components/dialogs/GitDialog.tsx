@@ -457,6 +457,7 @@ export function GitDialog({
       const trimmedBase = prBase.trim();
       const remotePrefix = (prBranches?.remotes ?? [])
         .map(([name]) => name)
+        .sort((a, b) => b.length - a.length)
         .find((name) => trimmedBase.startsWith(`${name}/`));
       const baseBranch = remotePrefix
         ? trimmedBase.slice(remotePrefix.length + 1)
@@ -818,7 +819,9 @@ function BranchSelect({
           ))}
           {filteredLocal.length > 0 && (
             <div>
-              <div className={styles.branchSelectGroup}>local</div>
+              <div className={styles.branchSelectGroup}>
+                {t('branchSelect.local')}
+              </div>
               {filteredLocal.map((n) => (
                 <button
                   key={n}

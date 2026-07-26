@@ -72,6 +72,7 @@ const EN: Messages = {
   'branchSelect.search': 'Search branches…',
   'branchSelect.loading': 'Loading…',
   'branchSelect.noMatches': 'No matches',
+  'branchSelect.local': 'local',
   'gitDiff.title': 'Changes',
   'gitDiff.summary': (v) =>
     `${v?.count ?? 0} files · +${v?.added ?? 0} −${v?.removed ?? 0}`,
@@ -2394,6 +2395,7 @@ const ZH: Messages = {
   'branchSelect.search': '搜索分支…',
   'branchSelect.loading': '加载中…',
   'branchSelect.noMatches': '无匹配',
+  'branchSelect.local': '本地',
   'gitDiff.title': '变更',
   'gitDiff.summary': (v) =>
     `${v?.count ?? 0} 个文件 · +${v?.added ?? 0} −${v?.removed ?? 0}`,
