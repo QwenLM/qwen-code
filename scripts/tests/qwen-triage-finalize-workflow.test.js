@@ -84,6 +84,9 @@ describe('qwen-triage-finalize workflow', () => {
     // Marker text is public: anyone can paste it into a PR comment. Every
     // lookup that acts on a marker must filter on the bot identity first.
     expect(script).toContain("gh api user --jq '.login'");
+    expect(script).toContain(
+      'select(.user.login == $bot) | select((.body | contains($m)) or (.body | contains($legacy)))',
+    );
     const authorFiltered = script.match(
       /select\(\.user\.login == \$bot\) \| select\(\.body \| contains\(\$m\)\)/g,
     );
