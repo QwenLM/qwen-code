@@ -1866,6 +1866,24 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     expect(r.cappedBy).not.toContain('criticals-unverified');
   });
 
+  it('a MODEL-written `[lint]` string is NOT deterministic — provenance, not the marker, decides', () => {
+    // The gate's own findings are deterministic because `scriptLintGate` read a
+    // tool's report; a body Critical a model merely tagged `[lint]` (or that quoted
+    // `[lint]` out of the diff) must still be verified — otherwise an unverified or
+    // injected claim launders itself into a blocker. With no verifier, it softens.
+    const r = composeReview({
+      criticalsInline: 0,
+      bodyCriticals: [
+        '[lint] deploy.sh:3 SC2086 — unquoted $x (model-written)',
+      ],
+      planPath: coveredPlan(['reverse-audit']), // verifier absent
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('criticals-unverified');
+  });
+
   it('a verified Request changes still blocks — the cap binds only when Step 4 is missing', () => {
     const r = composeReview({
       criticalsInline: 1,
@@ -2451,6 +2469,25 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     expect(g.criticals).toHaveLength(1);
     expect(g.criticals[0]).toContain('SC2086');
     expect(g.criticals[0]).toContain('[lint]');
+    expect(g.unreviewed).toEqual([]);
+  });
+
+  it('fails closed on a STALE report — headSha disagrees with the plan', () => {
+    const p = writePlan({ fetchedSha: 'aaaaaaa' });
+    writeReport({ ...withFinding(finding()), headSha: 'bbbbbbb' });
+    const g = scriptLintGate(p);
+    // The finding is NOT trusted (it was produced at a different commit); the
+    // review is unreviewed until script-lint re-runs at this head.
+    expect(g.criticals).toEqual([]);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('stale');
+  });
+
+  it('accepts a report whose headSha matches the plan (fresh)', () => {
+    const p = writePlan({ fetchedSha: 'aaaaaaa' });
+    writeReport({ ...withFinding(finding()), headSha: 'aaaaaaa' });
+    const g = scriptLintGate(p);
+    expect(g.criticals).toHaveLength(1);
     expect(g.unreviewed).toEqual([]);
   });
 

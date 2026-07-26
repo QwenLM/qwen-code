@@ -90,6 +90,13 @@ export interface ScriptLintReport {
   ok: boolean;
   /** One line for the agent's report. */
   note: string;
+  /**
+   * The worktree's `HEAD` when this report was produced (`git rev-parse HEAD`), or
+   * `undefined` when it could not be read. `compose-review` compares it to the
+   * plan's `fetchedSha` and treats a mismatch as no report — so a stale report
+   * left by an earlier review of an older commit cannot certify the current one.
+   */
+  headSha?: string;
 }
 
 interface ScriptLintArgs {
@@ -205,14 +212,23 @@ function addedRangesByPath(
  * not follow the link, so a non-regular file is skipped entirely — the linter is
  * never pointed at it either. The read is bounded to one block, not the whole file.
  */
-function firstLineOf(abs: string): string | null {
+type FirstLine =
+  /** A regular file we read — its first line, for shebang detection. */
+  | { kind: 'line'; text: string }
+  /** No file on the new side: the diff deleted it. Nothing to lint. */
+  | { kind: 'missing' }
+  /** Present but not a regular file (a symlink, fifo, device) or unreadable —
+   *  owed if a linter recognises the path, but we will not follow/read it. */
+  | { kind: 'irregular' };
+
+function firstLineOf(abs: string): FirstLine {
   let st;
   try {
     st = lstatSync(abs);
   } catch {
-    return null;
+    return { kind: 'missing' };
   }
-  if (!st.isFile()) return null;
+  if (!st.isFile()) return { kind: 'irregular' };
   let fd: number | undefined;
   try {
     fd = openSync(abs, 'r');
@@ -220,9 +236,9 @@ function firstLineOf(abs: string): string | null {
     const n = readSync(fd, buf, 0, buf.length, 0);
     const text = buf.toString('utf8', 0, n);
     const nl = text.indexOf('\n');
-    return nl >= 0 ? text.slice(0, nl) : text;
+    return { kind: 'line', text: nl >= 0 ? text.slice(0, nl) : text };
   } catch {
-    return null;
+    return { kind: 'irregular' };
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
@@ -255,12 +271,15 @@ function runTool(tool: LintTool, absPath: string): ToolRun {
   const argv: Record<LintTool, string[]> = {
     shellcheck: ['--norc', '--format=json1', '--severity=style', absPath],
     actionlint: ['-format', '{{json .}}', '-no-color', absPath],
-    // `--no-config` so a PR-controlled `.hadolint.yaml` in the worktree cannot
-    // `ignored: [DL3006, …]` its own findings away — the same isolation `--norc`
-    // gives shellcheck.
-    hadolint: ['--no-config', '--format', 'json', absPath],
+    // NOTE: hadolint has no `--no-config` flag — a prior attempt to add one made
+    // hadolint exit 2 (usage error) on every Dockerfile. Config isolation for
+    // hadolint (a PR-controlled `.hadolint.yaml`) needs a verified mechanism
+    // (`HADOLINT_CONFIG` / `--config <empty>`) and is tracked separately; for now
+    // the invocation is the plain, working one.
+    hadolint: ['--format', 'json', absPath],
   };
-  const env = { ...process.env };
+  // `HADOLINT_NO_COLOR` avoids ANSI in any stray output; the shellcheck knobs stay.
+  const env: NodeJS.ProcessEnv = { ...process.env, HADOLINT_NO_COLOR: '1' };
   delete env['SHELLCHECK_OPTS'];
   const r = spawnSync(tool, argv[tool], {
     encoding: 'utf8',
@@ -356,13 +375,21 @@ function parseFindings(tool: LintTool, raw: string): LintFinding[] | null {
       })
       .filter((x): x is LintFinding => x !== null);
   }
-  // actionlint: an array of { message, line, column, kind, ... }
-  return (Array.isArray(json) ? json : [])
-    .map((c) => {
-      const o = c as { line?: unknown; kind?: unknown; message?: unknown };
-      return mk(o.line, String(o.kind ?? 'actionlint'), 'error', o.message);
-    })
-    .filter((x): x is LintFinding => x !== null);
+  // actionlint never reaches here — a workflow is recorded as skipped upstream
+  // (its embedded-shell source mapping is not yet parsed). Fail closed if it ever
+  // does, rather than inventing severities/lines we cannot trust.
+  return null;
+}
+
+/** The worktree's HEAD commit, or undefined when it is not a git checkout (tests,
+ *  a plain directory). Best-effort — a missing SHA just skips the freshness check. */
+function headShaOf(worktree: string): string | undefined {
+  const r = spawnSync('git', ['-C', worktree, 'rev-parse', 'HEAD'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  const sha = `${r.stdout ?? ''}`.trim();
+  return r.status === 0 && /^[0-9a-f]{7,40}$/.test(sha) ? sha : undefined;
 }
 
 export function runScriptLint(
@@ -395,12 +422,39 @@ export function runScriptLint(
     const path = typeof f?.path === 'string' ? f.path : '';
     if (!path) continue;
     const abs = resolve(join(args.worktree, path));
-    // A file the diff deleted, or a symlink / fifo we will not follow, has nothing
-    // safe to lint on the new side — `firstLineOf` returns null for both.
-    const firstLine = firstLineOf(abs);
-    if (firstLine === null) continue;
-    const tool = toolFor(path, firstLine);
+    const first = firstLineOf(abs);
+    if (first.kind === 'missing') continue; // deleted on the new side — nothing to lint
+    if (first.kind === 'irregular') {
+      // A symlink/fifo/unreadable file. If a linter owns it BY NAME it was owed,
+      // so record it as skipped — never drop it silently, or an empty report reads
+      // as clean over a file we refused to read (a `hook.sh` -> /dev/zero symlink).
+      const byName = pathTool(path);
+      if (byName) {
+        skipped.push({
+          path,
+          tool: byName,
+          reason: `${path} is not a regular file (symlink/fifo) or is unreadable — not linted`,
+        });
+      }
+      continue;
+    }
+    const tool = toolFor(path, first.text);
     if (!tool) continue;
+
+    // Actionlint lints a workflow's embedded shell, but its JSON anchors each
+    // diagnostic at the `run:` key line (not the changed shell line) and flattens
+    // ShellCheck's severity — so a style nit reads as an `error` and a real finding
+    // reads as pre-existing. Until that source-mapping is parsed and verified, a
+    // workflow is disclosed as **skipped** (unreviewed) rather than certified from
+    // findings we cannot trust — shellcheck still covers standalone `.sh`.
+    if (tool === 'actionlint') {
+      skipped.push({
+        path,
+        tool,
+        reason: `${path}: actionlint embedded-shell source mapping is not yet supported — reported as unreviewed, not clean`,
+      });
+      continue;
+    }
 
     if (missing.has(tool)) {
       skipped.push({ path, tool, reason: `${tool} is not installed` });
@@ -451,7 +505,14 @@ export function runScriptLint(
   // clean, and `ok: true` on a crashed checker's silence is the trap we avoid.
   const ok = blocking.length === 0 && errored.length === 0;
   const note = buildNote(checked, skipped, errored, blocking.length);
-  return { checked, skipped, errored, ok, note };
+  return {
+    checked,
+    skipped,
+    errored,
+    ok,
+    note,
+    headSha: headShaOf(args.worktree),
+  };
 }
 
 function buildNote(

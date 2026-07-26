@@ -285,20 +285,30 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // carries an executable script but has no readable report is itself unreviewed
   // (fail closed). The report path is derived from the plan, not the input JSON a
   // model wrote, and the plan decides whether the lint was owed.
+  // How many of the body Criticals are the gate's own — deterministic by
+  // PROVENANCE, because `scriptLintGate` read a tool's report, not because a
+  // string contains `[lint]`. They still render and count toward `c` (pushed into
+  // `bodyCriticals`), but their deterministic status is tracked here, by count.
+  let gateCriticalCount = 0;
   if (input.planPath) {
     const gate = scriptLintGate(input.planPath);
     bodyCriticals.push(...gate.criticals);
+    gateCriticalCount = gate.criticals.length;
     unreviewed.push(...gate.unreviewed);
   }
 
-  // The Criticals a verifier must have ruled on before this review may post
-  // them as blockers. Deterministic `[build]`/`[test]`/`[lint]` body findings are
-  // pre-confirmed and skip verification by design; every other Critical —
-  // anchored or body — is a claim, and a claim is confirmed by Step 4 or it
-  // is not confirmed at all.
-  const nonDeterministicBodyCriticals = bodyCriticals.filter(
-    (x) => !/\[(?:build|test|lint)\]/i.test(x),
-  ).length;
+  // The Criticals a verifier must have ruled on before this review may post them
+  // as blockers. Deterministic body findings are pre-confirmed and skip
+  // verification by design: `[build]`/`[test]` (Agent 7 ran the tool) and the
+  // gate's own findings (this function ran the linter). `[lint]` is NOT trusted as
+  // a tag — a model-written string containing it must not launder an unverified
+  // claim into a blocker — so provenance, not the marker, decides: subtract the
+  // gate's count, and every remaining body Critical is a claim Step 4 must confirm.
+  const nonDeterministicBodyCriticals = Math.max(
+    0,
+    bodyCriticals.filter((x) => !/\[(?:build|test)\]/i.test(x)).length -
+      gateCriticalCount,
+  );
   const criticalsNeedingVerify =
     criticalsInline + nonDeterministicBodyCriticals;
   // Fail closed at every exit: this flag softens a Request changes below, and
@@ -1115,7 +1125,7 @@ export function scriptLintGate(planPath: string): {
 } {
   const criticals: string[] = [];
   const unreviewed: string[] = [];
-  let plan: { prNumber?: unknown; files?: unknown };
+  let plan: { prNumber?: unknown; files?: unknown; fetchedSha?: unknown };
   try {
     plan = JSON.parse(readFileSync(planPath, 'utf8'));
   } catch {
@@ -1144,6 +1154,19 @@ export function scriptLintGate(planPath: string): {
     // linted, and this is the proof-of-execution the model can no longer fake.
     unreviewed.push(
       'the executable-script lint — `qwen review script-lint` produced no report',
+    );
+    return { criticals, unreviewed };
+  }
+  // Fail closed on a STALE report. The filename is stable per PR, so an earlier
+  // review of an older commit can leave a clean report that a skipped lint step
+  // would then read as current — hiding a broken script a later commit added.
+  // The report records the HEAD it was produced at; if it disagrees with the
+  // plan's `fetchedSha`, it is not this review's report.
+  const planSha =
+    typeof plan.fetchedSha === 'string' ? plan.fetchedSha : undefined;
+  if (planSha && report.headSha && report.headSha !== planSha) {
+    unreviewed.push(
+      'the executable-script lint — the report is stale (produced at a different commit); re-run `qwen review script-lint`',
     );
     return { criticals, unreviewed };
   }

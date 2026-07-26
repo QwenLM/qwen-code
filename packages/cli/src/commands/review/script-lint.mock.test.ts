@@ -10,7 +10,7 @@
 // errors is not a clean file), and the context-line classification are pinned
 // with no binary present.
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   mkdtempSync,
   mkdirSync,
@@ -72,18 +72,13 @@ function setup(
 }
 
 describe('runScriptLint — tool JSON normalisation (injected runner)', () => {
-  it('normalises actionlint output and blocks on a changed-line finding', () => {
+  it('defers a workflow to skipped without ever running actionlint', () => {
     fresh();
-    const runner = fixedRunner({
-      kind: 'ok',
-      stdout: JSON.stringify([
-        {
-          message: 'shellcheck SC2086',
-          line: 8,
-          column: 9,
-          kind: 'shellcheck',
-        },
-      ]),
+    // The runner would report findings, but a workflow is deferred BEFORE it runs
+    // (actionlint's source-mapping is not yet parsed), so it lands in skipped, not
+    // checked — and the runner is never even called for it.
+    const runner = vi.fn(() => {
+      throw new Error('runner must not be called for a deferred workflow');
     });
     const { plan, worktree } = setup(
       '.github/workflows/ci.yml',
@@ -91,9 +86,10 @@ describe('runScriptLint — tool JSON normalisation (injected runner)', () => {
       { hunks: [{ newStart: 8, newEnd: 8 }] },
     );
     const r = runScriptLint({ plan, worktree }, runner);
-    expect(r.checked[0].tool).toBe('actionlint');
-    expect(r.checked[0].findings[0]).toMatchObject({ line: 8, inDiff: true });
-    expect(r.ok).toBe(false);
+    expect(r.checked).toEqual([]);
+    expect(r.skipped[0].tool).toBe('actionlint');
+    expect(r.skipped[0].reason).toContain('not yet supported');
+    expect(runner).not.toHaveBeenCalled();
     clean();
   });
 

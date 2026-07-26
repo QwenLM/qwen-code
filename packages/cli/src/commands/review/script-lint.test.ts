@@ -12,7 +12,13 @@
 // disclosed but does not; a linter that is not installed is skipped, not clean.
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  writeFileSync,
+  symlinkSync,
+  rmSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -126,28 +132,43 @@ describe.skipIf(!hasShellcheck)(
 );
 
 describe('runScriptLint — graceful degradation and scoping', () => {
-  it('skips a file whose linter is not installed, and says so (not clean)', () => {
-    // actionlint / hadolint are not installed in CI here; a workflow file must be
-    // reported as skipped, never as a clean pass.
+  it('defers a workflow to skipped — actionlint source-mapping is not yet supported', () => {
+    // A workflow is never certified from actionlint findings: its JSON anchors at
+    // the `run:` key line and flattens ShellCheck severity, so a wrong line/level
+    // would create false blockers. Until that is parsed and verified, the file is
+    // reported as skipped (unreviewed), never as a clean pass — and never run.
     const { plan, worktree } = setup(
       '.github/workflows/ci.yml',
       'name: CI\non: push\njobs: {}\n',
       [{ newStart: 1, newEnd: 3 }],
     );
     const r = runScriptLint({ plan, worktree });
-    if (r.checked.some((c) => c.tool === 'actionlint')) {
-      // actionlint IS installed on this machine — then it was checked, fine.
-      expect(r.skipped).toEqual([]);
-    } else {
-      expect(r.skipped).toHaveLength(1);
-      expect(r.skipped[0].tool).toBe('actionlint');
-      expect(r.skipped[0].reason).toContain('not installed');
-      expect(r.note).toContain('not installed');
-      // `skipped` deliberately does not flip `ok` — the agent (and now the
-      // deterministic gate) keys "not clean" off `skipped[]`, not `ok`. Pin it,
-      // so making `skipped` blocking later cannot pass this test unchanged.
-      expect(r.ok).toBe(true);
-    }
+    expect(r.checked).toEqual([]);
+    expect(r.skipped).toHaveLength(1);
+    expect(r.skipped[0].tool).toBe('actionlint');
+    expect(r.skipped[0].reason).toContain('not yet supported');
+    // `skipped` deliberately does not flip `ok` — the agent (and the deterministic
+    // gate) keys "not clean" off `skipped[]`, not `ok`.
+    expect(r.ok).toBe(true);
+  });
+
+  it('records a symlinked script as skipped, never dropped (empty ≠ clean)', () => {
+    // A `hook.sh` that is a symlink is lint-owed by name but not a regular file;
+    // it must not vanish from the report, or an empty report reads as a clean pass.
+    const dirLocal = mkdtempSync(join(tmpdir(), 'script-lint-sym-'));
+    writeFileSync(join(dirLocal, 'real.txt'), 'data\n');
+    symlinkSync(join(dirLocal, 'real.txt'), join(dirLocal, 'hook.sh'));
+    const planPath = join(dirLocal, 'plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({ files: [{ path: 'hook.sh', kind: 'source' }] }),
+    );
+    const r = runScriptLint({ plan: planPath, worktree: dirLocal });
+    expect(r.checked).toEqual([]);
+    expect(r.skipped).toHaveLength(1);
+    expect(r.skipped[0].tool).toBe('shellcheck');
+    expect(r.skipped[0].reason).toContain('not a regular file');
+    rmSync(dirLocal, { recursive: true, force: true });
   });
 
   it('checks nothing when no executable file changed', () => {

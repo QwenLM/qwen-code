@@ -200,10 +200,20 @@ describe('hasExecutableScript — the script-lint gate predicate', () => {
     ).toBe(true);
   });
 
-  it('excludes a pure-deletion script (no added lines to lint)', () => {
+  it('is owed for a SURVIVING script but not a true deletion — keyed on post-image, not added lines', () => {
+    // A true deletion has no post-image (fileLines 0) — nothing to lint.
     expect(
-      hasExecutableScript({ files: [{ path: 'gone.sh', addedLines: 0 }] }),
+      hasExecutableScript({ files: [{ path: 'gone.sh', fileLines: 0 }] }),
     ).toBe(false);
+    // A deletion-only edit survives (fileLines > 0) with addedLines 0 — e.g. a
+    // removed `fi` that breaks a `.sh`. It is still owed, precisely the case the
+    // added-lines-only predicate used to miss.
+    expect(
+      hasExecutableScript({
+        files: [{ path: 'broke.sh', addedLines: 0, fileLines: 12 }],
+      }),
+    ).toBe(true);
+    // Absent fileLines fails safe to owed.
     expect(
       hasExecutableScript({ files: [{ path: 'kept.sh', addedLines: 3 }] }),
     ).toBe(true);

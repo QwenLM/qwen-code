@@ -54,6 +54,8 @@ export interface RosterPlan {
     heavy?: unknown;
     addedLines?: unknown;
     removedLines?: unknown;
+    /** Lines in the post-change file; 0 for a true deletion (see report.ts). */
+    fileLines?: unknown;
   }>;
   srcDiffLines?: unknown;
   diffLines?: unknown;
@@ -141,11 +143,11 @@ export function hasExecutableScript(plan: RosterPlan): boolean {
   const files = Array.isArray(plan.files) ? plan.files : [];
   return files.some((f) => {
     if (typeof f?.path !== 'string' || pathTool(f.path) === null) return false;
-    // A pure deletion has nothing on the new side to lint, so requiring the agent
-    // for it launches a mandatory no-op. Exclude files with zero added lines;
-    // `addedLines` absent (a plan that never recorded it) fails safe to "require".
-    const added = f.addedLines;
-    return added === undefined || Number(added) > 0;
+    // Owed for any script that SURVIVES the diff — a deletion-only edit (no added
+    // lines, but the file remains, e.g. a removed `fi` that breaks a `.sh`) still
+    // needs linting; only a TRUE deletion (no post-image) is exempt. `fileLines`
+    // is 0 for a deletion and >0 for a surviving file; absent fails safe to owed.
+    return Number(f.fileLines ?? 1) > 0;
   });
 }
 
