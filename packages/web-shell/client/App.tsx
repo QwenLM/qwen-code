@@ -3145,6 +3145,16 @@ export function App({
     },
     [],
   );
+  // Daemon-side session registration lags behind the client, so schedule a
+  // backup reload ~2 s after the immediate one to pick up newly created sessions.
+  const scheduleDelayedSessionListReload = useCallback(() => {
+    if (delayedReloadTimerRef.current !== null) {
+      clearTimeout(delayedReloadTimerRef.current);
+    }
+    delayedReloadTimerRef.current = setTimeout(() => {
+      setSessionListReloadToken((n) => n + 1);
+    }, 2000);
+  }, []);
   const dispatchSessionChange = useCallback(
     (event: SessionChangeEvent) => {
       onSessionChange?.(event);
@@ -3241,15 +3251,7 @@ export function App({
           prompt: text,
           queued: false,
         });
-        // Schedule an additional delayed reload to account for daemon-side
-        // session registration lag — the immediate reload above may return
-        // a list that doesn't yet include the newly created session.
-        if (delayedReloadTimerRef.current !== null) {
-          clearTimeout(delayedReloadTimerRef.current);
-        }
-        delayedReloadTimerRef.current = setTimeout(() => {
-          setSessionListReloadToken((n) => n + 1);
-        }, 2000);
+        scheduleDelayedSessionListReload();
       }
       const result = await (
         sessionActions.sendPrompt as (
@@ -3259,7 +3261,12 @@ export function App({
       )(text, promptOptions);
       return result;
     },
-    [clearFollowup, ensureSessionForPrompt, sessionActions],
+    [
+      clearFollowup,
+      ensureSessionForPrompt,
+      scheduleDelayedSessionListReload,
+      sessionActions,
+    ],
   );
   const availableModels = useMemo(
     () =>
@@ -3878,8 +3885,12 @@ export function App({
     const cmds = queuedShellCommandsRef.current;
     if (cmds.length === 0) return;
     queuedShellCommandsRef.current = [];
+    const drainSessionId = connectionRef.current.sessionId;
+    let cancelled = false;
     void (async () => {
       for (const cmd of cmds) {
+        if (cancelled || connectionRef.current.sessionId !== drainSessionId)
+          return;
         try {
           await sessionActions.sendShellCommand(cmd);
         } catch (error: unknown) {
@@ -3887,6 +3898,9 @@ export function App({
         }
       }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [streamingState, sessionActions, reportError]);
 
   useEffect(() => {
@@ -5886,25 +5900,27 @@ export function App({
         }
         const needsSession = !connectionRef.current.sessionId;
         if (needsSession) setIsPreparingPrompt(true);
+        let sessionCreated = false;
         void ensureSessionForPrompt()
           .then(() => {
             if (needsSession && connectionRef.current.sessionId) {
-              setSessionListReloadToken((n) => n + 1);
-              if (delayedReloadTimerRef.current !== null) {
-                clearTimeout(delayedReloadTimerRef.current);
-              }
-              delayedReloadTimerRef.current = setTimeout(() => {
-                setSessionListReloadToken((n) => n + 1);
-              }, 2000);
+              sessionCreated = true;
+              dispatchSessionChangeRef.current?.({
+                type: 'submit',
+                sessionId: connectionRef.current.sessionId,
+                prompt: `!${cmd}`,
+                queued: false,
+              });
+              scheduleDelayedSessionListReload();
             }
             return sessionActions.sendShellCommand(cmd);
           })
           .catch((error: unknown) => {
             reportError(
               error,
-              connectionRef.current.sessionId
-                ? 'Failed to execute shell command'
-                : 'Failed to create session for shell command',
+              needsSession && !sessionCreated
+                ? 'Failed to create session for shell command'
+                : 'Failed to execute shell command',
             );
           })
           .finally(() => {
@@ -5940,6 +5956,7 @@ export function App({
       openGoals,
       createNewSession,
       ensureSessionForPrompt,
+      scheduleDelayedSessionListReload,
       gitDiffWorkspaceCwd,
       sessionWorktree,
       gitHubPrsSupported,
@@ -6001,6 +6018,7 @@ export function App({
   );
 
   const handleCancel = useCallback(() => {
+    queuedShellCommandsRef.current = [];
     sessionActions.cancel().catch((error: unknown) => {
       reportError(error, 'Failed to cancel request');
     });

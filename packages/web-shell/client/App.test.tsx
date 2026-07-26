@@ -40,6 +40,7 @@ type ChatEditorTestProps = {
     commitAccepted?: () => void,
     metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
   ) => boolean | void;
+  onCancel?: () => void;
   onInputTextChange?: (text: string) => void;
   onStartNewSessionSuggestion?: () => void;
   newSessionSuggestion?: { isVisible: boolean; classifiedInput: string } | null;
@@ -137,6 +138,7 @@ const {
       clearGoal: vi.fn().mockResolvedValue(undefined),
       forkSession: vi.fn().mockResolvedValue({ launched: false }),
       sendShellCommand: vi.fn().mockResolvedValue(undefined),
+      cancel: vi.fn().mockResolvedValue(undefined),
       getStats: vi.fn().mockResolvedValue({}),
       loadArtifacts: vi.fn().mockResolvedValue({ artifacts: [] }),
       loadSession: vi.fn().mockResolvedValue(undefined),
@@ -1076,6 +1078,7 @@ beforeEach(() => {
   mockSessionActions.clearGoal.mockResolvedValue(undefined);
   mockSessionActions.forkSession.mockResolvedValue({ launched: false });
   mockSessionActions.sendShellCommand.mockResolvedValue(undefined);
+  mockSessionActions.cancel.mockResolvedValue(undefined);
   mockSessionActions.getStats.mockResolvedValue({});
   mockSessionActions.loadSession.mockResolvedValue(undefined);
   mockStore.reset.mockClear();
@@ -1204,6 +1207,168 @@ describe('App shell command queueing', () => {
     // session's daemon.
     act(() => {
       mockConnection.sessionId = 'session-2';
+      testState.streamingState = 'idle';
+      rerender({ onToast });
+    });
+    await flush();
+
+    expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+  });
+
+  it('aborts remaining commands if the session changes mid-drain', async () => {
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    let resolveFirst!: () => void;
+    const firstDone = new Promise<void>((r) => {
+      resolveFirst = r;
+    });
+    mockSessionActions.sendShellCommand
+      .mockReturnValueOnce(firstDone)
+      .mockResolvedValueOnce(undefined);
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onToast });
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!first');
+      testState.latestChatEditorProps?.onSubmit('!second');
+      await Promise.resolve();
+    });
+
+    // Go idle — drain starts and blocks on the pending first command.
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender({ onToast });
+    });
+    await flush();
+
+    expect(mockSessionActions.sendShellCommand).toHaveBeenCalledTimes(1);
+
+    // Switch session while the first command is still running.
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      rerender({ onToast });
+    });
+
+    // Resolve the first command — the second must NOT be dispatched.
+    await act(async () => {
+      resolveFirst();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.sendShellCommand).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith('first');
+  });
+
+  it('drains multiple queued commands in FIFO order', async () => {
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onToast });
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!aaa');
+      testState.latestChatEditorProps?.onSubmit('!bbb');
+      testState.latestChatEditorProps?.onSubmit('!ccc');
+      await Promise.resolve();
+    });
+
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender({ onToast });
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendShellCommand).toHaveBeenCalledTimes(3);
+      });
+    });
+
+    expect(mockSessionActions.sendShellCommand).toHaveBeenNthCalledWith(
+      1,
+      'aaa',
+    );
+    expect(mockSessionActions.sendShellCommand).toHaveBeenNthCalledWith(
+      2,
+      'bbb',
+    );
+    expect(mockSessionActions.sendShellCommand).toHaveBeenNthCalledWith(
+      3,
+      'ccc',
+    );
+  });
+
+  it('continues draining after a command fails', async () => {
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    mockSessionActions.sendShellCommand
+      .mockRejectedValueOnce(new Error('boom'))
+      .mockResolvedValueOnce(undefined);
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onToast });
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!fail');
+      testState.latestChatEditorProps?.onSubmit('!ok');
+      await Promise.resolve();
+    });
+
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender({ onToast });
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendShellCommand).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    expect(mockSessionActions.sendShellCommand).toHaveBeenNthCalledWith(
+      1,
+      'fail',
+    );
+    expect(mockSessionActions.sendShellCommand).toHaveBeenNthCalledWith(
+      2,
+      'ok',
+    );
+    expect(onToast).toHaveBeenCalledWith('error', expect.any(String));
+  });
+
+  it('drops queued ! commands when the user cancels', async () => {
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onToast });
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!rm -rf build/');
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+
+    // User presses Stop — the queue must be cleared before the turn goes idle.
+    await act(async () => {
+      testState.latestChatEditorProps?.onCancel?.();
+      await Promise.resolve();
+    });
+
+    act(() => {
       testState.streamingState = 'idle';
       rerender({ onToast });
     });
