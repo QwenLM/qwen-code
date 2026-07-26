@@ -116,7 +116,7 @@ function hasDeletions(plan: RosterPlan): boolean {
 
 /** A PR number the plan actually resolved: a positive integer, as a number or the
  *  string `fetch-pr` writes. `null`, `0`, `''` and non-numeric junk are 'no PR'. */
-function isPositivePrNumber(value: unknown): boolean {
+export function isPositivePrNumber(value: unknown): boolean {
   if (typeof value === 'number') return Number.isInteger(value) && value > 0;
   if (typeof value === 'string')
     return /^\d+$/.test(value) && Number(value) > 0;

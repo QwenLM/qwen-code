@@ -102,7 +102,10 @@ import {
   isSystemReminderContent,
 } from '../utils/environmentContext.js';
 import type { SessionStartSource } from '../hooks/types.js';
-import { getCustomSystemPrompt } from './prompts.js';
+import {
+  getCustomSystemPrompt,
+  getManualPlanExitSystemReminder,
+} from './prompts.js';
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
 import {
   collectToolCallIdsFromHistory,
@@ -1642,6 +1645,7 @@ export class GeminiChat {
    * can't, since compression shrinks history independently of the push.
    */
   private userContentPushCount = 0;
+  private manualPlanExitNoticesEnabled = false;
 
   /**
    * Reset both partial-push markers in lockstep. Every history-mutation
@@ -1689,6 +1693,10 @@ export class GeminiChat {
   ) {
     validateHistory(history);
     this.redactApprovedPlansFromLoadedHistory();
+  }
+
+  enableManualPlanExitNotices(): void {
+    this.manualPlanExitNoticesEnabled = true;
   }
 
   /**
@@ -2029,6 +2037,8 @@ export class GeminiChat {
     let compressionInfo: ChatCompressionInfo;
     let requestContents: Content[];
     let userContentAdded = false;
+    let manualPlanExitNoticeVersion: number | undefined;
+    let manualPlanExitNoticeText: string | undefined;
 
     // Determine the ceiling for this turn's output request. The clamp below
     // (see clampOutputTokensToWindow) sizes the actual max_tokens to the room
@@ -2253,6 +2263,25 @@ export class GeminiChat {
         });
       }
 
+      if (this.manualPlanExitNoticesEnabled) {
+        const notice = this.config.takePendingManualPlanExitNotice();
+        if (notice) {
+          manualPlanExitNoticeVersion = notice.version;
+          manualPlanExitNoticeText = getManualPlanExitSystemReminder(
+            notice.currentMode,
+          );
+          userContent = {
+            ...userContent,
+            parts: [
+              ...(userContent.parts ?? []),
+              {
+                text: manualPlanExitNoticeText,
+              },
+            ],
+          };
+        }
+      }
+
       // Add user content to history ONCE before any attempts.
       this.history.push(userContent);
       currentUserContent = userContent;
@@ -2340,6 +2369,11 @@ export class GeminiChat {
         this.history.pop();
         // The push above was rolled back, so undo its count too.
         this.userContentPushCount--;
+      }
+      if (manualPlanExitNoticeVersion !== undefined) {
+        this.config.restorePendingManualPlanExitNotice(
+          manualPlanExitNoticeVersion,
+        );
       }
       streamDoneResolver!();
       throw error;
@@ -2615,6 +2649,29 @@ export class GeminiChat {
                     // tryCompress stops resetting it.
                     self.popPendingPartialAssistantTurn();
 
+                    // Reactive compression replaces the committed user turn.
+                    // Keep its one-shot notice in the rebuilt retry request.
+                    const noticeText = manualPlanExitNoticeText;
+                    if (
+                      noticeText &&
+                      !self.history.some((content) =>
+                        content.parts?.some((part) =>
+                          part.text?.includes(noticeText),
+                        ),
+                      )
+                    ) {
+                      const lastContent = self.history.at(-1);
+                      if (lastContent?.role === 'user') {
+                        lastContent.parts = [
+                          ...(lastContent.parts ?? []),
+                          { text: noticeText },
+                        ];
+                      } else {
+                        self.history.push(
+                          createUserContent([{ text: noticeText }]),
+                        );
+                      }
+                    }
                     requestContents = self.getRequestHistoryForRoute(
                       currentUserContent,
                       requestModalities,
