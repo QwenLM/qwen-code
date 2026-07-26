@@ -1086,6 +1086,37 @@ describe('noFollow option — symlink protection', () => {
     expect(await fs.readFile(real, 'utf-8')).toBe('ORIGINAL');
   });
 
+  it('atomicWriteFile: noFollow EXDEV completes the replacement after unlink', async () => {
+    const target = path.join(tmpDir, 'generation-closed.txt');
+    await fs.writeFile(target, 'ORIGINAL');
+    const exdevRename = async () => {
+      const e: NodeJS.ErrnoException = new Error('EXDEV');
+      e.code = 'EXDEV';
+      throw e;
+    };
+    let canCommit = true;
+    const unlink = async (p: Parameters<typeof fs.unlink>[0]) => {
+      await fs.unlink(p);
+      if (p === target) canCommit = false;
+    };
+    const openSpy = vi.fn(fs.open);
+
+    await atomicWriteFile(
+      target,
+      'NEW',
+      {
+        noFollow: true,
+        assertCanCommit: () => {
+          if (!canCommit) throw new Error('generation closed');
+        },
+      },
+      { rename: exdevRename, unlink, open: openSpy },
+    );
+
+    expect(openSpy).toHaveBeenCalledTimes(1);
+    expect(await fs.readFile(target, 'utf-8')).toBe('NEW');
+  });
+
   it('atomicWriteFileSync: noFollow EXDEV fallback also refuses to follow symlinks', () => {
     const real = path.join(tmpDir, 'real.txt');
     const link = path.join(tmpDir, 'link.txt');

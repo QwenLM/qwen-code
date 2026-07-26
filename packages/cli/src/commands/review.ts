@@ -15,6 +15,7 @@ import { fetchPrCommand } from './review/fetch-pr.js';
 import { captureLocalCommand } from './review/capture-local.js';
 import { planDiffCommand } from './review/plan-diff.js';
 import { prContextCommand } from './review/pr-context.js';
+import { commentStatusCommand } from './review/comment-status.js';
 import { loadRulesCommand } from './review/load-rules.js';
 import { presubmitCommand } from './review/presubmit.js';
 import { resolveAnchorsCommand } from './review/resolve-anchors.js';
@@ -36,6 +37,7 @@ export const reviewCommand: CommandModule = {
       .command(captureLocalCommand)
       .command(planDiffCommand)
       .command(prContextCommand)
+      .command(commentStatusCommand)
       .command(loadRulesCommand)
       .command(agentPromptCommand)
       .command(buildTestCommand)
@@ -48,7 +50,7 @@ export const reviewCommand: CommandModule = {
       .command(cleanupCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: parse-args, fetch-pr, capture-local, plan-diff, pr-context, load-rules, agent-prompt, build-test, resolve-anchors, check-coverage, presubmit, test-efficacy, compose-review, submit, or cleanup.',
+        'Specify a subcommand: parse-args, fetch-pr, capture-local, plan-diff, pr-context, comment-status, load-rules, agent-prompt, build-test, resolve-anchors, check-coverage, presubmit, test-efficacy, compose-review, submit, or cleanup.',
       )
       .version(false),
   handler: () => {

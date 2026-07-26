@@ -1177,7 +1177,7 @@ export interface SubagentStopOutput extends HookOutput {
 
 /**
  * StopFailure error types
- * Fires instead of Stop when an API error ended the turn
+ * Fires instead of Stop when an API error or loop detection ended the turn
  */
 export type StopFailureErrorType =
   | 'rate_limit'
@@ -1186,6 +1186,7 @@ export type StopFailureErrorType =
   | 'invalid_request'
   | 'server_error'
   | 'max_output_tokens'
+  | 'loop_detected'
   | 'unknown';
 
 /**

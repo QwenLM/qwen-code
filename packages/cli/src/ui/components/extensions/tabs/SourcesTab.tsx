@@ -7,6 +7,7 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
+import { ICON } from '../../../constants.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../../../keyMatchers.js';
 import { TextInput } from '../../shared/TextInput.js';
@@ -562,7 +563,9 @@ export const SourcesTab = ({
                 {installedHere.slice(0, INSTALLED_PREVIEW_LIMIT).map((p) => (
                   <Box key={p.name}>
                     <Box minWidth={2} flexShrink={0}>
-                      <Text color={theme.status.success}>{'●'}</Text>
+                      <Text color={theme.status.success}>
+                        {ICON.CIRCLE_FILLED}
+                      </Text>
                     </Box>
                     <Text color={theme.text.primary}>
                       {stripUnsafeCharacters(p.name)}
@@ -646,7 +649,7 @@ export const SourcesTab = ({
       <Box key={`row-${index}`}>
         <Box minWidth={2} flexShrink={0}>
           <Text color={isSelected ? theme.text.accent : theme.text.primary}>
-            {isSelected ? '●' : ' '}
+            {isSelected ? ICON.CIRCLE_FILLED : ' '}
           </Text>
         </Box>
         <Box flexGrow={1}>

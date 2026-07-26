@@ -6,6 +6,7 @@
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { DataProcessor } from './DataProcessor.js';
+import { dayKey } from '../dates.js';
 import type { Config, ChatRecord } from '@qwen-code/qwen-code-core';
 import type {
   InsightData,
@@ -72,26 +73,6 @@ describe('DataProcessor', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
-  });
-
-  describe('formatDate', () => {
-    it('should format date as YYYY-MM-DD', () => {
-      const date = new Date('2025-01-15T10:30:00Z');
-      // Access private method through any cast for testing
-      const result = (
-        dataProcessor as unknown as { formatDate(date: Date): string }
-      ).formatDate(date);
-      expect(result).toBe('2025-01-15');
-    });
-
-    it('should handle different timezones correctly', () => {
-      const date = new Date('2025-12-31T23:59:59Z');
-      const result = (
-        dataProcessor as unknown as { formatDate(date: Date): string }
-      ).formatDate(date);
-      // Result depends on local timezone, but should be a valid date string
-      expect(result).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-    });
   });
 
   describe('formatRecordsForAnalysis', () => {
@@ -247,7 +228,7 @@ describe('DataProcessor', () => {
       expect(result.dates).toEqual([]);
     });
 
-    it('should calculate streak of 1 for single date', () => {
+    it('reports a historical single date as longest 1 with no current streak', () => {
       const result = (
         dataProcessor as unknown as {
           calculateStreaks(dates: string[]): {
@@ -257,11 +238,13 @@ describe('DataProcessor', () => {
           };
         }
       ).calculateStreaks(['2025-01-15']);
-      expect(result.currentStreak).toBe(1);
+      // #6835: `currentStreak` means "the streak ending today or
+      // yesterday" — a months-old date is not a current streak.
+      expect(result.currentStreak).toBe(0);
       expect(result.longestStreak).toBe(1);
     });
 
-    it('should calculate consecutive day streak', () => {
+    it('keeps longestStreak for a historical run but zeroes currentStreak', () => {
       const dates = ['2025-01-15', '2025-01-16', '2025-01-17'];
       const result = (
         dataProcessor as unknown as {
@@ -272,7 +255,60 @@ describe('DataProcessor', () => {
           };
         }
       ).calculateStreaks(dates);
+      expect(result.currentStreak).toBe(0);
+      expect(result.longestStreak).toBe(3);
+    });
+
+    it('reports the trailing run as current when it ends today', () => {
+      const relKey = (daysAgo: number) => {
+        const d = new Date();
+        d.setDate(d.getDate() - daysAgo);
+        return dayKey(d);
+      };
+      const result = (
+        dataProcessor as unknown as {
+          calculateStreaks(dates: string[]): {
+            currentStreak: number;
+            longestStreak: number;
+          };
+        }
+      ).calculateStreaks([relKey(2), relKey(1), relKey(0)]);
       expect(result.currentStreak).toBe(3);
+      expect(result.longestStreak).toBe(3);
+    });
+
+    it('still counts a streak ending yesterday as current', () => {
+      const relKey = (daysAgo: number) => {
+        const d = new Date();
+        d.setDate(d.getDate() - daysAgo);
+        return dayKey(d);
+      };
+      const result = (
+        dataProcessor as unknown as {
+          calculateStreaks(dates: string[]): {
+            currentStreak: number;
+            longestStreak: number;
+          };
+        }
+      ).calculateStreaks([relKey(3), relKey(2), relKey(1)]);
+      expect(result.currentStreak).toBe(3);
+    });
+
+    it('zeroes currentStreak once the trailing run ended two days ago', () => {
+      const relKey = (daysAgo: number) => {
+        const d = new Date();
+        d.setDate(d.getDate() - daysAgo);
+        return dayKey(d);
+      };
+      const result = (
+        dataProcessor as unknown as {
+          calculateStreaks(dates: string[]): {
+            currentStreak: number;
+            longestStreak: number;
+          };
+        }
+      ).calculateStreaks([relKey(4), relKey(3), relKey(2)]);
+      expect(result.currentStreak).toBe(0);
       expect(result.longestStreak).toBe(3);
     });
 

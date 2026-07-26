@@ -1,6 +1,8 @@
 import { EventEmitter } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  channelLoopPath,
+  daemonChannelLoopPath,
   daemonObservedContactsPath,
   daemonSessionRoutesPath,
   parseConfiguredChannels,
@@ -52,6 +54,17 @@ it('isolates observed contact stores beside daemon routes', () => {
     '/tmp/qwen/channels/daemon/other-hash/observed-contacts.json',
   );
   expect(daemonObservedContactsPath('/workspace')).not.toBe(sessionsPath());
+});
+
+it('isolates daemon loop stores by workspace hash', () => {
+  expect(daemonChannelLoopPath('/workspace')).toBe(
+    '/tmp/qwen/channels/daemon/workspace-hash/cron.json',
+  );
+  expect(daemonChannelLoopPath('/other')).toBe(
+    '/tmp/qwen/channels/daemon/other-hash/cron.json',
+  );
+  expect(daemonChannelLoopPath('/workspace')).not.toBe(channelLoopPath());
+  expect(daemonChannelLoopPath('/workspace')).not.toBe(sessionsPath());
 });
 
 describe('parseConfiguredChannels', () => {

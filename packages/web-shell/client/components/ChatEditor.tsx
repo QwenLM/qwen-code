@@ -51,6 +51,7 @@ import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { VoiceButton } from '../voice/VoiceButton';
 import { GitBranchChipContent, GitBranchIndicator } from './GitBranchIndicator';
+import { GitModePopover, type SessionGitIntent } from './GitModePopover';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
 import { ChevronDownIcon, FolderClosedIcon } from 'lucide-react';
 import { WorkspaceSelector } from './WorkspaceSelector';
@@ -126,6 +127,10 @@ interface ChatEditorProps {
   gitBranch?: string;
   /** Whether the session is in a worktree (styles the git chip purple). */
   gitWorktree?: boolean;
+  /** Git mode intent for the empty-state composer chip (branch/worktree selection). */
+  gitModeIntent?: SessionGitIntent;
+  /** Callback when the user changes the git mode intent via the composer chip popover. */
+  onGitModeIntentChange?: (intent: SessionGitIntent) => void;
   /** Enriched working-tree summary (dirty / ahead-behind / stash / operation). */
   gitStatus?: DaemonWorkspaceGitStatus;
   /** Opens the working-tree Changes dialog; makes the git chip clickable. */
@@ -1157,6 +1162,8 @@ export const ChatEditor = memo(
       currentModel = '',
       gitBranch,
       gitWorktree,
+      gitModeIntent,
+      onGitModeIntentChange,
       gitStatus,
       onOpenGitDiff,
       workspaceName,
@@ -2101,15 +2108,24 @@ export const ChatEditor = memo(
                       })}
                     />
                   )}
-                  {gitBranchVisible && gitBranch && (
-                    <GitBranchIndicator
-                      branch={gitBranch}
-                      status={gitStatus}
-                      compact={!showGitBranchLabel}
-                      onOpenDiff={onOpenGitDiff}
-                      worktree={gitWorktree}
-                    />
-                  )}
+                  {gitBranchVisible &&
+                    gitBranch &&
+                    (gitModeIntent && onGitModeIntentChange ? (
+                      <GitModePopover
+                        branch={gitBranch}
+                        compact={!showGitBranchLabel}
+                        intent={gitModeIntent}
+                        onIntentChange={onGitModeIntentChange}
+                      />
+                    ) : (
+                      <GitBranchIndicator
+                        branch={gitBranch}
+                        status={gitStatus}
+                        compact={!showGitBranchLabel}
+                        onOpenDiff={onOpenGitDiff}
+                        worktree={gitWorktree}
+                      />
+                    ))}
                   {showModeAction && (
                     <div
                       className={`${styles.dropdownWrapper} ${

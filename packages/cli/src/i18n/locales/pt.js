@@ -70,6 +70,7 @@ export default {
   'Type your message or @path/to/file':
     'Digite sua mensagem ou @caminho/do/arquivo',
   '? for shortcuts': '? para atalhos',
+  'Pasting…': 'Colando…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Pressione 'i' para modo INSERÇÃO e 'Esc' para modo NORMAL.",
   'Cancel operation / Clear input (double press)':
@@ -1475,6 +1476,11 @@ export default {
   reviewed: 'revisado',
   'Code Changes:': 'Alterações de Código:',
   Performance: 'Desempenho',
+  'Generation Metrics': 'Métricas de geração',
+  'Latest Request': 'Última solicitação',
+  'Generation Time': 'Tempo de geração',
+  'Average TTFT': 'TTFT médio',
+  'Session TPS': 'TPS da sessão',
   'Wall Time:': 'Tempo Total:',
   'Agent Active:': 'Agente Ativo:',
   'API Time:': 'Tempo de API:',
