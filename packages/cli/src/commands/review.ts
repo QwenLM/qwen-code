@@ -22,6 +22,7 @@ import { resolveAnchorsCommand } from './review/resolve-anchors.js';
 import { checkCoverageCommand } from './review/check-coverage.js';
 import { agentPromptCommand } from './review/agent-prompt.js';
 import { buildTestCommand } from './review/build-test.js';
+import { scriptLintCommand } from './review/script-lint.js';
 import { submitCommand } from './review/submit.js';
 import { testEfficacyCommand } from './review/test-efficacy.js';
 import { cleanupCommand } from './review/cleanup.js';
@@ -41,6 +42,7 @@ export const reviewCommand: CommandModule = {
       .command(loadRulesCommand)
       .command(agentPromptCommand)
       .command(buildTestCommand)
+      .command(scriptLintCommand)
       .command(resolveAnchorsCommand)
       .command(checkCoverageCommand)
       .command(presubmitCommand)
