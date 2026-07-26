@@ -1131,6 +1131,11 @@ export function scriptLintGate(planPath: string): {
   try {
     plan = JSON.parse(readFileSync(planPath, 'utf8'));
   } catch {
+    // Fail CLOSED, like every other gate path: an unreadable plan means we cannot
+    // tell whether the lint was owed, and "cannot tell" must not open the gate.
+    unreviewed.push(
+      'the executable-script lint — could not read the plan to check the gate',
+    );
     return { criticals, unreviewed };
   }
   // A diff-only (cross-repo lightweight) review has no worktree, so the
@@ -1139,11 +1144,7 @@ export function scriptLintGate(planPath: string): {
   if (reviewMode(plan as RosterPlan) === 'diff-only') {
     return { criticals, unreviewed };
   }
-  // Owed only when the diff carries a file a linter owns by path — the same
-  // predicate the orchestrator's run is gated on, so the two cannot disagree.
-  if (!hasExecutableScript(plan as RosterPlan)) {
-    return { criticals, unreviewed };
-  }
+  const owed = hasExecutableScript(plan as RosterPlan);
   const reportPath = join(
     dirname(planPath),
     scriptLintReportName(plan.prNumber),
@@ -1152,26 +1153,34 @@ export function scriptLintGate(planPath: string): {
   try {
     report = JSON.parse(readFileSync(reportPath, 'utf8')) as ScriptLintReport;
   } catch {
-    // Owed but not produced: fail closed. A run cannot certify shell it never
-    // linted, and this is the proof-of-execution the model can no longer fake.
-    unreviewed.push(
-      'the executable-script lint — `qwen review script-lint` produced no report',
-    );
+    // No report. Fail closed ONLY when the diff carried a path-detected script
+    // (owed) — otherwise a diff with no scripts would be capped for a command it
+    // had no reason to run. A shebang-only script the path predicate cannot see
+    // also lands here, but the orchestrator runs script-lint on every same-repo
+    // review, so a real run has a report and is handled below on its own findings.
+    if (owed) {
+      unreviewed.push(
+        'the executable-script lint — `qwen review script-lint` produced no report',
+      );
+    }
     return { criticals, unreviewed };
   }
-  // Fail closed on a STALE report. The filename is stable per PR, so an earlier
-  // review of an older commit can leave a clean report that a skipped lint step
-  // would then read as current — hiding a broken script a later commit added.
-  // The report records the HEAD it was produced at; if it disagrees with the
-  // plan's `fetchedSha`, it is not this review's report.
+  // Fail closed on a STALE or unverifiable report. The filename is stable per PR,
+  // so an earlier review of an older commit can leave a report that a skipped lint
+  // step would read as current. The report records the HEAD it was produced at; if
+  // the plan has a commit and the report's does not MATCH it — including a report
+  // with no `headSha` at all (git could not be read) — it is not this review's.
   const planSha =
     typeof plan.fetchedSha === 'string' ? plan.fetchedSha : undefined;
-  if (planSha && report.headSha && report.headSha !== planSha) {
+  if (planSha && report.headSha !== planSha) {
     unreviewed.push(
-      'the executable-script lint — the report is stale (produced at a different commit); re-run `qwen review script-lint`',
+      'the executable-script lint — the report is stale or its commit could not be verified; re-run `qwen review script-lint`',
     );
     return { criticals, unreviewed };
   }
+  // Process the report's findings REGARDLESS of the path-only owed predicate: the
+  // report can name a shebang script (`hook.sh` by its `#!`) that `pathTool` could
+  // not, and returning early on the predicate would drop exactly those findings.
   for (const file of report.checked ?? []) {
     for (const f of file.findings ?? []) {
       if (f.inDiff && f.level !== 'style') {
@@ -1181,9 +1190,11 @@ export function scriptLintGate(planPath: string): {
       }
     }
   }
+  // Each skipped entry carries its OWN reason (not installed, an irregular file, a
+  // deferred checker) — surface it, rather than hard-coding "not installed".
   for (const s of report.skipped ?? []) {
     unreviewed.push(
-      `the executable-script lint — ${s.tool} is not installed (${s.path})`,
+      `the executable-script lint — ${s.path}: ${s.reason ?? `${s.tool} unavailable`}`,
     );
   }
   for (const e of report.errored ?? []) {

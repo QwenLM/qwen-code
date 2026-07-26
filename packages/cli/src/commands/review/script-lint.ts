@@ -33,6 +33,7 @@ import {
   readSync,
   closeSync,
 } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve, basename } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { parseDiff } from './lib/diff-plan.js';
@@ -244,6 +245,23 @@ function firstLineOf(abs: string): FirstLine {
   }
 }
 
+/** An empty hadolint config, written once. Pointing `HADOLINT_CONFIG` at it makes
+ *  hadolint use a config with no `ignored:` rules, so a `.hadolint.yaml` a PR added
+ *  to the worktree cannot suppress the findings we run it to catch. Best-effort: if
+ *  the write fails, the env var points at a path hadolint will simply not find. */
+let hadolintEmptyConfigPath: string | undefined;
+function emptyHadolintConfig(): string {
+  if (!hadolintEmptyConfigPath) {
+    hadolintEmptyConfigPath = join(tmpdir(), 'qwen-review-hadolint-empty.yaml');
+    try {
+      writeFileSync(hadolintEmptyConfigPath, '');
+    } catch {
+      /* best-effort — a missing config is still no ignores */
+    }
+  }
+  return hadolintEmptyConfigPath;
+}
+
 /** The outcome of pointing a linter at one file. */
 export type ToolRun =
   | { kind: 'ok'; stdout: string }
@@ -278,8 +296,16 @@ function runTool(tool: LintTool, absPath: string): ToolRun {
     // the invocation is the plain, working one.
     hadolint: ['--format', 'json', absPath],
   };
-  // `HADOLINT_NO_COLOR` avoids ANSI in any stray output; the shellcheck knobs stay.
-  const env: NodeJS.ProcessEnv = { ...process.env, HADOLINT_NO_COLOR: '1' };
+  // Config isolation, so a PR-controlled config cannot suppress its own findings:
+  // shellcheck gets `--norc` + `SHELLCHECK_OPTS` dropped (above); hadolint reads a
+  // config from `HADOLINT_CONFIG` when set, so point it at an empty one — that
+  // neutralises a `.hadolint.yaml` the diff added. `HADOLINT_NO_COLOR` keeps output
+  // clean. (Env vars are benign if a tool ignores them — unlike a bad CLI flag.)
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    HADOLINT_NO_COLOR: '1',
+    HADOLINT_CONFIG: emptyHadolintConfig(),
+  };
   delete env['SHELLCHECK_OPTS'];
   const r = spawnSync(tool, argv[tool], {
     encoding: 'utf8',
@@ -535,9 +561,13 @@ function buildNote(
     );
   }
   if (skipped.length > 0) {
+    // `skipped` mixes reasons now — a tool not installed, an irregular file, a
+    // deferred checker — so summarise by the tools involved without claiming they
+    // were all "not installed" (they may not be). The per-file reason is in each
+    // `skipped[]` entry for anyone who needs the specifics.
     const tools = [...new Set(skipped.map((s) => s.tool))].join(', ');
     parts.push(
-      `${skipped.length} file(s) not checked — ${tools} not installed (report as unreviewed, not clean).`,
+      `${skipped.length} file(s) not checked (${tools}) — report as unreviewed, not clean.`,
     );
   }
   return parts.join(' ');

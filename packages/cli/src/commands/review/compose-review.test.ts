@@ -2506,6 +2506,16 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     expect(g.unreviewed).toEqual([]);
   });
 
+  it('fails closed when the plan has a commit but the report has no headSha', () => {
+    // `headShaOf` could not read git → no `headSha`. When the plan DOES name a
+    // commit, an unverifiable report must not be trusted (the guard is not a no-op).
+    const p = writePlan({ fetchedSha: 'aaaaaaa' });
+    writeReport(withFinding(finding())); // no headSha
+    const g = scriptLintGate(p);
+    expect(g.criticals).toEqual([]);
+    expect(g.unreviewed[0]).toContain('could not be verified');
+  });
+
   it('ignores a cosmetic (style) or pre-existing (inDiff:false) finding', () => {
     const p = writePlan({});
     writeReport({
@@ -2520,17 +2530,23 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     expect(scriptLintGate(p).criticals).toEqual([]);
   });
 
-  it('reports a not-installed checker (skipped) as unreviewed', () => {
+  it('reports a skipped checker as unreviewed, surfacing its own reason', () => {
     const p = writePlan({});
     writeReport({
       skipped: [
-        { path: '.github/workflows/ci.yml', tool: 'actionlint', reason: 'x' },
+        {
+          path: '.github/workflows/ci.yml',
+          tool: 'actionlint',
+          reason: 'actionlint source mapping not yet supported',
+        },
       ],
     });
     const g = scriptLintGate(p);
     expect(g.criticals).toEqual([]);
     expect(g.unreviewed).toHaveLength(1);
-    expect(g.unreviewed[0]).toContain('actionlint');
+    // the FILE and the entry's own reason are disclosed (not a hardcoded string)
+    expect(g.unreviewed[0]).toContain('.github/workflows/ci.yml');
+    expect(g.unreviewed[0]).toContain('not yet supported');
   });
 
   it('reports an errored checker as unreviewed (fail closed)', () => {
@@ -2548,9 +2564,31 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     expect(g.unreviewed[0]).toContain('produced no report');
   });
 
-  it('is a no-op when the diff carries no executable script', () => {
+  it('reads a fresh report for a shebang script the path-predicate misses', () => {
+    // hasExecutableScript('.husky/pre-commit') is false (path-only), but the
+    // command shebang-detected it and reported a finding. The gate reads the
+    // report regardless of the predicate, so the finding is NOT dropped.
+    const p = writePlan({
+      files: [{ path: '.husky/pre-commit', kind: 'source' }],
+    });
+    writeReport({
+      checked: [
+        {
+          path: '.husky/pre-commit',
+          tool: 'shellcheck',
+          findings: [finding()],
+        },
+      ],
+      ok: false,
+    });
+    const g = scriptLintGate(p);
+    expect(g.criticals).toHaveLength(1);
+    expect(g.criticals[0]).toContain('.husky/pre-commit');
+  });
+
+  it('is a no-op when nothing was owed and no report exists', () => {
     const p = writePlan({ files: [{ path: 'a.ts', kind: 'source' }] });
-    writeReport(withFinding(finding()));
+    // no report written — not owed by path, and none produced → contribute nothing
     expect(scriptLintGate(p)).toEqual({ criticals: [], unreviewed: [] });
   });
 
