@@ -61,7 +61,7 @@ interface CheckCoverageArgs {
 function runCheckCoverage(args: CheckCoverageArgs): void {
   let report;
   try {
-    report = coverageFromTranscripts(args.plan);
+    report = coverageFromTranscripts(args.plan, process.env);
   } catch (err) {
     if (err instanceof TranscriptsUnavailableError) {
       // Infrastructure, not a verdict. A read-only HOME or a sandbox leaves no

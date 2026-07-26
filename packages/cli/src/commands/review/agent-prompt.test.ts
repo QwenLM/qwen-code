@@ -1007,6 +1007,39 @@ describe('--roster — every prompt the plan requires, in one call', () => {
     }
   });
 
+  it('drops the adversarial personas when the plan records medium effort', () => {
+    // The wiring under test: the capturing command writes `effort` into the plan,
+    // and the roster reads it from there — no `--effort` flag on THIS command.
+    // A `medium` plan must build the reduced set (personas gone). If this reddens
+    // back to nine, `check-coverage` and `compose-review` — which read the same
+    // `plan.effort` — would flag the personas missing and escalate medium to high
+    // on every run. This is the boundary the pure-function test cannot reach.
+    const dir = mkdtempSync(join(tmpdir(), 'ap-roster-med-'));
+    try {
+      const plan = join(dir, 'plan.json');
+      writeFileSync(plan, JSON.stringify({ ...PLAN, effort: 'medium' }));
+      (agentPromptCommand.handler as (a: unknown) => void)({
+        plan,
+        roster: true,
+      });
+      const recorded = readRecordedPrompts(plan);
+      expect([...recorded.keys()].sort()).toEqual([
+        '1a',
+        '1b',
+        '2',
+        '3',
+        '4',
+        '5',
+      ]);
+      const printed = (writeStdoutLine as unknown as Mock).mock
+        .calls[0][0] as string;
+      expect(printed).toContain('6 agents required');
+      expect(printed).not.toMatch(/Agent 6[abc]:/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('a whole block copied lazily — separator line included — still delivers', () => {
     // The point of one call is that the compliant move is mechanical. An
     // orchestrator that copies from one ───── line to the next has copied an
