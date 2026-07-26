@@ -229,7 +229,7 @@ class UpdateGoalInvocation extends BaseToolInvocation<
       goalLifecycleChanged: false,
       nextAction: receipt.readyForVerification
         ? 'End this turn without user-facing text. Do not claim the Goal is complete or blocked. The Goal status card will report the independent verification result.'
-        : 'Continue this turn without claiming the Goal is complete or blocked. A repeated-blocker audit requires the same blocker mode and materially identical reason across three consecutive Goal turns, with current evidence cited on each turn.',
+        : 'Continue this turn without claiming the Goal is complete or blocked. A repeated-blocker audit requires the same blocker mode and exact same reason text across three consecutive Goal turns, with current evidence cited on each turn.',
     };
     let returnDisplay: string;
     if (!receipt.recorded) {
@@ -266,7 +266,7 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
     super(
       UpdateGoalTool.Name,
       ToolDisplayNames.UPDATE_GOAL,
-      'Propose that the current Goal is complete or blocked. Before calling, call get_goal in the current turn and cite only values from evidenceCatalog.entries[].uuid, never goalId, turnId, or lineageTurnIds. If completion depends on user-facing content delivered in the current turn, emit only the content required by the objective, then call get_goal, wait for its result, and call update_goal in a later model step with the returned delivered_output UUID. Do not add progress or completion commentary when the objective requires an exact output format. For blocked proposals, use authority when a user or maintainer decision or permission is required, external when an unavailable external resource or capability is evidenced, and repeated for the same evidenced blocker across three consecutive Goal turns with a materially identical reason; omitting blockerKind follows the repeated-blocker audit. Core records at most one proposal for the exact permitted turn and queues eligible proposals for independent verification. This tool never changes the Goal lifecycle or claims a terminal result. Do not tell the user the Goal is complete or blocked. If this tool reports readyForVerification, end the turn without additional user-facing text; otherwise continue the turn without claiming a terminal result. The Goal status card reports the independent verification result.',
+      'Propose that the current Goal is complete or blocked. Before calling, call get_goal in the current turn and cite only values from evidenceCatalog.entries[].uuid, never goalId, turnId, or lineageTurnIds. If completion depends on user-facing content delivered in the current turn, emit only the content required by the objective, then call get_goal, wait for its result, and call update_goal in a later model step with the returned delivered_output UUID. Do not add progress or completion commentary when the objective requires an exact output format. For blocked proposals, use authority when a user or maintainer decision or permission is required, external when an unavailable external resource or capability is evidenced, and repeated for the same evidenced blocker with the exact same reason text across three consecutive Goal turns; omitting blockerKind follows the repeated-blocker audit. Core records at most one proposal for the exact permitted turn and queues eligible proposals for independent verification. This tool never changes the Goal lifecycle or claims a terminal result. Do not tell the user the Goal is complete or blocked. If this tool reports readyForVerification, end the turn without additional user-facing text; otherwise continue the turn without claiming a terminal result. The Goal status card reports the independent verification result.',
       Kind.Think,
       {
         type: 'object',
@@ -295,7 +295,7 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
             type: 'string',
             enum: ['authority', 'external', 'repeated'],
             description:
-              'authority: a user or maintainer decision or permission is required; external: an evidenced external resource or capability is unavailable; repeated: the same evidenced blocker with a materially identical reason across three consecutive Goal turns. Omission uses the repeated-blocker audit.',
+              'authority: a user or maintainer decision or permission is required; external: an evidenced external resource or capability is unavailable; repeated: the same evidenced blocker with the exact same reason text across three consecutive Goal turns. Omission uses the repeated-blocker audit.',
           },
         },
         required: ['status', 'reason', 'evidenceRefs'],

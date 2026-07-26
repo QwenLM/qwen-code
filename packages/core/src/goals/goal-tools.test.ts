@@ -234,6 +234,9 @@ describe('UpdateGoalTool', () => {
     expect(schema.properties.blockerKind.description).toContain(
       'three consecutive Goal turns',
     );
+    expect(schema.properties.blockerKind.description).toContain(
+      'exact same reason text',
+    );
   });
 
   it('rejects lineage turn ids before recording a proposal', async () => {
@@ -425,7 +428,7 @@ describe('UpdateGoalTool', () => {
         readyForVerification: false,
         goalLifecycleChanged: false,
         nextAction:
-          'Continue this turn without claiming the Goal is complete or blocked. A repeated-blocker audit requires the same blocker mode and materially identical reason across three consecutive Goal turns, with current evidence cited on each turn.',
+          'Continue this turn without claiming the Goal is complete or blocked. A repeated-blocker audit requires the same blocker mode and exact same reason text across three consecutive Goal turns, with current evidence cited on each turn.',
       });
       expect(result.terminateTurn).toBeUndefined();
     }
@@ -488,6 +491,24 @@ describe('UpdateGoalTool', () => {
     };
     const tool = new UpdateGoalTool(makeConfig(runtime));
 
+    expect(() =>
+      goalTurnContext.run(permit, () =>
+        tool.build({
+          status: 'complete',
+          reason: 'x'.repeat(GOAL_PROPOSAL_REASON_MAX_CHARACTERS),
+          evidenceRefs: ['evidence-1'],
+        }),
+      ),
+    ).not.toThrow();
+    expect(() =>
+      goalTurnContext.run(permit, () =>
+        tool.build({
+          status: 'complete',
+          reason: 'é'.repeat(GOAL_PROPOSAL_REASON_MAX_BYTES / 2),
+          evidenceRefs: ['evidence-1'],
+        }),
+      ),
+    ).not.toThrow();
     expect(() =>
       goalTurnContext.run(permit, () =>
         tool.build({

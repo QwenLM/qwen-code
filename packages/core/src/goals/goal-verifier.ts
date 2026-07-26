@@ -32,6 +32,8 @@ const GOAL_VERIFIER_SYSTEM_PROMPT = `You are an independent Goal Verifier. Judge
 
 Evidence with proofKind "delivered_output" proves only that content was delivered; it cannot prove tests, files, tools, or remote state changed. Evidence with proofKind "external_fact" may support those external facts. For a blocked proposal, apply the supplied blockedPolicy exactly.
 
+For a complete proposal, evidence with proofKind "delivered_output" and turnId equal to currentTurnId is the current turn's delivered output.
+
 The runtime sends this request only after successfully executing update_goal and recording its proposal. Never require evidence that update_goal itself was called. Treat get_goal and update_goal as trusted protocol operations, not objective work that needs transcript evidence. Judge the remaining objective conditions from the supplied evidence.
 
 Return exactly one JSON object with keys "decision" and "reason". decision must be "accept" or "reject". Include no markdown fence, preamble, extra key, or commentary.`;
@@ -44,8 +46,8 @@ interface GoalVerifierInputBase {
     revision: number;
     objective: string;
   };
+  currentTurnId: string;
   evidence: readonly GoalVerifierEvidenceRecord[];
-  currentDeliveredOutput?: readonly string[];
 }
 
 export type GoalVerifierInput = GoalVerifierInputBase &
@@ -89,6 +91,7 @@ function verifierContents(input: GoalVerifierInput): Content[] {
       revision: input.goal.revision,
       objective: input.goal.objective,
     },
+    currentTurnId: input.currentTurnId,
     proposal: {
       status: input.proposal.status,
       reason: input.proposal.reason,
@@ -104,9 +107,6 @@ function verifierContents(input: GoalVerifierInput): Content[] {
       proofKind: record.proofKind,
       content: record.content,
     })),
-    ...(input.currentDeliveredOutput
-      ? { currentDeliveredOutput: [...input.currentDeliveredOutput] }
-      : {}),
     ...(input.proposal.status === 'blocked'
       ? { blockedPolicy: input.blockedPolicy }
       : {}),

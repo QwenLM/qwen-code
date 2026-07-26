@@ -328,21 +328,14 @@ export function createGoalRuntime(
     attempt: VerificationAttempt,
     evidence: ReturnType<typeof validateGoalEvidenceReferences>,
   ): GoalVerifierInput => {
-    const currentDeliveredOutput = evidence.citedRecords
-      .filter(
-        (record) =>
-          record.proofKind === 'delivered_output' &&
-          record.turnId === attempt.permit.turnId,
-      )
-      .map((record) => record.content);
     const base = {
       goal: {
         goalId: attempt.goal.goalId,
         revision: attempt.goal.revision,
         objective: attempt.goal.objective,
       },
+      currentTurnId: attempt.permit.turnId,
       evidence: evidence.citedRecords,
-      ...(currentDeliveredOutput.length > 0 ? { currentDeliveredOutput } : {}),
     };
     if (attempt.proposal.status === 'complete') {
       return {
@@ -826,7 +819,7 @@ export function createGoalRuntime(
         proposal.blockerKind !== 'authority' &&
         proposal.blockerKind !== 'external'
       ) {
-        const fingerprint = `${proposal.blockerKind ?? ''}\n${proposal.reason}`;
+        const fingerprint = `${proposal.blockerKind ?? 'repeated'}\n${proposal.reason}`;
         blockedAuditCandidate = {
           fingerprint,
           count:

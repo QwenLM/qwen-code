@@ -21,6 +21,7 @@ function input(): GoalVerifierInput {
       revision: 2,
       objective: 'Make all tests pass',
     },
+    currentTurnId: 'turn-3',
     proposal: {
       status: 'complete',
       reason: 'The focused suite passed',
@@ -36,7 +37,6 @@ function input(): GoalVerifierInput {
         content: '18 tests passed',
       },
     ],
-    currentDeliveredOutput: ['Implementation and verification are complete.'],
   };
 }
 
@@ -120,6 +120,8 @@ describe('createGoalVerifier', () => {
       request.contents[0]?.parts?.[0]?.text ?? '',
     ) as Record<string, unknown>;
     expect(payload).not.toHaveProperty('fullHistory');
+    expect(payload).toMatchObject({ currentTurnId: 'turn-3' });
+    expect(payload).not.toHaveProperty('currentDeliveredOutput');
     expect(JSON.stringify(payload)).not.toContain('preview');
     expect(request.systemInstruction).toContain(
       'Never require evidence that update_goal itself was called',
@@ -153,12 +155,33 @@ describe('createGoalVerifier', () => {
     });
   });
 
+  it('keeps maximum valid evidence and proposal reason within the request limit', async () => {
+    const { config, generateText } = configFor(
+      '{"decision":"accept","reason":"grounded"}',
+    );
+    const value = input();
+    value.proposal.reason = 'r'.repeat(16_000);
+    value.evidence = [
+      {
+        ...value.evidence[0]!,
+        proofKind: 'delivered_output',
+        content: 'e'.repeat(24_000),
+      },
+    ];
+
+    await expect(createGoalVerifier(config)(value)).resolves.toEqual({
+      decision: 'accept',
+      reason: 'grounded',
+    });
+    expect(generateText).toHaveBeenCalledOnce();
+  });
+
   it('rejects an unbounded verifier request before calling the provider', async () => {
     const { config, generateText } = configFor(
       '{"decision":"accept","reason":"grounded"}',
     );
     const value = input();
-    value.currentDeliveredOutput = ['x'.repeat(64_000)];
+    value.goal.objective = 'x'.repeat(64_000);
 
     await expect(createGoalVerifier(config)(value)).rejects.toBeInstanceOf(
       GoalVerifierInputTooLargeError,

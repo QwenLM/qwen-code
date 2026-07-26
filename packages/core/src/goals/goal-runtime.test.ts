@@ -1600,21 +1600,21 @@ describe('goal runtime', () => {
     ).toEqual({ recorded: true, readyForVerification: true });
   });
 
-  it('requires three repeated blocked turns and resets that audit on resume', async () => {
+  it('normalizes omitted blocker kinds in the repeated audit and resets it on resume', async () => {
     const journal = fakeGoalJournal();
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({ journal });
     runtime.bindHost(host);
     await runtime.dispatch({ action: 'create', objective: 'ship' });
 
-    for (let index = 0; index < 2; index += 1) {
+    for (const blockerKind of [undefined, 'repeated'] as const) {
       const permit = host.started.at(-1)!;
       expect(
         runtime.recordTerminalProposal(permit, {
           status: 'blocked',
           reason: 'waiting for access',
           evidenceRefs: [],
-          blockerKind: 'repeated',
+          ...(blockerKind ? { blockerKind } : {}),
         }),
       ).toEqual({ recorded: true, readyForVerification: false });
       await runtime.finishTurn(permit);
@@ -1626,7 +1626,6 @@ describe('goal runtime', () => {
         status: 'blocked',
         reason: 'waiting for access',
         evidenceRefs: [],
-        blockerKind: 'repeated',
       }),
     ).toEqual({ recorded: true, readyForVerification: true });
     await runtime.dispatch({
