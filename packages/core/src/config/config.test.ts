@@ -8099,6 +8099,69 @@ describe('Model Switching and Config Updates', () => {
     });
   });
 
+  describe('UserPromptSubmit dispatch through the hook execution bridge', () => {
+    it.each([
+      {
+        name: 'forwards a string submitted prompt',
+        submittedPrompt: 'submitted prompt',
+        expected: 'submitted prompt',
+      },
+      {
+        name: 'preserves an empty submitted prompt',
+        submittedPrompt: '',
+        expected: '',
+      },
+      {
+        name: 'drops a numeric submitted prompt',
+        submittedPrompt: 42,
+        expected: undefined,
+      },
+      {
+        name: 'drops an object submitted prompt',
+        submittedPrompt: { text: 'submitted prompt' },
+        expected: undefined,
+      },
+      {
+        name: 'drops a null submitted prompt',
+        submittedPrompt: null,
+        expected: undefined,
+      },
+      {
+        name: 'handles a missing submitted prompt',
+        submittedPrompt: undefined,
+        expected: undefined,
+      },
+    ])('$name', async ({ submittedPrompt, expected }) => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const fireUserPromptSubmitEvent = vi.fn().mockResolvedValue(undefined);
+      // @ts-expect-error - accessing private for testing
+      config['hookSystem'] = { fireUserPromptSubmitEvent };
+
+      const response = await config
+        .getMessageBus()!
+        .request<HookExecutionRequest, HookExecutionResponse>(
+          {
+            type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            eventName: 'UserPromptSubmit',
+            input: {
+              prompt: 'model prompt',
+              submitted_prompt: submittedPrompt,
+            },
+          },
+          MessageBusType.HOOK_EXECUTION_RESPONSE,
+        );
+
+      expect(fireUserPromptSubmitEvent).toHaveBeenCalledWith(
+        'model prompt',
+        undefined,
+        expected,
+      );
+      expect(response.success).toBe(true);
+    });
+  });
+
   describe('Stop dispatch through the hook execution bridge', () => {
     it.each([
       {

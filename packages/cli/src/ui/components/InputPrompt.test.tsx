@@ -413,6 +413,66 @@ describe('InputPrompt', () => {
     unmount();
   });
 
+  it('prepares submission provenance before clearing the input buffer', async () => {
+    const prepareInputSubmission = vi.fn();
+    mockedUseUIActions.mockReturnValue({
+      handleRetryLastPrompt: vi.fn(),
+      temporaryCloseFeedbackDialog: vi.fn(),
+      popAllQueuedMessages: vi.fn(() => null),
+      prepareInputSubmission,
+    } as unknown as ReturnType<typeof useUIActions>);
+    props.buffer.setText('restored prompt');
+    vi.mocked(props.buffer.setText).mockClear();
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+    act(() => {
+      stdin.write('\r');
+    });
+
+    await waitFor(() => {
+      expect(prepareInputSubmission).toHaveBeenCalledWith('restored prompt');
+      expect(props.buffer.setText).toHaveBeenCalledWith('');
+      expect(props.onSubmit).toHaveBeenCalledWith('restored prompt');
+    });
+    expect(prepareInputSubmission.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(props.buffer.setText).mock.invocationCallOrder[0],
+    );
+    expect(
+      vi.mocked(props.buffer.setText).mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(props.onSubmit).mock.invocationCallOrder[0]);
+    unmount();
+  });
+
+  it('clears restored provenance before applying same-text history', async () => {
+    const clearRestoredSubmission = vi.fn();
+    mockedUseUIActions.mockReturnValue({
+      handleRetryLastPrompt: vi.fn(),
+      temporaryCloseFeedbackDialog: vi.fn(),
+      popAllQueuedMessages: vi.fn(() => null),
+      clearRestoredSubmission,
+    } as unknown as ReturnType<typeof useUIActions>);
+    props.buffer.setText('repeat prompt');
+    vi.mocked(props.buffer.setText).mockClear();
+
+    const { unmount } = renderWithProviders(<InputPrompt {...props} />);
+    const historyArgs = mockedUseInputHistory.mock.calls.at(-1)?.[0];
+    if (!historyArgs) {
+      throw new Error('useInputHistory was not called');
+    }
+
+    act(() => {
+      historyArgs.onChange('repeat prompt');
+    });
+
+    expect(clearRestoredSubmission).toHaveBeenCalledOnce();
+    expect(props.buffer.setText).toHaveBeenCalledWith('repeat prompt');
+    expect(clearRestoredSubmission.mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(props.buffer.setText).mock.invocationCallOrder[0],
+    );
+    unmount();
+  });
+
   it('queues the prompt for the next turn on Ctrl+Q', async () => {
     props.buffer.setText('send this later');
     const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
@@ -1400,6 +1460,37 @@ describe('InputPrompt', () => {
       expect(clipboardUtils.saveClipboardImage).toHaveBeenCalled();
       expect(clipboardUtils.cleanupOldClipboardImages).toHaveBeenCalled();
       // Note: The new implementation adds images as attachments rather than inserting into buffer
+      unmount();
+    });
+
+    it('keeps generated attachment references out of submitted provenance', async () => {
+      const imagePath = path.join(
+        'test',
+        'project',
+        'src',
+        '.qwen',
+        'tmp',
+        'clipboard.png',
+      );
+      vi.mocked(clipboardUtils.clipboardHasImage).mockResolvedValue(true);
+      vi.mocked(clipboardUtils.saveClipboardImage).mockResolvedValue(imagePath);
+      props.buffer.setText('describe this image');
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write(isWindows ? '\x1Bv' : '\x16');
+      await wait();
+      stdin.write('\r');
+
+      await waitFor(() => {
+        expect(props.onSubmit).toHaveBeenCalledWith(
+          '@.qwen/tmp/clipboard.png\n\ndescribe this image',
+          { submittedPrompt: 'describe this image' },
+        );
+      });
       unmount();
     });
 

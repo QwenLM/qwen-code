@@ -52,6 +52,7 @@ import ansiEscapes from 'ansi-escapes';
 import {
   type Config,
   makeFakeConfig,
+  SendMessageType,
   type GeminiClient,
   type SubagentManager,
 } from '@qwen-code/qwen-code-core';
@@ -332,7 +333,7 @@ describe('AppContainer State Management', () => {
       getQueuedMessagesText: vi.fn().mockReturnValue(''),
       popAllMessages: vi.fn().mockReturnValue(null),
       drainQueue: vi.fn().mockReturnValue([]),
-      popNextSegment: vi.fn().mockReturnValue(null),
+      popNextTurn: vi.fn().mockReturnValue(null),
     });
     mockedUseAutoAcceptIndicator.mockReturnValue(false);
     mockedUseGitBranchName.mockReturnValue('main');
@@ -1045,7 +1046,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue(''),
         popAllMessages: vi.fn().mockReturnValue(null),
         drainQueue: vi.fn().mockReturnValue([]),
-        popNextSegment: vi.fn().mockReturnValue(null),
+        popNextTurn: vi.fn().mockReturnValue(null),
       });
 
       render(
@@ -1061,7 +1062,11 @@ describe('AppContainer State Management', () => {
         deferUntilIdle: true,
       });
 
-      expect(mockQueueMessage).toHaveBeenCalledWith('/btw next turn', true);
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        '/btw next turn',
+        true,
+        '/btw next turn',
+      );
       expect(mockSubmitQuery).not.toHaveBeenCalled();
     });
 
@@ -1087,7 +1092,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue(''),
         popAllMessages: vi.fn().mockReturnValue(null),
         drainQueue: vi.fn().mockReturnValue([]),
-        popNextSegment: vi.fn().mockReturnValue(null),
+        popNextTurn: vi.fn().mockReturnValue(null),
       });
 
       render(
@@ -1101,7 +1106,12 @@ describe('AppContainer State Management', () => {
 
       capturedUIActions.handleFinalSubmit('/btw quick side question');
 
-      expect(mockSubmitQuery).toHaveBeenCalledWith('/btw quick side question');
+      expect(mockSubmitQuery).toHaveBeenCalledWith(
+        '/btw quick side question',
+        SendMessageType.UserQuery,
+        undefined,
+        { submittedPrompt: '/btw quick side question' },
+      );
       expect(mockQueueMessage).not.toHaveBeenCalled();
     });
 
@@ -1127,7 +1137,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue(''),
         popAllMessages: vi.fn().mockReturnValue(null),
         drainQueue: vi.fn().mockReturnValue([]),
-        popNextSegment: vi.fn().mockReturnValue(null),
+        popNextTurn: vi.fn().mockReturnValue(null),
       });
 
       render(
@@ -1141,7 +1151,12 @@ describe('AppContainer State Management', () => {
 
       capturedUIActions.handleFinalSubmit('/model');
 
-      expect(mockSubmitQuery).toHaveBeenCalledWith('/model');
+      expect(mockSubmitQuery).toHaveBeenCalledWith(
+        '/model',
+        SendMessageType.UserQuery,
+        undefined,
+        { submittedPrompt: '/model' },
+      );
       expect(mockQueueMessage).not.toHaveBeenCalled();
     });
 
@@ -1168,7 +1183,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue(''),
         popAllMessages: vi.fn().mockReturnValue(null),
         drainQueue: vi.fn().mockReturnValue([]),
-        popNextSegment: vi.fn().mockReturnValue(null),
+        popNextTurn: vi.fn().mockReturnValue(null),
       });
 
       render(
@@ -1187,8 +1202,280 @@ describe('AppContainer State Management', () => {
         1,
         '<system-reminder>\nUse list_agents to inspect restored agents.\n' +
           '</system-reminder>\n\ncontinue the review',
+        false,
+        'continue the review',
       );
-      expect(mockQueueMessage).toHaveBeenNthCalledWith(2, 'one more check');
+      expect(mockQueueMessage).toHaveBeenNthCalledWith(
+        2,
+        'one more check',
+        false,
+        'one more check',
+      );
+    });
+
+    it('preserves unchanged queue provenance across the input clear before submit', () => {
+      const modelText =
+        '<system-reminder>\nmanaged context\n</system-reminder>\n\nreview this';
+      const mockQueueMessage = vi.fn();
+      let onBufferChange: ((text: string) => void) | undefined;
+      mockedUseTextBuffer.mockImplementation((options) => {
+        onBufferChange = options.onChange;
+        return {
+          text: '',
+          setText: vi.fn(),
+        };
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [modelText],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(modelText),
+        popAllMessages: vi.fn().mockReturnValue({
+          modelText,
+          submittedPrompt: 'review this',
+        }),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(capturedUIActions.popAllQueuedMessages()).toBe(modelText);
+      capturedUIActions.prepareInputSubmission?.(modelText);
+      capturedUIActions.handleFinalSubmit(modelText);
+      act(() => {
+        onBufferChange?.('');
+      });
+
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        modelText,
+        false,
+        'review this',
+      );
+    });
+
+    it('separates edited restores from same-text history resubmissions', () => {
+      const modelText =
+        '<system-reminder>\nmanaged context\n</system-reminder>\n\nreview this';
+      const mockQueueMessage = vi.fn();
+      let onBufferChange: ((text: string) => void) | undefined;
+      mockedUseTextBuffer.mockImplementation((options) => {
+        onBufferChange = options.onChange;
+        return {
+          text: '',
+          setText: vi.fn(),
+        };
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [modelText],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(modelText),
+        popAllMessages: vi.fn().mockReturnValue({
+          modelText,
+          submittedPrompt: 'review this',
+        }),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(capturedUIActions.popAllQueuedMessages()).toBe(modelText);
+      act(() => {
+        onBufferChange?.(`${modelText} with edits`);
+        onBufferChange?.(modelText);
+      });
+      capturedUIActions.handleFinalSubmit(modelText);
+
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        modelText,
+        false,
+        undefined,
+      );
+
+      mockQueueMessage.mockClear();
+      expect(capturedUIActions.popAllQueuedMessages()).toBe(modelText);
+      capturedUIActions.prepareInputSubmission?.(`${modelText} with edits`);
+      capturedUIActions.handleFinalSubmit(`${modelText} with edits`);
+
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        `${modelText} with edits`,
+        false,
+        undefined,
+      );
+
+      mockQueueMessage.mockClear();
+      expect(capturedUIActions.popAllQueuedMessages()).toBe(modelText);
+      capturedUIActions.prepareInputSubmission?.(`${modelText} `);
+      capturedUIActions.handleFinalSubmit(`${modelText} `);
+
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        `${modelText} `,
+        false,
+        undefined,
+      );
+
+      mockQueueMessage.mockClear();
+      expect(capturedUIActions.popAllQueuedMessages()).toBe(modelText);
+      act(() => {
+        onBufferChange?.(`${modelText} with edits`);
+        onBufferChange?.('');
+        onBufferChange?.('fresh prompt');
+      });
+      capturedUIActions.handleFinalSubmit('fresh prompt');
+
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        'fresh prompt',
+        false,
+        'fresh prompt',
+      );
+
+      mockQueueMessage.mockClear();
+      expect(capturedUIActions.popAllQueuedMessages()).toBe(modelText);
+      capturedUIActions.clearRestoredSubmission?.();
+      capturedUIActions.handleFinalSubmit(modelText);
+
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        modelText,
+        false,
+        modelText,
+      );
+    });
+
+    it('does not create provenance for a whitespace-only submission', () => {
+      const mockQueueMessage = vi.fn();
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.handleFinalSubmit('   ');
+
+      expect(mockQueueMessage).toHaveBeenCalledWith('   ', false, undefined);
+    });
+
+    it('captures trimmed multiline Unicode input as provenance', () => {
+      const mockQueueMessage = vi.fn();
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.handleFinalSubmit(' \n你好 🌏\nsecond line \n ');
+
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        ' \n你好 🌏\nsecond line \n ',
+        false,
+        '你好 🌏\nsecond line',
+      );
+    });
+
+    it('uses the explicit pre-attachment text as provenance', () => {
+      const mockQueueMessage = vi.fn();
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.handleFinalSubmit(
+        '@.qwen/tmp/clipboard.png\n\ndescribe this image',
+        { submittedPrompt: 'describe this image' },
+      );
+
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        '@.qwen/tmp/clipboard.png\n\ndescribe this image',
+        false,
+        'describe this image',
+      );
+    });
+
+    it('omits provenance when a programmatic caller explicitly has none', () => {
+      const mockQueueMessage = vi.fn();
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.handleFinalSubmit('configured initial prompt', {
+        submittedPrompt: undefined,
+      });
+
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        'configured initial prompt',
+        false,
+        undefined,
+      );
     });
 
     it.each(['exit', 'quit', ':q', ':q!', ':wq', ':wq!'])(
@@ -1212,7 +1499,7 @@ describe('AppContainer State Management', () => {
           getQueuedMessagesText: vi.fn().mockReturnValue(''),
           popAllMessages: vi.fn().mockReturnValue(null),
           drainQueue: vi.fn().mockReturnValue([]),
-          popNextSegment: vi.fn().mockReturnValue(null),
+          popNextTurn: vi.fn().mockReturnValue(null),
         });
 
         render(
@@ -1262,7 +1549,7 @@ describe('AppContainer State Management', () => {
           getQueuedMessagesText: vi.fn().mockReturnValue(''),
           popAllMessages: vi.fn().mockReturnValue(null),
           drainQueue: vi.fn().mockReturnValue([]),
-          popNextSegment: vi.fn().mockReturnValue(null),
+          popNextTurn: vi.fn().mockReturnValue(null),
         });
 
         render(
@@ -1291,7 +1578,12 @@ describe('AppContainer State Management', () => {
     const ON_CANCEL_SUBMIT_ARG_INDEX = 15;
     type CapturedCancelSubmit = (info?: {
       pendingItem: HistoryItemWithoutId | null;
-      lastTurnUserItem: { id: number; text: string } | null;
+      lastTurnUserItem: {
+        id: number;
+        text: string;
+        submittedPrompt?: string;
+      } | null;
+      canUndoLastLoggedUserMessage: boolean;
       turnProducedMeaningfulContent: boolean;
     }) => void;
     let capturedOnCancelSubmit: CapturedCancelSubmit | null = null;
@@ -1302,10 +1594,15 @@ describe('AppContainer State Management', () => {
     // common case (the cancelled turn added the user prompt in the
     // history fixture). Defaults to the fixture's id=1 so the tests
     // that use single-USER history fixtures work without parameterizing.
-    const cancelInfoFor = (text: string, id = 1) =>
+    const cancelInfoFor = (text: string, id = 1, submittedPrompt?: string) =>
       ({
         pendingItem: null,
-        lastTurnUserItem: { id, text },
+        lastTurnUserItem: {
+          id,
+          text,
+          ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
+        },
+        canUndoLastLoggedUserMessage: true,
         turnProducedMeaningfulContent: false,
       }) as const;
 
@@ -1361,7 +1658,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue(''),
         popAllMessages: vi.fn().mockReturnValue(null),
         drainQueue: vi.fn().mockReturnValue([]),
-        popNextSegment: vi.fn().mockReturnValue(null),
+        popNextTurn: vi.fn().mockReturnValue(null),
       });
 
       render(
@@ -1430,7 +1727,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue(''),
         popAllMessages: vi.fn().mockReturnValue(null),
         drainQueue: vi.fn().mockReturnValue([]),
-        popNextSegment: vi.fn().mockReturnValue(null),
+        popNextTurn: vi.fn().mockReturnValue(null),
       });
 
       render(
@@ -1458,7 +1755,9 @@ describe('AppContainer State Management', () => {
 
     it('moves queued follow-up messages into an empty buffer on cancel', async () => {
       const mockSetText = vi.fn();
-      const mockPopAllMessages = vi.fn().mockReturnValue('queued follow-up');
+      const mockPopAllMessages = vi
+        .fn()
+        .mockReturnValue({ modelText: 'queued follow-up' });
       const mockClearQueue = vi.fn();
       mockedUseTextBuffer.mockReturnValue({
         text: '',
@@ -1485,7 +1784,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue('queued follow-up'),
         popAllMessages: mockPopAllMessages,
         drainQueue: vi.fn().mockReturnValue(['queued follow-up']),
-        popNextSegment: vi.fn().mockReturnValue('queued follow-up'),
+        popNextTurn: vi.fn().mockReturnValue({ modelText: 'queued follow-up' }),
       });
 
       render(
@@ -1568,7 +1867,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue(''),
         popAllMessages: vi.fn().mockReturnValue(null),
         drainQueue: vi.fn().mockReturnValue([]),
-        popNextSegment: vi.fn().mockReturnValue(null),
+        popNextTurn: vi.fn().mockReturnValue(null),
       });
 
       render(
@@ -1601,6 +1900,144 @@ describe('AppContainer State Management', () => {
       // escape so the cancelled `> prompt` actually disappears from
       // scrollback rather than appearing twice (transcript + input box).
       expect(mockStdout.write).toHaveBeenCalledWith(ansiEscapes.clearTerminal);
+    });
+
+    it('does not remove a newer BTW entry when restoring a cancelled main turn', async () => {
+      const mockSetText = vi.fn();
+      const mockTruncateToItem = vi.fn();
+      const mockRemoveLastUserMessage = vi.fn().mockResolvedValue(true);
+      const mockStripOrphans = vi.fn();
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [
+          { id: 1, type: 'user', text: 'main prompt' },
+          { id: 2, type: 'info', text: 'Request cancelled.' },
+        ],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: mockTruncateToItem,
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: mockRemoveLastUserMessage,
+      });
+      vi.spyOn(mockConfig, 'getGeminiClient').mockReturnValue({
+        initialize: vi.fn().mockResolvedValue(undefined),
+        setTools: vi.fn().mockResolvedValue(undefined),
+        isInitialized: vi.fn().mockReturnValue(false),
+        stripOrphanedUserEntriesFromHistory: mockStripOrphans,
+      } as unknown as GeminiClient);
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: vi.fn(),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      triggerCancel({
+        ...cancelInfoFor('main prompt'),
+        canUndoLastLoggedUserMessage: false,
+      });
+
+      expect(mockTruncateToItem).toHaveBeenCalledWith(1);
+      expect(mockSetText).toHaveBeenCalledWith('main prompt');
+      expect(mockStripOrphans).toHaveBeenCalled();
+      expect(mockRemoveLastUserMessage).not.toHaveBeenCalled();
+    });
+
+    it('reuses the cancelled turn provenance on an unchanged resubmit', async () => {
+      const modelText =
+        '<system-reminder>\nmanaged context\n</system-reminder>\n\nreview this';
+      const mockSetText = vi.fn();
+      const mockQueueMessage = vi.fn();
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [
+          { id: 1, type: 'user', text: modelText },
+          { id: 2, type: 'info', text: 'Request cancelled.' },
+        ],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: vi.fn().mockResolvedValue(true),
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      triggerCancel(cancelInfoFor(modelText, 1, 'review this'));
+      capturedUIActions.handleFinalSubmit(modelText);
+
+      expect(mockSetText).toHaveBeenCalledWith(modelText);
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        modelText,
+        false,
+        'review this',
+      );
     });
 
     it('does not auto-restore when the cancelled turn did not add a user item (e.g. Cron / slash submit_prompt)', async () => {
@@ -1649,7 +2086,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue(''),
         popAllMessages: vi.fn().mockReturnValue(null),
         drainQueue: vi.fn().mockReturnValue([]),
-        popNextSegment: vi.fn().mockReturnValue(null),
+        popNextTurn: vi.fn().mockReturnValue(null),
       });
 
       render(
@@ -1669,6 +2106,7 @@ describe('AppContainer State Management', () => {
       triggerCancel({
         pendingItem: null,
         lastTurnUserItem: null,
+        canUndoLastLoggedUserMessage: false,
         turnProducedMeaningfulContent: false,
       });
 
@@ -1716,7 +2154,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue(''),
         popAllMessages: vi.fn().mockReturnValue(null),
         drainQueue: vi.fn().mockReturnValue([]),
-        popNextSegment: vi.fn().mockReturnValue(null),
+        popNextTurn: vi.fn().mockReturnValue(null),
       });
 
       render(
@@ -1735,6 +2173,7 @@ describe('AppContainer State Management', () => {
       triggerCancel({
         pendingItem: null,
         lastTurnUserItem: { id: 1, text: 'a different text' },
+        canUndoLastLoggedUserMessage: true,
         turnProducedMeaningfulContent: false,
       });
 
@@ -1778,7 +2217,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue(''),
         popAllMessages: vi.fn().mockReturnValue(null),
         drainQueue: vi.fn().mockReturnValue([]),
-        popNextSegment: vi.fn().mockReturnValue(null),
+        popNextTurn: vi.fn().mockReturnValue(null),
       });
 
       render(
@@ -1843,7 +2282,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue(''),
         popAllMessages: vi.fn().mockReturnValue(null),
         drainQueue: vi.fn().mockReturnValue([]),
-        popNextSegment: vi.fn().mockReturnValue(null),
+        popNextTurn: vi.fn().mockReturnValue(null),
       });
 
       render(
@@ -1866,6 +2305,7 @@ describe('AppContainer State Management', () => {
           text: 'partial reply…',
         },
         lastTurnUserItem: { id: 1, text: 'what time is it?' },
+        canUndoLastLoggedUserMessage: true,
         turnProducedMeaningfulContent: false,
       });
 
@@ -1917,7 +2357,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue(''),
         popAllMessages: vi.fn().mockReturnValue(null),
         drainQueue: vi.fn().mockReturnValue([]),
-        popNextSegment: vi.fn().mockReturnValue(null),
+        popNextTurn: vi.fn().mockReturnValue(null),
       });
 
       render(
@@ -1937,6 +2377,7 @@ describe('AppContainer State Management', () => {
       triggerCancel({
         pendingItem: { type: 'gemini_thought', text: 'thinking…' },
         lastTurnUserItem: { id: 1, text: 'what time is it?' },
+        canUndoLastLoggedUserMessage: true,
         turnProducedMeaningfulContent: true,
       });
 
@@ -1989,7 +2430,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue(''),
         popAllMessages: vi.fn().mockReturnValue(null),
         drainQueue: vi.fn().mockReturnValue([]),
-        popNextSegment: vi.fn().mockReturnValue(null),
+        popNextTurn: vi.fn().mockReturnValue(null),
       });
 
       render(
@@ -2011,6 +2452,7 @@ describe('AppContainer State Management', () => {
       triggerCancel({
         pendingItem: null,
         lastTurnUserItem: { id: 999, text: 'foo' },
+        canUndoLastLoggedUserMessage: true,
         turnProducedMeaningfulContent: false,
       });
 
@@ -2058,7 +2500,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue(''),
         popAllMessages: vi.fn().mockReturnValue(null),
         drainQueue: vi.fn().mockReturnValue([]),
-        popNextSegment: vi.fn().mockReturnValue(null),
+        popNextTurn: vi.fn().mockReturnValue(null),
       });
 
       render(
@@ -2119,9 +2561,11 @@ describe('AppContainer State Management', () => {
         addMessage: vi.fn(),
         clearQueue: vi.fn(),
         getQueuedMessagesText: vi.fn().mockReturnValue('queued thought'),
-        popAllMessages: vi.fn().mockReturnValue('queued thought'),
+        popAllMessages: vi
+          .fn()
+          .mockReturnValue({ modelText: 'queued thought' }),
         drainQueue: vi.fn().mockReturnValue([]),
-        popNextSegment: vi.fn().mockReturnValue('queued thought'),
+        popNextTurn: vi.fn().mockReturnValue({ modelText: 'queued thought' }),
       });
 
       render(
@@ -2198,7 +2642,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue(''),
         popAllMessages: vi.fn().mockReturnValue(null),
         drainQueue: vi.fn().mockReturnValue([]),
-        popNextSegment: vi.fn().mockReturnValue(null),
+        popNextTurn: vi.fn().mockReturnValue(null),
       });
 
       render(
@@ -2235,7 +2679,9 @@ describe('AppContainer State Management', () => {
       // Mirrors claude-code's popAllEditable behaviour.
       const mockSetText = vi.fn();
       const mockClearQueue = vi.fn();
-      const mockPopAllMessages = vi.fn().mockReturnValue('/model\n\nhi');
+      const mockPopAllMessages = vi
+        .fn()
+        .mockReturnValue({ modelText: '/model\n\nhi' });
       mockedUseTextBuffer.mockReturnValue({
         text: '',
         setText: mockSetText,
@@ -2271,7 +2717,7 @@ describe('AppContainer State Management', () => {
         getQueuedMessagesText: vi.fn().mockReturnValue('/model\n\nhi'),
         popAllMessages: mockPopAllMessages,
         drainQueue: vi.fn().mockReturnValue([]),
-        popNextSegment: vi.fn().mockReturnValue('/model'),
+        popNextTurn: vi.fn().mockReturnValue({ modelText: '/model' }),
       });
 
       render(
@@ -2319,9 +2765,11 @@ describe('AppContainer State Management', () => {
         addMessage: vi.fn(),
         clearQueue: vi.fn(),
         getQueuedMessagesText: vi.fn().mockReturnValue('queued follow-up'),
-        popAllMessages: vi.fn().mockReturnValue('queued follow-up'),
+        popAllMessages: vi
+          .fn()
+          .mockReturnValue({ modelText: 'queued follow-up' }),
         drainQueue: vi.fn().mockReturnValue(['queued follow-up']),
-        popNextSegment: vi.fn().mockReturnValue('queued follow-up'),
+        popNextTurn: vi.fn().mockReturnValue({ modelText: 'queued follow-up' }),
       });
 
       render(

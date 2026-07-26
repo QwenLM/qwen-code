@@ -166,7 +166,13 @@ export function expandPendingPastePlaceholders(
 
 export interface InputPromptProps {
   buffer: TextBuffer;
-  onSubmit: (value: string, options?: { deferUntilIdle?: boolean }) => void;
+  onSubmit: (
+    value: string,
+    options?: {
+      deferUntilIdle?: boolean;
+      submittedPrompt?: string;
+    },
+  ) => void;
   userMessages: readonly string[];
   onClearScreen: () => void;
   config: Config;
@@ -605,6 +611,8 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         shellHistory.addCommandToHistory(finalValue);
       }
 
+      const submittedPrompt = finalValue;
+
       // Convert attachments to @references and prepend to the message
       if (attachments.length > 0) {
         const attachmentRefs = attachments
@@ -613,12 +621,18 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         finalValue = `${attachmentRefs}\n\n${finalValue.trim()}`;
       }
 
+      uiActions.prepareInputSubmission?.(finalValue);
       // Clear the buffer *before* calling onSubmit to prevent potential re-submission
       // if onSubmit triggers a re-render while the buffer still holds the old value.
       buffer.setText('');
       clearPromptStash(targetDir);
       if (deferUntilIdle) {
-        onSubmit(finalValue, { deferUntilIdle: true });
+        onSubmit(finalValue, {
+          deferUntilIdle: true,
+          ...(attachments.length > 0 ? { submittedPrompt } : {}),
+        });
+      } else if (attachments.length > 0) {
+        onSubmit(finalValue, { submittedPrompt });
       } else {
         onSubmit(finalValue);
       }
@@ -657,6 +671,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       pendingPastes,
       followup,
       onPromptSuggestionDismiss,
+      uiActions,
     ],
   );
 
@@ -665,10 +680,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const customSetTextAndResetCompletionSignal = useCallback(
     (newText: string) => {
+      uiActions.clearRestoredSubmission?.();
       buffer.setText(newText);
       setHistoryRestoredText(newText);
     },
-    [buffer],
+    [buffer, uiActions],
   );
 
   const inputHistory = useInputHistory({

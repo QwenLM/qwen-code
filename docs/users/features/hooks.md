@@ -139,6 +139,8 @@ Function hooks directly call registered JavaScript/TypeScript functions. They ar
 
 Prompt hooks use an LLM to evaluate hook input and return a decision. This is useful for making intelligent decisions based on context, such as determining whether to allow or block an operation.
 
+> **Data handling:** A prompt hook sends its event input to the configured model provider. When file-backed debug logging is enabled, the fully expanded prompt-hook request is also written to the session debug log. Treat hook input and debug logs as potentially sensitive.
+
 **How it works:**
 
 1. The hook input JSON is injected into your prompt using the `$ARGUMENTS` placeholder
@@ -184,7 +186,7 @@ Prompt hooks can be used with most hook events, including:
 - `PostToolUse` - Evaluate tool results and potentially inject context
 - `Stop` - Determine whether to continue or stop
 - `SubagentStop` - Evaluate subagent results
-- `UserPromptSubmit` - Evaluate or enrich user prompts
+- `UserPromptSubmit` - Evaluate or enrich eligible model-bound prompts
 
 **Example: Stop Hook**
 
@@ -235,24 +237,24 @@ When `ok` is `false`, Qwen Code will continue working and use the `reason` as co
 
 Hooks fire at specific points during a Qwen Code session. Different events support different matchers to filter trigger conditions.
 
-| Event                | Triggered When                            | Matcher Target                                                 |
-| :------------------- | :---------------------------------------- | :------------------------------------------------------------- |
-| `PreToolUse`         | Before tool execution                     | Tool id (`write_file`, `read_file`, `run_shell_command`, etc.) |
-| `PostToolUse`        | After successful tool execution           | Tool id                                                        |
-| `PostToolUseFailure` | After tool execution fails                | Tool id                                                        |
-| `UserPromptSubmit`   | After user submits prompt                 | None (always fires)                                            |
-| `SessionStart`       | When session starts or resumes            | Source (`startup`, `resume`, `clear`, `compact`)               |
-| `SessionEnd`         | When session ends                         | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)          |
-| `MessageDisplay`     | Repeatedly, as the reply streams          | None (always fires)                                            |
-| `Stop`               | When Claude prepares to conclude response | None (always fires)                                            |
-| `SubagentStart`      | When subagent starts                      | Agent type (`Bash`, `Explorer`, `Plan`, etc.)                  |
-| `SubagentStop`       | When subagent stops                       | Agent type                                                     |
-| `PreCompact`         | Before conversation compaction            | Trigger (`manual`, `auto`)                                     |
-| `Notification`       | When notifications are sent               | Type (`permission_prompt`, `idle_prompt`, `auth_success`)      |
-| `PermissionRequest`  | When permission dialog is shown           | Tool id                                                        |
-| `PermissionDenied`   | When tool permission is denied            | Tool id                                                        |
-| `TodoCreated`        | When a new todo item is created           | None (always fires)                                            |
-| `TodoCompleted`      | When a todo item is marked as completed   | None (always fires)                                            |
+| Event                | Triggered When                              | Matcher Target                                                 |
+| :------------------- | :------------------------------------------ | :------------------------------------------------------------- |
+| `PreToolUse`         | Before tool execution                       | Tool id (`write_file`, `read_file`, `run_shell_command`, etc.) |
+| `PostToolUse`        | After successful tool execution             | Tool id                                                        |
+| `PostToolUseFailure` | After tool execution fails                  | Tool id                                                        |
+| `UserPromptSubmit`   | Before an eligible prompt reaches the model | None (when emitted)                                            |
+| `SessionStart`       | When session starts or resumes              | Source (`startup`, `resume`, `clear`, `compact`)               |
+| `SessionEnd`         | When session ends                           | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)          |
+| `MessageDisplay`     | Repeatedly, as the reply streams            | None (always fires)                                            |
+| `Stop`               | When Claude prepares to conclude response   | None (always fires)                                            |
+| `SubagentStart`      | When subagent starts                        | Agent type (`Bash`, `Explorer`, `Plan`, etc.)                  |
+| `SubagentStop`       | When subagent stops                         | Agent type                                                     |
+| `PreCompact`         | Before conversation compaction              | Trigger (`manual`, `auto`)                                     |
+| `Notification`       | When notifications are sent                 | Type (`permission_prompt`, `idle_prompt`, `auth_success`)      |
+| `PermissionRequest`  | When permission dialog is shown             | Tool id                                                        |
+| `PermissionDenied`   | When tool permission is denied              | Tool id                                                        |
+| `TodoCreated`        | When a new todo item is created             | None (always fires)                                            |
+| `TodoCompleted`      | When a todo item is marked as completed     | None (always fires)                                            |
 
 ### Matcher Patterns
 
@@ -327,7 +329,18 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
 
 ### Hook Input Structure
 
-All hooks receive standardized input in JSON format through stdin (command) or POST body (http).
+All hook executors receive the standardized event input. The delivery boundary depends on the executor:
+
+| Hook type  | Input recipient                                                 |
+| :--------- | :-------------------------------------------------------------- |
+| `command`  | Child process through JSON on `stdin`                           |
+| `http`     | Configured endpoint through a JSON `POST` body                  |
+| `function` | Trusted in-process callback                                     |
+| `prompt`   | Configured model provider after the input replaces `$ARGUMENTS` |
+
+Function hooks are trusted code running in the Qwen process. They receive an in-process object, so fields must not be treated as immutable against a function hook.
+
+Qwen does not control whether a hook process, endpoint, callback, or model provider retains or forwards its input. Review each configured executor's data-handling policy.
 
 **Common Fields:**
 
@@ -342,6 +355,8 @@ All hooks receive standardized input in JSON format through stdin (command) or P
 ```
 
 Event-specific fields are added based on the hook type. When running in a subagent, `agent_id` and `agent_type` are additionally included.
+
+Hook input is a forward-extensible JSON contract: new optional fields can be added to existing events. Consumers should ignore unknown fields. A strict decoder that rejects unknown properties must be updated to explicitly allow each new optional field before upgrading Qwen Code. For security-sensitive hooks, a decoder failure can change fail-open or fail-closed behavior, so administrators must validate the upgraded payload against the deployed hook before rollout.
 
 ### Hook Output Structure
 
@@ -491,15 +506,24 @@ The `permissionDecision` value controls whether the tool runs:
 
 #### UserPromptSubmit
 
-**Purpose**: Executed when the user submits a prompt to modify, validate, or enrich the input.
+**Purpose**: Executed before an eligible prompt reaches the model to validate, block, or enrich the current model invocation. The existing event can also occur on continuation paths, so `prompt` must not be assumed to be raw user input.
 
 **Event-specific fields**:
 
 ```json
 {
-  "prompt": "the user's submitted prompt text"
+  "prompt": "current model-bound prompt for this hook invocation",
+  "submitted_prompt": "optional user text captured at a supported interactive TUI submission boundary"
 }
 ```
+
+`submitted_prompt` is optional. It is present only when Qwen can carry provenance from a supported interactive TUI submission to a fresh `UserQuery`. It is omitted for unsupported producers and machine-driven paths such as same-turn steering, tool-result continuations, retries, cron, notifications, and teammate traffic. ACP, headless, `serve`, SDK, and remote-input paths do not produce it in this version.
+
+Deferred input can retain the field when its provenance remains complete. A combined batch retains provenance only when every constituent item has it; edited, partially known, or otherwise ambiguous input omits the field. Consumers that require user-submitted text should treat absence as unavailable rather than falling back to `prompt`.
+
+This field is provenance, not authentication, tenant identity, authorization, or DLP. It is caller-supplied data. Every executor configured for this event receives it; in particular, HTTP hooks send it to their endpoint and prompt hooks send it to their model provider.
+
+Sequential UserPromptSubmit hooks can append `additionalContext` to `prompt`; `submitted_prompt` continues to represent the captured submission. Function hooks are trusted same-process code and are not constrained by an immutability guarantee.
 
 **Output Options**:
 
@@ -1291,7 +1315,7 @@ A PostToolUse HTTP hook that sends all tool execution records to a remote audit 
 
 ### Example 3: User Prompt Validation Hook
 
-A UserPromptSubmit hook that validates user prompts for sensitive information and provides context for long prompts:
+A UserPromptSubmit hook that validates supported interactive TUI submissions for sensitive information and provides context for long prompts. It skips invocations where source provenance is unavailable. The keyword check is illustrative and is not a complete DLP policy:
 
 **prompt_validator.py**
 
@@ -1305,9 +1329,12 @@ try:
     input_data = json.load(sys.stdin)
 except json.JSONDecodeError as e:
     print(f"Error: Invalid JSON input: {e}", file=sys.stderr)
-    exit(1)
+    sys.exit(1)
 
-user_prompt = input_data.get("prompt", "")
+user_prompt = input_data.get("submitted_prompt")
+if user_prompt is None:
+    # Do not mistake model-bound or machine-generated content for raw input.
+    sys.exit(0)
 
 # Sensitive words list
 sensitive_words = ["password", "secret", "token", "api_key"]
@@ -1324,7 +1351,7 @@ for word in sensitive_words:
             }
         }
         print(json.dumps(output))
-        exit(0)
+        sys.exit(0)
 
 # Check prompt length and add warning context if too long
 if len(user_prompt) > 1000:
@@ -1335,10 +1362,10 @@ if len(user_prompt) > 1000:
         }
     }
     print(json.dumps(output))
-    exit(0)
+    sys.exit(0)
 
 # No processing needed for normal cases
-exit(0)
+sys.exit(0)
 ```
 
 ## Troubleshooting
@@ -1347,5 +1374,5 @@ exit(0)
 - Verify hook script permissions and executability
 - Ensure proper JSON formatting in hook outputs
 - Use specific matcher patterns to avoid unintended hook execution
-- Use `--debug` mode to see detailed hook matching and execution information
+- Use `--debug` mode to see detailed hook matching and execution information. Prompt-hook inputs can be written to the session debug log, so apply appropriate access and retention controls.
 - Temporarily disable all hooks: add `"disableAllHooks": true` in settings
