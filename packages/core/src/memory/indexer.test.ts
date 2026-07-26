@@ -8,7 +8,11 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { getAutoMemoryFilePath, getAutoMemoryIndexPath } from './paths.js';
+import {
+  AUTO_MEMORY_PINNED_DIRNAME,
+  getAutoMemoryFilePath,
+  getAutoMemoryIndexPath,
+} from './paths.js';
 import {
   buildManagedAutoMemoryIndex,
   buildTeamAutoMemoryIndex,
@@ -102,10 +106,10 @@ describe('managed auto-memory indexer', () => {
     expect(index).toContain('The repo uses pnpm workspaces.');
   });
 
-  it('includes a valid pinned document in the generated index', async () => {
+  it('keeps a valid pinned document in the generated index', async () => {
     const pinnedFile = getAutoMemoryFilePath(
       projectRoot,
-      path.join('pinned', 'architecture.md'),
+      path.join(AUTO_MEMORY_PINNED_DIRNAME, 'architecture.md'),
     );
     await fs.mkdir(path.dirname(pinnedFile), { recursive: true });
     await fs.writeFile(

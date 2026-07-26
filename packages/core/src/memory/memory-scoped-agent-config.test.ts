@@ -149,6 +149,12 @@ describe('createMemoryScopedAgentConfig', () => {
     ).resolves.toBe('deny');
     await expect(
       protectedPm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(memoryRoot, 'PINNED', 'architecture.md'),
+      }),
+    ).resolves.toBe('deny');
+    await expect(
+      protectedPm.evaluate({
         toolName: ToolNames.EDIT,
         filePath: path.join(pinnedAlias, 'architecture.md'),
       }),
@@ -165,6 +171,18 @@ describe('createMemoryScopedAgentConfig', () => {
         filePath: path.join(memoryRoot, 'pinned-notes', 'ordinary.md'),
       }),
     ).resolves.toBe('allow');
+    expect(
+      protectedPm.findMatchingDenyRule({
+        toolName: ToolNames.EDIT,
+        filePath: pinnedFile,
+      }),
+    ).toBe('ManagedAutoMemory(edit: pinned memory is read-only)');
+    expect(
+      protectedPm.findMatchingDenyRule({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(pinnedDir, 'new.md'),
+      }),
+    ).toBe('ManagedAutoMemory(write_file: pinned memory is read-only)');
 
     const userPinnedFile = path.join(
       getUserAutoMemoryRoot(),
@@ -232,6 +250,31 @@ describe('createMemoryScopedAgentConfig', () => {
         filePath: targetFile,
       }),
     ).resolves.toBe('deny');
+  });
+
+  it('protects paths below a dangling top-level pinned symlink', async () => {
+    const pinnedDir = path.join(getAutoMemoryRoot(projectRoot), 'pinned');
+    await fs.symlink(
+      path.join(tempDir, 'missing-pinned-target'),
+      pinnedDir,
+      'dir',
+    );
+
+    const pm = permissionManager(
+      createMemoryScopedAgentConfig({} as Config, projectRoot, {
+        includeUserMemory: false,
+        protectPinnedMemory: true,
+      }),
+    );
+    const context = {
+      toolName: ToolNames.WRITE_FILE,
+      filePath: path.join(pinnedDir, 'new.md'),
+    };
+
+    await expect(pm.evaluate(context)).resolves.toBe('deny');
+    expect(pm.findMatchingDenyRule(context)).toBe(
+      'ManagedAutoMemory(write_file: pinned memory is read-only)',
+    );
   });
 
   it('allows creating new nested topic files inside memory roots', async () => {

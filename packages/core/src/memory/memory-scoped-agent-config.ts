@@ -116,7 +116,7 @@ function isProtectedPinnedMemoryPath(
       memoryRoot,
       AUTO_MEMORY_PINNED_DIRNAME,
     );
-    if (isWithinRoot(literalCandidate, literalPinnedRoot)) {
+    if (isWithinRootCaseInsensitive(literalCandidate, literalPinnedRoot)) {
       return true;
     }
 
@@ -124,7 +124,7 @@ function isProtectedPinnedMemoryPath(
     return (
       !!resolvedCandidate &&
       !!resolvedPinnedRoot &&
-      isWithinRoot(resolvedCandidate, resolvedPinnedRoot)
+      isWithinRootCaseInsensitive(resolvedCandidate, resolvedPinnedRoot)
     );
   });
 }
@@ -207,6 +207,10 @@ function isWithinRoot(filePath: string, root: string): boolean {
     rel === '' ||
     (rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel))
   );
+}
+
+function isWithinRootCaseInsensitive(filePath: string, root: string): boolean {
+  return isWithinRoot(filePath.toLowerCase(), root.toLowerCase());
 }
 
 async function evaluateScopedDecision(

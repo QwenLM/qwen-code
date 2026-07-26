@@ -20,6 +20,8 @@ records excluded from Dream consolidation:
   by the existing indexer under its normal limits.
 - Deny Dream `write_file` and `edit` operations when the requested path is
   lexically below `pinned/`.
+- Match the reserved top-level directory name case-insensitively so the
+  deny-list cannot fail open on case-insensitive filesystems.
 - Also deny aliases that resolve through a symlink into `pinned/`.
 - Keep the existing read-only shell gate, which already rejects `rm` and every
   other mutating shell command.
@@ -27,10 +29,10 @@ records excluded from Dream consolidation:
   consolidation analysis and avoid intentionally removing their existing index
   entries, subject to normal index limits.
 
-The path check compares both literal and resolved paths. Literal containment
-protects `pinned/` even when that directory is itself a symlink. Resolved
-containment prevents a writable-looking path elsewhere in memory from
-symlinking back into `pinned/`.
+The path check compares both literal and resolved paths case-insensitively.
+Literal containment protects `pinned/` even when that directory is itself a
+symlink. Resolved containment prevents a writable-looking path elsewhere in
+memory from symlinking back into `pinned/`.
 
 Protection is an explicit option on the existing memory-scoped agent
 configuration and is enabled by the forked Dream planner. This covers scheduled

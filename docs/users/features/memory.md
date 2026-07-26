@@ -105,6 +105,11 @@ memory documents. Valid pinned files are readable by Qwen and are included the
 next time `MEMORY.md` is rebuilt, under the same size and file-count limits as
 other memory documents.
 
+Only the top-level `pinned/` directory directly inside a managed-memory root is
+protected; nested directories such as `memory/project/pinned/` are ordinary
+writable memory. Dream workers match the reserved directory name
+case-insensitively.
+
 Dream is instructed to skip `pinned/` during consolidation. Forked Dream
 workers, including background cleanup, additionally enforce that boundary on
 their write and edit tools, including paths that resolve through a symlink into
