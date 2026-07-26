@@ -296,7 +296,8 @@ jobs:
               needs.authorize.outputs.should_run != 'true')) ||
             (github.event_name == 'issue_comment' &&
              (github.event.issue.state != 'open' ||
-              needs.authorize.outputs.should_run != 'true'))
+              needs.authorize.outputs.should_run != 'true' ||
+              !startsWith(github.event.comment.body, '@qwen-code /triage')))
           ) &&
           format('{0}-run-{1}', github.workflow, github.run_id) ||
           format('{0}-{1}', github.workflow, github.event.issue.number || github.event.pull_request.number || github.event.inputs.number)
@@ -1537,7 +1538,8 @@ jobs:
            github.event.issue.state == 'open' &&
            (github.event.comment.body == '@qwen-code /verify' ||
             startsWith(github.event.comment.body, '@qwen-code /verify ')) &&
-           needs.authorize.outputs.should_run == 'true') &&
+           needs.authorize.outputs.should_run == 'true' &&
+           vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') &&
           format('{0}-verify-{1}', github.workflow, github.event.issue.number) ||
           format('{0}-verify-run-{1}', github.workflow, github.run_id)
         }}
@@ -1812,14 +1814,28 @@ jobs:
           HOOKS_ABS="$(cd "$HOOKS_DIR" 2>/dev/null && pwd -P || echo '')"
           if [ -n "$GIT_DIR_ABS" ] && [ -n "$HOOKS_ABS" ] && [ "${HOOKS_ABS#"$GIT_DIR_ABS"/}" != "$HOOKS_ABS" ]; then
             find "$HOOKS_ABS" \( -type f -o -type l \) ! -name '*.sample' -delete 2>/dev/null || true
-          elif [ -n "$HOOKS_ABS" ]; then
-            echo "::warning::hooksPath resolves outside the git dir (${HOOKS_ABS}); not sweeping it."
+          else
+            # Resolves outside the git dir (or not at all). Warning and
+            # walking away would leave a live hook directory that the next
+            # root-owned git command executes, so unlink the ENTRY without
+            # descending into it and put an empty root-owned directory back.
+            RAW_HOOKS="$(git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
+            echo "::warning::hooks path did not resolve inside the git dir (${HOOKS_ABS:-unresolved}); unlinking it."
+            rm -f "$RAW_HOOKS" 2>/dev/null || rm -rf "$RAW_HOOKS" 2>/dev/null || true
+            mkdir -p "${GIT_DIR_ABS:-.git}/hooks" 2>/dev/null || true
+            git config --local --unset-all core.hooksPath 2>/dev/null || true
           fi
-          # Remove the entry itself, never a glob BELOW it: PR code can
-          # replace .qwen/tmp with a symlink (verified: `rm -rf .qwen/tmp/*`
-          # then deletes the link TARGET's contents, outside the workspace,
-          # as root). `rm -rf` on a symlink unlinks the link only.
-          rm -rf .qwen/tmp 2>/dev/null || true
+          # Never descend through a PR-writable parent. `rm -rf .qwen/tmp`
+          # is not enough on its own: if `.qwen` is itself a symlink the
+          # path resolves outside the workspace (the same way
+          # `rm -rf .qwen/tmp/*` did — verified). Unlink any symlink on the
+          # way, and only recurse into a real directory.
+          [ -L .qwen ] && rm -f .qwen
+          if [ -L .qwen/tmp ]; then
+            rm -f .qwen/tmp
+          elif [ -d .qwen/tmp ]; then
+            rm -rf .qwen/tmp
+          fi
           # Stale result dirs from an interrupted run must not leak into this
           # run's artifact collection.
           find tmp -maxdepth 2 -type d -name '*-verify-*' -exec rm -rf {} + 2>/dev/null || true
@@ -1829,12 +1845,23 @@ jobs:
           # the skill's canonical tmp/base-tree path (not git-registered)
           # would still make the next `git worktree add` fail, so remove it
           # by name too.
+          # Worktree paths come from PR-writable git metadata, so a lexical
+          # `tmp/` prefix is not enough: canonicalize and require the REAL
+          # path to sit inside the workspace before deleting anything.
+          WS_ABS="$(cd "${GITHUB_WORKSPACE:-$PWD}" 2>/dev/null && pwd -P || echo '')"
           git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | while IFS= read -r wt; do
-            case "$wt" in
-              "${GITHUB_WORKSPACE:-$PWD}"/tmp/*) git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt" ;;
+            [ -n "$WS_ABS" ] || continue
+            wt_abs="$(cd "$wt" 2>/dev/null && pwd -P || echo '')"
+            case "$wt_abs" in
+              "$WS_ABS"/tmp/*) git worktree remove --force "$wt_abs" 2>/dev/null || rm -rf "$wt_abs" ;;
+              *) [ -n "$wt_abs" ] && echo "::warning::skipping worktree outside the workspace: $wt_abs" ;;
             esac
           done
-          rm -rf tmp/base-tree 2>/dev/null || true
+          if [ -L tmp/base-tree ]; then
+            rm -f tmp/base-tree
+          elif [ -d tmp/base-tree ]; then
+            rm -rf tmp/base-tree
+          fi
           git worktree prune -v || true
           echo "stale agent state cleaned"
 
@@ -1879,6 +1906,11 @@ jobs:
           # queued for a scarce runner. Assert the head we authorized is the
           # head we got: otherwise a push during the wait would have us
           # execute code nobody checked.
+          # Record the base OID while .git is still root-owned. The second
+          # pin (after the build) must not re-derive it from git metadata
+          # the lifecycle user could have rewritten; an OID is
+          # content-addressed, so archiving by it is safe even then.
+          git rev-parse 'HEAD^1' > "${RUNNER_TEMP:?}/verify-base-oid"
           ACTUAL_HEAD="$(git rev-parse 'HEAD^2')"
           if [ "$ACTUAL_HEAD" != "$EXPECTED_HEAD" ]; then
             echo "::error::PR head moved after authorization (authorized ${EXPECTED_HEAD}, checked out ${ACTUAL_HEAD}); refusing to execute it."
@@ -1928,38 +1960,25 @@ jobs:
           # full disk, and OOM/signal kills are infrastructure — reporting
           # those as a PR verdict tells the author their code is broken when
           # it is not. Classify from the exit status and the log.
-          # ⚠️ The log is PR-influenced: lifecycle and build scripts print
-          # whatever they like, so a build that genuinely fails can also emit
-          # the word "ETIMEDOUT". Misreading that as infrastructure is the
-          # worse error — it tells the author to re-run something that will
-          # fail identically — so the patterns below are restricted to lines
-          # only npm's own reporter or the kernel produces, anchored at the
-          # start of a line. A signal exit (>128) needs no log evidence: it
-          # comes from the runner, not from the PR.
-          classify_failure() { # $1 status -> echoes fail|infra-error
-            local status="$1"
-            if [ "$status" -gt 128 ]; then
-              echo infra-error
-              return
-            fi
-            if grep -qE '^(npm ERR! code (ENOSPC|ECONNRESET|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|EPROTO|ERR_SOCKET_TIMEOUT)|npm ERR! network |npm ERR! .*(50[0-9] (Internal Server Error|Bad Gateway|Service Unavailable))|Killed$|Out of memory: Kill|.*: cannot allocate memory)' "$prepare_log" 2>/dev/null; then
-              echo infra-error
-            else
-              echo fail
-            fi
-          }
+          # No infra-vs-PR verdict is derivable here: BOTH inputs are
+          # PR-controlled. A lifecycle script can exit with a signal status,
+          # and it can print any line the log heuristic looked for — so the
+          # old classifier let a PR turn its own deterministic breakage into
+          # "infrastructure, please re-run", which hides the failure and
+          # preserves a stale report. Everything the prepare step observes
+          # is therefore reported as `fail`; the comment offers re-running as
+          # a possibility without asserting it, and a genuine infrastructure
+          # incident shows up in the log the comment already embeds.
           if [ "${install_status:-0}" -ne 0 ]; then
-            KIND="$(classify_failure "$install_status")"
-            echo "verdict=$KIND" >> "$GITHUB_OUTPUT"
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
             echo "failure_phase=install" >> "$GITHUB_OUTPUT"
-            echo "::error::npm ci failed (exit ${install_status}); classified as ${KIND}."
+            echo "::error::npm ci failed (exit ${install_status})."
             exit 0
           fi
           if [ "${build_status:-0}" -ne 0 ]; then
-            KIND="$(classify_failure "$build_status")"
-            echo "verdict=$KIND" >> "$GITHUB_OUTPUT"
+            echo "verdict=fail" >> "$GITHUB_OUTPUT"
             echo "failure_phase=build" >> "$GITHUB_OUTPUT"
-            echo "::error::npm run build failed (exit ${build_status}); classified as ${KIND}."
+            echo "::error::npm run build failed (exit ${build_status})."
             exit 0
           fi
           echo "Install/build completed before verification." >> "$GITHUB_STEP_SUMMARY"
@@ -2011,8 +2030,18 @@ jobs:
           #    the base commit again and make it root-owned and read-only, so
           #    the agent (running as node) loads instructions the PR cannot
           #    have touched.
+          # Archive the OID recorded before the chown, never `HEAD^1` again:
+          # by this point the lifecycle user owned the workspace including
+          # .git, and could have rewritten HEAD or its parents so that
+          # `HEAD^1` names a tree of its choosing. The OID is
+          # content-addressed and was captured while .git was root-owned.
+          BASE_OID="$(cat "${RUNNER_TEMP:?}/verify-base-oid")"
+          case "$BASE_OID" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*) ;;
+            *) echo "::error::No trusted base OID recorded; refusing to re-pin the verifier."; exit 1 ;;
+          esac
           STAGE_DIR="$(mktemp -d)"
-          git archive 'HEAD^1' -- .qwen | tar -x -C "$STAGE_DIR"
+          git archive "$BASE_OID" -- .qwen | tar -x -C "$STAGE_DIR"
           rm -rf .qwen
           mv "$STAGE_DIR/.qwen" .qwen
           rm -rf "$STAGE_DIR"
@@ -2361,8 +2390,13 @@ jobs:
           # Snapshot BOTH stages: a full/unwritable results volume fails tee
           # while qwen exits 0, and reading only [0] would publish `pass` over
           # a truncated evidence stream.
-          AGENT_STATUS=${PIPESTATUS[0]}
-          TEE_STATUS=${PIPESTATUS[1]}
+          # Snapshot the WHOLE array in one command: any assignment is
+          # itself a command and resets PIPESTATUS, so reading [0] and then
+          # [1] leaves the second read unset — which under `set -u` aborts
+          # the step right after the agent finishes (verified).
+          PIPE_STATUS=("${PIPESTATUS[@]}")
+          AGENT_STATUS=${PIPE_STATUS[0]}
+          TEE_STATUS=${PIPE_STATUS[1]:-0}
           EXIT_CODE=$AGENT_STATUS
           set -e
 
@@ -2686,6 +2720,23 @@ jobs:
               printf 'The verification job did not complete (checkout, runner, or setup error) and produced no report. See the workflow run for details.\n\n'
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
             } > "$BODY_FILE"
+          elif [ "${VERDICT:-}" = "skipped" ] || [ "${VERDICT:-}" = "n/a" ]; then
+            # These outcomes deliberately upload nothing, so their download
+            # always "fails"; they must be answered before the
+            # download-failure branch or their real reason is unreachable.
+            WEAK_BODY=true
+            {
+              printf '%s\n\n' '<!-- qwen-triage:verify -->'
+              if [ "${VERDICT:-}" = "skipped" ]; then
+                printf '**Sandboxed verification: not run** - [workflow run](%s)\n\n' "$RUN_URL"
+                printf 'Skipped because %s.\n\n' "${SKIP_REASON:-the PR was not in a verifiable state}"
+              else
+                printf '**Sandboxed verification: n/a** - [workflow run](%s)\n\n' "$RUN_URL"
+                printf 'This PR changes documentation/assets only — there is no code to execute, so a sandboxed verification has nothing to verify.\n\n'
+                printf '该 PR 仅改动文档/静态资源，没有可执行的代码，沙箱验证没有验证对象。\n\n'
+              fi
+              printf '%s\n' '— _Qwen Code · sandboxed verification_'
+            } > "$BODY_FILE"
           elif [ "${DOWNLOAD_OUTCOME:-success}" != "success" ]; then
             # The verify job may have succeeded, but its artifact never
             # arrived (the download step is continue-on-error). Without this
@@ -2698,23 +2749,6 @@ jobs:
               printf '**Sandboxed verification: results unavailable** - [workflow run](%s)\n\n' "$RUN_URL"
               printf 'The verification ran, but its result artifact could not be retrieved for publishing, so there is nothing to report here. The run log still has the agent output; re-run `@qwen-code /verify` for a fresh report.\n\n'
               printf '验证已执行，但结果产物未能取回用于发布，因此此处没有可报告的内容。运行日志中仍有 agent 输出；如需完整报告请重新运行 `@qwen-code /verify`。\n\n'
-              printf '%s\n' '— _Qwen Code · sandboxed verification_'
-            } > "$BODY_FILE"
-          elif [ "${VERDICT:-}" = "skipped" ]; then
-            WEAK_BODY=true
-            {
-              printf '%s\n\n' '<!-- qwen-triage:verify -->'
-              printf '**Sandboxed verification: not run** - [workflow run](%s)\n\n' "$RUN_URL"
-              printf 'Skipped because %s.\n\n' "${SKIP_REASON:-the PR was not in a verifiable state}"
-              printf '%s\n' '— _Qwen Code · sandboxed verification_'
-            } > "$BODY_FILE"
-          elif [ "${VERDICT:-}" = "n/a" ]; then
-            WEAK_BODY=true
-            {
-              printf '%s\n\n' '<!-- qwen-triage:verify -->'
-              printf '**Sandboxed verification: n/a** - [workflow run](%s)\n\n' "$RUN_URL"
-              printf 'This PR changes documentation/assets only — there is no code to execute, so a sandboxed verification has nothing to verify.\n\n'
-              printf '该 PR 仅改动文档/静态资源，没有可执行的代码，沙箱验证没有验证对象。\n\n'
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
             } > "$BODY_FILE"
           elif [ -n "${PREPARE_FAILURE_PHASE:-}" ]; then
@@ -2818,12 +2852,22 @@ jobs:
               MISSING_REPORT_NOTE='No report.md was found in the run artifacts, so the report section is omitted — see the workflow run output.'
               echo "::warning::${MISSING_REPORT_NOTE}"
             fi
+            # A run that timed out or crashed before writing report.md has
+            # no findings to preserve: marking it substantive would let a
+            # headline plus "no report found" overwrite the previous round's
+            # real evidence, which is the opposite of the rule.
+            if [ -z "$REPORT" ]; then
+              WEAK_BODY=true
+            fi
             {
               printf '%s\n' '<!-- qwen-triage:verify -->'
               # Substantive marker: this body carries findings, so a later
               # weak notice must not displace it as the follow-up round's
               # previous-report snapshot.
-              printf '%s\n\n' '<!-- qwen-triage:verify-substantive -->'
+              if [ -n "$REPORT" ]; then
+                printf '%s\n' '<!-- qwen-triage:verify-substantive -->'
+              fi
+              printf '\n'
               printf '**Sandboxed verification: %s** - [workflow run](%s)\n\n' "$HEADLINE" "$RUN_URL"
               if [ "${VERDICT:-}" = 'pass' ]; then
                 printf '%s\n\n' "$SCOPE_EN"

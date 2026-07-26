@@ -597,7 +597,10 @@ describe('qwen-triage verify hardening', () => {
     expect(hooks).toBeGreaterThan(unsetExt);
     // And the sweep only deletes inside the repository's own git dir.
     expect(clean).toContain('rev-parse --absolute-git-dir');
-    expect(clean).toContain('not sweeping it');
+    // An outward-resolving entry is unlinked, not merely reported: leaving
+    // it lets the next root-owned git command execute it.
+    expect(clean).toContain('unlinking it');
+    expect(clean).toContain('git config --local --unset-all core.hooksPath');
   });
 
   // A fixed proxy port lets PR lifecycle code squat it: the real proxy dies
@@ -617,7 +620,8 @@ describe('qwen-triage verify hardening', () => {
   // And 137 is ambiguous between the watchdog and an OOM kill.
   it('classifies tee failures and distinguishes watchdog kills from crashes', () => {
     const runStep = step('Run verification agent');
-    expect(runStep).toContain('TEE_STATUS=${PIPESTATUS[1]}');
+    expect(runStep).toContain('PIPE_STATUS=("${PIPESTATUS[@]}")');
+    expect(runStep).toContain('TEE_STATUS=${PIPE_STATUS[1]:-0}');
     expect(runStep).toMatch(/TEE_STATUS:-0.*-ne 0/s);
     expect(runStep).toContain('WATCHDOG_FIRED');
   });
@@ -908,7 +912,7 @@ describe('qwen-triage verify hardening round 2', () => {
   it('re-establishes the verifier trust boundary after the build', () => {
     const runStep = step('Run verification agent');
     const kill = runStep.indexOf('pkill -KILL -u node');
-    const repin = runStep.indexOf("git archive 'HEAD^1' -- .qwen");
+    const repin = runStep.indexOf('git archive "$BASE_OID" -- .qwen');
     const chown = runStep.indexOf('chown -R root:root .qwen');
     const home = runStep.indexOf('verify-agent-home');
     const launch = runStep.indexOf('QWEN_CMD=(');
@@ -1416,12 +1420,21 @@ describe('qwen-triage verify execution-time controls', () => {
         spawnSync('bash', ['-c', snippet], {
           cwd: repo,
           encoding: 'utf8',
-          env: { ...process.env, EXPECTED_HEAD: expected },
+          // The step also records the trusted base OID here, for the
+          // post-build re-pin to archive by OID rather than by HEAD^1.
+          env: { ...process.env, EXPECTED_HEAD: expected, RUNNER_TEMP: dir },
         });
 
       const matching = run(headOid);
       expect(matching.status).toBe(0);
       expect(matching.stdout).toContain('matches the authorized head');
+      // The base OID is captured while .git is still root-owned.
+      expect(readFileSync(join(dir, 'verify-base-oid'), 'utf8').trim()).toBe(
+        spawnSync('git', ['rev-parse', 'HEAD^1'], {
+          cwd: repo,
+          encoding: 'utf8',
+        }).stdout.trim(),
+      );
 
       const moved = run('0000000000000000000000000000000000000000');
       expect(moved.status).not.toBe(0);
@@ -1433,58 +1446,182 @@ describe('qwen-triage verify execution-time controls', () => {
     }
   });
 
-  // The prepare log is written by PR-controlled code, so infra patterns must
-  // be ones only npm's reporter or the kernel emits.
-  it('does not let PR build output masquerade as an infrastructure failure', () => {
-    // Scoped: the tmux job has an identically named step without this
-    // helper, and an unscoped lookup would find that one.
-    const prepare = stepIn('verify', 'Install and build PR app');
-    const body = prepare
+  // The old log-pattern classifier is gone: both of its inputs were
+  // PR-controlled, so it could be made to report a PR's own breakage as an
+  // infrastructure incident. Its replacement is asserted in the
+  // 'never derives an infra verdict from PR-controlled build output' test.
+});
+
+describe('qwen-triage verify round-3 hardening', () => {
+  // Assignments reset PIPESTATUS, so reading [0] then [1] leaves the second
+  // unset — and under `set -u` that aborts the step immediately after the
+  // agent finishes, on every run.
+  it('snapshots PIPESTATUS in one command', () => {
+    const runStep = stepIn('verify', 'Run verification agent');
+    expect(runStep).toContain('PIPE_STATUS=("${PIPESTATUS[@]}")');
+    expect(runStep).not.toMatch(/AGENT_STATUS=\$\{PIPESTATUS\[0\]\}/);
+
+    // Execute the shape both ways to keep the reason in the suite.
+    const broken = spawnSync(
+      'bash',
+      [
+        '-c',
+        'set -euo pipefail\nset +e\n(exit 3) | tee /dev/null\nA=${PIPESTATUS[0]}\nB=${PIPESTATUS[1]}\nset -e\necho "reached $A $B"',
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(`${broken.stdout}${broken.stderr}`).toContain('unbound variable');
+    const fixed = spawnSync(
+      'bash',
+      [
+        '-c',
+        'set -euo pipefail\nset +e\n(exit 3) | tee /dev/null\nst=("${PIPESTATUS[@]}")\nset -e\necho "reached ${st[0]} ${st[1]}"',
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(fixed.stdout).toContain('reached 3 0');
+  });
+
+  // GitHub evaluates concurrency BEFORE the job `if`, so a predicate that is
+  // broader than the job's own condition lets a run that will skip take the
+  // shared per-PR slot and displace one that would have run.
+  it('keeps concurrency predicates as narrow as the job conditions', () => {
+    // /verify must not enter the triage job's per-PR group.
+    expect(job('triage')).toContain(
+      "!startsWith(github.event.comment.body, '@qwen-code /triage')",
+    );
+    // A disabled-pool /verify must fall to the per-run group, not the
+    // shared one it would then skip out of.
+    const verifyJob = job('verify');
+    const group = verifyJob.slice(
+      verifyJob.indexOf('concurrency:'),
+      verifyJob.indexOf('timeout-minutes:'),
+    );
+    expect(group).toContain("vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true'");
+  });
+
+  // Cleanups must never descend through a PR-writable parent, and an
+  // outward-resolving hooks entry must be removed rather than reported.
+  it('survives symlink escapes in the workspace cleanup', () => {
+    const clean = stepIn('verify', 'Clean stale agent state');
+    const script = clean
       .match(/run: \|-\n([\s\S]*)$/)?.[1]
       .replace(/^ {10}/gm, '');
-    const start = body.indexOf('classify_failure() {');
-    const end = body.indexOf('if [ "${install_status:-0}"');
-    expect(start).toBeGreaterThan(-1);
-    const dir = mkdtempSync(join(tmpdir(), 'verify-classify-fail-'));
+    const dir = mkdtempSync(join(tmpdir(), 'verify-symlink-'));
+    const sh = (cmd, cwd) =>
+      spawnSync('bash', ['-c', cmd], { cwd, encoding: 'utf8' });
     try {
-      const logFile = join(dir, 'prepare.log');
-      const classify = (log, status) => {
-        writeFileSync(logFile, `${log}\n`);
-        return spawnSync(
-          'bash',
-          [
-            '-c',
-            `prepare_log="$1"\n${body.slice(start, end)}\nclassify_failure "$2"`,
-            '_',
-            logFile,
-            String(status),
-          ],
-          { encoding: 'utf8' },
-        ).stdout.trim();
+      const victim = join(dir, 'victim');
+      const repo = join(dir, 'repo');
+      const setup = () => {
+        rmSync(repo, { recursive: true, force: true });
+        rmSync(victim, { recursive: true, force: true });
+        mkdirSync(victim, { recursive: true });
+        mkdirSync(repo, { recursive: true });
+        writeFileSync(join(victim, 'precious.txt'), 'keep me');
+        sh(
+          'git init -q . && git config user.email t@t && git config user.name t && echo x > f && git add -A && git commit -qm x',
+          repo,
+        );
       };
-      // PR-authored output that merely mentions infrastructure words.
-      for (const log of [
-        'FAIL src/a.test.ts > expected ETIMEDOUT to equal ok',
-        'building... registry error handling module compiled',
-        "src/x.ts(3,5): error TS2322: Type '502 Bad Gateway' is not assignable",
-        'ENOSPC is handled by our retry logic',
-      ]) {
-        expect(classify(log, 1)).toBe('fail');
-      }
-      // Diagnostics only npm or the kernel produce.
-      for (const log of [
-        'npm ERR! code ETIMEDOUT',
-        'npm ERR! network request to https://registry.npmjs.org failed',
-        'npm ERR! code ENOSPC',
-        'Out of memory: Killed process 1234 (node)',
-        'Killed',
-      ]) {
-        expect(classify(log, 1)).toBe('infra-error');
-      }
-      // A signal exit needs no log evidence at all.
-      expect(classify('anything', 137)).toBe('infra-error');
+      const runClean = () =>
+        spawnSync('bash', ['-c', script], {
+          cwd: repo,
+          encoding: 'utf8',
+          env: { ...process.env, GITHUB_WORKSPACE: repo },
+        });
+
+      // .qwen itself is a symlink pointing out of the workspace.
+      setup();
+      sh(`ln -s "${victim}" "${repo}/.qwen"`, dir);
+      runClean();
+      expect(readFileSync(join(victim, 'precious.txt'), 'utf8')).toBe(
+        'keep me',
+      );
+
+      // .qwen/tmp is a symlink pointing out of the workspace.
+      setup();
+      mkdirSync(join(repo, '.qwen'), { recursive: true });
+      sh(`ln -s "${victim}" "${repo}/.qwen/tmp"`, dir);
+      runClean();
+      expect(readFileSync(join(victim, 'precious.txt'), 'utf8')).toBe(
+        'keep me',
+      );
+
+      // .git/hooks symlinked outside: the entry must go, its target must not.
+      setup();
+      rmSync(join(repo, '.git', 'hooks'), { recursive: true, force: true });
+      sh(`ln -s "${victim}" "${repo}/.git/hooks"`, dir);
+      writeFileSync(join(victim, 'post-checkout'), '#!/bin/sh\necho pwned\n');
+      const out = runClean();
+      expect(`${out.stdout}${out.stderr}`).toContain('unlinking it');
+      expect(
+        sh(`test -L "${repo}/.git/hooks"; echo $?`, dir).stdout.trim(),
+      ).toBe('1');
+      expect(
+        sh(`test -d "${repo}/.git/hooks"; echo $?`, dir).stdout.trim(),
+      ).toBe('0');
+      // The link target is left alone — never traversed.
+      expect(readFileSync(join(victim, 'post-checkout'), 'utf8')).toContain(
+        'pwned',
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // The second pin runs after the workspace (including .git) was handed to
+  // the build user, so it must archive an OID captured while .git was still
+  // root-owned rather than re-deriving HEAD^1 from PR-writable metadata.
+  it('re-pins the verifier from an OID recorded before the chown', () => {
+    const pin = stepIn('verify', 'Pin agent inputs from base');
+    expect(pin).toContain(
+      'git rev-parse \'HEAD^1\' > "${RUNNER_TEMP:?}/verify-base-oid"',
+    );
+    const runStep = stepIn('verify', 'Run verification agent');
+    expect(runStep).toContain(
+      'BASE_OID="$(cat "${RUNNER_TEMP:?}/verify-base-oid")"',
+    );
+    expect(runStep).toContain('git archive "$BASE_OID" -- .qwen');
+    expect(runStep).not.toContain("git archive 'HEAD^1' -- .qwen");
+    expect(runStep).toContain('refusing to re-pin the verifier');
+  });
+
+  // Both inputs to the old classifier were PR-controlled, so no infra
+  // verdict is derivable from the prepare step at all.
+  it('never derives an infra verdict from PR-controlled build output', () => {
+    const prepare = stepIn('verify', 'Install and build PR app');
+    expect(prepare).not.toContain('classify_failure');
+    expect(prepare).not.toContain('npm ERR! code');
+    expect(prepare).toContain('echo "verdict=fail" >> "$GITHUB_OUTPUT"');
+    expect(prepare).not.toContain('verdict=infra-error');
+  });
+
+  // skipped / n-a upload no artifact, so their download always fails; their
+  // own reason must still reach the comment.
+  it('answers skipped and docs-only before the download-failure branch', () => {
+    const publish = stepIn(
+      'publish-verify',
+      'Post verification report comment',
+    );
+    const skipped = publish.indexOf('"${VERDICT:-}" = "skipped"');
+    const download = publish.indexOf(
+      '"${DOWNLOAD_OUTCOME:-success}" != "success"',
+    );
+    expect(skipped).toBeGreaterThan(-1);
+    expect(download).toBeGreaterThan(skipped);
+  });
+
+  // A crashed run with no report has nothing to preserve, so it must not
+  // claim the substantive marker and overwrite the previous round's report.
+  it('marks a body substantive only when a report exists', () => {
+    const publish = stepIn(
+      'publish-verify',
+      'Post verification report comment',
+    );
+    expect(publish).toMatch(/if \[ -z "\$REPORT" \]; then\s+WEAK_BODY=true/);
+    expect(publish).toMatch(
+      /if \[ -n "\$REPORT" \]; then\s+printf '%s\\n' '<!-- qwen-triage:verify-substantive -->'/,
+    );
   });
 });
