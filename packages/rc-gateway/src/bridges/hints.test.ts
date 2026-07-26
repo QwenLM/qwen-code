@@ -64,6 +64,61 @@ describe('computeBridgeHints (bridge-protocol contract shape)', () => {
     expect(h.argsSummaryShort.length).toBeLessThanOrEqual(140);
   });
 
+  it('PEM private key block → high sensitivity, deeplink', () => {
+    const h = computeBridgeHints({
+      name: 'write_file',
+      args: {
+        content:
+          '-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBgkqhkiG9w0BAQ==\n-----END PRIVATE KEY-----',
+      },
+    });
+    expect(h.sensitivity).toBe('high');
+    expect(h.recommendedSurface).toBe('deeplink');
+  });
+
+  it('PEM RSA private key header → high sensitivity, deeplink', () => {
+    const h = computeBridgeHints({
+      name: 'write_file',
+      args: { content: '-----BEGIN RSA PRIVATE KEY-----\nabc\n' },
+    });
+    expect(h.sensitivity).toBe('high');
+    expect(h.recommendedSurface).toBe('deeplink');
+  });
+
+  it('bare GitHub PAT (ghp_...) with no adjacent keyword → high sensitivity', () => {
+    const h = computeBridgeHints({
+      name: 'run_shell',
+      args: { cmd: 'curl -H "x: ghp_1234567890abcdefghijklmnopqrstuvwxyz"' },
+    });
+    expect(h.sensitivity).toBe('high');
+    expect(h.recommendedSurface).toBe('deeplink');
+  });
+
+  it('bare AWS access key id (AKIA...) → high sensitivity', () => {
+    const h = computeBridgeHints({
+      name: 'set_env',
+      args: { value: 'AKIAIOSFODNN7EXAMPLE' },
+    });
+    expect(h.sensitivity).toBe('high');
+    expect(h.recommendedSurface).toBe('deeplink');
+  });
+
+  it('existing keyword-based matches still work (no regression)', () => {
+    const h = computeBridgeHints({
+      name: 'set_env',
+      args: { apiKey: 'sk-x' },
+    });
+    expect(h.sensitivity).toBe('high');
+  });
+
+  it('a benign string not matching any pattern stays low', () => {
+    const h = computeBridgeHints({
+      name: 'read_file',
+      args: { path: 'src/index.ts', note: 'hello world' },
+    });
+    expect(h.sensitivity).toBe('low');
+  });
+
   it('is total for odd inputs and degrades unserializable args to a safe deeplink', () => {
     expect(computeBridgeHints(null).recommendedSurface).toBe('inline');
     expect(computeBridgeHints(42).sensitivity).toBe('low');

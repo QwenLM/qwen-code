@@ -14,9 +14,24 @@ const MAX_SHORT = 140;
 /**
  * Secret-looking content in tool-call args — a key or value that smells like a
  * credential. Conservative (false-positives just downgrade to a deeplink).
+ *
+ * Beyond the keyword matches, this also matches specific high-signal formats
+ * that carry NO adjacent keyword at all:
+ *  - PEM key headers (`-----BEGIN PRIVATE KEY-----`, `-----BEGIN RSA PRIVATE
+ *    KEY-----`, etc.) — the keyword alternative `private[_-]?key` only matches
+ *    an underscore/hyphen form and never matches the PEM header's literal
+ *    space + ALL-CAPS text.
+ *  - Bare vendor token prefixes: GitHub (`ghp_`, `github_pat_`, `gho_`,
+ *    `ghu_`, `ghs_`), Slack (`xoxb-`/`xoxp-`/`xoxa-`/`xoxr-`/`xoxs-`), AWS
+ *    access key ids (`AKIA...`), and OpenAI/Anthropic-style API keys
+ *    (`sk-...`, including `sk-ant-...`).
+ *
+ * Every added alternative is a literal (or small bounded character class)
+ * prefix match with no nested/overlapping quantifiers, so the regex stays
+ * linear-time — it cannot ReDoS on attacker-controlled args text.
  */
 const SECRET_RE =
-  /(api[_-]?key|secret|token|password|passwd|credential|authorization|bearer|private[_-]?key|client[_-]?secret|access[_-]?key)/i;
+  /(api[_-]?key|secret|token|password|passwd|credential|authorization|bearer|private[_-]?key|client[_-]?secret|access[_-]?key|-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_|github_pat_|gho_|ghu_|ghs_|xox[baprs]-|AKIA[0-9A-Z]{16}|sk-(ant-)?[A-Za-z0-9]{10,})/i;
 
 /** Mutating/destructive tool names → at least medium sensitivity. */
 const DANGEROUS_TOOL_RE =

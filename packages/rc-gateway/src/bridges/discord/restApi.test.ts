@@ -74,7 +74,22 @@ describe('DiscordRestApi — createMessage', () => {
   it('omits components when none are given', async () => {
     const { impl, calls } = fakeFetch(() => ({ status: 200, json: {} }));
     await api(impl).createMessage('chan_1', 'no buttons');
-    expect(calls[0].body).toEqual({ content: 'no buttons' });
+    expect(calls[0].body).toEqual({
+      content: 'no buttons',
+      allowed_mentions: { parse: [] },
+    });
+  });
+
+  it('suppresses all mention parsing (no @everyone/@here/role/user pings)', async () => {
+    // Discord parses @everyone/@here/roles by DEFAULT when this field is
+    // absent — relayed agent output containing "@everyone" would otherwise
+    // ping the whole server using the bot's permissions.
+    const { impl, calls } = fakeFetch(() => ({ status: 200, json: {} }));
+    await api(impl).createMessage('chan_1', '@everyone hi @here <@&123>');
+    expect(
+      (calls[0].body as { allowed_mentions: { parse: string[] } })
+        .allowed_mentions,
+    ).toEqual({ parse: [] });
   });
 
   it('surfaces a 429 retry_after', async () => {
@@ -109,6 +124,15 @@ describe('DiscordRestApi — editMessage', () => {
       'https://discord.test/api/v10/channels/chan_1/messages/m_42',
     );
     expect((calls[0].body as { content: string }).content).toBe('Resolved');
+  });
+
+  it('suppresses all mention parsing on edit too', async () => {
+    const { impl, calls } = fakeFetch(() => ({ status: 200, json: {} }));
+    await api(impl).editMessage('chan_1', 'm_42', '@everyone edited');
+    expect(
+      (calls[0].body as { allowed_mentions: { parse: string[] } })
+        .allowed_mentions,
+    ).toEqual({ parse: [] });
   });
 });
 

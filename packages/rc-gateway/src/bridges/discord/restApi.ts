@@ -103,7 +103,16 @@ export class DiscordRestApi {
     content: string,
     components: DiscordActionRow[] = [],
   ): Promise<DiscordRestResult> {
-    const body: Record<string, unknown> = { content };
+    // Discord parses @everyone/@here/role mentions by DEFAULT when
+    // `allowed_mentions` is absent, so relayed agent output (a streamed
+    // reply, a tool call's argsSummaryShort) containing "@everyone" would
+    // ping the whole server using the bot's permissions. Suppress ALL
+    // mention parsing — this is a relay of untrusted content, not a
+    // deliberate human ping.
+    const body: Record<string, unknown> = {
+      content,
+      allowed_mentions: { parse: [] },
+    };
     if (components.length > 0) body['components'] = components;
     return this.call(
       'POST',
@@ -126,7 +135,7 @@ export class DiscordRestApi {
     return this.call(
       'PATCH',
       `/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(messageId)}`,
-      { content, components },
+      { content, components, allowed_mentions: { parse: [] } },
     );
   }
 
