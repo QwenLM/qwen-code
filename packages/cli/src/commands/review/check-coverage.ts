@@ -45,10 +45,6 @@ import { shellQuotePath } from './lib/shell-quote.js';
 interface CheckCoverageArgs {
   plan: string;
   out: string;
-  /** Review effort. `medium` drops the adversarial personas (6a/6b/6c) from the
-   * required set, matching what a balanced review launches — without it a medium
-   * review's un-launched personas read as missing coverage and exit 3. */
-  effort?: 'low' | 'medium' | 'high';
 }
 
 /**
@@ -65,7 +61,7 @@ interface CheckCoverageArgs {
 function runCheckCoverage(args: CheckCoverageArgs): void {
   let report;
   try {
-    report = coverageFromTranscripts(args.plan, process.env, args.effort);
+    report = coverageFromTranscripts(args.plan, process.env);
   } catch (err) {
     if (err instanceof TranscriptsUnavailableError) {
       // Infrastructure, not a verdict. A read-only HOME or a sandbox leaves no
@@ -250,15 +246,6 @@ export const checkCoverageCommand: CommandModule = {
         type: 'string',
         demandOption: true,
         describe: 'Output JSON path (will be overwritten)',
-      })
-      .option('effort', {
-        type: 'string',
-        choices: ['low', 'medium', 'high'],
-        describe:
-          'Review effort level. `medium` drops the adversarial personas ' +
-          '(6a/6b/6c) from the required set (pass the same value used for ' +
-          '`agent-prompt --roster --effort`), so a balanced review is not ' +
-          'flagged for coverage it deliberately did not run.',
       }),
   handler: (argv) => {
     runCheckCoverage(argv as unknown as CheckCoverageArgs);

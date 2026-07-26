@@ -58,6 +58,16 @@ export interface RosterPlan {
   worktreePath?: unknown;
   prNumber?: unknown;
   untrackedFiles?: unknown;
+  /**
+   * The review's effort, as the capturing command recorded it (`--effort`).
+   * `'medium'` is the balanced tier and drops the adversarial personas; anything
+   * else — including absent — keeps the full roster. It lives in the plan, not in
+   * a caller argument, on purpose: the roster this file computes must not be
+   * shrinkable by whoever calls `requiredAgents`, or the shrink is what gets
+   * called. `check-coverage`, `agent-prompt --roster` and `compose-review`'s
+   * recomputation then all read the same value and cannot disagree.
+   */
+  effort?: unknown;
 }
 
 /** One agent this review must launch. */
@@ -129,10 +139,7 @@ function heavyFiles(plan: RosterPlan): string[] {
  * list is discretionary. If a role is in it, a review that did not launch it has a
  * dimension nobody reviewed, and must not certify the diff.
  */
-export function requiredAgents(
-  plan: RosterPlan,
-  effort?: 'low' | 'medium' | 'high',
-): RequiredAgent[] {
+export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   const mode = reviewMode(plan);
   const out: RequiredAgent[] = [];
   const add = (role: RoleId, file?: string) =>
@@ -185,8 +192,9 @@ export function requiredAgents(
     // (balanced) review deliberately skips them, so they must not be *required*
     // either — otherwise `check-coverage` flags them missing and exits 3, and a
     // medium review of every small (3A) diff halts before Step 4. Only high
-    // requires them.
-    if (effort !== 'medium') {
+    // requires them. The effort is read from the plan the capturing command
+    // wrote, never from a caller argument (see `RosterPlan.effort`).
+    if (plan.effort !== 'medium') {
       add('6a');
       add('6b');
       add('6c');

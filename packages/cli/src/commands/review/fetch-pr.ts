@@ -73,9 +73,12 @@ interface FetchPrArgs {
   host?: string;
   /** yargs camelCases `--max-chunk-lines`; the snake_case form does not exist. */
   maxChunkLines: number;
+  effort?: 'low' | 'medium' | 'high';
 }
 
 type FetchPrResult = PlanReport & {
+  /** The review's effort, recorded so the roster reads one value everywhere. */
+  effort?: 'low' | 'medium' | 'high';
   prNumber: string;
   ownerRepo: string;
   remote: string;
@@ -373,6 +376,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     diffPath,
     diffPathAbsolute,
     prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
+    ...(args.effort ? { effort: args.effort } : {}),
     ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path)),
   };
 
@@ -438,6 +442,15 @@ export const fetchPrCommand: CommandModule = {
         default: DEFAULT_MAX_CHUNK_LINES,
         describe:
           'Target size, in diff lines, of each review chunk. A chunk boundary falls on a hunk boundary; a hunk larger than this is split only at a top-level declaration, never inside a function.',
+      })
+      .option('effort', {
+        type: 'string',
+        choices: ['low', 'medium', 'high'],
+        describe:
+          'The review effort. `medium` (balanced) drops the adversarial ' +
+          'personas from the required roster; recorded in the plan so ' +
+          'check-coverage, agent-prompt --roster and compose-review all read ' +
+          'one value. Omit for the full (high) roster.',
       }),
   handler: async (argv) => {
     setGhHost((argv as { host?: string }).host);

@@ -82,20 +82,22 @@ describe('requiredAgents — Step 3A', () => {
     expect(keys(PR).filter((k) => k.startsWith('chunk-'))).toEqual([]);
   });
 
-  it('drops the adversarial personas at medium effort, but keeps every other dimension', () => {
+  it('drops the adversarial personas when the plan records medium effort, but keeps every other dimension', () => {
     // The personas (6a/6b/6c) are a high-only dimension; a balanced (medium)
     // review deliberately does not launch them, so they must not be *required*
     // — otherwise check-coverage flags them missing and exits 3, halting every
-    // small-diff medium review.
-    const med = requiredAgents(PR as never, 'medium').map((a) => a.key);
+    // small-diff medium review. The effort is read from the plan itself
+    // (`plan.effort`, written by the capturing command), never from a caller
+    // argument — a roster the caller could shrink is a roster that gets shrunk.
+    const med = keys({ ...PR, effort: 'medium' });
     expect(med).not.toContain('6a');
     expect(med).not.toContain('6b');
     expect(med).not.toContain('6c');
     expect(med).toEqual(
       expect.arrayContaining(['0', '1a', '2', '3', '4', '5', '7']),
     );
-    // High (and the default, undefined) still demand them.
-    expect(requiredAgents(PR as never, 'high').map((a) => a.key)).toEqual(
+    // High, and the default (no effort recorded), still demand them.
+    expect(keys({ ...PR, effort: 'high' })).toEqual(
       expect.arrayContaining(['6a', '6b', '6c']),
     );
     expect(keys(PR)).toEqual(expect.arrayContaining(['6a', '6b', '6c']));

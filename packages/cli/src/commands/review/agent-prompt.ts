@@ -69,13 +69,6 @@ interface AgentPromptArgs {
   wholeDiff?: boolean;
   /** Build every prompt the plan's roster requires, in one call. */
   roster?: boolean;
-  /**
-   * The review's effort level. With `--roster`, `medium` drops the three
-   * adversarial personas (6a/6b/6c) from the built roster so the set matches
-   * what a balanced review launches — and what `check-coverage --effort medium`
-   * will hold it to. Omitted / `high` builds the full roster.
-   */
-  effort?: 'low' | 'medium' | 'high';
   /** With --role reverse-audit: build one block PER CHUNK, in one call. */
   allChunks?: boolean;
   rules?: string;
@@ -1239,13 +1232,11 @@ function rosterLabel(req: RequiredAgent): string {
  * the list it builds is the same one `check-coverage` will hold the run to,
  * because both come from `requiredAgents(plan)`.
  */
-function runRoster(
-  report: PlanReport,
-  planPath: string,
-  rules?: string,
-  effort?: 'low' | 'medium' | 'high',
-): void {
-  const roster = requiredAgents(report as RosterPlan, effort);
+function runRoster(report: PlanReport, planPath: string, rules?: string): void {
+  // The roster reads `plan.effort` (written by the capturing command), so a
+  // `medium` plan builds the reduced set here without an `--effort` flag — and
+  // `check-coverage` holds the run to that same set from the same field.
+  const roster = requiredAgents(report as RosterPlan);
   const blocks = roster.map((req, i) => {
     const { key, prompt } = buildLaunch(
       report,
@@ -1620,7 +1611,7 @@ function runAgentPrompt(args: AgentPromptArgs): void {
   // summary of its own — and every check downstream passed, because a paraphrase
   // keeps the diff path.
   if (args.roster) {
-    runRoster(report, args.plan, rules, args.effort);
+    runRoster(report, args.plan, rules);
     return;
   }
 
@@ -1774,14 +1765,6 @@ export const agentPromptCommand: CommandModule = {
           'invariant agents alike — in one call, each labelled and separated. ' +
           'The list is the same one check-coverage reads out of the plan.',
       })
-      .option('effort', {
-        type: 'string',
-        choices: ['low', 'medium', 'high'],
-        describe:
-          'Review effort level. With --roster, `medium` drops the adversarial ' +
-          'personas (6a/6b/6c) so the roster matches what a balanced review ' +
-          'launches (pass the same value to `check-coverage --effort`).',
-      })
       .option('whole-diff', {
         type: 'boolean',
         describe:
@@ -1821,7 +1804,6 @@ export const agentPromptCommand: CommandModule = {
       file: argv['file'] as string | undefined,
       wholeDiff: argv['whole-diff'] === true,
       roster: argv['roster'] === true,
-      effort: argv['effort'] as 'low' | 'medium' | 'high' | undefined,
       allChunks: argv['all-chunks'] === true,
       rules: argv['rules'] as string | undefined,
       findings: argv['findings'] as string | undefined,
