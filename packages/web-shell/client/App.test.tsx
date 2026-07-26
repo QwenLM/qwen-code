@@ -1558,6 +1558,7 @@ describe('App shell command queueing', () => {
     });
 
     expect(onToast).toHaveBeenCalledWith('warning', expect.any(String));
+    expect(mockSessionActions.cancel).toHaveBeenCalled();
 
     act(() => {
       testState.streamingState = 'idle';
@@ -1606,6 +1607,8 @@ describe('App shell command queueing', () => {
       testState.latestChatEditorProps?.onCancel?.();
       await Promise.resolve();
     });
+
+    expect(mockSessionActions.cancel).toHaveBeenCalled();
 
     // Resolve the first command — the second must NOT be dispatched.
     await act(async () => {

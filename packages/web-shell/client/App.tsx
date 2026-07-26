@@ -3889,6 +3889,8 @@ export function App({
     }
   }, [connection.sessionId, pushToast, t]);
 
+  // Declared after the session-switch wipe effect above: React runs effects in
+  // declaration order, so the queue is already cleared before this drain sees it.
   const prevShellDrainStreamingStateRef = useRef(streamingState);
   useEffect(() => {
     const prev = prevShellDrainStreamingStateRef.current;
