@@ -7,6 +7,10 @@
 import type { SpawnOptions } from 'node:child_process';
 import { spawn } from 'node:child_process';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  isStackedSkillCompletableCommand,
+  isValidStackedSkillPrefix,
+} from '../../utils/commands.js';
 import type { SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
 import { writeOsc52 } from './clipboardUtils.js';
@@ -242,7 +246,9 @@ export function isMidInputCompletableCommand(cmd: SlashCommand): boolean {
  * Only triggers when the "/" is preceded by whitespace and the cursor is
  * right at or within the partial command (no text between cursor and slash).
  *
- * Returns null when input starts with "/" (handled by start-of-line completion).
+ * A buffer may start with a slash command and still contain a later mid-input
+ * slash token (for example, "/review /skill" or "/review\n/skill"). The
+ * whitespace-before-slash anchor below excludes only the slash at position 0.
  *
  * `cursorOffset` and all returned positions are code-point offsets, so non-BMP
  * characters before the token (e.g. "please 👍 /sto") don't skew the result.
@@ -251,9 +257,6 @@ export function findMidInputSlashCommand(
   input: string,
   cursorOffset: number,
 ): MidInputSlashCommand | null {
-  // Start-of-line slash handled by existing dropdown completion
-  if (input.startsWith('/')) return null;
-
   // Work in code points. The slash and command chars are always BMP, so once we
   // anchor on the slash, lengths map 1:1 to UTF-16 — only the prefix can drift.
   const codePoints = toCodePoints(input);
@@ -343,8 +346,9 @@ export type SlashCommandToken = {
   commandName: string;
   /**
    * Whether the token corresponds to a known command.
-   * Mid-input tokens are only valid when they match a model-invocable command.
-   * Line-start tokens are valid for all interactive commands.
+   * Line-start tokens are valid for all interactive commands. Mid-input tokens
+   * are valid when they match a model-invocable command, or when they are
+   * stackable skills following an existing stacked-skill prefix.
    */
   valid: boolean;
 };
@@ -358,7 +362,7 @@ const SLASH_TOKEN_RE = /(?:^|(?<=\s))\/([a-zA-Z][a-zA-Z0-9:_-]*)/g;
  * - Tokens at position 0 are valid if they match any command.
  * - Mid-input tokens (preceded by whitespace) are valid only if they match a
  *   `modelInvocable` command, since built-in commands typed mid-text won't be
- *   executed.
+ *   executed, or if they continue a valid stacked-skill prefix.
  */
 export function findSlashCommandTokens(
   text: string,
@@ -396,8 +400,13 @@ export function findSlashCommandTokens(
         // Line-start: valid if command is user-invocable (interactive)
         valid = cmd.userInvocable !== false && !cmd.hidden;
       } else {
-        // Mid-input: only valid if model-invocable
-        valid = cmd.modelInvocable === true;
+        // Mid-input: valid if model-invocable, or if this token continues a
+        // valid stacked skill invocation.
+        const prefix = text.slice(0, start);
+        valid =
+          cmd.modelInvocable === true ||
+          (isStackedSkillCompletableCommand(cmd) &&
+            isValidStackedSkillPrefix(prefix, commands));
       }
     }
 
