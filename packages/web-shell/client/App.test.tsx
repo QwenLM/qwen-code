@@ -1927,6 +1927,50 @@ describe('App shell command queueing', () => {
     expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
   });
 
+  it('allows new shell commands after cancel during session creation', async () => {
+    mockConnection.sessionId = undefined;
+    let resolveCreate!: () => void;
+    const createDone = new Promise<void>((r) => {
+      resolveCreate = r;
+    });
+    mockSessionActions.createSession.mockImplementation(() => {
+      return createDone.then(() => {
+        mockConnection.sessionId = 'session-1';
+        return { sessionId: 'session-1' };
+      });
+    });
+    renderApp({});
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!deploy prod');
+      await Promise.resolve();
+    });
+
+    // Cancel while session creation is in flight.
+    await act(async () => {
+      testState.latestChatEditorProps?.onCancel?.();
+      await Promise.resolve();
+    });
+
+    // Resolve session creation — the cancelled command must not execute.
+    await act(async () => {
+      resolveCreate();
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+
+    // A new ! command must not be silently dropped.
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!git status');
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith(
+      'git status',
+    );
+  });
+
   it('skips sendShellCommand when the session changes during session creation', async () => {
     mockConnection.sessionId = undefined;
     let resolveCreate!: () => void;

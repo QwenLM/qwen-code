@@ -6094,6 +6094,7 @@ export function App({
     queuedShellCommandsRef.current = [];
     drainGenerationRef.current++;
     isDrainingRef.current = false;
+    shellSubmitInFlightRef.current = false;
     if (dropped > 0) {
       pushToast('warning', t('queue.shellDropped', { count: dropped }));
     }
