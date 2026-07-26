@@ -135,7 +135,11 @@ async function handleCreateBranch(
 ): Promise<void> {
   const body = safeBody(req);
   const name = body['name'];
-  if (typeof name !== 'string' || !isValidRefName(name)) {
+  if (
+    typeof name !== 'string' ||
+    !isValidRefName(name) ||
+    name.startsWith('-')
+  ) {
     res
       .status(400)
       .json({ error: 'invalid_branch_name', message: 'Invalid branch name' });
