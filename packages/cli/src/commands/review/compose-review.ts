@@ -109,9 +109,11 @@ export interface ComposeReviewInput {
    * PR identity but no `prDescriptionHasHan` (a `plan-diff` plan, or one an
    * improvising orchestrator wired in place of `fetch-pr`'s report). A test
    * seam ONLY: production leaves it undefined and the CLI reads the PR with
-   * `gh pr view`; a model cannot supply it, being a function that does not
-   * serialise into the input JSON — so it can neither force nor suppress the
-   * Chinese fold, which is the whole point of keeping the signal the CLI's own.
+   * `gh pr view`. The handler **strips it from the input JSON** before use (the
+   * same way it strips `env`), so a model cannot supply one — not even a
+   * non-function value that would throw past the default and drop the fold. It
+   * can neither force nor suppress the Chinese fold, which is the whole point of
+   * keeping the signal the CLI's own.
    */
   prBodyFetcher?: PrBodyFetcher;
   /** Step 1's lightweight `pr-context` fetch failed. */
@@ -1247,6 +1249,13 @@ export const composeReviewCommand: CommandModule = {
     // always resolves the transcripts from the environment the CLI exported.
     const parsed = JSON.parse(raw) as ComposeReviewInput;
     delete parsed.env;
+    // Same reasoning for the bilingual body-language fetcher: it is a unit-test
+    // seam (production reads the PR with `gh pr view`). A state JSON carrying it —
+    // even a non-function value like `"suppress"` — would otherwise reach
+    // `bilingualFromPlan`, be called, throw, and drop the Chinese fold through the
+    // fail-safe. Stripping it here keeps the register the CLI's own, not the
+    // caller's, which is the whole point of the seam.
+    delete parsed.prBodyFetcher;
     // The inline counts are counted, not accepted — `submit` has refused them
     // since the count-beside-the-comments bug, and this boundary refusing them
     // too is what makes the Step 6 line and the posted verdict the same
