@@ -683,13 +683,13 @@ describe('Tool Control Parameters (E2E)', () => {
               toolCalls: [
                 fakeToolCall(
                   'run_shell_command',
-                  { command: 'echo hello' },
-                  'shell-echo',
+                  { command: 'touch allowed.txt' },
+                  'shell-touch',
                 ),
                 fakeToolCall(
                   'run_shell_command',
-                  { command: 'ls -la' },
-                  'shell-ls',
+                  { command: 'mkdir allowed-dir' },
+                  'shell-mkdir',
                 ),
               ],
             };
@@ -698,14 +698,14 @@ describe('Tool Control Parameters (E2E)', () => {
         }, FAKE_SERVER_OPTIONS);
 
         const q = query({
-          prompt: 'Run "echo hello" and "ls -la" commands.',
+          prompt: 'Run "touch allowed.txt" and "mkdir allowed-dir" commands.',
           options: {
             ...SHARED_TEST_OPTIONS,
             ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'default',
             // Allow specific shell commands
-            allowedTools: ['ShellTool(echo )', 'ShellTool(ls )'],
+            allowedTools: ['ShellTool(touch *)', 'ShellTool(mkdir *)'],
             debug: false,
           },
         });
@@ -719,10 +719,10 @@ describe('Tool Control Parameters (E2E)', () => {
 
           assertSuccessfulCompletion(messages);
 
-          expect(findToolResult(messages, 'shell-echo')).toMatchObject({
+          expect(findToolResult(messages, 'shell-touch')).toMatchObject({
             isError: false,
           });
-          expect(findToolResult(messages, 'shell-ls')).toMatchObject({
+          expect(findToolResult(messages, 'shell-mkdir')).toMatchObject({
             isError: false,
           });
         } finally {
