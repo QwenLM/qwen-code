@@ -1070,6 +1070,9 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       ) {
         return 'Parameter "model" is not supported for a named teammate.';
       }
+      if (!this.subagentManager.getAvailableModelGrades().has(params.model)) {
+        return `Unknown model grade "${params.model}".`;
+      }
     }
 
     // Some models emit an empty placeholder for the unused optional field.

@@ -669,6 +669,19 @@ describe('AgentTool', () => {
       ).toMatch(/model grade/i);
     });
 
+    it('rejects an unknown model grade', () => {
+      vi.mocked(mockSubagentManager.getAvailableModelGrades).mockReturnValue(
+        new Map([['small', 'fast']]),
+      );
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          model: 'high',
+        }),
+      ).toBe('Unknown model grade "high".');
+    });
+
     it('rejects a model grade for fork agents', () => {
       expect(
         agentTool.validateToolParams({
