@@ -2303,6 +2303,8 @@ export async function loadCliConfig(
                 exploreModel: settings.agents.builtin.exploreModel,
               }
             : undefined,
+          modelGrades: settings.agents.modelGrades,
+          allowedGrades: settings.agents.allowedGrades,
           maxParallelAgents: settings.agents.maxParallelAgents,
           maxParallelAgentsByModel: settings.agents.maxParallelAgentsByModel,
           displayMode: settings.agents.displayMode,

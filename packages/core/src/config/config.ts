@@ -864,6 +864,10 @@ export interface AgentsCollabSettings {
     /** Model selector for the built-in Explore subagent (default: inherit). */
     exploreModel?: string;
   };
+  /** Maps model grade names exposed to the Agent tool to model selectors. */
+  modelGrades?: Record<string, string>;
+  /** Optional whitelist of model grades exposed to the Agent tool. */
+  allowedGrades?: string[];
   /**
    * Global maximum number of background sub-agents running concurrently.
    * When the cap is reached, additional launches wait for a slot.

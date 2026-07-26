@@ -133,6 +133,7 @@ vi.mock('../../subagents/subagent-manager.js', () => {
     .fn()
     .mockReturnValue(() => {});
   SubagentManagerMock.prototype.listSubagents = vi.fn().mockResolvedValue([]);
+  SubagentManagerMock.prototype.getAvailableModelGrades = () => new Map();
   return { SubagentManager: SubagentManagerMock };
 });
 
