@@ -9,6 +9,7 @@
  * evaluator and enforcer stay frame-agnostic.
  */
 
+import { resolve as resolvePath } from 'node:path';
 import {
   extractShellOperations,
   splitCompoundCommand,
@@ -114,9 +115,65 @@ function operationForVirtualTool(virtualTool: string): PolicyOperation | null {
 }
 
 /**
+ * If `simple` is a `cd` invocation, returns its raw target argument (the
+ * empty string for a bare `cd` with no argument); otherwise returns
+ * `undefined`. Strips one layer of surrounding quotes and skips leading
+ * flags (e.g. `cd -P dir`) so the directory argument survives the common
+ * cases without a full shell-quoting implementation.
+ */
+function parseCdTarget(simple: string): string | undefined {
+  const match = /^cd(?:\s+(.*))?$/.exec(simple.trim());
+  if (!match) return undefined;
+  const rest = (match[1] ?? '').trim();
+  if (!rest) return '';
+  const token = rest.split(/\s+/).find((t) => !t.startsWith('-')) ?? '';
+  if (
+    token.length >= 2 &&
+    ((token.startsWith('"') && token.endsWith('"')) ||
+      (token.startsWith("'") && token.endsWith("'")))
+  ) {
+    return token.slice(1, -1);
+  }
+  return token;
+}
+
+/**
+ * Applies a parsed `cd` target to the running cwd. A bare `cd`, `cd -`
+ * (previous directory) and `cd ~` (home) are left UNCHANGED — we have no
+ * honest value for $OLDPWD or $HOME here, and guessing could put a path
+ * candidate somewhere bash never touched. An absolute target replaces the
+ * cwd outright; a relative target resolves against it (`node:path`'s
+ * `resolve` already gives this precedence for free).
+ */
+function applyCd(target: string, runningCwd: string): string {
+  if (!target || target === '-' || target === '~' || target.startsWith('~/')) {
+    return runningCwd;
+  }
+  return resolvePath(runningCwd, target);
+}
+
+/**
  * Paths + operations a shell command implies. Best-effort by construction: an
  * unparseable command contributes nothing and NEVER throws, so a call still
  * matches on kind/args. It can only ever ADD candidates, never remove them.
+ *
+ * Tracks a running cwd across the split subcommands: a `cd` in one
+ * subcommand carries forward to the ones after it (`cd config && cat
+ * secrets/x` reads `<cwd>/config/secrets/x`, not `<cwd>/secrets/x`).
+ * Without this, every subcommand resolved against the SAME static `cwd`
+ * regardless of an earlier `cd`, so the candidate path for anything after a
+ * `cd` was simply wrong — and a `pathGlob` deny anchored on the real
+ * (post-`cd`) location would silently fail to match even though bash truly
+ * touches that path. See frameContext.test.ts's "tracks a `cd` across
+ * compound subcommands" case for the exploit this closes.
+ *
+ * RESIDUAL: the daemon's own local enforcement
+ * (`packages/core/src/permissions/permission-manager.ts`,
+ * `evaluateCompoundCommand`/`evaluateSingle`) has this SAME single-static-cwd
+ * limitation and is intentionally NOT touched here (out of scope — no
+ * core/daemon changes). This fix closes the gap only for the remote
+ * gateway's auto-vote enforcement path built from this frame; the
+ * daemon-local enforcement path retains it.
  */
 function shellEnrichment(
   command: string,
@@ -125,8 +182,13 @@ function shellEnrichment(
   const paths: string[] = [];
   const operations: PolicyOperation[] = [];
   try {
+    let runningCwd = cwd;
     for (const simple of splitCompoundCommand(command)) {
-      for (const op of extractShellOperations(simple, cwd)) {
+      const cdTarget = parseCdTarget(simple);
+      if (cdTarget !== undefined) {
+        runningCwd = applyCd(cdTarget, runningCwd);
+      }
+      for (const op of extractShellOperations(simple, runningCwd)) {
         if (typeof op.filePath === 'string' && op.filePath.length > 0) {
           paths.push(op.filePath);
         }

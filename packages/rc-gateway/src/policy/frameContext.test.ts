@@ -137,4 +137,37 @@ describe('frameToContext — shell enrichment', () => {
     );
     expect(ctx.paths).toEqual(['a.ts']);
   });
+
+  // Regression: a `cd` in an earlier subcommand must carry forward to the
+  // ones that follow. Before the fix, every split subcommand was resolved
+  // against the SAME static `directory`, so `cd config && cat
+  // secrets/creds.txt` produced `/proj/secrets/creds.txt` as a candidate —
+  // never the real path bash touches, `/proj/config/secrets/creds.txt` —
+  // which let a `pathGlob:'config/secrets/**'` deny rule silently miss it.
+  it('tracks a `cd` across compound subcommands so later relative paths resolve against the post-cd directory', () => {
+    const ctx = frameToContext(
+      frame('execute', {
+        command: 'cd config && cat secrets/creds.txt',
+        directory: '/proj',
+      }),
+      { projectRoot: '/proj' },
+    );
+    expect(ctx.paths).toContain('/proj/config/secrets/creds.txt');
+  });
+
+  // Control: a recursive glob pattern matches the file regardless of which
+  // directory it resolves under, so this case passes both before and after
+  // the fix. It proves the fix doesn't need to hold for this case to matter,
+  // and that the cd-tracking change doesn't regress the simple case.
+  it('control: `cd sub && cat .env` still yields a path matching **/.env*', () => {
+    const ctx = frameToContext(
+      frame('execute', {
+        command: 'cd sub && cat .env',
+        directory: '/proj',
+      }),
+      { projectRoot: '/proj' },
+    );
+    expect(ctx.paths).toContain('/proj/sub/.env');
+    expect(ctx.paths.some((p) => p.endsWith('.env'))).toBe(true);
+  });
 });
