@@ -1186,7 +1186,13 @@ jobs:
             proxy_script="${RUNNER_TEMP:-/tmp}/qwen-openai-proxy-tmux.js"
             port_file="${RUNNER_TEMP:-/tmp}/qwen-openai-proxy-tmux.port"
             proxy_nonce="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
-            proxy_token="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+            # NOT in the `local` list above on purpose: the agent env below
+            # reads it as OPENAI_API_KEY and the proxy receives it as
+            # PROXY_TOKEN. Uppercase + export mirror the verify lane, so a
+            # tidy that adds it to `local` cannot silently blank the agent's
+            # key and 401 every completion.
+            PROXY_TOKEN="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+            export PROXY_TOKEN
             rm -f "$port_file"
             cat > "$proxy_script" <<'NODE'
           const http = require('node:http');
@@ -1316,7 +1322,6 @@ jobs:
             REVIEW_OPENAI_API_KEY="$REVIEW_OPENAI_API_KEY" \
               REVIEW_OPENAI_BASE_URL="$REVIEW_OPENAI_BASE_URL" \
               QWEN_PROXY_NONCE="$proxy_nonce" \
-              PROXY_TOKEN="$proxy_token" \
               node "$proxy_script" "$port_file" &
             OPENAI_PROXY_PID=$!
             trap 'kill "$OPENAI_PROXY_PID" 2>/dev/null || true' EXIT
@@ -1378,7 +1383,7 @@ jobs:
             "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
             "GITHUB_TOKEN="
             "GH_TOKEN="
-            "OPENAI_API_KEY=$proxy_token"
+            "OPENAI_API_KEY=$PROXY_TOKEN"
             "OPENAI_BASE_URL=$LOCAL_OPENAI_BASE_URL"
             "NO_PROXY=${NO_PROXY:-}"
             "no_proxy=${no_proxy:-}"
@@ -1476,6 +1481,16 @@ jobs:
        (needs.tmux-testing.result == 'success' &&
         needs.tmux-testing.outputs.verdict != '' &&
         needs.tmux-testing.outputs.verdict != 'n/a'))
+    # Per-RUN group, deliberately not per-PR: a GitHub concurrency group
+    # holds at most one running plus one pending job, and a newer pending job
+    # REPLACES the older one even with cancel-in-progress: false — so a
+    # per-PR group would let a second run cancel a completed run's pending
+    # publisher and drop its report. Overlap between publishers is instead
+    # made safe by the bot-owned prefix-match dedup below. Same shape as
+    # publish-verify.
+    concurrency:
+      group: "${{ format('{0}-publish-tmux-{1}', github.workflow, github.run_id) }}"
+      cancel-in-progress: false
     # Downloads one artifact and posts one comment; without this it would
     # inherit the 360-minute default and a hung gh call could hold a hosted
     # runner for six hours. Same bound as publish-verify.
@@ -1604,8 +1619,8 @@ jobs:
               printf '%s\n' '— _Qwen Code · tmux real-user testing_'
             } > "$BODY_FILE"
           else
-            REPORT="$(find tmux-results -name 'report.md' 2>/dev/null | head -1 || true)"
-            TRANSCRIPT="$(find tmux-results -name 'tmux-readable-full.log' 2>/dev/null | head -1 || true)"
+            REPORT="$(find tmux-results -mindepth 2 -type f -path '*-tmux-*/report.md' 2>/dev/null | sort | head -1 || true)"
+            TRANSCRIPT="$(find tmux-results -mindepth 2 -type f -path '*-tmux-*/tmux-readable-full.log' 2>/dev/null | sort | head -1 || true)"
             if [ -z "$REPORT" ] && [ -z "$TRANSCRIPT" ]; then
               MISSING_ARTIFACTS_NOTE='No report.md or tmux-readable-full.log was found in tmux-results, so detailed report sections are omitted.'
               echo "::warning::${MISSING_ARTIFACTS_NOTE}"
@@ -1650,13 +1665,24 @@ jobs:
           fi
 
           # Dedup: update an existing tmux comment if one is already present.
-          if ! EXISTING="$(
+          # Only BOT-OWNED comments STARTING with the marker are candidates,
+          # so a marker a human reviewer quotes cannot divert the bot into
+          # PATCHing (and overwriting) their comment with the write PAT.
+          # Fail CLOSED on identity failure: an empty login would widen the
+          # filter to every user's comments. Same discipline as publish-verify.
+          EXISTING=''
+          if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
+            echo "::warning::Could not resolve the bot identity; posting a fresh tmux comment instead of reusing one."
+            BOT_LOGIN=''
+          fi
+          if [ -n "$BOT_LOGIN" ] && ! EXISTING="$(
             # -F would otherwise make gh api default to POST.
             gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
               --method GET \
               --paginate \
               -F per_page=100 \
-              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-triage:tmux -->"))] | last | .id // empty'
+              | jq -sr --arg bot "$BOT_LOGIN" \
+                '[.[][] | select((.body | startswith("<!-- qwen-triage:tmux -->")) and .user.login == $bot)] | last | .id // empty'
           )"; then
             echo "::warning::Failed to look up existing tmux comments; will create a new one."
             EXISTING=""

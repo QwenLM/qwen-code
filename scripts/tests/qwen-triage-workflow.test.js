@@ -2222,7 +2222,7 @@ describe('qwen-triage tmux lane parity', () => {
     // The agent must actually present this run's token: reverting the env
     // wire to a literal makes every completion 401 and turns the verdict
     // into a false 'fail'. Assert the wire, not just the gate's presence.
-    expect(runStep).toContain('"OPENAI_API_KEY=$proxy_token"');
+    expect(runStep).toContain('"OPENAI_API_KEY=$PROXY_TOKEN"');
 
     // Execute the real proxy and prove the nonce + bearer token work.
     const proxy = runStep.match(/<<'NODE'\n([\s\S]*?)\n\s*NODE\n/)?.[1];
@@ -2392,5 +2392,88 @@ describe('qwen-triage tmux lane parity', () => {
     const minutes = Number(publish.match(/timeout-minutes: (\d+)/)?.[1]);
     expect(minutes).toBeGreaterThan(0);
     expect(minutes).toBeLessThanOrEqual(30);
+  });
+
+  // A per-RUN concurrency group (not per-PR) stops two publish-tmux jobs in
+  // the same run racing the post, while never letting a newer run cancel a
+  // completed run's pending publisher and drop its report. Parity with
+  // publish-verify.
+  it('serializes publish-tmux with a per-run concurrency group', () => {
+    const publish = job('publish-tmux');
+    expect(publish).toContain('concurrency:');
+    expect(publish).toContain('publish-tmux-{1}');
+    expect(publish).toContain('cancel-in-progress: false');
+  });
+
+  // The publisher must select the agent's report by TYPE and anchored PATH,
+  // not a loose `-name report.md | head -1`: a planted DIRECTORY named
+  // report.md that sorted ahead of the real one won the old predicate, and
+  // emit_block's [ -f ] guard then dropped the report silently while the
+  // non-empty REPORT string suppressed the missing-artifact note. Parity
+  // with the verify lane's predicate.
+  it('selects tmux artifacts by type and path, ignoring planted directories', () => {
+    const publish = stepIn('publish-tmux', 'Post tmux result comment');
+    expect(publish).toContain(
+      "find tmux-results -mindepth 2 -type f -path '*-tmux-*/report.md' 2>/dev/null | sort | head -1",
+    );
+    expect(publish).toContain(
+      "find tmux-results -mindepth 2 -type f -path '*-tmux-*/tmux-readable-full.log' 2>/dev/null | sort | head -1",
+    );
+
+    const dir = mkdtempSync(join(tmpdir(), 'tmux-select-'));
+    try {
+      // A planted directory named report.md that sorts FIRST.
+      mkdirSync(join(dir, 'tmux-results/AAA-planted-tmux-0/report.md'), {
+        recursive: true,
+      });
+      mkdirSync(join(dir, 'tmux-results/real-tmux-1'), { recursive: true });
+      writeFileSync(
+        join(dir, 'tmux-results/real-tmux-1/report.md'),
+        '## real report\n',
+      );
+      const out = spawnSync(
+        'bash',
+        [
+          '-c',
+          "find tmux-results -mindepth 2 -type f -path '*-tmux-*/report.md' 2>/dev/null | sort | head -1",
+        ],
+        { encoding: 'utf8', cwd: dir },
+      ).stdout.trim();
+      expect(out).toBe('tmux-results/real-tmux-1/report.md');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Dedup must PATCH only a BOT-OWNED comment STARTING with the marker.
+  // contains() with no author filter let a human reviewer who quoted the
+  // marker have their comment overwritten by the bot's PAT (#7723). Fail
+  // closed on identity, same as publish-verify.
+  it('dedups the tmux comment on a bot-owned prefix match, fail-closed', () => {
+    const publish = stepIn('publish-tmux', 'Post tmux result comment');
+    expect(publish).toContain('startswith("<!-- qwen-triage:tmux -->")');
+    expect(publish).toContain('.user.login == $bot');
+    expect(publish).not.toContain('contains("<!-- qwen-triage:tmux -->")');
+    expect(publish).toContain("gh api user --jq '.login'");
+  });
+
+  // GitHub 422s a comment over 65,536 chars and posts nothing. The invariant
+  // is the SUM of the two block caps plus the envelope, not any single block:
+  // a single-block assertion passes for any cap under ~65,000, so bumping the
+  // transcript cap from 30000 to 60000 would 422 the post undetected.
+  it('keeps the sum of the tmux block caps under the comment limit', () => {
+    const publish = stepIn('publish-tmux', 'Post tmux result comment');
+    const reportCap = Number(
+      publish.match(/emit_block 'E2E test report' "\$REPORT" (\d+)/)?.[1],
+    );
+    const transcriptCap = Number(
+      publish.match(
+        /emit_block 'Full tmux transcript' "\$TRANSCRIPT" (\d+)/,
+      )?.[1],
+    );
+    expect(reportCap).toBeGreaterThan(0);
+    expect(transcriptCap).toBeGreaterThan(0);
+    const envelope = 4096; // verdict header, description, markers, signature
+    expect(reportCap + transcriptCap + envelope).toBeLessThan(65536);
   });
 });

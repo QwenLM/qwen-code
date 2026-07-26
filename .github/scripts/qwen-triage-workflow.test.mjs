@@ -290,7 +290,7 @@ describe('qwen-triage: tmux-lane security controls', () => {
     assert.match(run.run, /proxy: unauthorized/);
     // The agent must present this run's token; a literal here 401s every
     // completion and turns the verdict into a false 'fail'.
-    assert.match(run.run, /OPENAI_API_KEY=\$proxy_token/);
+    assert.match(run.run, /OPENAI_API_KEY=\$PROXY_TOKEN/);
   });
 
   it('kills surviving build-user processes before the agent starts', () => {
