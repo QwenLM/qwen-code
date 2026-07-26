@@ -325,6 +325,109 @@ describe('ChatPane', () => {
     expect(latestChatEditorProps.workspaceColor).toBe('green');
   });
 
+  it('binds split Voice to the connected secondary workspace and revision', () => {
+    connectionState.workspaceCwd = '/work/api';
+    connectionState.capabilities = {
+      features: ['workspace_qualified_voice'],
+      workspaceCwd: '/work/web-shell',
+      workspaces: [
+        { id: 'w0', cwd: '/work/web-shell', primary: true, trusted: true },
+        { id: 'w1', cwd: '/work/api', primary: false, trusted: true },
+      ],
+    };
+
+    render({
+      workspaceCwd: '/work/api',
+      voiceUserRevision: 3,
+      voiceWorkspaceRevisions: {
+        '["workspace-qualified","id","w1","/work/api"]': 5,
+      },
+    });
+
+    expect(latestChatEditorProps.voiceTarget).toMatchObject({
+      route: 'workspace-qualified',
+      cwd: '/work/api',
+      selector: { kind: 'id', value: 'w1' },
+      sessionId: 'sess-1',
+      streamPath: 'workspaces/w1/voice/stream',
+    });
+    expect(latestChatEditorProps.voiceStatusRevision).toEqual({
+      user: 3,
+      workspace: 5,
+    });
+  });
+
+  it('binds split Voice to the legacy primary workspace without a workspace list', () => {
+    connectionState.capabilities = {
+      features: ['voice_transcribe'],
+      workspaceCwd: '/w',
+    };
+
+    render({ workspaceCwd: '/w' });
+
+    expect(latestChatEditorProps.voiceTarget).toMatchObject({
+      route: 'legacy-primary',
+      cwd: '/w',
+      sessionId: 'sess-1',
+      streamPath: 'voice/stream',
+    });
+  });
+
+  it('uses the merged registered workspace list for split Voice', () => {
+    connectionState.workspaceCwd = '/work/locked';
+    connectionState.capabilities = {
+      features: ['workspace_qualified_voice'],
+      workspaceCwd: '/work/web-shell',
+      workspaces: [
+        { id: 'w0', cwd: '/work/web-shell', primary: true, trusted: true },
+      ],
+    };
+
+    render({
+      workspaceCwd: '/work/locked',
+      voiceWorkspaces: [
+        { id: 'w0', cwd: '/work/web-shell', primary: true, trusted: true },
+        {
+          id: 'locked',
+          cwd: '/work/locked',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    });
+
+    expect(latestChatEditorProps.voiceTarget).toMatchObject({
+      route: 'workspace-qualified',
+      cwd: '/work/locked',
+      selector: { kind: 'id', value: 'locked' },
+      streamPath: 'workspaces/locked/voice/stream',
+    });
+  });
+
+  it('fails closed on split workspace mismatch and while hidden', () => {
+    connectionState.workspaceCwd = '/work/api';
+    connectionState.capabilities = {
+      features: ['workspace_qualified_voice'],
+      workspaceCwd: '/work/web-shell',
+      workspaces: [
+        { id: 'w0', cwd: '/work/web-shell', primary: true, trusted: true },
+        { id: 'w1', cwd: '/work/api', primary: false, trusted: true },
+      ],
+    };
+
+    render({ workspaceCwd: '/work/other' });
+    expect(latestChatEditorProps.voiceTarget).toBeUndefined();
+
+    act(() => {
+      root?.render(
+        <I18nProvider language="en">
+          <ChatPane workspaceCwd="/work/api" hidden />
+        </I18nProvider>,
+      );
+    });
+    expect(latestChatEditorProps.voiceTarget).toBeUndefined();
+  });
+
   it('surfaces the workspace in the pane header on a multi-workspace daemon', () => {
     connectionState.capabilities = {
       features: [],

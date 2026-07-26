@@ -18,7 +18,10 @@ import {
   useWorkspaceActions,
   type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
-import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionArtifact,
+  DaemonWorkspaceCapability,
+} from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../adapters/types';
 import { SubagentDetailsProvider } from '../subagentDetailsContext';
 import { useI18n } from '../i18n';
@@ -45,6 +48,10 @@ import {
   workspaceLabelForCwd,
 } from '../utils/workspace';
 import { workspaceAccentColor } from '../utils/workspaceColor';
+import {
+  resolveVoiceWorkspaceTarget,
+  type VoiceStatusRevision,
+} from '../voice/voice-workspace-target';
 import {
   getLocalCommands,
   localizeBuiltinDescriptions,
@@ -110,6 +117,10 @@ export interface ChatPaneProps {
   messageTurnOutputs?: readonly TurnOutputKind[];
   /** Allow prompt admission to recover a disconnected SSE stream. */
   restartSseOnPrompt?: boolean;
+  hidden?: boolean;
+  voiceUserRevision?: number;
+  voiceWorkspaceRevisions?: Readonly<Record<string, number>>;
+  voiceWorkspaces?: readonly DaemonWorkspaceCapability[];
 }
 
 /**
@@ -131,6 +142,10 @@ export function ChatPane({
   onPaneArtifactsChange,
   messageTurnOutputs,
   restartSseOnPrompt = false,
+  hidden = false,
+  voiceUserRevision = 0,
+  voiceWorkspaceRevisions = {},
+  voiceWorkspaces,
 }: ChatPaneProps) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -243,6 +258,33 @@ export function ChatPane({
   pendingToolApprovalRef.current = pendingToolApproval;
   const approvalActive =
     pendingToolApproval !== null || pendingAskUserApproval !== null;
+  const paneVoiceCwd =
+    connection.sessionId &&
+    connection.workspaceCwd &&
+    (!workspaceCwd || workspaceCwd === connection.workspaceCwd)
+      ? connection.workspaceCwd
+      : undefined;
+  const voiceTarget = useMemo(
+    () =>
+      resolveVoiceWorkspaceTarget({
+        capabilities: workspace.capabilities,
+        intendedCwd: paneVoiceCwd,
+        sessionId: connection.sessionId,
+        workspaces: voiceWorkspaces,
+      }),
+    [
+      connection.sessionId,
+      paneVoiceCwd,
+      voiceWorkspaces,
+      workspace.capabilities,
+    ],
+  );
+  const voiceStatusRevision: VoiceStatusRevision = {
+    user: voiceUserRevision,
+    workspace: voiceTarget
+      ? (voiceWorkspaceRevisions[voiceTarget.workspaceKey] ?? 0)
+      : 0,
+  };
   const isResponding = streamingState !== 'idle';
   const artifactsByTurn = useMemo(
     () =>
@@ -677,6 +719,8 @@ export function ChatPane({
           onSelectMode={handleSelectMode}
           onSelectModel={handleSelectModel}
           dialogOpen={approvalActive}
+          voiceTarget={hidden || approvalActive ? undefined : voiceTarget}
+          voiceStatusRevision={voiceStatusRevision}
           followupState={followupState}
           onAcceptFollowup={onAcceptFollowup}
           onDismissFollowup={onDismissFollowup}
