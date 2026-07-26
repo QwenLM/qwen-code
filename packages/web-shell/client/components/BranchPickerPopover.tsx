@@ -70,6 +70,7 @@ export function BranchPickerPopover({
     tags: true,
   });
   const searchRef = useRef<HTMLInputElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
 
   const fetchBranches = useCallback(async () => {
     setLoading(true);
@@ -227,10 +228,16 @@ export function BranchPickerPopover({
     <Popover open={open} onOpenChange={onOpenChange}>
       <PopoverTrigger asChild>{children}</PopoverTrigger>
       <PopoverContent
+        ref={contentRef}
         className={styles.picker}
         side="bottom"
         align="start"
         sideOffset={4}
+        onPointerDownOutside={(e) => {
+          if (contentRef.current?.contains(e.target as Node)) {
+            e.preventDefault();
+          }
+        }}
       >
         <div className={styles.searchWrap}>
           <SearchIcon size={14} className={styles.searchIcon} />
@@ -243,7 +250,7 @@ export function BranchPickerPopover({
           />
         </div>
 
-        <div className={styles.list} onPointerDown={(e) => e.stopPropagation()}>
+        <div className={styles.list}>
           {loading && (
             <div className={styles.loading}>{t('branchPicker.loading')}</div>
           )}
