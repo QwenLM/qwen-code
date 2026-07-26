@@ -143,6 +143,10 @@ describe('runScriptLint — graceful degradation and scoping', () => {
       expect(r.skipped[0].tool).toBe('actionlint');
       expect(r.skipped[0].reason).toContain('not installed');
       expect(r.note).toContain('not installed');
+      // `skipped` deliberately does not flip `ok` — the agent (and now the
+      // deterministic gate) keys "not clean" off `skipped[]`, not `ok`. Pin it,
+      // so making `skipped` blocking later cannot pass this test unchanged.
+      expect(r.ok).toBe(true);
     }
   });
 

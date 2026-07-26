@@ -124,7 +124,16 @@ export function pathTool(path: string): LintTool | null {
   ) {
     return 'hadolint';
   }
-  if (p.endsWith('.sh') || p.endsWith('.bash')) return 'shellcheck';
+  // Every extension `toolFor`'s shebang regex recognises (sh|bash|dash|ksh), so
+  // the roster and the command cannot disagree about a `.ksh`/`.dash` file.
+  if (
+    p.endsWith('.sh') ||
+    p.endsWith('.bash') ||
+    p.endsWith('.ksh') ||
+    p.endsWith('.dash')
+  ) {
+    return 'shellcheck';
+  }
   return null;
 }
 
@@ -246,7 +255,10 @@ function runTool(tool: LintTool, absPath: string): ToolRun {
   const argv: Record<LintTool, string[]> = {
     shellcheck: ['--norc', '--format=json1', '--severity=style', absPath],
     actionlint: ['-format', '{{json .}}', '-no-color', absPath],
-    hadolint: ['--format', 'json', absPath],
+    // `--no-config` so a PR-controlled `.hadolint.yaml` in the worktree cannot
+    // `ignored: [DL3006, …]` its own findings away — the same isolation `--norc`
+    // gives shellcheck.
+    hadolint: ['--no-config', '--format', 'json', absPath],
   };
   const env = { ...process.env };
   delete env['SHELLCHECK_OPTS'];
@@ -276,14 +288,20 @@ function runTool(tool: LintTool, absPath: string): ToolRun {
   return { kind: 'ok', stdout: `${r.stdout ?? ''}` };
 }
 
-/** Normalise each tool's JSON into `LintFinding[]` (line/code/level/message). */
-function parseFindings(tool: LintTool, raw: string): LintFinding[] {
+/**
+ * Normalise each tool's JSON into `LintFinding[]` — or `null` when non-empty
+ * output could not be parsed. Empty output is a clean run (`[]`); non-empty
+ * output the tool's own format cannot parse (a version skew, a deprecation line
+ * printed before the JSON) is a failure the caller must treat as errored, not as
+ * a clean file — the same fail-closed stance `runTool` takes on a bad exit.
+ */
+function parseFindings(tool: LintTool, raw: string): LintFinding[] | null {
   if (!raw.trim()) return [];
   let json: unknown;
   try {
     json = JSON.parse(raw);
   } catch {
-    return [];
+    return null;
   }
   const mk = (
     line: unknown,
@@ -400,11 +418,22 @@ export function runScriptLint(
       errored.push({ path, tool, reason: res.reason });
       continue;
     }
+    const parsed = parseFindings(tool, res.stdout);
+    if (parsed === null) {
+      // Non-empty output the tool's own format could not parse — fail closed, so
+      // it is not mistaken for a clean file (the trap `runTool` already avoids).
+      errored.push({
+        path,
+        tool,
+        reason: `${tool} produced unparseable output`,
+      });
+      continue;
+    }
     // Prefer the diff's added-line ranges (context excluded); fall back to the
     // plan's context-inclusive hunks only when the diff was unavailable. A file
     // present in the diff with no added lines yields `[]` — correctly nothing.
     const ranges = addedRanges.get(path) ?? hunksOf(f);
-    const findings = parseFindings(tool, res.stdout).map((x) => ({
+    const findings = parsed.map((x) => ({
       ...x,
       inDiff: inAnyHunk(x.line, ranges),
     }));

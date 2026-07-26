@@ -170,6 +170,24 @@ describe('runScriptLint — fail closed (a crashed checker is not clean)', () =>
       clean();
     },
   );
+
+  it('treats non-empty UNPARSEABLE output as errored, not a clean file', () => {
+    // A runner that "succeeded" but printed junk before/instead of JSON — a
+    // version skew, a deprecation notice. Fail closed, do not record `checked`.
+    fresh();
+    const { plan, worktree } = setup('x.sh', '#!/bin/bash\nrm $X\n', {
+      hunks: [{ newStart: 2, newEnd: 2 }],
+    });
+    const r = runScriptLint(
+      { plan, worktree },
+      fixedRunner({ kind: 'ok', stdout: 'Warning: deprecated\nnot json' }),
+    );
+    expect(r.checked).toEqual([]);
+    expect(r.errored).toHaveLength(1);
+    expect(r.errored[0].reason).toContain('unparseable');
+    expect(r.ok).toBe(false);
+    clean();
+  });
 });
 
 describe('runScriptLint — inDiff uses added lines, not hunk context', () => {
