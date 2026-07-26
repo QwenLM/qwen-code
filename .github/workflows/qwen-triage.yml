@@ -311,7 +311,8 @@ jobs:
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -uo pipefail
-          MARKER='<!-- qwen-triage-lifecycle -->'
+          MARKER='<!-- qwen-triage lifecycle -->'
+          LEGACY_MARKER='<!-- qwen-triage stage=status -->'
           printf -v BODY '%s\n\n%s\n\n%s' \
             "$MARKER" \
             "🔄 **Qwen Triage is running** — [watch live progress]($RUN_URL). Stage results will post in this thread as they complete." \
@@ -319,8 +320,8 @@ jobs:
           EXISTING_ID="$(
             gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
               --method GET --paginate -F per_page=100 |
-              jq -rs --arg m "$MARKER" \
-                '[.[][] | select(.body | contains($m))] | last | .id // empty'
+              jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" \
+                '[.[][] | select((.body | contains($m)) or (.body | contains($legacy)))] | last | .id // empty'
           )" || EXISTING_ID=''
           if [ -n "$EXISTING_ID" ]; then
             gh api --method PATCH \
@@ -637,7 +638,8 @@ jobs:
           TRIAGE_OUTCOME: '${{ steps.triage.outcome }}'
         run: |-
           set -uo pipefail
-          MARKER='<!-- qwen-triage-lifecycle -->'
+          MARKER='<!-- qwen-triage lifecycle -->'
+          LEGACY_MARKER='<!-- qwen-triage stage=status -->'
           if [ "${TRIAGE_OUTCOME:-}" = 'success' ]; then
             EN="✅ **Qwen Triage finished** — [view run]($RUN_URL). See the stage comments in this thread for the result."
             ZH="✅ **Qwen Triage 已完成** —— [查看运行]($RUN_URL)。结果见本线程中的各阶段评论。"
@@ -649,8 +651,8 @@ jobs:
           EXISTING_ID="$(
             gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
               --method GET --paginate -F per_page=100 |
-              jq -rs --arg m "$MARKER" \
-                '[.[][] | select(.body | contains($m))] | last | .id // empty'
+              jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" \
+                '[.[][] | select((.body | contains($m)) or (.body | contains($legacy)))] | last | .id // empty'
           )" || EXISTING_ID=''
           if [ -n "$EXISTING_ID" ]; then
             gh api --method PATCH \
