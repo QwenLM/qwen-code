@@ -130,9 +130,11 @@ differs only by the change under test; the verdict is the pair of counts.
   symlinks into the _head_ tree, so a "base" harness can quietly load
   changed head code and both cells pass. Before trusting any control,
   **assert the realpath** of every internal dependency the code under test
-  resolves (`node -p "require.resolve('@qwen-code/qwen-code-core')"` inside
-  the base worktree, or `readlink -f`) and confirm it points into the base
-  tree — then quote that check in the methodology note. If the links cannot
+  resolves — `readlink -f node_modules/@qwen-code/qwen-code-core` from
+  inside the base worktree — and confirm it points into the base tree.
+  (Do NOT reach for `require.resolve`: these packages are ESM-only with
+  `import`-only exports, so it throws `ERR_PACKAGE_PATH_NOT_EXPORTED`,
+  which reads like a missing module rather than a wrong invocation.) — then quote that check in the methodology note. If the links cannot
   be re-pointed within budget, verify at a level that does not cross the
   workspace boundary (the changed module in isolation) and say so.
 - Alternative control when a rebuild is too costly: revert only the key hunk

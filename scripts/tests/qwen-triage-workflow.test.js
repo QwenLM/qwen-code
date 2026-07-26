@@ -1094,8 +1094,16 @@ describe('qwen-triage verify hardening round 2', () => {
       .split('\n')
       .filter((l) => !/^\s*#/.test(l))
       .join('\n');
+    // No glob below a PR-writable parent, anywhere in the job...
     expect(code).not.toContain('rm -rf .qwen/tmp/*');
-    expect(code).toContain('rm -rf .qwen/tmp ');
+    // ...and BOTH cleanups (job start and job end) unlink a symlink rather
+    // than recursing through it. PR code runs between them, so the end is
+    // no safer than the start.
+    const guards = code.match(/if \[ -L \.qwen\/tmp \]; then/g) ?? [];
+    expect(guards.length).toBe(2);
+    expect((code.match(/\[ -L \.qwen \] && rm -f \.qwen/g) ?? []).length).toBe(
+      2,
+    );
   });
 
   // Status/report lifecycle is keyed on a machine marker, and identity
@@ -1350,6 +1358,25 @@ describe('qwen-triage verify publish fidelity', () => {
         PREPARE_FAILURE_PHASE: 'install',
       });
       expect(real).toContain('treated as a PR failure');
+      expect(real).toContain('npm ci');
+
+      // The build arm of the phase mapping was never rendered by any test,
+      // so a typo in that command name would have shipped unnoticed.
+      const buildPhase = render(dir, {
+        NAME: 'buildfail',
+        VERDICT: 'fail',
+        PREPARE_FAILURE_PHASE: 'build',
+      });
+      expect(buildPhase).toContain('npm run build');
+      expect(buildPhase).not.toContain('`npm ci` failed');
+
+      // An unrecognized phase must degrade, not mislabel.
+      const unknownPhase = render(dir, {
+        NAME: 'weirdphase',
+        VERDICT: 'fail',
+        PREPARE_FAILURE_PHASE: 'sideways',
+      });
+      expect(unknownPhase).toContain('install/build');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1676,11 +1703,25 @@ describe('qwen-triage verify round-3 hardening', () => {
           repo,
         );
       };
-      const runClean = () =>
+      // Isolate from the developer's global/system git config: a global
+      // core.hooksPath makes `git rev-parse --git-path hooks` resolve
+      // outside .git, which is exactly the case the step must survive.
+      // Run BOTH ways so the guard is proven, not assumed.
+      const globalCfg = join(dir, 'gitconfig-global');
+      writeFileSync(
+        globalCfg,
+        `[core]\n\thooksPath = ${join(dir, 'globalhooks')}\n`,
+      );
+      const runClean = (withGlobalHooksPath = false) =>
         spawnSync('bash', ['-c', script], {
           cwd: repo,
           encoding: 'utf8',
-          env: { ...process.env, GITHUB_WORKSPACE: repo },
+          env: {
+            ...process.env,
+            GITHUB_WORKSPACE: repo,
+            GIT_CONFIG_SYSTEM: '/dev/null',
+            GIT_CONFIG_GLOBAL: withGlobalHooksPath ? globalCfg : '/dev/null',
+          },
         });
 
       // .qwen itself is a symlink pointing out of the workspace.
@@ -1717,6 +1758,53 @@ describe('qwen-triage verify round-3 hardening', () => {
       expect(readFileSync(join(victim, 'post-checkout'), 'utf8')).toContain(
         'pwned',
       );
+
+      // Same again with a global core.hooksPath in play: before the fix the
+      // hooks path resolved to that global directory, the guard read
+      // "outside the git dir", and the planted symlink survived.
+      setup();
+      rmSync(join(repo, '.git', 'hooks'), { recursive: true, force: true });
+      sh(`ln -s "${victim}" "${repo}/.git/hooks"`, dir);
+      runClean(true);
+      expect(
+        sh(`test -L "${repo}/.git/hooks"; echo $?`, dir).stdout.trim(),
+      ).toBe('1');
+      expect(readFileSync(join(victim, 'precious.txt'), 'utf8')).toBe(
+        'keep me',
+      );
+
+      // And the ordinary case under the same global config: a REAL hooks
+      // directory with a planted hook must still be swept. This is what the
+      // hermetic HOOKS_DIR resolution governs — with the global path
+      // winning, the sweep would run somewhere else and leave the
+      // repository's own hook in place.
+      setup();
+      writeFileSync(
+        join(repo, '.git', 'hooks', 'post-checkout'),
+        '#!/bin/sh\necho pwned\n',
+      );
+      writeFileSync(
+        join(repo, '.git', 'hooks', 'pre-commit.sample'),
+        '#!/bin/sh\nexit 0\n',
+      );
+      runClean(true);
+      // The planted hook is gone...
+      expect(
+        sh(
+          `test -e "${repo}/.git/hooks/post-checkout"; echo $?`,
+          dir,
+        ).stdout.trim(),
+      ).toBe('1');
+      // ...and git's own samples survive, which is what proves the sweep ran
+      // on THIS repository's hooks directory. If resolution followed the
+      // global core.hooksPath, the outward-path fallback would unlink the
+      // whole directory and take the samples with it.
+      expect(
+        sh(
+          `test -e "${repo}/.git/hooks/pre-commit.sample"; echo $?`,
+          dir,
+        ).stdout.trim(),
+      ).toBe('0');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -1858,6 +1946,7 @@ describe('qwen-triage verify maintainer-review round', () => {
         [
           '#!/usr/bin/env bash',
           'case "$*" in',
+          '  *"pr view"*|*"--json title"*) echo "${FAKE_PR_TITLE:-Some PR title}" ;;',
           '  *workflows/qwen-triage.yml/runs*) echo "${FAKE_IN_FLIGHT:-0}" ;;',
           '  *) for a in "$@"; do case "$a" in body=*) echo posted >> "$POSTED";; esac; done ;;',
           'esac',
@@ -1891,6 +1980,12 @@ describe('qwen-triage verify maintainer-review round', () => {
       // An API hiccup must not deny an otherwise-valid request.
       expect(run('')).toBe(false);
       expect(run('junk')).toBe(false);
+      // The count is scoped to THIS PR (concurrency is per-PR), so the
+      // query must carry a resolved title; without one it stays silent
+      // rather than warning about other PRs' runs.
+      expect(stepIn('authorize', 'Report saturated verify queue')).toContain(
+        '.display_title == $ENV.PR_TITLE',
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

@@ -256,11 +256,21 @@ jobs:
           # Count this workflow's other in-flight runs for this PR. Two or
           # more already queued/running means this request will be dropped
           # by the concurrency group before it ever becomes a job.
+          # Count only runs for THIS pull request: the concurrency group is
+          # per-PR, so a run on another PR never contends for this slot and
+          # counting it would warn about a queue that does not exist. For
+          # issue_comment runs GitHub sets display_title to the issue title,
+          # which is the only per-PR handle these run records carry.
+          PR_TITLE="$(gh pr view "$NUMBER" --repo "$GITHUB_REPOSITORY" --json title --jq '.title' 2>/dev/null)" || PR_TITLE=''
+          if [ -z "$PR_TITLE" ]; then
+            exit 0
+          fi
           IN_FLIGHT="$(
-            gh api "repos/$GITHUB_REPOSITORY/actions/workflows/qwen-triage.yml/runs?event=issue_comment&per_page=100" \
+            PR_TITLE="$PR_TITLE" gh api "repos/$GITHUB_REPOSITORY/actions/workflows/qwen-triage.yml/runs?event=issue_comment&per_page=100" \
               --jq '[.workflow_runs[]
                      | select(.status == "queued" or .status == "in_progress")
-                     | select((.id | tostring) != $ENV.RUN_ID)] | length' 2>/dev/null
+                     | select((.id | tostring) != $ENV.RUN_ID)
+                     | select(.display_title == $ENV.PR_TITLE)] | length' 2>/dev/null
           )" || IN_FLIGHT=''
           case "$IN_FLIGHT" in
             ''|*[!0-9]*) exit 0 ;;
@@ -1884,8 +1894,12 @@ jobs:
           # repository's own git dir. A hooks path resolving anywhere else is
           # reported, never swept — a recursive root-owned delete is far
           # worse than a stale hook on a runner we are about to re-clean.
+          # Resolve hooks with global/system config OUT of the way. Verified:
+          # with a global core.hooksPath set, `git rev-parse --git-path hooks`
+          # returns that path, the guard below sees "outside the git dir", and
+          # a planted `.git/hooks` symlink survives untouched.
           GIT_DIR_ABS="$(git rev-parse --absolute-git-dir 2>/dev/null || echo '')"
-          HOOKS_DIR="$(git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
+          HOOKS_DIR="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
           HOOKS_ABS="$(cd "$HOOKS_DIR" 2>/dev/null && pwd -P || echo '')"
           if [ -n "$GIT_DIR_ABS" ] && [ -n "$HOOKS_ABS" ] && [ "${HOOKS_ABS#"$GIT_DIR_ABS"/}" != "$HOOKS_ABS" ]; then
             find "$HOOKS_ABS" \( -type f -o -type l \) ! -name '*.sample' -delete 2>/dev/null || true
@@ -1894,7 +1908,7 @@ jobs:
             # walking away would leave a live hook directory that the next
             # root-owned git command executes, so unlink the ENTRY without
             # descending into it and put an empty root-owned directory back.
-            RAW_HOOKS="$(git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
+            RAW_HOOKS="$(GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git rev-parse --git-path hooks 2>/dev/null || echo .git/hooks)"
             echo "::warning::hooks path did not resolve inside the git dir (${HOOKS_ABS:-unresolved}); unlinking it."
             rm -f "$RAW_HOOKS" 2>/dev/null || rm -rf "$RAW_HOOKS" 2>/dev/null || true
             mkdir -p "${GIT_DIR_ABS:-.git}/hooks" 2>/dev/null || true
@@ -2567,10 +2581,23 @@ jobs:
           set -uo pipefail
           [ -e .git ] || exit 0
           find tmp -maxdepth 2 -type d -name '*-verify-*' -exec rm -rf {} + 2>/dev/null || true
-          rm -rf .qwen/tmp 2>/dev/null || true
+          # Same symlink discipline as the start-of-job cleaner. The agent
+          # ran PR code since then, so this end is no safer than that start:
+          # never descend through a link, and canonicalize worktree paths
+          # before deleting.
+          [ -L .qwen ] && rm -f .qwen
+          if [ -L .qwen/tmp ]; then
+            rm -f .qwen/tmp
+          elif [ -d .qwen/tmp ]; then
+            rm -rf .qwen/tmp
+          fi
+          WS_ABS="$(cd "${GITHUB_WORKSPACE:-$PWD}" 2>/dev/null && pwd -P || echo '')"
           git worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | while IFS= read -r wt; do
-            case "$wt" in
-              "${GITHUB_WORKSPACE:-$PWD}"/tmp/*) git worktree remove --force "$wt" 2>/dev/null || rm -rf "$wt" ;;
+            [ -n "$WS_ABS" ] || continue
+            wt_abs="$(cd "$wt" 2>/dev/null && pwd -P || echo '')"
+            case "$wt_abs" in
+              "$WS_ABS"/tmp/*) git worktree remove --force "$wt_abs" 2>/dev/null || rm -rf "$wt_abs" ;;
+              *) [ -n "$wt_abs" ] && echo "::warning::skipping worktree outside the workspace: $wt_abs" ;;
             esac
           done
           git worktree prune -v || true
