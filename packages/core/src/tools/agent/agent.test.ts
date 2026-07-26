@@ -465,9 +465,9 @@ describe('AgentTool', () => {
     });
 
     it('advertises model grades without exposing model selectors', async () => {
-      vi.mocked(
-        mockSubagentManager.getAvailableModelGrades,
-      ).mockReturnValue(new Map([['small', 'fast']]));
+      vi.mocked(mockSubagentManager.getAvailableModelGrades).mockReturnValue(
+        new Map([['small', 'fast']]),
+      );
 
       await agentTool.refreshSubagents();
 
