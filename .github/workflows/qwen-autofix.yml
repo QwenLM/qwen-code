@@ -3060,7 +3060,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               cat "${WORKDIR}/${f}"
@@ -3147,8 +3147,13 @@ jobs:
             # which already holds the PAT, maps each to its thread. Findings it
             # DECLINED or deferred are deliberately left open. Best-effort
             # throughout: a resolve failure must never fail a good push.
-            if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
-              # first-100 page cap: threads beyond this page are not resolved
+            # Both this resolve block and the reply block below map an
+            # inline-comment id to its review thread, so the threads are
+            # fetched once here and shared. Hoisted above both so a round that
+            # only replies (no resolved-comments.txt) still has them.
+            # first-100 page cap: a comment in a thread past this page is not
+            # mapped, and each block falls back to the id as given.
+            if [[ -s "${WORKDIR}/resolved-comments.txt" || -s "${WORKDIR}/comment-replies.json" ]]; then
               THREADS_RAW="$(gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f query='
                 query($owner:String!,$name:String!,$pr:Int!){
                   repository(owner:$owner,name:$name){
@@ -3159,8 +3164,10 @@ jobs:
                 }' --jq '(.data.repository.pullRequest.reviewThreads // {nodes:[]})' 2> /dev/null || echo '{"nodes":[]}')"
               THREADS_JSON="$(jq '.nodes' <<< "${THREADS_RAW}")"
               if [[ "$(jq -r '.pageInfo.hasNextPage // false' <<< "${THREADS_RAW}")" == "true" ]]; then
-                echo "::warning::PR has more than 100 review threads; threads past the first page will not be resolved"
+                echo "::warning::PR has more than 100 review threads; threads past the first page will not be resolved or answered in-thread"
               fi
+            fi
+            if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
               RESOLVED_N=0
               while IFS= read -r rc_id || [[ -n "${rc_id}" ]]; do
                 rc_id="${rc_id%$'\r'}"
@@ -3184,6 +3191,51 @@ jobs:
                 fi
               done < "${WORKDIR}/resolved-comments.txt"
               echo "🧵 resolved ${RESOLVED_N} review thread(s) the agent implemented"
+            fi
+            # The mirror of the resolve above: a finding the agent did NOT
+            # resolve keeps its thread open, and this answers it IN that thread.
+            # Without it the reason sits only in the round summary, so the
+            # reviewer who opens the still-open thread sees silence and cannot
+            # tell their finding was read. Same neutralisation as the summary
+            # body — a reply is model output posted verbatim under the bot
+            # identity, so it could otherwise smuggle a forged control marker.
+            # Best-effort: a reply failure must never fail a good push.
+            if [[ -s "${WORKDIR}/comment-replies.json" ]] &&
+              jq -e 'type == "array"' "${WORKDIR}/comment-replies.json" > /dev/null 2>&1; then
+              REPLIED_N=0
+              while IFS=$'\t' read -r rc_id reply_b64; do
+                [[ "${rc_id}" =~ ^[0-9]+$ && -n "${reply_b64}" ]] || continue
+                # A finding cannot be both resolved and replied to; the resolve
+                # block above already closed anything in resolved-comments.txt,
+                # so skip it here rather than answer a thread we just resolved.
+                # Match tolerates the rc: prefix and a trailing CR, as the
+                # resolve block's own parsing does.
+                if [[ -f "${WORKDIR}/resolved-comments.txt" ]] &&
+                  tr -d '\r' < "${WORKDIR}/resolved-comments.txt" |
+                  grep -qxE "(rc:)?${rc_id}"; then
+                  continue
+                fi
+                REPLY_BODY="$(base64 -d <<< "${reply_b64}" | sed 's/<!--/<!\\-\\-/g')"
+                [[ -n "${REPLY_BODY}" ]] || continue
+                # GitHub rejects a reply aimed at another reply ("Replies to
+                # replies are not supported"), and rc_id can itself be a reply
+                # id — the feedback step lists every review comment, replies
+                # included. Map to the thread's top-level comment (the one
+                # valid target), falling back to rc_id when the thread is past
+                # the first-100 page cap and so absent from THREADS_JSON.
+                root_id="$(jq -r --argjson id "${rc_id}" \
+                  'map(select(any(.comments.nodes[]; .databaseId == $id)))
+                   | .[0].comments.nodes[0].databaseId // $id' <<< "${THREADS_JSON}")"
+                if gh api "repos/${REPO}/pulls/${PR}/comments/${root_id}/replies" \
+                  -f body="${REPLY_BODY}" > /dev/null 2>&1; then
+                  REPLIED_N=$(( REPLIED_N + 1 ))
+                else
+                  echo "::warning::could not reply to review comment ${rc_id}"
+                fi
+              done < <(jq -r '.[] | select(.id != null and .body != null)
+                | [(.id | tostring), (.body | @base64)] | @tsv' \
+                "${WORKDIR}/comment-replies.json" 2> /dev/null || true)
+              echo "🧵 replied on ${REPLIED_N} thread(s) the agent left open"
             fi
             {
               echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on: · 已处理最新评审反馈（第 ${NEXT_ROUND}/${MAX_ROUNDS} 轮）。改动内容与我反驳保留之处如下："
