@@ -16,6 +16,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
+import { getGhHost, setGhHost } from './lib/gh.js';
 import {
   composeReview,
   composeReviewCommand,
@@ -816,6 +817,29 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
     expect(written.event).toBe('COMMENT');
     expect(written.body).toContain('Suggestions are inline.');
     expect(written.body.endsWith(FOOTER)).toBe(true);
+  });
+
+  it('routes its gh calls via the PR host — --host reaches setGhHost', () => {
+    // The bilingual body-language recovery calls `gh pr view`; on GitHub Enterprise
+    // that call must hit the PR's host, or the composed body's language disagrees
+    // with what `submit` (which routes by host) posts. Drop the `setGhHost(host)`
+    // and this reddens.
+    const dir = mkdtempSync(join(tmpdir(), 'compose-host-'));
+    const inputPath = join(dir, 'compose.json');
+    const commentsPath = join(dir, 'comments.json');
+    writeFileSync(inputPath, JSON.stringify({ modelId: MODEL }), 'utf8');
+    writeFileSync(commentsPath, '[]', 'utf8');
+    setGhHost(undefined);
+    try {
+      (composeReviewCommand.handler as (argv: unknown) => void)({
+        input: inputPath,
+        comments: commentsPath,
+        host: 'github.example.com',
+      });
+      expect(getGhHost()).toBe('github.example.com');
+    } finally {
+      setGhHost(undefined);
+    }
   });
 
   it('a drafted inline Critical reaches the verdict line — the report-only hole', () => {

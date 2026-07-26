@@ -30,7 +30,7 @@ import {
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
 import { shellQuotePath } from './lib/shell-quote.js';
-import { gh } from './lib/gh.js';
+import { gh, setGhHost } from './lib/gh.js';
 import { isPositivePrNumber } from './lib/roster.js';
 import {
   CRITICAL_PREFIX,
@@ -1135,6 +1135,8 @@ interface ComposeReviewCliArgs {
   input: string | undefined;
   comments: string;
   out: string | undefined;
+  /** GitHub Enterprise host — routes this command's `gh` calls via GH_HOST. */
+  host?: string;
 }
 
 /**
@@ -1210,9 +1212,22 @@ export const composeReviewCommand: CommandModule = {
       .option('out', {
         type: 'string',
         describe: 'Also write the {event, body} JSON to this path',
+      })
+      .option('host', {
+        type: 'string',
+        describe:
+          'GitHub Enterprise host (routes gh via GH_HOST) — needed only when ' +
+          'the bilingual body-language recovery has to fetch the PR description',
       }),
   handler: (argv) => {
-    const { input, comments, out } = argv as unknown as ComposeReviewCliArgs;
+    const { input, comments, out, host } =
+      argv as unknown as ComposeReviewCliArgs;
+    // Route this command's own `gh` call — the bilingual recovery's `gh pr view`
+    // (see `fetchPrBodyViaGh`) — via the PR's host, exactly as fetch-pr and submit
+    // do. Without it a GHE review whose plan lacks the Han flag fetches the body
+    // from github.com, fails, and composes an English-only body that disagrees
+    // with what `submit` (which routes by host) posts.
+    setGhHost(host);
     // yargs enforces --comments on the real command line; this covers every
     // other way in (tests, programmatic calls) with the same sentence instead
     // of an ENOENT on `undefined`.
