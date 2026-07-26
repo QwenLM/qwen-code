@@ -27,6 +27,51 @@ const mockComposerCoreState = vi.hoisted(() => ({
   removeTopTag: vi.fn(),
 }));
 
+// Mock useWorkspace so BranchPickerPopover can render without a real provider.
+vi.mock('@qwen-code/webui/daemon-react-sdk', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@qwen-code/webui/daemon-react-sdk')>();
+  return {
+    ...actual,
+    useWorkspace: () => ({
+      client: {
+        workspaceByCwd: () => ({
+          workspaceGit: vi
+            .fn()
+            .mockResolvedValue({
+              v: 2,
+              branch: 'main',
+              detached: false,
+              staged: 0,
+              unstaged: 0,
+              untracked: 0,
+              conflicted: 0,
+              hasUpstream: false,
+              ahead: 0,
+              behind: 0,
+              stashCount: 0,
+              operation: null,
+              computedAt: 0,
+            }),
+          workspaceGitBranches: vi
+            .fn()
+            .mockResolvedValue({
+              v: 1,
+              local: [],
+              remote: [],
+              tags: [],
+              recent: [],
+              head: 'main',
+              detached: false,
+            }),
+          listWorkspaceSessions: vi.fn().mockResolvedValue([]),
+        }),
+      },
+      capabilities: { features: [] },
+    }),
+  };
+});
+
 const composerCoreState = vi.hoisted(() => ({
   slashMenu: null as SlashMenuState | null,
   focus: vi.fn(),
