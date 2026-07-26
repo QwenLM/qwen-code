@@ -59,7 +59,6 @@ export const legacyFilenames = [
   'commandMetadata',
   'CommandService',
   'commandUtils',
-  'commentJson',
   'commitAttribution',
   'compactionInputSlimming',
   'compressCommand',

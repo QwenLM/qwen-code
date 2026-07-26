@@ -21,9 +21,9 @@ import {
   type Mock,
 } from 'vitest';
 import * as fs from 'node:fs';
-import * as commentJson from 'comment-json';
 import stripJsonComments from 'strip-json-comments';
 import * as path from 'node:path';
+import * as jsoncEditor from '../utils/jsonc-editor.js';
 import {
   loadTrustedFolders,
   getTrustedFoldersPath,
@@ -61,12 +61,12 @@ vi.mock('fs', async (importOriginal) => {
 vi.mock('strip-json-comments', () => ({
   default: vi.fn((content) => content),
 }));
-vi.mock('comment-json', async (importOriginal) => {
-  const actual = await importOriginal<typeof commentJson>();
+vi.mock('../utils/jsonc-editor.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../utils/jsonc-editor.js')>();
   return {
     ...actual,
-    parse: vi.fn(actual.parse),
-    stringify: vi.fn(actual.stringify),
+    updateJsoncContent: vi.fn(actual.updateJsoncContent),
   };
 });
 
@@ -358,16 +358,13 @@ describe('Trusted Folders Loading', () => {
     expect(atomicWriteFileSync).not.toHaveBeenCalled();
   });
 
-  it('saveTrustedFolders should reject invalid preserved output', async () => {
+  it('saveTrustedFolders should reject invalid preserved output', () => {
     const userPath = getTrustedFoldersPath();
     const dirPath = path.dirname(userPath);
     const originalContent = `{
   // work repos
   "/existing/path": "TRUST_FOLDER"
 }`;
-    const parseSpy = vi.mocked(commentJson.parse);
-    const actualCommentJson =
-      await vi.importActual<typeof commentJson>('comment-json');
 
     (mockFsExistsSync as Mock).mockImplementation(
       (p) => p === userPath || p === dirPath,
@@ -376,13 +373,9 @@ describe('Trusted Folders Loading', () => {
       if (p === userPath) return originalContent;
       return '{}';
     });
-    parseSpy
-      .mockImplementationOnce((...args: Parameters<typeof commentJson.parse>) =>
-        actualCommentJson.parse(...args),
-      )
-      .mockImplementationOnce(() => {
-        throw new Error('invalid preserved output');
-      });
+    vi.mocked(jsoncEditor.updateJsoncContent).mockImplementationOnce(() => {
+      throw new Error('invalid preserved output');
+    });
 
     expect(() =>
       saveTrustedFolders({
