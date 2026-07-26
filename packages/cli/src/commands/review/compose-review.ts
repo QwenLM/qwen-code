@@ -22,7 +22,7 @@
 
 import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   coverageFromTranscripts,
@@ -30,6 +30,12 @@ import {
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
 import { shellQuotePath } from './lib/shell-quote.js';
+import {
+  hasExecutableScript,
+  reviewMode,
+  type RosterPlan,
+} from './lib/roster.js';
+import type { ScriptLintReport } from './script-lint.js';
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
@@ -249,13 +255,28 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   let plannedChunks: Array<{ id: number; files: string[] }> = [];
   let coveredChunks: number[] = [];
 
+  // The deterministic script-lint gate. `compose-review` is the authority here:
+  // it reads the report the orchestrator's `qwen review script-lint` step wrote
+  // and turns it into the verdict itself, so neither the existence of a blocker
+  // nor its severity depends on a model. A finding on a changed line (above
+  // cosmetic `style`) is a pre-confirmed `[lint]` Critical; an uninstalled or
+  // crashed checker is unreviewed scope; and — the proof it ran — a diff that
+  // carries an executable script but has no readable report is itself unreviewed
+  // (fail closed). The report path is derived from the plan, not the input JSON a
+  // model wrote, and the plan decides whether the lint was owed.
+  if (input.planPath) {
+    const gate = scriptLintGate(input.planPath);
+    bodyCriticals.push(...gate.criticals);
+    unreviewed.push(...gate.unreviewed);
+  }
+
   // The Criticals a verifier must have ruled on before this review may post
-  // them as blockers. Deterministic `[build]`/`[test]` body findings are
+  // them as blockers. Deterministic `[build]`/`[test]`/`[lint]` body findings are
   // pre-confirmed and skip verification by design; every other Critical —
   // anchored or body — is a claim, and a claim is confirmed by Step 4 or it
   // is not confirmed at all.
   const nonDeterministicBodyCriticals = bodyCriticals.filter(
-    (x) => !/\[(?:build|test)\]/i.test(x),
+    (x) => !/\[(?:build|test|lint)\]/i.test(x),
   ).length;
   const criticalsNeedingVerify =
     criticalsInline + nonDeterministicBodyCriticals;
@@ -1040,6 +1061,89 @@ export function describeChunkGap(
 interface Bi {
   en: string;
   zh: string;
+}
+
+/**
+ * Read the script-lint report the orchestrator wrote and turn it into verdict
+ * inputs, deterministically. Returns the pre-confirmed `[lint]` Criticals (a
+ * finding on a changed line, above cosmetic `style`) and the unreviewed-scope
+ * entries (a checker not installed or crashed, or — owed but absent — a report
+ * the run never produced). The path is DERIVED from the plan, never taken from
+ * the model's input JSON, and the plan itself decides whether the lint was owed:
+ * this is what takes the model out of both the block decision and the proof it ran.
+ */
+export function scriptLintGate(planPath: string): {
+  criticals: string[];
+  unreviewed: string[];
+} {
+  const criticals: string[] = [];
+  const unreviewed: string[] = [];
+  let plan: { prNumber?: unknown; files?: unknown };
+  try {
+    plan = JSON.parse(readFileSync(planPath, 'utf8'));
+  } catch {
+    return { criticals, unreviewed };
+  }
+  // A diff-only (cross-repo lightweight) review has no worktree, so the
+  // orchestrator could not have run script-lint — do not fail it closed for a
+  // command it cannot run, exactly as the roster never owed it there.
+  if (reviewMode(plan as RosterPlan) === 'diff-only') {
+    return { criticals, unreviewed };
+  }
+  // Owed only when the diff carries a file a linter owns by path — the same
+  // predicate the orchestrator's run is gated on, so the two cannot disagree.
+  if (!hasExecutableScript(plan as RosterPlan)) {
+    return { criticals, unreviewed };
+  }
+  const reportPath = join(
+    dirname(planPath),
+    scriptLintReportName(plan.prNumber),
+  );
+  let report: ScriptLintReport;
+  try {
+    report = JSON.parse(readFileSync(reportPath, 'utf8')) as ScriptLintReport;
+  } catch {
+    // Owed but not produced: fail closed. A run cannot certify shell it never
+    // linted, and this is the proof-of-execution the model can no longer fake.
+    unreviewed.push(
+      'the executable-script lint — `qwen review script-lint` produced no report',
+    );
+    return { criticals, unreviewed };
+  }
+  for (const file of report.checked ?? []) {
+    for (const f of file.findings ?? []) {
+      if (f.inDiff && f.level !== 'style') {
+        criticals.push(
+          `${file.path}:${f.line} ${f.code} — ${f.message} [lint]`,
+        );
+      }
+    }
+  }
+  for (const s of report.skipped ?? []) {
+    unreviewed.push(
+      `the executable-script lint — ${s.tool} is not installed (${s.path})`,
+    );
+  }
+  for (const e of report.errored ?? []) {
+    unreviewed.push(
+      `the executable-script lint — ${e.tool} errored on ${e.path}`,
+    );
+  }
+  return { criticals, unreviewed };
+}
+
+/**
+ * The report filename the orchestrator writes and this derives — pr-numbered
+ * when the plan resolved a PR, a stable local name otherwise (matching the old
+ * `agent-prompt` convention so a mid-flight upgrade finds the same file).
+ */
+function scriptLintReportName(pr: unknown): string {
+  const positive =
+    (typeof pr === 'number' && Number.isInteger(pr) && pr > 0) ||
+    (typeof pr === 'string' && /^\d+$/.test(pr) && Number(pr) > 0);
+  return positive
+    ? `qwen-review-pr-${pr}-script-lint.json`
+    : 'qwen-review-script-lint.json';
 }
 
 /**

@@ -129,12 +129,15 @@ function isPositivePrNumber(value: unknown): boolean {
  * Does the diff touch a file a linter owns by path — a shell script, a workflow,
  * a Dockerfile? Detected by path alone (`pathTool`), the same detector the command
  * uses, because here only the plan's file paths are in hand, not the files. A
- * shebang-only extensionless script does not trip this — the roster cannot read it
- * — but if any script-lint agent runs, the command still lints it; the roster only
- * decides whether to *require* the agent, and it requires it whenever the diff
- * carries something a lint would name.
+ * shebang-only extensionless script does not trip this — the roster cannot read it.
+ *
+ * `compose-review`'s deterministic script-lint gate reads this to decide whether a
+ * script-lint report was OWED — a diff that carries such a file but produced no
+ * report fails closed to unreviewed. It is the one predicate both the orchestrator's
+ * `qwen review script-lint` step and the gate that checks its output share, so they
+ * cannot disagree about what counts as an executable script.
  */
-function hasExecutableScript(plan: RosterPlan): boolean {
+export function hasExecutableScript(plan: RosterPlan): boolean {
   const files = Array.isArray(plan.files) ? plan.files : [];
   return files.some((f) => {
     if (typeof f?.path !== 'string' || pathTool(f.path) === null) return false;
@@ -230,14 +233,10 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
   if (mode !== 'diff-only') {
     add('1c');
     add('7');
-    // Script Lint reads the changed files from the tree, so — like Build & Test —
-    // it needs one: a `diff-only` review has no worktree to lint. And it is only
-    // required when the diff actually carries an executable script; a pure-TS PR
-    // has nothing for it to check, and requiring it there would exit-3 every such
-    // review over an agent with no job. The command still runs harmlessly on a
-    // diff with no scripts (it reports "nothing to lint"), but the *requirement*
-    // is scoped to when there is something to find.
-    if (hasExecutableScript(plan)) add('script-lint');
+    // The executable-script lint is NOT an agent: the orchestrator runs
+    // `qwen review script-lint` deterministically and `compose-review` reads its
+    // report as the sole authority (see hasExecutableScript). There is no role to
+    // require here — the gate enforces itself from the report, model out of the loop.
   }
 
   // A largely-rewritten file is not reviewable as a diff: the two ends of an

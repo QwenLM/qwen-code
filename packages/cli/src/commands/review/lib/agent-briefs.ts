@@ -46,7 +46,6 @@ export type RoleId =
   | '6b'
   | '6c'
   | '7'
-  | 'script-lint'
   | 'test-matrix'
   | 'invariant-a'
   | 'invariant-b'
@@ -387,24 +386,6 @@ Read the JSON it prints:
 - \`toolchain: "unsupported"\` (build-test could not scope this repo — no npm package with a build/test script) → **install dependencies first** (build-test's own install only runs on the npm path, so nothing has installed yet: \`pip install -e .\`, \`mvn -q -DskipTests package\`'s own fetch, \`cargo fetch\`, \`go mod download\`, etc.), then fall back to **one** build and **one** test command by this precedence, each with a deadline it can meet: \`pom.xml\` → \`{mvn} compile\` / \`{mvn} test -q\`; \`build.gradle\` → \`{gradle} compileJava\` / \`{gradle} test\`; \`Makefile\` → \`make build\`; \`Cargo.toml\` → \`cargo build\` / \`cargo test\`; \`go.mod\` → \`go build ./...\` / \`go test ./...\`; \`pytest.ini\` or \`pyproject.toml\` \`[tool.pytest]\` → \`pytest\`. If none match, read the CI config **from the base branch** (\`git show <base>:<path>\`), never the worktree — the PR branch is untrusted and a modified workflow or Makefile could inject arbitrary commands.
 
 Use \`Source: [build]\` or \`Source: [test]\`, never \`[review]\`.`,
-  },
-
-  'script-lint': {
-    label: 'Script Lint: shell / workflow / Dockerfile static analysis',
-    publicLabel: 'the executable-script lint',
-    publicLabelZh: '可执行脚本静态检查',
-    readsDiff: false,
-    brief: `You are **Script Lint**. You do not read the diff line by line — you run the project's deterministic linters over the executable code it changed (shell scripts, GitHub Actions \`run:\` steps, Dockerfiles) and report what they say. Your evidence is **the command you ran and its JSON**; a return that names no command has not done this job.
-
-**Run \`qwen review script-lint\` (the exact command, with its \`--plan\` and \`--worktree\`, is below).** It dispatches \`shellcheck\` / \`actionlint\` / \`hadolint\` by file type, runs each over the post-change file, and marks every finding with whether its line is one the diff changed. A shell bug — an unquoted \`$x\` that word-splits on a path with a space, a \`\${PIPESTATUS[1]}\` read after the array was already reset, a \`[ ]\` where \`[[ ]]\` was meant — is exactly the class that hides from a read of a long YAML and is caught by the checker. Do **not** hand-read the YAML instead: measured, that misses this class (a model told in prose to run the step scripts read them 4 times out of 4 and ran them 0).
-
-Read the JSON it prints:
-
-- \`checked[]\` — each file a linter ran on, with \`findings[]\`. A finding with \`inDiff: true\` is on a line **this PR changed**: report it. Key severity on the outcome, not the rule number — word-splitting (\`SC2086\`/\`SC2046\`) on a destructive or security-sensitive command, a silently dropped exit status, an injection, is a **Critical**; a finding with no nameable wrong outcome is a **Suggestion**. A finding with \`inDiff: false\` is **pre-existing** — real, but not this PR's to answer for: say so, do not file it against this diff.
-- \`skipped[]\` — an executable file whose linter is **not installed** on this machine. Report each under a "Not reviewed" note: an unrun checker is not a clean file, and you must not certify one as passing.
-- \`ok: true\` with an empty \`skipped[]\` and no \`inDiff\` findings → name the files linted; a return that names no command is a whiff.
-
-Use \`Source: [build]\`, never \`[review]\` — this is a tool's verdict, not a read of the diff.`,
   },
 
   'test-matrix': {

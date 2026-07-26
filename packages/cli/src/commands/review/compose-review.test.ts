@@ -18,6 +18,7 @@ import { join } from 'node:path';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import {
   composeReview,
+  scriptLintGate,
   composeReviewCommand,
   describeChunkGap,
   verdictLine,
@@ -2172,5 +2173,171 @@ describe('bilingual body — the PR author writes Chinese (prDescriptionHasHan)'
     expect(
       r.body.match(/old blocker at a\.ts:1 — still reachable\?/g) ?? [],
     ).toHaveLength(2);
+  });
+});
+
+describe('scriptLintGate — the deterministic gate reads the report', () => {
+  // Unit-level: the gate turns the orchestrator's report into verdict inputs
+  // (compose-review's coverage machinery is exercised elsewhere). A same-repo plan
+  // carries a worktreePath; without one (diff-only) the orchestrator could not run
+  // the command, so the gate must stay silent.
+  function writePlan(over: Record<string, unknown>): string {
+    const p = join(dir, 'plan.json');
+    writeFileSync(
+      p,
+      JSON.stringify({
+        worktreePath: '.qwen/tmp/review-pr-1',
+        files: [{ path: 'deploy.sh', kind: 'source', addedLines: 3 }],
+        ...over,
+      }),
+    );
+    return p;
+  }
+  function writeReport(
+    report: Record<string, unknown>,
+    name = 'qwen-review-script-lint.json',
+  ): void {
+    writeFileSync(
+      join(dir, name),
+      JSON.stringify({
+        checked: [],
+        skipped: [],
+        errored: [],
+        ok: true,
+        note: '',
+        ...report,
+      }),
+    );
+  }
+  const finding = (over: Record<string, unknown> = {}) => ({
+    line: 3,
+    code: 'SC2086',
+    level: 'info',
+    message: 'Double quote to prevent globbing',
+    inDiff: true,
+    ...over,
+  });
+  const withFinding = (f: Record<string, unknown>) => ({
+    checked: [{ path: 'deploy.sh', tool: 'shellcheck', findings: [f] }],
+    ok: false,
+  });
+
+  it('turns an inDiff finding (above style) into a [lint] critical', () => {
+    const p = writePlan({});
+    writeReport(withFinding(finding()));
+    const g = scriptLintGate(p);
+    expect(g.criticals).toHaveLength(1);
+    expect(g.criticals[0]).toContain('SC2086');
+    expect(g.criticals[0]).toContain('[lint]');
+    expect(g.unreviewed).toEqual([]);
+  });
+
+  it('ignores a cosmetic (style) or pre-existing (inDiff:false) finding', () => {
+    const p = writePlan({});
+    writeReport({
+      checked: [
+        {
+          path: 'deploy.sh',
+          tool: 'shellcheck',
+          findings: [finding({ level: 'style' }), finding({ inDiff: false })],
+        },
+      ],
+    });
+    expect(scriptLintGate(p).criticals).toEqual([]);
+  });
+
+  it('reports a not-installed checker (skipped) as unreviewed', () => {
+    const p = writePlan({});
+    writeReport({
+      skipped: [
+        { path: '.github/workflows/ci.yml', tool: 'actionlint', reason: 'x' },
+      ],
+    });
+    const g = scriptLintGate(p);
+    expect(g.criticals).toEqual([]);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('actionlint');
+  });
+
+  it('reports an errored checker as unreviewed (fail closed)', () => {
+    const p = writePlan({});
+    writeReport({
+      errored: [{ path: 'deploy.sh', tool: 'shellcheck', reason: 'exited 2' }],
+    });
+    expect(scriptLintGate(p).unreviewed[0]).toContain('errored');
+  });
+
+  it('fails closed when owed but no report was produced', () => {
+    const p = writePlan({}); // no report file written
+    const g = scriptLintGate(p);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('produced no report');
+  });
+
+  it('is a no-op when the diff carries no executable script', () => {
+    const p = writePlan({ files: [{ path: 'a.ts', kind: 'source' }] });
+    writeReport(withFinding(finding()));
+    expect(scriptLintGate(p)).toEqual({ criticals: [], unreviewed: [] });
+  });
+
+  it('is a no-op on a diff-only review — no worktree to have run it', () => {
+    const p = writePlan({ worktreePath: undefined });
+    writeReport({
+      errored: [{ path: 'deploy.sh', tool: 'shellcheck', reason: 'x' }],
+    });
+    expect(scriptLintGate(p)).toEqual({ criticals: [], unreviewed: [] });
+  });
+
+  it('derives the pr-numbered report name from the plan', () => {
+    const p = writePlan({ prNumber: '42' });
+    writeReport(withFinding(finding()), 'qwen-review-pr-42-script-lint.json');
+    expect(scriptLintGate(p).criticals).toHaveLength(1);
+  });
+});
+
+describe('composeReview — the script-lint gate wired to the verdict', () => {
+  it('a [lint] critical yields REQUEST_CHANGES, deterministically (no verifier)', () => {
+    // Same-repo (worktreePath) so the gate fires; a [lint] finding is pre-confirmed,
+    // so its Request changes stands with or without full coverage or a verifier.
+    const p = coveredPlan();
+    const planObj = JSON.parse(readFileSync(p, 'utf8'));
+    planObj.worktreePath = '.qwen/tmp/review-pr-1';
+    planObj.files.push({ path: 'deploy.sh', kind: 'source', addedLines: 3 });
+    writeFileSync(p, JSON.stringify(planObj));
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    writeFileSync(
+      join(dir, 'qwen-review-script-lint.json'),
+      JSON.stringify({
+        checked: [
+          {
+            path: 'deploy.sh',
+            tool: 'shellcheck',
+            findings: [
+              {
+                line: 3,
+                code: 'SC2086',
+                level: 'info',
+                message: 'x',
+                inDiff: true,
+              },
+            ],
+          },
+        ],
+        skipped: [],
+        errored: [],
+        ok: false,
+        note: '',
+      }),
+    );
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain('SC2086');
   });
 });

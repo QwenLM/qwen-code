@@ -17,7 +17,12 @@
 // than the thing doing the launching. These tests pin that derivation.
 
 import { describe, it, expect } from 'vitest';
-import { requiredAgents, reviewMode, isTerritoryFanOut } from './roster.js';
+import {
+  requiredAgents,
+  reviewMode,
+  isTerritoryFanOut,
+  hasExecutableScript,
+} from './roster.js';
 
 /** A same-repo PR: a worktree to build in, a PR number to check an issue against. */
 const PR = {
@@ -160,11 +165,16 @@ describe('requiredAgents — Step 3A', () => {
   });
 });
 
-describe('requiredAgents — the executable-script lint', () => {
-  // The requirement is scoped to a diff that actually carries a script a linter
-  // owns, detected by path — otherwise a pure-TS PR would exit-3 over an agent
-  // with nothing to check. It is the same `pathTool` the command dispatches on, so
-  // the roster and the command cannot disagree about what counts.
+describe('hasExecutableScript — the script-lint gate predicate', () => {
+  // No longer an agent requirement: the orchestrator runs `qwen review
+  // script-lint` and compose-review reads its report. This predicate is what
+  // both share to decide whether the lint was OWED — detected by path, the same
+  // `pathTool` the command dispatches on, so the two cannot disagree.
+  it('is never in the agent roster', () => {
+    const plan = { ...PR, files: [{ path: 'deploy.sh', kind: 'source' }] };
+    expect(keys(plan)).not.toContain('script-lint');
+  });
+
   it.each([
     ['deploy.sh', true],
     ['scripts/build.bash', true],
@@ -174,38 +184,29 @@ describe('requiredAgents — the executable-script lint', () => {
     ['src/pay.ts', false], // production TS: nothing a shell linter owns
     ['README.md', false],
     ['config.yml', false], // yaml, but not a workflow
-  ])('a diff touching %s requires script-lint: %s', (path, required) => {
-    const plan = {
-      ...PR,
-      files: [{ path, kind: 'source', removedLines: 0, heavy: false }],
-    };
-    expect(keys(plan).includes('script-lint')).toBe(required);
+  ])('a diff touching %s is an executable script: %s', (path, owed) => {
+    expect(hasExecutableScript({ files: [{ path }] })).toBe(owed);
   });
 
-  it('requires it when any one file among many is an executable script', () => {
-    const plan = {
-      ...PR,
-      files: [
-        { path: 'src/a.ts', kind: 'source' },
-        { path: 'src/b.ts', kind: 'source' },
-        { path: '.husky/pre-commit.sh', kind: 'source' },
-      ],
-    };
-    expect(keys(plan)).toContain('script-lint');
+  it('is true when any one file among many is an executable script', () => {
+    expect(
+      hasExecutableScript({
+        files: [
+          { path: 'src/a.ts' },
+          { path: 'src/b.ts' },
+          { path: '.husky/pre-commit.sh' },
+        ],
+      }),
+    ).toBe(true);
   });
 
-  it('does NOT require it on a diff-only review — there is no tree to lint', () => {
-    // Like Build & Test, it reads the changed files from a worktree; a cross-repo
-    // lightweight review has none, so requiring it would fail a review for not
-    // doing something it cannot.
-    const light = {
-      ...PR,
-      worktreePath: undefined,
-      prNumber: undefined,
-      files: [{ path: 'deploy.sh', kind: 'source' }],
-    };
-    expect(reviewMode(light)).toBe('diff-only');
-    expect(keys(light)).not.toContain('script-lint');
+  it('excludes a pure-deletion script (no added lines to lint)', () => {
+    expect(
+      hasExecutableScript({ files: [{ path: 'gone.sh', addedLines: 0 }] }),
+    ).toBe(false);
+    expect(
+      hasExecutableScript({ files: [{ path: 'kept.sh', addedLines: 3 }] }),
+    ).toBe(true);
   });
 });
 

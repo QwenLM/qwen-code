@@ -50,7 +50,6 @@ import {
 import { recordPrompt, writeBrief } from './lib/prompt-record.js';
 import { BRIEFS, type RoleId } from './lib/agent-briefs.js';
 import { pathRulesFor } from './lib/path-rules.js';
-import { shellQuotePath } from './lib/shell-quote.js';
 import {
   requiredAgents,
   reviewMode,
@@ -882,52 +881,6 @@ export function buildRoleBrief(
     }
   }
 
-  // Script Lint runs a command over the changed executable files, and — like
-  // Agent 7 — needs a tree to read them from and the plan to know which they are.
-  // Same tree/fallback rule: a worktree when there is one, the cwd only in local
-  // mode, never the user's own checkout in PR mode that unexpectedly lacks one.
-  if (role === 'script-lint') {
-    const wt = report.worktreePath;
-    if (typeof wt === 'string' && wt) {
-      parts.push(
-        '',
-        `**Run everything in the PR worktree** — your working directory is already ` +
-          `\`${wt}\`. Do not \`cd\` elsewhere.`,
-      );
-    }
-    const pr = report.prNumber;
-    const lintTree =
-      typeof wt === 'string' && wt
-        ? resolve(wt)
-        : pr === undefined && opts.planPath
-          ? '.'
-          : null;
-    if (lintTree && opts.planPath) {
-      // Guard `pr` before interpolating, exactly as the build-test block does: an
-      // absent number must not write `qwen-review-pr-undefined-script-lint.json`.
-      const outName =
-        pr !== undefined
-          ? `qwen-review-pr-${pr}-script-lint.json`
-          : 'qwen-review-script-lint.json';
-      parts.push(
-        '',
-        '**Lint the executable scripts the diff changed.** One call — it dispatches ' +
-          '`shellcheck` / `actionlint` / `hadolint` by file type and reports what they ' +
-          'say. Run it as given (a bare `qwen` re-creates the PATH skew this prefix ' +
-          'exists to avoid, and `script-lint` is new enough that an old global lacks it):',
-        '',
-        '```bash',
-        // Quote every interpolated path: a worktree like `/home/a/My Project`
-        // would otherwise word-split and the command would never run.
-        `"\${QWEN_CODE_CLI:-qwen}" review script-lint \\`,
-        `  --plan ${shellQuotePath(resolve(opts.planPath))} \\`,
-        `  --worktree ${shellQuotePath(resolve(lintTree))} \\`,
-        `  --out ${shellQuotePath(resolve(dirname(opts.planPath), outName))}`,
-        '```',
-      );
-    }
-  }
-
   // The checklists that attach to a path rather than to a dimension. A whole-diff
   // agent sees every file, so it gets every rule the diff triggers — but only the
   // agents that review *code* get them at all: Build & Test runs commands and Issue
@@ -956,16 +909,10 @@ export function buildRoleBrief(
   }
 
   // SKILL.md is explicit: "Do NOT inject review rules into Agent 7 (Build &
-  // Test) — it runs deterministic commands, not code review." Script Lint is the
-  // same shape — a command's verdict, not a read — so it is excluded too. The
-  // roster path hands the same --rules to every role, so the exclusion lives here,
-  // where both the single-role and roster builds pass through.
-  parts.push(
-    ...tail(
-      role === '7' || role === 'script-lint' ? undefined : opts.rules,
-      brief.output,
-    ),
-  );
+  // Test) — it runs deterministic commands, not code review." The roster path
+  // hands the same --rules to every role, so the exclusion lives here, where both
+  // the single-role and roster builds pass through.
+  parts.push(...tail(role === '7' ? undefined : opts.rules, brief.output));
   return parts.join('\n');
 }
 
