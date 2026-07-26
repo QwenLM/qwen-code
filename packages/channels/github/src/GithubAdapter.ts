@@ -30,7 +30,6 @@ const MAX_DISPATCHED_BODIES = 500;
 
 export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private octokit!: Octokit;
-  private botUserId: number | null = null;
   private botUsername: string | null = null;
   private webOrigin = 'https://github.com';
 
@@ -75,32 +74,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     });
     try {
       const { data } = await this.octokit.rest.users.getAuthenticated();
-      this.botUserId = data.id;
       this.botUsername = data.login;
     } catch (err) {
       throw new Error(
         `[Channel:${this.name}] failed to resolve bot identity: ${err}`,
       );
     }
-    // Resolve allowedUsers logins to immutable numeric IDs
-    const resolved: string[] = [];
-    for (const login of this.config.allowedUsers ?? []) {
-      try {
-        const { data: u } = await this.octokit.rest.users.getByUsername({
-          username: login,
-        });
-        resolved.push(String(u.id));
-      } catch (err) {
-        throw new Error(
-          `[Channel:${this.name}] could not resolve allowedUser "${login}" to a numeric ID: ${err}`,
-        );
-      }
-    }
-    // Only the gate consumes the resolved IDs. Keep this.config.allowedUsers as
-    // the original logins so connect() stays idempotent — the daemon reconnect
-    // path calls disconnect() + connect() on the same instance, and re-resolving
-    // already-numeric IDs would 404 (GET /users/{username} expects a login).
-    this.gate.replaceAllowedUsers(resolved);
+    // GitHub logins are case-insensitive; normalize both sides so the
+    // allowlist gate and ChannelBase's shared-session authorization match
+    // regardless of how the operator typed the config entry.
+    const allowed = (this.config.allowedUsers ?? []).map((u) =>
+      u.toLowerCase(),
+    );
+    this.config.allowedUsers = allowed;
+    this.gate.replaceAllowedUsers(allowed);
     this.startPollLoop();
   }
 
@@ -202,7 +189,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         );
 
         const newComments = comments.filter((c) => {
-          if (c.user?.id != null && c.user.id === this.botUserId) {
+          if (c.user?.login === this.botUsername) {
             return false;
           }
           if (c.created_at && c.created_at > maxUpdatedAt) {
@@ -228,7 +215,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
           const envelope: Envelope = {
             channelName: this.name,
-            senderId: String(comment.user?.id ?? 'unknown'),
+            senderId: (comment.user?.login || 'unknown').toLowerCase(),
             senderName: comment.user?.login || 'unknown',
             chatId,
             threadId,
@@ -298,7 +285,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
       const body = issue.body || '';
 
-      if (issue.user?.id === this.botUserId) return;
+      if (issue.user?.login === this.botUsername) return;
 
       const isMentioned = this.botUsername
         ? testBotMention(body, this.botUsername)
@@ -310,7 +297,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
       const envelope: Envelope = {
         channelName: this.name,
-        senderId: String(issue.user?.id ?? 'unknown'),
+        senderId: (issue.user?.login || 'unknown').toLowerCase(),
         senderName: issue.user?.login || 'unknown',
         chatId,
         threadId,

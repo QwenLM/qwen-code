@@ -29,13 +29,13 @@ import {
   detectFileType,
   processSingleFileContent,
   detectBOM,
-  decodeBufferWithEncodingInfo,
   readFileWithLineAndLimit,
   readFileWithEncoding,
   readFileWithEncodingInfo,
   detectFileEncoding,
   fileExists,
 } from './fileUtils.js';
+import { decodeBufferWithEncodingInfo } from './sync-file-encoding.js';
 import { iconvEncode } from './iconvHelper.js';
 import { LargeNonUtf8TextError } from './read-text-range.js';
 import type { Config } from '../config/config.js';
