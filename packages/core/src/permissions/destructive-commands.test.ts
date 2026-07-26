@@ -203,6 +203,34 @@ describe('isDestructiveCommand — git patterns', () => {
     }
   });
 
+  it('blocks the longer dot-only spellings of the whole tree', () => {
+    // Measured against real git rather than assumed: from the repository root
+    // every `./…` form here reverts exactly what `git checkout .` reverts, and
+    // from a subdirectory `../..` reverts strictly more than the `..` that is
+    // already blocked. Matching only the short spellings would leave
+    // `git checkout .` blocked and `git checkout ./.` allowed for two commands
+    // that are identical in effect.
+    for (const cmd of [
+      'git checkout .//',
+      'git checkout ./.',
+      'git checkout ././',
+      'git checkout ./..',
+      'git checkout ../..',
+      'git checkout ../../',
+      'git checkout ..//',
+      'git checkout .///',
+      'git checkout .././',
+      'git checkout ./../..',
+      // The separator forms of the same spellings.
+      'git checkout ./.>out.txt',
+      'git checkout ../..;echo done',
+    ]) {
+      const result = isDestructiveCommand(cmd, 'fix the bug');
+      expect(result).not.toBeNull();
+      expect(result!.blocked).toBe(true);
+    }
+  });
+
   it('blocks git stash drop', () => {
     const result = isDestructiveCommand('git stash drop', 'remove stash');
     expect(result).not.toBeNull();
@@ -265,6 +293,11 @@ describe('isDestructiveCommand — git patterns', () => {
       'git checkout ./src',
       'git checkout ./packages/core',
       'git checkout ../src',
+      'git checkout ../../pkg/a.ts',
+      // Three dots is not a pathspec at all — git resolves it as a revision
+      // and switches to a detached HEAD, reverting nothing. It sits next to
+      // the dot-only pathspecs above and must not be swept up with them.
+      'git checkout ...',
       // `--force` only counts on `git clean`; these are unrelated commands.
       'git push --force-with-lease',
       'git fetch --force',
