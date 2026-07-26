@@ -36,7 +36,7 @@ jobs:
   # ── Phase 1: Scan (read-only, no code changes) ──────────────────────────
   scan:
     name: 'Scan'
-    if: github.repository == 'ZijianZhang989/qwen-code'
+    if: '${{ github.repository == ''ZijianZhang989/qwen-code'' }}'
     runs-on: 'ubuntu-latest'
     timeout-minutes: 60
     permissions:
@@ -159,7 +159,7 @@ jobs:
   # ── Phase 2: Fix (write code, push PR) ──────────────────────────────────
   fix:
     name: 'Fix'
-    if: github.repository == 'ZijianZhang989/qwen-code' && needs.scan.result == 'success'
+    if: '${{ github.repository == ''ZijianZhang989/qwen-code'' && needs.scan.result == ''success'' }}'
     needs: 'scan'
     runs-on: 'ubuntu-latest'
     timeout-minutes: 90
@@ -227,7 +227,7 @@ jobs:
           fi
 
       - name: 'Check runner environment'
-        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        if: '${{ steps.dedup.outputs.open_prs_present == ''false'' }}'
         env:
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: |-
@@ -237,7 +237,7 @@ jobs:
           esac
 
       - name: 'Set up Node.js'
-        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        if: '${{ steps.dedup.outputs.open_prs_present == ''false'' }}'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version: '22.x'
@@ -245,7 +245,7 @@ jobs:
           cache-dependency-path: 'package-lock.json'
 
       - name: 'Install dependencies and build'
-        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        if: '${{ steps.dedup.outputs.open_prs_present == ''false'' }}'
         env:
           QWEN_SKIP_PREPARE: '1'
         run: |-
@@ -259,7 +259,7 @@ jobs:
           npm run bundle
 
       - name: 'Prepare Qwen Code CLI'
-        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        if: '${{ steps.dedup.outputs.open_prs_present == ''false'' }}'
         run: |-
           qwen_bin="${RUNNER_TEMP}/qwen-bin"
           mkdir -p "${qwen_bin}"
@@ -273,13 +273,13 @@ jobs:
           qwen --version
 
       - name: 'Resolve branch name'
-        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        if: '${{ steps.dedup.outputs.open_prs_present == ''false'' }}'
         id: 'branch'
         run: |-
           echo "name=hygiene/$(date -u +%Y%m%d-%H%M)" >> "${GITHUB_OUTPUT}"
 
       - name: 'Run fix agent'
-        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        if: '${{ steps.dedup.outputs.open_prs_present == ''false'' }}'
         id: 'agent'
         env:
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
@@ -330,7 +330,7 @@ jobs:
 
       # Gate: verify agent output before pushing
       - name: 'Gate on agent outcome'
-        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        if: '${{ steps.dedup.outputs.open_prs_present == ''false'' }}'
         id: 'gate'
         run: |-
           BRANCH="${{ steps.branch.outputs.name }}"
@@ -389,7 +389,7 @@ jobs:
 
       # Verification with auto-revert
       - name: 'Independent verification'
-        if: "${{ steps.gate.outputs.result == 'fixes' }}"
+        if: '${{ steps.gate.outputs.result == ''fixes'' }}'
         id: 'verify'
         run: |-
           REVERTED=0
@@ -434,7 +434,7 @@ jobs:
           fi
 
       - name: 'Push and open PR'
-        if: "${{ steps.gate.outputs.result == 'fixes' && env.DRY_RUN != 'true' }}"
+        if: '${{ steps.gate.outputs.result == ''fixes'' && env.DRY_RUN != ''true'' }}'
         id: 'publish'
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
@@ -469,7 +469,7 @@ jobs:
           fi
 
       - name: 'File report-only findings as issue'
-        if: "${{ always() && !cancelled() }}"
+        if: '${{ always() && !cancelled() }}'
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
         run: |-
