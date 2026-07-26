@@ -1130,14 +1130,17 @@ describe('App shell command queueing', () => {
     renderApp({ onSessionChange });
     await flush();
 
+    let accepted: boolean | void;
     await act(async () => {
-      testState.latestChatEditorProps?.onSubmit('!echo hi');
+      accepted = testState.latestChatEditorProps?.onSubmit('!echo hi');
       await vi.waitFor(() => {
         expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith(
           'echo hi',
         );
       });
     });
+    expect(accepted).toBe(false);
+    expect(editorClear).toHaveBeenCalled();
     expect(mockSessionActions.createSession).toHaveBeenCalled();
     expect(onSessionChange).toHaveBeenCalledWith({
       type: 'submit',
@@ -1156,13 +1159,16 @@ describe('App shell command queueing', () => {
     renderApp({ onToast });
     await flush();
 
+    let accepted: boolean | void;
     await act(async () => {
-      testState.latestChatEditorProps?.onSubmit('!echo hi');
+      accepted = testState.latestChatEditorProps?.onSubmit('!echo hi');
       await vi.waitFor(() => {
         expect(onToast).toHaveBeenCalledWith('error', expect.any(String));
       });
     });
 
+    expect(accepted).toBe(false);
+    expect(editorClear).not.toHaveBeenCalled();
     expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
   });
 

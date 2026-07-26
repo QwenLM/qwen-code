@@ -5919,6 +5919,7 @@ export function App({
           .then(() => {
             if (needsSession && connectionRef.current.sessionId) {
               sessionCreated = true;
+              editorRef.current?.clear();
               dispatchSessionChangeRef.current?.({
                 type: 'submit',
                 sessionId: connectionRef.current.sessionId,
@@ -5940,7 +5941,7 @@ export function App({
           .finally(() => {
             if (needsSession) setIsPreparingPrompt(false);
           });
-        return true;
+        return !needsSession;
       } else {
         if (promptBlocked) {
           return enqueuePrompt(
