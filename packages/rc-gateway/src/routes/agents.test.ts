@@ -257,6 +257,76 @@ describe('GET /rc/agents + /rc/agents/:id', () => {
     const body = (await res.json()) as { agents: Array<{ agentId: string }> };
     expect(body.agents).toHaveLength(2);
   });
+
+  it("session-locked share token: detail on another session's agent → 404 (not the other session's task text); own session's agent → 200", async () => {
+    const { url, registry } = await setup(
+      {},
+      {
+        id: 'tkn-share',
+        scopes: ['session:read', 'share'],
+        sessionLockId: 'S1',
+      },
+    );
+    const own = await registry.register({
+      sessionId: 'S1',
+      parentSessionId: null,
+      agentType: 'general',
+      task: 'S1 own task',
+      spawnedByTokenId: 'owner',
+    });
+    const child = await registry.register({
+      sessionId: 'S1-child',
+      parentSessionId: 'S1',
+      agentType: 'general',
+      task: 'S1 child task',
+      spawnedByTokenId: 'owner',
+    });
+    const other = await registry.register({
+      sessionId: 'S2',
+      parentSessionId: null,
+      agentType: 'general',
+      task: 'S2 SECRET task text',
+      spawnedByTokenId: 'owner',
+    });
+
+    // Another session's agent, by id, must 404 — same shape as unknown id —
+    // and must NEVER leak its task text in the response body.
+    const otherRes = await fetch(`${url}/rc/agents/${other.agentId}`);
+    expect(otherRes.status).toBe(404);
+    const otherBody = (await otherRes.json()) as { code: string };
+    expect(otherBody.code).toBe('agent_not_found');
+    expect(JSON.stringify(otherBody)).not.toContain('S2 SECRET task text');
+
+    // Own session's agent → 200.
+    const ownRes = await fetch(`${url}/rc/agents/${own.agentId}`);
+    expect(ownRes.status).toBe(200);
+    expect(((await ownRes.json()) as { agentId: string }).agentId).toBe(
+      own.agentId,
+    );
+
+    // Agent spawned FROM the locked session (parentSessionId tie) → 200.
+    const childRes = await fetch(`${url}/rc/agents/${child.agentId}`);
+    expect(childRes.status).toBe(200);
+    expect(((await childRes.json()) as { agentId: string }).agentId).toBe(
+      child.agentId,
+    );
+  });
+
+  it("non-locked owner token: detail on any session's agent → 200 (unaffected)", async () => {
+    const { url, registry } = await setup();
+    const other = await registry.register({
+      sessionId: 'S2',
+      parentSessionId: null,
+      agentType: 'general',
+      task: 'S2 task',
+      spawnedByTokenId: 'owner',
+    });
+    const res = await fetch(`${url}/rc/agents/${other.agentId}`);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { agentId: string }).agentId).toBe(
+      other.agentId,
+    );
+  });
 });
 
 describe('steer + cancel', () => {

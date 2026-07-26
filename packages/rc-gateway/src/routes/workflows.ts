@@ -234,13 +234,27 @@ export function createListWorkflowsRoute(
   };
 }
 
-/** GET /rc/workflows/:runId — detail incl. the per-agent session map. */
+/**
+ * GET /rc/workflows/:runId — detail incl. the per-agent session map.
+ * SESSION_READ scope at the mount, which admits a session-locked SHARE token.
+ * Mirrors createListWorkflowsRoute's confinement: a locked caller may only
+ * fetch a run that has at least one agent backing the locked session
+ * (`run.agents[].sessionId`) — fail-closed, so a run with no agents yet is
+ * not visible to a locked token. A run that fails the tie is reported 404 —
+ * the SAME shape as a missing runId — so a locked token cannot distinguish
+ * "exists in another session" from "doesn't exist". A non-locked (owner/
+ * write) token is unaffected — full access, as before.
+ */
 export function createGetWorkflowRoute(
   deps: WorkflowRoutesDeps,
 ): RequestHandler {
   return (req, res) => {
     const run = deps.runRegistry.get(req.params.runId);
-    if (!run) {
+    const lock = req.rcClient?.sessionLockId;
+    const visible =
+      run !== undefined &&
+      (lock === undefined || run.agents.some((a) => a.sessionId === lock));
+    if (!visible) {
       res
         .status(404)
         .json({ error: 'Unknown run', code: 'workflow_not_found' });

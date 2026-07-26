@@ -27,8 +27,13 @@ const MAX_SHORT = 140;
  *    (`sk-...`, including `sk-ant-...`).
  *
  * Every added alternative is a literal (or small bounded character class)
- * prefix match with no nested/overlapping quantifiers, so the regex stays
- * linear-time — it cannot ReDoS on attacker-controlled args text.
+ * prefix match with no nested/overlapping quantifiers, so matching stays
+ * bounded/near-linear in practice: the `[A-Z ]*` class inside the PEM
+ * alternative is only entered after the literal `-----BEGIN ` prefix has
+ * matched, so it cannot chain with another quantifier to blow up. Note this
+ * regex runs (below) on the RAW, uncapped `rawFull` string — the
+ * `MAX_FULL_BYTES` length cap is applied afterward, only to the value stored
+ * in `argsSummaryFull`.
  */
 const SECRET_RE =
   /(api[_-]?key|secret|token|password|passwd|credential|authorization|bearer|private[_-]?key|client[_-]?secret|access[_-]?key|-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_|github_pat_|gho_|ghu_|ghs_|xox[baprs]-|AKIA[0-9A-Z]{16}|sk-(ant-)?[A-Za-z0-9]{10,})/i;

@@ -579,6 +579,72 @@ describe('GET /rc/reviews, GET /rc/reviews/:id (list/detail)', () => {
       code: 'invalid_status',
     });
   });
+
+  it("session-locked share token: detail on another session's review → 404 (never the other session's path); own session's review → 200", async () => {
+    const { url, registry, store } = await setup();
+    const own = await registry.register({
+      sessionId: 'S1',
+      target: { kind: 'local' },
+      comment: false,
+      autofix: false,
+      approvalLeg: 'vote',
+      triggeredByTokenId: 'owner',
+    });
+    const other = await registry.register({
+      sessionId: 'S2',
+      target: { kind: 'path', path: 'SECRET-OTHER-SESSION' },
+      comment: false,
+      autofix: false,
+      approvalLeg: 'vote',
+      triggeredByTokenId: 'owner',
+    });
+
+    const share = await store.issueShare({
+      scopes: [SHARE, SESSION_READ],
+      label: 'share',
+      sessionLockId: 'S1',
+      ttlSec: 300,
+      parentId: 'owner',
+    });
+
+    // Another session's review, by id, must 404 — same shape as unknown id —
+    // and must NEVER leak its (raw filesystem) path in the response body.
+    const otherRes = await fetch(`${url}/rc/reviews/${other.reviewId}`, {
+      headers: { Authorization: `Bearer ${share.token}` },
+    });
+    expect(otherRes.status).toBe(404);
+    const otherBody = (await otherRes.json()) as { code: string };
+    expect(otherBody.code).toBe('review_not_found');
+    expect(JSON.stringify(otherBody)).not.toContain('SECRET-OTHER-SESSION');
+
+    // Own session's review → 200.
+    const ownRes = await fetch(`${url}/rc/reviews/${own.reviewId}`, {
+      headers: { Authorization: `Bearer ${share.token}` },
+    });
+    expect(ownRes.status).toBe(200);
+    expect(((await ownRes.json()) as { reviewId: string }).reviewId).toBe(
+      own.reviewId,
+    );
+  });
+
+  it("non-locked owner token: detail on any session's review → 200 (unaffected)", async () => {
+    const { url, registry, tokens } = await setup();
+    const other = await registry.register({
+      sessionId: 'S2',
+      target: { kind: 'path', path: '/some/path' },
+      comment: false,
+      autofix: false,
+      approvalLeg: 'vote',
+      triggeredByTokenId: 'owner',
+    });
+    const res = await fetch(`${url}/rc/reviews/${other.reviewId}`, {
+      headers: { Authorization: `Bearer ${tokens.owner}` },
+    });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { reviewId: string }).reviewId).toBe(
+      other.reviewId,
+    );
+  });
 });
 
 describe('POST /rc/reviews/:id/cancel', () => {

@@ -421,11 +421,22 @@ export function createListReviewsRoute(deps: ReviewRoutesDeps): RequestHandler {
   };
 }
 
-/** GET /rc/reviews/:id — SESSION_READ scope at the mount. */
+/**
+ * GET /rc/reviews/:id — SESSION_READ scope at the mount, which admits a
+ * session-locked SHARE token. Mirrors createListReviewsRoute's confinement: a
+ * locked caller may only fetch a review whose OWN `sessionId` equals the
+ * lock. A record that fails the tie is reported 404 — the SAME shape as a
+ * missing id — so a locked token cannot distinguish "exists in another
+ * session" from "doesn't exist". A non-locked (owner/write) token is
+ * unaffected — full access, as before.
+ */
 export function createGetReviewRoute(deps: ReviewRoutesDeps): RequestHandler {
   return (req, res) => {
     const rec = deps.registry.get(req.params.id);
-    if (!rec) {
+    const lock = req.rcClient?.sessionLockId;
+    const visible =
+      rec !== undefined && (lock === undefined || rec.sessionId === lock);
+    if (!visible) {
       res
         .status(404)
         .json({ error: 'Unknown review', code: 'review_not_found' });

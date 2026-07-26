@@ -239,11 +239,25 @@ export function createListAgentsRoute(deps: AgentRoutesDeps): RequestHandler {
   };
 }
 
-/** GET /rc/agents/:id — SESSION_READ scope at the mount. */
+/**
+ * GET /rc/agents/:id — SESSION_READ scope at the mount, which admits a
+ * session-locked SHARE token. Mirrors createListAgentsRoute's confinement: a
+ * locked caller may only fetch a record tied to its ONE session (own
+ * `sessionId`, or spawned FROM it via `parentSessionId`). A record that fails
+ * both ties is reported 404 — the SAME shape as a missing id — so a locked
+ * token cannot distinguish "exists in another session" from "doesn't exist".
+ * A non-locked (owner/write) token is unaffected — full access, as before.
+ */
 export function createGetAgentRoute(deps: AgentRoutesDeps): RequestHandler {
   return (req, res) => {
     const rec = deps.registry.get(req.params.id);
-    if (!rec) {
+    const lock = req.rcClient?.sessionLockId;
+    const visible =
+      rec !== undefined &&
+      (lock === undefined ||
+        rec.sessionId === lock ||
+        rec.parentSessionId === lock);
+    if (!visible) {
       res.status(404).json({ error: 'Unknown agent', code: 'agent_not_found' });
       return;
     }

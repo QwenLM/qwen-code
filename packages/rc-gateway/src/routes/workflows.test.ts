@@ -298,6 +298,79 @@ describe('GET /rc/workflows (list)', () => {
   });
 });
 
+describe('GET /rc/workflows/:runId (detail)', () => {
+  it("session-locked share token: detail on a run backed by another session → 404 (never the other session's map); own-session run → 200", async () => {
+    const { url, runRegistry } = await setup(50, undefined, {
+      id: 'tkn-share',
+      scopes: ['session:read', 'share'],
+      sessionLockId: 'S1',
+    });
+    const own = runRegistry.create({
+      runId: 'r-own',
+      name: 'own',
+      scriptHash: 'h1',
+    });
+    runRegistry.addAgent(own.runId, 'a1', 'S1');
+    const other = runRegistry.create({
+      runId: 'r-other',
+      name: 'other-secret',
+      scriptHash: 'h2',
+    });
+    runRegistry.addAgent(other.runId, 'a2', 'S2');
+    const empty = runRegistry.create({
+      runId: 'r-empty',
+      name: 'empty',
+      scriptHash: 'h3',
+    });
+
+    // Another session's run, by id, must 404 — same shape as unknown id — and
+    // must NEVER leak its per-agent session map in the response body.
+    const otherRes = await fetch(`${url}/rc/workflows/${other.runId}`);
+    expect(otherRes.status).toBe(404);
+    const otherBody = (await otherRes.json()) as {
+      code: string;
+      agents?: unknown;
+    };
+    expect(otherBody.code).toBe('workflow_not_found');
+    // The 404 body must be the bare not-found shape — no per-agent session
+    // map and no leaked run name (the 200 shape's `agents`/`name` fields).
+    expect(otherBody).not.toHaveProperty('agents');
+    expect(JSON.stringify(otherBody)).not.toContain('other-secret');
+
+    // A run with no agents at all — no determinable session tie — is
+    // fail-closed excluded (not visible) for a locked caller.
+    const emptyRes = await fetch(`${url}/rc/workflows/${empty.runId}`);
+    expect(emptyRes.status).toBe(404);
+
+    // Own-session run (tied via one of its agents) → 200.
+    const ownRes = await fetch(`${url}/rc/workflows/${own.runId}`);
+    expect(ownRes.status).toBe(200);
+    expect(((await ownRes.json()) as { runId: string }).runId).toBe(own.runId);
+  });
+
+  it('non-locked owner token: detail on any run → 200 (unaffected)', async () => {
+    const { url, runRegistry } = await setup();
+    const other = runRegistry.create({
+      runId: 'r-other',
+      name: 'other',
+      scriptHash: 'h2',
+    });
+    runRegistry.addAgent(other.runId, 'a2', 'S2');
+    const res = await fetch(`${url}/rc/workflows/${other.runId}`);
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { runId: string }).runId).toBe(other.runId);
+  });
+
+  it('unknown runId still → 404 workflow_not_found (unlocked token)', async () => {
+    const { url } = await setup();
+    const res = await fetch(`${url}/rc/workflows/does-not-exist`);
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as { code: string }).code).toBe(
+      'workflow_not_found',
+    );
+  });
+});
+
 describe('cancel', () => {
   it('409 workflow_not_running on a terminal run', async () => {
     const { url, runRegistry } = await setup();
