@@ -144,6 +144,14 @@ differs only by the change under test; the verdict is the pair of counts.
 - Report the cell table: environment per cell, observable oracle per cell
   (exit code, stderr line, wire request, rendered frame), and `X/Y` at head
   vs control. "5/9 flip from broken to fixed" is the shape to aim for.
+- When a change **suppresses** output — a removed notice, a narrowed log, a
+  swallowed error — check whether the information survives anywhere before
+  calling the suppression correct. Follow the value: is the cause still
+  carried in a field someone reads? Grep the repo for that field; a bare
+  `catch {}` on the path and a field with no readers anywhere means the
+  reason is now unobservable even in devtools. Losing "which failure was
+  this" is a real regression even when hiding the message was the goal, and
+  it is invisible to any behavioural assertion.
 - Probe the type boundaries of the changed expression, not just the
   reported repro: a coercion/conversion fix gets cells for `null`, boolean,
   object, and astral inputs, and lossy results (e.g. `String({})` →
@@ -172,6 +180,26 @@ If the PR adds or modifies tests, prove at least the central one is not
 vacuous: revert the key source hunk (scratch copy), run that test, confirm it
 fails, restore. A test that stays green against the un-fixed source is a
 finding, not a pass.
+
+Report the mutation matrix **including the mutations that changed nothing**:
+one row per guard the PR introduces, the suite that should catch it, and
+pinned / not-pinned. Survivors are not noise — classify each as an ordinary
+**coverage gap** (the behaviour is right, nothing asserts it) or as **dead
+code** (the clause cannot decide any outcome), and say which. A guard whose
+deletion leaves every test green is one of those two things, and the
+difference matters to the author. Where a survivor mirrors a pre-existing gap
+rather than something the PR introduced, say so — and label the whole set as
+completeness reporting, not merge conditions, unless one of them is load-bearing.
+
+Watch for the subtler failure: **a test that passes for the wrong reason.**
+If deleting the new guard leaves its own new test green, that test is pinned
+by something else (an earlier early-return, a different branch) and asserts
+nothing about the change. Name what actually pins it.
+
+And do not generalize from one dead guard to its siblings. A clause that is
+unreachable in one call path may be the only thing protecting another —
+check each on its own evidence and report the contrast, so "this guard is
+dead" is not read as "remove them all".
 
 **The reverted run must FAIL THE INTENDED ASSERTION** with the behavioural
 mismatch the test exists to catch. A revert that breaks the import, the
@@ -320,17 +348,23 @@ central claim from being tested — say why.
 1. **Verdict line first**, with assertion totals and the verified head OID
    (`git rev-parse HEAD^2` — not the snapshot's, which may have drifted).
 2. **Central claim + A/B table** (cells, oracles, head vs control counts).
-3. **Findings**, ordered by severity, each with the exact reproducing
+3. **Corrections**, when an earlier review round or bot comment described
+   the code inaccurately (a wrong ARIA role, a wrong mechanism, a
+   misattributed cause). State the correct fact with its evidence and label
+   it explicitly as a correction to the description — not as a request to
+   change the code. Leaving a wrong description standing costs the next
+   reader more than the original finding did.
+4. **Findings**, ordered by severity, each with the exact reproducing
    command; for a blocker, enumerate the blast radius (the affected call
    sites, not just the one you hit), demonstrate the sharpest consequence
    end-to-end when budget allows, and where the cause is clear add a
    collapsed minimal suggested fix that preserves the original commit's
    intent.
-4. **Not covered** — every claim, surface, or gate you skipped. A silent cap
+5. **Not covered** — every claim, surface, or gate you skipped. A silent cap
    reads as "covered everything"; never allow that.
-5. **Methodology** — one paragraph: environment, how each harness drove the
+6. **Methodology** — one paragraph: environment, how each harness drove the
    code, where the raw logs live.
-6. **中文摘要** in a collapsed `<details>` block: verdict, A/B 结论, findings,
+7. **中文摘要** in a collapsed `<details>` block: verdict, A/B 结论, findings,
    未覆盖范围.
 
 ## Hard rules
