@@ -359,7 +359,9 @@ async function extractMetadata(
   // Get git repository name
   let gitRepo: string | undefined;
   if (cwd) {
-    const { getGitRepoName } = await import('@qwen-code/qwen-code-core');
+    const { getGitRepoName } = await import(
+      '../../../utils/deferred-core-runtime.js'
+    );
     gitRepo = getGitRepoName(cwd);
   }
 
