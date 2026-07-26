@@ -10,11 +10,8 @@ import * as path from 'node:path';
 import { globSync } from 'glob';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { readFileWithLineAndLimit } from '../utils/fileUtils.js';
-import {
-  iconvEncode,
-  iconvEncodingExists,
-  isUtf8CompatibleEncoding,
-} from '../utils/iconvHelper.js';
+import { isUtf8CompatibleEncoding } from '../utils/encoding.js';
+import { loadIconvLite, type IconvLite } from '../utils/load-iconv-lite.js';
 import { getSystemEncoding } from '../utils/systemEncoding.js';
 import type {
   ReadTextFileRequest,
@@ -182,7 +179,7 @@ export function detectLineEnding(content: string): LineEnding {
   return content.includes('\r\n') ? 'crlf' : 'lf';
 }
 
-interface PreparedTextFileContent {
+export interface PreparedTextFileContent {
   data: string | Buffer;
   encoding?: BufferEncoding;
 }
@@ -212,11 +209,12 @@ function getBOMBytesForEncoding(encoding: string): Buffer | null {
   }
 }
 
-function prepareTextFileContent(
+export function prepareTextFileContent(
   filePath: string,
   content: string,
   meta?: ReadTextFileResponse['_meta'] | null,
-): PreparedTextFileContent {
+  iconvLite?: IconvLite,
+): PreparedTextFileContent | undefined {
   const lineEnding = meta?.['lineEnding'] as string | undefined;
   const shouldUseCrlf = needsCrlfLineEndings(filePath) || lineEnding === 'crlf';
   const normalizedContent = shouldUseCrlf
@@ -226,17 +224,20 @@ function prepareTextFileContent(
   const encoding = meta?.['encoding'] as string | undefined;
 
   // Check if a non-UTF-8 encoding is specified and supported by iconv-lite
-  const isNonUtf8Encoding =
+  if (encoding && !isUtf8CompatibleEncoding(encoding) && !iconvLite) {
+    return undefined;
+  }
+
+  if (
     encoding &&
     !isUtf8CompatibleEncoding(encoding) &&
-    iconvEncodingExists(encoding);
-
-  if (isNonUtf8Encoding) {
+    iconvLite?.encodingExists(encoding)
+  ) {
     // Non-UTF-8 encoding (e.g. GBK, Big5, Shift_JIS, UTF-16LE, UTF-32BE…)
     // Use iconv-lite to encode the content. When the file originally had a BOM
     // (bom: true), prepend the correct BOM bytes for this encoding so the
     // byte-order mark is preserved on write-back.
-    const encoded = iconvEncode(normalizedContent, encoding);
+    const encoded = iconvLite.encode(normalizedContent, encoding);
     if (bom) {
       const bomBytes = getBOMBytesForEncoding(encoding);
       return {
@@ -261,14 +262,35 @@ function prepareTextFileContent(
   return { data: normalizedContent, encoding: 'utf-8' };
 }
 
-export function encodeTextFileContent(
+export async function prepareTextFileContentAsync(
   filePath: string,
   content: string,
   meta?: ReadTextFileResponse['_meta'] | null,
-): Buffer {
-  const prepared = prepareTextFileContent(filePath, content, meta);
-  if (Buffer.isBuffer(prepared.data)) return prepared.data;
-  return Buffer.from(prepared.data, prepared.encoding ?? 'utf-8');
+): Promise<PreparedTextFileContent> {
+  let prepared = prepareTextFileContent(filePath, content, meta);
+  if (!prepared) {
+    prepared = prepareTextFileContent(
+      filePath,
+      content,
+      meta,
+      await loadIconvLite(),
+    );
+  }
+  if (!prepared) {
+    throw new Error('iconv-lite did not prepare non-UTF-8 text content');
+  }
+  return prepared;
+}
+
+export async function encodeTextFileContentAsync(
+  filePath: string,
+  content: string,
+  meta?: ReadTextFileResponse['_meta'] | null,
+): Promise<Buffer> {
+  const prepared = await prepareTextFileContentAsync(filePath, content, meta);
+  return Buffer.isBuffer(prepared.data)
+    ? prepared.data
+    : Buffer.from(prepared.data, prepared.encoding ?? 'utf-8');
 }
 
 /**
@@ -308,7 +330,11 @@ export class StandardFileSystemService implements FileSystemService {
     params: Omit<WriteTextFileRequest, 'sessionId'>,
   ): Promise<WriteTextFileResponse> {
     const { path: filePath, _meta } = params;
-    const prepared = prepareTextFileContent(filePath, params.content, _meta);
+    const prepared = await prepareTextFileContentAsync(
+      filePath,
+      params.content,
+      _meta,
+    );
     if (Buffer.isBuffer(prepared.data)) {
       await atomicWriteFile(filePath, prepared.data);
     } else {

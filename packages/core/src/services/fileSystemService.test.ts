@@ -8,12 +8,12 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import {
   StandardFileSystemService,
-  encodeTextFileContent,
   needsUtf8Bom,
   resetUtf8BomCache,
   detectLineEnding,
   ensureCrlfLineEndings,
 } from './fileSystemService.js';
+import { encodeTextFileContent } from '../utils/sync-file-encoding.js';
 
 const mockPlatform = vi.hoisted(() => vi.fn().mockReturnValue('linux'));
 const mockGetSystemEncoding = vi.hoisted(() =>
