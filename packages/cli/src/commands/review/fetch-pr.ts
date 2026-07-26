@@ -32,6 +32,7 @@ import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { createReviewWorktreeLease } from '../../services/review-worktree-lease.js';
 import { ensureAuthenticated, gh, setGhHost } from './lib/gh.js';
+import type { ReviewEffort } from './parse-args.js';
 import { git, gitOpt, gitRaw, refExists, releaseWorktree } from './lib/git.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
 import {
@@ -73,12 +74,12 @@ interface FetchPrArgs {
   host?: string;
   /** yargs camelCases `--max-chunk-lines`; the snake_case form does not exist. */
   maxChunkLines: number;
-  effort?: 'low' | 'medium' | 'high';
+  effort?: ReviewEffort;
 }
 
 type FetchPrResult = PlanReport & {
   /** The review's effort, recorded so the roster reads one value everywhere. */
-  effort?: 'low' | 'medium' | 'high';
+  effort?: ReviewEffort;
   prNumber: string;
   ownerRepo: string;
   remote: string;

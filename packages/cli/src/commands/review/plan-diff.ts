@@ -19,6 +19,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR } from './lib/paths.js';
+import type { ReviewEffort } from './parse-args.js';
 import {
   buildDiffPlan,
   DEFAULT_MAX_CHUNK_LINES,
@@ -39,7 +40,7 @@ interface PlanDiffArgs {
   /** The PR this diff came from — passed ONLY after `pr-context` succeeded. */
   pr?: number;
   repo?: string;
-  effort?: 'low' | 'medium' | 'high';
+  effort?: ReviewEffort;
 }
 
 /** A plan for a diff nobody fetched: no worktree — and PR identity only when
@@ -52,7 +53,7 @@ type PlanDiffResult = PlanReport & {
   prNumber?: string;
   ownerRepo?: string;
   /** The review's effort, recorded so the roster reads one value everywhere. */
-  effort?: 'low' | 'medium' | 'high';
+  effort?: ReviewEffort;
 };
 
 function runPlanDiff(args: PlanDiffArgs): void {

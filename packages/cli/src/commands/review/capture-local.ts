@@ -21,6 +21,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
+import type { ReviewEffort } from './parse-args.js';
 import { captureLocalDiff, type SkippedFile } from './lib/local-diff.js';
 import { buildDiffPlan, READ_FILE_CHAR_CAP } from './lib/diff-plan.js';
 import {
@@ -35,12 +36,12 @@ interface CaptureLocalArgs {
   file?: string;
   target: string;
   untracked: boolean;
-  effort?: 'low' | 'medium' | 'high';
+  effort?: ReviewEffort;
 }
 
 type CaptureLocalResult = PlanReport & {
   /** The review's effort, recorded so the roster reads one value everywhere. */
-  effort?: 'low' | 'medium' | 'high';
+  effort?: ReviewEffort;
   diffPath: string;
   diffPathAbsolute: string;
   /** Untracked files whose contents are in the diff — `git diff` shows none. */
