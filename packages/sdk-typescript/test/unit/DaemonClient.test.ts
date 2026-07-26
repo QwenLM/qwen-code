@@ -971,6 +971,28 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('appends cwd query parameter to git diff, log, and commit-detail URLs', async () => {
+      const ok = { v: 1 as const, workspaceCwd: '/w', available: true };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, ok));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const ws = client.workspaceByCwd('/work/main');
+      const cwd = '/worktrees/feature-x';
+
+      await ws.workspaceGitDiff(cwd);
+      await ws.workspaceGitDiffFile('src/a.ts', undefined, cwd);
+      await ws.workspaceGitDiffFile('src/a.ts', 'src/old.ts', cwd);
+      await ws.workspaceGitLog(50, 0, cwd);
+      await ws.workspaceGitCommitDetail('abc123', cwd);
+
+      expect(calls.map((c) => c.url)).toEqual([
+        'http://daemon/workspaces/%2Fwork%2Fmain/git/diff?cwd=%2Fworktrees%2Ffeature-x',
+        'http://daemon/workspaces/%2Fwork%2Fmain/git/diff/file?path=src%2Fa.ts&cwd=%2Fworktrees%2Ffeature-x',
+        'http://daemon/workspaces/%2Fwork%2Fmain/git/diff/file?path=src%2Fa.ts&oldPath=src%2Fold.ts&cwd=%2Fworktrees%2Ffeature-x',
+        'http://daemon/workspaces/%2Fwork%2Fmain/git/log?limit=50&skip=0&cwd=%2Fworktrees%2Ffeature-x',
+        'http://daemon/workspaces/%2Fwork%2Fmain/git/log/commit?sha=abc123&cwd=%2Fworktrees%2Ffeature-x',
+      ]);
+    });
+
     it('reads workspace-qualified GitHub pull requests over REST', async () => {
       const list = {
         v: 1 as const,
@@ -1398,6 +1420,27 @@ describe('DaemonClient', () => {
         },
         signal: expect.any(AbortSignal),
       });
+    });
+
+    it('encodes a before-record transcript boundary', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          v: 1,
+          sessionId: 'with/slash',
+          events: [],
+          hasMore: false,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.getSessionTranscriptPage('with/slash', {
+        beforeRecordId: 'record/1',
+        limit: 2,
+      });
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/with%2Fslash/transcript?beforeRecordId=record%2F1&limit=2',
+      );
     });
 
     it('uses direct REST fetch even when an ACP transport is configured', async () => {
@@ -3955,6 +3998,20 @@ describe('DaemonClient', () => {
       expect(result).toEqual(trustStatus);
       expect(calls[0]?.url).toBe('http://daemon/workspace/trust');
       expect(calls[0]?.method).toBe('GET');
+    });
+
+    it('requests v2 trust status without breaking v1 fallback responses', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, trustStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.workspaceTrust({ statusVersion: 2 });
+
+      expect(result).toEqual(trustStatus);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/trust?statusVersion=2',
+      );
     });
 
     it('requestWorkspaceTrustChange posts desired state and reason', async () => {

@@ -13,6 +13,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { daemonObservedContactsPath } from '../../commands/channel/runtime.js';
 import { ObservedChannelContactStore } from '../../commands/channel/observed-contact-store.js';
 import {
+  createWorkspaceGenerationGuard,
   createWorkspaceRegistry,
   type WorkspaceRegistry,
   type WorkspaceRuntime,
@@ -157,6 +158,51 @@ describe('workspace observed channel contact routes', () => {
       id: '42',
     });
     expect(empty.body).toEqual({ users: [], groups: [] });
+  });
+
+  it('rejects legacy reads when the live primary workspace is untrusted', async () => {
+    const primary = runtime('primary', '/work/main');
+    const app = express();
+    registerWorkspaceChannelObservedContactRoutes(app, {
+      primaryWorkspace: primary.workspaceCwd,
+      workspaceRegistry: registry([primary]),
+      isWorkspaceTrusted: () => false,
+    });
+
+    const response = await request(app).get(
+      '/workspace/channel/observed-contacts',
+    );
+
+    expect(response.status).toBe(403);
+    expect(response.body.code).toBe('untrusted_workspace');
+  });
+
+  it('rejects reads captured from closed runtime generations', async () => {
+    const primaryGuard = createWorkspaceGenerationGuard();
+    const secondaryGuard = createWorkspaceGenerationGuard();
+    primaryGuard.close();
+    secondaryGuard.close();
+    const primary = runtime('primary', '/work/main');
+    const secondary = {
+      ...runtime('secondary', '/work/secondary'),
+      generationGuard: secondaryGuard,
+    };
+    const app = express();
+    registerWorkspaceChannelObservedContactRoutes(app, {
+      primaryWorkspace: primary.workspaceCwd,
+      workspaceRegistry: registry([primary, secondary]),
+      captureGenerationAssertion: () => () => primaryGuard.assertOpen(),
+    });
+
+    const [legacy, qualified] = await Promise.all([
+      request(app).get('/workspace/channel/observed-contacts'),
+      request(app).get('/workspaces/secondary/channel/observed-contacts'),
+    ]);
+
+    for (const response of [legacy, qualified]) {
+      expect(response.status).toBe(503);
+      expect(response.body.code).toBe('workspace_runtime_unavailable');
+    }
   });
 
   it('validates freshness bounds and query shape', async () => {

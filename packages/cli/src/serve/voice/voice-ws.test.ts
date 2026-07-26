@@ -567,7 +567,23 @@ describe('createVoiceWsConnectionHandler', () => {
     await coordinator.disposeRuntime(runtime, 'workspace_removed');
 
     expect(ws.closeCode).toBe(1012);
+    expect(ws.closeReason).toBe('Workspace removed');
     expect(coordinator.getWorkspaceActivity(runtime)).toBe(0);
+  });
+
+  it('reports trust reconfiguration when replacing a runtime', async () => {
+    const coordinator = new WorkspaceVoiceCoordinator();
+    const runtime = { workspaceId: 'primary' } as WorkspaceRuntime;
+    const ws = new FakeWs(false);
+    const handler = createVoiceWsConnectionHandler('/ws', {
+      acquireVoiceLease: () => coordinator.acquire(runtime),
+    });
+    handler(ws as never, {} as never);
+
+    await coordinator.disposeRuntime(runtime, 'trust_reconfigured');
+
+    expect(ws.closeCode).toBe(1012);
+    expect(ws.closeReason).toBe('Workspace trust reconfigured');
   });
 
   it('reports daemon shutdown when its runtime lease is aborted on shutdown', async () => {

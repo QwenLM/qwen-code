@@ -45,6 +45,8 @@ import {
 } from './eventBus.js';
 import {
   normalizeCompactedReplayMaxBytes,
+  normalizeMaxJournalBytes,
+  normalizeMaxJournalEvents,
   TurnBoundaryCompactionEngine,
 } from './compactionEngine.js';
 import {
@@ -1439,6 +1441,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   const compactedReplayMaxBytes = normalizeCompactedReplayMaxBytes(
     opts.compactedReplayMaxBytes,
   );
+  const maxJournalEvents = normalizeMaxJournalEvents(opts.maxJournalEvents);
+  const maxJournalBytes = normalizeMaxJournalBytes(opts.maxJournalBytes);
   const channelFactory = opts.channelFactory ?? defaultSpawnChannelFactory;
   // Close over a per-handle env-override snapshot. Calls to
   // `channelFactory` at spawn time receive this as the 2nd arg, so
@@ -3631,6 +3635,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       undefined,
       new TurnBoundaryCompactionEngine({
         maxReplayBytes: compactedReplayMaxBytes,
+        maxJournalEvents,
+        maxJournalBytes,
         onReplayWindowEviction: (eviction) => {
           teeServeDebugLine(
             `replay window evicted ${JSON.stringify(eviction)}`,
@@ -4839,6 +4845,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               : maxPendingPromptsPerSession,
           eventRingSize,
           compactedReplayMaxBytes,
+          maxJournalEvents,
+          maxJournalBytes,
           channelIdleTimeoutMs: resolvedChannelIdleTimeoutMs(),
           sessionIdleTimeoutMs,
         },

@@ -2510,7 +2510,7 @@ export function App({
   // it — the composer git chip / `/diff` (current workspace) or a sidebar
   // folder's git chip (that workspace) — so each can target its own repo.
   const [gitDialog, setGitDialog] = useState<
-    { workspaceCwd: string; view: GitDialogView } | undefined
+    { workspaceCwd: string; gitCwd?: string; view: GitDialogView } | undefined
   >(undefined);
   // Main content view. The scheduled-tasks page replaces the chat pane inline
   // (not a modal overlay), mirroring the reference design; creating or opening
@@ -5064,7 +5064,11 @@ export function App({
               pushToast('info', t('localCommand.diffNoWorkspace'));
               return true;
             }
-            setGitDialog({ workspaceCwd: gitDiffWorkspaceCwd, view: 'diff' });
+            setGitDialog({
+              workspaceCwd: gitDiffWorkspaceCwd,
+              gitCwd: sessionWorktree?.path,
+              view: 'diff',
+            });
             return true;
           }
           if (cmd === 'log') {
@@ -5072,7 +5076,11 @@ export function App({
               pushToast('info', t('localCommand.logNoWorkspace'));
               return true;
             }
-            setGitDialog({ workspaceCwd: gitDiffWorkspaceCwd, view: 'log' });
+            setGitDialog({
+              workspaceCwd: gitDiffWorkspaceCwd,
+              gitCwd: sessionWorktree?.path,
+              view: 'log',
+            });
             return true;
           }
           if (cmd === 'prs') {
@@ -5886,6 +5894,7 @@ export function App({
       openGoals,
       createNewSession,
       gitDiffWorkspaceCwd,
+      sessionWorktree,
       gitHubPrsSupported,
       handleBusyGoalClear,
       handleGoalSlashCommand,
@@ -6738,8 +6747,9 @@ export function App({
           )}
           {gitDialog && (
             <GitDialog
-              key={`${gitDialog.workspaceCwd}:${gitDialog.view}`}
+              key={`${gitDialog.workspaceCwd}:${gitDialog.gitCwd ?? ''}:${gitDialog.view}`}
               workspaceCwd={gitDialog.workspaceCwd}
+              gitCwd={gitDialog.gitCwd}
               initialView={gitDialog.view}
               onClose={() => setGitDialog(undefined)}
             />
@@ -7921,10 +7931,11 @@ export function App({
                           onGitModeIntentChange={gitModeEligible ? setGitModeIntent : undefined}
                           gitStatus={selectedWorkspaceGitStatus}
                           onOpenGitDiff={
-                            gitDiffWorkspaceCwd && !sessionWorktree
+                            gitDiffWorkspaceCwd
                               ? () =>
                                   setGitDialog({
                                     workspaceCwd: gitDiffWorkspaceCwd,
+                                    gitCwd: sessionWorktree?.path,
                                     view: 'diff',
                                   })
                               : undefined

@@ -47,9 +47,12 @@ exists — if it does, skip re-submitting (the existing review already gates the
 PR). Only update issue comments, not PR reviews.
 
 ```bash
-# Check for existing terminal-exit review before re-submitting
-EXISTING=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
-  --jq '[.[] | select(.user.login=="qwen-code-ci-bot" and .state=="CHANGES_REQUESTED")] | length')
+# Check for existing terminal-exit review before re-submitting. Paginate: a
+# heavily-reviewed PR is exactly where re-runs happen, and an unpaginated read
+# sees only the first page — missing the gating review and duplicating it.
+EXISTING=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --method GET --paginate -F per_page=100 |
+  jq -s --arg bot "$BOT_LOGIN" \
+    '[.[][] | select(.user.login == $bot and .state == "CHANGES_REQUESTED")] | length')
 # Only submit if no existing terminal review
 if [ "$EXISTING" -eq 0 ]; then gh pr review ... ; fi
 ```
@@ -80,6 +83,25 @@ Every staged comment (Stage 1 gate-pass, Stage 2, Stage 3) ends with the signatu
 gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
   -f commit_id="$HEAD_SHA" -f event=APPROVE -f body='LGTM, looks ready to ship. ✅'
 ```
+
+**Approve once per commit — and only your OWN approval counts as already done.** Re-running triage three times must not stack three approvals, so check before posting. But "already approved" means **this bot's** `APPROVED` review on **this exact** `HEAD_SHA`, and nothing else:
+
+- **Another account's approval is not yours.** `main` requires two approving reviews, so a maintainer's approval is a *different* vote — the whole reason the bot's is still needed. Never read it as "already approved".
+- **A `DISMISSED` review is not an approval.** Branch protection runs with `dismiss_stale_reviews: true`, so every push dismisses the bot's prior approval. That is precisely when a fresh one is required.
+- **An approval on an earlier commit does not carry over**, for the same reason.
+
+Decide it with the query, not by scanning the review list — the failure mode is silent, and the run still reports ✅:
+
+```bash
+# Does the bot's OWN approval already stand on the commit under review?
+BOT_LOGIN=$(gh api user --jq '.login')   # re-resolve if this is a fresh shell
+MINE=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" --method GET --paginate -F per_page=100 |
+  jq -s --arg bot "$BOT_LOGIN" --arg sha "$HEAD_SHA" \
+    '[.[][] | select(.user.login == $bot and .state == "APPROVED" and .commit_id == $sha)] | length')
+if [ "$MINE" -eq 0 ]; then gh api ... -f event=APPROVE ... ; fi
+```
+
+This rule exists because a maintainer approved a PR three minutes before re-triggering `/triage`; the run read that human approval as "existing approval from prior run still valid, head SHA unchanged", skipped its own approve, and reported ✅ Approved (5/5) — leaving the PR at 1 of 2 required approvals with nothing in the run log marked wrong.
 
 Only approve when you're genuinely confident.
 

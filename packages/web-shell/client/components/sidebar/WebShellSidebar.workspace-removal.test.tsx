@@ -2010,7 +2010,7 @@ describe('WebShellSidebar workspace removal', () => {
     expect(sessionActions.renameSession).not.toHaveBeenCalled();
   });
 
-  it('keeps a pinned secondary row restricted until that workspace is locked', async () => {
+  it('allows pin on an unlocked secondary workspace but keeps destructive actions restricted', async () => {
     connection.capabilities = {
       ...capabilities,
       features: [...capabilities.features, 'session_organization'],
@@ -2033,8 +2033,9 @@ describe('WebShellSidebar workspace removal', () => {
       await Promise.resolve();
       await Promise.resolve();
     });
-    expect(inlineSessionAction('Pinned secondary', 'Unpin')).toBeUndefined();
-    expect(sessionAction('Pinned secondary')).toBeUndefined();
+    expect(inlineSessionAction('Pinned secondary', 'Unpin')).toBeDefined();
+    expect(inlineSessionAction('Pinned secondary', 'Delete')).toBeUndefined();
+    expect(inlineSessionAction('Pinned secondary', 'Rename')).toBeUndefined();
 
     renderSidebar({ lockedWorkspaceCwd: '/tmp/other' });
     await act(async () => {
@@ -2045,7 +2046,7 @@ describe('WebShellSidebar workspace removal', () => {
     expect(sessionAction('Pinned secondary')).toBeDefined();
   });
 
-  it('keeps unlocked secondary actions conservative across every sidebar surface', async () => {
+  it('allows organization but keeps destructive actions conservative for unlocked secondary sessions', async () => {
     connection.capabilities = {
       ...capabilities,
       features: [
@@ -2122,13 +2123,11 @@ describe('WebShellSidebar workspace removal', () => {
     });
 
     expect(archiveButtonFor('Unlocked normal')?.disabled).toBe(false);
-    expect(sessionAction('Unlocked normal')).toBeUndefined();
-    expect(inlineSessionAction('Unlocked normal', 'Pin')).toBeUndefined();
+    expect(inlineSessionAction('Unlocked normal', 'Pin')).toBeDefined();
     expect(inlineSessionAction('Unlocked normal', 'Delete')).toBeUndefined();
 
     expect(archiveButtonFor('Unlocked pinned')?.disabled).toBe(false);
-    expect(sessionAction('Unlocked pinned')).toBeUndefined();
-    expect(inlineSessionAction('Unlocked pinned', 'Unpin')).toBeUndefined();
+    expect(inlineSessionAction('Unlocked pinned', 'Unpin')).toBeDefined();
 
     const archivedItems = await openSessionMenuItems('Unlocked archived');
     expect(archivedItems).toEqual([
@@ -2149,13 +2148,13 @@ describe('WebShellSidebar workspace removal', () => {
         .closest<HTMLElement>('[class*="headerRow"]')
         ?.textContent?.includes('other'),
     );
-    expect(secondaryCreateGroup).toBeUndefined();
+    expect(secondaryCreateGroup).toBeDefined();
     expect(
       container.querySelector('button[aria-label="Rename group"]'),
-    ).toBeNull();
+    ).not.toBeNull();
     expect(
       container.querySelector('button[aria-label="Delete group"]'),
-    ).toBeNull();
+    ).not.toBeNull();
   });
 
   it('does not carry an active rename edit across equal session ids in another workspace', async () => {

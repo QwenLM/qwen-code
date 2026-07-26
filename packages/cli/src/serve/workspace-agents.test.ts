@@ -110,6 +110,7 @@ function buildApp(opts: {
   bridge: AcpSessionBridge;
   boundWorkspace: string;
   strictNoToken?: boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
 }) {
   const app = express();
   app.use(express.json({ limit: '10mb' }));
@@ -147,6 +148,9 @@ function buildApp(opts: {
       }
       return out;
     },
+    ...(opts.captureGenerationAssertion
+      ? { captureGenerationAssertion: opts.captureGenerationAssertion }
+      : {}),
   });
   return app;
 }
@@ -435,6 +439,29 @@ describe('workspace agents routes', () => {
     expect(after).toContain('fresh-out-of-band');
   });
 
+  it('rejects a list result when the runtime generation closes in flight', async () => {
+    const bridge = buildBridgeStub();
+    let assertions = 0;
+    const app = buildApp({
+      bridge,
+      boundWorkspace: workspace,
+      captureGenerationAssertion: () => () => {
+        assertions += 1;
+        if (assertions === 2) {
+          throw Object.assign(new Error('generation closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+      },
+    });
+
+    const res = await request(app).get('/workspace/agents');
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+    expect(assertions).toBe(2);
+  });
+
   it('returns the full detail (with systemPrompt) on GET /workspace/agents/:agentType', async () => {
     const bridge = buildBridgeStub();
     const app = buildApp({ bridge, boundWorkspace: workspace });
@@ -535,6 +562,38 @@ describe('workspace agents routes', () => {
       'utf8',
     );
     expect(onDisk).toContain('name: tester');
+  });
+
+  it('rejects agent creation when the runtime closes at commit', async () => {
+    const bridge = buildBridgeStub();
+    let assertions = 0;
+    const app = buildApp({
+      bridge,
+      boundWorkspace: workspace,
+      captureGenerationAssertion: () => () => {
+        assertions += 1;
+        if (assertions === 3) {
+          const error = new Error('generation closed');
+          error.name = 'WorkspaceGenerationClosedError';
+          Object.assign(error, { code: 'workspace_generation_closed' });
+          throw error;
+        }
+      },
+    });
+
+    const res = await request(app).post('/workspace/agents').send({
+      scope: 'workspace',
+      name: 'blocked-agent',
+      description: 'must not persist',
+      systemPrompt: 'must not persist',
+    });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+    await expect(
+      fs.access(path.join(workspace, QWEN_DIR, 'agents', 'blocked-agent.md')),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(bridge.events).toEqual([]);
   });
 
   it('creates a user-level agent when scope=global', async () => {
