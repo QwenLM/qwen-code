@@ -5,7 +5,10 @@
  */
 
 import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { findGitRoot } from './gitUtils.js';
+
+const execFileAsync = promisify(execFile);
 
 const GH_TIMEOUT_MS = 10_000;
 const GH_MAX_BUFFER = 16 * 1024 * 1024;
@@ -189,11 +192,15 @@ function runGhPrList(gitRoot: string): Promise<string> {
   });
 }
 
-function ghErrorMessage(error: unknown): string {
+function ghErrorMessage(
+  error: unknown,
+  commandLabel = 'gh pr list',
+  timeoutMs = GH_TIMEOUT_MS,
+): string {
   // A timeout kill carries an empty stderr and a "Command failed: gh pr
   // list …" message; name the timeout instead of dumping the argv.
   if ((error as { killed?: unknown } | null)?.killed === true) {
-    return `gh pr list timed out after ${GH_TIMEOUT_MS / 1000}s`;
+    return `${commandLabel} timed out after ${timeoutMs / 1000}s`;
   }
   const stderr = (error as { stderr?: unknown } | null)?.stderr;
   const raw =
@@ -295,7 +302,10 @@ export async function createGitHubPullRequest(
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return { kind: 'cli_unavailable' };
     }
-    return { kind: 'failed', message: ghErrorMessage(error) };
+    return {
+      kind: 'failed',
+      message: ghErrorMessage(error, 'gh pr create', GH_CREATE_TIMEOUT_MS),
+    };
   }
 
   // `gh pr create` outputs the PR URL on stdout.
@@ -312,13 +322,10 @@ export async function getDefaultBranch(cwd: string): Promise<string | null> {
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return null;
   try {
-    const { execFile: ef } = await import('node:child_process');
-    const { promisify } = await import('node:util');
-    const exec = promisify(ef);
-    const { stdout } = await exec(
+    const { stdout } = await execFileAsync(
       'git',
       ['symbolic-ref', 'refs/remotes/origin/HEAD', '--short'],
-      { cwd: gitRoot, timeout: 5_000 },
+      { cwd: gitRoot, timeout: 5_000, encoding: 'utf8' },
     );
     return stdout.trim() || 'origin/main';
   } catch {

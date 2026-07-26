@@ -13,6 +13,7 @@ import {
   gitPull,
   gitCommit,
   isValidRefName,
+  isValidCheckoutRef,
 } from '@qwen-code/qwen-code-core';
 import type { SendBridgeError } from '../server/error-response.js';
 import { safeBody } from '../server/request-helpers.js';
@@ -103,6 +104,12 @@ async function handleCheckout(
     res.status(400).json({ error: 'missing_ref', message: 'ref is required' });
     return;
   }
+  if (!isValidCheckoutRef(ref)) {
+    res
+      .status(400)
+      .json({ error: 'invalid_ref', message: 'Invalid checkout ref' });
+    return;
+  }
   try {
     const result = await gitCheckout(cwd, ref.trim());
     res.status(200).json(result);
@@ -128,6 +135,12 @@ async function handleCreateBranch(
   }
   const startPoint =
     typeof body['startPoint'] === 'string' ? body['startPoint'] : undefined;
+  if (startPoint !== undefined && !isValidCheckoutRef(startPoint)) {
+    res
+      .status(400)
+      .json({ error: 'invalid_start_point', message: 'Invalid start point' });
+    return;
+  }
   try {
     const result = await gitCreateBranch(cwd, name, startPoint);
     res.status(200).json(result);

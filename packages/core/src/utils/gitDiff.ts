@@ -1489,7 +1489,9 @@ export async function fetchGitLog(
       '-n',
       String(limit + 1),
       ...(skip > 0 ? ['--skip', String(skip)] : []),
-      ...(options?.range ? [options.range] : []),
+      ...(options?.range && !options.range.startsWith('-')
+        ? [options.range, '--']
+        : []),
     ],
     gitRoot,
   );

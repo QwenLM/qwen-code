@@ -68,7 +68,8 @@
 
 .commitMessage:focus {
   border-color: var(--primary, #3b82f6);
-  box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary, #3b82f6) 20%, transparent);
+  box-shadow: 0 0 0 2px
+    color-mix(in srgb, var(--primary, #3b82f6) 20%, transparent);
 }
 
 .commitMessage::placeholder {
@@ -85,7 +86,7 @@
 }
 
 .commitStatusSuccess {
-  color: #22c55e;
+  color: var(--success-color);
 }
 
 .commitActions {
@@ -114,7 +115,7 @@
 
 .commitBtnPrimary {
   background: var(--primary, #3b82f6);
-  color: #fff;
+  color: var(--background);
 }
 
 .commitBtnPrimary:hover:not(:disabled) {
@@ -136,8 +137,12 @@
 }
 
 @keyframes spin {
-  from { transform: rotate(0deg); }
-  to { transform: rotate(360deg); }
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* ── PR create form ─────────────────────────── */

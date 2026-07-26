@@ -91,6 +91,8 @@ export function BranchPickerPopover({
       setSearch('');
       setNewBranchMode(false);
       setCheckoutRefMode(false);
+      setNewBranchName('');
+      setCheckoutRefValue('');
       setStatusMsg(null);
       setTimeout(() => searchRef.current?.focus(), 50);
     }
@@ -106,6 +108,7 @@ export function BranchPickerPopover({
 
   const handleCheckout = useCallback(
     async (ref: string) => {
+      if (busyAction) return;
       setBusyAction('checkout');
       try {
         await client.workspaceGitCheckout(ref);
@@ -118,11 +121,11 @@ export function BranchPickerPopover({
         setBusyAction(null);
       }
     },
-    [client, onBranchChanged, onOpenChange, showStatus, t],
+    [client, busyAction, onBranchChanged, onOpenChange, showStatus, t],
   );
 
   const handleNewBranch = useCallback(async () => {
-    if (!validateBranchName(newBranchName)) return;
+    if (busyAction || !validateBranchName(newBranchName)) return;
     setBusyAction('newBranch');
     try {
       await client.workspaceGitCreateBranch(newBranchName);
@@ -137,7 +140,15 @@ export function BranchPickerPopover({
     } finally {
       setBusyAction(null);
     }
-  }, [client, newBranchName, onBranchChanged, onOpenChange, showStatus, t]);
+  }, [
+    client,
+    busyAction,
+    newBranchName,
+    onBranchChanged,
+    onOpenChange,
+    showStatus,
+    t,
+  ]);
 
   const handleCheckoutRef = useCallback(async () => {
     if (!checkoutRefValue.trim()) return;
@@ -288,20 +299,22 @@ export function BranchPickerPopover({
                       {t('branchPicker.action.pull')}
                     </span>
                   </button>
-                  <button
-                    type="button"
-                    className={styles.actionItem}
-                    disabled={!!busyAction}
-                    onClick={() => {
-                      onOpenCommit?.();
-                      onOpenChange(false);
-                    }}
-                  >
-                    <GitCommitIcon size={14} className={styles.actionIcon} />
-                    <span className={styles.actionLabel}>
-                      {t('branchPicker.action.commit')}
-                    </span>
-                  </button>
+                  {onOpenCommit && (
+                    <button
+                      type="button"
+                      className={styles.actionItem}
+                      disabled={!!busyAction}
+                      onClick={() => {
+                        onOpenCommit();
+                        onOpenChange(false);
+                      }}
+                    >
+                      <GitCommitIcon size={14} className={styles.actionIcon} />
+                      <span className={styles.actionLabel}>
+                        {t('branchPicker.action.commit')}
+                      </span>
+                    </button>
+                  )}
                   <button
                     type="button"
                     className={styles.actionItem}

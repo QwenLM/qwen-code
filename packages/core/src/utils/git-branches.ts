@@ -6,6 +6,7 @@
 
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { isValidGitSha, isValidRefName } from './gitDirect.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -186,6 +187,21 @@ async function getDetachedHead(cwd: string): Promise<string> {
   }
 }
 
+/**
+ * Whether `value` is safe to pass to git as a checkout target or branch start
+ * point: a plausible ref name (branch, tag, or short/full SHA) that cannot be
+ * mistaken for a git option (`-f`, `--patch`, `--output=…`) or a pathspec (`.`)
+ * that `git checkout` would act on destructively.
+ */
+export function isValidCheckoutRef(value: string): boolean {
+  const ref = value.trim();
+  if (!ref || ref.startsWith('-')) return false;
+  // 'HEAD' is a valid checkout target/start point even though
+  // isValidRefName rejects it as a branch name.
+  if (ref === 'HEAD') return true;
+  return isValidRefName(ref) || isValidGitSha(ref);
+}
+
 export interface GitCheckoutResult {
   branch: string;
   detached: boolean;
@@ -199,7 +215,12 @@ export async function gitCheckout(
   cwd: string,
   ref: string,
 ): Promise<GitCheckoutResult> {
-  await runGit(cwd, ['checkout', ref]);
+  if (!isValidCheckoutRef(ref)) {
+    throw new Error(`invalid checkout ref: ${ref}`);
+  }
+  // `--` terminates options/pathspecs so a validated ref can never be
+  // reinterpreted as a path (e.g. `.` wiping the working tree).
+  await runGit(cwd, ['checkout', ref, '--']);
   const headRaw = await runGit(cwd, ['symbolic-ref', '--short', 'HEAD']).catch(
     () => '',
   );
@@ -221,7 +242,12 @@ export async function gitCreateBranch(
   startPoint?: string,
 ): Promise<GitCheckoutResult> {
   const args = ['checkout', '-b', name];
-  if (startPoint) args.push(startPoint);
+  if (startPoint) {
+    if (!isValidCheckoutRef(startPoint)) {
+      throw new Error(`invalid start point: ${startPoint}`);
+    }
+    args.push(startPoint);
+  }
   await runGit(cwd, args);
   return { branch: name, detached: false };
 }

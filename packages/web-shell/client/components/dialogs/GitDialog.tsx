@@ -226,7 +226,7 @@ export function GitDialog({
 
   const doCommit = useCallback(
     async (andPush: boolean) => {
-      if (!commitMsg.trim()) return;
+      if (commitBusy || !commitMsg.trim()) return;
       setCommitBusy(andPush ? 'push' : 'commit');
       setCommitStatus(null);
       try {
@@ -256,7 +256,7 @@ export function GitDialog({
         setCommitBusy(null);
       }
     },
-    [client, workspaceCwd, commitMsg, t],
+    [client, workspaceCwd, commitMsg, commitBusy, t],
   );
 
   // Auto-fill PR form when it opens.
@@ -412,10 +412,16 @@ export function GitDialog({
     setPrStatus(null);
     try {
       const ws = client.workspaceByCwd(workspaceCwd);
-      // Strip remote prefix for gh pr create --base (e.g. origin/main → main)
-      const baseBranch = prBase.trim().includes('/')
-        ? prBase.trim().slice(prBase.trim().indexOf('/') + 1)
-        : prBase.trim();
+      // Strip a known remote prefix for `gh pr create --base`
+      // (origin/main → main), but leave local branch names — which may
+      // themselves contain "/" — untouched.
+      const trimmedBase = prBase.trim();
+      const remotePrefix = (prBranches?.remotes ?? [])
+        .map(([name]) => name)
+        .find((name) => trimmedBase.startsWith(`${name}/`));
+      const baseBranch = remotePrefix
+        ? trimmedBase.slice(remotePrefix.length + 1)
+        : trimmedBase;
       const result = await ws.workspaceGitHubCreatePullRequest({
         title: prTitle.trim(),
         body: prBody.trim() || undefined,
@@ -435,7 +441,7 @@ export function GitDialog({
     } finally {
       setPrBusy(false);
     }
-  }, [client, workspaceCwd, prTitle, prBody, prBase, t]);
+  }, [client, workspaceCwd, prTitle, prBody, prBase, prBranches, t]);
 
   return (
     <DialogShell

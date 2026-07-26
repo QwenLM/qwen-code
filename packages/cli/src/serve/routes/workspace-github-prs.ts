@@ -184,7 +184,10 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
           return;
         case 'failed':
           res.status(502).json({
-            error: result.message.slice(0, GITHUB_PR_ERROR_MESSAGE_MAX),
+            error: sanitizeMessage(result.message, runtime.workspaceCwd).slice(
+              0,
+              GITHUB_PR_ERROR_MESSAGE_MAX,
+            ),
             code: 'github_pr_create_failed',
           });
           return;
