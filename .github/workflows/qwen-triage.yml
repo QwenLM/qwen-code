@@ -592,6 +592,9 @@ jobs:
         run: |-
           set -euo pipefail
           HAS_REVIEW=false
+          HEAD_SHA=''
+          # unknown until both the review list and the head SHA are readable
+          STANDING=unknown
           if BOT_LOGIN="$(gh api user --jq '.login')" &&
              REVIEWS="$(
                gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER/reviews" \
@@ -609,6 +612,26 @@ jobs:
               echo "::warning::Failed to inspect triage reviews; posting a summary comment."
               HAS_REVIEW=false
             fi
+            # Adding no review is benign only when the bot's OWN verdict already
+            # stands on the current head. Pin the lookup to login, state, AND
+            # commit: another account's approval is a different vote (main needs
+            # two), and `dismiss_stale_reviews` voids the bot's own on every
+            # push. Observed: the agent read a maintainer's approval on the head
+            # commit as its own, skipped approving, and reported success — the
+            # PR sat at 1 of 2 approvals with nothing in the log marked wrong.
+            if HEAD_SHA="$(
+                 gh api "repos/$GITHUB_REPOSITORY/pulls/$NUMBER" --jq '.head.sha'
+               )" && [ -n "$HEAD_SHA" ]; then
+              STANDING="$(
+                printf '%s' "$REVIEWS" |
+                  jq -rs \
+                    --arg bot "$BOT_LOGIN" \
+                    --arg sha "$HEAD_SHA" \
+                    '[.[][] | select(.user.login == $bot and .commit_id == $sha)
+                            | select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")]
+                     | if length > 0 then "own" else "none" end'
+              )" || STANDING=unknown
+            fi
           else
             echo "::warning::Failed to fetch triage reviews; posting a summary comment."
           fi
@@ -616,9 +639,22 @@ jobs:
             echo "Triage re-run posted a review; no summary comment needed."
             exit 0
           fi
-          printf -v BODY '%s\n\n%s\n\n%s' \
+          case "$STANDING" in
+            own)
+              NOTE="The bot already has a review of its own on \`$HEAD_SHA\`, which still stands."
+              ;;
+            none)
+              NOTE="⚠️ The bot has **no review of its own** on \`$HEAD_SHA\`. If this re-run was meant to approve, it did not — an approval left by another account is a separate vote and does not count as the bot's own."
+              echo "::warning title=Triage re-run left no bot review::The bot has no APPROVED or CHANGES_REQUESTED review on $HEAD_SHA and this re-run added none."
+              ;;
+            *)
+              NOTE="The bot's review state on the head commit could not be read."
+              ;;
+          esac
+          printf -v BODY '%s\n\n%s\n\n%s\n\n%s' \
             '<!-- qwen-triage stage=rerun-summary -->' \
             'Triage re-run completed without a new review.' \
+            "$NOTE" \
             "The stage comments above were updated with the latest result. [View workflow run]($RUN_URL)."
           gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
             -f body="$BODY" >/dev/null
