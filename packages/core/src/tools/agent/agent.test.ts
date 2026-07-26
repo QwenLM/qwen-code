@@ -480,6 +480,9 @@ describe('AgentTool', () => {
         };
       };
       expect(properties.properties.model?.enum).toEqual(['small']);
+      expect(properties.properties.model?.description).toContain(
+        'explicit model keep their configured model',
+      );
     });
 
     it('declares the background default and foreground opt-out', () => {

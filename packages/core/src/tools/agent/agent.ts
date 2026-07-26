@@ -1002,7 +1002,7 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
           type: 'string',
           enum: availableGrades,
           description:
-            'User-defined model grade for this subagent. Omit it to use the agent default.',
+            'User-defined model grade for this subagent. Custom agents with an explicit model keep their configured model. Omit it to use the agent default.',
         };
       } else {
         delete schema.properties.model;
