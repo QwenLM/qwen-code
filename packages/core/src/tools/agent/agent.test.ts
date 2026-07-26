@@ -682,7 +682,7 @@ describe('AgentTool', () => {
           ...validParams,
           model: 'high',
         }),
-      ).toBe('Unknown model grade "high".');
+      ).toBe('Unknown model grade "high". Available: small.');
     });
 
     it('rejects a model grade for fork agents', () => {
