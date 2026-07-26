@@ -203,6 +203,7 @@ function mount(
     hasOlderHistory?: boolean;
     loadingOlderHistory?: boolean;
     historyCapacityReached?: boolean;
+    historyPaginationError?: boolean;
     onLoadOlderHistory?: () => Promise<void>;
     transcriptBlockCount?: number;
     transcriptActivity?: {
@@ -243,6 +244,7 @@ function mount(
             hasOlderHistory={opts.hasOlderHistory}
             loadingOlderHistory={opts.loadingOlderHistory}
             historyCapacityReached={opts.historyCapacityReached}
+            historyPaginationError={opts.historyPaginationError}
             onLoadOlderHistory={opts.onLoadOlderHistory}
             transcriptBlockCount={opts.transcriptBlockCount}
             transcriptActivity={opts.transcriptActivity}
@@ -1582,8 +1584,8 @@ describe('MessageList — turn collapse (DOM)', () => {
     const c = mount([userMsg('u1')], undefined, {
       historyPaginationError: true,
     });
-    expect(c.querySelector('[role="alert"]')?.textContent).toBe(
-      'Failed to load earlier history. Some older messages may be unavailable.',
+    expect(c.querySelector('[role="status"]')?.textContent).toBe(
+      'Earlier history could not be loaded.',
     );
   });
 

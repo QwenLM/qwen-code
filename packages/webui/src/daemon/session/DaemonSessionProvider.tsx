@@ -1257,6 +1257,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 hasMore: false,
                 loading: false,
                 capacityReached: true,
+                paginationError: false,
               });
             }
             for (const replayEvent of replayEvents) {
@@ -2460,6 +2461,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         hasMore: history.hasMore,
         loading: false,
         capacityReached: history.capacityReached,
+        paginationError: false,
       });
     } catch (error) {
       if (
@@ -2484,15 +2486,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         capacityReached: false,
         paginationError: !retryable,
       });
-      addNotice({
-        severity: 'warning',
-        category: 'user_action',
-        operation: 'load_session',
-        code: 'daemon.transcript_history.failed',
-        message: 'Failed to load earlier session history',
-        debugMessage: error instanceof Error ? error.message : String(error),
-        recoverable: retryable,
-      });
+      if (retryable) {
+        addNotice({
+          severity: 'warning',
+          category: 'user_action',
+          operation: 'load_session',
+          code: 'daemon.transcript_history.failed',
+          message: 'Failed to load earlier session history',
+          debugMessage: error instanceof Error ? error.message : String(error),
+          recoverable: retryable,
+        });
+      }
       throw error;
     }
   }, [addNotice, dismissNotice, maxBlocks, store]);

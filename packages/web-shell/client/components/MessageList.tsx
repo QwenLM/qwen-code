@@ -3817,7 +3817,7 @@ export const MessageList = memo(
         {historyPaginationError &&
           !showLoadingSkeleton &&
           !historyCapacityReached && (
-            <div className={styles.historyStatus} role="alert">
+            <div className={styles.historyStatus} role="status">
               {t('history.paginationError')}
             </div>
           )}
