@@ -127,6 +127,30 @@ describe('loadSandboxConfig sandbox command selection', () => {
     );
   });
 
+  it('does not blame QWEN_SANDBOX for a command that came from --sandbox', async () => {
+    installed('docker', 'podman');
+    probes({ docker: daemonDown(), podman: healthy() });
+
+    // `--sandbox docker` / `tools.sandbox` reach the same code path, so the
+    // error must not point at an env var the user never set.
+    const failure = await loadSandboxConfig({}, { sandbox: 'docker' }).catch(
+      (error: Error) => error,
+    );
+
+    expect((failure as Error).message).toContain("'docker' is installed");
+    expect((failure as Error).message).not.toContain('QWEN_SANDBOX');
+  });
+
+  it('names QWEN_SANDBOX when a missing command really did come from it', async () => {
+    process.env['QWEN_SANDBOX'] = 'podman';
+    installed('docker');
+    probes({});
+
+    await expect(loadSandboxConfig({}, {})).rejects.toThrow(
+      /Missing sandbox command 'podman' \(from QWEN_SANDBOX\)/,
+    );
+  });
+
   it('accepts an explicit choice that is usable', async () => {
     process.env['QWEN_SANDBOX'] = 'podman';
     installed('podman');

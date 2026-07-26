@@ -96,6 +96,12 @@ function getSandboxCommand(
     return '';
   }
 
+  // An explicitly named command can come from QWEN_SANDBOX, --sandbox, or
+  // tools.sandbox in settings. Naming the wrong one sends the user looking in
+  // a place they never configured, so only claim the env var when it won.
+  const sandboxSource =
+    environmentConfiguredSandbox.length > 0 ? ' (from QWEN_SANDBOX)' : '';
+
   if (typeof sandbox === 'string' && sandbox) {
     if (!isSandboxCommand(sandbox)) {
       throw new FatalSandboxError(
@@ -112,13 +118,13 @@ function getSandboxCommand(
       const failure = probeSandboxCommand(sandbox);
       if (failure) {
         throw new FatalSandboxError(
-          `Sandbox command '${sandbox}' (from QWEN_SANDBOX) is installed but cannot run: ${failure}`,
+          `Sandbox command '${sandbox}'${sandboxSource} is installed but cannot run: ${failure}`,
         );
       }
       return sandbox;
     }
     throw new FatalSandboxError(
-      `Missing sandbox command '${sandbox}' (from QWEN_SANDBOX)`,
+      `Missing sandbox command '${sandbox}'${sandboxSource}`,
     );
   }
 
