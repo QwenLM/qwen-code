@@ -350,6 +350,7 @@ function label(rec: AgentRecord, chunk: number | null): string {
 export function coverageFromTranscripts(
   planPath: string,
   env: NodeJS.ProcessEnv = process.env,
+  effort?: 'low' | 'medium' | 'high',
 ): CoverageFromTranscripts {
   const { plan, mtimeMs } = readPlan(planPath);
   const records = readTranscripts(mtimeMs, env, plan.diffPathAbsolute);
@@ -394,7 +395,7 @@ export function coverageFromTranscripts(
   // roster collapses to one line covering the whole run, and repeating "none was
   // built" once per chunk transcript would put N more copies of the same fact
   // into the posted body, right next to the line that already states it.
-  const rosterForRun = requiredAgents(plan as unknown as RosterPlan);
+  const rosterForRun = requiredAgents(plan as unknown as RosterPlan, effort);
   // ONE predicate for "was this prompt built", everywhere. A partial write can
   // leave a zero-byte record, and the Step 4/5 classifier already reads that as
   // not-built — a `Map.has()` here would read the same file as built, so an

@@ -129,7 +129,10 @@ function heavyFiles(plan: RosterPlan): string[] {
  * list is discretionary. If a role is in it, a review that did not launch it has a
  * dimension nobody reviewed, and must not certify the diff.
  */
-export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
+export function requiredAgents(
+  plan: RosterPlan,
+  effort?: 'low' | 'medium' | 'high',
+): RequiredAgent[] {
   const mode = reviewMode(plan);
   const out: RequiredAgent[] = [];
   const add = (role: RoleId, file?: string) =>
@@ -178,9 +181,16 @@ export function requiredAgents(plan: RosterPlan): RequiredAgent[] {
     add('3');
     add('4');
     add('5');
-    add('6a');
-    add('6b');
-    add('6c');
+    // The three adversarial personas are a high-effort dimension. A `medium`
+    // (balanced) review deliberately skips them, so they must not be *required*
+    // either — otherwise `check-coverage` flags them missing and exits 3, and a
+    // medium review of every small (3A) diff halts before Step 4. Only high
+    // requires them.
+    if (effort !== 'medium') {
+      add('6a');
+      add('6b');
+      add('6c');
+    }
   }
 
   // Both topologies. 1b owns the deleted side; 1c owns the cross-file walk and

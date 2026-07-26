@@ -82,6 +82,25 @@ describe('requiredAgents — Step 3A', () => {
     expect(keys(PR).filter((k) => k.startsWith('chunk-'))).toEqual([]);
   });
 
+  it('drops the adversarial personas at medium effort, but keeps every other dimension', () => {
+    // The personas (6a/6b/6c) are a high-only dimension; a balanced (medium)
+    // review deliberately does not launch them, so they must not be *required*
+    // — otherwise check-coverage flags them missing and exits 3, halting every
+    // small-diff medium review.
+    const med = requiredAgents(PR as never, 'medium').map((a) => a.key);
+    expect(med).not.toContain('6a');
+    expect(med).not.toContain('6b');
+    expect(med).not.toContain('6c');
+    expect(med).toEqual(
+      expect.arrayContaining(['0', '1a', '2', '3', '4', '5', '7']),
+    );
+    // High (and the default, undefined) still demand them.
+    expect(requiredAgents(PR as never, 'high').map((a) => a.key)).toEqual(
+      expect.arrayContaining(['6a', '6b', '6c']),
+    );
+    expect(keys(PR)).toEqual(expect.arrayContaining(['6a', '6b', '6c']));
+  });
+
   it('skips the removed-behavior audit on a diff that removes nothing', () => {
     expect(keys(PR)).not.toContain('1b');
     expect(
