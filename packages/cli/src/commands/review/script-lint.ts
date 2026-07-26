@@ -7,8 +7,8 @@
 // `qwen review script-lint`: run the deterministic linters over the executable
 // code a diff adds or changes, and report what they say.
 //
-// A diff's shell — a `.sh` file, a `Makefile` recipe, a Dockerfile `RUN`, a
-// GitHub Actions `run:` block — is code, and its bugs (an unquoted `$x` that
+// A diff's shell — a `.sh`/`.bash` file, a Dockerfile `RUN`, a GitHub Actions
+// `run:` block — is code, and its bugs (an unquoted `$x` that
 // word-splits, a `${PIPESTATUS[1]}` read after the array was already reset, a
 // `[ ]` where `[[ ]]` was meant) are exactly the class a reviewer misses by
 // *reading* a 3000-line YAML and catches by *running* the checker. Measured:
@@ -24,9 +24,18 @@
 
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import {
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  lstatSync,
+  openSync,
+  readSync,
+  closeSync,
+} from 'node:fs';
 import { dirname, join, resolve, basename } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { parseDiff } from './lib/diff-plan.js';
 
 /** The deterministic checkers this command dispatches. */
 export type LintTool = 'shellcheck' | 'actionlint' | 'hadolint';
@@ -64,7 +73,20 @@ export interface ScriptLintReport {
    * said so. Never silently dropped: an unrun checker is not a clean file.
    */
   skipped: Array<{ path: string; tool: LintTool; reason: string }>;
-  /** True when no finding on a changed line is an `error` or `warning`. */
+  /**
+   * Files whose linter **ran but failed** — a spawn error, a signal, an
+   * unexpected exit status, a `maxBuffer` overflow. Distinct from `skipped` (not
+   * installed): a checker that crashed reviewed nothing, so we fail closed — an
+   * errored file forces `ok` false, it is never a clean pass on the tool's silence.
+   */
+  errored: Array<{ path: string; tool: LintTool; reason: string }>;
+  /**
+   * True when every applicable linter ran cleanly **and** no finding on a changed
+   * line is above `style` — `info`/`warning`/`error` all count against it (the
+   * SC2086 word-split is `info`, and it blocks). A run error (`errored[]`
+   * non-empty) also makes this false. An uninstalled linter (`skipped[]`) does
+   * not flip `ok`, but is disclosed for the agent to report as unreviewed.
+   */
   ok: boolean;
   /** One line for the agent's report. */
   note: string;
@@ -132,25 +154,126 @@ function inAnyHunk(line: number, ranges: Array<[number, number]>): boolean {
   return ranges.some(([s, e]) => line >= s && line <= e);
 }
 
-/** Run a tool, or report it missing. `null` means the binary is not installed. */
-function runTool(tool: LintTool, absPath: string): string | null {
+/**
+ * Added-line ranges per path, parsed from the unified diff — the lines this PR
+ * actually **added or changed**, with the three context lines git prints around
+ * each hunk EXCLUDED. The plan's `hunks` include that context (see report.ts), so
+ * keying `inDiff` off them marks a pre-existing diagnostic three lines from a real
+ * change as this PR's and blocks on someone else's bug. `addedRanges` is populated
+ * only for heavy files in the plan, so we parse the diff, which carries it for
+ * every file. If the diff cannot be read we fall back to the (context-inclusive)
+ * plan hunks — over-inclusive, but fail-closed, never fail-open to "nothing changed".
+ */
+function addedRangesByPath(
+  diffPath: string,
+): Map<string, Array<[number, number]>> {
+  const map = new Map<string, Array<[number, number]>>();
+  let text: string;
+  try {
+    text = readFileSync(diffPath, 'utf8');
+  } catch {
+    return map;
+  }
+  let parsed: ReturnType<typeof parseDiff>;
+  try {
+    parsed = parseDiff(text);
+  } catch {
+    return map;
+  }
+  for (const f of parsed.files) {
+    map.set(
+      f.path,
+      f.addedRanges.map((r) => [r.start, r.end] as [number, number]),
+    );
+  }
+  return map;
+}
+
+/**
+ * The file's first line, read safely for shebang detection — or `null` if the
+ * path is not a regular file. A PR is untrusted: a changed `hang.sh` symlinked to
+ * `/dev/zero` would hang a whole-file read, and a fifo would block. `lstat` does
+ * not follow the link, so a non-regular file is skipped entirely — the linter is
+ * never pointed at it either. The read is bounded to one block, not the whole file.
+ */
+function firstLineOf(abs: string): string | null {
+  let st;
+  try {
+    st = lstatSync(abs);
+  } catch {
+    return null;
+  }
+  if (!st.isFile()) return null;
+  let fd: number | undefined;
+  try {
+    fd = openSync(abs, 'r');
+    const buf = Buffer.alloc(4096);
+    const n = readSync(fd, buf, 0, buf.length, 0);
+    const text = buf.toString('utf8', 0, n);
+    const nl = text.indexOf('\n');
+    return nl >= 0 ? text.slice(0, nl) : text;
+  } catch {
+    return null;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/** The outcome of pointing a linter at one file. */
+export type ToolRun =
+  | { kind: 'ok'; stdout: string }
+  | { kind: 'missing' }
+  | { kind: 'error'; reason: string };
+
+/**
+ * How `runScriptLint` invokes a linter. Injectable so a test can feed canned
+ * output for all three tools — and exercise the fail-closed paths — without the
+ * binaries installed; the default is the real `spawnSync`-backed runner.
+ */
+export type ToolRunner = (tool: LintTool, absPath: string) => ToolRun;
+
+/**
+ * Run a linter over one file. Fails **closed**: only a clean exit (0) or a
+ * findings exit (1) yields output to parse; a spawn error (`EACCES`), a signal,
+ * a `maxBuffer` overflow, or any other status is an `error` the caller must not
+ * read as a clean file. `ENOENT` alone is `missing` (the binary is not installed).
+ */
+function runTool(tool: LintTool, absPath: string): ToolRun {
   // The three tools all take a file path and print machine-readable diagnostics.
+  // `shellcheck --norc` ignores a PR-controlled `.shellcheckrc` in the worktree
+  // (which could disable SC2086), and the sanitized env drops `SHELLCHECK_OPTS`
+  // for the same reason: a checker's configuration must come from us, not the diff.
   const argv: Record<LintTool, string[]> = {
-    shellcheck: ['--format=json1', '--severity=style', absPath],
+    shellcheck: ['--norc', '--format=json1', '--severity=style', absPath],
     actionlint: ['-format', '{{json .}}', '-no-color', absPath],
     hadolint: ['--format', 'json', absPath],
   };
+  const env = { ...process.env };
+  delete env['SHELLCHECK_OPTS'];
   const r = spawnSync(tool, argv[tool], {
     encoding: 'utf8',
     maxBuffer: 32 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'pipe'],
+    env,
   });
-  if ((r.error as NodeJS.ErrnoException | undefined)?.code === 'ENOENT') {
-    return null; // not installed
+  const err = r.error as NodeJS.ErrnoException | undefined;
+  if (err?.code === 'ENOENT') return { kind: 'missing' };
+  if (err) {
+    return { kind: 'error', reason: `${tool} failed to run: ${err.message}` };
   }
-  // All three exit non-zero when they find something — that is not a failure of
-  // the command, it is the finding. stdout carries the JSON; stderr is noise.
-  return `${r.stdout ?? ''}`;
+  if (r.signal) {
+    return { kind: 'error', reason: `${tool} was killed by ${r.signal}` };
+  }
+  // All three exit 0 (clean) or 1 (found something) on a normal run. Any other
+  // status — a parse/usage error, a crash — is not "no findings"; fail closed.
+  if (r.status !== 0 && r.status !== 1) {
+    const detail = `${r.stderr ?? ''}`.trim().split('\n')[0] ?? '';
+    return {
+      kind: 'error',
+      reason: `${tool} exited ${r.status ?? 'null'}${detail ? `: ${detail}` : ''}`,
+    };
+  }
+  return { kind: 'ok', stdout: `${r.stdout ?? ''}` };
 }
 
 /** Normalise each tool's JSON into `LintFinding[]` (line/code/level/message). */
@@ -224,8 +347,11 @@ function parseFindings(tool: LintTool, raw: string): LintFinding[] {
     .filter((x): x is LintFinding => x !== null);
 }
 
-export function runScriptLint(args: ScriptLintArgs): ScriptLintReport {
-  let plan: { files?: PlanFile[] };
+export function runScriptLint(
+  args: ScriptLintArgs,
+  runner: ToolRunner = runTool,
+): ScriptLintReport {
+  let plan: { files?: PlanFile[]; diffPathAbsolute?: unknown };
   try {
     plan = JSON.parse(readFileSync(args.plan, 'utf8'));
   } catch (err) {
@@ -234,17 +360,27 @@ export function runScriptLint(args: ScriptLintArgs): ScriptLintReport {
     );
   }
   const files = Array.isArray(plan.files) ? plan.files : [];
+  // The lines this PR actually added or changed, context excluded — keyed off the
+  // diff, not the plan's context-inclusive hunks. Empty when the diff is absent,
+  // in which case each file falls back to its (over-inclusive) plan hunks below.
+  const addedRanges =
+    typeof plan.diffPathAbsolute === 'string'
+      ? addedRangesByPath(plan.diffPathAbsolute)
+      : new Map<string, Array<[number, number]>>();
+
   const checked: FileLint[] = [];
   const skipped: ScriptLintReport['skipped'] = [];
+  const errored: ScriptLintReport['errored'] = [];
   const missing = new Set<LintTool>();
 
   for (const f of files) {
     const path = typeof f?.path === 'string' ? f.path : '';
     if (!path) continue;
     const abs = resolve(join(args.worktree, path));
-    // A file the diff deleted has nothing to lint on the new side.
-    if (!existsSync(abs)) continue;
-    const firstLine = readFileSync(abs, 'utf8').split('\n', 1)[0] ?? '';
+    // A file the diff deleted, or a symlink / fifo we will not follow, has nothing
+    // safe to lint on the new side — `firstLineOf` returns null for both.
+    const firstLine = firstLineOf(abs);
+    if (firstLine === null) continue;
     const tool = toolFor(path, firstLine);
     if (!tool) continue;
 
@@ -252,14 +388,23 @@ export function runScriptLint(args: ScriptLintArgs): ScriptLintReport {
       skipped.push({ path, tool, reason: `${tool} is not installed` });
       continue;
     }
-    const raw = runTool(tool, abs);
-    if (raw === null) {
+    const res = runner(tool, abs);
+    if (res.kind === 'missing') {
       missing.add(tool);
       skipped.push({ path, tool, reason: `${tool} is not installed` });
       continue;
     }
-    const ranges = hunksOf(f);
-    const findings = parseFindings(tool, raw).map((x) => ({
+    if (res.kind === 'error') {
+      // Fail closed: a checker that crashed reviewed nothing, so this file is not
+      // a clean pass — it is surfaced as errored and forces `ok` false below.
+      errored.push({ path, tool, reason: res.reason });
+      continue;
+    }
+    // Prefer the diff's added-line ranges (context excluded); fall back to the
+    // plan's context-inclusive hunks only when the diff was unavailable. A file
+    // present in the diff with no added lines yields `[]` — correctly nothing.
+    const ranges = addedRanges.get(path) ?? hunksOf(f);
+    const findings = parseFindings(tool, res.stdout).map((x) => ({
       ...x,
       inDiff: inAnyHunk(x.line, ranges),
     }));
@@ -273,23 +418,32 @@ export function runScriptLint(args: ScriptLintArgs): ScriptLintReport {
   const blocking = checked
     .flatMap((c) => c.findings)
     .filter((x) => x.inDiff && x.level !== 'style');
-  const ok = blocking.length === 0;
-  const note = buildNote(checked, skipped, blocking.length);
-  return { checked, skipped, ok, note };
+  // Fail closed: a linter that errored on a file also blocks — that file is not
+  // clean, and `ok: true` on a crashed checker's silence is the trap we avoid.
+  const ok = blocking.length === 0 && errored.length === 0;
+  const note = buildNote(checked, skipped, errored, blocking.length);
+  return { checked, skipped, errored, ok, note };
 }
 
 function buildNote(
   checked: FileLint[],
   skipped: ScriptLintReport['skipped'],
+  errored: ScriptLintReport['errored'],
   blocking: number,
 ): string {
-  if (checked.length === 0 && skipped.length === 0) {
+  if (checked.length === 0 && skipped.length === 0 && errored.length === 0) {
     return 'No executable scripts changed — nothing to lint.';
   }
   const parts: string[] = [];
   parts.push(
     `Linted ${checked.length} file(s); ${blocking} finding(s) on changed lines.`,
   );
+  if (errored.length > 0) {
+    const tools = [...new Set(errored.map((e) => e.tool))].join(', ');
+    parts.push(
+      `${errored.length} file(s) failed to lint — ${tools} errored (fail closed: not clean).`,
+    );
+  }
   if (skipped.length > 0) {
     const tools = [...new Set(skipped.map((s) => s.tool))].join(', ');
     parts.push(
@@ -324,13 +478,15 @@ export const scriptLintCommand: CommandModule = {
     const args = argv as unknown as ScriptLintArgs;
     const report = runScriptLint(args);
     const json = JSON.stringify(report, null, 2);
+    // Write the file when asked AND always print the JSON — the agent's brief
+    // says "read the JSON it prints", and the roster's generated command passes
+    // `--out`, so an `--out`-only "Wrote ..." line would leave the agent with no
+    // findings to read. Build & Test does exactly this (writes then prints).
     if (args.out) {
       mkdirSync(dirname(resolve(args.out)), { recursive: true });
       writeFileSync(args.out, json);
-      writeStdoutLine(`Wrote script-lint report to ${args.out}`);
-    } else {
-      writeStdoutLine(json);
     }
+    writeStdoutLine(json);
     writeStderrLine(report.note);
   },
 };

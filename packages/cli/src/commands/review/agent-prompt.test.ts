@@ -1898,10 +1898,13 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
       planPath: '/abs/tmp/plan.json',
     });
     expect(p).toContain('"${QWEN_CODE_CLI:-qwen}" review script-lint');
-    expect(p).toContain('--plan /abs/tmp/plan.json');
-    expect(p).toMatch(/--worktree \/[^\s]*review-pr-6766/);
-    expect(p).not.toMatch(/--plan \.qwen/);
-    expect(p).toContain('--out /abs/tmp/qwen-review-pr-6766-script-lint.json');
+    // Paths are shell-quoted so a worktree with a space cannot word-split.
+    expect(p).toContain("--plan '/abs/tmp/plan.json'");
+    expect(p).toMatch(/--worktree '\/[^\s']*review-pr-6766'/);
+    expect(p).not.toMatch(/--plan '?\.qwen/);
+    expect(p).toContain(
+      "--out '/abs/tmp/qwen-review-pr-6766-script-lint.json'",
+    );
     // Same PATH-skew guard as build-test: no bare executable `qwen`.
     expect(p).not.toMatch(/^qwen review /m);
   });
@@ -1913,7 +1916,7 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
       planPath: '/abs/tmp/plan.json',
     });
     expect(p).not.toContain('undefined');
-    expect(p).toContain('--out /abs/tmp/qwen-review-script-lint.json');
+    expect(p).toContain("--out '/abs/tmp/qwen-review-script-lint.json'");
   });
 
   it('emits NO script-lint block in PR mode when the worktree is missing', () => {

@@ -52,6 +52,7 @@ export interface RosterPlan {
     path?: unknown;
     kind?: unknown;
     heavy?: unknown;
+    addedLines?: unknown;
     removedLines?: unknown;
   }>;
   srcDiffLines?: unknown;
@@ -135,9 +136,14 @@ function isPositivePrNumber(value: unknown): boolean {
  */
 function hasExecutableScript(plan: RosterPlan): boolean {
   const files = Array.isArray(plan.files) ? plan.files : [];
-  return files.some(
-    (f) => typeof f?.path === 'string' && pathTool(f.path) !== null,
-  );
+  return files.some((f) => {
+    if (typeof f?.path !== 'string' || pathTool(f.path) === null) return false;
+    // A pure deletion has nothing on the new side to lint, so requiring the agent
+    // for it launches a mandatory no-op. Exclude files with zero added lines;
+    // `addedLines` absent (a plan that never recorded it) fails safe to "require".
+    const added = f.addedLines;
+    return added === undefined || Number(added) > 0;
+  });
 }
 
 /** Source files rewritten heavily enough that the diff is the wrong frame. */

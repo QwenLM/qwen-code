@@ -50,6 +50,7 @@ import {
 import { recordPrompt, writeBrief } from './lib/prompt-record.js';
 import { BRIEFS, type RoleId } from './lib/agent-briefs.js';
 import { pathRulesFor } from './lib/path-rules.js';
+import { shellQuotePath } from './lib/shell-quote.js';
 import {
   requiredAgents,
   reviewMode,
@@ -916,10 +917,12 @@ export function buildRoleBrief(
           'exists to avoid, and `script-lint` is new enough that an old global lacks it):',
         '',
         '```bash',
+        // Quote every interpolated path: a worktree like `/home/a/My Project`
+        // would otherwise word-split and the command would never run.
         `"\${QWEN_CODE_CLI:-qwen}" review script-lint \\`,
-        `  --plan ${resolve(opts.planPath)} \\`,
-        `  --worktree ${resolve(lintTree)} \\`,
-        `  --out ${resolve(dirname(opts.planPath), outName)}`,
+        `  --plan ${shellQuotePath(resolve(opts.planPath))} \\`,
+        `  --worktree ${shellQuotePath(resolve(lintTree))} \\`,
+        `  --out ${shellQuotePath(resolve(dirname(opts.planPath), outName))}`,
         '```',
       );
     }
