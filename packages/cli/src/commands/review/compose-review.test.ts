@@ -23,6 +23,7 @@ import {
   verdictLine,
   type ComposeReviewInput,
   type ComposeReviewResult,
+  type PrBodyFetcher,
 } from './compose-review.js';
 
 vi.mock('../../utils/stdioHelpers.js', () => ({
@@ -2118,5 +2119,127 @@ describe('bilingual body — the PR author writes Chinese (prDescriptionHasHan)'
     expect(
       r.body.match(/old blocker at a\.ts:1 — still reachable\?/g) ?? [],
     ).toHaveLength(2);
+  });
+});
+
+/**
+ * The plan flag is the deterministic path; this is the recovery for when it is
+ * missing. `fetch-pr` always writes `prDescriptionHasHan`, but a `plan-diff`
+ * plan never does, and an orchestrator that improvises the pipeline can hand
+ * `compose-review` a plan that is not `fetch-pr`'s report — which is how a
+ * Chinese-authored PR (#7686) shipped an English-only review while the four
+ * bot reviews before it, off a proper plan, were bilingual. When the flag is
+ * absent but the plan still names the PR, the register is recovered from the
+ * live description, which the caller cannot forge.
+ */
+describe('bilingual body — recovered from the live PR when the plan omits the flag', () => {
+  /** A covered plan with a PR identity but no `prDescriptionHasHan`, its mtime
+   *  kept old so its transcripts still read as newer than it. */
+  function namedPlanWithoutFlag(): string {
+    const p = coveredPlan();
+    const parsed = JSON.parse(readFileSync(p, 'utf8'));
+    delete parsed.prDescriptionHasHan;
+    parsed.ownerRepo = 'QwenLM/qwen-code';
+    parsed.prNumber = '7686';
+    writeFileSync(p, JSON.stringify(parsed));
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    return p;
+  }
+
+  /** A fetcher that records its calls, so a test can prove it was NOT reached. */
+  function recordingFetcher(body: string): PrBodyFetcher & { calls: number } {
+    const fn = ((_ownerRepo: string, _prNumber: string) => {
+      fn.calls++;
+      return body;
+    }) as PrBodyFetcher & { calls: number };
+    fn.calls = 0;
+    return fn;
+  }
+
+  it('folds in Chinese when the recovered description contains Han', () => {
+    const fetch = recordingFetcher('这个 PR 懒加载首次使用的依赖。');
+    const r = composeReview({
+      suggestionsInline: 1,
+      planPath: namedPlanWithoutFlag(),
+      prBodyFetcher: fetch,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(fetch.calls).toBe(1);
+    // Both halves: the English rides above the fold, the Chinese inside it.
+    expect(r.body).toContain('<details>\n<summary>中文说明</summary>');
+    expect(r.body).toContain('Suggestions are inline.');
+    expect(r.body).toContain('建议见行内评论。');
+  });
+
+  it('stays English when the recovered description has no Han', () => {
+    const fetch = recordingFetcher(
+      'This PR lazy-loads first-use dependencies.',
+    );
+    const r = composeReview({
+      suggestionsInline: 1,
+      planPath: namedPlanWithoutFlag(),
+      prBodyFetcher: fetch,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(fetch.calls).toBe(1);
+    expect(r.body).not.toContain('<details>');
+    expect(r.body).not.toContain('中文');
+  });
+
+  it('honours a recorded false without fetching — the English author is settled', () => {
+    // A real fetch-pr report that fetched the body and found no Han. Re-reading
+    // the live PR on every English review would be waste, and the recorded
+    // snapshot is the answer.
+    const p = coveredPlan();
+    const parsed = JSON.parse(readFileSync(p, 'utf8'));
+    parsed.prDescriptionHasHan = false;
+    parsed.ownerRepo = 'QwenLM/qwen-code';
+    parsed.prNumber = '7686';
+    writeFileSync(p, JSON.stringify(parsed));
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    const fetch = recordingFetcher('这段中文绝不该被读到。');
+    const r = composeReview({
+      suggestionsInline: 1,
+      planPath: p,
+      prBodyFetcher: fetch,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(fetch.calls).toBe(0);
+    expect(r.body).not.toContain('<details>');
+  });
+
+  it('does not fetch when the plan carries no PR identity', () => {
+    const fetch = recordingFetcher('这段中文绝不该被读到。');
+    const r = composeReview({
+      suggestionsInline: 1,
+      planPath: coveredPlan(), // no ownerRepo/prNumber, no flag
+      prBodyFetcher: fetch,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(fetch.calls).toBe(0);
+    expect(r.body).not.toContain('<details>');
+  });
+
+  it('falls back to English when the fetch throws — language never takes the review down', () => {
+    const boom: PrBodyFetcher = () => {
+      throw new Error('gh unreachable');
+    };
+    const r = composeReview({
+      suggestionsInline: 1,
+      planPath: namedPlanWithoutFlag(),
+      prBodyFetcher: boom,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).not.toContain('<details>');
+    expect(r.body).not.toContain('中文');
+    expect(r.body).toContain('Suggestions are inline.');
   });
 });

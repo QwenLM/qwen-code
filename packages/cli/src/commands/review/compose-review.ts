@@ -30,6 +30,7 @@ import {
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
 import { shellQuotePath } from './lib/shell-quote.js';
+import { gh } from './lib/gh.js';
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
@@ -39,6 +40,13 @@ import {
 } from './lib/inline-counts.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
+
+/**
+ * Reads a PR's description body, given its `owner/repo` and number. The one
+ * production implementation calls `gh pr view`; the bilingual fallback uses it
+ * to recover the Han signal from the live PR when the plan does not carry it.
+ */
+export type PrBodyFetcher = (ownerRepo: string, prNumber: string) => string;
 
 export interface ComposeReviewInput {
   /**
@@ -95,6 +103,16 @@ export interface ComposeReviewInput {
    * anything that would change where the transcripts are found on a real run.
    */
   env?: NodeJS.ProcessEnv;
+  /**
+   * How the bilingual fallback reads the live PR body when the plan carries a
+   * PR identity but no `prDescriptionHasHan` (a `plan-diff` plan, or one an
+   * improvising orchestrator wired in place of `fetch-pr`'s report). A test
+   * seam ONLY: production leaves it undefined and the CLI reads the PR with
+   * `gh pr view`; a model cannot supply it, being a function that does not
+   * serialise into the input JSON — so it can neither force nor suppress the
+   * Chinese fold, which is the whole point of keeping the signal the CLI's own.
+   */
+  prBodyFetcher?: PrBodyFetcher;
   /** Step 1's lightweight `pr-context` fetch failed. */
   contextUnavailable?: boolean;
   presubmit?: {
@@ -589,11 +607,13 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // description contains Han characters, the posted body carries the complete
   // Chinese version collapsed under the English one — the shape this repo's
   // own PR descriptions use, decided by the plan the CLI wrote, never by the
-  // caller. Fragments with no deterministic translation (model-written
-  // findings, caller echoes, error interpolations) ride verbatim in both
-  // halves. The footer stays outside the fold, once. A `zh === en` body has
-  // nothing translated, so no empty fold is published.
-  const bilingual = bilingualFromPlan(input.planPath);
+  // caller. When the plan does not record the signal but still names the PR,
+  // the switch recovers it from the live description (see `bilingualFromPlan`).
+  // Fragments with no deterministic translation (model-written findings, caller
+  // echoes, error interpolations) ride verbatim in both halves. The footer
+  // stays outside the fold, once. A `zh === en` body has nothing translated, so
+  // no empty fold is published.
+  const bilingual = bilingualFromPlan(input.planPath, input.prBodyFetcher);
   const render = (parts: Bi[], sep: string): string => {
     const en = parts.map((p) => p.en).join(sep);
     if (en === '') return '';
@@ -1041,6 +1061,30 @@ interface Bi {
   zh: string;
 }
 
+/** A positive PR number, as `fetch-pr`/`plan-diff` write it (a string) or a
+ *  raw integer. `null`, `0`, `''` and non-numeric junk are 'no PR'. */
+function positivePrNumber(value: unknown): string | undefined {
+  if (typeof value === 'number')
+    return Number.isInteger(value) && value > 0 ? String(value) : undefined;
+  if (typeof value === 'string' && /^\d+$/.test(value) && Number(value) > 0)
+    return value;
+  return undefined;
+}
+
+/** The production reader: one `gh pr view` for the description body. */
+const fetchPrBodyViaGh: PrBodyFetcher = (ownerRepo, prNumber) => {
+  const json = gh(
+    'pr',
+    'view',
+    prNumber,
+    '--repo',
+    ownerRepo,
+    '--json',
+    'body',
+  );
+  return (JSON.parse(json) as { body?: string }).body ?? '';
+};
+
 /**
  * Whether the posted body carries the collapsed Chinese version: the plan
  * (fetch-pr's report) recorded Han characters in the PR description. The
@@ -1048,14 +1092,47 @@ interface Bi {
  * the register of a certified body. A local plan has no such field, and a
  * plan that cannot be read defaults to English-only: the language must never
  * take the review down.
+ *
+ * A recorded `false` is authoritative: `fetch-pr` fetched the body and found
+ * no Han, so English-only is the answer and no network is spent — every
+ * English-authored PR review takes this path.
+ *
+ * The field being *absent* is a different state, and the one that shipped an
+ * English-only review over a Chinese-authored PR (#7686): `fetch-pr` always
+ * writes it, but a `plan-diff` plan never does, and an orchestrator that
+ * improvises the pipeline can wire `compose-review` at a plan that is not
+ * `fetch-pr`'s report at all. So when the flag is missing yet the plan still
+ * carries the PR's identity, recover the signal from the live PR — the real
+ * description, which the caller cannot fake, so this hardens the "signal is
+ * the CLI's own" property rather than loosening it. Any failure of that fetch
+ * falls back to English: the language must never take the review down.
  */
-function bilingualFromPlan(planPath: string | undefined): boolean {
+function bilingualFromPlan(
+  planPath: string | undefined,
+  fetchPrBody: PrBodyFetcher = fetchPrBodyViaGh,
+): boolean {
   if (!planPath) return false;
+  let plan: {
+    prDescriptionHasHan?: unknown;
+    ownerRepo?: unknown;
+    prNumber?: unknown;
+  };
   try {
-    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
-      prDescriptionHasHan?: unknown;
-    };
-    return plan?.prDescriptionHasHan === true;
+    plan = JSON.parse(readFileSync(planPath, 'utf8'));
+  } catch {
+    return false;
+  }
+  if (typeof plan?.prDescriptionHasHan === 'boolean') {
+    return plan.prDescriptionHasHan;
+  }
+  const ownerRepo =
+    typeof plan?.ownerRepo === 'string' && plan.ownerRepo
+      ? plan.ownerRepo
+      : undefined;
+  const prNumber = positivePrNumber(plan?.prNumber);
+  if (!ownerRepo || !prNumber) return false;
+  try {
+    return /\p{Script=Han}/u.test(fetchPrBody(ownerRepo, prNumber));
   } catch {
     return false;
   }
