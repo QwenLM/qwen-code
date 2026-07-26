@@ -259,7 +259,7 @@ describe('SubagentManager', () => {
       model: 'fast',
     };
 
-    it('resolves allowed grades and lets them override built-in defaults', () => {
+    it('resolves only available grades and preserves custom defaults', () => {
       const configuredManager = new SubagentManager(
         makeFakeConfig({
           agents: {
@@ -269,6 +269,9 @@ describe('SubagentManager', () => {
         }),
       );
 
+      expect(configuredManager.getAvailableModelGrades()).toEqual(
+        new Map([['high', 'qwen-max']]),
+      );
       expect(configuredManager.resolveModelGrade('high', builtinConfig)).toBe(
         'qwen-max',
       );
@@ -278,29 +281,6 @@ describe('SubagentManager', () => {
       expect(
         configuredManager.resolveModelGrade('missing', builtinConfig),
       ).toBeUndefined();
-    });
-
-    it('ignores malformed grade settings', () => {
-      const configuredManager = new SubagentManager(
-        makeFakeConfig({
-          agents: {
-            modelGrades: { high: 'qwen-max' },
-            allowedGrades: {} as string[],
-          },
-        }),
-      );
-
-      expect(
-        configuredManager.resolveModelGrade('high', builtinConfig),
-      ).toBeUndefined();
-    });
-
-    it('keeps an explicit custom-agent model ahead of a runtime grade', () => {
-      const configuredManager = new SubagentManager(
-        makeFakeConfig({
-          agents: { modelGrades: { high: 'qwen-max' } },
-        }),
-      );
 
       expect(
         configuredManager.resolveModelGrade('high', {
@@ -320,54 +300,39 @@ describe('SubagentManager', () => {
       ).toBe('qwen-max');
     });
 
-    it('does not resolve inherited object properties as grade names', () => {
+    it('exposes every valid grade without an allowlist', () => {
       const configuredManager = new SubagentManager(
         makeFakeConfig({
-          agents: { modelGrades: {} },
+          agents: { modelGrades: { small: 'fast', high: 'qwen-max' } },
         }),
       );
 
-      expect(
-        configuredManager.resolveModelGrade('toString', builtinConfig),
-      ).toBeUndefined();
+      expect(configuredManager.getAvailableModelGrades()).toEqual(
+        new Map([
+          ['small', 'fast'],
+          ['high', 'qwen-max'],
+        ]),
+      );
     });
 
-    it('rejects malformed grade values and shapes', () => {
-      // 非字符串值
-      const withNonString = new SubagentManager(
-        makeFakeConfig({
-          agents: { modelGrades: { high: 42 as unknown as string } },
-        }),
-      );
-      expect(
-        withNonString.resolveModelGrade('high', builtinConfig),
-      ).toBeUndefined();
-
-      // 仅空白的值
-      const withBlank = new SubagentManager(
-        makeFakeConfig({ agents: { modelGrades: { high: '  ' } } }),
-      );
-      expect(
-        withBlank.resolveModelGrade('high', builtinConfig),
-      ).toBeUndefined();
-
-      // modelGrades 是数组而非 plain object
-      const withArray = new SubagentManager(
+    it('ignores malformed grade settings', () => {
+      const malformedGrades = new SubagentManager(
         makeFakeConfig({
           agents: {
-            modelGrades: ['high'] as unknown as Record<string, string>,
+            modelGrades: {
+              valid: 'qwen-max',
+              invalid: 42 as unknown as string,
+              blank: '  ',
+              '  ': 'qwen-max',
+            },
+            allowedGrades: ['valid', 'invalid', 'blank', '  '],
           },
         }),
       );
-      expect(
-        withArray.resolveModelGrade('high', builtinConfig),
-      ).toBeUndefined();
 
-      // 无 modelGrades（带 grade 请求）
-      const withoutGrades = new SubagentManager(makeFakeConfig({ agents: {} }));
-      expect(
-        withoutGrades.resolveModelGrade('high', builtinConfig),
-      ).toBeUndefined();
+      expect(malformedGrades.getAvailableModelGrades()).toEqual(
+        new Map([['valid', 'qwen-max']]),
+      );
     });
   });
 

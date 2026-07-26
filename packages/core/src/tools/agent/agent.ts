@@ -994,20 +994,9 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         delete schema.properties.plan_mode_required;
       }
 
-      const { modelGrades, allowedGrades } = this.config.getAgentsSettings();
-      const availableGrades =
-        modelGrades &&
-        typeof modelGrades === 'object' &&
-        !Array.isArray(modelGrades) &&
-        (allowedGrades === undefined || Array.isArray(allowedGrades))
-          ? Object.keys(modelGrades).filter(
-              (grade) =>
-                grade.trim() !== '' &&
-                typeof modelGrades[grade] === 'string' &&
-                modelGrades[grade].trim() !== '' &&
-                (allowedGrades === undefined || allowedGrades.includes(grade)),
-            )
-          : [];
+      const availableGrades = [
+        ...this.subagentManager.getAvailableModelGrades().keys(),
+      ];
       if (availableGrades.length > 0) {
         schema.properties.model = {
           type: 'string',
@@ -1066,26 +1055,21 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       }
     }
 
-    if (
-      params.model !== undefined &&
-      (typeof params.model !== 'string' || params.model.trim() === '')
-    ) {
-      return 'Parameter "model" must be a non-empty model grade when set.';
-    }
-    if (
-      params.model !== undefined &&
-      params.subagent_type?.toLowerCase() === FORK_SUBAGENT_TYPE
-    ) {
-      return 'Parameter "model" cannot be used with subagent_type "fork".';
-    }
-    if (
-      params.model !== undefined &&
-      params.name &&
-      !isTeammate() &&
-      isTopLevelSession() &&
-      this.config.getTeamManager()
-    ) {
-      return 'Parameter "model" is not supported for a named teammate.';
+    if (params.model !== undefined) {
+      if (typeof params.model !== 'string' || params.model.trim() === '') {
+        return 'Parameter "model" must be a non-empty model grade when set.';
+      }
+      if (params.subagent_type?.toLowerCase() === FORK_SUBAGENT_TYPE) {
+        return 'Parameter "model" cannot be used with subagent_type "fork".';
+      }
+      if (
+        params.name &&
+        !isTeammate() &&
+        isTopLevelSession() &&
+        this.config.getTeamManager()
+      ) {
+        return 'Parameter "model" is not supported for a named teammate.';
+      }
     }
 
     // Some models emit an empty placeholder for the unused optional field.

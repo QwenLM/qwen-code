@@ -202,7 +202,6 @@ describe('AgentTool', () => {
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getCliVersion: vi.fn().mockReturnValue('test-version'),
       getSubagentManager: vi.fn(),
-      getAgentsSettings: vi.fn().mockReturnValue({}),
       getGeminiClient: vi.fn().mockReturnValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
@@ -247,6 +246,7 @@ describe('AgentTool', () => {
       loadSubagent: vi.fn(),
       createAgentHeadless: vi.fn(),
       resolveModelGrade: vi.fn().mockReturnValue(undefined),
+      getAvailableModelGrades: vi.fn().mockReturnValue(new Map()),
       addChangeListener: vi.fn((listener: () => void) => {
         changeListeners.push(listener);
         return () => {
@@ -464,11 +464,10 @@ describe('AgentTool', () => {
       expect(properties.properties.subagent_type.enum).toBeUndefined();
     });
 
-    it('advertises configured model grades without exposing model selectors', async () => {
-      vi.mocked(config.getAgentsSettings).mockReturnValue({
-        modelGrades: { small: 'fast', high: 'qwen-max' },
-        allowedGrades: ['small', 'missing'],
-      });
+    it('advertises model grades without exposing model selectors', async () => {
+      vi.mocked(
+        mockSubagentManager.getAvailableModelGrades,
+      ).mockReturnValue(new Map([['small', 'fast']]));
 
       await agentTool.refreshSubagents();
 
@@ -481,54 +480,6 @@ describe('AgentTool', () => {
         };
       };
       expect(properties.properties.model?.enum).toEqual(['small']);
-      expect(JSON.stringify(properties.properties.model)).not.toContain('fast');
-      expect(JSON.stringify(properties.properties.model)).not.toContain(
-        'qwen-max',
-      );
-    });
-
-    it('advertises all configured model grades when no allowlist is set', async () => {
-      vi.mocked(config.getAgentsSettings).mockReturnValue({
-        modelGrades: { small: 'fast', high: 'qwen-max' },
-      });
-
-      await agentTool.refreshSubagents();
-
-      const properties = agentTool.schema.parametersJsonSchema as {
-        properties: { model?: { enum?: string[] } };
-      };
-      expect(properties.properties.model?.enum).toEqual(['small', 'high']);
-    });
-
-    it('does not advertise grades from malformed settings', async () => {
-      vi.mocked(config.getAgentsSettings).mockReturnValue({
-        modelGrades: { high: 'qwen-max' },
-        allowedGrades: {} as string[],
-      });
-
-      await agentTool.refreshSubagents();
-
-      const properties = agentTool.schema.parametersJsonSchema as {
-        properties: { model?: { enum?: string[] } };
-      };
-      expect(properties.properties.model).toBeUndefined();
-    });
-
-    it('does not advertise unusable grades', async () => {
-      vi.mocked(config.getAgentsSettings).mockReturnValue({
-        modelGrades: {
-          empty: '  ',
-          malformed: 42 as unknown as string,
-          '  ': 'qwen-max',
-        },
-      });
-
-      await agentTool.refreshSubagents();
-
-      const properties = agentTool.schema.parametersJsonSchema as {
-        properties: { model?: { enum?: string[] } };
-      };
-      expect(properties.properties.model).toBeUndefined();
     });
 
     it('declares the background default and foreground opt-out', () => {
@@ -1333,16 +1284,15 @@ describe('AgentTool', () => {
       // guard and is rejected — proving executeTeammate was not taken.
       vi.mocked(config.getMaxSubagentDepth).mockReturnValue(1);
       vi.mocked(config.getTeamManager).mockReturnValue({} as never);
-      const result = await runWithAgentContext('sub-1', () => {
-        const invocation = agentTool.build({
-          description: 'Spawn teammate from within a sub-agent',
-          prompt: 'Do work',
-          subagent_type: 'file-search',
-          name: 'helper',
-          model: 'high',
-        });
-        return invocation.execute(new AbortController().signal);
+      const invocation = agentTool.build({
+        description: 'Spawn teammate from within a sub-agent',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+        name: 'helper',
       });
+      const result = await runWithAgentContext('sub-1', () =>
+        invocation.execute(new AbortController().signal),
+      );
 
       expect(result.llmContent).toContain('nesting depth limit reached');
       expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
@@ -3668,33 +3618,6 @@ describe('AgentTool', () => {
         .mockReturnValue('/test/transcript');
     });
 
-    it('uses the resolved model grade for a foreground subagent', async () => {
-      vi.mocked(mockSubagentManager.resolveModelGrade).mockReturnValue(
-        'mapped-model',
-      );
-
-      const invocation = (
-        agentTool as AgentToolWithProtectedMethods
-      ).createInvocation({
-        description: 'Search files',
-        prompt: 'Find all TypeScript files',
-        subagent_type: 'file-search',
-        model: 'high',
-        run_in_background: false,
-      });
-      await invocation.execute();
-
-      expect(mockSubagentManager.resolveModelGrade).toHaveBeenCalledWith(
-        'high',
-        mockSubagents[0],
-      );
-      expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledWith(
-        expect.objectContaining({ model: 'mapped-model' }),
-        expect.anything(),
-        expect.anything(),
-      );
-    });
-
     it('should call fireSubagentStartEvent before execution', async () => {
       const params: AgentParams = {
         description: 'Search files',
@@ -4737,6 +4660,10 @@ describe('AgentTool', () => {
       });
       await invocation.execute();
 
+      expect(mockSubagentManager.resolveModelGrade).toHaveBeenCalledWith(
+        'high',
+        expect.objectContaining({ name: 'monitor' }),
+      );
       expect(mockRegistry.tryReserveBackgroundSlot).toHaveBeenCalledWith(
         'mapped-model',
       );

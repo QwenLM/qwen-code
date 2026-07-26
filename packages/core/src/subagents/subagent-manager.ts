@@ -161,23 +161,30 @@ export class SubagentManager {
       return undefined;
     }
 
+    return this.getAvailableModelGrades().get(grade);
+  }
+
+  getAvailableModelGrades(): Map<string, string> {
     const { modelGrades, allowedGrades } = this.config.getAgentsSettings();
     if (
       !modelGrades ||
       typeof modelGrades !== 'object' ||
       Array.isArray(modelGrades) ||
-      (allowedGrades !== undefined &&
-        (!Array.isArray(allowedGrades) || !allowedGrades.includes(grade))) ||
-      !Object.hasOwn(modelGrades, grade)
+      (allowedGrades !== undefined && !Array.isArray(allowedGrades))
     ) {
-      return undefined;
+      return new Map();
     }
 
-    const model = modelGrades[grade];
-    if (typeof model !== 'string') {
-      return undefined;
-    }
-    return model.trim() || undefined;
+    return new Map(
+      Object.entries(modelGrades).flatMap(([grade, model]) =>
+        grade.trim() !== '' &&
+        typeof model === 'string' &&
+        model.trim() !== '' &&
+        (allowedGrades === undefined || allowedGrades.includes(grade))
+          ? [[grade, model.trim()] as const]
+          : [],
+      ),
+    );
   }
 
   private getBuiltinAgent(name: string): SubagentConfig | null {
