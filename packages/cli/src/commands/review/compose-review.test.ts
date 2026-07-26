@@ -2516,6 +2516,40 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     expect(g.unreviewed[0]).toContain('could not be verified');
   });
 
+  it('the staleness guard protects a LOCAL review too (capture-local writes fetchedSha)', () => {
+    // A local plan (untrackedFiles present, no worktreePath) is `local` mode, not
+    // diff-only, so the gate is armed; capture-local now writes `fetchedSha`, so a
+    // stale local report from another commit is caught rather than trusted.
+    const p = writePlan({
+      worktreePath: undefined,
+      untrackedFiles: [],
+      fetchedSha: 'aaaaaaa',
+    });
+    writeReport({ ...withFinding(finding()), headSha: 'bbbbbbb' });
+    const g = scriptLintGate(p);
+    expect(g.criticals).toEqual([]);
+    expect(g.unreviewed[0]).toContain('stale');
+  });
+
+  it('a DEFERRED-only report does not cap the verdict (actionlint deferral)', () => {
+    // actionlint is deferred, not skipped/errored — a workflow-only PR whose only
+    // "problem" is the deferral must NOT be made un-Approvable. The gate reads
+    // checked/skipped/errored, never `deferred`, so it contributes nothing.
+    const p = writePlan({
+      files: [{ path: '.github/workflows/ci.yml', kind: 'source' }],
+    });
+    writeReport({
+      deferred: [
+        {
+          path: '.github/workflows/ci.yml',
+          tool: 'actionlint',
+          reason: 'source mapping not yet supported',
+        },
+      ],
+    });
+    expect(scriptLintGate(p)).toEqual({ criticals: [], unreviewed: [] });
+  });
+
   it('ignores a cosmetic (style) or pre-existing (inDiff:false) finding', () => {
     const p = writePlan({});
     writeReport({

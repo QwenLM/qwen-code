@@ -648,13 +648,15 @@ Two failure modes this closes, both observed in this repo's own dogfood: reporti
 
 ### The executable-script lint (deterministic — you run it, not an agent)
 
-**Before composing the verdict, lint the executable scripts the diff changed** — same-repo reviews only (a lightweight review has no worktree to lint in). A diff's shell — a `.sh`/`.bash` file, a `.github/workflows/*` `run:` block, a Dockerfile — is code whose bugs (an unquoted `$x` that word-splits, a `${PIPESTATUS[1]}` read after the array was reset) hide from a read of a long YAML and are caught by _running_ the checker. Measured, twice: a model told in prose to run the step scripts read them and did not run them (0/4), and even the strongest model's attacker persona walked into a double-execute bug and declared it correct. So this is **not** an agent's job and **not** a lens to remember — it is a command you run:
+**Before composing the verdict, lint the executable scripts the diff changed** — for every review that has a tree to lint: a same-repo **PR** review (the fetch worktree) and a **local** review (the project root you are already in). Only a cross-repo **lightweight** review is exempt (it has no tree). A diff's shell — a `.sh`/`.bash` file, a `.github/workflows/*` `run:` block, a Dockerfile — is code whose bugs (an unquoted `$x` that word-splits, a `${PIPESTATUS[1]}` read after the array was reset) hide from a read of a long YAML and are caught by _running_ the checker. Measured, twice: a model told in prose to run the step scripts read them and did not run them (0/4), and even the strongest model's attacker persona walked into a double-execute bug and declared it correct. So this is **not** an agent's job and **not** a lens to remember — it is a command you run:
 
 ```bash
+# --worktree: the PR's `worktreePath` (PR review), or `.` — the project root — (local review).
+# --out: next to the plan; `qwen-review-pr-<n>-script-lint.json` for a PR, `qwen-review-script-lint.json` for a local review.
 "${QWEN_CODE_CLI:-qwen}" review script-lint \
   --plan <the plan report from Step 1> \
-  --worktree <worktreePath> \
-  --out <the plan report's directory>/qwen-review-pr-<n>-script-lint.json
+  --worktree <worktreePath for a PR review, or . for a local review> \
+  --out <the plan report's directory>/<the derived report name>
 ```
 
 **You do not read its output or decide anything from it — `compose-review` does.** It derives the report's path from the plan (the pr-numbered name above, next to the plan; `qwen-review-script-lint.json` for a local review), reads it as the sole authority, and turns it into the verdict itself: a finding on a **changed line** above cosmetic `style` becomes a **pre-confirmed `[lint]` Critical** that needs no verifier (the tool already ran); an **uninstalled or crashed** checker becomes **unreviewed scope** that caps a would-be Approve; and — the proof it ran — a diff that carries an executable script but produced **no readable report** is itself unreviewed (fail closed). That is the whole reason it runs here rather than inside an agent: neither the blocker nor its severity depends on a model, and skipping the command cannot slip an Approve past the fail-closed gate. It is harmless when the diff has no scripts (it reports "nothing to lint"), and it must write to the derived path or `compose-review` will not find it.

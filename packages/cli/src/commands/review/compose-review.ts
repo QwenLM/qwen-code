@@ -31,8 +31,8 @@ import {
 } from './lib/coverage.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import { gh, setGhHost } from './lib/gh.js';
-import { isPositivePrNumber } from './lib/roster.js';
 import {
+  isPositivePrNumber,
   hasExecutableScript,
   reviewMode,
   type RosterPlan,

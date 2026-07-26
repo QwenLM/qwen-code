@@ -17,6 +17,7 @@
 // new file reported "no changes to review".
 
 import type { CommandModule } from 'yargs';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -48,7 +49,19 @@ type CaptureLocalResult = PlanReport & {
   untrackedFiles: string[];
   /** Untracked files that were NOT reviewed. Named, never silently dropped. */
   skippedFiles: SkippedFile[];
+  /** The local `HEAD` commit, for the script-lint gate's report-freshness check. */
+  fetchedSha?: string;
 };
+
+/** The working tree's HEAD, or undefined when it is not a git checkout. */
+function localHeadSha(): string | undefined {
+  const r = spawnSync('git', ['rev-parse', 'HEAD'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'ignore'],
+  });
+  const sha = `${r.stdout ?? ''}`.trim();
+  return r.status === 0 && /^[0-9a-f]{7,40}$/.test(sha) ? sha : undefined;
+}
 
 /**
  * Render a repo path for a terminal.
@@ -87,6 +100,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
   writeFileSync(diffPath, capture.diff);
 
   const plan = buildDiffPlan(diffText);
+  const headSha = localHeadSha();
   const result: CaptureLocalResult = {
     diffPath,
     diffPathAbsolute: resolve(diffPath),
@@ -96,6 +110,10 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     ...buildPlanReport(plan, null),
     untrackedFiles: capture.untracked,
     skippedFiles: capture.skipped,
+    // The local HEAD, so the script-lint gate can check its report's freshness in
+    // the local flow too (without this, `fetchedSha` is absent and the staleness
+    // guard short-circuits — a stale local report would certify new code).
+    ...(headSha ? { fetchedSha: headSha } : {}),
     ...(args.effort ? { effort: args.effort } : {}),
   };
 

@@ -144,11 +144,13 @@ describe('runScriptLint — graceful degradation and scoping', () => {
     );
     const r = runScriptLint({ plan, worktree });
     expect(r.checked).toEqual([]);
-    expect(r.skipped).toHaveLength(1);
-    expect(r.skipped[0].tool).toBe('actionlint');
-    expect(r.skipped[0].reason).toContain('not yet supported');
-    // `skipped` deliberately does not flip `ok` — the agent (and the deterministic
-    // gate) keys "not clean" off `skipped[]`, not `ok`.
+    // actionlint is DEFERRED (a tool limitation), not skipped — the distinction
+    // matters: deferred is disclosed but does NOT cap the verdict, so a
+    // workflow-only PR is not made un-Approvable.
+    expect(r.skipped).toEqual([]);
+    expect(r.deferred).toHaveLength(1);
+    expect(r.deferred[0].tool).toBe('actionlint');
+    expect(r.deferred[0].reason).toContain('not yet supported');
     expect(r.ok).toBe(true);
   });
 

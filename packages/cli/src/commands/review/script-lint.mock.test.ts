@@ -87,8 +87,10 @@ describe('runScriptLint — tool JSON normalisation (injected runner)', () => {
     );
     const r = runScriptLint({ plan, worktree }, runner);
     expect(r.checked).toEqual([]);
-    expect(r.skipped[0].tool).toBe('actionlint');
-    expect(r.skipped[0].reason).toContain('not yet supported');
+    // deferred (a tool limitation), not skipped — and the runner was never called.
+    expect(r.deferred[0].tool).toBe('actionlint');
+    expect(r.deferred[0].reason).toContain('not yet supported');
+    expect(r.skipped).toEqual([]);
     expect(runner).not.toHaveBeenCalled();
     clean();
   });

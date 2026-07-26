@@ -82,6 +82,16 @@ export interface ScriptLintReport {
    */
   errored: Array<{ path: string; tool: LintTool; reason: string }>;
   /**
+   * Files a checker **deliberately declines** to lint (not absent, not crashed) —
+   * today only actionlint, whose embedded-shell source mapping is not yet parsed.
+   * Distinct from `skipped` precisely because the verdict must treat it
+   * differently: a deferred checker is a known tool limitation, disclosed but NOT
+   * capping — actionlint is installed on ~15% of PRs (every workflow change), and
+   * capping all of them on a checker we choose not to run would make them
+   * un-Approvable forever, which "install the tool" cannot fix.
+   */
+  deferred: Array<{ path: string; tool: LintTool; reason: string }>;
+  /**
    * True when every applicable linter ran cleanly **and** no finding on a changed
    * line is above `style` — `info`/`warning`/`error` all count against it (the
    * SC2086 word-split is `info`, and it blocks). A run error (`errored[]`
@@ -442,6 +452,7 @@ export function runScriptLint(
   const checked: FileLint[] = [];
   const skipped: ScriptLintReport['skipped'] = [];
   const errored: ScriptLintReport['errored'] = [];
+  const deferred: ScriptLintReport['deferred'] = [];
   const missing = new Set<LintTool>();
 
   for (const f of files) {
@@ -456,10 +467,13 @@ export function runScriptLint(
       // as clean over a file we refused to read (a `hook.sh` -> /dev/zero symlink).
       const byName = pathTool(path);
       if (byName) {
+        // Reason does NOT lead with the path — the gate prefixes `${path}:` when
+        // it discloses, and leading with it here would print the path twice.
         skipped.push({
           path,
           tool: byName,
-          reason: `${path} is not a regular file (symlink/fifo) or is unreadable — not linted`,
+          reason:
+            'not a regular file (symlink/fifo) or unreadable — not linted',
         });
       }
       continue;
@@ -470,14 +484,17 @@ export function runScriptLint(
     // Actionlint lints a workflow's embedded shell, but its JSON anchors each
     // diagnostic at the `run:` key line (not the changed shell line) and flattens
     // ShellCheck's severity — so a style nit reads as an `error` and a real finding
-    // reads as pre-existing. Until that source-mapping is parsed and verified, a
-    // workflow is disclosed as **skipped** (unreviewed) rather than certified from
-    // findings we cannot trust — shellcheck still covers standalone `.sh`.
+    // reads as pre-existing. Until that source-mapping is parsed and verified a
+    // workflow is **deferred**: disclosed, but NOT capping the verdict (it is a
+    // tool limitation, not a finding, and actionlint touches ~15% of PRs — capping
+    // every one of them would make workflow changes un-Approvable). shellcheck
+    // still covers standalone `.sh`.
     if (tool === 'actionlint') {
-      skipped.push({
+      deferred.push({
         path,
         tool,
-        reason: `${path}: actionlint embedded-shell source mapping is not yet supported — reported as unreviewed, not clean`,
+        reason:
+          'actionlint embedded-shell source mapping is not yet supported — not linted',
       });
       continue;
     }
@@ -530,11 +547,12 @@ export function runScriptLint(
   // Fail closed: a linter that errored on a file also blocks — that file is not
   // clean, and `ok: true` on a crashed checker's silence is the trap we avoid.
   const ok = blocking.length === 0 && errored.length === 0;
-  const note = buildNote(checked, skipped, errored, blocking.length);
+  const note = buildNote(checked, skipped, errored, deferred, blocking.length);
   return {
     checked,
     skipped,
     errored,
+    deferred,
     ok,
     note,
     headSha: headShaOf(args.worktree),
@@ -545,9 +563,15 @@ function buildNote(
   checked: FileLint[],
   skipped: ScriptLintReport['skipped'],
   errored: ScriptLintReport['errored'],
+  deferred: ScriptLintReport['deferred'],
   blocking: number,
 ): string {
-  if (checked.length === 0 && skipped.length === 0 && errored.length === 0) {
+  if (
+    checked.length === 0 &&
+    skipped.length === 0 &&
+    errored.length === 0 &&
+    deferred.length === 0
+  ) {
     return 'No executable scripts changed — nothing to lint.';
   }
   const parts: string[] = [];
@@ -561,13 +585,18 @@ function buildNote(
     );
   }
   if (skipped.length > 0) {
-    // `skipped` mixes reasons now — a tool not installed, an irregular file, a
-    // deferred checker — so summarise by the tools involved without claiming they
-    // were all "not installed" (they may not be). The per-file reason is in each
-    // `skipped[]` entry for anyone who needs the specifics.
+    // `skipped` mixes reasons — a tool not installed, an irregular file — so
+    // summarise by tool without claiming they were all "not installed". The
+    // per-file reason is in each `skipped[]` entry.
     const tools = [...new Set(skipped.map((s) => s.tool))].join(', ');
     parts.push(
       `${skipped.length} file(s) not checked (${tools}) — report as unreviewed, not clean.`,
+    );
+  }
+  if (deferred.length > 0) {
+    const tools = [...new Set(deferred.map((d) => d.tool))].join(', ');
+    parts.push(
+      `${deferred.length} file(s) deferred (${tools} — a tool limitation, disclosed but not blocking).`,
     );
   }
   return parts.join(' ');
