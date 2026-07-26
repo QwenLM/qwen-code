@@ -200,10 +200,12 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
             });
             return;
           case 'failed':
+            // Sanitize both the workspace cwd and the git root (gh runs at the
+            // git root, which may be a parent of the workspace) before truncating.
             res.status(502).json({
               error: sanitizeMessage(
-                result.message,
-                runtime.workspaceCwd,
+                sanitizeMessage(result.message, runtime.workspaceCwd),
+                result.gitRoot,
               ).slice(0, GITHUB_PR_ERROR_MESSAGE_MAX),
               code: 'github_pr_create_failed',
             });

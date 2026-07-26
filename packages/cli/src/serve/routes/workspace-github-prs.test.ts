@@ -7,7 +7,10 @@
 import express from 'express';
 import request from 'supertest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { fetchGitHubPullRequests } from '@qwen-code/qwen-code-core';
+import {
+  createGitHubPullRequest,
+  fetchGitHubPullRequests,
+} from '@qwen-code/qwen-code-core';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { sendBridgeError } from '../server/error-response.js';
 import {
@@ -19,9 +22,11 @@ import { registerWorkspaceQualifiedGitHubPrsRoutes } from './workspace-github-pr
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
+  createGitHubPullRequest: vi.fn(),
   fetchGitHubPullRequests: vi.fn(),
 }));
 
+const createGitHubPullRequestMock = vi.mocked(createGitHubPullRequest);
 const fetchGitHubPullRequestsMock = vi.mocked(fetchGitHubPullRequests);
 
 const passthroughMutate = () =>
@@ -215,6 +220,34 @@ describe('workspace GitHub PR routes', () => {
     expect(response.body.code).toBe('github_prs_failed');
     expect(response.body.error).not.toContain(gitRoot);
     expect(response.body.error.length).toBeLessThanOrEqual(512);
+  });
+
+  it('sanitizes the git root (not just the workspace cwd) on PR create failure', async () => {
+    // gh runs at the git root, which may be a parent of the workspace cwd; a
+    // failure message can embed that root, so it must be redacted too.
+    createGitHubPullRequestMock.mockResolvedValue({
+      kind: 'failed',
+      message: 'fatal: /work is not a GitHub remote',
+      gitRoot: '/work',
+    });
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+      workspaceRegistry: registry([runtime('primary', '/work/main', true)]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app)
+      .post('/workspaces/primary/github/prs/create')
+      .send({ title: 'Add a thing' });
+
+    expect(response.status).toBe(502);
+    expect(response.body).toMatchObject({
+      error: 'fatal: <workspace> is not a GitHub remote',
+      code: 'github_pr_create_failed',
+    });
+    expect(response.body.error).not.toContain('/work');
   });
 
   it('falls back to the bridge error mapper on unexpected throws', async () => {

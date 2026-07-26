@@ -255,7 +255,7 @@ export type CreateGitHubPullRequestResult =
   | { kind: 'ok'; url: string; number: number | null }
   | { kind: 'not_a_repo' }
   | { kind: 'cli_unavailable' }
-  | { kind: 'failed'; message: string };
+  | { kind: 'failed'; message: string; gitRoot: string };
 
 const GH_CREATE_TIMEOUT_MS = 30_000;
 
@@ -307,6 +307,7 @@ export async function createGitHubPullRequest(
     return {
       kind: 'failed',
       message: ghErrorMessage(error, 'gh pr create', GH_CREATE_TIMEOUT_MS),
+      gitRoot,
     };
   }
 

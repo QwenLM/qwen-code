@@ -2226,4 +2226,16 @@ describe('fetchGitLog range argument injection guard', () => {
     expect(log!.entries.length).toBe(2);
     await expect(fs.access(target)).rejects.toThrow();
   });
+
+  it('drops a range starting with .. and returns the full log', async () => {
+    const log = await fetchGitLog(repo, { range: '..HEAD' });
+    expect(log).not.toBeNull();
+    expect(log!.entries).toHaveLength(2);
+  });
+
+  it('drops a range with characters outside the allowlist', async () => {
+    const log = await fetchGitLog(repo, { range: 'HEAD;rm -rf /' });
+    expect(log).not.toBeNull();
+    expect(log!.entries).toHaveLength(2);
+  });
 });

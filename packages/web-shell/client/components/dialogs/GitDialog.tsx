@@ -323,6 +323,7 @@ export function GitDialog({
       })
       .catch(() => setPrBranches(null));
 
+    setPrStatus(null);
     setPrGenerating(true);
     const abort = new AbortController();
 
