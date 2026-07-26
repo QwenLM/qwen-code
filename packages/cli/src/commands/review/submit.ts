@@ -288,9 +288,13 @@ function compose(payload: ReviewPayload): {
   // `env` decides where the harness transcripts are read from, and it must not
   // come from a JSON the caller wrote: a run that wanted an approval could point
   // it at a directory of transcripts it fabricated, and the coverage gate reopens
-  // through one extra key. compose-review's own CLI strips it for the same reason.
-  const { env: _dropped, ...rest } = state;
+  // through one extra key. `prBodyFetcher` is the bilingual body-language seam:
+  // a non-function value reaching `bilingualFromPlan` throws and drops the Chinese
+  // fold through the fail-safe — the exact regression this PR closes. compose-review's
+  // own CLI strips both for the same reason.
+  const { env: _dropped, prBodyFetcher: _droppedFetcher, ...rest } = state;
   void _dropped;
+  void _droppedFetcher;
 
   const r = composeReview({
     ...rest,
