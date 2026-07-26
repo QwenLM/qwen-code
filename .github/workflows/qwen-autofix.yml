@@ -2944,6 +2944,51 @@ jobs:
           echo '--- feedback.md ---'
           cat "${WORKDIR}/feedback.md"
 
+      # The agent below runs for up to 80 minutes and the verification gate adds
+      # more, but nothing reaches the PR thread until "Push and report" at the
+      # very end: a maintainer who just engaged takeover sees silence and cannot
+      # tell a working round from a stuck one. The agent's output already
+      # streams live to the Actions log, so publish that link up front.
+      # Upserted by marker so one status comment per PR is EDITED each round
+      # (edits notify nobody) rather than stacking a new comment against a
+      # 100-round cap. Runs after prepare so a revalidated-away stale duplicate
+      # never announces a round it will not run. Best-effort: a status post that
+      # fails warns and continues — it must never cost the round.
+      - name: 'Post autofix status comment'
+        id: 'post_status'
+        if: |-
+          ${{ steps.prepare.outputs.stale != 'true' && needs.route.outputs.dry_run != 'true' }}
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        run: |-
+          set -uo pipefail
+          MARKER='<!-- autofix-status -->'
+          ROUND_DISPLAY="${EFFECTIVE_ROUND:-${ROUND}}"
+          BODY="$(printf '%s\n\n🔄 **AutoFix is working on this PR** — round %s/%s. [Watch live progress](%s); this round posts its report here when it finishes.\n\n<details>\n<summary>中文说明</summary>\n\n🔄 **AutoFix 正在处理此 PR** —— 第 %s/%s 轮。[查看实时进度](%s)；本轮结束后会在此发布报告。\n\n</details>' \
+            "${MARKER}" "${ROUND_DISPLAY}" "${MAX_ROUNDS}" "${RUN_URL}" \
+            "${ROUND_DISPLAY}" "${MAX_ROUNDS}" "${RUN_URL}")"
+          STATUS_ID="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate |
+            jq -rs --arg m "${MARKER}" --arg ab "${AUTOFIX_BOT}" \
+              '[ .[][] | select((.user.login // "") == $ab)
+                 | select((.body // "") | contains($m)) ] | last | .id // empty')" ||
+            STATUS_ID=''
+          if [[ -n "${STATUS_ID}" ]]; then
+            gh api --method PATCH "repos/${REPO}/issues/comments/${STATUS_ID}" \
+              -f body="${BODY}" > /dev/null ||
+              echo "::warning::Failed to update the autofix status comment on PR #${PR}; continuing."
+          else
+            STATUS_ID="$(gh api "repos/${REPO}/issues/${PR}/comments" \
+              -f body="${BODY}" --jq '.id')" ||
+              {
+                STATUS_ID=''
+                echo "::warning::Failed to post the autofix status comment on PR #${PR}; continuing."
+              }
+          fi
+          # Hand the id to the finalize step so it does not repeat this scan.
+          echo "comment_id=${STATUS_ID}" >> "${GITHUB_OUTPUT}"
+
       - name: 'Triage and address'
         id: 'address'
         # Skipped entirely for a stale duplicate target (see the live-watermark
@@ -3667,3 +3712,52 @@ jobs:
             } > "${WORKDIR}/report.md"
             gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md" || echo "::warning::Failed to post handoff comment on PR #${PR}"
           fi
+
+      # Flip the status comment out of "working" so a finished round never
+      # leaves a live-looking line behind. PATCH-only on purpose: a round that
+      # never posted a status (stale duplicate, dry run) must not gain one here.
+      # The verdict stays in the round report this job already posts; this only
+      # records that the round ended, and keeps the run link reachable.
+      # Gated on 'stale' for the same reason the announcement is: the per-PR
+      # concurrency group serialises duplicate address jobs, so the discarded
+      # one runs AFTER the real round already finalised. Ungated, it would
+      # overwrite that round's "finished" with its own "ended without
+      # publishing" and report a successful round as a failed one. An empty
+      # 'stale' (prepare itself crashed) still finalises — that IS this job's
+      # round, and it is exactly the case that must not stay "working".
+      - name: 'Finalize autofix status comment'
+        if: |-
+          ${{ always() && steps.prepare.outputs.stale != 'true' && needs.route.outputs.dry_run != 'true' }}
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
+          OUTCOME: '${{ steps.verify.outputs.outcome }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          # The id the announcement wrote. Empty means this round never
+          # announced (its step was skipped, or the post itself failed) — then
+          # no comment claims this round is working, so there is nothing to
+          # flip and no reason to scan for one. A previous round's comment is
+          # already terminal, and the next round's announcement re-PATCHes it.
+          STATUS_ID: '${{ steps.post_status.outputs.comment_id }}'
+        run: |-
+          set -uo pipefail
+          MARKER='<!-- autofix-status -->'
+          if [[ -z "${STATUS_ID}" ]]; then
+            echo "This round posted no status comment on PR #${PR}; nothing to finalize."
+            exit 0
+          fi
+          ROUND_DISPLAY="${EFFECTIVE_ROUND:-${ROUND}}"
+          # 'fixed'/'noop' are the two outcomes that published a round report;
+          # anything else means the round stopped before publishing one.
+          if [[ "${OUTCOME:-}" == 'fixed' || "${OUTCOME:-}" == 'noop' ]]; then
+            EN="$(printf '✅ **AutoFix round %s finished** — [view run](%s). See this round'"'"'s report below.' "${ROUND_DISPLAY}" "${RUN_URL}")"
+            ZH="$(printf '✅ **AutoFix 第 %s 轮已完成** —— [查看运行](%s)。本轮报告见下方。' "${ROUND_DISPLAY}" "${RUN_URL}")"
+          else
+            EN="$(printf '⚠️ **AutoFix round %s ended without publishing a report** — [view run](%s).' "${ROUND_DISPLAY}" "${RUN_URL}")"
+            ZH="$(printf '⚠️ **AutoFix 第 %s 轮结束但未发布报告** —— [查看运行](%s)。' "${ROUND_DISPLAY}" "${RUN_URL}")"
+          fi
+          BODY="$(printf '%s\n\n%s\n\n<details>\n<summary>中文说明</summary>\n\n%s\n\n</details>' \
+            "${MARKER}" "${EN}" "${ZH}")"
+          gh api --method PATCH "repos/${REPO}/issues/comments/${STATUS_ID}" \
+            -f body="${BODY}" > /dev/null ||
+            echo "::warning::Failed to finalize the autofix status comment on PR #${PR}; continuing."

@@ -59,7 +59,13 @@ const DIFF = '/abs/diff.txt';
  * satisfies that one. A plan that requires nothing is not a plan any capture
  * command writes, and coverage now reads the roster out of it.
  */
-function plan(opts: { step45?: boolean; han?: boolean } = {}): string {
+function plan(
+  opts: {
+    step45?: boolean;
+    han?: boolean;
+    effort?: 'low' | 'medium' | 'high';
+  } = {},
+): string {
   const p = join(dir, 'plan.json');
   writeFileSync(
     p,
@@ -68,6 +74,9 @@ function plan(opts: { step45?: boolean; han?: boolean } = {}): string {
       // What fetch-pr records when the PR description contains Han
       // characters — the deterministic bilingual-body switch.
       ...(opts.han ? { prDescriptionHasHan: true } : {}),
+      // The effort the capturing command recorded — the roster and the
+      // reverse-audit floor both read it from here.
+      ...(opts.effort ? { effort: opts.effort } : {}),
       srcDiffLines: 5000,
       diffLines: 5000,
       files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
@@ -282,7 +291,7 @@ function blindPrompt(chunk: number): string {
  */
 function coveredPlan(
   step45Keys: string[] = ['verify', 'reverse-audit'],
-  planOpts: { han?: boolean } = {},
+  planOpts: { han?: boolean; effort?: 'low' | 'medium' | 'high' } = {},
 ): string {
   transcript('a1', goodPrompt(1), { toolCalls: 3 });
   transcript('a2', goodPrompt(2), { toolCalls: 2 });
@@ -1641,6 +1650,51 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     expect(r.body).toMatch(
       /reverse audit — no auditor was launched with a prompt this skill builds/,
     );
+  });
+
+  it('does not require the reverse audit at medium effort — a by-design Comment cap, no FIX line', () => {
+    // The balanced tier skips Step 5 deliberately. A clean medium review still caps
+    // at Comment (it cannot certify the diff the way high does), but the reverse
+    // audit must NOT be flagged as a repairable gap: the FIX line telling the
+    // orchestrator to run it made the one mandated repair round rebuild the full
+    // high pipeline and escalate every medium review back to high.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      // verify ran; reverse audit absent BY DESIGN (plan records medium).
+      planPath: coveredPlan(['verify'], { effort: 'medium' }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    // The disclosure reads as by-design, not as a failure the author must chase.
+    expect(r.body).toContain(
+      'the balanced (medium) tier skips the second-look pass',
+    );
+    expect(r.body).not.toMatch(
+      /no auditor was launched with a prompt this skill builds/,
+    );
+    // And crucially: no reverse-audit FIX line, so nothing escalates medium to high.
+    expect(r.remediation.join(' ')).not.toContain('reverse audit:');
+  });
+
+  it('still requires the verifier at medium — an unverified blocker must not post', () => {
+    // Medium runs Step 4. A Critical it did not verify is still held back from
+    // becoming a public blocker, exactly as at high — but no reverse-audit
+    // remediation appears, because medium never owed it.
+    const r = composeReview({
+      criticalsInline: 1,
+      suggestionsInline: 0,
+      planPath: coveredPlan([], { effort: 'medium' }),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('criticals-unverified');
+    const fixes = r.remediation.join(' ');
+    expect(fixes).toContain('--role verify');
+    expect(fixes).not.toContain('--role reverse-audit');
   });
 
   it('says one sentence when verify and the reverse audit failed the same way', () => {
