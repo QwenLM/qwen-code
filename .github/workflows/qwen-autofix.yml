@@ -2955,6 +2955,7 @@ jobs:
       # never announces a round it will not run. Best-effort: a status post that
       # fails warns and continues — it must never cost the round.
       - name: 'Post autofix status comment'
+        id: 'post_status'
         if: |-
           ${{ steps.prepare.outputs.stale != 'true' && needs.route.outputs.dry_run != 'true' }}
         env:
@@ -2978,9 +2979,15 @@ jobs:
               -f body="${BODY}" > /dev/null ||
               echo "::warning::Failed to update the autofix status comment on PR #${PR}; continuing."
           else
-            gh api "repos/${REPO}/issues/${PR}/comments" -f body="${BODY}" > /dev/null ||
-              echo "::warning::Failed to post the autofix status comment on PR #${PR}; continuing."
+            STATUS_ID="$(gh api "repos/${REPO}/issues/${PR}/comments" \
+              -f body="${BODY}" --jq '.id')" ||
+              {
+                STATUS_ID=''
+                echo "::warning::Failed to post the autofix status comment on PR #${PR}; continuing."
+              }
           fi
+          # Hand the id to the finalize step so it does not repeat this scan.
+          echo "comment_id=${STATUS_ID}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Triage and address'
         id: 'address'
@@ -3726,16 +3733,17 @@ jobs:
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
           OUTCOME: '${{ steps.verify.outputs.outcome }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          # The id the announcement wrote. Empty means this round never
+          # announced (its step was skipped, or the post itself failed) — then
+          # no comment claims this round is working, so there is nothing to
+          # flip and no reason to scan for one. A previous round's comment is
+          # already terminal, and the next round's announcement re-PATCHes it.
+          STATUS_ID: '${{ steps.post_status.outputs.comment_id }}'
         run: |-
           set -uo pipefail
           MARKER='<!-- autofix-status -->'
-          STATUS_ID="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate |
-            jq -rs --arg m "${MARKER}" --arg ab "${AUTOFIX_BOT}" \
-              '[ .[][] | select((.user.login // "") == $ab)
-                 | select((.body // "") | contains($m)) ] | last | .id // empty')" ||
-            STATUS_ID=''
           if [[ -z "${STATUS_ID}" ]]; then
-            echo "No autofix status comment on PR #${PR}; nothing to finalize."
+            echo "This round posted no status comment on PR #${PR}; nothing to finalize."
             exit 0
           fi
           ROUND_DISPLAY="${EFFECTIVE_ROUND:-${ROUND}}"

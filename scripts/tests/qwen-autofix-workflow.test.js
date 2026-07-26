@@ -4868,6 +4868,18 @@ describe('qwen-autofix workflow', () => {
     expect(finalizeStatusCommentStep).not.toContain(
       'gh api "repos/${REPO}/issues/${PR}/comments" -f body=',
     );
+    // The announcement hands over the id it just wrote (both branches), so the
+    // finalize never repeats the paginated comment scan — one scan per round,
+    // not two, on a PR that can accumulate hundreds of comments over 100 rounds.
+    expect(postStatusCommentStep).toContain("id: 'post_status'");
+    expect(postStatusCommentStep).toContain(
+      'echo "comment_id=${STATUS_ID}" >> "${GITHUB_OUTPUT}"',
+    );
+    expect(postStatusCommentStep).toContain("--jq '.id'");
+    expect(finalizeStatusCommentStep).toContain(
+      "STATUS_ID: '${{ steps.post_status.outputs.comment_id }}'",
+    );
+    expect(finalizeStatusCommentStep).not.toContain('--paginate');
     // Tells a round that published a report from one that died before it.
     expect(finalizeStatusCommentStep).toContain("== 'fixed'");
     expect(finalizeStatusCommentStep).toContain(
