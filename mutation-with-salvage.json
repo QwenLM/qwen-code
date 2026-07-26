@@ -1,0 +1,114 @@
+[
+  [
+    "M01 mintty version gate → accept any mintty",
+    "killed"
+  ],
+  [
+    "M02 mintty missing-version refusal removed",
+    "SURVIVED"
+  ],
+  [
+    "M03 VTE packed-integer unpack disabled",
+    "killed"
+  ],
+  [
+    "M04 VTE 0.50.0 segfault guard removed",
+    "killed"
+  ],
+  [
+    "M05 VTE >= 0.50 gate → accept any VTE",
+    "killed"
+  ],
+  [
+    "M06 iTerm2 3.1 gate → accept any iTerm 3.x",
+    "killed"
+  ],
+  [
+    "M07 VS Code 1.72 gate → accept any VS Code",
+    "killed"
+  ],
+  [
+    "M08 WezTerm date gate removed",
+    "killed"
+  ],
+  [
+    "M09 Konsole 21.04 gate removed",
+    "killed"
+  ],
+  [
+    "M10 Alacritty detection removed",
+    "killed"
+  ],
+  [
+    "M11 JetBrains detection removed",
+    "killed"
+  ],
+  [
+    "M12 DomTerm detection removed",
+    "killed"
+  ],
+  [
+    "M13 Ghostty detection removed",
+    "killed"
+  ],
+  [
+    "M14 CI refusal removed",
+    "killed"
+  ],
+  [
+    "M15 TeamCity refusal removed",
+    "killed"
+  ],
+  [
+    "M16 tmux/screen refusal removed",
+    "killed"
+  ],
+  [
+    "M17 FORCE_HYPERLINK numeric parse → always enable",
+    "killed"
+  ],
+  [
+    "M18 NO_COLOR opt-out removed",
+    "killed"
+  ],
+  [
+    "M19 FORCE_COLOR=0 opt-out removed",
+    "killed"
+  ],
+  [
+    "M20 QWEN_DISABLE_HYPERLINKS opt-out removed",
+    "killed"
+  ],
+  [
+    "M21 sanitizeForOsc: bidi controls no longer stripped",
+    "killed"
+  ],
+  [
+    "M22 sanitizeForOsc: C1 controls no longer stripped",
+    "killed"
+  ],
+  [
+    "M23 tmux ESC-doubling removed",
+    "killed"
+  ],
+  [
+    "M24 screen DCS wrapping removed",
+    "killed"
+  ],
+  [
+    "M25 osc8Hyperlink: label no longer sanitized",
+    "killed"
+  ],
+  [
+    "M26 non-TTY guard removed",
+    "killed"
+  ],
+  [
+    "M27 auth call site: scheme allowlist removed",
+    "killed"
+  ],
+  [
+    "M28 auth call site: OSC 8 branch disabled entirely",
+    "killed"
+  ]
+]
