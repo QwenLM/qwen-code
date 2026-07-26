@@ -44,6 +44,7 @@ import {
   getToolCallPreparations,
   setToolCallPreparations,
 } from './tool-call-preparation.js';
+import { ApprovalMode } from '../config/approval-mode.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -194,6 +195,8 @@ describe('GeminiChat', async () => {
         .fn()
         .mockReturnValue({ debug: vi.fn(), warn: vi.fn(), info: vi.fn() }),
       getApprovalMode: vi.fn().mockReturnValue('default'),
+      takePendingManualPlanExitNotice: vi.fn().mockReturnValue(undefined),
+      restorePendingManualPlanExitNotice: vi.fn(),
       getFileReadCache: vi.fn().mockReturnValue({ clear: vi.fn() }),
     } as unknown as Config;
 
@@ -404,6 +407,382 @@ describe('GeminiChat', async () => {
         'Qwen Code is streaming a model response',
       );
       expect(mockSleepInhibitorRelease).toHaveBeenCalledTimes(1);
+    });
+
+    describe('manual plan-exit notices', () => {
+      beforeEach(() => {
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(async () =>
+          streamResponse(stopResponse([{ text: 'ok' }])),
+        );
+      });
+
+      it('is disabled by default', async () => {
+        vi.mocked(mockConfig.takePendingManualPlanExitNotice).mockReturnValue({
+          version: 1,
+          currentMode: ApprovalMode.DEFAULT,
+        });
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'continue' },
+          'prompt-id-plan-exit-disabled',
+        );
+        for await (const _ of stream) {
+          /* consume */
+        }
+
+        expect(
+          mockConfig.takePendingManualPlanExitNotice,
+        ).not.toHaveBeenCalled();
+        expect(
+          chat
+            .getHistory()
+            .flatMap((content) => content.parts ?? [])
+            .some((part) =>
+              part.text?.includes(
+                'changed outside the approved exit_plan_mode flow',
+              ),
+            ),
+        ).toBe(false);
+      });
+
+      it('appends one notice after a function response', async () => {
+        vi.mocked(mockConfig.takePendingManualPlanExitNotice)
+          .mockReturnValueOnce({
+            version: 7,
+            currentMode: ApprovalMode.AUTO_EDIT,
+          })
+          .mockReturnValue(undefined);
+        chat.enableManualPlanExitNotices();
+        chat.setHistory([
+          { role: 'user', parts: [{ text: 'read it' }] },
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-plan-exit',
+                  name: 'read_file',
+                  args: { path: '/tmp/input' },
+                },
+              },
+            ],
+          },
+        ]);
+
+        const firstStream = await chat.sendMessageStream(
+          'test-model',
+          {
+            message: {
+              functionResponse: {
+                id: 'call-plan-exit',
+                name: 'read_file',
+                response: { output: 'contents' },
+              },
+            },
+          },
+          'prompt-id-plan-exit-tool-result',
+        );
+        for await (const _ of firstStream) {
+          /* consume */
+        }
+
+        const secondStream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'next turn' },
+          'prompt-id-plan-exit-next-turn',
+        );
+        for await (const _ of secondStream) {
+          /* consume */
+        }
+
+        const toolResultTurn = chat.getHistory()[2]!;
+        expect(toolResultTurn.parts?.[0]?.functionResponse?.id).toBe(
+          'call-plan-exit',
+        );
+        expect(toolResultTurn.parts?.at(-1)?.text).toContain(
+          'The current approval mode is: auto-edit.',
+        );
+        expect(
+          chat
+            .getHistory()
+            .flatMap((content) => content.parts ?? [])
+            .filter((part) =>
+              part.text?.includes(
+                'changed outside the approved exit_plan_mode flow',
+              ),
+            ),
+        ).toHaveLength(1);
+      });
+
+      it('restores a claim when setup rolls back the history push', async () => {
+        vi.mocked(mockConfig.takePendingManualPlanExitNotice).mockReturnValue({
+          version: 11,
+          currentMode: ApprovalMode.DEFAULT,
+        });
+        chat.enableManualPlanExitNotices();
+        vi.spyOn(
+          chat as unknown as { getRequestHistory: () => Content[] },
+          'getRequestHistory',
+        ).mockImplementationOnce(() => {
+          throw new Error('history setup failed');
+        });
+
+        await expect(
+          chat.sendMessageStream(
+            'test-model',
+            { message: 'first' },
+            'prompt-id-plan-exit-rollback-1',
+          ),
+        ).rejects.toThrow('history setup failed');
+
+        expect(
+          mockConfig.restorePendingManualPlanExitNotice,
+        ).toHaveBeenCalledWith(11);
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'second' },
+          'prompt-id-plan-exit-rollback-2',
+        );
+        for await (const _ of stream) {
+          /* consume */
+        }
+
+        const history = chat.getHistory();
+        expect(
+          history.some((content) =>
+            content.parts?.some((part) => part.text === 'first'),
+          ),
+        ).toBe(false);
+        expect(
+          history
+            .flatMap((content) => content.parts ?? [])
+            .filter((part) =>
+              part.text?.includes(
+                'changed outside the approved exit_plan_mode flow',
+              ),
+            ),
+        ).toHaveLength(1);
+        expect(
+          mockConfig.restorePendingManualPlanExitNotice,
+        ).toHaveBeenCalledTimes(1);
+      });
+
+      it('commits one history part when provider setup retries', async () => {
+        vi.mocked(
+          mockConfig.takePendingManualPlanExitNotice,
+        ).mockReturnValueOnce({
+          version: 13,
+          currentMode: ApprovalMode.DEFAULT,
+        });
+        chat.enableManualPlanExitNotices();
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockRejectedValueOnce(new Error('transient transport setup'))
+          .mockImplementationOnce(async () =>
+            streamResponse(stopResponse([{ text: 'recovered' }])),
+          );
+        mockRetryWithBackoff.mockImplementationOnce(async (apiCall) => {
+          try {
+            return await apiCall();
+          } catch {
+            return apiCall();
+          }
+        });
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'retry me' },
+          'prompt-id-plan-exit-provider-retry',
+        );
+        for await (const _ of stream) {
+          /* consume */
+        }
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        expect(
+          mockConfig.takePendingManualPlanExitNotice,
+        ).toHaveBeenCalledTimes(1);
+        expect(
+          chat
+            .getHistory()
+            .flatMap((content) => content.parts ?? [])
+            .filter((part) =>
+              part.text?.includes(
+                'changed outside the approved exit_plan_mode flow',
+              ),
+            ),
+        ).toHaveLength(1);
+        expect(
+          mockConfig.restorePendingManualPlanExitNotice,
+        ).not.toHaveBeenCalled();
+      });
+
+      it.each([
+        {
+          tail: 'model',
+          compressedHistory: [
+            { role: 'user', parts: [{ text: 'summary' }] },
+            { role: 'model', parts: [{ text: 'ack' }] },
+          ] satisfies Content[],
+        },
+        {
+          tail: 'user',
+          compressedHistory: [
+            { role: 'user', parts: [{ text: 'summary' }] },
+            { role: 'model', parts: [{ text: 'ack' }] },
+            {
+              role: 'user',
+              parts: [{ text: 'restored attachment context' }],
+            },
+          ] satisfies Content[],
+        },
+      ])(
+        'preserves the committed notice across reactive compression with a $tail tail',
+        async ({ compressedHistory }) => {
+          vi.mocked(
+            mockConfig.takePendingManualPlanExitNotice,
+          ).mockReturnValueOnce({
+            version: 15,
+            currentMode: ApprovalMode.DEFAULT,
+          });
+          chat.enableManualPlanExitNotices();
+          vi.spyOn(ChatCompressionService.prototype, 'compress')
+            .mockResolvedValueOnce({
+              newHistory: null,
+              info: {
+                originalTokenCount: 0,
+                newTokenCount: 0,
+                compressionStatus: CompressionStatus.NOOP,
+              },
+            })
+            .mockResolvedValueOnce({
+              newHistory: compressedHistory,
+              info: {
+                originalTokenCount: 135_000,
+                newTokenCount: 40_000,
+                compressionStatus: CompressionStatus.COMPRESSED,
+              },
+            });
+          vi.mocked(mockContentGenerator.generateContentStream)
+            .mockRejectedValueOnce(
+              new Error('prompt is too long: 135000 tokens > 128000 maximum'),
+            )
+            .mockImplementationOnce(async () =>
+              streamResponse(stopResponse([{ text: 'after compression' }])),
+            );
+
+          const stream = await chat.sendMessageStream(
+            'test-model',
+            { message: 'retry after overflow' },
+            'prompt-id-plan-exit-reactive-compression',
+          );
+          for await (const _ of stream) {
+            /* consume */
+          }
+
+          const retryRequest = vi.mocked(
+            mockContentGenerator.generateContentStream,
+          ).mock.calls[1]![0] as { contents: Content[] };
+          expect(
+            retryRequest.contents
+              .flatMap((content) => content.parts ?? [])
+              .filter((part) =>
+                part.text?.includes(
+                  'changed outside the approved exit_plan_mode flow',
+                ),
+              ),
+          ).toHaveLength(1);
+          expect(
+            chat
+              .getHistory()
+              .flatMap((content) => content.parts ?? [])
+              .filter((part) =>
+                part.text?.includes(
+                  'changed outside the approved exit_plan_mode flow',
+                ),
+              ),
+          ).toHaveLength(1);
+          const history = chat.getHistory();
+          const noticeTurn = history.find((content) =>
+            content.parts?.some((part) =>
+              part.text?.includes(
+                'changed outside the approved exit_plan_mode flow',
+              ),
+            ),
+          );
+          expect(noticeTurn?.parts?.at(-1)?.text).toContain(
+            'changed outside the approved exit_plan_mode flow',
+          );
+          expect(
+            history.some(
+              (content, index) =>
+                content.role === 'user' && history[index + 1]?.role === 'user',
+            ),
+          ).toBe(false);
+          expect(
+            mockConfig.takePendingManualPlanExitNotice,
+          ).toHaveBeenCalledTimes(1);
+          expect(
+            mockConfig.restorePendingManualPlanExitNotice,
+          ).not.toHaveBeenCalled();
+        },
+      );
+
+      it('does not redeliver after rebuilding a chat with the same cursor', async () => {
+        let pending = true;
+        vi.mocked(
+          mockConfig.takePendingManualPlanExitNotice,
+        ).mockImplementation(() => {
+          if (!pending) {
+            return undefined;
+          }
+          pending = false;
+          return {
+            version: 17,
+            currentMode: ApprovalMode.DEFAULT,
+          };
+        });
+        chat.enableManualPlanExitNotices();
+
+        const firstStream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'first chat' },
+          'prompt-id-plan-exit-before-rebuild',
+        );
+        for await (const _ of firstStream) {
+          /* consume */
+        }
+
+        const replacementChat = new GeminiChat(mockConfig, config);
+        replacementChat.enableManualPlanExitNotices();
+        const replacementStream = await replacementChat.sendMessageStream(
+          'test-model',
+          { message: 'replacement chat' },
+          'prompt-id-plan-exit-after-rebuild',
+        );
+        for await (const _ of replacementStream) {
+          /* consume */
+        }
+
+        expect(
+          replacementChat
+            .getHistory()
+            .flatMap((content) => content.parts ?? [])
+            .some((part) =>
+              part.text?.includes(
+                'changed outside the approved exit_plan_mode flow',
+              ),
+            ),
+        ).toBe(false);
+        expect(
+          mockConfig.takePendingManualPlanExitNotice,
+        ).toHaveBeenCalledTimes(2);
+      });
     });
 
     it('increments the user-content push counter once per surviving send', async () => {

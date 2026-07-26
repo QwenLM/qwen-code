@@ -571,7 +571,8 @@ describe('Gemini Client (client.ts)', () => {
       getNoBrowser: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(true),
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
-      consumePendingManualPlanExitNotice: vi.fn().mockReturnValue(false),
+      takePendingManualPlanExitNotice: vi.fn().mockReturnValue(undefined),
+      restorePendingManualPlanExitNotice: vi.fn(),
       getSdkMode: vi.fn().mockReturnValue(false),
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(false),
@@ -973,6 +974,21 @@ describe('Gemini Client (client.ts)', () => {
     beforeEach(() => {
       sessionStartProfilerMocks.createSessionStartProfiler.mockClear();
       sessionStartProfilerMocks.profilers.length = 0;
+    });
+
+    it('enables manual plan-exit notices on every main chat', async () => {
+      const enableSpy = vi.spyOn(
+        GeminiChat.prototype,
+        'enableManualPlanExitNotices',
+      );
+
+      await client.startChat();
+      await client.startChat(
+        [{ role: 'user', parts: [{ text: 'resumed' }] }],
+        SessionStartSource.Compact,
+      );
+
+      expect(enableSpy).toHaveBeenCalledTimes(2);
     });
 
     it('passes startup, resume, and clear sources to the profiler', async () => {
@@ -6241,74 +6257,6 @@ hello
         ],
         expect.any(AbortSignal),
       );
-    });
-
-    it('injects a one-shot exit notice after a manual plan-mode exit', async () => {
-      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(
-        ApprovalMode.DEFAULT,
-      );
-      vi.mocked(
-        mockConfig.consumePendingManualPlanExitNotice,
-      ).mockReturnValueOnce(true);
-      const mockStream = (async function* () {
-        yield { type: 'content', value: 'Continuing' };
-      })();
-      mockTurnRunFn.mockReturnValue(mockStream);
-      client['chat'] = {
-        addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
-
-      const stream = client.sendMessageStream(
-        [{ text: 'Now implement it' }],
-        new AbortController().signal,
-        'prompt-id-manual-plan-exit',
-      );
-      for await (const _ of stream) {
-        // consume stream
-      }
-
-      expect(mockTurnRunFn).toHaveBeenCalledWith(
-        'test-model',
-        expect.arrayContaining([
-          expect.stringContaining(
-            'The user has manually switched out of plan mode',
-          ),
-        ]),
-        expect.any(AbortSignal),
-      );
-    });
-
-    it('does not inject the exit notice when none is pending', async () => {
-      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(
-        ApprovalMode.DEFAULT,
-      );
-      const mockStream = (async function* () {
-        yield { type: 'content', value: 'Reply' };
-      })();
-      mockTurnRunFn.mockReturnValue(mockStream);
-      client['chat'] = {
-        addHistory: vi.fn(),
-        getHistory: vi.fn().mockReturnValue([]),
-      } as unknown as GeminiChat;
-
-      const stream = client.sendMessageStream(
-        [{ text: 'Hello' }],
-        new AbortController().signal,
-        'prompt-id-no-plan-exit-notice',
-      );
-      for await (const _ of stream) {
-        // consume stream
-      }
-
-      const requestArg = mockTurnRunFn.mock.calls.at(-1)![1] as string[];
-      expect(
-        requestArg.some(
-          (part) =>
-            typeof part === 'string' &&
-            part.includes('manually switched out of plan mode'),
-        ),
-      ).toBe(false);
     });
 
     it('uses the subagent plan reminder when a subagent inherits PLAN mode', async () => {
