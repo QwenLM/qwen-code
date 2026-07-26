@@ -3881,25 +3881,31 @@ export function App({
     queuedShellCommandsRef.current = [];
   }, [connection.sessionId]);
 
+  const prevShellDrainStreamingStateRef = useRef(streamingState);
   useEffect(() => {
-    if (streamingState !== 'idle') return;
+    const prev = prevShellDrainStreamingStateRef.current;
+    prevShellDrainStreamingStateRef.current = streamingState;
+    // Only start a drain on the transition into idle. sendShellCommand drives
+    // streamingState non-idle while each command runs, so cancelling the drain
+    // on every streamingState change would drop every command after the first.
+    if (prev === 'idle' || streamingState !== 'idle') return;
     const cmds = queuedShellCommandsRef.current;
     if (cmds.length === 0) return;
     queuedShellCommandsRef.current = [];
     drainCancelledRef.current = false;
     const drainSessionId = connectionRef.current.sessionId;
-    let cancelled = false;
     void (async () => {
       for (let i = 0; i < cmds.length; i++) {
         if (
           drainCancelledRef.current ||
-          cancelled ||
           connectionRef.current.sessionId !== drainSessionId
         ) {
+          const dropped = cmds.length - i;
           console.warn(
             '[web-shell] dropping %d queued shell command(s)',
-            cmds.length - i,
+            dropped,
           );
+          pushToast('warning', t('queue.shellDropped', { count: dropped }));
           return;
         }
         try {
@@ -3909,10 +3915,7 @@ export function App({
         }
       }
     })();
-    return () => {
-      cancelled = true;
-    };
-  }, [streamingState, sessionActions, reportError]);
+  }, [streamingState, sessionActions, reportError, pushToast, t]);
 
   useEffect(() => {
     modelDialogModeRef.current = modelDialogMode;

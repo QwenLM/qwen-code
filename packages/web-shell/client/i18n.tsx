@@ -1144,6 +1144,8 @@ const EN: Messages = {
     "Slash commands can't be queued while a turn is running.",
   'queue.shellQueued':
     'Shell command queued — it will run after the current turn finishes.',
+  'queue.shellDropped': (v) =>
+    `${v?.count ?? 0} queued shell command(s) will not run.`,
   'queue.queueFailed': 'Failed to queue message',
   'queue.insertFailed': 'Failed to insert queued message',
   'queue.deleteFailed': 'Failed to move message out of queue',
@@ -3422,6 +3424,8 @@ const ZH: Messages = {
   'queue.submittingDisabled': '排队消息正在提交中...',
   'queue.commandBlocked': '当前回合运行时，Slash 命令不能进入排队。',
   'queue.shellQueued': 'Shell 命令已排队，将在当前回合结束后执行。',
+  'queue.shellDropped': (v) =>
+    `${v?.count ?? 0} 条排队的 Shell 命令将不会执行。`,
   'queue.queueFailed': '排队消息失败',
   'queue.insertFailed': '插入排队消息失败',
   'queue.deleteFailed': '移出队列失败',

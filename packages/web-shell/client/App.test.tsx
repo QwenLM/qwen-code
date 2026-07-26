@@ -1122,7 +1122,12 @@ afterEach(() => {
 describe('App shell command queueing', () => {
   it('lazily creates a session for ! shell commands in a new task', async () => {
     mockConnection.sessionId = undefined;
-    renderApp();
+    mockSessionActions.createSession.mockImplementation(async () => {
+      mockConnection.sessionId = 'session-1';
+      return { sessionId: 'session-1' };
+    });
+    const onSessionChange = vi.fn();
+    renderApp({ onSessionChange });
     await flush();
 
     await act(async () => {
@@ -1134,6 +1139,12 @@ describe('App shell command queueing', () => {
       });
     });
     expect(mockSessionActions.createSession).toHaveBeenCalled();
+    expect(onSessionChange).toHaveBeenCalledWith({
+      type: 'submit',
+      sessionId: 'session-1',
+      prompt: '!echo hi',
+      queued: false,
+    });
   });
 
   it('reports an error and skips the command when session creation fails', async () => {
@@ -1262,6 +1273,7 @@ describe('App shell command queueing', () => {
 
     expect(mockSessionActions.sendShellCommand).toHaveBeenCalledTimes(1);
     expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith('first');
+    expect(onToast).toHaveBeenCalledWith('warning', expect.any(String));
   });
 
   it('drains multiple queued commands in FIFO order', async () => {
@@ -1302,6 +1314,73 @@ describe('App shell command queueing', () => {
     expect(mockSessionActions.sendShellCommand).toHaveBeenNthCalledWith(
       3,
       'ccc',
+    );
+  });
+
+  it('keeps draining when streamingState changes between commands', async () => {
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    let resolveFirst!: () => void;
+    const firstDone = new Promise<void>((r) => {
+      resolveFirst = r;
+    });
+    mockSessionActions.sendShellCommand
+      .mockReturnValueOnce(firstDone)
+      .mockResolvedValueOnce(undefined)
+      .mockResolvedValueOnce(undefined);
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onToast });
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!first');
+      testState.latestChatEditorProps?.onSubmit('!second');
+      testState.latestChatEditorProps?.onSubmit('!third');
+      await Promise.resolve();
+    });
+
+    // Go idle — drain starts and blocks on the pending first command.
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender({ onToast });
+    });
+    await flush();
+    expect(mockSessionActions.sendShellCommand).toHaveBeenCalledTimes(1);
+
+    // A running command drives streamingState non-idle and back to idle (as
+    // sendShellCommand does via promptStatus). That must not cancel the drain.
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onToast });
+    });
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender({ onToast });
+    });
+
+    // Resolve the first command — the rest must still drain in FIFO order.
+    await act(async () => {
+      resolveFirst();
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendShellCommand).toHaveBeenCalledTimes(3);
+      });
+    });
+
+    expect(mockSessionActions.sendShellCommand).toHaveBeenNthCalledWith(
+      1,
+      'first',
+    );
+    expect(mockSessionActions.sendShellCommand).toHaveBeenNthCalledWith(
+      2,
+      'second',
+    );
+    expect(mockSessionActions.sendShellCommand).toHaveBeenNthCalledWith(
+      3,
+      'third',
     );
   });
 
