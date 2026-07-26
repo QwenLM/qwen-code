@@ -1557,6 +1557,8 @@ describe('App shell command queueing', () => {
       await Promise.resolve();
     });
 
+    expect(onToast).toHaveBeenCalledWith('warning', expect.any(String));
+
     act(() => {
       testState.streamingState = 'idle';
       rerender({ onToast });
@@ -1613,6 +1615,141 @@ describe('App shell command queueing', () => {
 
     expect(mockSessionActions.sendShellCommand).toHaveBeenCalledTimes(1);
     expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith('first');
+  });
+
+  it('does not drop queued commands when the UI language changes', async () => {
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onToast });
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!deploy prod');
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+
+    // Change language mid-turn — the queue must survive.
+    act(() => {
+      rerender({ onToast, language: 'zh-CN' });
+    });
+    await flush();
+
+    expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+    const warningCalls = onToast.mock.calls.filter(
+      (c: unknown[]) => c[0] === 'warning',
+    );
+    expect(warningCalls).toHaveLength(0);
+
+    // Turn ends — the queued command must still drain.
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender({ onToast, language: 'zh-CN' });
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith(
+          'deploy prod',
+        );
+      });
+    });
+  });
+
+  it('does not drain when the connection is not connected', async () => {
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onToast });
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!echo hi');
+      await Promise.resolve();
+    });
+
+    // Go idle but disconnect in the same commit.
+    act(() => {
+      mockConnection.status = 'disconnected';
+      testState.streamingState = 'idle';
+      rerender({ onToast });
+    });
+    await flush();
+
+    expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+    expect(onToast).toHaveBeenCalledWith('warning', expect.any(String));
+  });
+
+  it('does not resume a cancelled drain when a later drain starts', async () => {
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    let resolveFirst!: () => void;
+    const firstDone = new Promise<void>((r) => {
+      resolveFirst = r;
+    });
+    mockSessionActions.sendShellCommand
+      .mockReturnValueOnce(firstDone)
+      .mockResolvedValueOnce(undefined);
+
+    // Turn 1: queue two commands.
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onToast });
+    });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!A');
+      testState.latestChatEditorProps?.onSubmit('!B');
+      await Promise.resolve();
+    });
+
+    // Go idle — drain starts, dispatches A (pending).
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender({ onToast });
+    });
+    await flush();
+    expect(mockSessionActions.sendShellCommand).toHaveBeenCalledTimes(1);
+
+    // Cancel mid-drain — generation bumps, queue cleared.
+    await act(async () => {
+      testState.latestChatEditorProps?.onCancel?.();
+      await Promise.resolve();
+    });
+
+    // Turn 2: queue a new command.
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onToast });
+    });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!C');
+      await Promise.resolve();
+    });
+
+    // Go idle — new drain starts, dispatches C.
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender({ onToast });
+    });
+    await flush();
+    expect(mockSessionActions.sendShellCommand).toHaveBeenCalledTimes(2);
+    expect(mockSessionActions.sendShellCommand).toHaveBeenNthCalledWith(2, 'C');
+
+    // Resolve A — the old drain must NOT dispatch B.
+    await act(async () => {
+      resolveFirst();
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.sendShellCommand).toHaveBeenCalledTimes(2);
   });
 });
 

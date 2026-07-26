@@ -1144,8 +1144,12 @@ const EN: Messages = {
     "Slash commands can't be queued while a turn is running.",
   'queue.shellQueued':
     'Shell command queued — it will run after the current turn finishes.',
-  'queue.shellDropped': (v) =>
-    `${v?.count ?? 0} queued shell command(s) will not run.`,
+  'queue.shellDropped': (v) => {
+    const count = v?.count ?? 0;
+    return count === 1
+      ? '1 queued shell command will not run.'
+      : `${count} queued shell commands will not run.`;
+  },
   'queue.queueFailed': 'Failed to queue message',
   'queue.insertFailed': 'Failed to insert queued message',
   'queue.deleteFailed': 'Failed to move message out of queue',

@@ -3878,7 +3878,10 @@ export function App({
 
   // Drop queued commands on a session switch so the drain never runs a
   // command against a different workspace's daemon (mirrors useQueuedPrompts).
+  const prevQueueSessionIdRef = useRef(connection.sessionId);
   useEffect(() => {
+    if (prevQueueSessionIdRef.current === connection.sessionId) return;
+    prevQueueSessionIdRef.current = connection.sessionId;
     const dropped = queuedShellCommandsRef.current.length;
     queuedShellCommandsRef.current = [];
     if (dropped > 0) {
@@ -6050,12 +6053,16 @@ export function App({
   );
 
   const handleCancel = useCallback(() => {
+    const dropped = queuedShellCommandsRef.current.length;
     queuedShellCommandsRef.current = [];
     drainGenerationRef.current++;
+    if (dropped > 0) {
+      pushToast('warning', t('queue.shellDropped', { count: dropped }));
+    }
     sessionActions.cancel().catch((error: unknown) => {
       reportError(error, 'Failed to cancel request');
     });
-  }, [sessionActions, reportError]);
+  }, [sessionActions, reportError, pushToast, t]);
 
   const handleFocusTaskPill = useCallback((): boolean => {
     if (interactionBlocked) return false;
