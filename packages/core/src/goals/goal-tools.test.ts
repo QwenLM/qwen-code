@@ -200,8 +200,9 @@ describe('UpdateGoalTool', () => {
       'Do not tell the user the Goal is complete',
     );
     expect(tool.description).toContain(
-      'call get_goal in that same response before update_goal',
+      'call get_goal, wait for its result, and call update_goal in a later model step',
     );
+    expect(tool.description).not.toContain('in that same response');
     expect(tool.description).toContain(
       'Do not add progress or completion commentary',
     );
@@ -378,6 +379,36 @@ describe('UpdateGoalTool', () => {
     expect(runtime.getSnapshot().goal?.status).toBe('active');
   });
 
+  it('keeps audit-only blocker proposals in the current turn', async () => {
+    const { runtime, permit: activePermit } = await activeRuntime();
+    const tool = new UpdateGoalTool(makeConfig(runtime));
+    const build = () =>
+      goalTurnContext.run(activePermit, () =>
+        tool.build({
+          status: 'blocked',
+          reason: 'The same external blocker is still present',
+          evidenceRefs: ['tool-result-1'],
+          blockerKind: 'repeated',
+        }),
+      );
+
+    const first = await build().execute(new AbortController().signal);
+    const second = await build().execute(new AbortController().signal);
+
+    for (const result of [first, second]) {
+      expect(JSON.parse(String(result.llmContent))).toEqual({
+        proposalRecorded: result === first,
+        readyForVerification: false,
+        goalLifecycleChanged: false,
+        nextAction:
+          'Continue this turn without claiming the Goal is complete or blocked. This proposal is not ready for independent verification.',
+      });
+      expect(result.terminateTurn).toBeUndefined();
+    }
+    expect(first.returnDisplay).toContain('blocker audit');
+    expect(second.returnDisplay).toContain('already recorded');
+  });
+
   it('rejects a second proposal in the same exact turn', async () => {
     const { runtime, permit: activePermit } = await activeRuntime();
     const tool = new UpdateGoalTool(makeConfig(runtime));
@@ -465,10 +496,10 @@ describe('UpdateGoalTool', () => {
         tool.build({
           status: 'complete',
           reason: 'Focused tests passed',
-          evidenceRefs: ['same-reference', 'same-reference'],
+          evidenceRefs: ['same-reference', ' same-reference '],
         }),
       ),
-    ).toThrow(/unique|duplicate/i);
+    ).toThrow('evidenceRefs must contain unique stable evidence references');
   });
 
   it.each(['edit', 'replace', 'clear', 'finish'] as const)(
