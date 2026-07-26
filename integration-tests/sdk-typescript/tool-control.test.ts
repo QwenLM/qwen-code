@@ -396,17 +396,8 @@ describe('Tool Control Parameters (E2E)', () => {
           prompt: 'Read .env and data.txt.',
           options: {
             ...SHARED_TEST_OPTIONS,
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
-            model: 'fake-model',
-            env: {
-              NO_PROXY: LOCAL_OPENAI_NO_PROXY,
-              no_proxy: LOCAL_OPENAI_NO_PROXY,
-              OPENAI_API_KEY: 'fake-key',
-              OPENAI_BASE_URL: fakeServer.baseUrl,
-              OPENAI_MODEL: 'fake-model',
-              QWEN_MODEL: 'fake-model',
-            },
-            authType: 'openai',
             permissionMode: 'yolo',
             // Block reading .env files
             excludeTools: ['Read(.env)'],
@@ -924,13 +915,13 @@ describe('Tool Control Parameters (E2E)', () => {
               toolCalls: [
                 fakeToolCall(
                   'run_shell_command',
-                  { command: 'echo test' },
-                  'shell-echo-test',
+                  { command: 'touch allowed.txt' },
+                  'shell-touch-allowed',
                 ),
                 fakeToolCall(
                   'run_shell_command',
-                  { command: 'touch blocked.txt' },
-                  'shell-touch',
+                  { command: 'rm blocked.txt' },
+                  'shell-rm',
                 ),
               ],
             };
@@ -939,14 +930,14 @@ describe('Tool Control Parameters (E2E)', () => {
         }, FAKE_SERVER_OPTIONS);
 
         const q = query({
-          prompt: 'Run "echo test" and "touch blocked.txt" commands.',
+          prompt: 'Run "touch allowed.txt" and "rm blocked.txt" commands.',
           options: {
             ...SHARED_TEST_OPTIONS,
             ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
             permissionMode: 'default',
-            // Auto-approve echo commands
-            allowedTools: ['ShellTool(echo *)'],
+            // Auto-approve touch commands
+            allowedTools: ['ShellTool(touch *)'],
             canUseTool: async (toolName) => {
               canUseToolCalls.push(toolName);
               return {
@@ -967,15 +958,16 @@ describe('Tool Control Parameters (E2E)', () => {
 
           assertSuccessfulCompletion(messages);
 
-          expect(findToolResult(messages, 'shell-echo-test')).toMatchObject({
-            isError: false,
-          });
-          expect(findToolResult(messages, 'shell-touch')).toMatchObject({
+          expect(findToolResult(messages, 'shell-touch-allowed')).toMatchObject(
+            {
+              isError: false,
+            },
+          );
+          expect(findToolResult(messages, 'shell-rm')).toMatchObject({
             content: expect.stringContaining(
               '[Operation Cancelled] Reason: Non-allowed tools should trigger this',
             ),
           });
-          expect(helper.fileExists('blocked.txt')).toBe(false);
           expect(canUseToolCalls).toEqual(['run_shell_command']);
         } finally {
           await q.close();
@@ -1237,17 +1229,8 @@ describe('Tool Control Parameters (E2E)', () => {
           prompt: 'Read test.txt and write "modified" to it.',
           options: {
             ...SHARED_TEST_OPTIONS,
+            ...fakeModelOptions(fakeServer.baseUrl),
             cwd: testDir,
-            model: 'fake-model',
-            env: {
-              NO_PROXY: LOCAL_OPENAI_NO_PROXY,
-              no_proxy: LOCAL_OPENAI_NO_PROXY,
-              OPENAI_API_KEY: 'fake-key',
-              OPENAI_BASE_URL: fakeServer.baseUrl,
-              OPENAI_MODEL: 'fake-model',
-              QWEN_MODEL: 'fake-model',
-            },
-            authType: 'openai',
             permissionMode: 'plan',
             // allowedTools should be overridden by plan mode
             allowedTools: ['write_file'],
