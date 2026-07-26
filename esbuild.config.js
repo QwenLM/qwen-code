@@ -116,6 +116,32 @@ const sdkNodeExporterStubPlugin = {
   },
 };
 
+const syncFileEncodingTreeShakePlugin = {
+  name: 'sync-file-encoding-tree-shake',
+  setup(build) {
+    build.onResolve(
+      { filter: /^\.\/utils\/sync-file-encoding\.js$/ },
+      (args) => {
+        if (
+          !/[\\/]packages[\\/]core[\\/](?:src|dist[\\/]src)[\\/]index\.(?:ts|js)$/.test(
+            args.importer,
+          )
+        ) {
+          return null;
+        }
+        const sourceExtension = args.importer.endsWith('.ts') ? '.ts' : '.js';
+        return {
+          path: path.resolve(
+            args.resolveDir,
+            args.path.replace(/\.js$/, sourceExtension),
+          ),
+          sideEffects: false,
+        };
+      },
+    );
+  },
+};
+
 const external = [
   '@lydell/node-pty',
   'node-pty',
@@ -204,6 +230,7 @@ const mainBuild = esbuild.build({
   loader: { '.node': 'file' },
   plugins: [
     sdkNodeExporterStubPlugin,
+    syncFileEncodingTreeShakePlugin,
     wasmBinaryPlugin,
     wasmLoader({ mode: 'embedded' }),
   ],

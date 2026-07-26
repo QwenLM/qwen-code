@@ -46,6 +46,7 @@ const mockDownloadFromArchiveUrl = vi.hoisted(() => vi.fn());
 const mockExtractArchiveFile = vi.hoisted(() => vi.fn());
 
 vi.mock('simple-git', () => ({
+  CheckRepoActions: { IS_REPO_ROOT: 'is-repo-root' },
   simpleGit: vi.fn((path: string) => {
     mockGit.path.mockReturnValue(path);
     return mockGit;
