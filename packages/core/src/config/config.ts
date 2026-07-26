@@ -312,6 +312,22 @@ export interface ApprovalModeInfo {
   description: string;
 }
 
+type ManualPlanExitNoticeEventKind = 'clear' | 'manual-exit';
+
+interface ManualPlanExitNoticeEventState {
+  version: number;
+  kind: ManualPlanExitNoticeEventKind;
+}
+
+interface ManualPlanExitNoticeCursorState {
+  seenVersion: number;
+}
+
+export interface ManualPlanExitNotice {
+  version: number;
+  currentMode: ApprovalMode;
+}
+
 /**
  * Detailed information about each approval mode.
  * Used for UI display and protocol responses.
@@ -1769,7 +1785,13 @@ export class Config {
   private approvalMode: ApprovalMode;
   private prePlanMode?: ApprovalMode;
   private approvalModeRevision = 0;
-  private pendingManualPlanExitNotice = false;
+  private manualPlanExitNoticeEventState: ManualPlanExitNoticeEventState = {
+    version: 0,
+    kind: 'clear',
+  };
+  private manualPlanExitNoticeCursorState: ManualPlanExitNoticeCursorState = {
+    seenVersion: 0,
+  };
   private autoModeDenialState: AutoModeDenialState = createDenialState();
   private readonly accessibility: AccessibilitySettings;
   private readonly showResponseTokensPerSecond: boolean;
@@ -5422,6 +5444,34 @@ export class Config {
     return this.approvalModeRevision;
   }
 
+  private getManualPlanExitNoticeEventState(): ManualPlanExitNoticeEventState {
+    if (
+      !Object.prototype.hasOwnProperty.call(
+        this,
+        'manualPlanExitNoticeEventState',
+      ) &&
+      Object.prototype.hasOwnProperty.call(this, 'approvalMode')
+    ) {
+      const inheritedEvent = this.manualPlanExitNoticeEventState;
+      this.manualPlanExitNoticeEventState = inheritedEvent
+        ? { ...inheritedEvent }
+        : { version: 0, kind: 'clear' };
+    }
+    return this.manualPlanExitNoticeEventState;
+  }
+
+  private getOwnManualPlanExitNoticeCursorState(): ManualPlanExitNoticeCursorState {
+    if (
+      !Object.prototype.hasOwnProperty.call(
+        this,
+        'manualPlanExitNoticeCursorState',
+      )
+    ) {
+      this.manualPlanExitNoticeCursorState = { seenVersion: 0 };
+    }
+    return this.manualPlanExitNoticeCursorState;
+  }
+
   setApprovalMode(
     mode: ApprovalMode,
     options?: {
@@ -5462,20 +5512,22 @@ export class Config {
     }
     // Update all mode bookkeeping only after fallible transition work has
     // succeeded, so callers never observe a partially applied mode change.
+    let noticeEvent =
+      Config.prototype.getManualPlanExitNoticeEventState.call(this);
+    if (!Object.prototype.hasOwnProperty.call(this, 'approvalMode')) {
+      noticeEvent = { ...noticeEvent };
+      this.manualPlanExitNoticeEventState = noticeEvent;
+    }
     if (mode === ApprovalMode.PLAN && fromMode !== ApprovalMode.PLAN) {
       this.prePlanMode = fromMode;
-      // A stale exit notice must not survive a re-entry: the plan-mode
-      // reminder takes over again on the next turn.
-      this.pendingManualPlanExitNotice = false;
+      noticeEvent.version++;
+      noticeEvent.kind = 'clear';
     } else if (mode !== ApprovalMode.PLAN && fromMode === ApprovalMode.PLAN) {
       this.prePlanMode = undefined;
-      if (!options?.fromApprovedPlanExit) {
-        // While in plan mode the model is told "plan mode is active" on
-        // every turn; on a manual exit that reminder just stops appearing,
-        // which models do not reliably notice (#7671). Queue an explicit
-        // one-shot exit notice for the next turn's reminder assembly.
-        this.pendingManualPlanExitNotice = true;
-      }
+      noticeEvent.version++;
+      noticeEvent.kind = options?.fromApprovedPlanExit
+        ? 'clear'
+        : 'manual-exit';
     }
     // Any deliberate mode change invalidates the AUTO denialTracking signal.
     if (fromMode !== mode) {
@@ -5488,14 +5540,48 @@ export class Config {
   }
 
   /**
-   * One-shot: returns whether a manual (non-approved) plan-mode exit is
-   * pending model notification, and clears the flag. Consumed by the
-   * system-reminder assembly in `GeminiClient` on the next model-bound turn.
+   * Claims the latest manual plan-exit notice for this conversation.
    */
+  takePendingManualPlanExitNotice(): ManualPlanExitNotice | undefined {
+    const event = Config.prototype.getManualPlanExitNoticeEventState.call(this);
+    const cursor =
+      Config.prototype.getOwnManualPlanExitNoticeCursorState.call(this);
+    if (event.version <= cursor.seenVersion) {
+      return undefined;
+    }
+
+    cursor.seenVersion = event.version;
+    if (
+      event.kind !== 'manual-exit' ||
+      this.approvalMode === ApprovalMode.PLAN
+    ) {
+      return undefined;
+    }
+
+    return {
+      version: event.version,
+      currentMode: this.approvalMode,
+    };
+  }
+
+  restorePendingManualPlanExitNotice(version: number): void {
+    const event = Config.prototype.getManualPlanExitNoticeEventState.call(this);
+    const cursor =
+      Config.prototype.getOwnManualPlanExitNoticeCursorState.call(this);
+    if (
+      event.version === version &&
+      event.kind === 'manual-exit' &&
+      this.approvalMode !== ApprovalMode.PLAN &&
+      cursor.seenVersion === version
+    ) {
+      cursor.seenVersion = Math.max(0, version - 1);
+    }
+  }
+
   consumePendingManualPlanExitNotice(): boolean {
-    const pending = this.pendingManualPlanExitNotice;
-    this.pendingManualPlanExitNotice = false;
-    return pending;
+    return (
+      Config.prototype.takePendingManualPlanExitNotice.call(this) !== undefined
+    );
   }
 
   /**
