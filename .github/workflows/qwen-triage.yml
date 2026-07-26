@@ -973,7 +973,12 @@ jobs:
           set -euo pipefail
           apt-get install -y --no-install-recommends tmux util-linux
 
-          npm install -g --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest'
+          # Run the global install from RUNNER_TEMP: the persistent workspace
+          # still holds the PREVIOUS run's checked-out tree here, and npm
+          # reads a cwd .npmrc — whose settings (script-shell, hooks) a
+          # --registry flag does not override — into a root-privileged
+          # install. Same fix as the verify lane.
+          (cd "${RUNNER_TEMP:?}" && npm install -g --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest')
           qwen --version
           tmux -V
 
@@ -1062,6 +1067,14 @@ jobs:
             exit 1
           fi
 
+          # `npm ci`/`npm run build` just ran the PR's lifecycle scripts, which
+          # can plant a `tmp/<name>-tmux-<ts>/` directory holding a report.md
+          # and a transcript. The collector below globs `*-tmux-*` and the
+          # publisher takes the first match, so a planted dir can supply the
+          # comment's contents. Sweep after the last PR-controlled process and
+          # before the agent starts; from here only the agent writes them.
+          find tmp -maxdepth 2 -type d -name '*-tmux-*' -exec rm -rf {} + 2>/dev/null || true
+
           # Bypass the runner proxy before launching qwen: the proxy cuts the
           # SSE stream to the model host, and qwen reads HTTP(S)_PROXY directly
           # without honoring NO_PROXY. Clear proxy env for qwen itself while
@@ -1133,17 +1146,28 @@ jobs:
           unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
 
           start_openai_proxy() {
-            local proxy_port proxy_script
-            proxy_port=8787
-            proxy_script="${RUNNER_TEMP:-/tmp}/qwen-openai-proxy.js"
+            local proxy_port proxy_script proxy_nonce port_file
+            # PR lifecycle code ran before this step and could have left a
+            # server on a fixed port: the real proxy would die with
+            # EADDRINUSE while the health probe succeeded against the
+            # squatter, and qwen would take its completions. Proven
+            # exploitable on the verify lane; same defences here — ephemeral
+            # port reported through a root-owned file, a per-run nonce the
+            # health endpoint must echo, and a liveness check on our PID.
+            proxy_script="${RUNNER_TEMP:-/tmp}/qwen-openai-proxy-tmux.js"
+            port_file="${RUNNER_TEMP:-/tmp}/qwen-openai-proxy-tmux.port"
+            proxy_nonce="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+            rm -f "$port_file"
             cat > "$proxy_script" <<'NODE'
           const http = require('node:http');
+          const { writeFileSync } = require('node:fs');
           const { Readable } = require('node:stream');
 
-          const port = Number(process.argv[2]);
+          const portFile = process.argv[2];
           const baseUrl = process.env.REVIEW_OPENAI_BASE_URL;
           const apiKey = process.env.REVIEW_OPENAI_API_KEY;
-          if (!baseUrl || !apiKey || !Number.isInteger(port)) {
+          const nonce = process.env.QWEN_PROXY_NONCE;
+          if (!baseUrl || !apiKey || !portFile || !nonce) {
             console.error('missing proxy configuration');
             process.exit(1);
           }
@@ -1153,8 +1177,9 @@ jobs:
 
           const server = http.createServer(async (req, res) => {
             if (req.url === '/__health') {
-              res.writeHead(204);
-              res.end();
+              // Identity, not just liveness: a squatter cannot know the nonce.
+              res.writeHead(200, { 'content-type': 'text/plain' });
+              res.end(nonce);
               return;
             }
 
@@ -1227,27 +1252,41 @@ jobs:
             }
           });
 
-          server.listen(port, '127.0.0.1');
+          // Port 0: let the OS choose, then publish it where only root can write.
+          server.listen(0, '127.0.0.1', () => {
+            writeFileSync(portFile, String(server.address().port));
+          });
           NODE
 
             REVIEW_OPENAI_API_KEY="$REVIEW_OPENAI_API_KEY" \
               REVIEW_OPENAI_BASE_URL="$REVIEW_OPENAI_BASE_URL" \
-              node "$proxy_script" "$proxy_port" &
+              QWEN_PROXY_NONCE="$proxy_nonce" \
+              node "$proxy_script" "$port_file" &
             OPENAI_PROXY_PID=$!
             trap 'kill "$OPENAI_PROXY_PID" 2>/dev/null || true' EXIT
 
-            for _ in 1 2 3 4 5; do
-              if curl -fsS "http://127.0.0.1:${proxy_port}/__health" >/dev/null; then
-                break
-              fi
+            proxy_port=''
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
               if ! kill -0 "$OPENAI_PROXY_PID" 2>/dev/null; then
                 echo "::error::OpenAI proxy exited before becoming ready"
                 exit 1
               fi
+              if [ -z "$proxy_port" ] && [ -s "$port_file" ]; then
+                proxy_port="$(tr -cd '0-9' < "$port_file")"
+              fi
+              if [ -n "$proxy_port" ] &&
+                 [ "$(curl -fsS "http://127.0.0.1:${proxy_port}/__health" 2>/dev/null)" = "$proxy_nonce" ]; then
+                break
+              fi
+              proxy_port=''
               sleep 1
             done
-            if ! curl -fsS "http://127.0.0.1:${proxy_port}/__health" >/dev/null; then
-              echo "::error::OpenAI proxy did not become ready"
+            # All three must hold: the PID we started is alive, the port it
+            # reported, and the nonce echoed back.
+            if [ -z "$proxy_port" ] ||
+               ! kill -0 "$OPENAI_PROXY_PID" 2>/dev/null ||
+               [ "$(curl -fsS "http://127.0.0.1:${proxy_port}/__health" 2>/dev/null)" != "$proxy_nonce" ]; then
+              echo "::error::OpenAI proxy did not become ready (or another process answered on its port)"
               exit 1
             fi
 
@@ -1347,7 +1386,16 @@ jobs:
         run: |-
           set -uo pipefail
           [ -e .git ] || exit 0
-          rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
+          # Never descend through a PR-writable parent: PR code ran in this
+          # workspace, so `.qwen` or `.qwen/tmp` can be a symlink pointing
+          # outside it (verified on the verify lane: the glob then deletes
+          # the link target's contents as root).
+          [ -L .qwen ] && rm -f .qwen
+          if [ -L .qwen/tmp ]; then
+            rm -f .qwen/tmp
+          elif [ -d .qwen/tmp ]; then
+            rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
+          fi
           find tmp -maxdepth 2 -type d -name '*-tmux-*' -exec rm -rf {} + 2>/dev/null || true
           git worktree prune -v || true
 
@@ -1415,16 +1463,32 @@ jobs:
             local summary="$1" file="$2" max="$3" content truncated='' summary_html
             [ -n "$file" ] && [ -f "$file" ] || return 0
             summary_html="$(printf '%s' "$summary" | html_escape)"
-            if [ "$(wc -c < "$file")" -gt "$max" ]; then
-              truncated=$'\n\n...truncated -- full log in the run artifacts.'
-            fi
-            if ! content="$(
+            # Escape FIRST, then cap. Escaping inflates every & < > by 4-5
+            # bytes, so a raw-side cap can push the assembled body past
+            # GitHub's 65,536-char comment limit, 422 the post, and leave no
+            # comment at all. Same fix the verify lane carries; truncation is
+            # done on a character boundary via node, because BSD `iconv -c`
+            # passes an incomplete trailing UTF-8 sequence through unchanged.
+            local esc_file="${TMPDIR:-/tmp}/tmux-emit-$$"
+            if ! (
               set -o pipefail
-              head -c "$max" "$file" | tr -d '\000' | html_escape
-            )"; then
+              head -c 400000 "$file" | tr -d '\000' | html_escape > "$esc_file"
+            ); then
               echo "::warning::emit_block failed while rendering $summary; see run artifacts." >&2
+              rm -f "$esc_file"
               content='<em>Log could not be rendered; see run artifacts.</em>'
-            elif [ -n "$truncated" ]; then
+            else
+              if [ "$(wc -c < "$esc_file")" -gt "$max" ] ||
+                 [ "$(wc -c < "$file")" -gt 400000 ]; then
+                truncated=$'\n\n...truncated -- full log in the run artifacts.'
+              fi
+              content="$(node -e '
+                const fs = require("node:fs");
+                const [file, max] = process.argv.slice(1);
+                const buf = fs.readFileSync(file).subarray(0, Number(max));
+                process.stdout.write(new TextDecoder("utf-8").decode(buf).replace(/�+$/, ""));
+              ' "$esc_file" "$max")" || content="$(head -c "$max" "$esc_file")"
+              rm -f "$esc_file"
               content="${content}${truncated}"
             fi
             printf '<details>\n<summary>%s</summary>\n\n<pre><code>\n' "$summary_html"

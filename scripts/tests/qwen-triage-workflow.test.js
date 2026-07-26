@@ -110,7 +110,10 @@ describe('qwen-triage tmux workflow', () => {
     expect(postStep).toContain('html_escape()');
     expect(postStep).toContain("tr -d '\\000'");
     expect(postStep).toContain('Log could not be rendered');
-    expect(postStep).toContain('if ! content="$(');
+    // The escape now writes to a file and the cap is applied afterwards, so
+    // the guarantee is "a render failure is caught", not the old inline
+    // capture shape. See the tmux-lane-parity suite for the cap itself.
+    expect(postStep).toContain('html_escape > "$esc_file"');
     expect(postStep).toContain('set -o pipefail');
     expect(postStep).toContain('::warning::emit_block failed');
     expect(postStep).toContain(
@@ -2049,6 +2052,12 @@ describe('qwen-triage verify maintainer-review round', () => {
     expect(publishJob).toContain(
       'needs.verify.outputs.pr_number || github.event.issue.number',
     );
+    // Same one-line class in the tmux sibling: a job cancelled while
+    // pending never evaluates its outputs either, so without the fallback
+    // publish-tmux hits the same null guard and posts nothing.
+    expect(job('publish-tmux')).toContain(
+      'needs.tmux-testing.outputs.pr_number || github.event.issue.number',
+    );
     // ...and the step that warned on the inverted premise is gone.
     expect(job('authorize')).not.toContain('Report saturated verify queue');
 
@@ -2181,5 +2190,141 @@ describe('qwen-triage verify maintainer-review round', () => {
     const runStep = stepIn('verify', 'Run verification agent');
     expect(runStep).toContain("res.end('proxy error: upstream request failed");
     expect(runStep).not.toContain('proxy error: ${error instanceof Error');
+  });
+});
+
+describe('qwen-triage tmux lane parity', () => {
+  // The verify lane earned these five controls the hard way; the tmux lane
+  // executes the same untrusted PR code on the same persistent pool, so
+  // leaving them out was a gap rather than a scope boundary.
+
+  // A fixed proxy port is squattable by a detached lifecycle process: the
+  // real proxy dies EADDRINUSE while the health probe succeeds against the
+  // squatter, and the agent takes ITS chat completions.
+  it('binds the tmux model proxy to an ephemeral port and authenticates it', () => {
+    const runStep = stepIn('tmux-testing', 'Run tmux real-user testing');
+    expect(runStep).not.toContain('proxy_port=8787');
+    expect(runStep).toContain("server.listen(0, '127.0.0.1'");
+    expect(runStep).toContain('QWEN_PROXY_NONCE');
+    expect(runStep).toContain('!= "$proxy_nonce"');
+    expect(runStep).toContain('kill -0 "$OPENAI_PROXY_PID"');
+
+    // Start the real proxy with the old fixed port occupied.
+    const proxy = runStep.match(/<<'NODE'\n([\s\S]*?)\n\s*NODE\n/)?.[1];
+    expect(proxy).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'tmux-proxy-'));
+    try {
+      writeFileSync(join(dir, 'proxy.js'), proxy.replace(/^ {10}/gm, ''));
+      writeFileSync(
+        join(dir, 'upstream.js'),
+        [
+          "const http = require('node:http');",
+          "const fs = require('node:fs');",
+          "const s = http.createServer((q, r) => { r.writeHead(200); r.end('{}'); });",
+          "s.listen(0, '127.0.0.1', () => fs.writeFileSync(process.argv[2], String(s.address().port)));",
+        ].join('\n'),
+      );
+      const driver = [
+        'set -u',
+        'node "$1/upstream.js" "$1/up.port" & UP=$!',
+        'for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1/up.port" ] && break; sleep 0.3; done',
+        'REVIEW_OPENAI_BASE_URL="http://127.0.0.1:$(cat "$1/up.port")/v1" \\',
+        '  REVIEW_OPENAI_API_KEY=k QWEN_PROXY_NONCE=n0nce \\',
+        '  node "$1/proxy.js" "$1/px.port" & PX=$!',
+        'for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1/px.port" ] && break; sleep 0.3; done',
+        'P="$(cat "$1/px.port")"',
+        'echo "port=$P"',
+        'echo "health=$(curl -sS "http://127.0.0.1:$P/__health")"',
+        'kill $UP $PX 2>/dev/null',
+      ].join('\n');
+      const out = spawnSync('bash', ['-c', driver, '_', dir], {
+        encoding: 'utf8',
+        timeout: 60000,
+      }).stdout;
+      // An OS-chosen port, and identity proven by the nonce rather than a
+      // bare 204 any squatter could return.
+      expect(out).toMatch(/port=\d+/);
+      expect(out).not.toContain('port=8787');
+      expect(out).toContain('health=n0nce');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // PR lifecycle scripts run before the agent and can plant a
+  // tmp/<name>-tmux-<ts>/ directory whose report.md and transcript the
+  // collector would hand to the publisher.
+  it('sweeps planted tmux artifacts before the agent starts', () => {
+    const runStep = stepIn('tmux-testing', 'Run tmux real-user testing');
+    const sweep =
+      "find tmp -maxdepth 2 -type d -name '*-tmux-*' -exec rm -rf {} +";
+    const sweepAt = runStep.indexOf(sweep);
+    expect(sweepAt).toBeGreaterThan(-1);
+    // Before the proxy and the agent launch, after the build.
+    expect(sweepAt).toBeLessThan(runStep.indexOf('start_openai_proxy'));
+  });
+
+  // The global install must not read the previous PR's .npmrc: a --registry
+  // flag does not override script-shell or hooks.
+  it('runs the tmux global install away from the checked-out tree', () => {
+    expect(stepIn('tmux-testing', 'Install tmux runner tools')).toContain(
+      '(cd "${RUNNER_TEMP:?}" && npm install -g',
+    );
+  });
+
+  // Cleanup must not descend through a PR-writable parent.
+  it('unlinks tmux-lane symlinks instead of globbing through them', () => {
+    const code = job('tmux-testing')
+      .split('\n')
+      .filter((l) => !/^\s*#/.test(l))
+      .join('\n');
+    expect(code).toContain('[ -L .qwen ] && rm -f .qwen');
+    expect(code).toContain('if [ -L .qwen/tmp ]; then');
+  });
+
+  // Escaping inflates & < > by 4-5 bytes each, so a raw-side cap can push
+  // the assembled comment past GitHub's 65,536-char limit and 422 the post.
+  it('caps the tmux comment after escaping, on a character boundary', () => {
+    const publish = stepIn('publish-tmux', 'Post tmux result comment');
+    const escFirst = publish.indexOf('html_escape > "$esc_file"');
+    expect(escFirst).toBeGreaterThan(-1);
+    expect(publish).toContain('TextDecoder');
+    expect(publish).not.toContain('head -c "$max" "$file" | tr -d');
+
+    // Execute it: dense metacharacter content must stay under the cap and
+    // remain valid UTF-8.
+    const script = publish
+      .match(/run: \|-\n([\s\S]*)$/)?.[1]
+      .replace(/^ {10}/gm, '');
+    const helpers = script.slice(
+      script.indexOf('html_escape()'),
+      script.indexOf('if [ "${TMUX_RESULT:-}"'),
+    );
+    const dir = mkdtempSync(join(tmpdir(), 'tmux-emit-'));
+    try {
+      const dense = join(dir, 'dense.log');
+      writeFileSync(dense, '<T<U>>&'.repeat(7300));
+      const utf8 = join(dir, 'utf8.log');
+      // One ASCII byte of padding so the cut lands inside a 3-byte char.
+      writeFileSync(utf8, `x${'验证证据链路测试'.repeat(8000)}`);
+      const emit = (file) => {
+        const proc = spawnSync(
+          'bash',
+          ['-c', `${helpers}\nemit_block 'Log' "$1" 20000`, '_', file],
+          { encoding: 'utf8', maxBuffer: 20 * 1024 * 1024 },
+        );
+        expect(proc.status).toBe(0);
+        return proc.stdout;
+      };
+      const capped = emit(dense);
+      expect(Buffer.byteLength(capped)).toBeLessThan(65536);
+      expect(capped).toContain('truncated');
+      expect(capped).not.toContain('<T<U>');
+      const cut = emit(utf8);
+      expect(Buffer.from(cut, 'utf8').toString('utf8')).toBe(cut);
+      expect(cut).not.toContain('\ufffd');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
