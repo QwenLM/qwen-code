@@ -99,6 +99,34 @@ function subagentApprovalModesLabel(): string {
  * Manages subagent configurations stored as Markdown files with YAML frontmatter.
  * Provides CRUD operations, validation, and integration with the runtime system.
  */
+/**
+ * Normalizes raw `modelGrades`/`allowedGrades` settings into a validated
+ * shape, or `null` when malformed (non-object modelGrades, array-shaped, or
+ * non-array allowlist). The Agent tool schema build and `resolveModelGrade`
+ * both go through this so the advertised grades and runtime resolution
+ * cannot drift.
+ */
+export function normalizeModelGradeSettings(
+  settings: { modelGrades?: unknown; allowedGrades?: unknown } | undefined,
+): { grades: Record<string, string>; allowlist: string[] | undefined } | null {
+  const modelGrades = settings?.modelGrades;
+  if (
+    !modelGrades ||
+    typeof modelGrades !== 'object' ||
+    Array.isArray(modelGrades)
+  ) {
+    return null;
+  }
+  const allowedGrades = settings?.allowedGrades;
+  if (allowedGrades !== undefined && !Array.isArray(allowedGrades)) {
+    return null;
+  }
+  return {
+    grades: modelGrades as Record<string, string>,
+    allowlist: allowedGrades as string[] | undefined,
+  };
+}
+
 export class SubagentManager {
   private readonly validator: SubagentValidator;
   private subagentsCache: Map<SubagentLevel, SubagentConfig[]> | null = null;
@@ -161,19 +189,21 @@ export class SubagentManager {
       return undefined;
     }
 
-    const { modelGrades, allowedGrades } = this.config.getAgentsSettings();
+    const normalized = normalizeModelGradeSettings(
+      this.config.getAgentsSettings(),
+    );
+    if (!normalized) {
+      return undefined;
+    }
+    const { grades, allowlist } = normalized;
     if (
-      !modelGrades ||
-      typeof modelGrades !== 'object' ||
-      Array.isArray(modelGrades) ||
-      (allowedGrades !== undefined &&
-        (!Array.isArray(allowedGrades) || !allowedGrades.includes(grade))) ||
-      !Object.hasOwn(modelGrades, grade)
+      (allowlist !== undefined && !allowlist.includes(grade)) ||
+      !Object.hasOwn(grades, grade)
     ) {
       return undefined;
     }
 
-    const model = modelGrades[grade];
+    const model = grades[grade];
     if (typeof model !== 'string') {
       return undefined;
     }

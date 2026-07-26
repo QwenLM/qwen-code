@@ -70,7 +70,13 @@ function escapeRegExp(value: string): string {
 }
 
 // Mock dependencies
-vi.mock('../../subagents/subagent-manager.js');
+vi.mock('../../subagents/subagent-manager.js', async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    SubagentManager: vi.fn(),
+  };
+});
 vi.mock('../../agents/runtime/agent-headless.js');
 
 // Spies for the subagent-span layer so tests can assert what status taxonomy
