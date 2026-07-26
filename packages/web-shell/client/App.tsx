@@ -2426,7 +2426,8 @@ export function App({
   const streamingState = useStreamingState();
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
   const queuedShellCommandsRef = useRef<string[]>([]);
-  const drainCancelledRef = useRef(false);
+  const drainGenerationRef = useRef(0);
+  const shellSubmitInFlightRef = useRef(false);
   const localStreamingStartedAtRef = useRef(Date.now());
   const previousStreamingStateRef =
     useRef<DaemonStreamingState>(streamingState);
@@ -3878,8 +3879,12 @@ export function App({
   // Drop queued commands on a session switch so the drain never runs a
   // command against a different workspace's daemon (mirrors useQueuedPrompts).
   useEffect(() => {
+    const dropped = queuedShellCommandsRef.current.length;
     queuedShellCommandsRef.current = [];
-  }, [connection.sessionId]);
+    if (dropped > 0) {
+      pushToast('warning', t('queue.shellDropped', { count: dropped }));
+    }
+  }, [connection.sessionId, pushToast, t]);
 
   const prevShellDrainStreamingStateRef = useRef(streamingState);
   useEffect(() => {
@@ -3892,13 +3897,14 @@ export function App({
     const cmds = queuedShellCommandsRef.current;
     if (cmds.length === 0) return;
     queuedShellCommandsRef.current = [];
-    drainCancelledRef.current = false;
+    const generation = ++drainGenerationRef.current;
     const drainSessionId = connectionRef.current.sessionId;
     void (async () => {
       for (let i = 0; i < cmds.length; i++) {
         if (
-          drainCancelledRef.current ||
-          connectionRef.current.sessionId !== drainSessionId
+          drainGenerationRef.current !== generation ||
+          connectionRef.current.sessionId !== drainSessionId ||
+          connectionRef.current.status !== 'connected'
         ) {
           const dropped = cmds.length - i;
           console.warn(
@@ -5913,13 +5919,27 @@ export function App({
           return true;
         }
         const needsSession = !connectionRef.current.sessionId;
-        if (needsSession) setIsPreparingPrompt(true);
+        if (needsSession) {
+          if (shellSubmitInFlightRef.current) return false;
+          shellSubmitInFlightRef.current = true;
+          setIsPreparingPrompt(true);
+        }
         let sessionCreated = false;
         void ensureSessionForPrompt()
+          .finally(() => {
+            if (needsSession) {
+              setIsPreparingPrompt(false);
+              shellSubmitInFlightRef.current = false;
+            }
+          })
           .then(() => {
             if (needsSession && connectionRef.current.sessionId) {
               sessionCreated = true;
-              editorRef.current?.clear();
+              if (commitComposerAccepted) {
+                commitComposerAccepted();
+              } else {
+                editorRef.current?.clear();
+              }
               dispatchSessionChangeRef.current?.({
                 type: 'submit',
                 sessionId: connectionRef.current.sessionId,
@@ -5937,9 +5957,6 @@ export function App({
                 ? 'Failed to create session for shell command'
                 : 'Failed to execute shell command',
             );
-          })
-          .finally(() => {
-            if (needsSession) setIsPreparingPrompt(false);
           });
         return !needsSession;
       } else {
@@ -6034,7 +6051,7 @@ export function App({
 
   const handleCancel = useCallback(() => {
     queuedShellCommandsRef.current = [];
-    drainCancelledRef.current = true;
+    drainGenerationRef.current++;
     sessionActions.cancel().catch((error: unknown) => {
       reportError(error, 'Failed to cancel request');
     });

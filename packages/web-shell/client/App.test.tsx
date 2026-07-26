@@ -1132,7 +1132,11 @@ describe('App shell command queueing', () => {
 
     let accepted: boolean | void;
     await act(async () => {
-      accepted = testState.latestChatEditorProps?.onSubmit('!echo hi');
+      accepted = testState.latestChatEditorProps?.onSubmit(
+        '!echo hi',
+        undefined,
+        editorCommit,
+      );
       await vi.waitFor(() => {
         expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith(
           'echo hi',
@@ -1140,13 +1144,112 @@ describe('App shell command queueing', () => {
       });
     });
     expect(accepted).toBe(false);
-    expect(editorClear).toHaveBeenCalled();
+    expect(editorCommit).toHaveBeenCalled();
+    expect(editorClear).not.toHaveBeenCalled();
     expect(mockSessionActions.createSession).toHaveBeenCalled();
     expect(onSessionChange).toHaveBeenCalledWith({
       type: 'submit',
       sessionId: 'session-1',
       prompt: '!echo hi',
       queued: false,
+    });
+  });
+
+  it('returns true and clears editor for ! commands with an existing session', async () => {
+    renderApp({});
+    await flush();
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('!ls');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith('ls');
+      });
+    });
+    expect(accepted).toBe(true);
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+  });
+
+  it('blocks duplicate ! submission while session creation is in flight', async () => {
+    mockConnection.sessionId = undefined;
+    let resolveCreate!: () => void;
+    const createDone = new Promise<void>((r) => {
+      resolveCreate = r;
+    });
+    mockSessionActions.createSession.mockImplementation(() => {
+      return createDone.then(() => {
+        mockConnection.sessionId = 'session-1';
+        return { sessionId: 'session-1' };
+      });
+    });
+    renderApp({});
+    await flush();
+
+    let first: boolean | void;
+    let second: boolean | void;
+    await act(async () => {
+      first = testState.latestChatEditorProps?.onSubmit('!git push');
+      second = testState.latestChatEditorProps?.onSubmit('!git push');
+      await Promise.resolve();
+    });
+
+    expect(first).toBe(false);
+    expect(second).toBe(false);
+
+    await act(async () => {
+      resolveCreate();
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendShellCommand).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith(
+      'git push',
+    );
+  });
+
+  it('releases isPreparing after session creation, not after command completion', async () => {
+    mockConnection.sessionId = undefined;
+    let resolveCreate!: () => void;
+    const createDone = new Promise<void>((r) => {
+      resolveCreate = r;
+    });
+    mockSessionActions.createSession.mockImplementation(() => {
+      return createDone.then(() => {
+        mockConnection.sessionId = 'session-1';
+        return { sessionId: 'session-1' };
+      });
+    });
+    let resolveCmd!: () => void;
+    const cmdDone = new Promise<void>((r) => {
+      resolveCmd = r;
+    });
+    mockSessionActions.sendShellCommand.mockReturnValue(cmdDone);
+    renderApp({});
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!npm run build');
+      await Promise.resolve();
+    });
+
+    expect(testState.latestChatEditorProps?.isPreparing).toBe(true);
+
+    // Resolve session creation — isPreparing must drop even though the
+    // command is still running.
+    await act(async () => {
+      resolveCreate();
+      await Promise.resolve();
+    });
+
+    expect(testState.latestChatEditorProps?.isPreparing).toBe(false);
+    expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith(
+      'npm run build',
+    );
+
+    // Clean up the pending command promise.
+    await act(async () => {
+      resolveCmd();
+      await Promise.resolve();
     });
   });
 
@@ -1230,6 +1333,7 @@ describe('App shell command queueing', () => {
     await flush();
 
     expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+    expect(onToast).toHaveBeenCalledWith('warning', expect.any(String));
   });
 
   it('aborts remaining commands if the session changes mid-drain', async () => {
