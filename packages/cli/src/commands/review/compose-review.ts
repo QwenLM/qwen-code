@@ -30,6 +30,8 @@ import {
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
 import { shellQuotePath } from './lib/shell-quote.js';
+import { gh, setGhHost } from './lib/gh.js';
+import { isPositivePrNumber } from './lib/roster.js';
 import {
   hasExecutableScript,
   reviewMode,
@@ -45,6 +47,13 @@ import {
 } from './lib/inline-counts.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
+
+/**
+ * Reads a PR's description body, given its `owner/repo` and number. The one
+ * production implementation calls `gh pr view`; the bilingual fallback uses it
+ * to recover the Han signal from the live PR when the plan does not carry it.
+ */
+export type PrBodyFetcher = (ownerRepo: string, prNumber: string) => string;
 
 export interface ComposeReviewInput {
   /**
@@ -101,6 +110,18 @@ export interface ComposeReviewInput {
    * anything that would change where the transcripts are found on a real run.
    */
   env?: NodeJS.ProcessEnv;
+  /**
+   * How the bilingual fallback reads the live PR body when the plan carries a
+   * PR identity but no `prDescriptionHasHan` (a `plan-diff` plan, or one an
+   * improvising orchestrator wired in place of `fetch-pr`'s report). A test
+   * seam ONLY: production leaves it undefined and the CLI reads the PR with
+   * `gh pr view`. The handler **strips it from the input JSON** before use (the
+   * same way it strips `env`), so a model cannot supply one — not even a
+   * non-function value that would throw past the default and drop the fold. It
+   * can neither force nor suppress the Chinese fold, which is the whole point of
+   * keeping the signal the CLI's own.
+   */
+  prBodyFetcher?: PrBodyFetcher;
   /** Step 1's lightweight `pr-context` fetch failed. */
   contextUnavailable?: boolean;
   presubmit?: {
@@ -611,11 +632,13 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // description contains Han characters, the posted body carries the complete
   // Chinese version collapsed under the English one — the shape this repo's
   // own PR descriptions use, decided by the plan the CLI wrote, never by the
-  // caller. Fragments with no deterministic translation (model-written
-  // findings, caller echoes, error interpolations) ride verbatim in both
-  // halves. The footer stays outside the fold, once. A `zh === en` body has
-  // nothing translated, so no empty fold is published.
-  const bilingual = bilingualFromPlan(input.planPath);
+  // caller. When the plan does not record the signal but still names the PR,
+  // the switch recovers it from the live description (see `bilingualFromPlan`).
+  // Fragments with no deterministic translation (model-written findings, caller
+  // echoes, error interpolations) ride verbatim in both halves. The footer
+  // stays outside the fold, once. A `zh === en` body has nothing translated, so
+  // no empty fold is published.
+  const bilingual = bilingualFromPlan(input.planPath, input.prBodyFetcher);
   const render = (parts: Bi[], sep: string): string => {
     const en = parts.map((p) => p.en).join(sep);
     if (en === '') return '';
@@ -1063,6 +1086,20 @@ interface Bi {
   zh: string;
 }
 
+/** The production reader: one `gh pr view` for the description body. */
+const fetchPrBodyViaGh: PrBodyFetcher = (ownerRepo, prNumber) => {
+  const json = gh(
+    'pr',
+    'view',
+    prNumber,
+    '--repo',
+    ownerRepo,
+    '--json',
+    'body',
+  );
+  return (JSON.parse(json) as { body?: string }).body ?? '';
+};
+
 /**
  * Read the script-lint report the orchestrator wrote and turn it into verdict
  * inputs, deterministically. Returns the pre-confirmed `[lint]` Criticals (a
@@ -1153,14 +1190,49 @@ function scriptLintReportName(pr: unknown): string {
  * the register of a certified body. A local plan has no such field, and a
  * plan that cannot be read defaults to English-only: the language must never
  * take the review down.
+ *
+ * A recorded `false` is authoritative: `fetch-pr` fetched the body and found
+ * no Han, so English-only is the answer and no network is spent — every
+ * English-authored PR review takes this path.
+ *
+ * The field being *absent* is a different state, and the one that shipped an
+ * English-only review over a Chinese-authored PR (#7686): `fetch-pr` always
+ * writes it, but a `plan-diff` plan never does, and an orchestrator that
+ * improvises the pipeline can wire `compose-review` at a plan that is not
+ * `fetch-pr`'s report at all. So when the flag is missing yet the plan still
+ * carries the PR's identity, recover the signal from the live PR — the real
+ * description, which the caller cannot fake, so this hardens the "signal is
+ * the CLI's own" property rather than loosening it. Any failure of that fetch
+ * falls back to English: the language must never take the review down.
  */
-function bilingualFromPlan(planPath: string | undefined): boolean {
+function bilingualFromPlan(
+  planPath: string | undefined,
+  fetchPrBody: PrBodyFetcher = fetchPrBodyViaGh,
+): boolean {
   if (!planPath) return false;
+  let plan: {
+    prDescriptionHasHan?: unknown;
+    ownerRepo?: unknown;
+    prNumber?: unknown;
+  };
   try {
-    const plan = JSON.parse(readFileSync(planPath, 'utf8')) as {
-      prDescriptionHasHan?: unknown;
-    };
-    return plan?.prDescriptionHasHan === true;
+    plan = JSON.parse(readFileSync(planPath, 'utf8'));
+  } catch {
+    return false;
+  }
+  if (typeof plan?.prDescriptionHasHan === 'boolean') {
+    return plan.prDescriptionHasHan;
+  }
+  const ownerRepo =
+    typeof plan?.ownerRepo === 'string' && plan.ownerRepo
+      ? plan.ownerRepo
+      : undefined;
+  const prNumber = isPositivePrNumber(plan?.prNumber)
+    ? String(plan.prNumber)
+    : undefined;
+  if (!ownerRepo || !prNumber) return false;
+  try {
+    return /\p{Script=Han}/u.test(fetchPrBody(ownerRepo, prNumber));
   } catch {
     return false;
   }
@@ -1170,6 +1242,8 @@ interface ComposeReviewCliArgs {
   input: string | undefined;
   comments: string;
   out: string | undefined;
+  /** GitHub Enterprise host — routes this command's `gh` calls via GH_HOST. */
+  host?: string;
 }
 
 /**
@@ -1245,9 +1319,22 @@ export const composeReviewCommand: CommandModule = {
       .option('out', {
         type: 'string',
         describe: 'Also write the {event, body} JSON to this path',
+      })
+      .option('host', {
+        type: 'string',
+        describe:
+          'GitHub Enterprise host (routes gh via GH_HOST) — needed only when ' +
+          'the bilingual body-language recovery has to fetch the PR description',
       }),
   handler: (argv) => {
-    const { input, comments, out } = argv as unknown as ComposeReviewCliArgs;
+    const { input, comments, out, host } =
+      argv as unknown as ComposeReviewCliArgs;
+    // Route this command's own `gh` call — the bilingual recovery's `gh pr view`
+    // (see `fetchPrBodyViaGh`) — via the PR's host, exactly as fetch-pr and submit
+    // do. Without it a GHE review whose plan lacks the Han flag fetches the body
+    // from github.com, fails, and composes an English-only body that disagrees
+    // with what `submit` (which routes by host) posts.
+    setGhHost(host);
     // yargs enforces --comments on the real command line; this covers every
     // other way in (tests, programmatic calls) with the same sentence instead
     // of an ENOENT on `undefined`.
@@ -1267,6 +1354,13 @@ export const composeReviewCommand: CommandModule = {
     // always resolves the transcripts from the environment the CLI exported.
     const parsed = JSON.parse(raw) as ComposeReviewInput;
     delete parsed.env;
+    // Same reasoning for the bilingual body-language fetcher: it is a unit-test
+    // seam (production reads the PR with `gh pr view`). A state JSON carrying it —
+    // even a non-function value like `"suppress"` — would otherwise reach
+    // `bilingualFromPlan`, be called, throw, and drop the Chinese fold through the
+    // fail-safe. Stripping it here keeps the register the CLI's own, not the
+    // caller's, which is the whole point of the seam.
+    delete parsed.prBodyFetcher;
     // The inline counts are counted, not accepted — `submit` has refused them
     // since the count-beside-the-comments bug, and this boundary refusing them
     // too is what makes the Step 6 line and the posted verdict the same

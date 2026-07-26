@@ -11,7 +11,7 @@ import type { AgentSpawnConfig } from './types.js';
 import { AgentCore } from '../runtime/agent-core.js';
 import { getTeammateContext } from '../team/identity.js';
 import { createContentGenerator } from '../../core/contentGenerator.js';
-import { ApprovalMode, type Config } from '../../config/config.js';
+import { ApprovalMode, Config } from '../../config/config.js';
 
 const DEFAULT_MODE = 'default' as ApprovalMode;
 const PLAN_MODE = 'plan' as ApprovalMode;
@@ -669,6 +669,56 @@ describe('InProcessBackend', () => {
     expect(agentContext.getPrePlanMode()).toBe(DEFAULT_MODE);
     expect(parentConfig.getApprovalMode()).toBe(DEFAULT_MODE);
     expect(parentConfig.setApprovalMode).not.toHaveBeenCalled();
+  });
+
+  it('copies the inherited plan-exit event into a per-agent mode override', async () => {
+    const parentConfig = createMockConfig() as unknown as Record<
+      string,
+      unknown
+    >;
+    Object.assign(parentConfig, {
+      approvalMode: ApprovalMode.DEFAULT,
+      manualPlanExitNoticeEventState: {
+        version: 2,
+        kind: 'manual-exit',
+      },
+      takePendingManualPlanExitNotice:
+        Config.prototype.takePendingManualPlanExitNotice,
+      restorePendingManualPlanExitNotice:
+        Config.prototype.restorePendingManualPlanExitNotice,
+    });
+    const backendWithParentMode = new InProcessBackend(
+      parentConfig as unknown as Config,
+    );
+    await backendWithParentMode.init();
+
+    const config = createSpawnConfig('agent-1');
+    config.inProcess!.approvalMode = ApprovalMode.AUTO_EDIT;
+    await backendWithParentMode.spawnAgent(config);
+
+    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
+    const { runtimeContext } = destructureAgentCoreCall(
+      MockAgentCore.mock.calls.at(-1)!,
+    );
+    const agentContext = runtimeContext as unknown as Config;
+    expect(agentContext.takePendingManualPlanExitNotice()).toEqual({
+      version: 2,
+      currentMode: ApprovalMode.AUTO_EDIT,
+    });
+
+    Object.assign(parentConfig['manualPlanExitNoticeEventState'] as object, {
+      version: 3,
+      kind: 'manual-exit',
+    });
+    expect(agentContext.takePendingManualPlanExitNotice()).toBeUndefined();
+    expect(
+      Config.prototype.takePendingManualPlanExitNotice.call(
+        parentConfig as unknown as Config,
+      ),
+    ).toEqual({
+      version: 3,
+      currentMode: ApprovalMode.DEFAULT,
+    });
   });
 
   it('restores a plan-mode per-agent config to default without mutating the parent config', async () => {
