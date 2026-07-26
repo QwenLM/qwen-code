@@ -243,7 +243,7 @@ export function BranchPickerPopover({
           />
         </div>
 
-        <div className={styles.list}>
+        <div className={styles.list} onPointerDown={(e) => e.stopPropagation()}>
           {loading && (
             <div className={styles.loading}>{t('branchPicker.loading')}</div>
           )}
