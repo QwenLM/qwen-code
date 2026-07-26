@@ -3060,7 +3060,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt comment-replies.json pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               cat "${WORKDIR}/${f}"
@@ -3184,6 +3184,32 @@ jobs:
                 fi
               done < "${WORKDIR}/resolved-comments.txt"
               echo "🧵 resolved ${RESOLVED_N} review thread(s) the agent implemented"
+            fi
+            # The mirror of the resolve above: a finding the agent did NOT
+            # resolve keeps its thread open, and this answers it IN that thread.
+            # Without it the reason sits only in the round summary, so the
+            # reviewer who opens the still-open thread sees silence and cannot
+            # tell their finding was read. Same neutralisation as the summary
+            # body — a reply is model output posted verbatim under the bot
+            # identity, so it could otherwise smuggle a forged control marker.
+            # Best-effort: a reply failure must never fail a good push.
+            if [[ -s "${WORKDIR}/comment-replies.json" ]] &&
+              jq -e 'type == "array"' "${WORKDIR}/comment-replies.json" > /dev/null 2>&1; then
+              REPLIED_N=0
+              while IFS=$'\t' read -r rc_id reply_b64; do
+                [[ "${rc_id}" =~ ^[0-9]+$ && -n "${reply_b64}" ]] || continue
+                REPLY_BODY="$(base64 -d <<< "${reply_b64}" | sed 's/<!--/<!\\-\\-/g')"
+                [[ -n "${REPLY_BODY}" ]] || continue
+                if gh api "repos/${REPO}/pulls/${PR}/comments/${rc_id}/replies" \
+                  -f body="${REPLY_BODY}" > /dev/null 2>&1; then
+                  REPLIED_N=$(( REPLIED_N + 1 ))
+                else
+                  echo "::warning::could not reply to review comment ${rc_id}"
+                fi
+              done < <(jq -r '.[] | select(.id != null and .body != null)
+                | [(.id | tostring), (.body | @base64)] | @tsv' \
+                "${WORKDIR}/comment-replies.json" 2> /dev/null || true)
+              echo "🧵 replied on ${REPLIED_N} thread(s) the agent left open"
             fi
             {
               echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on: · 已处理最新评审反馈（第 ${NEXT_ROUND}/${MAX_ROUNDS} 轮）。改动内容与我反驳保留之处如下："
