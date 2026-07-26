@@ -23,6 +23,7 @@ function minimalConfig(over: Partial<Record<string, unknown>> = {}): Config {
   return {
     getTargetDir: () => '/Users/test/project',
     getModelInvocableCommandsExecutor: () => undefined,
+    getShellDefaultTimeoutMs: () => undefined,
     ...over,
   } as unknown as Config;
 }
@@ -185,7 +186,7 @@ describe('SkillTool.toAutoClassifierInput', () => {
 // AgentTool ──────────────────────────────────────────────────────────────
 
 describe('AgentTool.toAutoClassifierInput', () => {
-  it('forwards full prompt and subagent_type (no truncation)', () => {
+  it('forwards full prompt, subagent_type, and fork_turns', () => {
     // Regression guard: prior implementation truncated to 200 chars, which
     // hid attack payloads placed after character 200 from the classifier
     // while the sub-agent still received the full text. Same attack surface
@@ -200,11 +201,31 @@ describe('AgentTool.toAutoClassifierInput', () => {
       {
         description: 'short desc',
         prompt: longPrompt,
-        subagent_type: 'coder',
+        subagent_type: 'fork',
+        fork_turns: '3',
       },
     );
-    expect(result['subagent_type']).toBe('coder');
+    expect(result['subagent_type']).toBe('fork');
+    expect(result['fork_turns']).toBe('3');
     expect(result['prompt']).toBe(longPrompt);
     expect((result['prompt'] as string).length).toBe(longPrompt.length);
+  });
+
+  it('includes working_dir so AUTO-mode classification can see the worktree rebind', () => {
+    const result = (
+      AgentTool.prototype.toAutoClassifierInput as (
+        p: unknown,
+      ) => Record<string, unknown>
+    ).call(
+      {},
+      {
+        description: 'review',
+        prompt: 'review the diff',
+        subagent_type: 'file-search',
+        working_dir: '.qwen/tmp/review-pr-1',
+      },
+    );
+    expect(result['working_dir']).toBe('.qwen/tmp/review-pr-1');
+    expect(result['subagent_type']).toBe('file-search');
   });
 });

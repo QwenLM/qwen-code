@@ -41,6 +41,7 @@ const sessions = [
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useConnection: () => ({ sessionId: 'me' }),
+  useWorkspace: () => ({ client: {} }),
   useSessions: () => ({
     sessions,
     loading: false,

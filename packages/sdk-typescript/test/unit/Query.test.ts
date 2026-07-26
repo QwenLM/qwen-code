@@ -366,6 +366,40 @@ describe('Query', () => {
       await query.close();
     });
 
+    it('should use new session ID when forkSession is true', async () => {
+      const resumeId = '123e4567-e89b-12d3-a456-426614174000';
+      const query = new Query(transport, {
+        cwd: '/test',
+        forkSession: true,
+        resume: resumeId,
+      });
+
+      expect(query.getSessionId()).not.toBe(resumeId);
+      expect(query.getSessionId()).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i,
+      );
+
+      await respondToInitialize(transport, query);
+      await query.close();
+    });
+
+    it('should use explicit sessionId when forkSession is true', async () => {
+      const resumeId = '123e4567-e89b-12d3-a456-426614174000';
+      const forkId = '234e5678-e89b-12d3-a456-426614174001';
+      const query = new Query(transport, {
+        cwd: '/test',
+        forkSession: true,
+        resume: resumeId,
+        sessionId: forkId,
+      });
+
+      expect(query.getSessionId()).toBe(forkId);
+      expect(query.getSessionId()).not.toBe(resumeId);
+
+      await respondToInitialize(transport, query);
+      await query.close();
+    });
+
     it('should handle initialization errors', async () => {
       const query = new Query(transport, {
         cwd: '/test',
@@ -1270,6 +1304,124 @@ describe('Query', () => {
       await query.close();
     });
 
+    it('should provide setEffort() method', async () => {
+      const query = new Query(transport, { cwd: '/test' });
+
+      await respondToInitialize(transport, query);
+
+      const setEffortPromise = query.setEffort('high');
+
+      await vi.waitFor(() => {
+        const messages = transport.getAllWrittenMessages();
+        const setEffortMsg = findControlRequest(
+          messages,
+          ControlRequestType.SET_EFFORT,
+        );
+        expect(setEffortMsg).toBeDefined();
+      });
+
+      const messages = transport.getAllWrittenMessages();
+      const setEffortMsg = findControlRequest(
+        messages,
+        ControlRequestType.SET_EFFORT,
+      )!;
+
+      expect((setEffortMsg.request as Record<string, unknown>).effort).toBe(
+        'high',
+      );
+
+      transport.simulateMessage(
+        createControlResponse(setEffortMsg.request_id, true, {
+          subtype: 'set_effort',
+          effort: 'high',
+          applied: true,
+        }),
+      );
+
+      const result = await setEffortPromise;
+      expect(result).toBe(true);
+
+      await query.close();
+    });
+
+    it('should provide getAvailableModels() method', async () => {
+      const query = new Query(transport, { cwd: '/test' });
+
+      await respondToInitialize(transport, query);
+
+      const modelsPromise = query.getAvailableModels();
+
+      await vi.waitFor(() => {
+        const messages = transport.getAllWrittenMessages();
+        const modelsMsg = findControlRequest(
+          messages,
+          ControlRequestType.GET_AVAILABLE_MODELS,
+        );
+        expect(modelsMsg).toBeDefined();
+      });
+
+      const messages = transport.getAllWrittenMessages();
+      const modelsMsg = findControlRequest(
+        messages,
+        ControlRequestType.GET_AVAILABLE_MODELS,
+      )!;
+
+      transport.simulateMessage(
+        createControlResponse(modelsMsg.request_id, true, {
+          subtype: 'get_available_models',
+          models: [{ id: 'qwen-max', label: 'Qwen Max' }],
+        }),
+      );
+
+      const result = await modelsPromise;
+      expect(result).toMatchObject({
+        subtype: 'get_available_models',
+        models: [{ id: 'qwen-max', label: 'Qwen Max' }],
+      });
+
+      await query.close();
+    });
+
+    it('should provide getUsageInfo() method', async () => {
+      const query = new Query(transport, { cwd: '/test' });
+
+      await respondToInitialize(transport, query);
+
+      const usagePromise = query.getUsageInfo('week');
+
+      await vi.waitFor(() => {
+        const messages = transport.getAllWrittenMessages();
+        const usageMsg = findControlRequest(
+          messages,
+          ControlRequestType.GET_USAGE_INFO,
+        );
+        expect(usageMsg).toBeDefined();
+      });
+
+      const messages = transport.getAllWrittenMessages();
+      const usageMsg = findControlRequest(
+        messages,
+        ControlRequestType.GET_USAGE_INFO,
+      )!;
+
+      expect((usageMsg.request as Record<string, unknown>).range).toBe('week');
+
+      transport.simulateMessage(
+        createControlResponse(usageMsg.request_id, true, {
+          range: 'week',
+          summary: { totalTokens: 50000 },
+        }),
+      );
+
+      const result = await usagePromise;
+      expect(result).toMatchObject({
+        range: 'week',
+        summary: { totalTokens: 50000 },
+      });
+
+      await query.close();
+    });
+
     it('should throw if methods called on closed query', async () => {
       const query = new Query(transport, { cwd: '/test' });
       await respondToInitialize(transport, query);
@@ -1285,6 +1437,27 @@ describe('Query', () => {
       );
       await expect(query.mcpServerStatus()).rejects.toThrow('Query is closed');
       await expect(query.getContextUsage()).rejects.toThrow('Query is closed');
+      await expect(query.setEffort('high')).rejects.toThrow('Query is closed');
+      await expect(query.getAvailableModels()).rejects.toThrow(
+        'Query is closed',
+      );
+      await expect(query.getUsageInfo()).rejects.toThrow('Query is closed');
+    });
+
+    it('should send effort in initialize payload when provided in options', async () => {
+      const query = new Query(transport, { cwd: '/test', effort: 'high' });
+
+      await respondToInitialize(transport, query);
+
+      const messages = transport.getAllWrittenMessages();
+      const initMsg = findControlRequest(
+        messages,
+        ControlRequestType.INITIALIZE,
+      );
+      expect(initMsg).toBeDefined();
+      expect((initMsg!.request as Record<string, unknown>).effort).toBe('high');
+
+      await query.close();
     });
   });
 

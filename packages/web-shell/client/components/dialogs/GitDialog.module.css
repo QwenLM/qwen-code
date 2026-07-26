@@ -1,0 +1,41 @@
+.content {
+  display: flex;
+  min-height: 50vh;
+  flex-direction: column;
+}
+
+.tabBar {
+  display: flex;
+  gap: 2px;
+  padding: 0 0 8px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+.tab {
+  padding: 4px 12px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.tab:hover,
+.tabActive {
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
+}
+
+.tabActive {
+  color: inherit;
+  font-weight: 500;
+}
+
+.tabPanel {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+}

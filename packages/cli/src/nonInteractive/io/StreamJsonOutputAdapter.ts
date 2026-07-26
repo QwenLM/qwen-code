@@ -10,6 +10,7 @@ import type {
   ServerGeminiStreamEvent,
   ToolCallRequestInfo,
   McpToolProgressData,
+  ShellProgressData,
 } from '@qwen-code/qwen-code-core';
 import { GeminiEventType } from '@qwen-code/qwen-code-core';
 import type {
@@ -310,7 +311,7 @@ export class StreamJsonOutputAdapter
    */
   override emitToolProgress(
     request: ToolCallRequestInfo,
-    progress: McpToolProgressData,
+    progress: McpToolProgressData | ShellProgressData,
   ): void {
     if (!this.includePartialMessages) {
       return;

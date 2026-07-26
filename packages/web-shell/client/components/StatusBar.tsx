@@ -10,6 +10,7 @@ import {
 import type { DaemonSessionTaskStatus } from '@qwen-code/sdk/daemon';
 import { useConnection } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../i18n';
+import { isComposerTask } from '../utils/composerTasks';
 import styles from './StatusBar.module.css';
 
 const GOAL_PILL_INTERVAL_MS = 1000;
@@ -54,6 +55,8 @@ interface StatusBarProps {
     condition: string;
     setAt: number;
   } | null;
+  /** Open the Goals page. When omitted the goal pill stays a plain label. */
+  onOpenGoals?: () => void;
   /** Hide the settings gear button (e.g. when /settings is in hiddenSlashCommands). */
   hideSettings?: boolean;
   /** Toggle the keyboard-shortcuts panel (same as typing `?` in the editor). */
@@ -96,23 +99,20 @@ export function getTaskPillLabel(
   tasks: readonly DaemonSessionTaskStatus[],
   t: ReturnType<typeof useI18n>['t'],
 ): string {
-  if (tasks.length === 0) return '';
+  const composerTasks = tasks.filter(isComposerTask);
+  if (composerTasks.length === 0) return '';
 
-  const running = tasks.filter((task) => task.status === 'running');
+  const running = composerTasks.filter((task) => task.status === 'running');
   if (running.length > 0) {
-    const counts = { agent: 0, shell: 0, monitor: 0 };
+    const counts = { shell: 0, monitor: 0 };
     for (const task of running) {
-      counts[task.kind]++;
+      if (task.kind === 'shell') counts.shell += 1;
+      if (task.kind === 'monitor') counts.monitor += 1;
     }
     const parts: string[] = [];
     if (counts.shell > 0) {
       parts.push(
         formatCount(counts.shell, 'tasks.pill.shell', 'tasks.pill.shells', t),
-      );
-    }
-    if (counts.agent > 0) {
-      parts.push(
-        formatCount(counts.agent, 'tasks.pill.agent', 'tasks.pill.agents', t),
       );
     }
     if (counts.monitor > 0) {
@@ -128,21 +128,12 @@ export function getTaskPillLabel(
     return parts.join(', ');
   }
 
-  const pausedAgents = tasks.filter(
-    (task) => task.kind === 'agent' && task.status === 'paused',
+  return t(
+    composerTasks.length === 1 ? 'tasks.pill.done' : 'tasks.pill.doneMany',
+    {
+      count: composerTasks.length,
+    },
   );
-  if (pausedAgents.length > 0) {
-    return t(
-      pausedAgents.length === 1
-        ? 'tasks.pill.agentPaused'
-        : 'tasks.pill.agentsPaused',
-      { count: pausedAgents.length },
-    );
-  }
-
-  return t(tasks.length === 1 ? 'tasks.pill.done' : 'tasks.pill.doneMany', {
-    count: tasks.length,
-  });
 }
 
 function formatGoalElapsed(ms: number): string {
@@ -166,6 +157,7 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
       onReturnToInput,
       tasks,
       activeGoal,
+      onOpenGoals,
       hideSettings,
       onToggleShortcuts,
       compact = false,
@@ -356,11 +348,31 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
               </span>
             </button>
           )}
-          {goalLabel && (
-            <span className={styles.goal} title={activeGoal?.condition}>
-              {goalLabel}
-            </span>
-          )}
+          {goalLabel &&
+            (onOpenGoals ? (
+              <button
+                type="button"
+                className={styles.goalButton}
+                onClick={onOpenGoals}
+                title={activeGoal?.condition}
+                // The visible label is truncated and the full condition lives
+                // only in `title`, which is a hover tooltip screen readers do
+                // not reliably announce. Name the goal here, but keep the
+                // button's purpose in front of it — the condition alone would
+                // read as a bare string with no hint it opens anything.
+                aria-label={
+                  activeGoal?.condition
+                    ? `${t('sidebar.goals')}: ${activeGoal.condition}`
+                    : t('sidebar.goals')
+                }
+              >
+                <span className={styles.goal}>{goalLabel}</span>
+              </button>
+            ) : (
+              <span className={styles.goal} title={activeGoal?.condition}>
+                {goalLabel}
+              </span>
+            ))}
         </div>
       </div>
     );

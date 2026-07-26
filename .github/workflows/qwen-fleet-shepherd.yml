@@ -1,0 +1,457 @@
+name: 'Fleet Shepherd'
+
+# Keeps the open bot-PR fleet moving without a human shepherd. Every tick it
+# walks the AUTOFIX_BOT's open PRs and applies the smallest lever that
+# unblocks each one — all levers were validated by hand before automation:
+#
+#   • conflict         → dispatch the autofix loop for that PR (its --conflict
+#                        path merges base and resolves), once per head SHA and
+#                        never while an address run is already live or queued
+#   • stale base       → update-branch when far behind main (fresh CI signal +
+#                        propagates workflow/skill fixes; self-limiting since
+#                        behind_by resets to 0 after the sync)
+#   • scan liveness    → if no autofix full scan (schedule/dispatch) ran
+#                        recently, dispatch one (GitHub cron is unreliable)
+#
+# It also maintains a single "Fleet Shepherd Dashboard" issue (edited in
+# place, never comment spam) so fleet state is observable at a glance.
+#
+# NON-GOAL: rerunning flaky-failed CI. That is owned by the CI Failure Patrol
+# (.github/workflows/qwen-ci-flaky-rerun.yml), which has its own markers,
+# attempt caps, and a behaviorally-tested classifier — a second scheduled
+# rerun owner here raced it (observed live as rerun-vs-rerun cancellation
+# storms), so the shepherd only REPORTS red CI on the dashboard.
+#
+# Safety rails: bot-authored main-targeting in-repo PRs only; per-action
+# markers make every write idempotent; per-tick action caps bound blast
+# radius; every remote read fails CLOSED (an unreadable snapshot skips the
+# levers it feeds — it never masquerades as empty state); DRY-RUN via
+# dispatch input; global kill switch via the FLEET_SHEPHERD_DISABLED
+# repository variable. Dispatches use the workflow's own token
+# (actions: write); comments, update-branch, and the dashboard use
+# CI_DEV_BOT_PAT so synced branches still trigger CI and all writes carry
+# the bot identity.
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Log intended actions without performing any write'
+        required: false
+        default: false
+        type: 'boolean'
+
+permissions:
+  contents: 'read'
+  actions: 'write'
+
+concurrency:
+  group: 'fleet-shepherd'
+  cancel-in-progress: false
+
+env:
+  AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
+  BEHIND_SYNC_THRESHOLD: '25'
+  SCAN_LIVENESS_MINUTES: '60'
+  MAX_SYNCS_PER_TICK: '3'
+  MAX_CONFLICT_DISPATCHES_PER_TICK: '2'
+  DASHBOARD_TITLE: 'Fleet Shepherd Dashboard'
+  # Maintainer opt-out label, honored at every engagement path (mirrors
+  # qwen-autofix.yml's SKIP_LABEL).
+  SKIP_LABEL: 'autofix/skip'
+
+jobs:
+  shepherd:
+    if: |-
+      ${{ github.repository == 'QwenLM/qwen-code' && vars.FLEET_SHEPHERD_DISABLED != 'true' }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 15
+    steps:
+      - name: 'Shepherd the fleet'
+        env:
+          REPO: '${{ github.repository }}'
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          ACTIONS_TOKEN: '${{ github.token }}'
+          DRY_RUN: '${{ inputs.dry_run }}'
+        run: |-
+          # Explicit, not implied: the act() contract, every if-wrapper, and
+          # the behavioral test all assume these semantics (Actions' default
+          # bash gives -e but NOT pipefail).
+          set -eo pipefail
+
+          DASH_ROWS=''
+          SYNCS=0
+          DISPATCHES=0
+          NOW_EPOCH="$(date -u +%s)"
+
+          act() {
+            # act <description> <command...> — honors dry-run and never aborts
+            # the tick (set -e safe via the if-wrapper at call sites), but DOES
+            # propagate the command's real exit status so callers can make
+            # follow-ups conditional: a dedup marker must never be posted for an
+            # action that failed, or the failure becomes permanent (every later
+            # tick sees the marker and skips while nothing was actually done).
+            local desc="$1" rc=0
+            shift
+            if [[ "${DRY_RUN}" == "true" ]]; then
+              echo "🧪 DRY-RUN: ${desc}"
+              return 0
+            fi
+            echo "▶ ${desc}"
+            "$@" || rc=$?
+            if [[ "${rc}" -ne 0 ]]; then
+              echo "::warning::action failed rc=${rc} (${desc})"
+            fi
+            return "${rc}"
+          }
+
+          # ---- identity: all PAT writes must be the bot -------------------
+          bot_actor="$(gh api user --jq '.login' 2> /dev/null || echo '')"
+          if [[ "${bot_actor}" != "${AUTOFIX_BOT}" ]]; then
+            echo "::error::CI_DEV_BOT_PAT authenticates as '${bot_actor:-unknown}'; expected ${AUTOFIX_BOT}."
+            exit 1
+          fi
+
+          # ---- dashboard lookup (also carries the liveness watermark) -----
+          # Exact-title equality (an in:title search is substring-based, and a
+          # bystander issue merely CONTAINING the title must never be
+          # hijacked-and-overwritten), interpolated into the jq expression
+          # because gh's --jq accepts a single expression only (no --arg).
+          # A FAILED lookup is not "not found": creating on failure would mint
+          # a duplicate dashboard per transient error, so the dashboard is
+          # simply skipped for the tick (same fail-closed rule as the fleet
+          # and marker reads).
+          DASH_LOOKUP_OK=true
+          DASH_NUM=''
+          if DASH_LIST="$(gh issue list --repo "${REPO}" --state open \
+            --search "in:title \"${DASHBOARD_TITLE}\"" \
+            --json number,title 2> /dev/null)"; then
+            DASH_NUM="$(jq -r --arg t "${DASHBOARD_TITLE}" 'map(select(.title == $t)) | .[0].number // ""' <<< "${DASH_LIST}")"
+          else
+            DASH_LOOKUP_OK=false
+            echo "::warning::dashboard lookup failed; dashboard update skipped this tick"
+          fi
+          # The liveness watermark LIVES in the dashboard body, so watermark
+          # state is known only when the lookup succeeded AND (no dashboard
+          # exists yet — a legitimate first tick — or the body was read). A
+          # failed body read flips DASH_LOOKUP_OK too: writing would replace
+          # the body that holds the watermark, and dispatching on an unknown
+          # watermark would launch a duplicate full scan every tick for the
+          # duration of a PAT outage once cron is stale.
+          PREV_DASH=''
+          if [[ -n "${DASH_NUM}" ]]; then
+            if ! PREV_DASH="$(gh issue view "${DASH_NUM}" --repo "${REPO}" --json body --jq '.body // ""' 2> /dev/null)"; then
+              PREV_DASH=''
+              DASH_LOOKUP_OK=false
+              echo "::warning::dashboard body read failed; dashboard write and liveness lever skipped this tick"
+            fi
+          fi
+          PREV_LIVENESS_LINE="$(grep -oE '<!-- fleet-shepherd liveness-dispatched: [^>]* -->' <<< "${PREV_DASH}" | head -1 || true)"
+          PREV_LIVENESS="$(grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z' <<< "${PREV_LIVENESS_LINE}" | head -1 || true)"
+          PREV_LIVENESS_RUN="$(grep -oE 'run=[0-9]+' <<< "${PREV_LIVENESS_LINE}" | head -1 | cut -d= -f2 || true)"
+
+          # ---- scan liveness watchdog -------------------------------------
+          # GitHub cron is unreliable (observed 16h of silence on a */10
+          # schedule). Liveness counts only SCHEDULE runs plus the shepherd's
+          # own liveness dispatches (watermark AND run id recorded in the
+          # dashboard body) — a conflict dispatch is also a workflow_dispatch
+          # event but is NOT a full scan, so it must neither satisfy nor
+          # starve the watchdog; run-id attribution is what keeps a same-tick
+          # conflict dispatch out of the count. Reads use the
+          # workflow token: actions read/write is guaranteed there, while the
+          # PAT's actions scope is not.
+          # A FAILED snapshot read is UNKNOWN, not an empty repo: acting on
+          # '[]' would both zero the in-flight count and blank the schedule
+          # signal, dispatching a duplicate scan on top of a running one. Skip
+          # the lever for the tick instead (same fail-closed rule as the other
+          # reads).
+          SCAN_RUNS_OK=true
+          if ! env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
+            --limit 50 --json event,createdAt,status,databaseId > /tmp/scan-runs.json 2> /dev/null; then
+            SCAN_RUNS_OK=false
+            echo "::warning::autofix run-list read failed; liveness lever and conflict dispatches skipped this tick"
+          fi
+          LAST_SCHEDULE="$(jq -r '[.[] | select(.event == "schedule")] | first | .createdAt // ""' /tmp/scan-runs.json 2> /dev/null || echo '')"
+          # In-flight counts SCHEDULE runs plus OUR OWN liveness dispatch,
+          # attributed by recorded run id — never by timestamp proximity: a
+          # conflict dispatch fired later in the SAME tick is created seconds
+          # from the watermark, and a proximity window would count its
+          # two-hour address run as in-flight liveness, starving the
+          # watchdog. Unknown-id fallback (id capture failed, or a pre-id
+          # marker): the dispatch is simply not counted, so the failure mode
+          # is one absorbed duplicate scan — never starvation. Same for the
+          # first tick: no watermark, nothing attributed.
+          SCAN_INFLIGHT="$(jq -r --arg lvrun "${PREV_LIVENESS_RUN}" '
+            [ .[] | select(.status != "completed")
+              | select(
+                  (.event == "schedule")
+                  or (.event == "workflow_dispatch" and $lvrun != ""
+                      and ((.databaseId | tostring) == $lvrun)) ) ]
+            | length' /tmp/scan-runs.json 2> /dev/null || echo 0)"
+          LAST_SIGNAL="${LAST_SCHEDULE}"
+          if [[ -n "${PREV_LIVENESS}" && "${PREV_LIVENESS}" > "${LAST_SIGNAL}" ]]; then
+            LAST_SIGNAL="${PREV_LIVENESS}"
+          fi
+          SCAN_AGE_MIN=99999
+          if [[ -n "${LAST_SIGNAL}" ]]; then
+            SCAN_AGE_MIN=$(( (NOW_EPOCH - $(date -u -d "${LAST_SIGNAL}" +%s)) / 60 ))
+          fi
+          LIVENESS_OUT="${PREV_LIVENESS}"
+          LIVENESS_RUN_OUT="${PREV_LIVENESS_RUN}"
+          echo "🫀 last scan signal: ${LAST_SIGNAL:-never} (${SCAN_AGE_MIN}m ago), liveness-relevant in-flight: ${SCAN_INFLIGHT}, snapshot ok: ${SCAN_RUNS_OK}, watermark state known: ${DASH_LOOKUP_OK}"
+          if [[ "${DASH_LOOKUP_OK}" == "true" && "${SCAN_RUNS_OK}" == "true" && "${SCAN_AGE_MIN}" -ge "${SCAN_LIVENESS_MINUTES}" && "${SCAN_INFLIGHT}" == "0" ]]; then
+            DISPATCH_T0="$(date -u -d '5 seconds ago' +%Y-%m-%dT%H:%M:%SZ)"
+            if act "scan liveness: dispatch unforced review scan" \
+              env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh workflow run qwen-autofix.yml --repo "${REPO}" -f phase=review; then
+              LIVENESS_OUT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+              LIVENESS_RUN_OUT=''
+              # Identify OUR run by id for next tick's in-flight attribution.
+              # Safe correlation window: nothing else in this tick has
+              # dispatched yet (conflict dispatches happen later in the
+              # walk), so the newest dispatch created since T0 is ours. If it
+              # never appears, run=none is recorded and the failure mode is a
+              # duplicate scan, not starvation.
+              if [[ "${DRY_RUN}" != "true" ]]; then
+                for _ in 1 2 3 4 5; do
+                  sleep 2
+                  LIVENESS_RUN_OUT="$(env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
+                    --event workflow_dispatch --limit 5 --json databaseId,createdAt 2> /dev/null \
+                    | jq -r --arg t0 "${DISPATCH_T0}" '[ .[] | select(.createdAt >= $t0) ] | first | .databaseId // "" | tostring' 2> /dev/null || true)"
+                  if [[ -n "${LIVENESS_RUN_OUT}" && "${LIVENESS_RUN_OUT}" != "null" ]]; then break; fi
+                done
+              fi
+            fi
+          fi
+
+          # Busy-set for the conflict lever, built HERE so the shepherd does
+          # not depend on any unmerged autofix-side dedup: a PR whose
+          # review-address job is running or queued in a live autofix run must
+          # not be dispatched again (also what makes the dispatch-succeeded /
+          # marker-failed retry idempotent on current main). Schedule/dispatch
+          # matrix jobs never appear in the PR's check rollup, so this is the
+          # only way to see them. EVERY jobs read is tracked: a partial
+          # enumeration is not a busy-set, it is unknown busy-state, and
+          # BUSY_OK=false defers every conflict dispatch below (it inherits
+          # SCAN_RUNS_OK so a failed run-list read defers the same way).
+          SHEP_BUSY=' '
+          BUSY_OK="${SCAN_RUNS_OK}"
+          while IFS= read -r LIVE_RUN; do
+            [[ -z "${LIVE_RUN}" ]] && continue
+            if ! RUN_JOBS="$(env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run view "${LIVE_RUN}" --repo "${REPO}" --json jobs 2> /dev/null)" \
+              || ! MATCHED="$(jq -r '.jobs[] | select(.status != "completed") | .name | capture("^review-address \\((?<pr>[0-9]+),") | .pr' <<< "${RUN_JOBS}" 2> /dev/null)"; then
+              BUSY_OK=false
+              echo "::warning::jobs read failed for run ${LIVE_RUN}; busy-state unknown — conflict dispatches deferred this tick"
+              break
+            fi
+            while IFS= read -r BUSY; do
+              [[ -n "${BUSY}" ]] && SHEP_BUSY="${SHEP_BUSY}${BUSY} "
+            done <<< "${MATCHED}"
+          done < <(jq -r '.[] | select(.status != "completed") | .databaseId' /tmp/scan-runs.json 2> /dev/null)
+          [[ "${SHEP_BUSY}" != ' ' ]] && echo "🚧 review-address in flight/queued for PR(s):${SHEP_BUSY}"
+
+
+          # Live opt-out recheck used immediately before every MUTATING lever:
+          # the fleet snapshot filtered skip once at tick start, but a
+          # maintainer adding autofix/skip mid-tick must still win before a
+          # dispatch or branch sync. Fail closed: an unreadable label state
+          # counts as skipped.
+          # Returns 0 when the mutation must NOT proceed, with the reason in
+          # LIVE_SKIP_REASON: 'label' (consent withdrawn) vs 'unreadable'
+          # (fail closed on an API failure) — callers word their notes
+          # accordingly so an outage is never reported as a maintainer
+          # decision.
+          live_skip() {
+            local pr="$1" labels
+            LIVE_SKIP_REASON=''
+            if ! labels="$(gh pr view "${pr}" --repo "${REPO}" --json labels 2> /dev/null)"; then
+              LIVE_SKIP_REASON='unreadable'
+              return 0
+            fi
+            if [[ "$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${labels}")" == "true" ]]; then
+              LIVE_SKIP_REASON='label'
+              return 0
+            fi
+            return 1
+          }
+          skip_note() {
+            if [[ "${LIVE_SKIP_REASON}" == 'label' ]]; then
+              printf '%s present (live) — consent withdrawn, no %s' "${SKIP_LABEL}" "$1"
+            else
+              printf 'label state unreadable — fail closed, no %s' "$1"
+            fi
+          }
+
+          # ---- walk the bot fleet (one list call carries all per-PR meta) --
+          # autofix/skip is the maintainer opt-out honored at every
+          # engagement path — a skip-labeled PR gets no shepherd levers and
+          # no dashboard row (gh's --jq takes no --arg, so filter with
+          # standalone jq).
+          if ! gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" --base main \
+            --limit 50 --json number,headRefName,headRefOid,mergeable,isCrossRepository,statusCheckRollup,labels \
+            > /tmp/fleet-raw.json 2> /dev/null; then
+            # A failed fleet fetch must not masquerade as an empty fleet: the
+            # walk is skipped AND the dashboard keeps its previous body rather
+            # than being overwritten with a misleading empty table.
+            echo "::warning::fleet enumeration failed; skipping this tick's walk and dashboard update"
+            exit 0
+          fi
+          jq --arg skip "${SKIP_LABEL}" \
+            '[.[] | select(.isCrossRepository == false) | select([.labels[]?.name] | index($skip) | not)]' \
+            /tmp/fleet-raw.json > /tmp/fleet.json
+
+          while IFS= read -r ROW; do
+            [[ -z "${ROW}" ]] && continue
+            PR="$(jq -r '.number' <<< "${ROW}")"
+            BRANCH="$(jq -r '.headRefName // ""' <<< "${ROW}")"
+            HEAD="$(jq -r '.headRefOid // ""' <<< "${ROW}")"
+            MERGEABLE="$(jq -r '.mergeable // "UNKNOWN"' <<< "${ROW}")"
+            if [[ -z "${BRANCH}" || -z "${HEAD}" ]]; then
+              echo "⚠️ #${PR}: incomplete metadata; skipping this tick"
+              DASH_ROWS="${DASH_ROWS}| #${PR} | ? | incomplete metadata | — |\n"
+              continue
+            fi
+            # WAITING and REQUESTED are also not-yet-final check states.
+            PENDING="$(jq -r '[.statusCheckRollup[]? | select((.status // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"))] | length' <<< "${ROW}")"
+            # Platform-blind on purpose: the dashboard is a health VIEW, and
+            # a Windows- or macOS-only regression is just as red as an Ubuntu
+            # one (reruns stay with the Patrol either way).
+            FAILED_TEST_URL="$(jq -r '[.statusCheckRollup[]? | select(.conclusion == "FAILURE") | select(.name | startswith("Test (")) | .detailsUrl][0] // ""' <<< "${ROW}")"
+            BEHIND="$(gh api "repos/${REPO}/compare/main...${HEAD}" --jq '.behind_by // 0' 2> /dev/null || echo 0)"
+
+            STATUS_NOTE='idle'
+            ACTION_NOTE='—'
+
+            # 1) conflict → dispatch the loop for this PR, once per head SHA.
+            # The dedup marker is posted ONLY when the dispatch succeeded — a
+            # marker for a failed dispatch would freeze the PR at this head.
+            if [[ "${MERGEABLE}" == "CONFLICTING" ]]; then
+              STATUS_NOTE='conflicting'
+              # Markers are consumed ONLY by this lever, so the read lives
+              # here: non-conflicting PRs (the majority of the fleet) skip
+              # the paginated comments fetch entirely, and a failed read
+              # defers just this lever instead of dropping the PR from the
+              # dashboard and the other levers. Empty history must still
+              # never masquerade as "no markers" — hence MARKS_OK.
+              MARKS_OK=true
+              MY_MARKS=''
+              if ! gh api "repos/${REPO}/issues/${PR}/comments" --paginate > /tmp/ic.json 2> /dev/null; then
+                MARKS_OK=false
+              else
+                MY_MARKS="$(jq -r --arg ab "${AUTOFIX_BOT}" '[.[] | select(.user.login == $ab) | .body] | join("\n")' /tmp/ic.json)"
+              fi
+              if [[ "${MARKS_OK}" != "true" ]]; then
+                # Acting on unreadable history could double-fire the dispatch.
+                ACTION_NOTE='marker read failed — deferring dispatch'
+              elif [[ "${BUSY_OK}" != "true" ]]; then
+                # Runs or jobs read failed — busy-state is UNKNOWN, and a
+                # blind dispatch could stack onto a live address run.
+                ACTION_NOTE='busy-state unknown (runs or jobs read failed) — deferring dispatch'
+              elif [[ "${SHEP_BUSY}" == *" ${PR} "* ]]; then
+                # An address run for this PR is already live or queued — a
+                # second dispatch would only stack a duplicate behind it.
+                ACTION_NOTE='review-address already in flight — deferring dispatch'
+              elif [[ "${PENDING}" != "0" ]]; then
+                # Mirror the consumer: the autofix scan skips a PR with checks
+                # in flight, so dispatching now would waste the dispatch AND
+                # plant a dedup marker for a scan that never ran.
+                ACTION_NOTE="checks in flight (${PENDING}) — deferring conflict dispatch"
+              elif [[ "${MY_MARKS}" == *"<!-- fleet-shepherd conflict-dispatch sha=${HEAD} -->"* ]]; then
+                ACTION_NOTE='conflict dispatch already sent for this head'
+              elif [[ "${DISPATCHES}" -ge "${MAX_CONFLICT_DISPATCHES_PER_TICK}" ]]; then
+                ACTION_NOTE='conflict-dispatch budget reached this tick'
+              elif live_skip "${PR}"; then
+                # Budget first: once it is exhausted no mutation is possible,
+                # so the PAT-backed live label read would be pure waste.
+                ACTION_NOTE="$(skip_note dispatch)"
+              else
+                if act "#${PR}: dispatch autofix for conflict resolution" \
+                  env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh workflow run qwen-autofix.yml --repo "${REPO}" -f pr_number="${PR}"; then
+                  # The dispatch HAPPENED, so it counts against the per-tick
+                  # budget regardless of the marker's fate (counting only on
+                  # marker success would let a marker outage overspend the cap).
+                  DISPATCHES=$(( DISPATCHES + 1 ))
+                  if act "#${PR}: post conflict notice" \
+                    gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🐑 Merge conflict with main detected — dispatched the autofix loop to resolve it. / 检测到与 main 的合并冲突，已触发 autofix 处理。\n\n<!-- fleet-shepherd conflict-dispatch sha=%s -->' "${HEAD}")"; then
+                    ACTION_NOTE='dispatched conflict resolution'
+                  else
+                    # Without the marker the next tick may re-dispatch. The
+                    # shepherd's OWN busy-set defers while the dispatched run
+                    # is live or queued, and once it completes a
+                    # still-conflicting PR SHOULD be retried — so annotate
+                    # honestly rather than fake a marker.
+                    ACTION_NOTE='dispatched; marker post failed — busy-set defers duplicates while the run lives'
+                  fi
+                else
+                  ACTION_NOTE='conflict dispatch FAILED — will retry next tick'
+                fi
+              fi
+
+            # 2) stale base → sync. Self-limiting: behind_by resets on sync.
+            # expected_head_sha makes the sync a compare-and-swap: if the loop
+            # pushed between our read and this call, GitHub rejects it and the
+            # next tick re-evaluates the fresh head.
+            elif [[ "${MERGEABLE}" == "MERGEABLE" && "${BEHIND}" -ge "${BEHIND_SYNC_THRESHOLD}" && "${PENDING}" == "0" ]]; then
+              STATUS_NOTE="behind by ${BEHIND}"
+              if [[ "${SYNCS}" -ge "${MAX_SYNCS_PER_TICK}" ]]; then
+                ACTION_NOTE='sync budget reached this tick'
+              elif live_skip "${PR}"; then
+                ACTION_NOTE="$(skip_note sync)"
+              else
+                if act "#${PR}: update-branch (behind by ${BEHIND})" \
+                  gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${HEAD}" --silent; then
+                  SYNCS=$(( SYNCS + 1 ))
+                  ACTION_NOTE='synced with main'
+                else
+                  ACTION_NOTE='sync rejected (head moved?) — will retry next tick'
+                fi
+              fi
+
+            # 3) red CI → reruns are owned by the CI Failure Patrol
+            # (qwen-ci-flaky-rerun.yml): it has its own markers, caps, and a
+            # tested classifier, and a second scheduled rerun owner here raced
+            # it. The shepherd only surfaces the state on the dashboard.
+            elif [[ -n "${FAILED_TEST_URL}" && "${PENDING}" == "0" ]]; then
+              # The URL is WHY the extraction exists: the dashboard links
+              # straight to the failing job so nobody walks PRs one by one.
+              STATUS_NOTE="[ci red](${FAILED_TEST_URL})"
+              ACTION_NOTE='reruns owned by CI Failure Patrol'
+            elif [[ "${PENDING}" != "0" ]]; then
+              STATUS_NOTE="checks in flight (${PENDING})"
+            fi
+
+            echo "🐑 #${PR} [${STATUS_NOTE}] → ${ACTION_NOTE}"
+            DASH_ROWS="${DASH_ROWS}| #${PR} | \`${HEAD:0:9}\` | ${STATUS_NOTE} | ${ACTION_NOTE} |\n"
+          done < <(jq -c '.[]' /tmp/fleet.json)
+
+          # ---- dashboard: one issue, edited in place ----------------------
+          {
+            echo "Auto-maintained by the Fleet Shepherd workflow — do not edit by hand."
+            echo
+            echo "Last tick: $(date -u +%Y-%m-%dT%H:%M:%SZ) · scan-signal age: ${SCAN_AGE_MIN}m · syncs: ${SYNCS} · dispatches: ${DISPATCHES}"
+            echo
+            echo '| PR | Head | State | Action this tick |'
+            echo '| --- | --- | --- | --- |'
+            printf '%b' "${DASH_ROWS}"
+            if [[ -n "${LIVENESS_OUT}" ]]; then
+              echo
+              echo "<!-- fleet-shepherd liveness-dispatched: ${LIVENESS_OUT} run=${LIVENESS_RUN_OUT:-none} -->"
+            fi
+          } > /tmp/dashboard.md
+          # Every act() call is if-wrapped: act propagates the real exit code
+          # (so markers stay conditional), and under set -e a BARE failing call
+          # would abort the whole tick.
+          if [[ "${DASH_LOOKUP_OK}" != "true" ]]; then
+            : # lookup failed — keep the previous dashboard untouched
+          elif [[ -z "${DASH_NUM}" ]]; then
+            if ! act "create dashboard issue" \
+              gh issue create --repo "${REPO}" --title "${DASHBOARD_TITLE}" --body-file /tmp/dashboard.md; then
+              echo "::warning::dashboard create failed; will retry next tick"
+            fi
+          else
+            if ! act "update dashboard issue #${DASH_NUM}" \
+              gh issue edit "${DASH_NUM}" --repo "${REPO}" --body-file /tmp/dashboard.md; then
+              echo "::warning::dashboard update failed; will retry next tick"
+            fi
+          fi
+          echo "✅ tick complete (syncs=${SYNCS} dispatches=${DISPATCHES})"

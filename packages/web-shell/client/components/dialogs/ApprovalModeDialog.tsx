@@ -77,6 +77,7 @@ export function ApprovalModeDialog({
         approvalModes.length > 0 ? `mode-opt-${activeIndex}` : undefined
       }
       aria-label={t('mode.select')}
+      data-web-shell-approval-mode-dialog
     >
       {approvalModes.map((mode, index) => {
         const selected = index === activeIndex;
@@ -92,6 +93,8 @@ export function ApprovalModeDialog({
             className={`${styles.row} ${selected ? styles.selected : ''} ${
               isCurrent ? dp('dialog-current') : ''
             }`}
+            data-web-shell-approval-mode-option
+            data-mode-id={mode.id}
             onClick={() => confirm(index)}
             onMouseMove={() => moveHighlight(index)}
           >

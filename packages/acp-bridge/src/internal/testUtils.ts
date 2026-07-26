@@ -39,6 +39,7 @@ import * as path from 'node:path';
 import {
   AgentSideConnection,
   PROTOCOL_VERSION,
+  RequestError,
   ndJsonStream,
 } from '@agentclientprotocol/sdk';
 import type {
@@ -62,8 +63,9 @@ import type {
   SetSessionModeResponse,
 } from '@agentclientprotocol/sdk';
 import { createAcpSessionBridge } from '../bridge.js';
+import { isNotCurrentlyGeneratingCancelError } from '../bridgeErrors.js';
 import type { BridgeOptions } from '../bridgeOptions.js';
-import type { AcpSessionBridge } from '../bridgeTypes.js';
+import { PROMPT_CANCEL_METHOD, type AcpSessionBridge } from '../bridgeTypes.js';
 import type { AcpChannel } from '../channel.js';
 
 // Workspace fixtures must round-trip through `path.resolve` so the
@@ -77,8 +79,8 @@ export const WS_B = path.resolve(path.sep, 'work', 'b');
 export const SESS_A = `sess:${WS_A}`;
 
 /**
- * Convenience wrapper: `createAcpSessionBridge` requires `boundWorkspace`
- * (per #3803 §02 — 1 daemon = 1 workspace). Tests that only ever talk
+ * Convenience wrapper: `createAcpSessionBridge` requires the workspace owned
+ * by this bridge. Tests that only ever talk
  * to `WS_A` would otherwise repeat `boundWorkspace: WS_A` everywhere;
  * this helper defaults it. Tests that need a different bind path (e.g.
  * the mismatch test) pass `boundWorkspace` explicitly.
@@ -106,6 +108,10 @@ export interface FakeAgentOpts {
   initializeDelayMs?: number;
   /** Force `initialize` to throw. */
   initializeThrows?: Error;
+  initializeImpl?: (
+    p: InitializeRequest,
+    self: FakeAgent,
+  ) => Promise<InitializeResponse> | InitializeResponse;
   /**
    * Custom prompt handler. Default returns `end_turn` synchronously. Useful
    * for test cases that want to observe prompt ordering.
@@ -115,6 +121,8 @@ export interface FakeAgentOpts {
     self: FakeAgent,
   ) => Promise<PromptResponse> | PromptResponse;
   cancelImpl?: (p: CancelNotification, self: FakeAgent) => Promise<void> | void;
+  /** Make the fake expose only standard ACP cancellation. */
+  promptCancelExtension?: boolean;
   /**
    * Custom `newSession` handler. Default returns a synthesized id (see
    * `newSession` below). Used by tests that need to exercise the
@@ -141,6 +149,7 @@ export interface FakeAgentOpts {
 }
 
 export class FakeAgent implements Agent {
+  initializeCalls: InitializeRequest[] = [];
   newSessionCalls: NewSessionRequest[] = [];
   loadSessionCalls: LoadSessionRequest[] = [];
   resumeSessionCalls: ResumeSessionRequest[] = [];
@@ -150,10 +159,14 @@ export class FakeAgent implements Agent {
     [];
   constructor(private readonly opts: FakeAgentOpts = {}) {}
 
-  async initialize(_p: InitializeRequest): Promise<InitializeResponse> {
+  async initialize(p: InitializeRequest): Promise<InitializeResponse> {
+    this.initializeCalls.push(p);
     if (this.opts.initializeThrows) throw this.opts.initializeThrows;
     if (this.opts.initializeDelayMs) {
       await new Promise((r) => setTimeout(r, this.opts.initializeDelayMs));
+    }
+    if (this.opts.initializeImpl) {
+      return await this.opts.initializeImpl(p, this);
     }
     return {
       protocolVersion: PROTOCOL_VERSION,
@@ -225,6 +238,29 @@ export class FakeAgent implements Agent {
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     this.extMethodCalls.push({ method, params });
+    if (method === PROMPT_CANCEL_METHOD) {
+      if (this.opts.promptCancelExtension === false) {
+        throw RequestError.methodNotFound(method);
+      }
+      const sessionId = params['sessionId'];
+      if (typeof sessionId !== 'string') {
+        throw new Error('Invalid or missing sessionId');
+      }
+      let delayMs = 1;
+      while (true) {
+        try {
+          await this.cancel({ sessionId });
+          return { cancelled: true };
+        } catch (error) {
+          if (!isNotCurrentlyGeneratingCancelError(error)) throw error;
+        }
+        await new Promise<void>((resolve) => {
+          const timer = setTimeout(resolve, delayMs);
+          timer.unref();
+        });
+        delayMs = Math.min(delayMs * 2, 100);
+      }
+    }
     if (this.opts.extMethodImpl) {
       return this.opts.extMethodImpl(method, params, this);
     }

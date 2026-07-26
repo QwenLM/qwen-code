@@ -1604,6 +1604,90 @@ describe('BaseJsonOutputAdapter', () => {
         expect(result).toBe('Tool result');
       });
 
+      it('includes the vision bridge disclosure with tool content', () => {
+        const response = {
+          callId: 'pdf-success',
+          resultDisplay: {
+            type: 'vision_bridge_notice' as const,
+            summary: 'Transcribed PDF pages 20-23; remaining pages 24-25',
+            notice:
+              'Converted 4 images via qwen3-vl-plus (dashscope.aliyuncs.com).',
+          },
+          responseParts: [
+            {
+              functionResponse: {
+                response: { output: 'Page 20: transcribed content' },
+              },
+            },
+          ],
+          error: undefined,
+          errorType: undefined,
+        };
+
+        expect(toolResultContent(response)).toBe(
+          'Transcribed PDF pages 20-23; remaining pages 24-25\n' +
+            'Converted 4 images via qwen3-vl-plus (dashscope.aliyuncs.com).\n' +
+            'Page 20: transcribed content',
+        );
+      });
+
+      it('prefers a top-level tool error over content with a vision bridge disclosure', () => {
+        const response = {
+          callId: 'pdf-failure',
+          resultDisplay: {
+            type: 'vision_bridge_notice' as const,
+            summary: 'Failed to read PDF after rendering pages 20-23',
+            notice: 'Vision bridge (qwen3-vl-plus) failed.',
+          },
+          responseParts: [
+            {
+              functionResponse: {
+                response: { output: 'Partial transcription' },
+              },
+            },
+          ],
+          error: new Error('No extractable text layer.'),
+          errorType: undefined,
+        };
+
+        expect(toolResultContent(response)).toBe(
+          'Failed to read PDF after rendering pages 20-23\n' +
+            'Vision bridge (qwen3-vl-plus) failed.\n' +
+            'No extractable text layer.',
+        );
+      });
+
+      it('prefers an embedded tool error over content with a vision bridge disclosure', () => {
+        const response = {
+          callId: 'pdf-failure',
+          resultDisplay: {
+            type: 'vision_bridge_notice' as const,
+            summary: 'Failed to read PDF after rendering pages 20-23',
+            notice: 'Vision bridge (qwen3-vl-plus) failed.',
+          },
+          responseParts: [
+            {
+              functionResponse: {
+                response: { output: 'Partial transcription' },
+              },
+            },
+            {
+              functionResponse: {
+                response: { error: 'No extractable text layer.' },
+              },
+            },
+          ],
+          error: undefined,
+          errorType: undefined,
+        };
+
+        expect(toolResultContent(response)).toBe(
+          'Failed to read PDF after rendering pages 20-23\n' +
+            'Vision bridge (qwen3-vl-plus) failed.\n' +
+            'No extractable text layer.',
+        );
+      });
+
       it('should extract content from responseParts', () => {
         const response = {
           callId: 'tool-1',
@@ -1630,6 +1714,30 @@ describe('BaseJsonOutputAdapter', () => {
         const result = toolResultContent(response);
 
         expect(result).toBe('Tool failed');
+      });
+
+      it('prefers detailed response error over the operational summary', () => {
+        const response = {
+          callId: 'tool-1',
+          resultDisplay: 'partial output',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'tool-1',
+                name: 'shell',
+                response: {
+                  error: 'Command timed out.\npartial output',
+                },
+              },
+            },
+          ],
+          error: new Error('Command timed out.'),
+          errorType: undefined,
+        };
+
+        expect(toolResultContent(response)).toBe(
+          'Command timed out.\npartial output',
+        );
       });
 
       it('should return undefined if no content', () => {

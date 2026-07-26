@@ -62,6 +62,7 @@ export function ThemeDialog({
       aria-activedescendant={
         themes.length > 0 ? `theme-opt-${selectedIdx}` : undefined
       }
+      data-web-shell-theme-dialog
     >
       {themes.map((theme, index) => {
         const selected = theme.id === currentTheme;
@@ -77,6 +78,8 @@ export function ThemeDialog({
               index === selectedIdx ? 'selected' : undefined,
               selected ? 'dialog-current' : undefined,
             )}
+            data-web-shell-theme-option
+            data-theme-id={theme.id}
             onClick={() => confirm(index)}
             onMouseMove={() => setSelectedIdx(index)}
           >

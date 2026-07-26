@@ -6,11 +6,14 @@
 
 import type { Application, RequestHandler, Response } from 'express';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import type { DaemonLogger } from '../daemon-logger.js';
 import {
   detectFromLoopback,
   parseClientIdHeader,
   parsePermissionVoteBody,
 } from '../server/request-helpers.js';
+import type { WorkspaceRegistry } from '../workspace-registry.js';
+import { requireSessionRuntime } from './session-runtime.js';
 
 type SendPermissionVoteError = (
   res: Response,
@@ -20,6 +23,8 @@ type SendPermissionVoteError = (
 
 interface RegisterPermissionRoutesDeps {
   bridge: AcpSessionBridge;
+  workspaceRegistry: WorkspaceRegistry;
+  daemonLog?: DaemonLogger;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   sendPermissionVoteError: SendPermissionVoteError;
 }
@@ -28,7 +33,13 @@ export function registerPermissionRoutes(
   app: Application,
   deps: RegisterPermissionRoutesDeps,
 ): void {
-  const { bridge, mutate, sendPermissionVoteError } = deps;
+  const {
+    bridge,
+    workspaceRegistry,
+    daemonLog,
+    mutate,
+    sendPermissionVoteError,
+  } = deps;
 
   app.post('/session/:id/permission/:requestId', mutate(), (req, res) => {
     const sessionId = req.params['id'];
@@ -46,7 +57,16 @@ export function registerPermissionRoutes(
     };
     let accepted: boolean;
     try {
-      accepted = bridge.respondToSessionPermission(
+      const runtime = requireSessionRuntime({
+        sessionId,
+        route: 'POST /session/:id/permission/:requestId',
+        res,
+        workspaceRegistry,
+        daemonLog,
+        details: { requestId },
+      });
+      if (!runtime) return;
+      accepted = runtime.bridge.respondToSessionPermission(
         sessionId,
         requestId,
         response,

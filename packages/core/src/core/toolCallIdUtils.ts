@@ -61,6 +61,7 @@ export function normalizeModelToolCallIds(
   parts: readonly Part[],
   usedIds: Set<string>,
   rawIdsInCurrentTurn: Set<string>,
+  reservedIds?: ReadonlyMap<string, string>,
 ): Part[] {
   const normalized: Part[] = [];
 
@@ -83,7 +84,7 @@ export function normalizeModelToolCallIds(
     }
 
     const id = rawId
-      ? nextAvailableDuplicateId(rawId, usedIds)
+      ? (reservedIds?.get(rawId) ?? nextAvailableDuplicateId(rawId, usedIds))
       : nextGeneratedId(usedIds);
     if (rawId && id !== rawId) {
       debugLogger.debug(
@@ -110,6 +111,20 @@ export function normalizeModelToolCallIds(
   }
 
   return normalized;
+}
+
+export function reserveModelToolCallId(
+  rawId: string,
+  usedIds: Set<string>,
+  reservedIds: Map<string, string>,
+): string {
+  const existing = reservedIds.get(rawId);
+  if (existing) return existing;
+
+  const id = nextAvailableDuplicateId(rawId, usedIds);
+  reservedIds.set(rawId, id);
+  usedIds.add(id);
+  return id;
 }
 
 export function getProviderToolCallId(

@@ -12,6 +12,7 @@ import {
   CODING_PLAN_ENV_KEY,
   codingPlanProvider,
   TOKEN_PLAN_BASE_URL,
+  TOKEN_PLAN_ENV_KEY,
   tokenPlanProvider,
   buildProviderTemplate,
   computeModelListVersion,
@@ -65,6 +66,11 @@ describe('useProviderUpdates', () => {
   const mockConfig = {
     reloadModelProvidersConfig: vi.fn(),
     refreshAuth: vi.fn(),
+    getContentGeneratorConfig: vi.fn().mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      apiKeyEnvKey: CODING_PLAN_ENV_KEY,
+    }),
     getModel: vi.fn().mockReturnValue('qwen3.5-plus'),
     getModelsConfig: vi.fn(() => mockModelsConfig),
   };
@@ -75,6 +81,11 @@ describe('useProviderUpdates', () => {
     vi.clearAllMocks();
     mockSettings.merged['modelProviders'] = {};
     mockSettings.merged[PROVIDER_METADATA_NS] = {};
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      apiKeyEnvKey: CODING_PLAN_ENV_KEY,
+    });
     mockConfig.getModel.mockReturnValue('qwen3.5-plus');
     mockModelsConfig.syncAfterAuthRefresh.mockClear();
     delete process.env[CODING_PLAN_ENV_KEY];
@@ -303,6 +314,67 @@ describe('useProviderUpdates', () => {
     );
     expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
     expect(mockModelsConfig.syncAfterAuthRefresh).not.toHaveBeenCalled();
+    expect(mockConfig.refreshAuth).toHaveBeenCalledWith(AuthType.USE_OPENAI);
+  });
+
+  it('does not refresh auth when updating an inactive provider on the same protocol', async () => {
+    mockConfig.getContentGeneratorConfig.mockReturnValue({
+      authType: AuthType.USE_OPENAI,
+      baseUrl: TOKEN_PLAN_BASE_URL,
+      apiKeyEnvKey: TOKEN_PLAN_ENV_KEY,
+    });
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: chinaTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    expect(mockConfig.refreshAuth).not.toHaveBeenCalled();
+  });
+
+  it('does not refresh auth before auth initialization completes', async () => {
+    mockConfig.getContentGeneratorConfig.mockReturnValue(undefined as never);
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: chinaTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
     expect(mockConfig.refreshAuth).not.toHaveBeenCalled();
   });
 

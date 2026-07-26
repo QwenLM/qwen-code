@@ -118,6 +118,14 @@
   min-height: 20px;
 }
 
+.modelUsageRow {
+  display: grid;
+  grid-template-columns:
+    minmax(14ch, 1.4fr)
+    repeat(3, minmax(9ch, 1fr));
+  column-gap: 16px;
+}
+
 .tableNameCol {
   color: var(--foreground);
   font-weight: 700;
@@ -137,6 +145,13 @@
 .tableNumCol {
   flex: 1 1 15ch;
   min-width: 10ch;
+  color: var(--foreground);
+  text-align: right;
+  white-space: nowrap;
+}
+
+.tableValueCol {
+  min-width: 9ch;
   color: var(--foreground);
   text-align: right;
   white-space: nowrap;

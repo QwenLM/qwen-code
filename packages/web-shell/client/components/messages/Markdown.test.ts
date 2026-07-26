@@ -10,6 +10,7 @@ import {
 } from '../../customization';
 import { I18nProvider } from '../../i18n';
 import { ThemeProvider } from '../../themeContext';
+import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import * as EnhancedTableModule from './EnhancedMarkdownTable';
 import {
   MAX_HIGHLIGHT_LINE_CHARS,
@@ -20,6 +21,7 @@ import {
   isSafeHref,
   isSafeImageSrc,
   Markdown,
+  markdownUrlTransform,
   resolveFenceLanguage,
 } from './Markdown';
 
@@ -117,6 +119,113 @@ describe('isSafeImageSrc', () => {
 
   it('allows relative paths', () => {
     expect(isSafeImageSrc('/images/logo.png')).toBe(true);
+  });
+});
+
+describe('markdownUrlTransform', () => {
+  it('lets the qwen-session scheme through untouched', () => {
+    expect(markdownUrlTransform('qwen-session://abc-123')).toBe(
+      'qwen-session://abc-123',
+    );
+    expect(markdownUrlTransform('  qwen-session://abc-123  ')).toBe(
+      '  qwen-session://abc-123  ',
+    );
+  });
+
+  it('defers every other url to react-markdown’s sanitizer', () => {
+    expect(markdownUrlTransform('https://example.com')).toBe(
+      'https://example.com',
+    );
+    expect(markdownUrlTransform('mailto:a@b.c')).toBe('mailto:a@b.c');
+    // defaultUrlTransform rewrites unsafe schemes to ''.
+    expect(markdownUrlTransform('javascript:alert(1)')).toBe('');
+    expect(markdownUrlTransform('data:text/html;base64,PHN2Zz4=')).toBe('');
+  });
+});
+
+describe('qwen-session:// links', () => {
+  function renderMd(content: string): HTMLDivElement {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        createElement(
+          I18nProvider,
+          { language: 'en' },
+          createElement(Markdown, { content }),
+        ),
+      );
+    });
+    (container as HTMLDivElement & { __unmount: () => void }).__unmount = () =>
+      act(() => root.unmount());
+    return container as HTMLDivElement;
+  }
+
+  it('survives react-markdown url sanitization and becomes a button', () => {
+    // Without `urlTransform`, react-markdown rewrites every non-http(s)/mailto
+    // href to '' before `components.a` runs, so the interception branch never
+    // fires and the link renders as an inert anchor.
+    const c = renderMd('[🧵 abc12345](qwen-session://abc12345-full-id)');
+    const a = c.querySelector('a')!;
+    expect(a).toBeTruthy();
+    expect(a.getAttribute('role')).toBe('button');
+    (c as HTMLDivElement & { __unmount: () => void }).__unmount();
+    c.remove();
+  });
+
+  it('dispatches qwen:open-session with the session id on click', () => {
+    const seen: unknown[] = [];
+    const handler = (e: Event) => seen.push((e as CustomEvent).detail);
+    window.addEventListener('qwen:open-session', handler);
+    const c = renderMd('[🧵 abc12345](qwen-session://abc12345-full-id)');
+    act(() => {
+      c.querySelector('a')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      );
+    });
+    window.removeEventListener('qwen:open-session', handler);
+    expect(seen).toEqual(['abc12345-full-id']);
+    // The scheme is never written to the DOM: the anchor is a plain '#'.
+    expect(c.querySelector('a')!.getAttribute('href')).toBe('#');
+    (c as HTMLDivElement & { __unmount: () => void }).__unmount();
+    c.remove();
+  });
+
+  it('renders qwen session references as inert text in readonly mode', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const handler = vi.fn();
+    window.addEventListener('qwen:open-session', handler);
+    act(() => {
+      root.render(
+        createElement(
+          TranscriptRenderModeProvider,
+          { value: 'readonly' },
+          createElement(Markdown, {
+            content: '[child](qwen-session://child-session)',
+          }),
+        ),
+      );
+    });
+
+    expect(container.querySelector('a')).toBeNull();
+    expect(container.querySelector('span')?.textContent).toBe('child');
+    expect(handler).not.toHaveBeenCalled();
+
+    window.removeEventListener('qwen:open-session', handler);
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('still sanitizes dangerous schemes', () => {
+    const c = renderMd('[x](javascript:alert(1))');
+    const a = c.querySelector('a')!;
+    expect(a.getAttribute('role')).not.toBe('button');
+    expect(a.getAttribute('href')).toBeNull();
+    (c as HTMLDivElement & { __unmount: () => void }).__unmount();
+    c.remove();
   });
 });
 
@@ -1203,13 +1312,11 @@ describe('Markdown code highlighting while streaming', () => {
     container.remove();
   });
 
-  it('highlights the block as it streams, and the appended chunk too', async () => {
+  it('keeps a growing block plain and highlights it once settled', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
 
-    // First streamed chunk: gets highlighted (async grammar load, then the
-    // synchronous re-highlight).
     await act(async () => {
       root.render(
         createElement(Markdown, {
@@ -1218,19 +1325,25 @@ describe('Markdown code highlighting while streaming', () => {
         }),
       );
     });
-    await act(async () => {
-      await new Promise((resolve) => setTimeout(resolve, 300));
-    });
-    expect(container.querySelector('.shiki')).not.toBeNull();
+    expect(container.querySelector('.shiki')).toBeNull();
     expect(container.textContent).toContain('const a = 1;');
 
-    // Appended chunk (still streaming): the new line is re-highlighted
-    // synchronously — content never lags out of the DOM.
     await act(async () => {
       root.render(
         createElement(Markdown, {
           content: '```ts\nconst a = 1;\nconst b = 2;\n```',
           isStreaming: true,
+        }),
+      );
+    });
+    expect(container.querySelector('.shiki')).toBeNull();
+    expect(container.textContent).toContain('const b = 2;');
+
+    await act(async () => {
+      root.render(
+        createElement(Markdown, {
+          content: '```ts\nconst a = 1;\nconst b = 2;\n```',
+          isStreaming: false,
         }),
       );
     });
@@ -1292,11 +1405,8 @@ describe('Markdown code highlighting while streaming', () => {
     });
     expect(container.textContent).toContain('const aaa');
 
-    // Replace the content while streaming. `ts` is already warm, so the
-    // synchronous re-highlight produces the new block's HTML immediately; the
-    // stale highlight (of `const aaa`) must NOT be shown — `const zzz` is.
-    // (The cold-language variant of this — where the new grammar is still
-    // loading — is covered deterministically in Markdown.coldHighlight.test.tsx.)
+    // Replaced streaming content is shown as current plain text, never as the
+    // stale highlight from the previous settled response.
     await act(async () => {
       root.render(
         createElement(Markdown, {
@@ -1305,11 +1415,11 @@ describe('Markdown code highlighting while streaming', () => {
         }),
       );
     });
+    expect(container.querySelector('.shiki')).toBeNull();
     expect(container.textContent).toContain('const zzz');
     expect(container.textContent).not.toContain('const aaa');
 
-    // Positive case: once the regenerated content settles, it is actually
-    // highlighted (re-highlighted synchronously — not stuck on plain text).
+    // Once regenerated content settles, it is highlighted.
     await act(async () => {
       root.render(
         createElement(Markdown, {

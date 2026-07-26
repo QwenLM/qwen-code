@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import path from 'node:path';
 import {
   APPROVAL_MODES,
   type ApprovalMode,
@@ -13,7 +12,9 @@ import {
   GROUP_COLOR_OPTIONS,
   SessionService,
   SessionOrganizationError,
+  SESSION_WRITER_RPC_CODES,
   type SessionGroupColor,
+  type SessionGroupPresetColor,
   BuiltinAgentRegistry,
   SubagentError,
   WorkspaceMemoryFileTooLargeError,
@@ -40,14 +41,21 @@ import {
   UpstreamDeviceFlowError,
 } from '../auth/device-flow.js';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
+import { parseSessionSource } from '@qwen-code/acp-bridge';
+import {
+  translateAndCheckAbsoluteWorkspacePath,
+  canonicalizeWorkspace,
+} from '@qwen-code/acp-bridge/workspacePaths';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   WorkspaceMismatchError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
-import { SessionArtifactValidationError } from '@qwen-code/acp-bridge/sessionArtifacts';
-import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
+import {
+  SessionArtifactAuthorizationError,
+  SessionArtifactValidationError,
+} from '@qwen-code/acp-bridge/sessionArtifacts';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from '../fs/paths.js';
 import {
@@ -133,6 +141,53 @@ import {
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+const SESSION_WRITER_RPC_ERRORS = {
+  session_writer_conflict: {
+    code: SESSION_WRITER_RPC_CODES.session_writer_conflict,
+    message: 'This session is already open in another Qwen process.',
+  },
+  session_writer_lost: {
+    code: SESSION_WRITER_RPC_CODES.session_writer_lost,
+    message: 'Write ownership for this session was lost.',
+  },
+  session_transcript_changed: {
+    code: SESSION_WRITER_RPC_CODES.session_transcript_changed,
+    message: 'The session transcript changed outside its active writer.',
+  },
+  session_writer_unavailable: {
+    code: SESSION_WRITER_RPC_CODES.session_writer_unavailable,
+    message: 'Session write ownership could not be verified.',
+  },
+} as const;
+
+function sessionWriterRpcError(err: unknown):
+  | {
+      code: number;
+      message: string;
+      data: { errorKind: keyof typeof SESSION_WRITER_RPC_ERRORS };
+    }
+  | undefined {
+  if (!err || typeof err !== 'object') return undefined;
+  const candidate = err as Record<string, unknown>;
+  const data = isObject(candidate['data']) ? candidate['data'] : undefined;
+  const errorKind = data?.['errorKind'] ?? candidate['errorKind'];
+  if (
+    typeof errorKind !== 'string' ||
+    !(errorKind in SESSION_WRITER_RPC_ERRORS)
+  ) {
+    return undefined;
+  }
+  const typedKind = errorKind as keyof typeof SESSION_WRITER_RPC_ERRORS;
+  const expected = SESSION_WRITER_RPC_ERRORS[typedKind];
+  const code = candidate['code'] ?? candidate['rpcCode'];
+  if (code !== expected.code) return undefined;
+  return {
+    code: expected.code,
+    message: expected.message,
+    data: { errorKind: typedKind },
+  };
 }
 
 const debugLogger = createDebugLogger('ACP_HTTP_DISPATCH');
@@ -223,6 +278,69 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}workspace/agents/delete`,
 ];
 
+const TRUSTED_WORKSPACE_METHODS = new Set<string>([
+  `${QWEN_METHOD_NS}workspace/mcp`,
+  `${QWEN_METHOD_NS}workspace/skills`,
+  `${QWEN_METHOD_NS}workspace/providers`,
+  `${QWEN_METHOD_NS}workspace/env`,
+  `${QWEN_METHOD_NS}workspace/preflight`,
+  `${QWEN_METHOD_NS}workspace/init`,
+  `${QWEN_METHOD_NS}workspace/permissions`,
+  `${QWEN_METHOD_NS}workspace/permissions/set`,
+  `${QWEN_METHOD_NS}workspace/voice`,
+  `${QWEN_METHOD_NS}workspace/voice/set`,
+  `${QWEN_METHOD_NS}workspace/setup-github`,
+  `${QWEN_METHOD_NS}workspace/set_tool_enabled`,
+  `${QWEN_METHOD_NS}workspace/restart_mcp_server`,
+  `${QWEN_METHOD_NS}workspace/memory`,
+  `${QWEN_METHOD_NS}workspace/memory/write`,
+  `${QWEN_METHOD_NS}workspace/memory/remember`,
+  `${QWEN_METHOD_NS}workspace/memory/remember/get`,
+  `${QWEN_METHOD_NS}workspace/memory/forget`,
+  `${QWEN_METHOD_NS}workspace/memory/forget/get`,
+  `${QWEN_METHOD_NS}workspace/memory/dream`,
+  `${QWEN_METHOD_NS}workspace/memory/dream/get`,
+  `${QWEN_METHOD_NS}file/write`,
+  `${QWEN_METHOD_NS}file/edit`,
+  `${QWEN_METHOD_NS}workspace/tools`,
+  `${QWEN_METHOD_NS}workspace/mcp/tools`,
+  `${QWEN_METHOD_NS}workspace/mcp/resources`,
+  `${QWEN_METHOD_NS}workspace/mcp/servers/add`,
+  `${QWEN_METHOD_NS}workspace/mcp/servers/remove`,
+  `${QWEN_METHOD_NS}workspace/agents/list`,
+  `${QWEN_METHOD_NS}workspace/agents/get`,
+  `${QWEN_METHOD_NS}workspace/agents/create`,
+  `${QWEN_METHOD_NS}workspace/agents/update`,
+  `${QWEN_METHOD_NS}workspace/agents/delete`,
+  `${QWEN_METHOD_NS}workspace/session_groups/create`,
+  `${QWEN_METHOD_NS}workspace/session_groups/update`,
+  `${QWEN_METHOD_NS}workspace/session_groups/delete`,
+]);
+
+const WORKSPACE_GENERATION_MUTATION_METHODS = new Set<string>([
+  `${QWEN_METHOD_NS}workspace/init`,
+  `${QWEN_METHOD_NS}workspace/trust/request`,
+  `${QWEN_METHOD_NS}workspace/permissions/set`,
+  `${QWEN_METHOD_NS}workspace/voice/set`,
+  `${QWEN_METHOD_NS}workspace/setup-github`,
+  `${QWEN_METHOD_NS}workspace/set_tool_enabled`,
+  `${QWEN_METHOD_NS}workspace/restart_mcp_server`,
+  `${QWEN_METHOD_NS}workspace/memory/write`,
+  `${QWEN_METHOD_NS}workspace/memory/remember`,
+  `${QWEN_METHOD_NS}workspace/memory/forget`,
+  `${QWEN_METHOD_NS}workspace/memory/dream`,
+  `${QWEN_METHOD_NS}file/write`,
+  `${QWEN_METHOD_NS}file/edit`,
+  `${QWEN_METHOD_NS}workspace/mcp/servers/add`,
+  `${QWEN_METHOD_NS}workspace/mcp/servers/remove`,
+  `${QWEN_METHOD_NS}workspace/agents/create`,
+  `${QWEN_METHOD_NS}workspace/agents/update`,
+  `${QWEN_METHOD_NS}workspace/agents/delete`,
+  `${QWEN_METHOD_NS}workspace/session_groups/create`,
+  `${QWEN_METHOD_NS}workspace/session_groups/update`,
+  `${QWEN_METHOD_NS}workspace/session_groups/delete`,
+]);
+
 function advertisedQwenVendorMethods(
   sessionShellCommandEnabled: boolean,
 ): string[] {
@@ -300,7 +418,9 @@ function parseOptionalSafeIntegerInRange(
  * Closes the body-amplification DoS the REST code documents. Returns the
  * bound workspace when omitted.
  */
-function parseOptionalWorkspaceCwd(
+// Exported for the sandbox-translation wiring test — this is the entry
+// point for every ACP JSON-RPC `cwd` (#7139).
+export function parseOptionalWorkspaceCwd(
   params: Record<string, unknown>,
   boundWorkspace: string,
 ): string {
@@ -316,13 +436,14 @@ function parseOptionalWorkspaceCwd(
       `\`cwd\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
     );
   }
-  // `path.isAbsolute` (platform-aware) — same as the REST route. A bare
-  // `startsWith('/')` would reject valid Windows `C:\…`/UNC paths a client
-  // gets back from `/capabilities.workspaceCwd`.
-  if (!path.isAbsolute(cwd)) {
+  // #7139: the shared helper maps a Windows-shaped cwd to its container
+  // bind mount before the (platform-aware) absolute-path check — same as
+  // the REST route.
+  const sandboxCwd = translateAndCheckAbsoluteWorkspacePath(cwd);
+  if (sandboxCwd === null) {
     throw new AcpParamError('`cwd` must be an absolute path when provided');
   }
-  return cwd;
+  return sandboxCwd;
 }
 
 /** Validate a `session/prompt` body before it reaches the bridge/agent. */
@@ -411,6 +532,8 @@ function pickSessionArtifactInput(
     mimeType,
     sizeBytes,
     metadata,
+    retention,
+    clientRetained,
   } = params;
 
   return {
@@ -424,6 +547,8 @@ function pickSessionArtifactInput(
     mimeType,
     sizeBytes,
     metadata,
+    retention,
+    clientRetained,
   } as AddSessionArtifactInput;
 }
 
@@ -440,6 +565,8 @@ function toRpcError(err: unknown): {
   message: string;
   data?: Record<string, unknown>;
 } {
+  const writerError = sessionWriterRpcError(err);
+  if (writerError) return writerError;
   if (err instanceof AcpParamError || err instanceof InvalidCursorError) {
     return { code: RPC.INVALID_PARAMS, message: err.message };
   }
@@ -533,6 +660,17 @@ function toRpcError(err: unknown): {
       data: { errorKind: 'client_id_required' },
     };
   }
+  if (err instanceof SessionArtifactAuthorizationError) {
+    return {
+      code: RPC.INVALID_REQUEST,
+      message: err.message,
+      data: {
+        errorKind: 'artifact_forbidden',
+        sessionId: err.sessionId,
+        artifactId: err.artifactId,
+      },
+    };
+  }
   if (err instanceof SessionArtifactValidationError) {
     return {
       code: RPC.INVALID_PARAMS,
@@ -578,7 +716,37 @@ function toRpcError(err: unknown): {
     case 'InvalidClientIdError':
       return { code: RPC.INVALID_PARAMS, message: errMsg(err) };
     case 'SessionLimitExceededError':
-      return { code: RPC.INTERNAL_ERROR, message: errMsg(err) };
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: errMsg(err),
+        data: {
+          errorKind: 'session_limit_exceeded',
+          limit: (err as { limit?: unknown }).limit,
+          scope: 'workspace',
+          retryable: true,
+        },
+      };
+    case 'WorkspaceGenerationClosedError':
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: 'Workspace runtime is not active.',
+        data: {
+          errorKind: 'workspace_runtime_unavailable',
+          httpStatus: 503,
+          retryable: true,
+        },
+      };
+    case 'TotalSessionLimitExceededError':
+      return {
+        code: RPC.INTERNAL_ERROR,
+        message: errMsg(err),
+        data: {
+          errorKind: 'session_limit_exceeded',
+          limit: (err as { limit?: unknown }).limit,
+          scope: (err as { scope?: unknown }).scope,
+          retryable: true,
+        },
+      };
     case 'PromptQueueFullError': {
       const promptErr = err as {
         sessionId?: unknown;
@@ -627,6 +795,7 @@ export class AcpDispatcher {
   constructor(
     private readonly bridge: HttpAcpBridge,
     private readonly boundWorkspace: string,
+    private readonly getEnv: () => Readonly<NodeJS.ProcessEnv>,
     private readonly workspace: DaemonWorkspaceService,
     private readonly workspaceRememberLane: WorkspaceRememberTaskLane,
     private readonly fsFactory?: WorkspaceFileSystemFactory,
@@ -634,13 +803,27 @@ export class AcpDispatcher {
     private readonly sessionShellCommandEnabled: boolean = false,
     private readonly registry?: ConnectionRegistry,
     private readonly archiveCoordinator: SessionArchiveCoordinator = new SessionArchiveCoordinator(),
+    private readonly isWorkspaceTrusted: () => boolean = () => true,
+    private readonly captureGenerationAssertion: () =>
+      | (() => void)
+      | undefined = () => undefined,
   ) {
     this.agentManager = createDaemonSubagentManager(boundWorkspace);
   }
 
-  private killOrphanSession(sessionId: string): void {
+  private killOrphanSession(
+    sessionId: string,
+    removePersistedSession = false,
+  ): void {
     void this.bridge
       .killSession(sessionId, { requireZeroAttaches: true })
+      .then(async (killed) => {
+        if (killed && removePersistedSession) {
+          await new SessionService(this.boundWorkspace).removeSession(
+            sessionId,
+          );
+        }
+      })
       .catch((err) =>
         writeStderrLine(
           `qwen serve: /acp orphan killSession(${logSafe(sessionId)}) failed: ${logSafe(errMsg(err))}`,
@@ -1007,6 +1190,32 @@ export class AcpDispatcher {
     >;
     const id = isRequest(msg) ? msg.id : undefined;
 
+    const generationScoped =
+      TRUSTED_WORKSPACE_METHODS.has(method) ||
+      WORKSPACE_GENERATION_MUTATION_METHODS.has(method);
+    const assertGenerationOpen = generationScoped
+      ? this.captureGenerationAssertion()
+      : undefined;
+    try {
+      assertGenerationOpen?.();
+    } catch (error) {
+      if (id !== undefined) {
+        conn.sendConn(rpcErrorFrame(id, error));
+      }
+      return;
+    }
+    if (TRUSTED_WORKSPACE_METHODS.has(method) && !this.isWorkspaceTrusted()) {
+      if (id !== undefined) {
+        conn.sendConn(
+          error(id, -32003, 'Workspace is not trusted.', {
+            errorKind: 'untrusted_workspace',
+            httpStatus: 403,
+          }),
+        );
+      }
+      return;
+    }
+
     // RFD §2.3: when both are present the `Acp-Session-Id` header and the
     // `sessionId` param MUST agree — reject divergence rather than let a
     // POST act on a session other than the one the header names.
@@ -1037,6 +1246,16 @@ export class AcpDispatcher {
 
         case 'session/new': {
           const cwd = parseOptionalWorkspaceCwd(params, this.boundWorkspace);
+          const source = parseSessionSource(
+            params['sourceType'],
+            params['sourceId'],
+          );
+          if ('error' in source) {
+            if (id !== undefined) {
+              conn.sendConn(error(id, RPC.INVALID_PARAMS, source.error));
+            }
+            return;
+          }
           // ACP standard: session/new MUST create a new isolated session.
           // Always use sessionScope 'thread' regardless of client params.
           // The REST surface (POST /session) supports 'single' for
@@ -1045,12 +1264,13 @@ export class AcpDispatcher {
             workspaceCwd: cwd,
             clientId: conn.clientId,
             sessionScope: 'thread',
+            ...source,
           });
           // Teardown raced the spawn: the connection was destroyed while the
           // bridge call was in flight, so nothing will tear this session down.
           // Kill the orphan (no other client could have attached yet).
           if (conn.destroyed) {
-            this.killOrphanSession(session.sessionId);
+            this.killOrphanSession(session.sessionId, true);
             return;
           }
           conn.getOrCreateSession(session.sessionId).clientId =
@@ -1058,7 +1278,7 @@ export class AcpDispatcher {
           conn.ownSession(session.sessionId);
           const configOptions = await this.configOptionsFor(session.sessionId);
           if (conn.destroyed) {
-            this.killOrphanSession(session.sessionId);
+            this.killOrphanSession(session.sessionId, true);
             return;
           }
           // Build ACP-standard models/modes from configOptions.
@@ -1068,6 +1288,13 @@ export class AcpDispatcher {
           const modes = this.extractModeState(configOptions);
           this.replyConn(conn, id, {
             sessionId: session.sessionId,
+            ...(session.sourceType ? { sourceType: session.sourceType } : {}),
+            ...(session.sourceId !== undefined
+              ? { sourceId: session.sourceId }
+              : {}),
+            ...(session.sourcePersisted !== undefined
+              ? { sourcePersisted: session.sourcePersisted }
+              : {}),
             ...(configOptions ? { configOptions } : {}),
             ...(models ? { models } : {}),
             ...(modes ? { modes } : {}),
@@ -1110,17 +1337,25 @@ export class AcpDispatcher {
             [sessionId],
             async () => {
               await assertSessionLoadable(cwd, sessionId);
+              // Re-seed the persisted parent lineage so a restored sub-session
+              // still reports its parent over the ACP transport (parity with the
+              // REST restore handler); the bridge creates the entry without it.
+              const metadata = await new SessionService(
+                cwd,
+              ).readCreationMetadata(sessionId);
               return method === 'session/load'
                 ? await this.bridge.loadSession({
                     sessionId,
                     workspaceCwd: cwd,
                     clientId: conn.clientId,
                     historyReplay: 'response',
+                    ...metadata,
                   })
                 : await this.bridge.resumeSession({
                     sessionId,
                     workspaceCwd: cwd,
                     clientId: conn.clientId,
+                    ...metadata,
                   });
             },
           );
@@ -1248,10 +1483,41 @@ export class AcpDispatcher {
             }
             archiveState = rawArchiveState;
           }
+          const parentSessionId =
+            typeof params['parentSessionId'] === 'string'
+              ? params['parentSessionId']
+              : undefined;
+          if (parentSessionId !== undefined) {
+            if (parentSessionId.length === 0) {
+              throw new AcpParamError(
+                '`parentSessionId` must be a non-empty string',
+              );
+            }
+            if (view === 'organized') {
+              throw new AcpParamError(
+                '`parentSessionId` is not supported with `view` "organized"',
+              );
+            }
+          }
+          const parsedSource = parseSessionSource(
+            params['sourceType'],
+            params['sourceId'],
+          );
+          if ('error' in parsedSource) {
+            throw new AcpParamError(parsedSource.error);
+          }
           const result = await listWorkspaceSessionsForResponse(
             this.bridge,
             workspaceCwd,
-            { cursor, size: metaSize, archiveState, view, group },
+            {
+              cursor,
+              size: metaSize,
+              archiveState,
+              view,
+              group,
+              parentSessionId,
+              ...parsedSource,
+            },
           );
           this.replyConn(conn, id, {
             sessions: result.sessions.map((s) => ({
@@ -1262,6 +1528,13 @@ export class AcpDispatcher {
               updatedAt: s.updatedAt,
               displayName: s.displayName,
               title: s.displayName,
+              ...(s.parentSessionId !== undefined
+                ? { parentSessionId: s.parentSessionId }
+                : {}),
+              ...(s.sourceType !== undefined
+                ? { sourceType: s.sourceType }
+                : {}),
+              ...(s.sourceId !== undefined ? { sourceId: s.sourceId } : {}),
               clientCount: s.clientCount,
               hasActivePrompt: s.hasActivePrompt,
               isArchived: s.isArchived === true,
@@ -1287,25 +1560,21 @@ export class AcpDispatcher {
           conn.ownedSessions.delete(sessionId);
           conn.closingSessions.add(sessionId);
           let closeStarted = false;
+          const closeLocalSessionStream = () => {
+            try {
+              conn.closeSessionStream(sessionId);
+            } catch (teardownErr) {
+              writeStderrLine(
+                `qwen serve: /acp session/close local teardown failed (${logSafe(sessionId)}): ${logSafe(errMsg(teardownErr))}`,
+              );
+            }
+          };
           const closeSession = async () => {
             closeStarted = true;
-            try {
-              await this.bridge.closeSession(
-                sessionId,
-                this.sessionCtx(conn, sessionId, loopback),
-              );
-            } finally {
-              // Local teardown must run even if the bridge close throws —
-              // otherwise the SSE stream, abort controller, buffered frames and
-              // pending permissions leak until idle TTL.
-              try {
-                conn.closeSessionStream(sessionId);
-              } catch (teardownErr) {
-                writeStderrLine(
-                  `qwen serve: /acp session/close local teardown failed (${logSafe(sessionId)}): ${logSafe(errMsg(teardownErr))}`,
-                );
-              }
-            }
+            await this.bridge.closeSession(
+              sessionId,
+              this.sessionCtx(conn, sessionId, loopback),
+            );
           };
           try {
             try {
@@ -1331,11 +1600,19 @@ export class AcpDispatcher {
           } catch (err) {
             if (!closeStarted) {
               conn.ownedSessions.add(sessionId);
+            } else {
+              try {
+                this.bridge.getSessionSummary(sessionId);
+                conn.ownedSessions.add(sessionId);
+              } catch {
+                closeLocalSessionStream();
+              }
             }
             throw err;
           } finally {
             conn.closingSessions.delete(sessionId);
           }
+          closeLocalSessionStream();
           this.replyConn(conn, id, {});
           return;
         }
@@ -1939,7 +2216,7 @@ export class AcpDispatcher {
             params['color'] !== null &&
             (typeof params['color'] !== 'string' ||
               !GROUP_COLOR_OPTIONS.includes(
-                params['color'] as SessionGroupColor,
+                params['color'] as SessionGroupPresetColor,
               ))
           ) {
             throw new AcpParamError(
@@ -1971,7 +2248,7 @@ export class AcpDispatcher {
                 ? { groupId: params['groupId'] as string | null }
                 : {}),
               ...('color' in params
-                ? { color: params['color'] as SessionGroupColor | null }
+                ? { color: params['color'] as SessionGroupPresetColor | null }
                 : {}),
             });
             this.replyConn(conn, id, { sessionId, ...organization });
@@ -1995,6 +2272,7 @@ export class AcpDispatcher {
             name: params['name'] as string,
             color: params['color'] as SessionGroupColor,
           });
+          assertGenerationOpen?.();
           this.replyConn(conn, id, { group });
           return;
         }
@@ -2014,6 +2292,7 @@ export class AcpDispatcher {
               : {}),
             ...('order' in params ? { order: params['order'] as number } : {}),
           });
+          assertGenerationOpen?.();
           this.replyConn(conn, id, { group });
           return;
         }
@@ -2028,54 +2307,55 @@ export class AcpDispatcher {
             await createSessionOrganizationService(workspaceCwd).deleteGroup(
               groupId,
             );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, { deleted });
           return;
         }
 
         case `${QWEN_METHOD_NS}workspace/mcp`:
-          this.replyConn(
-            conn,
-            id,
-            await this.workspace.getWorkspaceMcpStatus(
+          {
+            const result = await this.workspace.getWorkspaceMcpStatus(
               this.wsCtx(conn, method),
-            ),
-          );
+            );
+            assertGenerationOpen?.();
+            this.replyConn(conn, id, result);
+          }
           return;
         case `${QWEN_METHOD_NS}workspace/skills`:
-          this.replyConn(
-            conn,
-            id,
-            await this.workspace.getWorkspaceSkillsStatus(
+          {
+            const result = await this.workspace.getWorkspaceSkillsStatus(
               this.wsCtx(conn, method),
-            ),
-          );
+            );
+            assertGenerationOpen?.();
+            this.replyConn(conn, id, result);
+          }
           return;
         case `${QWEN_METHOD_NS}workspace/providers`:
-          this.replyConn(
-            conn,
-            id,
-            await this.workspace.getWorkspaceProvidersStatus(
+          {
+            const result = await this.workspace.getWorkspaceProvidersStatus(
               this.wsCtx(conn, method),
-            ),
-          );
+            );
+            assertGenerationOpen?.();
+            this.replyConn(conn, id, result);
+          }
           return;
         case `${QWEN_METHOD_NS}workspace/env`:
-          this.replyConn(
-            conn,
-            id,
-            await this.workspace.getWorkspaceEnvStatus(
+          {
+            const result = await this.workspace.getWorkspaceEnvStatus(
               this.wsCtx(conn, method),
-            ),
-          );
+            );
+            assertGenerationOpen?.();
+            this.replyConn(conn, id, result);
+          }
           return;
         case `${QWEN_METHOD_NS}workspace/preflight`:
-          this.replyConn(
-            conn,
-            id,
-            await this.workspace.getWorkspacePreflightStatus(
+          {
+            const result = await this.workspace.getWorkspacePreflightStatus(
               this.wsCtx(conn, method),
-            ),
-          );
+            );
+            assertGenerationOpen?.();
+            this.replyConn(conn, id, result);
+          }
           return;
 
         case `${QWEN_METHOD_NS}workspace/init`: {
@@ -2097,6 +2377,7 @@ export class AcpDispatcher {
             this.wsCtx(conn, method),
             { force },
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -2154,10 +2435,12 @@ export class AcpDispatcher {
             }
             return;
           }
+          assertGenerationOpen?.();
           const result = await this.workspace.requestWorkspaceTrustChange(ctx, {
             desiredState,
             ...(reason !== undefined ? { reason } : {}),
           });
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -2166,6 +2449,7 @@ export class AcpDispatcher {
           const result = await this.workspace.getWorkspacePermissionsStatus(
             this.wsCtx(conn, method),
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -2201,7 +2485,12 @@ export class AcpDispatcher {
 
           let rules: string[];
           try {
-            const settings = loadSettings(this.boundWorkspace);
+            const workspaceTrusted = this.isWorkspaceTrusted();
+            const settings = loadSettings(this.boundWorkspace, {
+              skipLoadEnvironment: true,
+              skipWorkspaceSettings: !workspaceTrusted,
+              workspaceTrusted,
+            });
             const scopeSettings =
               scope === 'workspace'
                 ? settings.workspace.settings
@@ -2241,6 +2530,7 @@ export class AcpDispatcher {
             }
             throw err;
           }
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -2249,6 +2539,7 @@ export class AcpDispatcher {
           const result = await this.workspace.getWorkspaceVoiceStatus(
             this.wsCtx(conn, method),
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -2266,6 +2557,7 @@ export class AcpDispatcher {
             this.wsCtx(conn, method),
             update,
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -2292,17 +2584,25 @@ export class AcpDispatcher {
             return;
           }
           try {
+            const fileOps = createSetupGithubFileOps(
+              this.fsFactory,
+              `ACP ${method}`,
+              conn.clientId,
+              assertGenerationOpen,
+            );
+            fileOps.assertCanWrite();
             const result = await setupGithub({
               cwd: this.boundWorkspace,
               workspaceRoot: this.boundWorkspace,
-              proxy: resolveSetupGithubProxy(this.boundWorkspace),
-              abortSignal: conn.abortSignal,
-              fileOps: createSetupGithubFileOps(
-                this.fsFactory,
-                `ACP ${method}`,
-                conn.clientId,
+              proxy: resolveSetupGithubProxy(
+                this.boundWorkspace,
+                this.getEnv(),
+                true,
               ),
+              abortSignal: conn.abortSignal,
+              fileOps,
             });
+            assertGenerationOpen?.();
             this.bridge.publishWorkspaceEvent({
               type: 'github_setup_completed',
               data: setupGithubEventData(result),
@@ -2358,6 +2658,7 @@ export class AcpDispatcher {
             toolName,
             params['enabled'] === true,
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -2399,6 +2700,7 @@ export class AcpDispatcher {
             serverName,
             rawIdx !== undefined ? { entryIndex: rawIdx } : undefined,
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -2536,7 +2838,10 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}session/artifacts`: {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
-          const result = await this.bridge.getSessionArtifacts(sessionId);
+          const result = await this.bridge.getSessionArtifacts(
+            sessionId,
+            this.sessionCtx(conn, sessionId, loopback),
+          );
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -2580,6 +2885,7 @@ export class AcpDispatcher {
           const result = await collectWorkspaceMemoryStatus(
             this.boundWorkspace,
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -2646,7 +2952,9 @@ export class AcpDispatcher {
             mode,
             content,
             projectRoot: this.boundWorkspace,
+            assertCanCommit: assertGenerationOpen,
           });
+          assertGenerationOpen?.();
           this.replyConn(conn, id, {
             ok: true,
             filePath: wr.filePath,
@@ -2714,6 +3022,7 @@ export class AcpDispatcher {
           try {
             const available =
               await this.bridge.isWorkspaceMemoryRememberAvailable();
+            assertGenerationOpen?.();
             if (!available) {
               if (id !== undefined) {
                 conn.sendConn(
@@ -2734,6 +3043,7 @@ export class AcpDispatcher {
               content: content.trim(),
               contextMode: rawContextMode,
               ...(conn.clientId ? { originatorClientId: conn.clientId } : {}),
+              ...(assertGenerationOpen ? { assertGenerationOpen } : {}),
             });
             this.replyConn(conn, id, task);
           } catch (err) {
@@ -2815,6 +3125,7 @@ export class AcpDispatcher {
           try {
             const available =
               await this.bridge.isWorkspaceMemoryRememberAvailable();
+            assertGenerationOpen?.();
             if (!available) {
               if (id !== undefined) {
                 conn.sendConn(
@@ -2834,6 +3145,7 @@ export class AcpDispatcher {
             const task = this.workspaceRememberLane.enqueueForget({
               query: trimmedQuery,
               ...(conn.clientId ? { originatorClientId: conn.clientId } : {}),
+              ...(assertGenerationOpen ? { assertGenerationOpen } : {}),
             });
             this.replyConn(conn, id, task);
           } catch (err) {
@@ -2887,6 +3199,7 @@ export class AcpDispatcher {
           try {
             const available =
               await this.bridge.isWorkspaceMemoryRememberAvailable();
+            assertGenerationOpen?.();
             if (!available) {
               if (id !== undefined) {
                 conn.sendConn(
@@ -2905,6 +3218,7 @@ export class AcpDispatcher {
             }
             const task = this.workspaceRememberLane.enqueueDream({
               ...(conn.clientId ? { originatorClientId: conn.clientId } : {}),
+              ...(assertGenerationOpen ? { assertGenerationOpen } : {}),
             });
             this.replyConn(conn, id, task);
           } catch (err) {
@@ -3225,6 +3539,7 @@ export class AcpDispatcher {
             return;
           }
           await fs.writeTextOverwrite(resolved, params['content'] as string);
+          assertGenerationOpen?.();
           this.replyConn(conn, id, { ok: true, path: p });
           return;
         }
@@ -3267,6 +3582,7 @@ export class AcpDispatcher {
             params['oldText'] as string,
             params['newText'] as string,
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, { ok: true, path: p, ...result } as unknown);
           return;
         }
@@ -3414,6 +3730,7 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}workspace/tools`: {
           const result = await this.bridge.getWorkspaceToolsStatus();
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -3429,6 +3746,7 @@ export class AcpDispatcher {
           }
           const result =
             await this.bridge.getWorkspaceMcpToolsStatus(serverName);
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -3444,6 +3762,7 @@ export class AcpDispatcher {
           }
           const result =
             await this.bridge.getWorkspaceMcpResourcesStatus(serverName);
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -3478,6 +3797,7 @@ export class AcpDispatcher {
             config as Record<string, unknown>,
             conn.clientId,
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -3499,6 +3819,7 @@ export class AcpDispatcher {
             name,
             conn.clientId,
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -3564,6 +3885,7 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}workspace/agents/list`: {
           const agents = await this.agentManager.listSubagents({ force: true });
+          assertGenerationOpen?.();
           this.replyConn(conn, id, {
             v: 1,
             workspaceCwd: this.boundWorkspace,
@@ -3582,6 +3904,7 @@ export class AcpDispatcher {
             return;
           }
           const config = await this.agentManager.loadSubagent(agentType);
+          assertGenerationOpen?.();
           if (!config) {
             if (id !== undefined)
               conn.sendConn(
@@ -3633,6 +3956,7 @@ export class AcpDispatcher {
               );
             return;
           }
+          assertGenerationOpen?.();
           await this.agentManager.createSubagent(
             {
               name,
@@ -3653,9 +3977,11 @@ export class AcpDispatcher {
                   ? params['model']
                   : undefined,
             },
-            { level },
+            { level, assertCanCommit: assertGenerationOpen },
           );
+          assertGenerationOpen?.();
           const created = await this.agentManager.loadSubagent(name, level);
+          assertGenerationOpen?.();
           this.replyConn(conn, id, {
             ok: true,
             agent: created ? agentToDetail(created) : null,
@@ -3767,15 +4093,19 @@ export class AcpDispatcher {
               );
             return;
           }
+          assertGenerationOpen?.();
           await this.agentManager.updateSubagent(
             agentType,
             updates,
             existing.level,
+            { assertCanCommit: assertGenerationOpen },
           );
+          assertGenerationOpen?.();
           const updated = await this.agentManager.loadSubagent(
             agentType,
             existing.level,
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, {
             ok: true,
             agent: updated ? agentToDetail(updated) : null,
@@ -3824,7 +4154,14 @@ export class AcpDispatcher {
               );
             return;
           }
-          await this.agentManager.deleteSubagent(agentType, existing.level);
+          assertGenerationOpen?.();
+          await this.agentManager.deleteSubagent(
+            agentType,
+            existing.level,
+            undefined,
+            { assertCanCommit: assertGenerationOpen },
+          );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, { ok: true });
           try {
             this.bridge.publishWorkspaceEvent({
@@ -3877,6 +4214,20 @@ export class AcpDispatcher {
   }
 
   /**
+   * Current epoch token of the session's event bus, or `undefined` when
+   * the session is unknown (torn down between ownership check and header
+   * write). The `/acp` GET route advertises it as `X-Qwen-Event-Epoch`
+   * BEFORE `stream.open()` flushes headers (DAEMON-001).
+   */
+  getSessionEventEpoch(sessionId: string): string | undefined {
+    try {
+      return this.bridge.getSessionEventEpoch(sessionId);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * Bind a session-scoped SSE stream to the bridge's event stream,
    * translating each `BridgeEvent` into a JSON-RPC frame (design §4.2).
    */
@@ -3885,6 +4236,7 @@ export class AcpDispatcher {
     sessionId: string,
     signal: AbortSignal,
     lastEventId?: number,
+    epoch?: string,
   ): Promise<void> {
     try {
       // On resume, `attachSessionStream` defers id-less buffered replies (e.g. a
@@ -3918,6 +4270,14 @@ export class AcpDispatcher {
       if (conn.hasInitialReplayPending(sessionId)) {
         const snapshot = this.bridge.getSessionReplaySnapshot(sessionId);
         if (snapshot) {
+          if (snapshot.degraded) {
+            // Compaction failed at least once for this session, so the
+            // snapshot may lag behind live events. Same operator breadcrumb
+            // the REST surface gets via the bus-level log (DAEMON-008).
+            writeStderrLine(
+              `qwen serve: /acp initial replay used a DEGRADED snapshot (compaction failure) session=${logSafe(sessionId)}; replay may be incomplete`,
+            );
+          }
           const snapshotEvents = [
             ...snapshot.compactedTurns,
             ...snapshot.liveJournal,
@@ -3961,6 +4321,7 @@ export class AcpDispatcher {
         ...(subscribeFromEventId !== undefined
           ? { lastEventId: subscribeFromEventId }
           : {}),
+        ...(epoch !== undefined ? { epoch } : {}),
       });
       for await (const event of iterable) {
         if (signal.aborted) break;

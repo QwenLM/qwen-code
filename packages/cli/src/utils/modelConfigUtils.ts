@@ -191,37 +191,41 @@ export interface ResolvedCliGenerationConfig {
   baseUrl: string;
   /** The full generation config to pass to core Config */
   generationConfig: Partial<ContentGeneratorConfig>;
+  /** Exact selected modelProviders baseUrl; null selects an implicit route. */
+  registryBaseUrl?: string | null;
   /** Source attribution for each resolved field */
   sources: ContentGeneratorConfigSources;
   /** Warnings generated during resolution */
   warnings: string[];
 }
 
-export function getAuthTypeFromEnv(): AuthType | undefined {
-  if (process.env['QWEN_OAUTH']) {
+export function getAuthTypeFromEnv(
+  env: Record<string, string | undefined> = process.env,
+): AuthType | undefined {
+  if (env['QWEN_OAUTH']) {
     return AuthType.QWEN_OAUTH;
   }
 
   if (
-    process.env['OPENAI_API_KEY'] &&
-    (process.env['OPENAI_MODEL'] || process.env['QWEN_MODEL']) &&
-    process.env['OPENAI_BASE_URL']
+    env['OPENAI_API_KEY'] &&
+    (env['OPENAI_MODEL'] || env['QWEN_MODEL']) &&
+    env['OPENAI_BASE_URL']
   ) {
     return AuthType.USE_OPENAI;
   }
 
-  if (process.env['GEMINI_API_KEY'] && process.env['GEMINI_MODEL']) {
+  if (env['GEMINI_API_KEY'] && env['GEMINI_MODEL']) {
     return AuthType.USE_GEMINI;
   }
 
-  if (process.env['GOOGLE_API_KEY'] && process.env['GOOGLE_MODEL']) {
+  if (env['GOOGLE_API_KEY'] && env['GOOGLE_MODEL']) {
     return AuthType.USE_VERTEX_AI;
   }
 
   if (
-    process.env['ANTHROPIC_API_KEY'] &&
-    process.env['ANTHROPIC_MODEL'] &&
-    process.env['ANTHROPIC_BASE_URL']
+    env['ANTHROPIC_API_KEY'] &&
+    env['ANTHROPIC_MODEL'] &&
+    env['ANTHROPIC_BASE_URL']
   ) {
     return AuthType.USE_ANTHROPIC;
   }
@@ -443,6 +447,9 @@ export function resolveCliGenerationConfig(
     apiKey: resolved.config.apiKey || '',
     baseUrl: resolved.config.baseUrl || '',
     generationConfig,
+    ...(modelProvider
+      ? { registryBaseUrl: modelProvider.baseUrl ?? null }
+      : {}),
     sources: resolved.sources,
     warnings: [
       ...resolved.warnings,

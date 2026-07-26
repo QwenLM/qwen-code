@@ -20,7 +20,10 @@ import type {
   BridgeEvent,
   SessionReplaySnapshot,
 } from '@qwen-code/acp-bridge/eventBus';
-import { SessionArtifactValidationError } from '@qwen-code/acp-bridge/sessionArtifacts';
+import {
+  SessionArtifactAuthorizationError,
+  SessionArtifactValidationError,
+} from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
   CancelSentinelCollisionError,
   InvalidClientIdError,
@@ -28,10 +31,16 @@ import {
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
+  SessionLimitExceededError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
+  TotalSessionLimitExceededError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
-import { SessionService, Storage } from '@qwen-code/qwen-code-core';
+import {
+  SessionOrganizationService,
+  SessionService,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import {
   resetHomeEnvBootstrapForTesting,
   SettingScope,
@@ -59,6 +68,12 @@ import {
   mountWorkspaceMemoryRememberRoutes,
   WorkspaceRememberTaskLane,
 } from '../workspace-remember.js';
+import {
+  createSingleWorkspaceRegistry,
+  createWorkspaceGenerationGuard,
+  type WorkspaceGenerationGuard,
+  type WorkspaceRuntime,
+} from '../workspace-registry.js';
 import {
   MAX_TRUST_REASON_LENGTH,
   MAX_VOICE_MODEL_LENGTH,
@@ -183,9 +198,11 @@ class FakeBridge {
   }
   async killSession(sessionId: string) {
     this.killed.push(sessionId);
+    return true;
   }
 
   loadShouldThrow = false;
+  loadError: unknown;
 
   async loadSession(req: {
     sessionId: string;
@@ -193,6 +210,7 @@ class FakeBridge {
     clientId?: string;
   }) {
     this.loadRequests.push(req);
+    if (this.loadError !== undefined) throw this.loadError;
     if (this.loadShouldThrow) throw new Error('load failed');
     if (this.gate) await this.gate;
     return {
@@ -222,17 +240,25 @@ class FakeBridge {
 
   subscribeThrows = false;
   /** Records every subscribeEvents call so tests can assert the resume cursor. */
-  subscribeCalls: Array<{ sessionId: string; lastEventId?: number }> = [];
+  subscribeCalls: Array<{
+    sessionId: string;
+    lastEventId?: number;
+    epoch?: string;
+  }> = [];
   /** Parallel to `subscribeCalls`: each subscription's abort signal, so a test
    * can detect when a closed stream's pump has actually stopped server-side. */
   subscribeSignals: Array<AbortSignal | undefined> = [];
 
   subscribeEvents(
     sessionId: string,
-    opts?: { signal?: AbortSignal; lastEventId?: number },
+    opts?: { signal?: AbortSignal; lastEventId?: number; epoch?: string },
   ) {
     if (this.subscribeThrows) throw new Error('subscribe failed');
-    this.subscribeCalls.push({ sessionId, lastEventId: opts?.lastEventId });
+    this.subscribeCalls.push({
+      sessionId,
+      lastEventId: opts?.lastEventId,
+      epoch: opts?.epoch,
+    });
     this.subscribeSignals.push(opts?.signal);
     const q = pushQueue(opts?.signal);
     this.queues.set(sessionId, q);
@@ -257,6 +283,15 @@ class FakeBridge {
   sessionLastEventId: number | undefined = undefined;
   getSessionLastEventId(_sessionId: string): number | undefined {
     return this.sessionLastEventId;
+  }
+
+  /**
+   * Bus epoch token advertised on the SSE response header and paired with
+   * resume cursors (DAEMON-001). Configurable per test.
+   */
+  sessionEventEpoch = 'fake-epoch';
+  getSessionEventEpoch(_sessionId: string): string {
+    return this.sessionEventEpoch;
   }
 
   respondToSessionPermission() {
@@ -396,6 +431,9 @@ class FakeBridge {
       }
     | undefined;
   lastArtifactListSessionId: string | undefined;
+  lastArtifactListContext:
+    | Parameters<HttpAcpBridge['getSessionArtifacts']>[1]
+    | undefined;
   lastRemovedArtifact:
     | {
         sessionId: string;
@@ -403,8 +441,12 @@ class FakeBridge {
         context: Parameters<HttpAcpBridge['removeSessionArtifact']>[2];
       }
     | undefined;
-  async getSessionArtifacts(sessionId: string) {
+  async getSessionArtifacts(
+    sessionId: string,
+    context: Parameters<HttpAcpBridge['getSessionArtifacts']>[1],
+  ) {
     this.lastArtifactListSessionId = sessionId;
+    this.lastArtifactListContext = context;
     return {
       v: 1,
       sessionId,
@@ -486,7 +528,12 @@ class FakeBridge {
     return { summary: 'remembered', filesTouched: [], touchedScopes: [] };
   }
   async runWorkspaceMemoryForget() {
-    return { summary: 'forgot', removedEntries: [], touchedTopics: [] };
+    return {
+      summary: 'forgot',
+      removedEntries: [],
+      touchedTopics: [],
+      touchedScopes: [],
+    };
   }
   async runWorkspaceMemoryDream() {
     return { summary: 'dreamed', touchedTopics: [], dedupedEntries: 0 };
@@ -861,6 +908,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     nextBridge?: FakeBridge;
     fsFactory?: WorkspaceFileSystemFactory;
     boundWorkspace?: string;
+    daemonEnv?: Readonly<NodeJS.ProcessEnv>;
+    primaryTrusted?: boolean;
+    generationGuard?: WorkspaceGenerationGuard;
   }): Promise<void> {
     server.closeAllConnections?.();
     await new Promise<void>((r) => server.close(() => r()));
@@ -868,10 +918,29 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const boundWorkspace = opts.boundWorkspace ?? '/ws';
     const app = express();
     app.use(express.json());
+    const workspaceRegistry = opts.generationGuard
+      ? createSingleWorkspaceRegistry({
+          workspaceId: 'primary',
+          workspaceCwd: boundWorkspace,
+          primary: true,
+          trusted: opts.primaryTrusted ?? true,
+          env: { mode: 'parent-process', overlayKeys: [] },
+          bridge: bridge as unknown as WorkspaceRuntime['bridge'],
+          workspaceService: fakeWorkspace,
+          routeFileSystemFactory: (opts.fsFactory ??
+            {}) as WorkspaceFileSystemFactory,
+          clientMcpSenderRegistry:
+            {} as WorkspaceRuntime['clientMcpSenderRegistry'],
+          generationGuard: opts.generationGuard,
+        })
+      : undefined;
     mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
       boundWorkspace,
       workspace: fakeWorkspace,
       enabled: true,
+      daemonEnv: opts.daemonEnv,
+      isPrimaryWorkspaceTrusted: () => opts.primaryTrusted ?? true,
+      workspaceRegistry,
       fsFactory: opts.fsFactory,
       sessionShellCommandEnabled: opts.sessionShellCommandEnabled,
       workspaceRememberLane: new WorkspaceRememberTaskLane(
@@ -969,6 +1038,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   async function writeStoredSession(
     sessionId: string,
     state: 'active' | 'archived' = 'active',
+    parentSessionId?: string,
+    sourceType?: string,
+    sourceId?: string,
   ): Promise<void> {
     const chatsDir = path.join(
       new Storage('/ws').getProjectDir(),
@@ -976,9 +1048,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       ...(state === 'archived' ? ['archive'] : []),
     );
     await fs.mkdir(chatsDir, { recursive: true });
-    await fs.writeFile(
-      path.join(chatsDir, `${sessionId}.jsonl`),
-      `${JSON.stringify({
+    const lines = [
+      JSON.stringify({
         uuid: `${sessionId}-user-1`,
         parentUuid: null,
         sessionId,
@@ -986,7 +1057,45 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         type: 'user',
         message: { role: 'user', parts: [{ text: 'hello' }] },
         cwd: '/ws',
-      })}\n`,
+      }),
+    ];
+    if (parentSessionId !== undefined) {
+      // Mirror ChatRecordingService.recordParentSession: one `parent_session`
+      // system record near the head of the transcript that SessionService
+      // rehydrates into the summary's parentSessionId.
+      lines.push(
+        JSON.stringify({
+          uuid: `${sessionId}-parent-1`,
+          parentUuid: `${sessionId}-user-1`,
+          sessionId,
+          timestamp: '2026-06-30T00:00:00.000Z',
+          type: 'system',
+          subtype: 'parent_session',
+          systemPayload: { parentSessionId },
+          cwd: '/ws',
+        }),
+      );
+    }
+    if (sourceType !== undefined) {
+      lines.push(
+        JSON.stringify({
+          uuid: `${sessionId}-source-1`,
+          parentUuid: `${sessionId}-user-1`,
+          sessionId,
+          timestamp: '2026-06-30T00:00:00.000Z',
+          type: 'system',
+          subtype: 'session_source',
+          systemPayload: {
+            sourceType,
+            ...(sourceId !== undefined ? { sourceId } : {}),
+          },
+          cwd: '/ws',
+        }),
+      );
+    }
+    await fs.writeFile(
+      path.join(chatsDir, `${sessionId}.jsonl`),
+      `${lines.join('\n')}\n`,
       'utf8',
     );
   }
@@ -1131,6 +1240,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(result.agentCapabilities._meta.qwen.methods).toContain(
       '_qwen/session/shell',
     );
+    expect(result.agentCapabilities._meta.qwen.methods).not.toContain(
+      '_qwen/session/rewind',
+    );
   });
 
   it('initialize advertises _qwen/session/lsp', async () => {
@@ -1164,6 +1276,80 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     }>;
     expect(frame.id).toBe(2);
     expect(frame.result.sessionId).toBe('sess-1');
+  });
+
+  it('maps workspace session admission failures to retryable RPC error data', async () => {
+    bridge.spawnOrAttach = async () => {
+      throw new SessionLimitExceededError(20);
+    };
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'session/new',
+      params: { cwd: '/ws' },
+    });
+    expect(ack.status).toBe(202);
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: {
+        code: number;
+        data: {
+          errorKind: string;
+          limit: number;
+          scope: string;
+          retryable: boolean;
+        };
+      };
+    }>;
+    expect(frame.id).toBe(3);
+    expect(frame.error.code).toBe(-32603);
+    expect(frame.error.data).toMatchObject({
+      errorKind: 'session_limit_exceeded',
+      limit: 20,
+      scope: 'workspace',
+      retryable: true,
+    });
+  });
+
+  it('maps total session admission failures to retryable RPC error data', async () => {
+    bridge.spawnOrAttach = async () => {
+      throw new TotalSessionLimitExceededError(10);
+    };
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      id: 3,
+      method: 'session/new',
+      params: { cwd: '/ws' },
+    });
+    expect(ack.status).toBe(202);
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: {
+        code: number;
+        data: {
+          errorKind: string;
+          limit: number;
+          scope: string;
+          retryable: boolean;
+        };
+      };
+    }>;
+    expect(frame.id).toBe(3);
+    expect(frame.error.code).toBe(-32603);
+    expect(frame.error.data).toMatchObject({
+      errorKind: 'session_limit_exceeded',
+      limit: 10,
+      scope: 'total',
+      retryable: true,
+    });
   });
 
   it('prompt streams session/update then the final result', async () => {
@@ -1275,6 +1461,50 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       lastEventId: undefined,
     });
     await fresh.body?.cancel().catch(() => {});
+  });
+
+  it('GET X-Qwen-Event-Epoch flows to subscribeEvents; invalid values degrade to "not provided"', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+
+    // Reconnect carrying cursor + epoch → subscribeEvents gets both.
+    const resumed = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': '42',
+        'x-qwen-event-epoch': 'epoch-abc',
+      },
+    });
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'sess-1',
+      lastEventId: 42,
+      epoch: 'epoch-abc',
+    });
+    // The stream advertises the CURRENT bus epoch back to the client so it
+    // can pair future cursors with it (DAEMON-001).
+    expect(resumed.headers.get('x-qwen-event-epoch')).toBe('fake-epoch');
+    await resumed.body?.cancel().catch(() => {});
+
+    // An out-of-charset token is rejected (logged) → treated as absent.
+    const bad = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': '42',
+        'x-qwen-event-epoch': 'not a valid token!',
+      },
+    });
+    await waitUntil(() => bridge.subscribeCalls.length >= 2);
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'sess-1',
+      lastEventId: 42,
+      epoch: undefined,
+    });
+    await bad.body?.cancel().catch(() => {});
   });
 
   it('real close-then-reconnect order keeps ownership (no 403) + prompt alive, resumes via Last-Event-ID', async () => {
@@ -3216,6 +3446,75 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
+  it('emits the stderr breadcrumb only when the initial replay snapshot is degraded', async () => {
+    const makeSnapshot = (
+      sessionId: string,
+      degraded: boolean,
+    ): SessionReplaySnapshot => ({
+      lastEventId: 1,
+      compactedTurns: [
+        {
+          v: 1,
+          id: 1,
+          type: 'session_update',
+          data: {
+            sessionId,
+            update: { sessionUpdate: 'user_message_chunk' },
+          },
+        } as BridgeEvent,
+      ],
+      liveJournal: [],
+      ...(degraded ? { degraded: true } : {}),
+    });
+    const degradedLine = (calls: unknown[][]) =>
+      calls.some(
+        ([line]) =>
+          typeof line === 'string' && line.includes('DEGRADED snapshot'),
+      );
+
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    // One reply frame per session/load; await each BEFORE opening the
+    // session stream — the GET must not race conn.ownSession() or the
+    // handler 403s and subscribeEvents never fires.
+    const replies = frameReader(connStream);
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Healthy snapshot: no operator breadcrumb.
+    bridge.replaySnapshot = makeSnapshot('deg-0', false);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 30,
+      method: 'session/load',
+      params: { sessionId: 'deg-0' },
+    });
+    await replies.next();
+    stdioMocks.writeStderrLine.mockClear();
+    await openStream(connId, 'deg-0');
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    expect(degradedLine(stdioMocks.writeStderrLine.mock.calls)).toBe(false);
+
+    // Degraded snapshot (DAEMON-008): breadcrumb names the session.
+    bridge.replaySnapshot = makeSnapshot('deg-1', true);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 31,
+      method: 'session/load',
+      params: { sessionId: 'deg-1' },
+    });
+    await replies.next();
+    stdioMocks.writeStderrLine.mockClear();
+    await openStream(connId, 'deg-1');
+    await waitUntil(() => bridge.subscribeCalls.length >= 2);
+    expect(degradedLine(stdioMocks.writeStderrLine.mock.calls)).toBe(true);
+    expect(
+      stdioMocks.writeStderrLine.mock.calls.some(
+        ([line]) => typeof line === 'string' && line.includes('deg-1'),
+      ),
+    ).toBe(true);
+    replies.close();
+  });
+
   it('defers prompt replies until initial load replay completes', async () => {
     bridge.replaySnapshot = {
       lastEventId: 1,
@@ -3521,6 +3820,46 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
+  it('session/load preserves sanitized session writer RPC errors', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440322';
+      await writeStoredSession(sessionId);
+      bridge.loadError = Object.assign(new Error('private lock details'), {
+        code: -32020,
+        data: { errorKind: 'session_writer_conflict' },
+      });
+
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const got = takeFrames(connStream, 1);
+      await new Promise((r) => setTimeout(r, 50));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 213,
+        method: 'session/load',
+        params: { sessionId },
+      });
+
+      const [frame] = (await got) as Array<{
+        id: number;
+        error: {
+          code: number;
+          message: string;
+          data?: { errorKind?: string };
+        };
+      }>;
+      expect(frame).toEqual({
+        id: 213,
+        error: {
+          code: -32020,
+          message: 'This session is already open in another Qwen process.',
+          data: { errorKind: 'session_writer_conflict' },
+        },
+        jsonrpc: '2.0',
+      });
+    });
+  });
+
   it('session/load holds archive gate while restore is in flight', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440124';
@@ -3578,6 +3917,61 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       reader.close();
     });
   });
+
+  it.each(['session/load', 'session/resume'] as const)(
+    '%s re-seeds the persisted parent lineage into the bridge restore call',
+    async (method) => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440130';
+        const parentId = '550e8400-e29b-41d4-a716-446655440131';
+        // A restored sub-session carries its parent only on disk; the bridge
+        // creates the live entry without it, so the dispatcher must recover it
+        // from the transcript and pass it to load/resume.
+        await writeStoredSession(sessionId, 'active', parentId);
+
+        let loadParent: unknown = 'unset';
+        let resumeParent: unknown = 'unset';
+        bridge.loadSession = async (req) => {
+          loadParent = (req as { parentSessionId?: string }).parentSessionId;
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: '/ws',
+            attached: true,
+            clientId: 'client-load',
+            state: { replayed: true },
+          };
+        };
+        bridge.resumeSession = async (req) => {
+          resumeParent = (req as { parentSessionId?: string }).parentSessionId;
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: '/ws',
+            attached: true,
+            clientId: 'client-resume',
+            state: { resumed: true },
+          };
+        };
+
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 214,
+          method,
+          params: { sessionId },
+        });
+        expect(await reader.next()).toMatchObject({ id: 214 });
+        reader.close();
+
+        if (method === 'session/load') {
+          expect(loadParent).toBe(parentId);
+        } else {
+          expect(resumeParent).toBe(parentId);
+        }
+      });
+    },
+  );
 
   it('session/prompt holds archive gate while prompt is in flight', async () => {
     await withRuntimeDir(async () => {
@@ -4352,6 +4746,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
 
   it('session/close runs local cleanup even if the bridge close throws', async () => {
     bridge.closeShouldThrow = true;
+    bridge.getSessionSummary = () => {
+      throw new Error('session already gone');
+    };
     const connId = await initialize();
     await newSession(connId); // creates + owns sess-1
     await new Promise((r) => setTimeout(r, 30));
@@ -4366,6 +4763,35 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     // Local teardown ran in `finally` despite the throw → session unowned now.
     const after = await openStream(connId, 'sess-1');
     expect(after.status).toBe(403);
+  });
+
+  it('session/close can be retried when the bridge reports a live refusal', async () => {
+    bridge.closeError = new Error('close drain refused');
+    const connId = await initialize();
+    await newSession(connId);
+
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 146,
+      method: 'session/close',
+      params: { sessionId: 'sess-1' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const stillOwned = await openStream(connId, 'sess-1');
+    expect(stillOwned.status).toBe(200);
+
+    bridge.closeError = undefined;
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 147,
+      method: 'session/close',
+      params: { sessionId: 'sess-1' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(bridge.closedSessions).toEqual(['sess-1', 'sess-1']);
+    const closed = await openStream(connId, 'sess-1');
+    expect(closed.status).toBe(403);
+    await stillOwned.body?.cancel().catch(() => {});
   });
 
   it('connection cap → 503 on initialize', async () => {
@@ -4453,7 +4879,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     for (const f of frames) expect(f.error?.code).toBe(-32602);
   });
 
-  it('session/new orphan: DELETE before spawn resolves → bridge.killSession', async () => {
+  it('session/new orphan: DELETE before spawn resolves removes the persisted session', async () => {
+    const removeSession = vi
+      .spyOn(SessionService.prototype, 'removeSession')
+      .mockResolvedValue(true);
     let release: () => void = () => {};
     bridge.gate = new Promise<void>((r) => (release = r));
     const connId = await initialize();
@@ -4471,6 +4900,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     release(); // spawn resolves AFTER destroy
     await new Promise((r) => setTimeout(r, 40));
     expect(bridge.killed).toContain('sess-1');
+    expect(removeSession).toHaveBeenCalledWith('sess-1');
+    removeSession.mockRestore();
   });
 
   it('session/load orphan (attached:false) → killSession, not detach', async () => {
@@ -5057,7 +5488,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   });
 
   it('dispatches _qwen/workspace/setup-github', async () => {
-    await restartServer({ fsFactory: makeFileFsFactory({}) });
+    await restartServer({
+      fsFactory: makeFileFsFactory({}),
+      daemonEnv: { HTTPS_PROXY: 'http://runtime-proxy.example:8080' },
+    });
     const connId = await initialize();
     const connStream = await openStream(connId);
     const got = takeFrames(connStream, 1);
@@ -5082,6 +5516,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect.objectContaining({
         cwd: '/ws',
         workspaceRoot: '/ws',
+        proxy: 'http://runtime-proxy.example:8080',
         abortSignal: expect.any(AbortSignal),
         fileOps: expect.any(Object),
       }),
@@ -5958,6 +6393,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         },
       });
       expect(bridge.lastArtifactListSessionId).toBe('sess-1');
+      expect(bridge.lastArtifactListContext).toEqual({
+        clientId: 'client-1',
+        fromLoopback: true,
+      });
     });
 
     it('_qwen/session/artifacts/add forwards only public artifact fields', async () => {
@@ -5982,6 +6421,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           storage: 'external_url',
           url: 'https://example.test/lineage',
           metadata: { table: 'fact_orders' },
+          retention: 'ephemeral',
+          clientRetained: false,
           source: 'tool',
           trustedPublisher: true,
           clientId: 'forged-client',
@@ -6000,6 +6441,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         storage: 'external_url',
         url: 'https://example.test/lineage',
         metadata: { table: 'fact_orders' },
+        retention: 'ephemeral',
+        clientRetained: false,
       });
       const artifact = bridge.lastAddedArtifact?.artifact as
         | Record<string, unknown>
@@ -6010,6 +6453,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(artifact).not.toHaveProperty('clientId');
       expect(artifact).not.toHaveProperty('toolName');
       expect(artifact).not.toHaveProperty('hookEventName');
+      expect(bridge.lastAddedArtifact?.context).toEqual({
+        clientId: 'client-1',
+        fromLoopback: true,
+      });
     });
 
     it('_qwen/session/artifacts/add maps artifact validation errors to invalid params', async () => {
@@ -6063,7 +6510,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         jsonrpc: '2.0',
         id: 59,
         method: '_qwen/session/artifacts/remove',
-        params: { sessionId: 'sess-1', artifactId: 'artifact-1' },
+        params: {
+          sessionId: 'sess-1',
+          artifactId: 'artifact-1',
+        },
       });
       const frames = await takeFrames(await streamRes, 2);
       expect(frames[1]).toMatchObject({
@@ -6082,6 +6532,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(bridge.lastRemovedArtifact).toMatchObject({
         sessionId: 'sess-1',
         artifactId: 'artifact-1',
+        context: {
+          clientId: 'client-1',
+          fromLoopback: true,
+        },
       });
     });
 
@@ -6110,6 +6564,46 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         },
       });
       expect(bridge.lastRemovedArtifact).toBeUndefined();
+    });
+
+    it('_qwen/session/artifacts/remove maps artifact authorization errors', async () => {
+      bridge.removeSessionArtifact = async () => {
+        throw new SessionArtifactAuthorizationError(
+          'sess-1',
+          'artifact-1',
+          'client-owner',
+          'client-other',
+        );
+      };
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 61,
+        method: '_qwen/session/artifacts/remove',
+        params: { sessionId: 'sess-1', artifactId: 'artifact-1' },
+      });
+
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          code: -32600,
+          message: 'artifact artifact-1 is owned by a different client',
+          data: {
+            errorKind: 'artifact_forbidden',
+            sessionId: 'sess-1',
+            artifactId: 'artifact-1',
+          },
+        },
+      });
     });
 
     it('_qwen/session/artifacts/add holds the archive gate while mutating', async () => {
@@ -6194,7 +6688,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           artifactId,
           context,
         ) => {
-          bridge.lastRemovedArtifact = { sessionId, artifactId, context };
+          bridge.lastRemovedArtifact = {
+            sessionId,
+            artifactId,
+            context,
+          };
           removeStarted();
           await removeReleasedPromise;
           return {
@@ -6272,6 +6770,195 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   });
 
   describe('workspace methods', () => {
+    it('maps a closed runtime generation to a retryable RPC error', async () => {
+      const generationGuard = createWorkspaceGenerationGuard();
+      await restartServer({ generationGuard });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      generationGuard.close();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 592,
+        method: '_qwen/workspace/mcp',
+        params: {},
+      });
+
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        id: 592,
+        error: {
+          code: -32603,
+          data: {
+            errorKind: 'workspace_runtime_unavailable',
+            httpStatus: 503,
+            retryable: true,
+          },
+        },
+      });
+    });
+
+    it('rejects trusted-only methods after primary trust is revoked', async () => {
+      await restartServer({ primaryTrusted: false });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 59,
+        method: '_qwen/workspace/memory/write',
+        params: { content: 'blocked' },
+      });
+
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        error: {
+          data: {
+            errorKind: 'untrusted_workspace',
+            httpStatus: 403,
+          },
+        },
+      });
+    });
+
+    it.each([
+      [
+        '_qwen/workspace/session_groups/create',
+        { workspaceCwd: '/ws', name: 'Blocked', color: 'blue' },
+      ],
+      [
+        '_qwen/workspace/session_groups/update',
+        { workspaceCwd: '/ws', groupId: 'blocked', name: 'Blocked' },
+      ],
+      [
+        '_qwen/workspace/session_groups/delete',
+        { workspaceCwd: '/ws', groupId: 'blocked' },
+      ],
+    ])(
+      'rejects untrusted session group mutation %s',
+      async (method, params) => {
+        await restartServer({ primaryTrusted: false });
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 590,
+          method,
+          params,
+        });
+
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({
+          id: 590,
+          error: {
+            data: {
+              errorKind: 'untrusted_workspace',
+              httpStatus: 403,
+            },
+          },
+        });
+      },
+    );
+
+    it('rejects a sensitive response when its runtime generation closes in flight', async () => {
+      const generationGuard = createWorkspaceGenerationGuard();
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      let releaseRead!: () => void;
+      const readReleased = new Promise<void>((resolve) => {
+        releaseRead = resolve;
+      });
+      const statusSpy = vi
+        .spyOn(fakeWorkspace, 'getWorkspaceMcpStatus')
+        .mockImplementationOnce(async () => {
+          markStarted();
+          await readReleased;
+          return {
+            v: 1,
+            workspaceCwd: '/ws',
+            initialized: false,
+            servers: [],
+          };
+        });
+      await restartServer({ generationGuard });
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const reader = frameReader(stream);
+
+      const posting = post(connId, {
+        jsonrpc: '2.0',
+        id: 591,
+        method: '_qwen/workspace/mcp',
+        params: {},
+      });
+      await started;
+      generationGuard.close();
+      releaseRead();
+      await posting;
+
+      expect(await reader.next()).toMatchObject({
+        id: 591,
+        error: {
+          data: {
+            errorKind: 'workspace_runtime_unavailable',
+            httpStatus: 503,
+          },
+        },
+      });
+      reader.close();
+      statusSpy.mockRestore();
+    });
+
+    it('rejects a session group mutation when its generation closes in flight', async () => {
+      const generationGuard = createWorkspaceGenerationGuard();
+      const createSpy = vi
+        .spyOn(SessionOrganizationService.prototype, 'createGroup')
+        .mockImplementationOnce(async ({ name, color }) => {
+          generationGuard.close();
+          return {
+            id: 'stale-group',
+            name,
+            color,
+            order: 0,
+            createdAt: '2026-07-24T00:00:00.000Z',
+            updatedAt: '2026-07-24T00:00:00.000Z',
+          };
+        });
+      try {
+        await restartServer({ generationGuard });
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 593,
+          method: '_qwen/workspace/session_groups/create',
+          params: {
+            workspaceCwd: '/ws',
+            name: 'Stale',
+            color: 'blue',
+          },
+        });
+
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({
+          id: 593,
+          error: {
+            data: {
+              errorKind: 'workspace_runtime_unavailable',
+              httpStatus: 503,
+              retryable: true,
+            },
+          },
+        });
+      } finally {
+        createSpy.mockRestore();
+      }
+    });
+
     it('_qwen/workspace/tools returns tools', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
@@ -6299,13 +6986,20 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           jsonrpc: '2.0',
           id: 70,
           method: '_qwen/workspace/session_groups/create',
-          params: { workspaceCwd: '/ws', name: 'Frontend', color: 'blue' },
+          params: {
+            workspaceCwd: '/ws',
+            name: 'Frontend',
+            color: '#12ABEF',
+          },
         });
         const createFrame = (await reader.next()) as {
           result: { group: { id: string; name: string; color: string } };
         };
         const group = createFrame.result.group;
-        expect(group).toMatchObject({ name: 'Frontend', color: 'blue' });
+        expect(group).toMatchObject({
+          name: 'Frontend',
+          color: '#12abef',
+        });
 
         await post(connId, {
           jsonrpc: '2.0',
@@ -6423,6 +7117,50 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
+    it('session/list organized default source includes legacy sessions', async () => {
+      await withRuntimeDir(async () => {
+        const legacyId = '550e8400-e29b-41d4-a716-446655440014';
+        const defaultId = '550e8400-e29b-41d4-a716-446655440015';
+        const scheduledId = '550e8400-e29b-41d4-a716-446655440016';
+        await writeStoredSession(legacyId);
+        await writeStoredSession(defaultId, 'active', undefined, 'default');
+        await writeStoredSession(
+          scheduledId,
+          'active',
+          undefined,
+          'scheduled_task',
+          'task-1',
+        );
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        const reader = frameReader(await streamRes);
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 87,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            view: 'organized',
+            group: 'all',
+            sourceType: 'default',
+            _meta: { size: 20 },
+          },
+        });
+        const frame = (await reader.next()) as {
+          result: { sessions: Array<{ sessionId: string }> };
+        };
+        expect(
+          frame.result.sessions.map((session) => session.sessionId),
+        ).toEqual(expect.arrayContaining([legacyId, defaultId]));
+        expect(
+          frame.result.sessions.map((session) => session.sessionId),
+        ).not.toContain(scheduledId);
+        reader.close();
+      });
+    });
+
     it('session/list group=ungrouped excludes color-tagged sessions', async () => {
       await withRuntimeDir(async () => {
         const sessionId = '550e8400-e29b-41d4-a716-446655440012';
@@ -6535,6 +7273,91 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           code: -32602,
           message: '`group` requires `view` to be "organized"',
         },
+      });
+    });
+
+    it('session/list rejects an empty parentSessionId', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 76,
+        method: 'session/list',
+        params: {
+          workspaceCwd: '/ws',
+          parentSessionId: '',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        id: 76,
+        error: {
+          code: -32602,
+          message: '`parentSessionId` must be a non-empty string',
+        },
+      });
+    });
+
+    it('session/list rejects parentSessionId with the organized view', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 77,
+        method: 'session/list',
+        params: {
+          workspaceCwd: '/ws',
+          view: 'organized',
+          parentSessionId: 'parent-1',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        id: 77,
+        error: {
+          code: -32602,
+          message: '`parentSessionId` is not supported with `view` "organized"',
+        },
+      });
+    });
+
+    it('session/list?parentSessionId returns only that parent’s children, each tagged with parentSessionId', async () => {
+      await withRuntimeDir(async () => {
+        const parentId = '550e8400-e29b-41d4-a716-446655440020';
+        const otherParentId = '550e8400-e29b-41d4-a716-446655440021';
+        const childOfParent = '550e8400-e29b-41d4-a716-446655440022';
+        const childOfOther = '550e8400-e29b-41d4-a716-446655440023';
+        await writeStoredSession(parentId);
+        await writeStoredSession(childOfParent, 'active', parentId);
+        await writeStoredSession(childOfOther, 'active', otherParentId);
+
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 78,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            parentSessionId: parentId,
+            _meta: { size: 20 },
+          },
+        });
+        const frames = (await takeFrames(await streamRes, 1)) as Array<{
+          id: number;
+          result: {
+            sessions: Array<{ sessionId: string; parentSessionId?: string }>;
+          };
+        }>;
+        expect(frames[0].id).toBe(78);
+        const sessions = frames[0].result.sessions;
+        // Only the child of the requested parent surfaces — not the parent
+        // itself and not the sibling under a different parent.
+        expect(sessions.map((s) => s.sessionId)).toEqual([childOfParent]);
+        expect(sessions[0]!.parentSessionId).toBe(parentId);
       });
     });
 
@@ -7498,6 +8321,55 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(frames[0]).toMatchObject({ error: { code: -32602 } });
     });
 
+    it.each([
+      {
+        method: '_qwen/file/write',
+        params: { path: 'test.txt', content: 'new content' },
+      },
+      {
+        method: '_qwen/file/edit',
+        params: { path: 'test.txt', oldText: 'old', newText: 'new' },
+      },
+    ])(
+      '$method rejects success when its runtime generation closes in flight',
+      async ({ method, params }) => {
+        const generationGuard = createWorkspaceGenerationGuard();
+        const closeGeneration = async () => {
+          generationGuard.close();
+          return { writtenBytes: 3 };
+        };
+        await restartServer({
+          generationGuard,
+          fsFactory: makeFileFsFactory({
+            writeTextOverwrite: closeGeneration,
+            edit: closeGeneration,
+          }),
+        });
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((resolve) => setTimeout(resolve, 30));
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 95,
+          method,
+          params,
+        });
+
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({
+          id: 95,
+          error: {
+            data: {
+              errorKind: 'workspace_runtime_unavailable',
+              httpStatus: 503,
+              retryable: true,
+            },
+          },
+        });
+      },
+    );
+
     it('_qwen/file/glob rejects missing pattern', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
@@ -7605,6 +8477,7 @@ describe('ACP WebSocket transport security', () => {
       allowedOrigins?: { allowAny: boolean; origins: Set<string> };
       checkRate?: (key: string, tier: string) => boolean;
       cdpTunnelOverWs?: boolean;
+      daemonEnv?: Readonly<NodeJS.ProcessEnv>;
     } = {},
   ) {
     return new Promise<void>((resolve) => {
@@ -7615,6 +8488,7 @@ describe('ACP WebSocket transport security', () => {
         boundWorkspace: '/ws',
         workspace: fakeWorkspace,
         enabled: true,
+        daemonEnv: opts.daemonEnv,
         token: opts.token,
         allowedOrigins: opts.allowedOrigins,
         workspaceRememberLane: new WorkspaceRememberTaskLane(
@@ -7758,7 +8632,7 @@ describe('ACP WebSocket transport security', () => {
     expect(bridge.runtimeMcpAdds).toHaveLength(0);
     expect(bridge.runtimeMcpRemoves).toHaveLength(0);
     expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
-      'qwen serve: set QWEN_CDP_MCP_COMMAND to enable browser automation MCP (chrome-devtools-mcp is no longer bundled)',
+      'qwen serve: set QWEN_CDP_MCP_COMMAND to enable browser automation MCP (no adapter is bundled)',
     );
 
     ws.close();
@@ -7775,7 +8649,7 @@ describe('ACP WebSocket transport security', () => {
     await yieldImmediate();
     expect(bridge.runtimeMcpAdds).toHaveLength(0);
     expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
-      'qwen serve: set QWEN_CDP_MCP_COMMAND to enable browser automation MCP (chrome-devtools-mcp is no longer bundled)',
+      'qwen serve: set QWEN_CDP_MCP_COMMAND to enable browser automation MCP (no adapter is bundled)',
     );
 
     ws.close();
@@ -7811,8 +8685,11 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('passes a custom CDP MCP command through to the runtime config', async () => {
-    process.env['QWEN_CDP_MCP_COMMAND'] = '/opt/custom/cdp-adapter';
-    await startServer({ cdpTunnelOverWs: true });
+    process.env['QWEN_CDP_MCP_COMMAND'] = '/opt/process/cdp-adapter';
+    await startServer({
+      cdpTunnelOverWs: true,
+      daemonEnv: { QWEN_CDP_MCP_COMMAND: '/opt/custom/cdp-adapter' },
+    });
     const ws = await wsConnect();
     await initializeCdpBridge(ws);
 

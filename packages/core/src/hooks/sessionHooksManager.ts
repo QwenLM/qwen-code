@@ -6,17 +6,22 @@
 
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type {
-  HookEventName,
   CommandHookConfig,
   HttpHookConfig,
   FunctionHookConfig,
   FunctionHookCallback,
   HookConfig,
   HookExecutionResult,
+  HookEventName,
 } from './types.js';
 import { HookType } from './types.js';
+import { getHookMatcherTarget, getToolMatcherTargets } from './hookPlanner.js';
 
 const debugLogger = createDebugLogger('SESSION_HOOKS_MANAGER');
+
+function isToolMatcherEvent(event: HookEventName): boolean {
+  return getHookMatcherTarget(event)?.kind === 'toolName';
+}
 
 /**
  * Generate a unique hook ID
@@ -271,7 +276,31 @@ export class SessionHooksManager {
     target: string,
   ): SessionHookEntry[] {
     const hooks = this.getHooksForEvent(sessionId, event);
-    return hooks.filter((entry) => this.matchesPattern(entry.matcher, target));
+
+    return hooks.filter((entry) => {
+      if (isToolMatcherEvent(event)) {
+        return this.matchesToolPattern(entry.matcher, target);
+      }
+      return this.matchesPattern(entry.matcher, target);
+    });
+  }
+
+  private matchesToolPattern(pattern: string, toolName: string): boolean {
+    if (
+      pattern.includes('|') &&
+      !pattern.startsWith('^') &&
+      !pattern.startsWith('(')
+    ) {
+      const alternatives = pattern.split('|').map((s) => s.trim());
+      return alternatives.some((alt) => this.matchesToolPattern(alt, toolName));
+    }
+
+    const targets = getToolMatcherTargets(toolName);
+    if (targets.includes(pattern)) {
+      return true;
+    }
+
+    return this.matchesPattern(pattern, toolName);
   }
 
   /**

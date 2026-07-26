@@ -23,6 +23,7 @@ import {
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
 import type {
+  DaemonInputAnnotation,
   DaemonPendingPromptSummary,
   DaemonTranscriptStore,
 } from '@qwen-code/sdk/daemon';
@@ -52,6 +53,21 @@ interface UseQueuedPromptsArgs {
 
 const MAX_COMPLETED_PROMPT_IDS = 100;
 
+/**
+ * Merge a restored prompt's text into the editor content. Restoration paths
+ * (failed submits, failed mid-turn inserts, queue clears) prepend the prompt
+ * above whatever the user is currently typing — but several of them can fire
+ * for the same prompt across reconnects/refreshes, and a user retrying an
+ * identical message produces the same text twice. Stacking those copies is
+ * what #7128 reports as "inputs concatenated after refresh", so restoring
+ * text that is already present at the top of the editor is a no-op.
+ */
+export function mergeRestoredPromptText(current: string, text: string): string {
+  if (!current.trim()) return text;
+  if (current === text || current.startsWith(`${text}\n`)) return current;
+  return `${text}\n${current}`;
+}
+
 type RefreshPendingPromptsResult =
   | 'refreshed'
   | 'skipped'
@@ -74,7 +90,9 @@ function areQueuedPromptsEqual(
       prompt.serverState === other.serverState &&
       prompt.isEditing === other.isEditing &&
       prompt.isRemoving === other.isRemoving &&
-      (prompt.images?.length ?? 0) === (other.images?.length ?? 0)
+      (prompt.images?.length ?? 0) === (other.images?.length ?? 0) &&
+      (prompt.inputAnnotations?.length ?? 0) ===
+        (other.inputAnnotations?.length ?? 0)
     );
   });
 }
@@ -96,6 +114,7 @@ export interface UseQueuedPromptsResult {
     text: string,
     images?: PromptImage[],
     onComplete?: () => void,
+    inputAnnotations?: DaemonInputAnnotation[],
   ) => boolean;
   removeQueuedPrompt: (id: number) => void;
   insertQueuedPrompt: (id: number) => Promise<void>;
@@ -282,10 +301,17 @@ export function useQueuedPrompts({
         return;
       }
       const current = editorRef.current?.getText() ?? '';
-      const next = current.trim() ? `${text}\n${current}` : text;
-      editorRef.current?.setText(next);
-      if (images && images.length > 0) {
-        editorRef.current?.restoreImages(images);
+      const next = mergeRestoredPromptText(current, text);
+      if (next !== current) {
+        editorRef.current?.setText(next);
+        // Restore images only alongside a text change: restoreImages appends
+        // to the pasted-image list, so running it on a deduplicated restore
+        // (same prompt restored twice across reconnects/retries) would double
+        // the attachments while the text correctly stays single (#7134
+        // review follow-up).
+        if (images && images.length > 0) {
+          editorRef.current?.restoreImages(images);
+        }
       }
       editorRef.current?.focus();
     },
@@ -359,7 +385,13 @@ export function useQueuedPrompts({
           const text = prompt?.text ?? '';
           if (text) {
             displayedServerPromptIdsRef.current.add(promptId);
-            store.appendLocalUserMessage(text, toStoreImages(prompt?.images));
+            store.appendLocalUserMessage(
+              text,
+              toStoreImages(prompt?.images),
+              prompt?.inputAnnotations?.length
+                ? { inputAnnotations: prompt.inputAnnotations }
+                : undefined,
+            );
           }
         }
         void refreshPendingPrompts();
@@ -415,7 +447,12 @@ export function useQueuedPrompts({
   );
 
   const enqueuePrompt = useCallback(
-    (text: string, images?: PromptImage[], onComplete?: () => void) => {
+    (
+      text: string,
+      images?: PromptImage[],
+      onComplete?: () => void,
+      inputAnnotations?: DaemonInputAnnotation[],
+    ) => {
       const trimmed = text.trim();
       if (!trimmed) return true;
       const localId = nextQueuedPromptIdRef.current++;
@@ -423,11 +460,15 @@ export function useQueuedPrompts({
       const submitAbort = new AbortController();
       submitAbortControllersRef.current.add(submitAbort);
       const queuedImages = images ? [...images] : undefined;
+      const queuedAnnotations = inputAnnotations
+        ? [...inputAnnotations]
+        : undefined;
       const nextPrompt: QueuedPrompt = {
         id: localId,
         sessionId: targetSessionId,
         text: trimmed,
         images: queuedImages,
+        inputAnnotations: queuedAnnotations,
         onComplete,
         serverState: 'submitting',
       };
@@ -437,6 +478,7 @@ export function useQueuedPrompts({
       sessionActions
         .submitPrompt(trimmed, {
           images,
+          inputAnnotations: queuedAnnotations,
           optimisticUserMessage: false,
           sessionId: targetSessionId,
           signal: submitAbort.signal,
@@ -462,6 +504,9 @@ export function useQueuedPrompts({
               store.appendLocalUserMessage(
                 trimmed,
                 toStoreImages(queuedImages),
+                queuedAnnotations?.length
+                  ? { inputAnnotations: queuedAnnotations }
+                  : undefined,
               );
             }
             const next = queuedPromptsRef.current.filter(
@@ -533,7 +578,6 @@ export function useQueuedPrompts({
     if (streamingState !== 'idle') return;
     const ctrl = midTurnEnqueueAbortRef.current;
     if (!ctrl) return;
-    console.debug('[mid-turn] turn settled; cancelling any in-flight push');
     ctrl.abort();
     midTurnEnqueueAbortRef.current = null;
   }, [streamingState]);
@@ -914,16 +958,6 @@ export function useQueuedPrompts({
     useDaemonMidTurnInjected();
   useEffect(() => {
     if (!sessionId || midTurnInjectedBatches.length === 0) return;
-    if (
-      clientId === undefined &&
-      midTurnInjectedBatches.some(
-        (b) => b.sessionId === sessionId && b.originatorClientId !== undefined,
-      )
-    ) {
-      console.debug(
-        '[mid-turn] originator-stamped batches but no client id; dedupe skipped (may resend next turn)',
-      );
-    }
     const next = removeInjectedFromQueue(
       queuedPromptsRef.current,
       midTurnInjectedBatches,

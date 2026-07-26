@@ -67,6 +67,7 @@ describe('auto-memory extraction with agent planner', () => {
         touchedTopics: ['user'],
         touchedProjectScope: true,
         touchedUserScope: false,
+        hasToolActivity: true,
         systemMessage: 'Managed auto-memory updated: user.md',
       };
     });

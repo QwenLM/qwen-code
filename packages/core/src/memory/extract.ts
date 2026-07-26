@@ -197,9 +197,12 @@ export async function runAutoMemoryExtract(params: {
     await Promise.all([projectRebuild, userRebuild]);
   }
 
+  const madeGenuineProgress =
+    agentResult.touchedTopics.length > 0 || agentResult.hasToolActivity;
+
   const cursor: AutoMemoryExtractCursor = {
     sessionId: params.sessionId,
-    processedOffset: params.history.length,
+    processedOffset: madeGenuineProgress ? params.history.length : startOffset,
     updatedAt: now.toISOString(),
   };
   await writeExtractCursor(params.projectRoot, cursor);

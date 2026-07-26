@@ -208,6 +208,8 @@ export function splitCommands(command: string): string[] {
   let currentCommand = '';
   let inSingleQuotes = false;
   let inDoubleQuotes = false;
+  let inBackticks = false;
+  let substitutionDepth = 0;
   let i = 0;
 
   const previousNonWhitespaceChar = (index: number): string | undefined => {
@@ -229,19 +231,53 @@ export function splitCommands(command: string): string[] {
       continue;
     }
 
-    if (char === '\\' && i < command.length - 1) {
+    // Inside single quotes the shell treats a backslash as a literal
+    // character — it escapes nothing, so `'a\'` closes the quote. Consuming
+    // the following character here would keep the parser "inside" the quote
+    // and swallow every separator to the end of the line, hiding whole
+    // commands from the permission checks that consume these segments.
+    if (!inSingleQuotes && char === '\\' && i < command.length - 1) {
       currentCommand += char + command[i + 1];
       i += 2;
       continue;
     }
 
-    if (char === "'" && !inDoubleQuotes) {
+    if (!inSingleQuotes && char === '`') {
+      inBackticks = !inBackticks;
+    } else if (
+      !inSingleQuotes &&
+      !inBackticks &&
+      char === '$' &&
+      nextChar === '('
+    ) {
+      substitutionDepth++;
+      currentCommand += '$(';
+      i += 2;
+      continue;
+    } else if (!inBackticks && substitutionDepth > 0 && char === ')') {
+      substitutionDepth--;
+    } else if (
+      !inBackticks &&
+      substitutionDepth === 0 &&
+      char === "'" &&
+      !inDoubleQuotes
+    ) {
       inSingleQuotes = !inSingleQuotes;
-    } else if (char === '"' && !inSingleQuotes) {
+    } else if (
+      !inBackticks &&
+      substitutionDepth === 0 &&
+      char === '"' &&
+      !inSingleQuotes
+    ) {
       inDoubleQuotes = !inDoubleQuotes;
     }
 
-    if (!inSingleQuotes && !inDoubleQuotes) {
+    if (
+      !inSingleQuotes &&
+      !inDoubleQuotes &&
+      !inBackticks &&
+      substitutionDepth === 0
+    ) {
       if (
         (char === '&' && nextChar === '&') ||
         (char === '|' && (nextChar === '|' || nextChar === '&'))
@@ -294,6 +330,68 @@ export function splitCommands(command: string): string[] {
 }
 
 /**
+ * A parameter expansion standing in command position — `$VAR`, `"$VAR"`,
+ * `${VAR}`, `"${VAR:-default}"`, `${VAR-default}` — resolved the way the shell
+ * will resolve it at execution time.
+ *
+ * Without this, such a command had NO identifiable root: the tokenizer turns
+ * the expansion into a non-string (or empty) token, `getCommandRoot` returns
+ * undefined, and the shell tool hard-refuses the command before any approval
+ * mode is consulted — including YOLO. Dogfooded live: the bundled /review
+ * skill invokes every command as `"${QWEN_CODE_CLI:-qwen}" review …`, and each
+ * run opened with "Could not identify command root to obtain permission from
+ * user" until the model hand-resolved the variable itself.
+ *
+ * Resolution mirrors POSIX: `:-` substitutes the default when the variable is
+ * unset OR empty; `-` only when unset. Quoting then decides what happens,
+ * exactly as it does in the shell. A QUOTED expansion is one word: empty means
+ * an empty command name, which has nothing to name and stays refusable. An
+ * UNQUOTED expansion field-splits: an empty result is REMOVED and the next
+ * token is the command (`$VAR printf OK` with VAR unset runs `printf`), and a
+ * multi-word value's FIRST field is the command (`$VAR OK` with
+ * VAR='/usr/bin/env printf' runs `env`). The environment consulted is this
+ * process's own, which is what the spawned shell inherits.
+ */
+const PARAMETER_EXPANSION_COMMAND =
+  /^("?)\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?-)([^}]*))?\}|([A-Za-z_][A-Za-z0-9_]*))\1$/;
+
+function resolveLeadingParameterExpansion(command: string): string | undefined {
+  let rest = command;
+  // Leading env assignments come first (`FOO=1 "${BAR:-baz}" …`), exactly as
+  // the plain-token path below skips them.
+  while (true) {
+    const t = takeLeadingToken(rest);
+    if (!t || !isEnvAssignmentToken(t.token)) break;
+    rest = t.rest;
+  }
+  const head = takeLeadingToken(rest);
+  if (!head) return undefined;
+  const m = PARAMETER_EXPANSION_COMMAND.exec(head.token);
+  if (!m) return undefined;
+  const quoted = m[1] === '"';
+  const name = (m[2] ?? m[5]) as string;
+  const op = m[3];
+  const value = process.env[name];
+  const useDefault =
+    op === undefined ? false : op === ':-' ? !value : value === undefined;
+  const resolved = useDefault
+    ? stripSymmetricQuotes(m[4] ?? '').value
+    : (value ?? '');
+  if (quoted) {
+    // One word, splitting suppressed — empty is an empty command name.
+    return resolved || undefined;
+  }
+  // Unquoted: the shell field-splits the expansion before command lookup.
+  const fields = resolved.split(/[ \t\n]+/).filter(Boolean);
+  if (fields.length === 0) {
+    // The empty expansion is removed; the command is whatever follows it.
+    const next = head.rest.trim();
+    return next ? getCommandRoot(next) : undefined;
+  }
+  return fields[0];
+}
+
+/**
  * Extracts the root command from a given shell command string.
  * Skips leading env var assignments (VAR=value) so that
  * `PYTHONPATH=/tmp python3 -c "..."` returns `python3`.
@@ -302,6 +400,11 @@ export function getCommandRoot(command: string): string | undefined {
   const trimmedCommand = command.trim();
   if (!trimmedCommand) {
     return undefined;
+  }
+
+  const expanded = resolveLeadingParameterExpansion(trimmedCommand);
+  if (expanded !== undefined) {
+    return expanded.split(/[\\/]/).pop();
   }
 
   try {
@@ -458,6 +561,28 @@ const PKILL_OPTIONS_WITH_VALUES = new Set([
   '--uid',
   '-u',
   '--euid',
+]);
+
+const XARGS_OPTIONS_WITH_VALUES = new Set([
+  '-I',
+  '-n',
+  '-P',
+  '-s',
+  '-E',
+  '-d',
+  '-L',
+  '-l',
+  '-a',
+  '-J',
+  '-R',
+  '--replace',
+  '--max-args',
+  '--max-procs',
+  '--max-chars',
+  '--eof',
+  '--delimiter',
+  '--max-lines',
+  '--arg-file',
 ]);
 
 export const SHELL_SELF_KILL_REJECTION =
@@ -736,13 +861,126 @@ function pkillTargetsSelf(tokens: string[]): boolean {
   return args.some((arg) => matchesSelfProcessPattern(arg));
 }
 
+function pgrepTargetsSelf(tokens: string[]): boolean {
+  return pkillTargetsSelf(['pkill', ...tokens.slice(1)]);
+}
+
+function pgrepSubstitutionArgs(segment: string): string[] {
+  let quote: '"' | "'" | '' = '';
+  let escaped = false;
+  const args: string[] = [];
+
+  for (let index = 0; index < segment.length; index++) {
+    const char = segment[index]!;
+
+    if (quote === "'") {
+      if (char === "'") quote = '';
+      continue;
+    }
+
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+
+    if (char === '\\') {
+      escaped = true;
+      continue;
+    }
+
+    if (char === '"') {
+      quote = quote === '"' ? '' : '"';
+      continue;
+    }
+
+    if (char === "'" && quote === '') {
+      quote = "'";
+      continue;
+    }
+
+    if (char === '`') {
+      let end = index + 1;
+      let innerEscaped = false;
+      for (; end < segment.length; end++) {
+        const innerChar = segment[end]!;
+        if (innerEscaped) {
+          innerEscaped = false;
+          continue;
+        }
+        if (innerChar === '\\') {
+          innerEscaped = true;
+          continue;
+        }
+        if (innerChar === '`') break;
+      }
+      if (end >= segment.length) {
+        break;
+      }
+
+      const inner = segment.slice(index + 1, end).trim();
+      const match = inner.match(/^pgrep\b(.*)$/i);
+      if (match) {
+        args.push(match[1] ?? '');
+      }
+      index = end;
+      continue;
+    }
+
+    if (char !== '$' || segment[index + 1] !== '(') {
+      continue;
+    }
+
+    const end = segment.indexOf(')', index + 2);
+    if (end === -1) {
+      break;
+    }
+
+    const inner = segment.slice(index + 2, end).trim();
+    const match = inner.match(/^pgrep\b(.*)$/i);
+    if (match) {
+      args.push(match[1] ?? '');
+    }
+    index = end;
+  }
+
+  return args;
+}
+
+function killCommandTargetsSelf(segment: string): boolean {
+  return pgrepSubstitutionArgs(segment).some((args) => {
+    const parsed = parseShellSegment(`pgrep ${args}`);
+    return parsed !== null && pgrepTargetsSelf(parsed);
+  });
+}
+
+function xargsInvokesKill(segment: string | undefined): boolean {
+  if (!segment) {
+    return false;
+  }
+  const parsed = parseShellSegment(segment);
+  if (!parsed) {
+    return false;
+  }
+  const tokens = unwrapExecutionPrefixes(parsed);
+  if (normalizeExecutableName(tokens[0] ?? '') !== 'xargs') {
+    return false;
+  }
+
+  const commandTokens = unwrapExecutionPrefixes(
+    commandArguments(tokens, XARGS_OPTIONS_WITH_VALUES),
+  );
+  const command = commandTokens.find((token) => !isOptionToken(token));
+  return normalizeExecutableName(command ?? '') === 'kill';
+}
+
 export function detectSelfKillCommand(command: string): boolean {
   if (!/kill/i.test(command)) {
     return false;
   }
 
   const segments = getCommandSegments(command);
-  for (const segment of segments) {
+  for (let index = 0; index < segments.length; index++) {
+    const segment = segments[index]!;
     const parsed = parseShellSegment(segment);
     if (!parsed) {
       continue;
@@ -762,6 +1000,16 @@ export function detectSelfKillCommand(command: string): boolean {
     }
     if (root === 'pkill' && pkillTargetsSelf(tokens)) {
       return true;
+    }
+    if (root === 'kill' && killCommandTargetsSelf(segment)) {
+      return true;
+    }
+    if (root === 'pgrep' && pgrepTargetsSelf(tokens)) {
+      for (let j = index + 1; j < segments.length; j++) {
+        if (xargsInvokesKill(segments[j])) {
+          return true;
+        }
+      }
     }
   }
 

@@ -7,6 +7,8 @@ export type {
   ChannelLoopToolCreateInput,
   ChannelLoopToolHandler,
   ChannelLoopToolResult,
+  PermissionRequestEvent,
+  PermissionResolvedEvent,
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
@@ -25,8 +27,17 @@ export type {
 export { BlockStreamer } from './BlockStreamer.js';
 export type { BlockStreamerOptions } from './BlockStreamer.js';
 export { ChannelBase } from './ChannelBase.js';
+export {
+  CHANNEL_PROACTIVE_DELIVERY_ERROR_CODE,
+  ChannelProactiveDeliveryError,
+  isChannelProactiveDeliveryError,
+} from './ChannelProactiveDeliveryError.js';
+export type { ChannelProactiveDeliveryDisposition } from './ChannelProactiveDeliveryError.js';
 export type {
   ChannelBaseOptions,
+  ChannelMemoryRecallCacheStatus,
+  ChannelMemoryRecallObservation,
+  ChannelMemoryRecallResult,
   ChannelLoopController,
 } from './ChannelBase.js';
 export { ChannelLoopScheduler } from './ChannelLoopScheduler.js';
@@ -34,6 +45,17 @@ export type {
   ChannelLoopSchedulerOptions,
   ChannelLoopRunner,
 } from './ChannelLoopScheduler.js';
+export {
+  buildChannelWebhookPrompt,
+  resolveChannelWebhookTarget,
+} from './ChannelWebhookTask.js';
+export type {
+  ChannelWebhookConfig,
+  ChannelWebhookRunOptions,
+  ChannelWebhookSourceConfig,
+  ChannelWebhookTargetConfig,
+  ChannelWebhookTask,
+} from './ChannelWebhookTask.js';
 export { ChannelLoopStore } from './ChannelLoopStore.js';
 export type {
   ChannelLoop,
@@ -46,6 +68,8 @@ export { PairingStore } from './PairingStore.js';
 export type { PairingRequest } from './PairingStore.js';
 export { GroupGate } from './GroupGate.js';
 export type { GroupCheckResult } from './GroupGate.js';
+export { DmGate } from './DmGate.js';
+export type { DmCheckResult } from './DmGate.js';
 export { SenderGate } from './SenderGate.js';
 export type { SenderCheckResult } from './SenderGate.js';
 export { SessionRouter } from './SessionRouter.js';
@@ -55,15 +79,22 @@ export {
   sanitizeLogText,
 } from './sanitize.js';
 export { isTerminalTaskLifecycleType } from './types.js';
+export { PollingChannelBase } from './PollingChannelBase.js';
 export type {
   Attachment,
   BlockStreamingChunkConfig,
   BlockStreamingCoalesceConfig,
   ChannelConfig,
+  ChannelConfigFieldDescriptor,
+  ChannelConfigFieldKind,
   ChannelIdentityConfig,
+  ChannelManagementDescriptor,
+  ChannelMemoryIntentClassifier,
+  ChannelMemoryIntentClassifierResult,
   ChannelMemoryScopeConfig,
   ChannelMemoryScopeMode,
   ChannelPlugin,
+  ChannelProactiveTarget,
   ChannelRuntimeIdentity,
   ChannelRuntimeMemoryScope,
   ChannelTaskCancellationReason,
@@ -71,9 +102,17 @@ export type {
   ChannelTaskLifecycleEvent,
   ChannelType,
   DispatchMode,
+  DmPolicy,
   Envelope,
   GroupConfig,
   GroupPolicy,
+  ObservedChannelIdentity,
+  ObservedChannelContactObservation,
+  ObservedChannelContact,
+  ObservedChannelRelatedContact,
+  ObservedChannelTopic,
+  ObservedChannelGroup,
+  ObservedChannelContactGraph,
   SanitizedToolCallEvent,
   SenderPolicy,
   SessionScope,

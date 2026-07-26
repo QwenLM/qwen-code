@@ -20,9 +20,8 @@ import {
   ToolConfirmationOutcome,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
-import { z } from 'zod';
 import type { SessionContext } from './types.js';
-import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
+import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import type {
   AgentSideConnection,
@@ -30,6 +29,9 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   buildPermissionRequestContent,
+  interactionMetaFields,
+  requestPermissionWithAbort,
+  resolvePermissionOutcome,
   toPermissionOptions,
 } from './permissionUtils.js';
 
@@ -198,9 +200,13 @@ export class SubAgentTracker {
       const { title, locations, kind } =
         this.toolCallEmitter.resolveToolMetadata(event.name, state?.args);
 
+      const permissionOptions = toPermissionOptions(fullConfirmationDetails);
+      const offeredPermissionOptions = permissionOptions.map((option) => ({
+        ...option,
+      }));
       const params: RequestPermissionRequest = {
         sessionId: this.ctx.sessionId,
-        options: toPermissionOptions(fullConfirmationDetails),
+        options: permissionOptions,
         toolCall: {
           toolCallId: event.callId,
           status: 'pending',
@@ -214,22 +220,30 @@ export class SubAgentTracker {
           // `kind` ACP can't carry. This is the second producer path (nested
           // sub-agent tool calls); Session.ts adds the same _meta on the primary
           // path.
-          _meta: { toolName: event.name },
+          _meta: {
+            toolName: event.name,
+            ...interactionMetaFields(fullConfirmationDetails),
+          },
         },
       };
 
       try {
         // Request permission from client
-        const output = await this.client.requestPermission(params);
-        const outcome =
-          output.outcome.outcome === 'cancelled'
-            ? ToolConfirmationOutcome.Cancel
-            : z
-                .nativeEnum(ToolConfirmationOutcome)
-                .parse(output.outcome.optionId);
+        const output = await requestPermissionWithAbort(
+          this.client,
+          params,
+          abortSignal,
+        );
+        const outcome = resolvePermissionOutcome(
+          output,
+          offeredPermissionOptions,
+        );
         // Respond to subagent with the outcome
         await event.respond(outcome, {
-          answers: 'answers' in output ? output.answers : undefined,
+          answers:
+            'answers' in output
+              ? (output.answers as Record<string, string> | undefined)
+              : undefined,
         });
         if (outcome === ToolConfirmationOutcome.Cancel) {
           this.onPermissionCancel?.();

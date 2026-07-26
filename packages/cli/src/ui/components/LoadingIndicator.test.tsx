@@ -104,6 +104,27 @@ describe('<LoadingIndicator />', () => {
     expect(lastFrame()).toContain('Processing data...');
   });
 
+  it('should display whole elapsed seconds below one minute', () => {
+    const half = renderWithContext(
+      <LoadingIndicator currentLoadingPhrase="Working..." elapsedTime={17.5} />,
+      StreamingState.Responding,
+    );
+    expect(half.lastFrame()).toContain('(17s · esc to cancel)');
+
+    const whole = renderWithContext(
+      <LoadingIndicator currentLoadingPhrase="Working..." elapsedTime={18} />,
+      StreamingState.Responding,
+    );
+    expect(whole.lastFrame()).toContain('(18s · esc to cancel)');
+
+    // Timer start / reset publishes exactly 0.
+    const zero = renderWithContext(
+      <LoadingIndicator currentLoadingPhrase="Working..." elapsedTime={0} />,
+      StreamingState.Responding,
+    );
+    expect(zero.lastFrame()).toContain('(0s · esc to cancel)');
+  });
+
   it('should display the elapsedTime correctly when Responding', () => {
     const props = {
       currentLoadingPhrase: 'Working...',

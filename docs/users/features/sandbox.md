@@ -114,6 +114,8 @@ Priority order (highest to lowest):
 
 `settings.env.QWEN_SANDBOX_IMAGE` also works as a generic env injection mechanism, but `tools.sandboxImage` is the preferred persistent setting.
 
+Custom images are user-managed. Rebuild them with an up-to-date Qwen Code installation to receive the safe update handoff; older images may still use their original in-process updater.
+
 ### macOS Seatbelt profiles
 
 Built-in profiles (set via `SEATBELT_PROFILE` env var):

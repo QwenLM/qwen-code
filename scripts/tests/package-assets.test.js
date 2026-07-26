@@ -11,6 +11,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  truncateSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -219,9 +220,7 @@ describe('package asset scripts', () => {
     );
 
     expect(distPackageJson.files).toContain('examples');
-    expect(distPackageJson.bundledDependencies).toContain(
-      '@qwen-code/audio-capture',
-    );
+    expect(distPackageJson.bundledDependencies).toBeUndefined();
     expect(distPackageJson.optionalDependencies).toMatchObject({
       '@qwen-code/audio-capture': rootPackageJson.version,
     });
@@ -233,91 +232,6 @@ describe('package asset scripts', () => {
           'node_modules',
           '@qwen-code',
           'audio-capture',
-          'dist',
-          'index.js',
-        ),
-      ),
-    ).toBe(true);
-    expect(
-      existsSync(
-        path.join(
-          rootDir,
-          'dist',
-          'node_modules',
-          '@qwen-code',
-          'audio-capture',
-          'prebuilds',
-          'darwin-arm64',
-          'debug.log',
-        ),
-      ),
-    ).toBe(false);
-    expect(
-      existsSync(
-        path.join(
-          rootDir,
-          'dist',
-          'node_modules',
-          '@qwen-code',
-          'audio-capture',
-          'prebuilds',
-          'darwin-arm64',
-          '@qwen-code+audio-capture.node',
-        ),
-      ),
-    ).toBe(true);
-    const distAudioPackageJson = JSON.parse(
-      readFileSync(
-        path.join(
-          rootDir,
-          'dist',
-          'node_modules',
-          '@qwen-code',
-          'audio-capture',
-          'package.json',
-        ),
-        'utf8',
-      ),
-    );
-    expect(distAudioPackageJson.scripts).toBeUndefined();
-    expect(distAudioPackageJson.devDependencies).toBeUndefined();
-    expect(
-      existsSync(
-        path.join(
-          rootDir,
-          'dist',
-          'node_modules',
-          '@qwen-code',
-          'audio-capture',
-          'node_modules',
-          'node-gyp-build',
-          'package.json',
-        ),
-      ),
-    ).toBe(true);
-    expect(
-      existsSync(
-        path.join(
-          rootDir,
-          'dist',
-          'node_modules',
-          '@qwen-code',
-          'audio-capture',
-          'dist',
-          'index.test.js',
-        ),
-      ),
-    ).toBe(false);
-    expect(
-      existsSync(
-        path.join(
-          rootDir,
-          'dist',
-          'node_modules',
-          '@qwen-code',
-          'audio-capture',
-          'dist',
-          'index.spec.js',
         ),
       ),
     ).toBe(false);
@@ -362,6 +276,82 @@ describe('package asset scripts', () => {
     );
   });
 
+  it.each([
+    ['dist/web-shell/assets/icon.svg', '<svg>chrome-devtools-mcp</svg>\n'],
+    ['dist/chunks/server.js.map', '{"sources":["Chrome-Devtools-MCP"]}\n'],
+  ])(
+    'fails packaging when prepared dist contains scanner-sensitive literals in %s',
+    (packagePath, contents) => {
+      const rootDir = createFixtureRoot();
+      createBundleArtifacts(rootDir);
+      const browserMcpPackageName = ['chrome', 'devtools', 'mcp'].join('-');
+      writeFile(rootDir, packagePath, contents);
+      stubConsole();
+
+      const expectedPath = path.relative(
+        path.join(rootDir, 'dist'),
+        path.join(rootDir, packagePath),
+      );
+
+      expect(() =>
+        preparePackage({ rootDir, requireNativeAudioCapture: false }),
+      ).toThrow(
+        `Prepared package contains forbidden string "${browserMcpPackageName}" in ${expectedPath}`,
+      );
+    },
+  );
+
+  it('fails packaging when prepared dist exceeds the unpacked size budget', () => {
+    const rootDir = createFixtureRoot();
+    createBundleArtifacts(rootDir);
+    stubConsole();
+
+    preparePackage({
+      rootDir,
+      requireNativeAudioCapture: false,
+      maxPackageUnpackedBytes: 50_000,
+    });
+
+    const oversizedRootDir = createFixtureRoot();
+    createBundleArtifacts(oversizedRootDir);
+    writeFile(oversizedRootDir, 'dist/chunks/large.js', 'x'.repeat(64 * 1024));
+
+    expect(() =>
+      preparePackage({
+        rootDir: oversizedRootDir,
+        requireNativeAudioCapture: false,
+        maxPackageUnpackedBytes: 50_000,
+      }),
+    ).toThrow(/Prepared package unpacked size \d+ bytes exceeds 50000 bytes/);
+  });
+
+  it('enforces a 96 MiB default unpacked size budget', () => {
+    const rootDir = createFixtureRoot();
+    createBundleArtifacts(rootDir);
+    writeFile(rootDir, 'dist/chunks/large.bin', '');
+    const largeFile = path.join(rootDir, 'dist', 'chunks', 'large.bin');
+    truncateSync(largeFile, 95 * 1024 * 1024);
+    stubConsole();
+
+    expect(() =>
+      preparePackage({
+        rootDir,
+        requireNativeAudioCapture: false,
+      }),
+    ).not.toThrow();
+
+    truncateSync(largeFile, 96 * 1024 * 1024);
+
+    expect(() =>
+      preparePackage({
+        rootDir,
+        requireNativeAudioCapture: false,
+      }),
+    ).toThrow(
+      /Prepared package unpacked size \d+ bytes exceeds 100663296 bytes/,
+    );
+  });
+
   it('omits bundledDependencies when audio-capture artifacts are missing', () => {
     const rootDir = createFixtureRoot();
     rmSync(path.join(rootDir, 'packages', 'audio-capture', 'prebuilds'), {
@@ -393,9 +383,13 @@ describe('package asset scripts', () => {
   it('removes stale bundled audio-capture files when artifacts are missing', () => {
     const rootDir = createFixtureRoot();
     createBundleArtifacts(rootDir);
+    writeFile(
+      rootDir,
+      'dist/node_modules/@qwen-code/audio-capture/prebuilds/darwin-arm64/@qwen-code+audio-capture.node',
+      'stale native addon\n',
+    );
     stubConsole();
 
-    preparePackage({ rootDir, requireNativeAudioCapture: false });
     rmSync(path.join(rootDir, 'packages', 'audio-capture', 'prebuilds'), {
       recursive: true,
       force: true,

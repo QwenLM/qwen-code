@@ -9,6 +9,8 @@ import {
   buildCron,
   describeCron,
   describeLastRun,
+  formatCountdown,
+  parseCronToBuilder,
   parseHhmm,
   type BuilderState,
   type TranslateFn,
@@ -124,6 +126,125 @@ describe('describeCron', () => {
     // Non-divisor */N: fires irregularly, so it is not labeled "every N min".
     expect(describeCron('*/45 * * * *', t)).toBe('*/45 * * * *');
     expect(describeCron('*/7 * * * *', t)).toBe('*/7 * * * *');
+  });
+});
+
+describe('parseCronToBuilder', () => {
+  // The load-bearing property: for every shape the pickers can represent,
+  // reversing then rebuilding must yield the exact same cron — otherwise
+  // opening the edit form would silently rewrite the schedule.
+  it('round-trips every builder-representable shape', () => {
+    for (const cron of [
+      '*/15 * * * *',
+      '*/1 * * * *',
+      '30 * * * *', // hourly at :30 — minute rides in `time`
+      '0 * * * *', // hourly at :00
+      '0 9 * * *', // daily
+      '30 8 * * 1-5', // weekdays
+      '0 9 * * 3', // weekly (Wed)
+      '0 9 * * 0', // weekly (Sun, canonical 0)
+    ]) {
+      expect(buildCron(parseCronToBuilder(cron))).toBe(cron);
+    }
+  });
+
+  it('maps recognized shapes onto the right pickers', () => {
+    expect(parseCronToBuilder('*/15 * * * *')).toMatchObject({
+      frequency: 'minutes',
+      minuteInterval: 15,
+    });
+    expect(parseCronToBuilder('30 * * * *')).toMatchObject({
+      frequency: 'hourly',
+      time: '00:30',
+    });
+    expect(parseCronToBuilder('0 9 * * *')).toMatchObject({
+      frequency: 'daily',
+      time: '09:00',
+    });
+    expect(parseCronToBuilder('30 8 * * 1-5')).toMatchObject({
+      frequency: 'weekdays',
+      time: '08:30',
+    });
+    expect(parseCronToBuilder('0 9 * * 3')).toMatchObject({
+      frequency: 'weekly',
+      time: '09:00',
+      weekday: 3,
+    });
+  });
+
+  it('normalizes Sunday-as-7 to weekday 0', () => {
+    const b = parseCronToBuilder('0 9 * * 7');
+    expect(b).toMatchObject({ frequency: 'weekly', weekday: 0 });
+    // Rebuilds to the canonical Sunday form.
+    expect(buildCron(b)).toBe('0 9 * * 0');
+  });
+
+  it('falls back to custom for anything the pickers cannot represent', () => {
+    for (const cron of [
+      '*/45 * * * *', // non-divisor of 60
+      '*/7 * * * *', // non-divisor of 60
+      '0 9 * * 1,3,5', // day-of-week list
+      '0 9 1 * *', // day-of-month
+      '0 9,17 * * *', // hour list
+      '99 9 * * *', // minute out of range
+      '0 33 * * *', // hour out of range
+      'not a cron',
+    ]) {
+      const b = parseCronToBuilder(cron);
+      expect(b.frequency).toBe('custom');
+      expect(b.customCron).toBe(cron);
+    }
+  });
+
+  it('handles surrounding whitespace and blank input', () => {
+    expect(parseCronToBuilder('  0 9 * * *  ')).toMatchObject({
+      frequency: 'daily',
+      time: '09:00',
+    });
+    // Blank falls back to custom with a safe default expression.
+    expect(parseCronToBuilder('   ')).toMatchObject({ frequency: 'custom' });
+  });
+});
+
+describe('formatCountdown', () => {
+  // Real-ish t: maps the unit/dueNow keys to short words so assertions read
+  // like the rendered pill.
+  const tc: TranslateFn = (key) =>
+    ({
+      'scheduledTasks.dueNow': 'due',
+      'scheduledTasks.dur.d': 'd',
+      'scheduledTasks.dur.h': 'h',
+      'scheduledTasks.dur.m': 'm',
+      'scheduledTasks.dur.s': 's',
+    })[key] ?? key;
+
+  const S = 1000;
+  const M = 60 * S;
+  const H = 60 * M;
+  const D = 24 * H;
+
+  it('reads "due" at or past zero', () => {
+    expect(formatCountdown(0, tc)).toBe('due');
+    expect(formatCountdown(-5000, tc)).toBe('due');
+  });
+
+  it('shows the two most-significant units', () => {
+    expect(formatCountdown(45 * S, tc)).toBe('45s');
+    expect(formatCountdown(5 * M + 20 * S, tc)).toBe('5m 20s');
+    expect(formatCountdown(3 * H + 12 * M, tc)).toBe('3h 12m');
+    expect(formatCountdown(2 * D + 5 * H, tc)).toBe('2d 5h');
+    expect(formatCountdown(1 * M + 30 * S, tc)).toBe('1m 30s');
+  });
+
+  it('drops a zero secondary unit', () => {
+    expect(formatCountdown(3 * H, tc)).toBe('3h');
+    expect(formatCountdown(2 * D, tc)).toBe('2d');
+    expect(formatCountdown(5 * M, tc)).toBe('5m');
+  });
+
+  it('floors sub-second remainders into the seconds bucket', () => {
+    expect(formatCountdown(999, tc)).toBe('0s');
+    expect(formatCountdown(1500, tc)).toBe('1s');
   });
 });
 

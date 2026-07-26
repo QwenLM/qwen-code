@@ -65,17 +65,55 @@ const GLOBAL_DUPLICATE_THRESHOLD = 6;
 // trip the detector (3 cycles = 6 calls: A B A B A B).
 const ALTERNATING_PATTERN_CYCLES = 3;
 
-// Default hard per-turn tool call cap. Circuit breaker against runaway
-// turns that no pattern detector catches (e.g. the model varies arguments
-// on every call). Not gated by skipLoopDetection, but configurable via the
+// Default per-turn tool call cap. Circuit breaker against runaway turns.
+// Not gated by skipLoopDetection, but configurable via the
 // `model.maxToolCallsPerTurn` setting (values <= 0 disable the cap) and
 // suppressed by an explicit in-session disable. A "turn" for cap purposes
 // is one model turn plus its ToolResult continuations; a blocking Stop-hook
 // continuation (e.g. a /goal iteration) starts a fresh budget via
 // loopDetector.reset() in client.ts, so the cap bounds each iteration
-// rather than an entire goal chain — which is what keeps 100 sufficient
-// for legitimate work.
+// rather than an entire goal chain.
+//
+// This default is a *soft* cap: once the turn exceeds it, the cap only halts
+// when a stuck-repetition signal is present (the model keeps repeating the
+// same call). A productive turn (diverse calls, no repetition) is allowed to
+// continue up to the hard cap below. This avoids halting legitimately large
+// multi-package implementation turns (modern models make hundreds of calls).
+// NOTE: this adaptive behavior applies only to the default; an *explicitly*
+// set `model.maxToolCallsPerTurn` is honored as a hard cap (the released
+// contract) — see checkTurnToolCallCap.
 export const DEFAULT_MAX_TOOL_CALLS_PER_TURN = 100;
+
+// Hard cap = soft cap * this multiplier, for the adaptive (default) cap only.
+// Absolute backstop that halts regardless of repetition, so a runaway that
+// varies its arguments on every call (which no repetition signal catches) is
+// still bounded. With the default soft cap of 100 this is 1000 — high enough
+// that modern models making hundreds of legitimate calls per task are not
+// false-positived, while still bounding a pathological runaway.
+const ADAPTIVE_CAP_HARD_MULTIPLIER = 10;
+
+/**
+ * Recursively canonicalizes a JSON-compatible value for stable hashing: object
+ * keys are sorted (so property insertion order does not change the identity)
+ * while array order is preserved. Used by getToolCallKey so two semantically
+ * identical tool-call arguments that differ only in field order hash to the
+ * same key — otherwise a stuck model could evade the repeat guards just by
+ * reordering fields.
+ */
+function canonicalizeForHash(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(canonicalizeForHash);
+  }
+  if (value !== null && typeof value === 'object') {
+    const source = value as Record<string, unknown>;
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(source).sort()) {
+      sorted[key] = canonicalizeForHash(source[key]);
+    }
+    return sorted;
+  }
+  return value;
+}
 
 /**
  * Service for detecting and preventing infinite loops in AI responses.
@@ -133,10 +171,10 @@ export class LoopDetectionService {
   // detection (ABABAB…). Kept at 2 * ALTERNATING_PATTERN_CYCLES entries.
   private recentToolCallKeys: string[] = [];
 
-  // Total tool calls emitted in the current turn. Always-on circuit breaker;
-  // exceeds the configured per-turn cap → hard-stop. Accumulates across
-  // ToolResult continuations within a turn (reset() only runs for top-level
-  // interactions).
+  // Total tool calls emitted in the current turn. Always-on circuit breaker
+  // (see checkTurnToolCallCap for the adaptive soft/hard logic). Accumulates
+  // across ToolResult continuations within a turn (reset() only runs for
+  // top-level interactions).
   private turnToolCallTotal = 0;
 
   // Rollback floor for turnToolCallTotal: the committed total as of the last
@@ -145,6 +183,15 @@ export class LoopDetectionService {
   // we roll back to this floor — discarding only the failed attempt, not the
   // counts from prior completed round-trips.
   private turnToolCallTotalCommitted = 0;
+
+  // Always-on per-(tool,args) repeat tracker for the adaptive cap. The cap is
+  // always-on, but globalToolCallCounts is only maintained inside the gated
+  // heuristic path, so the cap keeps its own tracker to stay independent of
+  // skipLoopDetection. capMaxKeyRepeat is the running max count of any single
+  // (tool,args) key this turn — the stuck-repetition signal that decides
+  // whether exceeding the soft cap halts (stuck) or is allowed (productive).
+  private capKeyCounts = new Map<string, number>();
+  private capMaxKeyRepeat = 0;
 
   // Loop type of the most recent firing. Bubbled up through the
   // LoopDetected event so callers (non-interactive CLI, telemetry) can tell
@@ -179,7 +226,7 @@ export class LoopDetectionService {
   }
 
   private getToolCallKey(toolCall: { name: string; args: object }): string {
-    const argsString = JSON.stringify(toolCall.args);
+    const argsString = JSON.stringify(canonicalizeForHash(toolCall.args));
     const keyString = `${toolCall.name}:${argsString}`;
     return createHash('sha256').update(keyString).digest('hex');
   }
@@ -284,10 +331,15 @@ export class LoopDetectionService {
     // double-count against both always-on guards. Roll the per-turn cap back
     // to the last committed round-trip (never below it — prior round-trips
     // stay) and drop the consecutive-identical streak so the replayed attempt
-    // cannot push it over the threshold.
+    // cannot push it over the threshold. The adaptive cap's repeat tracker is
+    // cleared (consistent with how the heuristic path clears
+    // globalToolCallCounts on retry): the replayed calls re-populate it, and a
+    // stuck pattern simply re-accumulates toward the threshold.
     if (event.type === GeminiEventType.Retry) {
       this.turnToolCallTotal = this.turnToolCallTotalCommitted;
       this.resetToolCallCount();
+      this.capKeyCounts.clear();
+      this.capMaxKeyRepeat = 0;
       return false;
     }
 
@@ -295,37 +347,48 @@ export class LoopDetectionService {
       return false;
     }
 
+    // All always-on guards below honor an explicit in-session disable (the
+    // user's active "stop detecting" choice). When disabled there is no
+    // consumer for the per-call key, so skip the SHA-256 hashing entirely.
+    if (this.disabledForSession) {
+      return false;
+    }
+
+    // Hash the (tool,args) key once and share it across the guards that need
+    // it (consecutive-identical and the adaptive cap's stuck tracker). Args
+    // can be large (e.g. write_file content), so avoid recomputing per guard.
+    const key = this.getToolCallKey(event.value);
+
+    // Always-on stuck-repetition tracking for the adaptive cap (see
+    // checkTurnToolCallCap): lets the cap tell a productive turn from a stuck
+    // one, regardless of skipLoopDetection.
+    this.trackCapKeyRepeat(key);
+
     // Consecutive identical tool calls (same name AND identical args) are the
     // one repetition signal precise enough to halt unconditionally — an
     // identical call returns an identical result, so it is never productive.
     // Promoted here from the opt-in tier so it protects every user regardless
     // of the `skipLoopDetection` config default: the DashScope server rejects
     // this pattern with a 400 (issue #5019) far below the per-turn cap, so
-    // the gated default left users unprotected. Like the per-turn cap below,
-    // it honors an explicit in-session disable — the user's active "stop
-    // detecting" choice.
-    if (!this.disabledForSession && this.checkToolCallLoop(event.value)) {
+    // the gated default left users unprotected.
+    if (this.checkToolCallLoop(key)) {
       this.loopDetected = true;
       return true;
     }
 
-    if (
-      !this.disabledForSession &&
-      this.checkShellCommandStagnation(event.value)
-    ) {
+    if (this.checkShellCommandStagnation(event.value)) {
       this.loopDetected = true;
       return true;
     }
 
-    if (!this.disabledForSession && this.checkTurnToolCallCap()) {
+    if (this.checkTurnToolCallCap()) {
       this.loopDetected = true;
       return true;
     }
     return false;
   }
 
-  private checkToolCallLoop(toolCall: { name: string; args: object }): boolean {
-    const key = this.getToolCallKey(toolCall);
+  private checkToolCallLoop(key: string): boolean {
     if (this.lastToolCallKey === key) {
       this.toolCallRepetitionCount++;
     } else {
@@ -783,15 +846,44 @@ export class LoopDetectionService {
   }
 
   /**
-   * Per-turn hard cap: if the turn exceeds the configured maximum number of
-   * tool calls (getMaxToolCallsPerTurn — already resolved to an effective
-   * value, Infinity when disabled) the turn is halted. This is a safety net
-   * independent of skipLoopDetection and fires on the very next tool call
-   * that pushes the total past the cap, not retroactively.
+   * Records a (tool,args) occurrence for the adaptive cap and updates the
+   * running max repeat count. Always-on (called from checkAlwaysOnSafeties
+   * with the already-hashed key).
+   */
+  private trackCapKeyRepeat(key: string): void {
+    const count = (this.capKeyCounts.get(key) ?? 0) + 1;
+    this.capKeyCounts.set(key, count);
+    if (count > this.capMaxKeyRepeat) {
+      this.capMaxKeyRepeat = count;
+    }
+  }
+
+  /**
+   * Per-turn cap. `getMaxToolCallsPerTurn()` is the configured value (already
+   * resolved, Infinity when disabled). Independent of skipLoopDetection.
+   *
+   * Two behaviors depending on whether the value was explicitly configured:
+   * - Explicit value: a hard cap (the released contract) — the turn halts on
+   *   the call that exceeds it, with no adaptive extension.
+   * - Default (unset): adaptive — once the turn exceeds the soft cap it halts
+   *   only on a stuck-repetition signal (some (tool,args) call repeated
+   *   GLOBAL_DUPLICATE_THRESHOLD times); a productive turn (diverse calls)
+   *   continues up to the hard backstop (soft * ADAPTIVE_CAP_HARD_MULTIPLIER),
+   *   which always halts to bound an argument-varying runaway.
    */
   private checkTurnToolCallCap(): boolean {
     this.turnToolCallTotal++;
-    if (this.turnToolCallTotal > this.config.getMaxToolCallsPerTurn()) {
+    const cap = this.config.getMaxToolCallsPerTurn();
+    if (this.turnToolCallTotal <= cap) {
+      return false;
+    }
+
+    // Over the configured cap. An explicit value is a hard cap; the default is
+    // adaptive (allow productive turns, halt on stuck or the hard backstop).
+    const explicitHardCap = this.config.isMaxToolCallsPerTurnExplicit();
+    const hardCap = cap * ADAPTIVE_CAP_HARD_MULTIPLIER;
+    const stuck = this.capMaxKeyRepeat >= GLOBAL_DUPLICATE_THRESHOLD;
+    if (explicitHardCap || this.turnToolCallTotal > hardCap || stuck) {
       this.lastLoopType = LoopType.TURN_TOOL_CALL_CAP;
       logLoopDetected(
         this.config,
@@ -886,6 +978,8 @@ export class LoopDetectionService {
     this.recentToolCallKeys = [];
     this.turnToolCallTotal = 0;
     this.turnToolCallTotalCommitted = 0;
+    this.capKeyCounts.clear();
+    this.capMaxKeyRepeat = 0;
   }
 
   private resetToolCallCount(): void {

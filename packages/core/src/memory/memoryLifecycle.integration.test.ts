@@ -82,6 +82,7 @@ describe('managed auto-memory lifecycle integration', () => {
           touchedTopics: [topic],
           touchedProjectScope: true,
           touchedUserScope: false,
+          hasToolActivity: true,
           systemMessage: undefined,
         };
       },

@@ -15,6 +15,10 @@ if (process.env['QWEN_DEBUG_LOG_FILE'] === undefined) {
   process.env['QWEN_DEBUG_LOG_FILE'] = '0';
 }
 
+if (process.env['QWEN_SERVE_NO_PERSISTENT_REGISTRATION'] === undefined) {
+  process.env['QWEN_SERVE_NO_PERSISTENT_REGISTRATION'] = '1';
+}
+
 import './src/test-utils/customMatchers.js';
 
 // Lowlight is loaded asynchronously in production to keep it out of the

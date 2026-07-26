@@ -5,6 +5,7 @@
  */
 
 import type {
+  DaemonInputAnnotation,
   DaemonTranscriptBlock,
   DaemonTextTranscriptBlock,
   DaemonToolTranscriptBlock,
@@ -33,14 +34,10 @@ type DaemonPermissionTranscriptBlock = Extract<
   { kind: 'permission' }
 >;
 
-type ExtendedDaemonStatusTranscriptBlock = DaemonStatusTranscriptBlock & {
-  source?: string;
-  data?: unknown;
-};
-
 type ExtendedDaemonTextTranscriptBlock = DaemonTextTranscriptBlock & {
   meta?: {
     source?: unknown;
+    inputAnnotations?: unknown;
     qwenDiscreteMessage?: boolean;
     backgroundTask?: unknown;
   };
@@ -50,17 +47,104 @@ interface TranscriptMessageLabels {
   promptCancelled?: string;
   branchSuccess?: (name: string) => string;
   midTurnInserted?: (message: string) => string;
+  modelStreamInterrupted?: string;
 }
 
 interface TranscriptMessageOptions {
   labels?: TranscriptMessageLabels;
 }
 
+interface BackgroundAgentTaskUpdate {
+  status: string;
+  endTime: number;
+}
+
+function collectBackgroundAgentTaskUpdates(
+  blocks: readonly DaemonTranscriptBlock[],
+): ReadonlyMap<string, BackgroundAgentTaskUpdate> {
+  const updates = new Map<string, BackgroundAgentTaskUpdate>();
+  for (const block of blocks) {
+    if (block.kind !== 'assistant') continue;
+    const meta = getRecord(block.meta);
+    if (
+      meta?.['source'] !== 'background_notification' ||
+      meta['qwenDiscreteMessage'] !== true
+    ) {
+      continue;
+    }
+    const task = getRecord(meta['backgroundTask']);
+    const toolUseId = getString(task, 'toolUseId');
+    const status = getString(task, 'status');
+    if (task?.['kind'] !== 'agent' || !toolUseId || !status) continue;
+    updates.set(toolUseId, {
+      status,
+      endTime: block.serverTimestamp ?? block.clientReceivedAt,
+    });
+  }
+  return updates;
+}
+
+function applyBackgroundAgentTaskUpdate(
+  tool: DaemonMessageToolCall,
+  update: BackgroundAgentTaskUpdate | undefined,
+): void {
+  if (!update) return;
+  switch (update.status) {
+    case 'completed':
+      tool.status = 'completed';
+      tool.endTime = update.endTime;
+      break;
+    case 'failed':
+      tool.status = 'failed';
+      tool.endTime = update.endTime;
+      break;
+    case 'cancelled':
+    case 'canceled':
+      tool.status = 'completed';
+      tool.endTime = update.endTime;
+      tool.rawOutput = {
+        ...(getRecord(tool.rawOutput) ?? {}),
+        status: 'cancelled',
+      };
+      break;
+  }
+}
+
 function isIgnoredWebShellStatus(text: string): boolean {
   return (
     text.startsWith('language_changed (unrecognized daemon event):') ||
+    text.startsWith('session_cwd_changed (unrecognized daemon event):') ||
     text.startsWith('Model switched: ')
   );
+}
+
+function getErrorDisplayText(
+  block: DaemonStatusTranscriptBlock,
+  labels?: TranscriptMessageLabels,
+): string {
+  if (
+    block.errorKind === 'model_stream_interrupted' ||
+    // Older daemons emit this turn_error before they know about errorKind.
+    (block.source === 'turn_error' &&
+      block.text.trim().toLowerCase() === 'terminated')
+  ) {
+    return labels?.modelStreamInterrupted ?? block.text;
+  }
+  return block.text;
+}
+
+function getErrorMessageData(
+  data: unknown,
+  errorKind: DaemonStatusTranscriptBlock['errorKind'],
+): { data?: unknown } {
+  if (data === undefined) return {};
+  if (!errorKind) return { data };
+  return {
+    data: {
+      ...(getRecord(data) ?? { value: data }),
+      errorKind,
+    },
+  };
 }
 
 function getSessionBranchDisplayName(data: unknown): string | null {
@@ -175,6 +259,7 @@ export function transcriptBlocksToDaemonMessages(
   // parentToolCallId; unparented blocks are rendered as top-level transcript.
   const toolsByCallId = new Map<string, DaemonMessageToolCall>();
   const permissionToolInfoByCallId = new Map<string, PermissionToolInfo>();
+  const backgroundAgentTaskUpdates = collectBackgroundAgentTaskUpdates(blocks);
   let currentAssistantIdx: number | null = null;
   let currentThinkingIdx: number | null = null;
   // Tool cards are standalone transcript turns. Once a tool is emitted,
@@ -195,11 +280,20 @@ export function transcriptBlocksToDaemonMessages(
         currentThinkingIdx = null;
         needsNewContentMessage = false;
         const textBlock = block as DaemonTextTranscriptBlock;
+        const meta = getRecord(
+          (textBlock as ExtendedDaemonTextTranscriptBlock).meta,
+        );
+        const source = getString(meta, 'source');
+        const inputAnnotations = Array.isArray(meta?.inputAnnotations)
+          ? (meta.inputAnnotations as DaemonInputAnnotation[])
+          : undefined;
         const msg: DaemonUserMessage = {
           id: block.id,
           role: 'user',
           content: textBlock.text,
           timestamp: blockTime,
+          ...(source ? { source } : {}),
+          ...(inputAnnotations ? { inputAnnotations } : {}),
         };
         // Attach images if present
         if (textBlock.images && textBlock.images.length > 0) {
@@ -357,6 +451,10 @@ export function transcriptBlocksToDaemonMessages(
       case 'tool': {
         const toolBlock = block as DaemonToolTranscriptBlock;
         const toolCall = daemonToolBlockToToolCall(toolBlock);
+        applyBackgroundAgentTaskUpdate(
+          toolCall,
+          backgroundAgentTaskUpdates.get(toolCall.callId),
+        );
         const permissionInfo = permissionToolInfoByCallId.get(toolCall.callId);
         if (permissionInfo?.title) {
           toolCall.title = permissionInfo.title;
@@ -525,7 +623,7 @@ export function transcriptBlocksToDaemonMessages(
 
       case 'status':
       case 'debug': {
-        const statusBlock = block as ExtendedDaemonStatusTranscriptBlock;
+        const statusBlock = block;
         const branchDisplayName =
           statusBlock.source === 'session_branched'
             ? getSessionBranchDisplayName(statusBlock.data)
@@ -570,16 +668,17 @@ export function transcriptBlocksToDaemonMessages(
       }
 
       case 'error': {
-        const errorBlock = block as ExtendedDaemonStatusTranscriptBlock;
+        const errorBlock = block;
+        const errorKind = errorBlock.errorKind;
         messages.push({
           id: block.id,
           role: 'system',
-          content: errorBlock.text,
+          content: getErrorDisplayText(errorBlock, options.labels),
           variant: 'error',
           retryable: errorBlock.source === 'turn_error',
           timestamp: blockTime,
           ...(errorBlock.source ? { source: errorBlock.source } : {}),
-          ...(errorBlock.data !== undefined ? { data: errorBlock.data } : {}),
+          ...getErrorMessageData(errorBlock.data, errorKind),
         });
         needsNewContentMessage = true;
         break;

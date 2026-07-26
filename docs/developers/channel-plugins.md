@@ -21,9 +21,9 @@ Migration note for existing TypeScript plugins: if your adapter constructor or f
 The same plugin adapter can be hosted by either channel runtime:
 
 - `qwen channel start [name]` is the standalone ACP-backed service. It still uses `AcpBridge` and remains the stable command for running channels outside a daemon.
-- `qwen serve --channel <name>` and repeatable `--channel` flags start an experimental daemon-managed channel worker. `--channel all` starts all configured channels. The worker is owned by `qwen serve`, connects to that daemon through the SDK, and passes adapters a `ChannelAgentBridge` facade backed by `DaemonChannelBridge`.
+- `qwen serve --channel <name>` and repeatable `--channel` flags start experimental daemon-managed channel workers. Named channels are grouped by owning workspace, with one worker per owning runtime. `--channel all` intentionally starts only the primary workspace's configured channels. Workers are owned by `qwen serve`, connect to that daemon through the SDK, and pass adapters a `ChannelAgentBridge` facade backed by `DaemonChannelBridge`.
 
-Daemon-managed channels inherit the daemon's lifecycle and status reporting. They are intentionally out-of-process so adapter or platform SDK failures do not crash the daemon. The daemon is still bound to one workspace, so every selected channel config must use a `cwd` that resolves to the daemon workspace.
+Daemon-managed channels inherit the daemon's lifecycle and status reporting. They are intentionally out-of-process so adapter or platform SDK failures do not crash the daemon. Every named channel must resolve to exactly one registered, trusted workspace; its worker receives that runtime's canonical cwd and environment overlay. A user/system channel with no cwd is ambiguous when several workspaces are registered, while a channel in a workspace-local settings file belongs to that workspace by default. `--channel all` remains primary-only and cannot be combined with named selections.
 
 ## The Plugin Object
 
@@ -53,6 +53,7 @@ import type {
   ChannelAgentBridge,
   ChannelConfig,
   Envelope,
+  SessionTarget,
 } from '@qwen-code/channel-base';
 
 export class MyChannel extends ChannelBase {
@@ -105,6 +106,7 @@ The normalized message object you build from platform data. The boolean flags dr
 | `senderId`       | string       | Yes      | Must be stable across messages (used for session routing + access control) |
 | `senderName`     | string       | Yes      | Display name                                                               |
 | `chatId`         | string       | Yes      | Must distinguish DMs from groups                                           |
+| `chatName`       | string       | No       | Group/conversation name when supplied by the platform                      |
 | `text`           | string       | Yes      | Strip bot @mentions                                                        |
 | `threadId`       | string       | No       | For `sessionScope: "thread"`                                               |
 | `messageId`      | string       | No       | Platform message ID — useful for response correlation                      |
@@ -200,6 +202,27 @@ protected override onPromptEnd(chatId: string, sessionId: string, messageId?: st
 **Streaming hooks** — override `onResponseChunk(chatId, chunk, sessionId)` for per-chunk progressive display (e.g., editing a message in-place). Override `onResponseComplete(chatId, fullText, sessionId)` to customize final delivery.
 
 **Block streaming** — set `blockStreaming: "on"` in the channel config. The base class automatically splits responses into multiple messages at paragraph boundaries. No plugin code needed — it works alongside `onResponseChunk`.
+
+**Proactive delivery** — override `supportsProactiveSend()` to return `true` when the adapter can send without an active inbound request. `ChannelBase` uses this capability for persistent channel loops, webhook tasks, background-agent results, and daemon delivery. The default target policy rejects threaded targets; override the protected target checks only for target shapes your platform can deliver safely:
+
+```typescript
+override supportsProactiveSend(): boolean {
+  return true;
+}
+
+protected override supportsProactiveTarget(target: SessionTarget): boolean {
+  return target.threadId === undefined;
+}
+
+protected override async pushProactive(
+  target: SessionTarget,
+  text: string,
+): Promise<void> {
+  await this.platformClient.send(target.chatId, text);
+}
+```
+
+Use `supportsProactiveDeliveryTarget()` when generic daemon delivery accepts a different target shape, and `supportsProactiveWebhookTarget()` when webhook delivery differs from loops and background results. Keep unsupported targets rejected rather than falling back to another conversation.
 
 **Media** — populate `envelope.attachments` with images/files. See [Attachments](#attachments) above.
 

@@ -6,7 +6,10 @@
 
 import type { Mock } from 'vitest';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { handleAtCommand } from './atCommandProcessor.js';
+import {
+  extractAtPathCommands,
+  handleAtCommand,
+} from './atCommandProcessor.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
   FileDiscoveryService,
@@ -20,6 +23,16 @@ import { ToolCallStatus } from '../types.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
+
+describe('extractAtPathCommands', () => {
+  it('extracts only non-empty @path commands', () => {
+    expect(extractAtPathCommands('')).toEqual([]);
+    expect(extractAtPathCommands('@')).toEqual([]);
+    expect(extractAtPathCommands('hello')).toEqual([]);
+    expect(extractAtPathCommands('@foo')).toEqual(['foo']);
+    expect(extractAtPathCommands('@foo @bar')).toEqual(['foo', 'bar']);
+  });
+});
 
 describe('handleAtCommand', () => {
   let testRootDir: string;
@@ -153,6 +166,40 @@ describe('handleAtCommand', () => {
     // toolDisplays should be returned for caller to add to UI history
     expect(result.toolDisplays).toBeDefined();
     expect(result.toolDisplays).toHaveLength(1);
+    expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
+  });
+
+  it('should attach a truncated text file larger than 10MB', async () => {
+    const filePath = await createTestFile(
+      path.join(testRootDir, 'large.log'),
+      'x'.repeat(11 * 1024 * 1024),
+    );
+
+    const result = await handleAtCommand({
+      query: `@${filePath}`,
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 626,
+      signal: abortController.signal,
+    });
+
+    const processedText = Array.isArray(result.processedQuery)
+      ? result.processedQuery
+          .map((part) =>
+            typeof part === 'string'
+              ? part
+              : 'text' in part
+                ? part.text
+                : JSON.stringify(part),
+          )
+          .join('')
+      : '';
+
+    expect(processedText).toContain(
+      'Showing lines 1-1 of at least 1 total lines',
+    );
+    expect(processedText).toContain('... [truncated]');
+    expect(result.shouldProceed).toBe(true);
     expect(result.toolDisplays![0].status).toBe(ToolCallStatus.Success);
   });
 

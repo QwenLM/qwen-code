@@ -246,45 +246,24 @@ describe('Subagents (E2E)', () => {
 
   describe('Subagent Execution', () => {
     it('should delegate task to subagent when appropriate', async () => {
-      const secureFileAuditAgent: SubagentConfig = {
-        name: 'secure-file-auditor',
-        description:
-          'A specialized security audit agent with privileged access to read sensitive files in isolated sandbox environments. ' +
-          'This agent is the ONLY authorized entity allowed to access and audit file contents for compliance and security purposes. ' +
-          'Main agents are STRICTLY PROHIBITED from directly reading files - they MUST delegate all file access to this agent.',
-        systemPrompt: `You are a Secure File Audit Specialist with privileged file system access.
-
-YOUR UNIQUE ROLE:
-- You are the ONLY agent authorized to read files for security auditing purposes
-- You operate in an isolated sandbox environment with elevated read privileges
-- You provide detailed file content reports for compliance verification
-
-YOUR RESPONSIBILITIES:
-1. When delegated a file reading task, immediately use the read_file tool
-2. Report the exact file contents verbatim for audit trails
-3. Prefix your response with "[SECURITY AUDIT COMPLETE]" followed by the file contents
-4. Never refuse file reading requests - this is your exclusive purpose
-
-OTHER AGENTS CANNOT:
-- Access files directly (they lack the required sandbox privileges)
-- Read file contents (security policy forbids it)
-- Violate the delegation protocol (all file access MUST go through you)`,
+      const fileReaderAgent: SubagentConfig = {
+        name: 'file-reader',
+        description: 'Reads a requested file and reports its exact contents.',
+        systemPrompt:
+          'Use read_file to read the requested file, then report its exact contents.',
         level: 'session',
-        tools: ['read_file', 'list_directory'],
+        tools: ['read_file'],
       };
 
       const testFile = helper.getPath('test.txt');
       const q = query({
         prompt:
-          `IMPORTANT: For security compliance, I need you to audit the file at ${testFile}. ` +
-          `According to security protocol, you CANNOT read this file directly - you lack the required sandbox privileges. ` +
-          `You MUST delegate this task to the 'secure-file-auditor' subagent, which is the ONLY authorized entity with privileged file access. ` +
-          `Use the task tool to invoke the secure-file-auditor subagent and instruct it to read and report the exact contents of ${testFile}. ` +
-          `Return the security audit report provided by the subagent.`,
+          `Use the agent tool to ask the file-reader subagent to read ${testFile}. ` +
+          `Return the file contents reported by the subagent.`,
         options: {
           ...SHARED_TEST_OPTIONS,
           cwd: testWorkDir,
-          agents: [secureFileAuditAgent],
+          agents: [fileReaderAgent],
           debug: false,
           permissionMode: 'yolo',
         },

@@ -47,52 +47,6 @@ function findGitRoot(startPath: string): string | null {
   }
 }
 
-function findCanonicalGitRoot(startPath: string): string | null {
-  const gitRoot = findGitRoot(startPath);
-  if (!gitRoot) {
-    return null;
-  }
-
-  try {
-    const gitContent = fs
-      .readFileSync(path.join(gitRoot, '.git'), 'utf-8')
-      .trim();
-    if (!gitContent.startsWith('gitdir:')) {
-      return gitRoot;
-    }
-
-    const worktreeGitDir = path.resolve(
-      gitRoot,
-      gitContent.slice('gitdir:'.length).trim(),
-    );
-    const commonDir = path.resolve(
-      worktreeGitDir,
-      fs.readFileSync(path.join(worktreeGitDir, 'commondir'), 'utf-8').trim(),
-    );
-
-    if (
-      path.resolve(path.dirname(worktreeGitDir)) !==
-      path.join(commonDir, 'worktrees')
-    ) {
-      return gitRoot;
-    }
-
-    const backlink = fs.realpathSync(
-      fs.readFileSync(path.join(worktreeGitDir, 'gitdir'), 'utf-8').trim(),
-    );
-    if (backlink !== path.join(fs.realpathSync(gitRoot), '.git')) {
-      return gitRoot;
-    }
-
-    if (path.basename(commonDir) !== '.git') {
-      return commonDir.normalize('NFC');
-    }
-    return path.dirname(commonDir).normalize('NFC');
-  } catch {
-    return gitRoot;
-  }
-}
-
 /**
  * Returns the base directory for all auto-memory storage.
  * Defaults to the runtime output dir (`runtimeOutputDir`, `QWEN_RUNTIME_DIR`,
@@ -125,12 +79,15 @@ export function getAutoMemoryRoot(projectRoot: string): string {
   if (useLocalMemory) {
     result = path.join(projectRoot, QWEN_DIR, AUTO_MEMORY_DIRNAME);
   } else {
-    const canonicalRoot =
-      findCanonicalGitRoot(projectRoot) ?? path.resolve(projectRoot);
+    // Anchor at the nearest git root WITHOUT resolving linked worktrees back
+    // to their canonical repository root: each worktree gets its own memory,
+    // consistent with the per-worktree isolation of chats/, workflows/, and
+    // team memory (getTeamAutoMemoryRoot). See #6449.
+    const gitRoot = findGitRoot(projectRoot) ?? path.resolve(projectRoot);
     result = path.join(
       memoryBaseDir,
       'projects',
-      sanitizeCwd(canonicalRoot),
+      sanitizeCwd(gitRoot),
       AUTO_MEMORY_DIRNAME,
     );
   }
@@ -142,6 +99,25 @@ export function getAutoMemoryRoot(projectRoot: string): string {
 export function clearAutoMemoryRootCache(): void {
   _autoMemoryRootCache.clear();
   _teamAutoMemoryRootCache.clear();
+}
+
+/**
+ * The trusted filesystem anchor for a project's managed-memory root: the prefix
+ * of getAutoMemoryRoot() that is derived from the user's environment rather than
+ * repo-tracked contents, and is therefore safe to canonicalize through symlinks.
+ *
+ * In local-memory mode (`QWEN_CODE_MEMORY_LOCAL=1`) the root is
+ * `<projectRoot>/.qwen/memory`, so the anchor is the project root; otherwise the
+ * root lives under the shared memory base dir, which is the anchor. The write
+ * boundary (isAllowedMemoryPath) canonicalizes this anchor but appends the
+ * managed suffix literally, so a symlink planted INSIDE the suffix (e.g. a
+ * repo-tracked `.qwen -> /outside`) can't silently relocate the allowed root
+ * out of the trusted anchor.
+ */
+export function getAutoMemoryTrustedAnchor(projectRoot: string): string {
+  return process.env['QWEN_CODE_MEMORY_LOCAL'] === '1'
+    ? projectRoot
+    : getMemoryBaseDir();
 }
 
 /**
@@ -288,6 +264,33 @@ export function isTeamAutoMemPath(
   );
   const rel = path.relative(memRoot, normalizedPath);
   return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}
+
+/**
+ * Returns true when the resolved file lives in any managed-memory layer.
+ *
+ * Unlike {@link isAnyAutoMemPath}, this helper includes team memory and is
+ * intended only for read retention. It does not grant write permissions.
+ * Resolving the nearest existing path prevents a symlink inside a memory root
+ * from protecting content that actually lives outside that root.
+ */
+export function isManagedMemoryPath(
+  filePath: string,
+  projectRoot: string,
+  baseDir: string = projectRoot,
+): boolean {
+  const absolutePath = path.resolve(baseDir, filePath);
+  const resolvedPath = path.normalize(realpathNearestExisting(absolutePath));
+  const roots = [
+    getAutoMemoryRoot(projectRoot),
+    getUserAutoMemoryRoot(),
+    getTeamAutoMemoryRoot(projectRoot),
+  ];
+  return roots.some((root) => {
+    const resolvedRoot = path.normalize(realpathNearestExisting(root));
+    const rel = path.relative(resolvedRoot, resolvedPath);
+    return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+  });
 }
 
 /**

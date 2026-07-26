@@ -6,7 +6,11 @@
 
 import type { GenerateContentParameters } from '@google/genai';
 import { createDebugLogger } from '../../utils/debugLogger.js';
-import { getErrorStatus, getErrorType } from '../../utils/errors.js';
+import {
+  getErrorMessage,
+  getErrorStatus,
+  getErrorType,
+} from '../../utils/errors.js';
 import { getRateLimitErrorDetails } from '../../utils/rateLimit.js';
 import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import type { ErrorHandler, RequestContext } from './types.js';
@@ -112,7 +116,7 @@ export class EnhancedErrorHandler implements ErrorHandler {
       return `Request timeout after ${durationSeconds}s. Try reducing input length or increasing timeout in config.`;
     }
 
-    return error instanceof Error ? error.message : String(error);
+    return error instanceof Error ? getErrorMessage(error) : String(error);
   }
 
   private buildDiagnostics(

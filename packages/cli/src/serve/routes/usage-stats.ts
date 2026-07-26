@@ -8,16 +8,17 @@
  * Read-only usage-dashboard surface behind the Web Shell Daemon Status
  * "统计 / Usage" tab. Serves the selected range's (`today`/`week`/`month`)
  * flattened token totals plus a trailing per-day heatmap, computed by core's
- * `buildUsageDashboard` from the durable local usage history (global `~/.qwen`,
- * cross-project) — the same source the TUI `/stats` command reads. The history
- * load runs read-only (`persistRebuild: false`), so serving a GET never writes
- * to `~/.qwen`, even when the persisted file is missing and the loader falls
- * back to transcript replay.
+ * `buildUsageDashboard` from the local usage history (global `~/.qwen`,
+ * cross-project). Uses `loadUsageHistoryWithLive`, which unions the durable
+ * `usage_record.jsonl` (written only by the TUI `/clear` path) with a replay of
+ * recent transcripts — so daemon / Web Shell sessions and any in-progress
+ * session are counted here, unlike the TUI `/stats` view. The load is
+ * read-only (never writes `~/.qwen`).
  *
  * Open GET (no `mutate` gate), consistent with `GET /daemon/status` and
  * `GET /scheduled-tasks`: it exposes only aggregate local usage counts.
  *
- * The heavy step — `loadUsageHistory` can replay every project's transcripts —
+ * The heavy step — `loadUsageHistoryWithLive` can replay recent transcripts —
  * is cached once (range-independent), so toggling Today/7D/30D re-aggregates
  * cheaply from a single disk read instead of re-loading per range, and
  * concurrent requests coalesce onto the in-flight load.
@@ -26,7 +27,7 @@
 import type { Application } from 'express';
 import {
   buildUsageDashboard,
-  loadUsageHistory,
+  loadUsageHistoryWithLive,
   type UsageSummaryRecord,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -58,8 +59,10 @@ function parseRange(raw: unknown): UsageRange {
 
 /** Parse + clamp `?heatmapDays=`; anything invalid falls back to the default. */
 function parseHeatmapDays(raw: unknown): number {
-  const value = typeof raw === 'string' ? Number.parseInt(raw, 10) : Number.NaN;
-  if (!Number.isFinite(value)) return DEFAULT_HEATMAP_DAYS;
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw)) {
+    return DEFAULT_HEATMAP_DAYS;
+  }
+  const value = Number.parseInt(raw, 10);
   return Math.min(MAX_HEATMAP_DAYS, Math.max(MIN_HEATMAP_DAYS, value));
 }
 
@@ -67,9 +70,7 @@ export function registerUsageStatsRoutes(
   app: Application,
   deps: RegisterUsageStatsRoutesDeps = {},
 ): void {
-  const loadHistory =
-    deps.loadHistory ??
-    (() => loadUsageHistory(undefined, { persistRebuild: false }));
+  const loadHistory = deps.loadHistory ?? (() => loadUsageHistoryWithLive());
   const ttlMs = deps.cacheTtlMs ?? DEFAULT_CACHE_TTL_MS;
 
   // Closure-scoped, range-independent history cache (one daemon per process).

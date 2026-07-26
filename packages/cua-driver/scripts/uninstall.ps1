@@ -1,4 +1,4 @@
-﻿# cua-driver-rs uninstaller (Windows) — removes everything install.ps1
+﻿# qwen-cua-driver uninstaller (Windows) — removes everything install.ps1
 # laid down: the Scheduled Task autostart entry, running daemon
 # processes, the directory junctions wiring the visible bin dir back to
 # a per-version release dir, the entire package home tree, and any skill
@@ -6,11 +6,11 @@
 # config directories.
 #
 # Usage (one-liner — recommended):
-#   irm https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/uninstall.ps1 | iex
+#   irm https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/uninstall.ps1 | iex
 #
 # Force (skip all prompts):
 #   $env:CUA_DRIVER_RS_UNINSTALL_FORCE = '1'
-#   irm https://raw.githubusercontent.com/trycua/cua/main/libs/cua-driver/scripts/uninstall.ps1 | iex
+#   irm https://raw.githubusercontent.com/QwenLM/qwen-code/main/packages/cua-driver/scripts/uninstall.ps1 | iex
 #
 # Why an env var and not a `-Force` parameter: `iex` (Invoke-Expression)
 # refuses to parse a script that opens with `[CmdletBinding()] param(...)`
@@ -20,13 +20,13 @@
 # the self-elevation re-exec for free (no -ArgumentList forwarding).
 #
 # What gets removed:
-#   - Scheduled Task 'cua-driver-serve' (autostart entry registered by
-#     `cua-driver autostart enable` or install.ps1 -AutoStart)
-#   - Any running cua-driver.exe processes (so file handles don't pin
+#   - Scheduled Task 'qwen-cua-driver-serve' (autostart entry registered by
+#     `qwen-cua-driver autostart enable` or install.ps1 -AutoStart)
+#   - Any running qwen-cua-driver.exe processes (so file handles don't pin
 #     the binary directory open during the delete pass)
-#   - <visibleBinDir>     = %LOCALAPPDATA%\Programs\Cua\cua-driver\bin  (directory junction)
-#   - <currentDir>        = %USERPROFILE%\.cua-driver\packages\current  (directory junction)
-#   - <packageHome>       = %USERPROFILE%\.cua-driver\                  (entire tree:
+#   - <visibleBinDir>     = %LOCALAPPDATA%\Programs\Qwen\qwen-cua-driver\bin  (directory junction)
+#   - <currentDir>        = %USERPROFILE%\.qwen-cua-driver\packages\current  (directory junction)
+#   - <packageHome>       = %USERPROFILE%\.qwen-cua-driver\                  (entire tree:
 #                                                                              releases, lockfile,
 #                                                                              telemetry id,
 #                                                                              install marker,
@@ -45,11 +45,11 @@
 #
 # Env overrides (mirror install.ps1's variable names):
 #   $env:CUA_DRIVER_RS_INSTALL_DIR   visible bin dir to remove
-#                                    (default %LOCALAPPDATA%\Programs\Cua\cua-driver\bin;
+#                                    (default %LOCALAPPDATA%\Programs\Qwen\qwen-cua-driver\bin;
 #                                     v0.2.13 and earlier used Programs\trycua\cua-driver-rs\bin
 #                                     — that legacy path is always cleaned up too)
 #   $env:CUA_DRIVER_RS_HOME          package home to remove
-#                                    (default %USERPROFILE%\.cua-driver;
+#                                    (default %USERPROFILE%\.qwen-cua-driver;
 #                                     v0.2.13 and earlier used .cua-driver-rs —
 #                                     that legacy path is always cleaned up too)
 #
@@ -62,14 +62,14 @@
 #               re-exec child (see Elevation below).
 #
 # Elevation:
-#   `install.ps1 -AutoStart` (and `cua-driver autostart enable`) register
-#   the `cua-driver-serve` Scheduled Task at RunLevel=Highest — the
+#   `install.ps1 -AutoStart` (and `qwen-cua-driver autostart enable`) register
+#   the `qwen-cua-driver-serve` Scheduled Task at RunLevel=Highest — the
 #   daemon spawned by it then runs at High IL so it can drive UWP /
 #   AppContainer apps (Calculator, Settings, Photos — see
 #   autostart.rs:127). Side-effect: a non-elevated process (even the same
 #   user that installed it) can NOT terminate the daemon or delete the
 #   task — both fail with Access Denied, and the binary stays locked
-#   under ~\.cua-driver\... . If we detect either condition at startup
+#   under ~\.qwen-cua-driver\... . If we detect either condition at startup
 #   we self-elevate via UAC; otherwise we run in-place. Mirrors the
 #   install side's elevation pattern in autostart.rs:215-223.
 
@@ -88,7 +88,7 @@ $Force = [bool]$env:CUA_DRIVER_RS_UNINSTALL_FORCE
 
 # ---------- Elevation pre-check -------------------------------------------
 
-$AutoStartTask = "cua-driver-serve"
+$AutoStartTask = "qwen-cua-driver-serve"
 
 function Test-IsElevated {
     ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -96,7 +96,7 @@ function Test-IsElevated {
 
 function Test-NeedsElevation {
     # Either the autostart task exists (RunLevel=Highest, so deleting it
-    # needs admin) or a cua-driver.exe is running (its parent was the
+    # needs admin) or a qwen-cua-driver.exe is running (its parent was the
     # elevated task, so terminating it needs admin too). Detecting either
     # upfront lets us self-elevate before we start tearing things down
     # — otherwise the non-elevated path silently swallows access-denied
@@ -109,13 +109,13 @@ function Test-NeedsElevation {
     } finally {
         $ErrorActionPreference = $prevEAP
     }
-    $hasDaemon = @(Get-Process -Name "cua-driver" -ErrorAction SilentlyContinue).Count -gt 0
+    $hasDaemon = @(Get-Process -Name "qwen-cua-driver" -ErrorAction SilentlyContinue).Count -gt 0
     return ($hasTask -or $hasDaemon)
 }
 
 if (-not (Test-IsElevated) -and (Test-NeedsElevation)) {
-    Write-Host "==> cua-driver-rs uninstaller: detected -AutoStart install state" -ForegroundColor Cyan
-    Write-Host "    (the 'cua-driver-serve' task is RunLevel=Highest and/or a daemon is"
+    Write-Host "==> qwen-cua-driver uninstaller: detected -AutoStart install state" -ForegroundColor Cyan
+    Write-Host "    (the 'qwen-cua-driver-serve' task is RunLevel=Highest and/or a daemon is"
     Write-Host "    running at High IL). Removing them needs admin — triggering UAC prompt."
 
     # Re-exec self elevated. $MyInvocation.MyCommand.Path is set when invoked
@@ -129,7 +129,7 @@ if (-not (Test-IsElevated) -and (Test-NeedsElevation)) {
 
     $scriptPath = $MyInvocation.MyCommand.Path
     if (-not $scriptPath) {
-        $tmp = Join-Path $env:TEMP ("cua-driver-uninstall-" + [Guid]::NewGuid().ToString('N') + ".ps1")
+        $tmp = Join-Path $env:TEMP ("qwen-cua-driver-uninstall-" + [Guid]::NewGuid().ToString('N') + ".ps1")
         $body = $MyInvocation.MyCommand.Definition
         Set-Content -LiteralPath $tmp -Value $body -Encoding UTF8
         $scriptPath = $tmp
@@ -153,7 +153,7 @@ if ($env:CUA_DRIVER_RS_INSTALL_DIR) {
     $VisibleBinDir = $env:CUA_DRIVER_RS_INSTALL_DIR
 } else {
     # New layout (v0.2.14+). Path rename rationale: see install.ps1.
-    $VisibleBinDir = Join-Path $env:LOCALAPPDATA "Programs\Cua\cua-driver\bin"
+    $VisibleBinDir = Join-Path $env:LOCALAPPDATA "Programs\Qwen\qwen-cua-driver\bin"
 }
 
 # Legacy bin dir from v0.2.13 and earlier. We also clean these up so a
@@ -165,7 +165,7 @@ $LegacyVendorDir     = Join-Path $env:LOCALAPPDATA "Programs\trycua"
 if ($env:CUA_DRIVER_RS_HOME) {
     $HomeDir = $env:CUA_DRIVER_RS_HOME
 } else {
-    $HomeDir = Join-Path $env:USERPROFILE ".cua-driver"
+    $HomeDir = Join-Path $env:USERPROFILE ".qwen-cua-driver"
 }
 
 # Legacy package home from v0.2.13 and earlier.
@@ -176,7 +176,7 @@ $CurrentDir   = Join-Path $PackagesDir "current"
 # $AutoStartTask hoisted to the elevation pre-check block above.
 
 # Skill junctions — mirrors the AGENTS list in
-# libs/cua-driver/rust/crates/cua-driver/src/skills.rs (the verb that
+# packages/cua-driver/rust/crates/cua-driver/src/skills.rs (the verb that
 # creates them) so we remove from the same paths. Both the current
 # `cua-driver` name and the pre-rename `cua-driver-rs` name are swept
 # so a user who installed before the rename ends up clean.
@@ -251,7 +251,7 @@ Write-Step "  bin dir     : $VisibleBinDir"
 Write-Step "  package home: $HomeDir"
 Write-Host ""
 
-# 1. Scheduled Task autostart (registered by `cua-driver autostart enable`
+# 1. Scheduled Task autostart (registered by `qwen-cua-driver autostart enable`
 #    or install.ps1 -AutoStart). Idempotent — schtasks /Query returns
 #    non-zero AND writes stderr when the task is absent. Under PS 5.1 with
 #    $ErrorActionPreference=Stop (set at the top of this script), native
@@ -288,14 +288,14 @@ if ($taskExitCode -eq 0 -and $taskQuery) {
     Write-Step "no scheduled task '$AutoStartTask' registered (skipping)"
 }
 
-# 2. Running cua-driver.exe processes. The serve daemon and any active
-#    `cua-driver` invocation hold file handles to the binary, which
+# 2. Running qwen-cua-driver.exe processes. The serve daemon and any active
+#    `qwen-cua-driver` invocation hold file handles to the binary, which
 #    pin the directory junction's target open and make Remove-Item
 #    fail with "in use". Stop them up front so subsequent deletes
 #    aren't racy.
-$running = @(Get-Process -Name "cua-driver" -ErrorAction SilentlyContinue)
+$running = @(Get-Process -Name "qwen-cua-driver" -ErrorAction SilentlyContinue)
 if ($running.Count -gt 0) {
-    Write-Step "stopping $($running.Count) running cua-driver.exe process(es)"
+    Write-Step "stopping $($running.Count) running qwen-cua-driver.exe process(es)"
     foreach ($p in $running) {
         try {
             Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue
@@ -307,7 +307,7 @@ if ($running.Count -gt 0) {
     # releases its file handles before we try to delete the binary dir.
     Start-Sleep -Milliseconds 250
 } else {
-    Write-Step "no running cua-driver.exe processes"
+    Write-Step "no running qwen-cua-driver.exe processes"
 }
 
 # 3. Visible bin directory junction. Only remove when it's actually a
@@ -357,7 +357,7 @@ if (Test-Path -LiteralPath $HomeDir) {
         Remove-Item -LiteralPath $HomeDir -Force -Recurse -ErrorAction SilentlyContinue
         if (Test-Path -LiteralPath $HomeDir) {
             Write-WarningStep "$HomeDir was not fully removed — some files may still be locked."
-            Write-WarningStep "  Close any open cua-driver processes / shells with cwd inside the tree and re-run."
+            Write-WarningStep "  Close any open qwen-cua-driver processes / shells with cwd inside the tree and re-run."
         } else {
             Write-Step "removed $HomeDir"
         }
@@ -431,7 +431,7 @@ Write-Host ""
 Write-Host "    claude mcp remove cua-driver-rs"
 Write-Host ""
 Write-Host "  Or edit ~/.claude.json directly and delete entries whose 'command' points at"
-Write-Host "  cua-driver.exe under %LOCALAPPDATA%\Programs\Cua\cua-driver\bin\"
+Write-Host "  qwen-cua-driver.exe under %LOCALAPPDATA%\Programs\Qwen\qwen-cua-driver\bin\"
 Write-Host "  (or the legacy %LOCALAPPDATA%\Programs\trycua\cua-driver-rs\bin\ from v0.2.13 and earlier)."
 Write-Host ""
 Write-Host "PATH:"

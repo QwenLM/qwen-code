@@ -89,7 +89,13 @@ function loopbackHost(): string {
 }
 
 async function makeHarness(
-  opts: { token?: string; trusted?: boolean } = {},
+  opts: {
+    token?: string;
+    trusted?: boolean;
+    runtimeEnv?: Readonly<NodeJS.ProcessEnv>;
+    daemonEnv?: Readonly<NodeJS.ProcessEnv>;
+    hotReload?: boolean;
+  } = {},
 ): Promise<Harness> {
   const scratch = await fsp.mkdtemp(
     path.join(
@@ -125,7 +131,26 @@ async function makeHarness(
   const app = createServeApp(
     { ...baseOpts, workspace, token: opts.token },
     undefined,
-    { bridge, fsFactory },
+    {
+      bridge,
+      fsFactory,
+      ...(opts.hotReload
+        ? {
+            workspaceTrustHotReloadAvailable: true,
+            primaryWorkspaceTrusted: true,
+          }
+        : {}),
+      daemonEnv: opts.daemonEnv ?? {},
+      ...(opts.runtimeEnv
+        ? {
+            primaryRuntimeEnv: {
+              mode: 'runtime-overlay' as const,
+              overlayKeys: Object.keys(opts.runtimeEnv),
+              effectiveEnv: opts.runtimeEnv,
+            },
+          }
+        : {}),
+    },
   );
   return { workspace, scratch, bridgeEvents, app };
 }
@@ -236,6 +261,58 @@ describe('POST /workspace/setup-github', () => {
         data: expect.objectContaining({ releaseTag: 'v1.2.3' }),
       }),
     ]);
+  });
+
+  it('does not publish completion after the runtime generation closes', async () => {
+    await teardown(h);
+    h = await makeHarness({ token: 'secret', hotReload: true });
+    setupGithubMocks.setupGithub.mockImplementationOnce(async () => {
+      const registry = h.app.locals['workspaceRegistry'] as {
+        primaryEntry: { current?: { guard: { close(): void } } };
+      };
+      registry.primaryEntry.current?.guard.close();
+      return setupResult();
+    });
+
+    const res = await request(h.app)
+      .post('/workspace/setup-github')
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .send({ consent: true });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+    expect(h.bridgeEvents).toEqual([]);
+  });
+
+  it('returns retryable unavailable when generation closes before directory setup', async () => {
+    await teardown(h);
+    h = await makeHarness({ token: 'secret', hotReload: true });
+    setupGithubMocks.setupGithub.mockImplementationOnce(
+      async (opts: {
+        workspaceRoot: string;
+        fileOps: {
+          ensureWorkflowDirectory(gitRepoRoot: string): Promise<void>;
+        };
+      }) => {
+        const registry = h.app.locals['workspaceRegistry'] as {
+          primaryEntry: { current?: { guard: { close(): void } } };
+        };
+        registry.primaryEntry.current?.guard.close();
+        await opts.fileOps.ensureWorkflowDirectory(opts.workspaceRoot);
+        return setupResult();
+      },
+    );
+
+    const res = await request(h.app)
+      .post('/workspace/setup-github')
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .send({ consent: true });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+    expect(h.bridgeEvents).toEqual([]);
   });
 
   it('rejects untrusted workspace before creating workflow directory', async () => {
@@ -370,6 +447,34 @@ describe('POST /workspace/setup-github', () => {
     );
   });
 
+  it('does not let workspace settings disable fallback trust checks', async () => {
+    await writeJson(path.join(h.scratch, 'home', 'settings.json'), {
+      proxy: 'http://user-proxy.example:8080',
+      security: { folderTrust: { enabled: true } },
+    });
+    await writeJson(
+      path.join(h.workspace, SETTINGS_DIRECTORY_NAME, 'settings.json'),
+      {
+        proxy: 'http://workspace-proxy.example:8080',
+        security: { folderTrust: { enabled: false } },
+      },
+    );
+    setupGithubMocks.setupGithub.mockResolvedValueOnce(setupResult());
+
+    const res = await request(h.app)
+      .post('/workspace/setup-github')
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .send({ consent: true });
+
+    expect(res.status).toBe(200);
+    expect(setupGithubMocks.setupGithub).toHaveBeenCalledWith(
+      expect.objectContaining({
+        proxy: 'http://user-proxy.example:8080',
+      }),
+    );
+  });
+
   it('uses workspace proxy settings after trust is established', async () => {
     await writeJson(path.join(h.scratch, 'home', 'settings.json'), {
       proxy: 'http://user-proxy.example:8080',
@@ -397,6 +502,29 @@ describe('POST /workspace/setup-github', () => {
     expect(setupGithubMocks.setupGithub).toHaveBeenCalledWith(
       expect.objectContaining({
         proxy: 'http://workspace-proxy.example:8080',
+      }),
+    );
+  });
+
+  it('uses the owning runtime environment for proxy fallback', async () => {
+    await teardown(h);
+    h = await makeHarness({
+      token: 'secret',
+      runtimeEnv: { HTTPS_PROXY: 'http://runtime-proxy.example:8080' },
+      daemonEnv: { HTTPS_PROXY: 'http://daemon-proxy.example:8080' },
+    });
+    setupGithubMocks.setupGithub.mockResolvedValueOnce(setupResult());
+
+    const res = await request(h.app)
+      .post('/workspace/setup-github')
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .send({ consent: true });
+
+    expect(res.status).toBe(200);
+    expect(setupGithubMocks.setupGithub).toHaveBeenCalledWith(
+      expect.objectContaining({
+        proxy: 'http://runtime-proxy.example:8080',
       }),
     );
   });

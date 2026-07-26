@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import fs from 'node:fs/promises';
 import * as nodeFs from 'node:fs';
 import path from 'node:path';
@@ -17,6 +17,19 @@ import type { Config } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { checkPriorRead } from '../tools/priorReadEnforcement.js';
+import { getPDFPageCount, isPdftotextAvailable } from './pdf.js';
+
+vi.mock('./pdf.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./pdf.js')>();
+  return {
+    ...actual,
+    getPDFPageCount: vi.fn(),
+    isPdftotextAvailable: vi.fn(),
+  };
+});
+
+const mockGetPDFPageCount = vi.mocked(getPDFPageCount);
+const mockIsPdftotextAvailable = vi.mocked(isPdftotextAvailable);
 
 /** Helper to convert PartListUnion to string for test assertions */
 function contentToString(parts: PartListUnion): string {
@@ -90,6 +103,10 @@ describe('readManyFiles', () => {
   }
 
   beforeEach(async () => {
+    mockGetPDFPageCount.mockReset();
+    mockGetPDFPageCount.mockResolvedValue(null);
+    mockIsPdftotextAvailable.mockReset();
+    mockIsPdftotextAvailable.mockResolvedValue(true);
     tempRootDir = nodeFs.realpathSync(
       await fs.mkdtemp(path.join(os.tmpdir(), 'read-many-files-test-')),
     );
@@ -128,6 +145,22 @@ describe('readManyFiles', () => {
       expect(content).toContain('Content of file1.txt');
       expect(content).toContain('Content of file2.txt');
       expect(content).toContain('--- End of content ---');
+    });
+
+    it('should include truncated large text files instead of reporting a size error', async () => {
+      const relativePath = 'large.log';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      await fs.writeFile(absolutePath, 'x'.repeat(11 * 1024 * 1024), 'utf-8');
+      const mockConfig = createMockConfig(tempRootDir);
+
+      const result = await readManyFiles(mockConfig, { paths: [relativePath] });
+
+      const content = contentToString(result.contentParts);
+      expect(content).toContain('Showing lines 1-1 of at least 1 total lines');
+      expect(content).toContain('... [truncated]');
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.error).toBeUndefined();
+      expect(result.files[0]!.filePath).toBe(absolutePath);
     });
 
     it('should include truncated notebooks that do not expose text line ranges', async () => {
@@ -201,6 +234,33 @@ describe('readManyFiles', () => {
       expect(result.files[0]!.content).toContain('Unsupported image file');
     });
 
+    it('references large PDFs instead of inlining extracted text for @ attachments', async () => {
+      const relativePath = 'paper.pdf';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      await fs.writeFile(absolutePath, Buffer.alloc(2 * 1024 * 1024));
+      mockGetPDFPageCount.mockResolvedValueOnce(31);
+      const cache = new FileReadCache();
+      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
+
+      const result = await readManyFiles(mockConfig, { paths: [relativePath] });
+      const content = contentToString(result.contentParts);
+
+      expect(result.files).toHaveLength(1);
+      expect(result.files[0]!.error).toBeUndefined();
+      expect(result.files[0]!.content).toContain('PDF "paper.pdf"');
+      expect(content).toContain("Use the 'pages' parameter");
+      expect(content.length).toBeLessThan(1000);
+      expect(mockGetPDFPageCount).toHaveBeenCalledTimes(1);
+      expect(mockGetPDFPageCount).toHaveBeenCalledWith(absolutePath);
+      expect(mockIsPdftotextAvailable).not.toHaveBeenCalled();
+
+      const status = cache.check(nodeFs.statSync(absolutePath));
+      expect(status.state).toBe('fresh');
+      if (status.state === 'fresh') {
+        expect(status.entry.lastReadCacheable).toBe(false);
+      }
+    });
+
     it('should return message when no files found', async () => {
       const mockConfig = createMockConfig(tempRootDir);
 
@@ -230,6 +290,20 @@ describe('readManyFiles', () => {
       expect(content).toContain('file2.txt');
       // Should NOT contain the file contents, just the structure
       expect(content).not.toContain('Content of file1.txt');
+    });
+
+    it('should propagate aborts before reading a directory', async () => {
+      await createTestFile('mydir', 'file1.txt');
+      const mockConfig = createMockConfig(tempRootDir);
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(
+        readManyFiles(mockConfig, {
+          paths: ['mydir'],
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow(/abort/i);
     });
 
     it('should handle directory with trailing slash', async () => {
@@ -395,6 +469,20 @@ describe('readManyFiles', () => {
   });
 
   describe('per-file error surfacing', () => {
+    it('should propagate aborts from file reads instead of returning an error message', async () => {
+      const { relativePath } = await createTestFile('cancel.txt');
+      const mockConfig = createMockConfig(tempRootDir);
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(
+        readManyFiles(mockConfig, {
+          paths: [relativePath],
+          signal: controller.signal,
+        }),
+      ).rejects.toThrow(/abort/i);
+    });
+
     it('should surface processSingleFileContent errors instead of silently skipping the file', async () => {
       // Trigger the >10MB file-size error path in processSingleFileContent.
       const relativePath = 'huge.bin';

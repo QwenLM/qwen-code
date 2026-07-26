@@ -373,7 +373,10 @@ export async function runSkillReviewByAgent(params: {
     systemPrompt: SKILL_REVIEW_SYSTEM_PROMPT,
     maxTurns: params.maxTurns ?? DEFAULT_AUTO_SKILL_MAX_TURNS,
     maxTimeMinutes:
-      (params.timeoutMs ?? DEFAULT_AUTO_SKILL_TIMEOUT_MS) / 60_000,
+      params.timeoutMs !== undefined
+        ? params.timeoutMs / 60_000
+        : (params.config.getMemoryAgentTimeoutMinutes() ??
+          DEFAULT_AUTO_SKILL_TIMEOUT_MS / 60_000),
     tools: [
       ToolNames.READ_FILE,
       ToolNames.LS,

@@ -11,6 +11,7 @@ import type { Config } from '@qwen-code/qwen-code-core';
 import {
   __resetActiveGoalStoreForTests,
   clearActiveGoal,
+  getActiveGoal,
   notifyGoalTerminal,
 } from '@qwen-code/qwen-code-core';
 
@@ -86,14 +87,30 @@ describe('goalCommand', () => {
     expect((result as { content: string }).content).toMatch(/disabled/i);
   });
 
-  it('rejects oversized conditions', async () => {
-    const ctx = createMockCommandContext({
-      services: { config: makeConfig() as unknown as Config },
-    });
-    const result = await goalCommand.action!(ctx, 'x'.repeat(4001));
-    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
-    expect((result as { content: string }).content).toMatch(/limited/i);
-  });
+  it.each(['interactive', 'non_interactive', 'acp'] as const)(
+    'accepts conditions longer than 4,000 characters in %s mode',
+    async (executionMode) => {
+      const ctx = createMockCommandContext({
+        executionMode,
+        services: { config: makeConfig() as unknown as Config },
+      });
+      const condition = `${'x'.repeat(4_001)}-goal-condition-end`;
+
+      const result = await goalCommand.action!(ctx, condition);
+
+      expect(result).toMatchObject({ type: 'submit_prompt' });
+      const submit = result as { content: Array<{ text: string }> };
+      expect(submit.content[0].text).toContain(condition);
+      expect(getActiveGoal('sess-1')?.condition).toBe(condition);
+      expect(
+        (ctx.ui.addItem as ReturnType<typeof vi.fn>).mock.calls[0][0],
+      ).toMatchObject({
+        type: 'goal_status',
+        kind: 'set',
+        condition,
+      });
+    },
+  );
 
   it('clears existing goal on clear keyword and emits a cleared card', async () => {
     const cfg = makeConfig();

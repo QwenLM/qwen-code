@@ -1,0 +1,198 @@
+name: 'Comment Attachment Guard'
+
+on:
+  issue_comment:
+    types:
+      - 'created'
+      - 'edited'
+  pull_request_review_comment:
+    types:
+      - 'created'
+      - 'edited'
+  pull_request_review:
+    types:
+      - 'submitted'
+      - 'edited'
+
+permissions:
+  contents: 'read'
+  issues: 'write'
+  pull-requests: 'write'
+
+jobs:
+  remove-suspicious-attachments:
+    timeout-minutes: 2
+    if: |-
+      ${{ github.repository == 'QwenLM/qwen-code' }}
+    runs-on: 'ubuntu-latest'
+    steps:
+      - name: 'Remove suspicious attachment comments'
+        uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3' # v9.0.0
+        with:
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          script: |
+            const trustedAssociations = new Set([
+              'OWNER',
+              'MEMBER',
+              'COLLABORATOR',
+            ]);
+            const highRiskExtension =
+              /\.(?:zip|rar|7z|tar\.gz|tgz|dmg|pkg|exe|msi|bat|ps1|node|dylib)(?![a-zA-Z0-9])/i;
+            const linkPattern =
+              /(?:https?:\/\/|www\.|\/\/)[^\s"'<>\]]+|\[[^\]]+\]\((?:[^()\s]|\([^()\s]*\))+\)/gi;
+            const errorMessage = (error) =>
+              `${error?.status ? `${error.status} ` : ''}${error?.message ?? error}`;
+            const decodeTarget = (target) => {
+              let decoded = target;
+              for (let i = 0; i < 3; i += 1) {
+                try {
+                  const next = decodeURIComponent(decoded);
+                  if (next === decoded) {
+                    break;
+                  }
+                  decoded = next;
+                } catch {
+                  decoded = decoded.replace(/%[0-9a-f]{2}/gi, (match) =>
+                    String.fromCharCode(Number.parseInt(match.slice(1), 16)),
+                  );
+                }
+              }
+              return decoded
+                .replace(/[\u200B-\u200D\uFEFF\u00AD\u2060\u180E]/g, '')
+                .normalize('NFKC');
+            };
+            const highRiskTarget = (url) => {
+              let targets = [url];
+              if (/^(?:https?:\/\/|www\.|\/\/)/i.test(url)) {
+                try {
+                  const normalizedUrl = /^\/\//.test(url)
+                    ? `https:${url}`
+                    : /^www\./i.test(url)
+                      ? `https://${url}`
+                      : url;
+                  const parsedUrl = new URL(normalizedUrl);
+                  targets = [
+                    ...parsedUrl.pathname.split('/').filter(Boolean),
+                    ...parsedUrl.searchParams.values(),
+                  ];
+                } catch {
+                  targets = [url];
+                }
+              }
+              return (
+                targets
+                  .map(decodeTarget)
+                  .find((segment) => highRiskExtension.test(segment)) ||
+                decodeTarget(targets[targets.length - 1] || url)
+              );
+            };
+
+            const { sender } = context.payload;
+            const comment = context.payload.comment ?? context.payload.review;
+            const association = comment.author_association ?? '';
+            const action = context.payload.action ?? '';
+            const commentAuthor = comment.user?.login ?? 'ghost';
+            const body = comment.body ?? '';
+            const scanBody = body
+              .replace(/```[\s\S]*?```/g, '')
+              .replace(/`[^`]*`/g, '');
+            const eventName = context.eventName;
+
+            if (
+              trustedAssociations.has(association) ||
+              sender?.type === 'Bot' ||
+              (action === 'edited' &&
+                sender?.login &&
+                sender.login !== commentAuthor)
+            ) {
+              core.info(`Trusted author (${association || sender?.type}); skipping.`);
+              return;
+            }
+
+            const reasons = [];
+            const linkSnippets = scanBody.match(linkPattern) ?? [];
+            const hasHighRiskLink = linkSnippets.some((snippet) => {
+              const mdMatch = snippet.match(/^\[[^\]]+\]\((.+)\)$/);
+              const url = mdMatch ? mdMatch[1] : snippet;
+              return highRiskExtension.test(highRiskTarget(url));
+            });
+            if (hasHighRiskLink) {
+              reasons.push('high-risk file extension in a link or attachment');
+            }
+
+            if (reasons.length === 0) {
+              core.info('No suspicious attachment pattern found.');
+              return;
+            }
+
+            const { owner, repo } = context.repo;
+            const moderationVerb =
+              eventName === 'pull_request_review' ? 'minimize' : 'delete';
+            let actionTaken = '';
+            let moderationErrorMessage = '';
+            let moderationErrorStatus;
+            try {
+              if (eventName === 'issue_comment') {
+                await github.rest.issues.deleteComment({
+                  owner,
+                  repo,
+                  comment_id: comment.id,
+                });
+                actionTaken = 'removed';
+              } else if (eventName === 'pull_request_review_comment') {
+                await github.rest.pulls.deleteReviewComment({
+                  owner,
+                  repo,
+                  comment_id: comment.id,
+                });
+                actionTaken = 'removed';
+              } else if (eventName === 'pull_request_review') {
+                await github.graphql(
+                  `mutation MinimizeComment($id: ID!) {
+                    minimizeComment(input: {subjectId: $id, classifier: SPAM}) {
+                      minimizedComment {
+                        isMinimized
+                      }
+                    }
+                  }`,
+                  { id: comment.node_id },
+                );
+                actionTaken = 'minimized';
+              }
+            } catch (error) {
+              moderationErrorStatus = error?.status;
+              moderationErrorMessage = `Failed to ${moderationVerb} suspicious comment ${comment.id}: ${errorMessage(error)}`;
+              core.warning(moderationErrorMessage);
+            }
+
+            try {
+              await core.summary
+                .addHeading('Suspicious attachment detected')
+                .addTable([
+                  [
+                    { data: 'Field', header: true },
+                    { data: 'Value', header: true },
+                  ],
+                  ['Event', eventName],
+                  ['Author', commentAuthor],
+                  ['Association', association || 'none'],
+                  ['Comment ID', String(comment.id)],
+                  ['Reason', reasons.join(', ')],
+                  [
+                    'Action',
+                    actionTaken ||
+                      (eventName === 'pull_request_review'
+                        ? 'minimize failed'
+                        : 'delete failed'),
+                  ],
+                ])
+                .write();
+            } catch (error) {
+              core.warning(
+                `Failed to write suspicious comment summary: ${errorMessage(error)}`,
+              );
+            }
+
+            if (moderationErrorMessage && moderationErrorStatus !== 404) {
+              core.setFailed(moderationErrorMessage);
+            }

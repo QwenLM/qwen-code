@@ -36,6 +36,143 @@ describe('MID_TURN_MESSAGE_INJECTED_EVENT (shared wire constant)', () => {
 });
 
 describe('daemon event schema', () => {
+  it('recognizes sanitized channel delivery result events', () => {
+    const delivered: DaemonEvent = {
+      id: 1,
+      v: 1,
+      type: 'channel_delivery_result',
+      promptId: 'prompt-1',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'prompt-1',
+        source: 'prompt',
+        status: 'delivered',
+        promptId: 'prompt-1',
+      },
+    };
+    const failed: DaemonEvent = {
+      id: 2,
+      v: 1,
+      type: 'channel_delivery_result',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'task-1:123',
+        source: 'scheduled',
+        status: 'failed',
+        taskId: 'task-1',
+        firedAt: 123,
+        code: 'channel_delivery_rejected',
+        error: 'Recipient rejected.',
+      },
+    };
+    const skipped: DaemonEvent = {
+      id: 3,
+      v: 1,
+      type: 'channel_delivery_result',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'task-1:456',
+        source: 'scheduled',
+        status: 'skipped',
+        taskId: 'task-1',
+        firedAt: 456,
+      },
+    };
+
+    expect(asKnownDaemonEvent(delivered)).toBe(delivered);
+    expect(asKnownDaemonEvent(failed)).toBe(failed);
+    expect(asKnownDaemonEvent(skipped)).toBe(skipped);
+    expect(DAEMON_KNOWN_EVENT_TYPE_VALUES).toContain('channel_delivery_result');
+  });
+
+  it('rejects malformed or unsanitized channel delivery results', () => {
+    const base = {
+      id: 1,
+      v: 1 as const,
+      type: 'channel_delivery_result',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'prompt-1',
+        source: 'prompt',
+        status: 'delivered',
+        promptId: 'prompt-1',
+      },
+    };
+
+    expect(
+      asKnownDaemonEvent({
+        ...base,
+        data: { ...base.data, target: { id: 'secret' } },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        ...base,
+        data: { ...base.data, text: 'secret final answer' },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        ...base,
+        data: { ...base.data, status: 'failed' },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        ...base,
+        data: { ...base.data, source: 'scheduled' },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('accepts every canonical channel delivery error code', () => {
+    // Canonical set from acp-bridge bridgeOptions.ts — the SDK carries an
+    // independent copy, so this test catches drift.
+    const canonicalCodes = [
+      'channel_worker_unavailable',
+      'channel_delivery_timeout',
+      'channel_delivery_invalid',
+      'channel_delivery_rejected',
+      'channel_delivery_queue_full',
+      'channel_delivery_failed',
+    ];
+    for (const code of canonicalCodes) {
+      const event: DaemonEvent = {
+        id: 1,
+        v: 1,
+        type: 'channel_delivery_result',
+        data: {
+          sessionId: 'session-1',
+          deliveryId: 'task-1:123',
+          source: 'scheduled',
+          status: 'failed',
+          taskId: 'task-1',
+          firedAt: 123,
+          code,
+          error: 'Something went wrong.',
+        },
+      };
+      expect(asKnownDaemonEvent(event), `code ${code} rejected`).toBe(event);
+    }
+    // A code outside the canonical set is rejected.
+    const unknown: DaemonEvent = {
+      id: 2,
+      v: 1,
+      type: 'channel_delivery_result',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'task-1:123',
+        source: 'scheduled',
+        status: 'failed',
+        taskId: 'task-1',
+        firedAt: 123,
+        code: 'channel_delivery_exploded',
+        error: 'Not a real code.',
+      },
+    };
+    expect(asKnownDaemonEvent(unknown)).toBeUndefined();
+  });
+
   it('recognizes pending prompt queue events', () => {
     const added: DaemonEvent = {
       id: 10,
@@ -2101,6 +2238,7 @@ describe('PR 21 — auth device-flow events', () => {
         | 'in_flight'
         | 'disabled'
         | 'budget_would_exceed'
+        | 'authentication_required'
         // F2 (#4175 commit 5): pool-mode hard restart failure carried
         // alongside the soft-skip reasons. The reducer treats it like
         // any other refusal — count + remember last — without a
@@ -2109,7 +2247,13 @@ describe('PR 21 — auth device-flow events', () => {
         // counter is the operator-meaningful signal ("this many
         // restart attempts didn't take effect").
         | 'restart_failed'
-      > = ['in_flight', 'disabled', 'budget_would_exceed', 'restart_failed'];
+      > = [
+        'in_flight',
+        'disabled',
+        'budget_would_exceed',
+        'authentication_required',
+        'restart_failed',
+      ];
       let state = initial;
       for (const [i, reason] of reasons.entries()) {
         state = reduceDaemonSessionEvent(state, {
@@ -2119,7 +2263,7 @@ describe('PR 21 — auth device-flow events', () => {
           data: { serverName: 'docs', reason },
         });
       }
-      expect(state.mcpRestartRefusedCount).toBe(4);
+      expect(state.mcpRestartRefusedCount).toBe(5);
       expect(state.mcpRestartCount).toBe(0);
       expect(state.lastMcpRestartRefused?.reason).toBe('restart_failed');
       // Bogus reason literal is rejected by the parser.
@@ -2650,6 +2794,122 @@ describe('PR 21 — auth device-flow events', () => {
   });
 
   describe('state_resync_required (#4175 F4 prereq, Ilya0527 issue #15)', () => {
+    it('recognizes history_truncated and records it without entering resync', () => {
+      const event = {
+        v: 1,
+        type: 'history_truncated',
+        data: {
+          reason: 'replay_window_exceeded',
+          truncatedEvents: 4,
+          retainedEvents: 2,
+          maxBytes: 512,
+          truncatedTurns: 2,
+          fullTranscriptAvailable: true,
+        },
+      } satisfies DaemonEvent;
+
+      const known = asKnownDaemonEvent(event);
+      expect(known?.type).toBe('history_truncated');
+      expect(
+        asKnownDaemonEvent({
+          ...event,
+          data: {
+            ...event.data,
+            fullTranscriptAvailable: false,
+          },
+        })?.type,
+      ).toBe('history_truncated');
+
+      const state = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        event,
+      );
+      expect(state.awaitingResync).toBe(false);
+      expect(state.historyTruncatedCount).toBe(1);
+      expect(state.lastHistoryTruncated).toEqual(event.data);
+    });
+
+    it('rejects malformed history_truncated payloads', () => {
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'replay_window_exceeded',
+            retainedEvents: 2,
+            maxBytes: 512,
+            fullTranscriptAvailable: true,
+          },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'replay_window_exceeded',
+            truncatedEvents: -1,
+            retainedEvents: 2,
+            maxBytes: 512,
+            fullTranscriptAvailable: true,
+          },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'replay_window_exceeded',
+            truncatedEvents: 4,
+            retainedEvents: 2.5,
+            maxBytes: 512,
+            fullTranscriptAvailable: true,
+          },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'replay_window_exceeded',
+            truncatedEvents: 4,
+            retainedEvents: 2,
+            maxBytes: 512,
+            truncatedTurns: -1,
+            fullTranscriptAvailable: true,
+          },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'wrong_reason',
+            truncatedEvents: 4,
+            retainedEvents: 2,
+            maxBytes: 512,
+            fullTranscriptAvailable: true,
+          },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'history_truncated',
+          data: {
+            reason: 'replay_window_exceeded',
+            truncatedEvents: 4,
+            retainedEvents: 2,
+            maxBytes: 512,
+            fullTranscriptAvailable: 'yes',
+          },
+        }),
+      ).toBeUndefined();
+    });
+
     it('sets awaitingResync + records the resync data when daemon emits state_resync_required', () => {
       const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
         v: 1,
@@ -3087,6 +3347,57 @@ describe('PR 21 — auth device-flow events', () => {
   });
 
   describe('session_snapshot (A5 #4511)', () => {
+    it('validates and reduces recording degradation events', () => {
+      const event = {
+        id: 44,
+        v: 1,
+        type: 'session_recording_degraded',
+        data: { sessionId: 's-1', reason: 'write_failed' },
+      } satisfies DaemonEvent;
+
+      expect(asKnownDaemonEvent(event)).toBe(event);
+      const state = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        event,
+      );
+      expect(state.sessionId).toBe('s-1');
+      expect(state.recordingDegraded).toBe(true);
+    });
+
+    it('applies recording degradation while awaiting resync', () => {
+      const state = reduceDaemonSessionEvent(
+        {
+          ...createDaemonSessionViewState(),
+          awaitingResync: true,
+        },
+        {
+          v: 1,
+          type: 'session_recording_degraded',
+          data: { sessionId: 's-1', reason: 'write_failed' },
+        },
+      );
+
+      expect(state.recordingDegraded).toBe(true);
+      expect(state.awaitingResync).toBe(true);
+    });
+
+    it('rejects malformed recording degradation events', () => {
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'session_recording_degraded',
+          data: { sessionId: '', reason: 'write_failed' },
+        }),
+      ).toBeUndefined();
+      expect(
+        asKnownDaemonEvent({
+          v: 1,
+          type: 'session_recording_degraded',
+          data: { sessionId: 's-1', reason: 'disk_full' },
+        }),
+      ).toBeUndefined();
+    });
+
     it('asKnownDaemonEvent narrows session_snapshot', () => {
       const event: DaemonEvent = {
         v: 1,
@@ -3115,6 +3426,46 @@ describe('PR 21 — auth device-flow events', () => {
       expect(state.sessionId).toBe('s-1');
       expect(state.currentModelId).toBe('qwen-turbo');
       expect(state.approvalMode).toBe('yolo');
+    });
+
+    it('uses snapshot recording state when present and preserves it for old daemons', () => {
+      const degraded = reduceDaemonSessionEvent(
+        createDaemonSessionViewState(),
+        {
+          v: 1,
+          type: 'session_snapshot',
+          data: {
+            sessionId: 's-1',
+            currentModelId: null,
+            currentApprovalMode: null,
+            recordingDegraded: true,
+          },
+        },
+      );
+      expect(degraded.recordingDegraded).toBe(true);
+
+      const legacySnapshot = reduceDaemonSessionEvent(degraded, {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's-1',
+          currentModelId: null,
+          currentApprovalMode: null,
+        },
+      });
+      expect(legacySnapshot.recordingDegraded).toBe(true);
+
+      const recovered = reduceDaemonSessionEvent(legacySnapshot, {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's-1',
+          currentModelId: null,
+          currentApprovalMode: null,
+          recordingDegraded: false,
+        },
+      });
+      expect(recovered.recordingDegraded).toBe(false);
     });
 
     it('reducer does not overwrite model/mode with null snapshot values', () => {
@@ -3173,6 +3524,21 @@ describe('PR 21 — auth device-flow events', () => {
       });
       expect(state.unrecognizedKnownEventCount).toBe(1);
       expect(state.approvalMode).toBeUndefined();
+    });
+
+    it('drops session_snapshot with a non-boolean recordingDegraded', () => {
+      const state = reduceDaemonSessionEvent(createDaemonSessionViewState(), {
+        v: 1,
+        type: 'session_snapshot',
+        data: {
+          sessionId: 's1',
+          currentModelId: null,
+          currentApprovalMode: null,
+          recordingDegraded: 'yes' as unknown as boolean,
+        },
+      });
+      expect(state.unrecognizedKnownEventCount).toBe(1);
+      expect(state.recordingDegraded).toBe(false);
     });
   });
 });

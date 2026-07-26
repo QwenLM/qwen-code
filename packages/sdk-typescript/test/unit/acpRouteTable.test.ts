@@ -359,7 +359,26 @@ describe('acpRouteTable – matchRoute', () => {
     expect(result!.mapping.method).toBe('_qwen/session/artifacts/remove');
     expect(
       result!.mapping.extractParams(result!.segments, undefined, 'DELETE'),
-    ).toEqual({ sessionId: 's8', artifactId: 'art 1' });
+    ).toEqual({
+      sessionId: 's8',
+      artifactId: 'art 1',
+    });
+    expect(
+      result!.mapping.extractParams(
+        result!.segments,
+        {
+          clientId: 'client-a',
+          sessionId: 'body-session',
+          artifactId: 'body-artifact',
+          deleteContent: true,
+        },
+        'DELETE',
+      ),
+    ).toEqual({
+      sessionId: 's8',
+      artifactId: 'art 1',
+      clientId: 'client-a',
+    });
   });
 
   it('POST /session/:id/recap maps to _qwen/session/recap', () => {
@@ -442,6 +461,12 @@ describe('acpRouteTable – matchRoute', () => {
     const result = matchRoute('/workspace/mcp', 'GET');
     expect(result).not.toBeNull();
     expect(result!.mapping.method).toBe('_qwen/workspace/mcp');
+  });
+
+  it('POST /workspace/mcp/reload maps to _qwen/workspace/mcp/reload', () => {
+    const result = matchRoute('/workspace/mcp/reload', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/mcp/reload');
   });
 
   it('GET /workspace/skills maps to _qwen/workspace/skills', () => {
@@ -879,6 +904,11 @@ describe('acpRouteTable – matchRoute', () => {
 
   it('returns null for removed route /session/:id/approval-mode', () => {
     expect(matchRoute('/session/s12/approval-mode', 'POST')).toBeNull();
+  });
+
+  it('keeps rewind routes off ACP so strict REST auth cannot be bypassed', () => {
+    expect(matchRoute('/session/s12/rewind/snapshots', 'GET')).toBeNull();
+    expect(matchRoute('/session/s12/rewind', 'POST')).toBeNull();
   });
 
   // ---- Unknown/unmatched routes ---------------------------------------

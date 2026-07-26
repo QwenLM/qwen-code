@@ -1,11 +1,10 @@
 import {
   ViewPlugin,
   Decoration,
-  DecorationSet,
   EditorView,
-  ViewUpdate,
   WidgetType,
 } from '@codemirror/view';
+import type { DecorationSet, ViewUpdate } from '@codemirror/view';
 import { RangeSetBuilder } from '@codemirror/state';
 import type { CommandInfo } from '../adapters/types';
 import { getSlashCommandArgumentHint } from '../completions/slashCompletion';

@@ -1,9 +1,13 @@
+import { ActionableError } from './robot';
+
 // coord-norm.ts — Opt-in 0–1000 relative-coordinate shim for mobile-mcp.
 //
 // Mirrors packages/cua-driver's coord_norm.rs design. Default off = pixel
 // passthrough (zero behavior change). When on, input coordinates are
 // denormalized from 0–scale to device pixels/points before reaching the
-// backend, and output coordinates are normalized back.
+// backend. Query tools (get_screen_size, list_elements) return real pixel
+// values — the model learns the coordinate system from tool descriptions
+// and server instructions.
 //
 // Env vars:
 //   MOBILE_MCP_COORDINATE_SPACE  "0" (default, off) | "1" (on)
@@ -24,11 +28,6 @@ export function coordinateScale(): number {
 
 export function normToPx(norm: number, dim: number, scale: number): number {
   return Math.round((norm / scale) * dim);
-}
-
-export function pxToNorm(px: number, dim: number, scale: number): number {
-  if (dim === 0) return 0;
-  return Math.round((px / dim) * scale);
 }
 
 // ── Per-tool coordinate field mapping ────────────────────────────────────────
@@ -93,6 +92,12 @@ export function denormalizeArgs(
 
   for (const { field, isX } of fields) {
     if (typeof args[field] === 'number') {
+      if (args[field] < 0 || args[field] > scale) {
+        throw new ActionableError(
+          `Coordinate '${field}' value ${args[field]} is out of the normalized range [0, ${scale}]. ` +
+            `Use normalized coordinates (0-${scale}), not pixel coordinates.`,
+        );
+      }
       const dim = isX ? screenWidth : screenHeight;
       args[field] = normToPx(args[field], dim, scale);
     }
@@ -103,58 +108,22 @@ export function denormalizeArgs(
     toolName === 'mobile_swipe_on_screen' &&
     typeof args.distance === 'number'
   ) {
+    if (args.distance < 0 || args.distance > scale) {
+      throw new ActionableError(
+        `Swipe 'distance' value ${args.distance} is out of the normalized range [0, ${scale}]. ` +
+          `Use normalized coordinates (0-${scale}), not pixel values.`,
+      );
+    }
     const dir = args.direction;
     const dim = dir === 'up' || dir === 'down' ? screenHeight : screenWidth;
     args.distance = normToPx(args.distance, dim, scale);
   }
 }
 
-// ── Output: normalize element coordinates and screen size ────────────────────
+// ── Query helpers ───────────────────────────────────────────────────────────
 
-export function normalizeElementResult(
-  toolName: string,
-  response: string,
-  screenWidth: number,
-  screenHeight: number,
-): string {
-  if (toolName !== 'mobile_list_elements_on_screen') return response;
-
-  const scale = coordinateScale();
-  const prefix = 'Found these elements on screen: ';
-  if (!response.startsWith(prefix)) return response;
-
-  try {
-    const elements = JSON.parse(response.substring(prefix.length));
-    for (const el of elements) {
-      if (el.coordinates) {
-        el.coordinates.x = pxToNorm(el.coordinates.x, screenWidth, scale);
-        el.coordinates.y = pxToNorm(el.coordinates.y, screenHeight, scale);
-        el.coordinates.width = pxToNorm(
-          el.coordinates.width,
-          screenWidth,
-          scale,
-        );
-        el.coordinates.height = pxToNorm(
-          el.coordinates.height,
-          screenHeight,
-          scale,
-        );
-      }
-    }
-    return prefix + JSON.stringify(elements);
-  } catch (err) {
-    console.error('[coord-norm] Failed to normalize element coordinates:', err);
-    return response;
-  }
-}
-
-export function normalizeScreenSizeResult(
-  toolName: string,
-  response: string,
-): string {
-  if (toolName !== 'mobile_get_screen_size') return response;
-  const scale = coordinateScale();
-  return `Screen size is ${scale}x${scale} (normalized 0-${scale} coordinate space)`;
+export function hasCoordFields(toolName: string): boolean {
+  return toolName in INPUT_COORD_FIELDS;
 }
 
 // ── Ingest: extract screen size from get_screen_size response ────────────────

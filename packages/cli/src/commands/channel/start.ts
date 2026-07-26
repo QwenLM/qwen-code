@@ -1,10 +1,14 @@
 import type { CommandModule } from 'yargs';
 import {
-  appendChannelMemory,
+  addChannelMemoryEntries,
   clearChannelMemory,
+  getChannelMemoryRevision,
+  listChannelMemoryEntries,
   nextFireTime,
-  parseCron,
   readChannelMemory,
+  recordChannelMemoryRecallMetrics,
+  removeChannelMemoryEntries,
+  updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
@@ -14,11 +18,7 @@ import {
   ChannelLoopStore,
   SessionRouter,
 } from '@qwen-code/channel-base';
-import type {
-  ChannelBase,
-  ChannelBaseOptions,
-  ChannelLoopController,
-} from '@qwen-code/channel-base';
+import type { ChannelBase, ChannelBaseOptions } from '@qwen-code/channel-base';
 import { findCliEntryPath, parseChannelConfig } from './config-utils.js';
 import { resolveProxy } from './proxy.js';
 import {
@@ -32,11 +32,18 @@ import {
   loadChannelsConfig,
   loadChannelsFromExtensions,
   parseConfiguredChannels,
+  registerBackgroundResponseRelay,
+  registerPermissionRelay,
   registerSessionCleanup,
   registerToolCallDispatch,
   selectFirstModel,
   sessionsPath,
 } from './runtime.js';
+import { BridgeChannelMemoryIntentClassifier } from './memory-intent-classifier.js';
+import {
+  createChannelLoopController,
+  isChannelCronEnabled,
+} from './loop-runtime.js';
 
 export { resolveExtensionChannelEntrySpecifier } from './runtime.js';
 export { resolveProxy } from './proxy.js';
@@ -53,38 +60,29 @@ function isFileExistsError(err: unknown): boolean {
   );
 }
 
-function channelMemoryOptions(): Pick<ChannelBaseOptions, 'channelMemory'> {
+function channelMemoryOptions(
+  getBridge: () => AcpBridge,
+  cwd: string,
+): Pick<
+  ChannelBaseOptions,
+  'channelMemory' | 'memoryIntentClassifier' | 'channelMemoryRecallObserver'
+> {
   return {
     channelMemory: {
       readChannelMemory,
-      appendChannelMemory,
+      getChannelMemoryRevision,
+      listChannelMemoryEntries,
+      addChannelMemoryEntries,
+      updateChannelMemoryEntry,
+      removeChannelMemoryEntries,
       clearChannelMemory,
     },
+    memoryIntentClassifier: new BridgeChannelMemoryIntentClassifier(
+      getBridge,
+      cwd,
+    ),
+    channelMemoryRecallObserver: recordChannelMemoryRecallMetrics,
   };
-}
-
-function createLoopController(store: ChannelLoopStore): ChannelLoopController {
-  return {
-    create: (input) => store.create(input),
-    createForTarget: (input, maxEnabledLoops) =>
-      store.createForTarget(input, maxEnabledLoops),
-    listForTarget: (channelName, target) =>
-      store.listForTarget(channelName, target),
-    disable: (id) => store.disable(id),
-    validateCron: (cron) => {
-      parseCron(cron);
-      nextFireTime(cron, new Date());
-    },
-    nextFireTime: (job) =>
-      nextFireTime(job.cron, new Date(job.lastFiredAt ?? job.createdAt)),
-  };
-}
-
-function isChannelCronEnabled(settings: {
-  merged: { experimental?: { cron?: boolean } };
-}): boolean {
-  if (process.env['QWEN_CODE_DISABLE_CRON'] === '1') return false;
-  return settings.merged.experimental?.cron !== false;
 }
 
 function writeServiceInfoOrExit(channels: string[], cleanup: () => void): void {
@@ -168,6 +166,8 @@ async function startSingle(
     config = await parseChannelConfig(
       name,
       channelsConfig[name] as Record<string, unknown>,
+      process.cwd(),
+      { resolveEnvVars: 'available' },
     );
   } catch (err) {
     writeStderrLine(
@@ -194,14 +194,14 @@ async function startSingle(
     ? new ChannelLoopStore({ filePath: channelLoopPath() })
     : undefined;
   const loopController = loopStore
-    ? createLoopController(loopStore)
+    ? createChannelLoopController(loopStore)
     : undefined;
   const channels: Map<string, ChannelBase> = new Map();
 
   const channel = await createChannel(name, config, bridge, {
     router,
     proxy,
-    ...channelMemoryOptions(),
+    ...channelMemoryOptions(() => bridge, config.cwd),
     ...(loopController ? { loopController } : {}),
   });
   channels.set(name, channel);
@@ -213,6 +213,8 @@ async function startSingle(
       })
     : undefined;
   registerToolCallDispatch(bridge, router, channels);
+  registerBackgroundResponseRelay(bridge, router, channels);
+  registerPermissionRelay(bridge, router, channels);
   registerSessionCleanup(bridge, router, channels);
 
   try {
@@ -266,6 +268,8 @@ async function startSingle(
         channel.disconnect();
         await channel.connect();
         registerToolCallDispatch(bridge, router, channels);
+        registerBackgroundResponseRelay(bridge, router, channels);
+        registerPermissionRelay(bridge, router, channels);
         registerSessionCleanup(bridge, router, channels);
         attachDisconnectHandler(bridge);
 
@@ -350,7 +354,7 @@ async function startAll(
     ? new ChannelLoopStore({ filePath: channelLoopPath() })
     : undefined;
   const loopController = loopStore
-    ? createLoopController(loopStore)
+    ? createChannelLoopController(loopStore)
     : undefined;
   // Register per-channel scope overrides so each channel uses its own sessionScope
   for (const { name, config } of parsed) {
@@ -368,12 +372,14 @@ async function startAll(
       await createChannel(name, config, bridge, {
         router,
         proxy,
-        ...channelMemoryOptions(),
+        ...channelMemoryOptions(() => bridge, config.cwd),
         ...(loopController ? { loopController } : {}),
       }),
     );
   }
   registerToolCallDispatch(bridge, router, channels);
+  registerBackgroundResponseRelay(bridge, router, channels);
+  registerPermissionRelay(bridge, router, channels);
   registerSessionCleanup(bridge, router, channels);
 
   // Connect all channels
@@ -472,6 +478,8 @@ async function startAll(
           process.exit(1);
         }
         registerToolCallDispatch(bridge, router, channels);
+        registerBackgroundResponseRelay(bridge, router, channels);
+        registerPermissionRelay(bridge, router, channels);
         registerSessionCleanup(bridge, router, channels);
         attachDisconnectHandler(bridge);
 
@@ -532,7 +540,7 @@ export const startCommand: CommandModule<object, { name?: string }> = {
     }),
   handler: async (argv) => {
     const settings = loadSettings(process.cwd());
-    const proxy = resolveProxy(
+    const proxy = await resolveProxy(
       (argv as Record<string, unknown>)['proxy'] as string | undefined,
       settings.merged.proxy as string | undefined,
     );

@@ -4,7 +4,11 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { EditorState, StateEffect } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
-import type { WebShellAtProvider, WebShellComposerTag } from '../customization';
+import type {
+  WebShellAtProvider,
+  WebShellBuiltinAtProvidersConfig,
+  WebShellComposerTag,
+} from '../customization';
 import {
   useAtMentionMenu,
   type AtMentionWorkspaceActions,
@@ -44,6 +48,7 @@ function setViewState(view: EditorView, doc: string, anchor = doc.length) {
 function Harness({
   actions,
   disabled = false,
+  builtinProviders,
   providers,
   shellMode = false,
   view,
@@ -51,6 +56,7 @@ function Harness({
 }: {
   actions?: AtMentionWorkspaceActions;
   disabled?: boolean;
+  builtinProviders?: WebShellBuiltinAtProvidersConfig;
   providers?: readonly WebShellAtProvider[];
   shellMode?: boolean;
   view?: EditorView | null;
@@ -65,6 +71,7 @@ function Harness({
     disabledRef: { current: disabled },
     shellModeRef: { current: shellMode },
     workspaceActionsRef: { current: actions },
+    builtinProviders,
     providers,
     createInlineTagEffect,
   });
@@ -74,6 +81,7 @@ function Harness({
 function mount({
   actions,
   disabled,
+  builtinProviders,
   providers,
   shellMode,
   view,
@@ -81,6 +89,7 @@ function mount({
 }: {
   actions?: AtMentionWorkspaceActions;
   disabled?: boolean;
+  builtinProviders?: WebShellBuiltinAtProvidersConfig;
   providers?: readonly WebShellAtProvider[];
   shellMode?: boolean;
   view?: EditorView | null;
@@ -98,6 +107,7 @@ function mount({
       <Harness
         actions={actions}
         disabled={disabled}
+        builtinProviders={builtinProviders}
         providers={providers}
         shellMode={shellMode}
         view={view}
@@ -144,6 +154,104 @@ describe('useAtMentionMenu', () => {
     expect(latest!.state).toBeNull();
   });
 
+  it('can disable all built-in @ providers', () => {
+    mount({ builtinProviders: false });
+
+    act(() => latest!.refreshForView(makeView('@')));
+
+    expect(latest!.state?.providers).toEqual([]);
+  });
+
+  it('can whitelist built-in @ providers', () => {
+    mount({ builtinProviders: ['files'] });
+
+    act(() => latest!.refreshForView(makeView('@')));
+
+    expect(latest!.state?.providers.map((provider) => provider.id)).toEqual([
+      'files',
+    ]);
+  });
+
+  it('rejects custom providers that reuse built-in ids', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mount({
+      builtinProviders: ['files'],
+      providers: [
+        {
+          id: 'extensions',
+          label: 'Custom Extensions',
+          search: vi.fn().mockResolvedValue([]),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+
+    expect(latest!.state?.providers.map((provider) => provider.id)).toEqual([
+      'files',
+    ]);
+    expect(error).toHaveBeenCalledWith(
+      '[@mention] duplicate provider id="extensions" ignored',
+    );
+    error.mockRestore();
+  });
+
+  it('rejects custom providers that reuse disabled built-in ids', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mount({
+      builtinProviders: false,
+      providers: [
+        {
+          id: 'files',
+          label: 'Custom Files',
+          search: vi.fn().mockResolvedValue([]),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+
+    expect(latest!.state?.providers).toEqual([]);
+    expect(error).toHaveBeenCalledWith(
+      '[@mention] duplicate provider id="files" ignored',
+    );
+    error.mockRestore();
+  });
+
+  it('rejects duplicate custom provider ids', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mount({
+      providers: [
+        {
+          id: 'custom',
+          label: 'First',
+          order: 0,
+          search: vi.fn().mockResolvedValue([]),
+        },
+        {
+          id: 'custom',
+          label: 'Second',
+          order: 1,
+          search: vi.fn().mockResolvedValue([]),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+
+    expect(latest!.state?.providers.map((provider) => provider.id)).toEqual([
+      'custom',
+      'files',
+      'extensions',
+      'mcp-resources',
+    ]);
+    expect(latest!.state?.providers[0]?.label).toBe('First');
+    expect(error).toHaveBeenCalledWith(
+      '[@mention] duplicate provider id="custom" ignored',
+    );
+    error.mockRestore();
+  });
+
   it('strips ANSI, BiDi, and control characters from extension display text', async () => {
     vi.useFakeTimers();
     mount({
@@ -166,7 +274,15 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.enterCategory(1));
     await runDebounce();
 
-    expect(latest!.state?.items[0]?.description).toBe('Reviewtxt中文');
+    expect(latest!.state?.items[0]).toMatchObject({
+      description: 'Reviewtxt中文',
+      composerTag: {
+        id: 'extension:@ext:review',
+        kind: 'extension',
+        value: 'Reviewtxt中文',
+        serialized: '@ext:review',
+      },
+    });
   });
 
   it('filters cached extension provider data while searching', async () => {
@@ -543,6 +659,31 @@ describe('useAtMentionMenu', () => {
     ]);
   });
 
+  it('searches matching files across the workspace', async () => {
+    vi.useFakeTimers();
+    const listDirectory = vi.fn();
+    const globWorkspace = vi.fn().mockResolvedValue({
+      matches: ['packages/cli/src/config.ts', 'packages/core/src/config.ts'],
+    });
+    mount({ actions: { globWorkspace, listDirectory } });
+
+    act(() => latest!.refreshForView(makeView('@config')));
+    await runDebounce();
+
+    expect(globWorkspace).toHaveBeenCalledWith(
+      '**/*[cC][oO][nN][fF][iI][gG]*',
+      {
+        maxResults: 50,
+        signal: expect.any(AbortSignal),
+      },
+    );
+    expect(listDirectory).not.toHaveBeenCalled();
+    expect(latest!.state?.items.map((item) => item.label)).toEqual([
+      'packages/cli/src/config.ts',
+      'packages/core/src/config.ts',
+    ]);
+  });
+
   it('preserves provider selection when accept dispatch triggers a synchronous refresh', async () => {
     vi.useFakeTimers();
     const view = makeView('@');
@@ -583,57 +724,63 @@ describe('useAtMentionMenu', () => {
     });
   });
 
-  it('decorates accepted extension refs as inline composer tags', async () => {
-    vi.useFakeTimers();
-    const inlineTagEffect = StateEffect.define<{
-      from: number;
-      to: number;
-      tag: WebShellComposerTag;
-    }>();
-    const view = makeView('@');
-    mount({
-      view,
-      createInlineTagEffect: (range) => inlineTagEffect.of(range),
-      actions: {
-        loadExtensionsStatus: vi.fn().mockResolvedValue({
-          extensions: [
-            {
-              name: 'review',
-              displayName: 'Review',
-              isActive: true,
-            },
-          ],
-        }),
-      },
-    });
+  it.each([
+    ['localized displayName', 'Review', 'Review'],
+    ['extension name fallback', undefined, 'review'],
+  ])(
+    'decorates accepted extension refs using the %s',
+    async (_case, displayName, expectedValue) => {
+      vi.useFakeTimers();
+      const inlineTagEffect = StateEffect.define<{
+        from: number;
+        to: number;
+        tag: WebShellComposerTag;
+      }>();
+      const view = makeView('@');
+      mount({
+        view,
+        createInlineTagEffect: (range) => inlineTagEffect.of(range),
+        actions: {
+          loadExtensionsStatus: vi.fn().mockResolvedValue({
+            extensions: [
+              {
+                name: 'review',
+                ...(displayName ? { displayName } : {}),
+                isActive: true,
+              },
+            ],
+          }),
+        },
+      });
 
-    act(() => latest!.refreshForView(view));
-    act(() => latest!.enterCategory(1));
-    await runDebounce();
-    act(() => {
-      expect(latest!.accept()).toBe(true);
-    });
+      act(() => latest!.refreshForView(view));
+      act(() => latest!.enterCategory(1));
+      await runDebounce();
+      act(() => {
+        expect(latest!.accept()).toBe(true);
+      });
 
-    const spec = vi.mocked(view.dispatch).mock.calls[0]?.[0];
-    expect(spec).toMatchObject({
-      changes: { from: 0, to: 1, insert: '@ext:review ' },
-      selection: { anchor: 12 },
-      scrollIntoView: true,
-    });
-    expect(Array.isArray(spec?.effects)).toBe(true);
-    const effect = Array.isArray(spec?.effects) ? spec.effects[0] : undefined;
-    expect(effect?.is(inlineTagEffect)).toBe(true);
-    expect(effect?.value).toEqual({
-      from: 0,
-      to: 11,
-      tag: {
-        id: 'extension:@ext:review',
-        kind: 'extension',
-        value: 'review',
-        serialized: '@ext:review',
-      },
-    });
-  });
+      const spec = vi.mocked(view.dispatch).mock.calls[0]?.[0];
+      expect(spec).toMatchObject({
+        changes: { from: 0, to: 1, insert: '@ext:review ' },
+        selection: { anchor: 12 },
+        scrollIntoView: true,
+      });
+      expect(Array.isArray(spec?.effects)).toBe(true);
+      const effect = Array.isArray(spec?.effects) ? spec.effects[0] : undefined;
+      expect(effect?.is(inlineTagEffect)).toBe(true);
+      expect(effect?.value).toEqual({
+        from: 0,
+        to: 11,
+        tag: {
+          id: 'extension:@ext:review',
+          kind: 'extension',
+          value: expectedValue,
+          serialized: '@ext:review',
+        },
+      });
+    },
+  );
 
   it('clears a pending provider search when closing from items', async () => {
     vi.useFakeTimers();
@@ -763,6 +910,7 @@ describe('useAtMentionMenu', () => {
   });
 
   it('keeps built-in providers when custom provider ids collide', () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
     const search = vi.fn().mockResolvedValue([]);
     mount({
       providers: [
@@ -781,6 +929,11 @@ describe('useAtMentionMenu', () => {
       'extensions',
       'mcp-resources',
     ]);
+    expect(search).not.toHaveBeenCalled();
+    expect(error).toHaveBeenCalledWith(
+      '[@mention] duplicate provider id="files" ignored',
+    );
+    error.mockRestore();
   });
 
   it('accepts a custom item by inserting its label fallback', async () => {
@@ -873,6 +1026,66 @@ describe('useAtMentionMenu', () => {
         kind: 'table',
         value: 'TICKET-123',
         serialized: '@ticket:TICKET-123',
+      },
+    });
+  });
+
+  it('adds a separator after custom composer tag insert text', async () => {
+    vi.useFakeTimers();
+    const inlineTagEffect = StateEffect.define<{
+      from: number;
+      to: number;
+      tag: WebShellComposerTag;
+    }>();
+    const view = makeView('@');
+    mount({
+      view,
+      createInlineTagEffect: (range) => inlineTagEffect.of(range),
+      providers: [
+        {
+          id: 'custom',
+          label: 'Custom',
+          order: 0,
+          search: vi.fn().mockResolvedValue([
+            {
+              id: 'ctx-1',
+              label: 'ctx-1',
+              insertText: '<host_context_ref id="ctx-1">',
+              composerTag: {
+                id: 'ctx-1',
+                kind: 'table',
+                value: 'ctx-1',
+              },
+            },
+          ]),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => {
+      expect(latest!.accept()).toBe(true);
+    });
+
+    const spec = vi.mocked(view.dispatch).mock.calls[0]?.[0];
+    expect(spec).toMatchObject({
+      changes: {
+        from: 0,
+        to: 1,
+        insert: '<host_context_ref id="ctx-1"> ',
+      },
+      selection: { anchor: 30 },
+      scrollIntoView: true,
+    });
+    const effect = Array.isArray(spec?.effects) ? spec.effects[0] : undefined;
+    expect(effect?.value).toMatchObject({
+      from: 0,
+      to: 29,
+      tag: {
+        id: 'ctx-1',
+        serialized: '<host_context_ref id="ctx-1">',
       },
     });
   });
@@ -1244,7 +1457,7 @@ describe('useAtMentionMenu', () => {
     });
   });
 
-  it('escapes glob metacharacters in the fallback file search', async () => {
+  it('escapes glob metacharacters in workspace file search', async () => {
     vi.useFakeTimers();
     const globWorkspace = vi.fn().mockResolvedValue({ matches: [] });
     mount({ actions: { globWorkspace } });
@@ -1254,10 +1467,29 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.updateSearch('foo*bar?'));
     await runDebounce();
 
-    expect(globWorkspace).toHaveBeenCalledWith('foo\\*bar\\?*', {
-      maxResults: 50,
-      signal: expect.any(AbortSignal),
-    });
+    expect(globWorkspace).toHaveBeenCalledWith(
+      '**/*[fF][oO][oO]\\*[bB][aA][rR]\\?*',
+      {
+        maxResults: 50,
+        signal: expect.any(AbortSignal),
+      },
+    );
+  });
+
+  it('normalizes escaped paths and literalizes extglob operators', async () => {
+    vi.useFakeTimers();
+    const globWorkspace = vi.fn().mockResolvedValue({ matches: [] });
+    mount({ actions: { globWorkspace } });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(0));
+    act(() => latest!.updateSearch('./foo\\ bar+(test)'));
+    await runDebounce();
+
+    expect(globWorkspace).toHaveBeenCalledWith(
+      '**/*[fF][oO][oO] [bB][aA][rR]\\+\\([tT][eE][sS][tT]\\)*',
+      { maxResults: 50, signal: expect.any(AbortSignal) },
+    );
   });
 
   it('recovers from file provider list failures', async () => {
@@ -1308,6 +1540,7 @@ describe('useAtMentionMenu', () => {
 
   it('sanitizes custom provider item display text', async () => {
     vi.useFakeTimers();
+    const dataIcon = 'data:image/png;base64,a\nb';
     mount({
       providers: [
         {
@@ -1320,6 +1553,12 @@ describe('useAtMentionMenu', () => {
               label: '\u001b[31mName\u001b[0m\u202E',
               description: 'Desc\u202E',
               detail: 'Detail\u202E',
+              icon: dataIcon,
+              iconTooltip: 'Tip\u202E',
+              composerTag: {
+                id: 'tag',
+                icon: dataIcon,
+              },
             },
           ]),
         },
@@ -1334,6 +1573,12 @@ describe('useAtMentionMenu', () => {
       label: 'Name',
       description: 'Desc',
       detail: 'Detail',
+      icon: dataIcon,
+      iconTooltip: 'Tip',
+      composerTag: {
+        id: 'tag',
+        icon: dataIcon,
+      },
     });
   });
 
@@ -1480,6 +1725,63 @@ describe('useAtMentionMenu', () => {
       expect(latest!.select(1)).toBe(true);
     });
     expect(latest!.state?.selectedIndex).toBe(1);
+  });
+
+  it('selects enabled provider tabs and ignores disabled or same-tab choices', async () => {
+    vi.useFakeTimers();
+    const search = vi.fn(({ tabId }) =>
+      Promise.resolve([{ id: tabId ?? 'none', label: tabId ?? 'none' }]),
+    );
+    mount({
+      providers: [
+        {
+          id: 'custom',
+          label: 'Custom',
+          order: 0,
+          tabs: [
+            { id: 'open', label: 'Open' },
+            { id: 'disabled', label: 'Disabled', disabled: true },
+            { id: 'all', label: 'All' },
+          ],
+          search,
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+
+    expect(search).toHaveBeenLastCalledWith(
+      expect.objectContaining({ query: '', tabId: 'open' }),
+    );
+    expect(latest!.state).toMatchObject({
+      selectedTabId: 'open',
+      items: [expect.objectContaining({ id: 'open' })],
+    });
+
+    act(() => {
+      expect(latest!.selectTab('disabled')).toBe(false);
+      expect(latest!.selectTab('open')).toBe(true);
+    });
+
+    expect(search).toHaveBeenCalledTimes(1);
+    expect(latest!.state?.selectedTabId).toBe('open');
+
+    act(() => {
+      expect(latest!.selectTab('all')).toBe(true);
+    });
+    expect(latest!.state).toMatchObject({
+      selectedTabId: 'all',
+      loading: true,
+    });
+    await runDebounce();
+
+    expect(search).toHaveBeenCalledTimes(2);
+    expect(search).toHaveBeenLastCalledWith(
+      expect.objectContaining({ query: '', tabId: 'all' }),
+    );
+    expect(latest!.state?.items[0]?.id).toBe('all');
   });
 
   it('prefers the first matching file over the current-directory item', async () => {

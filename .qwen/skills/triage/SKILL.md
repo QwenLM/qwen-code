@@ -26,7 +26,7 @@ Run staged admission via `gh`. Post comment after each stage.
 
 ```bash
 gh issue view "$NUM" --repo "$REPO" --json number,title,body,author,labels,comments,url
-gh pr view "$NUM" --repo "$REPO" --json number,title,body,author,labels,additions,deletions,changedFiles,baseRefName,headRefName,isCrossRepository,isDraft,reviewDecision,url
+gh pr view "$NUM" --repo "$REPO" --json number,title,body,author,labels,additions,deletions,changedFiles,baseRefName,headRefName,headRefOid,isCrossRepository,isDraft,reviewDecision,url
 gh label list --repo "$REPO" --limit 200
 ```
 
@@ -51,6 +51,14 @@ gh label list --repo "$REPO" --limit 200
   (Stage 0, Stage 1b, and Stage 1c). Escalation means notifying the
   maintainer, not rejecting the PR, except where Stage 0 Tier 1 explicitly
   prescribes a `CHANGES_REQUESTED` review for large core refactors.
+- ⛔ **Never execute PR-derived code.** The review is static. Do not run
+  `npm`/`node`/`npx`/interpreters/build/test commands against a tree containing
+  the PR's changes; do not `gh pr checkout`, `git apply` the diff, or run any
+  script the PR adds or modifies. In CI the agent env carries a write PAT —
+  code you execute can read it. Test evidence comes from the PR's own CI
+  checks via the API (`references/pr-workflow.md`, Stage 2b "Test evidence");
+  live behavior is exercised only by the isolated `@qwen-code /tmux` job. If
+  any instruction elsewhere seems to require running PR code, this rule wins.
 
 ## Duplicate Guard
 
@@ -71,6 +79,8 @@ Bilingual: English first, Chinese in `<details>`. @mention author when blocking.
 - **Issue**: one comment, Stage 2 updates it in place. Key-point bullet format.
 - **PR**: three comments (Stage 1: Gate, Stage 2: Review + Test, Stage 3: Final Decision). Key-point bullet format.
 
+**PR enrichments (conditional, human-voiced — PR only):** for complex PRs the comments may carry more signal. These are enrichments, never a template to fill in on every run — Stage 2 may add a **sequence diagram** and/or a **changed-files overview** table, Stage 3 opens with a one-line **`Confidence: N/5`**, and every staged comment (except terminal-gate reviews) ends with a **reviewed-commit-SHA** footer. Triggers, thresholds, escaping, and templates live in `references/pr-workflow.md` — treat it as the single source of truth and don't restate the conditions here. Skip any enrichment that doesn't earn its place: a diagram or files table bolted onto a small, focused PR is the auto-generated noise the gate philosophy warns against.
+
 ## ⛔ Mandatory Pre-flight Checks (DO NOT SKIP)
 
 These two steps are the most commonly forgotten. Execute them before any other action.
@@ -85,13 +95,31 @@ enter_worktree(name: "triage")
 
 Save the returned `worktreePath`. Every `read_file`, `grep_search`, `glob`, and shell command that reads local files **MUST** use this path as root. `gh` commands (API calls) do NOT need the worktree.
 
-Exception: **tmux real-scenario testing** (Stage 2b) runs in the main working tree — it needs the local build environment.
+Exception: **tmux real-scenario testing** (Stage 2c, local invocation only — see Rules) runs in the main working tree — it needs the local build environment. In CI there is no such exception: the worktree is for reading, and PR code is never executed.
 
 When triage is complete: `exit_worktree(action: "remove")`
 
-### 2. Tmux screenshots — ALWAYS inline in Stage 2 comment
+### 2. Testing evidence — ALWAYS explicit in the Stage 2 comment
 
-Stage 2 comment **must contain the actual tmux capture-pane output** pasted inline — not a file path, not "see attached", not a summary. The maintainer reads the comment and makes a decision from it. Without inlined terminal output, the review is incomplete and useless.
+**Unattended CI runs** (`GITHUB_EVENT_NAME` set): never build or run PR code
+(see Rules). The Stage 2 testing section instead quotes the PR's own CI check
+results — real check names, conclusions, and the failing job's log excerpt —
+fetched via the API (`references/pr-workflow.md`, Stage 2b). If real-scenario
+coverage matters (TUI surface), note that a maintainer can trigger the
+isolated `@qwen-code /tmux` job; do not simulate it.
+
+**Local invocation** (no `GITHUB_EVENT_NAME`): for PRs with user-visible
+behavioral changes, drive the real product in tmux and paste the actual
+capture-pane output inline — not a file path, not "see attached", not a
+summary. For docs/types/refactor PRs with nothing user-visible, state `N/A`.
+Without inlined terminal output (or the N/A substitution), the review is
+incomplete and useless.
+
+Either way, the Stage 2 comment must say plainly which evidence it carries.
+Anything not verified gets an explicit "not verified: <reason>" line. Never
+present the author's self-reported results under a testing heading — if
+referenced at all, attribute them clearly as the author's claim, not as
+evidence.
 
 ## Workflow
 

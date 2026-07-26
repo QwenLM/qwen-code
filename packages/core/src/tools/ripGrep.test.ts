@@ -21,6 +21,7 @@ import fs from 'node:fs/promises';
 import os, { EOL } from 'node:os';
 import type { Config } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
+import { tildeifyPath } from '../utils/paths.js';
 import { spawn } from 'node:child_process';
 import { runRipgrep } from '../utils/ripgrepUtils.js';
 import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
@@ -1458,10 +1459,9 @@ describe('RipGrepTool', () => {
         path: path.join('src', 'app'),
       };
       const invocation = grepTool.build(params);
-      expect(invocation.getDescription()).toContain(
-        "'testPattern' in path 'src",
+      expect(invocation.getDescription()).toBe(
+        `'testPattern' in ${path.join('src', 'app')}`,
       );
-      expect(invocation.getDescription()).toContain("app'");
     });
 
     it('should generate correct description with default search path', () => {
@@ -1479,16 +1479,27 @@ describe('RipGrepTool', () => {
         path: path.join('src', 'app'),
       };
       const invocation = grepTool.build(params);
-      expect(invocation.getDescription()).toContain(
-        "'testPattern' in path 'src",
+      expect(invocation.getDescription()).toBe(
+        `'testPattern' in ${path.join('src', 'app')} (filter: '*.ts')`,
       );
-      expect(invocation.getDescription()).toContain("(filter: '*.ts')");
     });
 
     it('should use path when specified in description', () => {
       const params: RipGrepToolParams = { pattern: 'testPattern', path: '.' };
       const invocation = grepTool.build(params);
-      expect(invocation.getDescription()).toBe("'testPattern' in path '.'");
+      expect(invocation.getDescription()).toBe("'testPattern' in .");
+    });
+
+    it('should keep paths outside the project absolute (never project-relative)', () => {
+      const outside = path.resolve(os.tmpdir());
+      const params: RipGrepToolParams = {
+        pattern: 'testPattern',
+        path: outside,
+      };
+      const invocation = grepTool.build(params);
+      expect(invocation.getDescription()).toBe(
+        `'testPattern' in ${tildeifyPath(outside)}`,
+      );
     });
   });
 

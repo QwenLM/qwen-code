@@ -1,8 +1,27 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+const wsMock = vi.hoisted(() => ({
+  close: vi.fn(),
+  start: vi.fn<() => Promise<void>>(),
+}));
+
+vi.mock('@larksuiteoapi/node-sdk', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('@larksuiteoapi/node-sdk')>();
+  return {
+    ...actual,
+    WSClient: class {
+      start = wsMock.start;
+      close = wsMock.close;
+    },
+  };
+});
+
 import { FeishuChannel } from './FeishuAdapter.js';
 import type {
   ChannelAgentBridge,
   ChannelConfig,
+  ChannelProactiveDeliveryError,
   ChannelTaskLifecycleEvent,
   SessionTarget,
 } from '@qwen-code/channel-base';
@@ -30,6 +49,7 @@ function createConfig(overrides?: Partial<ChannelConfig>): ChannelConfig {
     sessionScope: 'user',
     cwd: '/tmp',
     groupPolicy: 'open',
+    dmPolicy: 'open',
     groups: { '*': { requireMention: true } },
     ...overrides,
   };
@@ -80,6 +100,61 @@ describe('FeishuChannel', () => {
       const channel = createChannel();
 
       expect(channel.supportsProactiveSend()).toBe(true);
+    });
+
+    it('logs message debug payloads from the shared handler map', () => {
+      const channel = createChannel();
+      const logDebugPayload = vi.fn();
+      const onMessage = vi.fn();
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        logDebugPayload,
+        onMessage,
+      });
+      const buildHandlerMap = getPrivateMethod<
+        () => Record<string, (data: unknown) => unknown>
+      >(channel, 'buildHandlerMap').bind(channel);
+      const payload = {
+        message: {
+          message_id: 'debug-m1',
+          chat_id: 'chat-1',
+          chat_type: 'p2p',
+          message_type: 'text',
+          content: JSON.stringify({ text: 'hello' }),
+        },
+        sender: {
+          sender_type: 'app',
+          sender_id: { open_id: 'bot-open-id' },
+        },
+      };
+
+      const result = buildHandlerMap()['im.message.receive_v1']?.(payload);
+
+      expect(logDebugPayload).toHaveBeenCalledWith('Feishu', payload);
+      expect(onMessage).toHaveBeenCalledWith(payload);
+      expect(result).toEqual({});
+    });
+
+    it('logs card action debug payloads and preserves stop toast response', () => {
+      const channel = createChannel();
+      const logDebugPayload = vi.fn();
+      const onCardAction = vi.fn().mockReturnValue(true);
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        logDebugPayload,
+        onCardAction,
+      });
+      const buildHandlerMap = getPrivateMethod<
+        () => Record<string, (data: unknown) => unknown>
+      >(channel, 'buildHandlerMap').bind(channel);
+      const payload = {
+        action: { value: { action: 'stop' } },
+        context: { open_message_id: 'card-1' },
+      };
+
+      const result = buildHandlerMap()['card.action.trigger']?.(payload);
+
+      expect(logDebugPayload).toHaveBeenCalledWith('Feishu', payload);
+      expect(onCardAction).toHaveBeenCalledWith(payload);
+      expect(result).toEqual({ toast: { type: 'info', content: '已停止' } });
     });
   });
 
@@ -809,6 +884,52 @@ describe('FeishuChannel', () => {
     });
   });
 
+  describe('connect: WebSocket', () => {
+    beforeEach(() => {
+      wsMock.close.mockReset();
+      wsMock.start.mockReset().mockResolvedValue(undefined);
+    });
+
+    function mockSuccessfulTokenFetch(): void {
+      vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
+        if (String(input).includes('/tenant_access_token/internal')) {
+          return new Response(
+            JSON.stringify({
+              tenant_access_token: 'test_token',
+              expire: 3600,
+            }),
+            { status: 200 },
+          );
+        }
+        return new Response(JSON.stringify({ bot: { open_id: 'bot_id' } }), {
+          status: 200,
+        });
+      });
+    }
+
+    it('rejects invalid credentials before starting WebSocket', async () => {
+      const channel = createChannel();
+      vi.spyOn(global, 'fetch').mockResolvedValue(
+        new Response(null, { status: 401 }),
+      );
+
+      await expect(channel.connect()).rejects.toThrow(
+        'failed to authenticate Feishu credentials',
+      );
+      expect(wsMock.start).not.toHaveBeenCalled();
+    });
+
+    it('resolves after the SDK start promise without waiting for onReady', async () => {
+      const channel = createChannel();
+      mockSuccessfulTokenFetch();
+
+      await channel.connect();
+
+      expect(wsMock.start).toHaveBeenCalledOnce();
+      channel.disconnect();
+    });
+  });
+
   describe('disconnect', () => {
     it('closes wsClient on disconnect', () => {
       const channel = createChannel();
@@ -1164,12 +1285,41 @@ describe('FeishuChannel', () => {
           },
           'hello',
         ),
-      ).rejects.toThrow('Feishu sendMessage failed: HTTP 500');
+      ).rejects.toEqual(
+        expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+          disposition: 'transient',
+          message: 'Feishu sendMessage failed: HTTP 500',
+        }),
+      );
 
       expect(stderrSpy).toHaveBeenCalledWith(
         expect.stringContaining('sendMessage failed: HTTP 500'),
       );
       stderrSpy.mockRestore();
+    });
+
+    it('classifies non-retryable proactive HTTP failures as permanent', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      vi.spyOn(global, 'fetch').mockResolvedValue(
+        new Response('permission denied', { status: 403 }),
+      );
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+      await expect(
+        channel.deliverProactive(
+          { channelName: 'test', type: 'user', id: 'ou_user' },
+          'direct result',
+        ),
+      ).rejects.toEqual(
+        expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+          disposition: 'permanent',
+          message: 'Feishu sendMessage failed: HTTP 403',
+        }),
+      );
     });
 
     it('sends proactive loop output to direct chats', async () => {
@@ -1202,6 +1352,77 @@ describe('FeishuChannel', () => {
         }),
       );
       fetchSpy.mockRestore();
+    });
+
+    it('maps typed chat and user deliveries to Feishu receive ID types', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }));
+
+      await channel.deliverProactive(
+        { channelName: 'test', type: 'chat', id: 'oc_group' },
+        'group result',
+      );
+      await channel.deliverProactive(
+        { channelName: 'test', type: 'user', id: 'ou_user' },
+        'direct result',
+      );
+
+      expect(fetchSpy.mock.calls[0]![0]).toBe(
+        'https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id',
+      );
+      expect(fetchSpy.mock.calls[1]![0]).toBe(
+        'https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id',
+      );
+    });
+
+    it('classifies proactive network failures as transient', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      vi.spyOn(global, 'fetch').mockRejectedValueOnce(
+        new Error('socket token=secret'),
+      );
+
+      await expect(
+        channel.deliverProactive(
+          { channelName: 'test', type: 'user', id: 'ou_user' },
+          'direct result',
+        ),
+      ).rejects.toEqual(
+        expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+          disposition: 'transient',
+          message: 'Feishu sendMessage failed: network error',
+        }),
+      );
+    });
+
+    it('classifies unexpected proactive delivery failures as transient', async () => {
+      const channel = createTestableChannel();
+      const failure = new Error('unexpected token lookup failure');
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        getTenantAccessToken: vi.fn().mockRejectedValue(failure),
+      });
+
+      await expect(
+        channel.deliverProactive(
+          { channelName: 'test', type: 'user', id: 'ou_user' },
+          'direct result',
+        ),
+      ).rejects.toEqual(
+        expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+          disposition: 'transient',
+          message: 'unexpected token lookup failure',
+          cause: failure,
+        }),
+      );
     });
   });
 
@@ -1287,6 +1508,66 @@ describe('FeishuChannel', () => {
         'oc_chat_id',
         expect.stringContaining('partial response text'),
       );
+    });
+
+    it('clears accumulated card text at response boundary', () => {
+      const channel = createChannel();
+      const cardSessions = getPrivateMethod<
+        Map<string, { accumulatedText: string; stopped: boolean }>
+      >(channel, 'cardSessions');
+      cardSessions.set('inbound_1', {
+        accumulatedText: 'intermediate response',
+        stopped: false,
+      });
+      getPrivateMethod<Map<string, string>>(channel, 'sessionToInboundMsg').set(
+        'session_1',
+        'inbound_1',
+      );
+
+      getPrivateMethod<(chatId: string, sessionId: string) => void>(
+        channel,
+        'onResponseBoundary',
+      ).call(channel, 'oc_chat_id', 'session_1');
+
+      expect(cardSessions.get('inbound_1')?.accumulatedText).toBe('');
+    });
+
+    it('cancels pending card updates at response boundary', () => {
+      vi.useFakeTimers();
+      try {
+        const channel = createChannel();
+        const cardSessions = getPrivateMethod<
+          Map<
+            string,
+            {
+              accumulatedText: string;
+              stopped: boolean;
+              pendingUpdateTimer?: ReturnType<typeof setTimeout>;
+            }
+          >
+        >(channel, 'cardSessions');
+        const timer = setTimeout(() => {}, 1000);
+        cardSessions.set('inbound_1', {
+          accumulatedText: 'intermediate response',
+          stopped: false,
+          pendingUpdateTimer: timer,
+        });
+        getPrivateMethod<Map<string, string>>(
+          channel,
+          'sessionToInboundMsg',
+        ).set('session_1', 'inbound_1');
+
+        getPrivateMethod<(chatId: string, sessionId: string) => void>(
+          channel,
+          'onResponseBoundary',
+        ).call(channel, 'oc_chat_id', 'session_1');
+
+        expect(
+          cardSessions.get('inbound_1')?.pendingUpdateTimer,
+        ).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('records failed lifecycle state for prompt-end card finalization', async () => {

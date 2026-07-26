@@ -29,11 +29,7 @@
 import type React from 'react';
 import { useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
-import {
-  DEFAULT_BUILTIN_SUBAGENT_TYPE as CORE_DEFAULT_SUBAGENT_TYPE,
-  ToolDisplayNames,
-  ToolNames,
-} from '@qwen-code/qwen-code-core';
+import { DEFAULT_BUILTIN_SUBAGENT_TYPE as CORE_DEFAULT_SUBAGENT_TYPE } from '@qwen-code/qwen-code-core';
 import { localizeToolDisplayName } from '../../../i18n/index.js';
 import {
   useBackgroundTaskViewActions,
@@ -42,7 +38,11 @@ import {
 import { ConfigContext } from '../../contexts/ConfigContext.js';
 import { theme } from '../../semantic-colors.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
-import { escapeAnsiCtrlCodes } from '../../utils/textUtils.js';
+import {
+  escapeAnsiCtrlCodes,
+  sanitizeMultilineForDisplay,
+} from '../../utils/textUtils.js';
+import { TOOL_DISPLAY_BY_NAME } from '../../utils/tool-display-map.js';
 import type {
   AgentDialogEntry,
   DialogEntry,
@@ -132,19 +132,6 @@ function statusIcon(entry: AgentDialogEntry & { synthesized?: boolean }): {
       return { glyph, color: theme.text.secondary };
   }
 }
-
-// Internal-tool-name → user-facing display-name lookup
-// (`run_shell_command` → `Shell`, `glob` → `Glob`, …). Mirrors the
-// same map BackgroundTasksDialog uses so the two surfaces stay
-// vocabulary-consistent — without it the panel would surface raw
-// internal identifiers like `run_shell_command` while the dialog
-// shows `Shell` for the same agent.
-const TOOL_DISPLAY_BY_NAME: Record<string, string> = Object.fromEntries(
-  (Object.keys(ToolNames) as Array<keyof typeof ToolNames>).map((key) => [
-    ToolNames[key],
-    ToolDisplayNames[key],
-  ]),
-);
 
 function activityLabel(entry: AgentDialogEntry): string {
   const last = entry.recentActivities?.at(-1);
@@ -474,9 +461,11 @@ const AgentRow: React.FC<{
   // chosen) and `recentActivities[].description` is LLM-generated;
   // both can carry terminal control sequences that would otherwise
   // bleed through Ink's `<Text>` and corrupt the panel chrome.
-  // HistoryItemDisplay applies the same `escapeAnsiCtrlCodes` to its
-  // user-facing content for the same reason.
-  const label = escapeAnsiCtrlCodes(descriptionWithoutPrefix(entry));
+  // `sanitizeMultilineForDisplay` (not just `escapeAnsiCtrlCodes`): the
+  // task description is model-generated and bare C0 controls (\r, BS, BEL)
+  // pass through the ANSI-sequence escape — matches the `activity` line
+  // below and the hardened dialog Progress rows.
+  const label = sanitizeMultilineForDisplay(descriptionWithoutPrefix(entry));
   // Note: foreground vs background is intentionally not surfaced here.
   // BackgroundTasksDialog tags foreground rows with `[blocking]`
   // (formerly `[in turn]`) to warn that cancelling will end the
@@ -484,7 +473,11 @@ const AgentRow: React.FC<{
   // cancel. The glance panel has no cancel surface, so the marker
   // reads as ambient noise. Keep the dialog as the place that
   // surfaces the flavor distinction.
-  const activity = escapeAnsiCtrlCodes(activityLabel(entry));
+  // `sanitizeMultilineForDisplay` (not just `escapeAnsiCtrlCodes`): the
+  // activity description is LLM-generated and bare C0 controls (\r, BS,
+  // BEL) pass through the ANSI-sequence escape — matches the hardened
+  // dialog Progress rows and ToolMessage approval context.
+  const activity = sanitizeMultilineForDisplay(activityLabel(entry));
   const elapsed = elapsedLabel(entry, now);
   const showType =
     entry.subagentType !== undefined &&

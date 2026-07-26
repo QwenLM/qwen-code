@@ -12,14 +12,17 @@ import { matches, nextFireTime, parseCron } from '../utils/cronParser.js';
 import { humanReadableCron } from '../utils/cronDisplay.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { ToolNames } from '../tools/tool-names.js';
-import type { DurableCronTask } from './cronTasksFile.js';
+import type { CronTaskDelivery, DurableCronTask } from './cronTasksFile.js';
 import {
   addCronTask,
   CRON_TASKS_DISPLAY_PATH,
+  appendCronRun,
   generateCronTaskId,
   getCronFilePath,
   readCronTasks,
   removeCronTasks,
+  taskHasLegacyCondition,
+  taskHasLegacyRunMode,
   updateCronTasks,
 } from './cronTasksFile.js';
 import { tryAcquireLock, releaseLock } from './cronTasksLock.js';
@@ -79,6 +82,14 @@ export interface CronJob {
   jitterMs: number;
   /** Persisted under ~/.qwen (per-project) — survives restarts. */
   durable?: boolean;
+  /**
+   * Id of the session this durable task is bound to. When set, the task fires
+   * ONLY in that session (independent of the per-project durable lock), so its
+   * transcript is the task's run history; the lock owner never fires it. When
+   * absent, the task uses the shared model: only the lock owner fires it.
+   */
+  boundSessionId?: string;
+  delivery?: CronTaskDelivery;
   /** One-shot that was due while no owning session ran — fired late. */
   missed?: boolean;
 }
@@ -162,6 +173,23 @@ function computeJitter(
   }
 
   return 0;
+}
+
+function cronJitterWindowMinutes(jitterMs: number): number {
+  return Math.ceil(Math.abs(jitterMs) / 60_000);
+}
+
+function isCronSlotVisibleToTick(
+  slotMinuteMs: number,
+  currentMs: number,
+  jitterMs: number,
+): boolean {
+  const currentMinute = new Date(currentMs);
+  currentMinute.setSeconds(0, 0);
+  return (
+    Math.abs(currentMinute.getTime() - slotMinuteMs) <=
+    cronJitterWindowMinutes(jitterMs) * 60_000
+  );
 }
 
 // Single id scheme, shared with the daemon's scheduled-tasks route via
@@ -249,9 +277,63 @@ export class CronScheduler {
   // the live job away (or clear its pendingRemoval guard) as if it had
   // been deleted on disk.
   private pendingAdd = new Set<string>();
+  // Durable one-shots this continuously-running scheduler loaded while it was
+  // eligible to fire them. Cleared on stop so a later enable still treats
+  // genuinely overdue work as missed.
+  private armedDurableOneShots = new Set<string>();
+  // Ids of legacy tasks (a pre-removal `isolated` task with a `condition`
+  // precondition) already reported as skipped, so the fail-closed remediation
+  // breadcrumb is logged once per task rather than on every file reload.
+  private warnedLegacyConditionIds = new Set<string>();
+  // Ids of bare `runMode: 'isolated'` legacy tasks already warned about — they
+  // still run (no safety gate), so this is a one-time behavior-change notice.
+  private warnedLegacyRunModeIds = new Set<string>();
+  // Durable ids whose lastFiredAt persist is in flight after a fire — the tick
+  // (on-time) OR a catch-up delivery. A reload racing that async write reads the
+  // stale disk stamp, so it must not re-detect and re-fire the same slot. Only
+  // populated once a fire has actually been stamped/delivered, so a catch-up that
+  // was merely buffered and then dropped never enters it and still re-detects.
+  //
+  // REF-COUNTED per id (not a plain Set): the same task can have two persists in
+  // flight at once (it fired again before the first write landed). Clearing on
+  // the FIRST settle would drop the guard while the second write is still
+  // pending; the count keeps it until the LAST in-flight persist for that id
+  // settles.
+  //
+  // LIMITATION: this guard is INSTANCE-scoped in-memory state. It protects
+  // against a reload racing a persist WITHIN one scheduler. It does NOT survive
+  // a new scheduler instance (daemon restart, keepalive revive, session reload):
+  // a fresh instance starts with an empty map, so if the previous instance died
+  // with a persist still in flight, the new one reads the stale on-disk stamp
+  // and can re-fire that slot once. Fully closing that narrow cross-instance
+  // window would need a durable stamp (in the tasks file or a lock file); it's
+  // accepted here as a sub-second restart-timing edge.
+  private firePersistPending = new Map<string, number>();
+
+  private markFirePersistPending(ids: Iterable<string>): void {
+    for (const id of ids) {
+      this.firePersistPending.set(
+        id,
+        (this.firePersistPending.get(id) ?? 0) + 1,
+      );
+    }
+  }
+
+  private clearFirePersistPending(ids: Iterable<string>): void {
+    for (const id of ids) {
+      const next = (this.firePersistPending.get(id) ?? 0) - 1;
+      if (next > 0) this.firePersistPending.set(id, next);
+      else this.firePersistPending.delete(id);
+    }
+  }
   private fileWatcher: fsSync.FSWatcher | null = null;
   private lockProbeTimer: ReturnType<typeof setInterval> | null = null;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  // Test-only auto-fire timers (QWEN_CODE_TEST_CRON_FAST). Each timer
+  // fires its job via forceFireJob after a short delay so integration
+  // tests don't wait for the wall-clock minute boundary. Cleared on
+  // stop()/destroy() so a session teardown never leaks a pending fire.
+  private testFireTimers = new Map<string, ReturnType<typeof setTimeout>>();
   // Catch-up work detected before start() installed onFire — flushed
   // through onFire as soon as it exists.
   private pendingFires: PendingFire[] = [];
@@ -310,6 +392,27 @@ export class CronScheduler {
     };
 
     this.jobs.set(id, job);
+
+    // Test seam: when QWEN_CODE_TEST_CRON_FAST is set, schedule an
+    // auto-fire for newly created session-only jobs so integration tests
+    // don't wait up to 60s for the wall-clock minute boundary. The timer
+    // fires once after the configured delay (default 5s), then the normal
+    // tick takes over for subsequent fires of recurring jobs. Timers are
+    // tracked in testFireTimers and cleared on stop()/destroy().
+    if (process.env['QWEN_CODE_TEST_CRON_FAST'] === '1' && !job.durable) {
+      const delayMs =
+        Number(process.env['QWEN_CODE_TEST_CRON_DELAY_MS']) || 5000;
+      const timer = setTimeout(() => {
+        this.testFireTimers.delete(id);
+        this.forceFireJob(id);
+      }, delayMs);
+      timer.unref();
+      this.testFireTimers.set(id, timer);
+      debugLogger.debug(
+        `Test seam: auto-fire scheduled for job ${id} in ${delayMs}ms`,
+      );
+    }
+
     return job;
   }
 
@@ -421,6 +524,13 @@ export class CronScheduler {
     this.pendingAdd.add(job.id);
     try {
       await addCronTask(this.projectRoot, jobToDurableTask(job));
+      if (
+        !job.recurring &&
+        this.durableEnabled &&
+        this.#shouldFireDurable(job)
+      ) {
+        this.armedDurableOneShots.add(job.id);
+      }
     } catch (error) {
       this.jobs.delete(job.id);
       throw error;
@@ -452,6 +562,7 @@ export class CronScheduler {
         throw error;
       }
     }
+    this.armedDurableOneShots.delete(id);
     return true;
   }
 
@@ -664,25 +775,89 @@ export class CronScheduler {
     // is no longer in this filtered set, so toggling off removes the job,
     // and toggling on reinstalls it on the next watcher reload. Absent
     // `enabled` counts as enabled, so tool-created tasks keep firing.
-    const tasks = read.filter(
-      (t) => hasParseableCron(t) && t.enabled !== false,
-    );
+    // Legacy safety gate — FAIL CLOSED. A task written by an older version as
+    // `runMode: 'isolated'` with a `condition` precondition only fired when the
+    // guard evaluated YES. That mode is gone, and `durableTaskToJob` no longer
+    // carries `condition`, so such a task would now fire inline and
+    // UNCONDITIONALLY — silently changing a safety gate ("only run if X") into
+    // "always run", with no user edit. Skip these entirely (left on disk, like
+    // an unparseable-cron entry) so the removal can never turn a guarded task
+    // into a runaway one; the user re-creates it if they still want it.
+    const tasks = read.filter((t) => {
+      if (!hasParseableCron(t) || t.enabled === false) return false;
+      if (taskHasLegacyCondition(t)) {
+        if (!this.warnedLegacyConditionIds.has(t.id)) {
+          this.warnedLegacyConditionIds.add(t.id);
+          // eslint-disable-next-line no-console -- operator-facing remediation breadcrumb for a silently-disabled task
+          console.warn(
+            `CronScheduler: scheduled task ${t.id} carries a legacy precondition ` +
+              `(isolated run mode was removed) and will NOT fire — recreate it if ` +
+              `you still want it to run.`,
+          );
+        }
+        return false;
+      }
+      // A bare `runMode: 'isolated'` task (no precondition) has no safety gate,
+      // so it still fires — but no longer in a fresh per-run session; it now
+      // accumulates history in its bound session. It runs, but warn once so an
+      // operator who relied on the clean slate knows why runs now differ.
+      if (taskHasLegacyRunMode(t) && !this.warnedLegacyRunModeIds.has(t.id)) {
+        this.warnedLegacyRunModeIds.add(t.id);
+        // eslint-disable-next-line no-console -- operator-facing behavior-change breadcrumb
+        console.warn(
+          `CronScheduler: scheduled task ${t.id} was created with the removed ` +
+            `'isolated' run mode; it now runs in its bound session (history ` +
+            `accumulates across runs). Recreate it and call create_sub_session ` +
+            `from the prompt for per-run isolation.`,
+        );
+      }
+      return true;
+    });
 
     const now = Date.now();
     const missedOneShots: DurableCronTask[] = [];
     const catchUpIds: string[] = [];
     const finalTasks: DurableCronTask[] = [];
-    if (handleMissed) {
+    // Detect missed / catch-up work for the tasks THIS session is responsible
+    // for — a scoped pass that now runs regardless of lock ownership. A task
+    // bound to this session is caught up here even when another session holds
+    // the lock; an unbound task is caught up only when this session IS the lock
+    // owner (`handleMissed`); a task bound to another session is that session's
+    // responsibility and skipped.
+    {
       for (const t of tasks) {
         // A task whose on-disk removal is already in flight (deleted via
         // cron_delete, or a just-delivered fire) is gone, not missed.
         if (this.pendingRemoval.has(t.id)) continue;
+        const responsibleForMissed =
+          typeof t.sessionId === 'string' && t.sessionId.length > 0
+            ? t.sessionId === this.sessionId
+            : handleMissed;
+        if (!responsibleForMissed) continue;
+        // A task that already fired this session — on-time via the tick OR as a
+        // catch-up — but whose lastFiredAt persist hasn't landed yet must not be
+        // re-detected: any reload racing that async write (e.g. a foreign write
+        // — another task's manual run, a rename, an unarchive — tripping the
+        // watcher) would otherwise read the stale disk lastFiredAt and fire the
+        // same slot a second time. (A catch-up merely buffered then dropped is
+        // NOT in this set, so it still re-detects from disk — intended recovery.)
+        if (this.firePersistPending.has(t.id)) continue;
         const jitter = computeJitter(t.id, t.cron, t.recurring);
         const anchor = t.recurring
           ? (t.lastFiredAt ?? t.createdAt)
           : t.createdAt;
         const nextFire = computeNextFireMs(t.cron, anchor, jitter);
         if (nextFire === null || nextFire >= now) continue;
+        // A live scheduler may reload after another one-shot rewrites the shared
+        // tasks file but before this armed job's next 1s tick. Leave that brief
+        // handoff to the tick, but recover it as missed once the slot is stale.
+        if (
+          !t.recurring &&
+          this.timer !== null &&
+          this.armedDurableOneShots.has(t.id) &&
+          isCronSlotVisibleToTick(nextFire - jitter, now, jitter)
+        )
+          continue;
         if (!t.recurring) {
           // Missed one-shots are delivered as one batched confirm-first
           // notification: the task file is project-controlled, and
@@ -724,6 +899,7 @@ export class CronScheduler {
       // existed.
       for (const t of [...missedOneShots, ...finalTasks]) {
         this.pendingRemoval.add(t.id);
+        this.armedDurableOneShots.delete(t.id);
         // A prior non-owner load may have installed this task as a
         // live job — drop it, or the now-owning tick could fire it a
         // second time before the on-disk removal propagates back
@@ -742,6 +918,7 @@ export class CronScheduler {
     for (const job of this.jobs.values()) {
       if (job.durable && !diskIds.has(job.id)) {
         this.jobs.delete(job.id);
+        this.armedDurableOneShots.delete(job.id);
       }
     }
     for (const id of this.pendingRemoval) {
@@ -771,6 +948,11 @@ export class CronScheduler {
         job.lastFiredAt = Math.max(existing.lastFiredAt, job.lastFiredAt ?? 0);
       }
       this.jobs.set(task.id, job);
+      if (!task.recurring && this.#shouldFireDurable(job)) {
+        this.armedDurableOneShots.add(task.id);
+      } else {
+        this.armedDurableOneShots.delete(task.id);
+      }
       if (!existing) durableJobCount++;
     }
 
@@ -855,10 +1037,17 @@ export class CronScheduler {
         // "defer to the owning session" path).
         for (const id of skipped) this.pendingRemoval.delete(id);
         if (runnable.length > 0) {
+          // The carrier is SYNTHETIC: its prompt is a notification about every
+          // task in `runnable`, not the command of any one of them.
+          const carrier = durableTaskToJob(
+            runnable[0]!,
+            this.recurringMaxAgeMs,
+          );
           onFire({
-            ...durableTaskToJob(runnable[0]!, this.recurringMaxAgeMs),
+            ...carrier,
             prompt: buildMissedCronNotification(runnable),
             missed: true,
+            delivery: undefined,
           });
           this.removeMissedFromDisk(runnable.map((t) => t.id));
         }
@@ -927,16 +1116,40 @@ export class CronScheduler {
       if (fired !== undefined) stamps.set(id, fired);
     }
     if (stamps.size === 0) return;
+    // Guard the just-delivered ids against re-detection by any reload that
+    // races this async write (which still reads the stale disk lastFiredAt).
+    // Cleared once the write lands, after which the disk anchor is current.
+    const guarded = [...stamps.keys()];
+    this.markFirePersistPending(guarded);
     this.trackPersist(
       updateCronTasks(this.projectRoot, (tasks) => {
         let changed = false;
         const next = tasks.map((t) => {
           const stamp = stamps.get(t.id);
-          if (stamp === undefined || t.lastFiredAt === stamp) return t;
+          // Never regress lastFiredAt (`>=`, not just `===`): a NEWER stamp may
+          // have landed after this catch-up was delivered — mainly a manual
+          // POST /run in the daemon process writing lastFiredAt=now while this
+          // bound session's async catch-up persist is still in flight (a
+          // cross-process race firePersistPending can't see). Overwriting it with
+          // the older catch-up minute would re-open the manually-covered slots.
+          // Mirrors the tick persist's guard.
+          if (stamp === undefined || (t.lastFiredAt ?? 0) >= stamp) return t;
           changed = true;
-          return { ...t, lastFiredAt: stamp };
+          // Late fire (overdue while no session owned the schedule) — record it
+          // as 'catch-up' so the history distinguishes it from an on-time fire.
+          return {
+            ...t,
+            lastFiredAt: stamp,
+            runs: appendCronRun(t.runs, {
+              at: stamp,
+              kind: 'catch-up',
+              ...(this.sessionId ? { sessionId: this.sessionId } : {}),
+            }),
+          };
         });
         return changed ? next : tasks;
+      }).finally(() => {
+        this.clearFirePersistPending(guarded);
       }),
     );
   }
@@ -1010,6 +1223,22 @@ export class CronScheduler {
   }
 
   /**
+   * Immediately fires a job by ID, bypassing the cron schedule check.
+   * Sets lastFiredAt to prevent the normal tick from re-firing the same
+   * minute slot. Returns true if the job existed and was fired, false
+   * otherwise. Primarily a test seam (see QWEN_CODE_TEST_CRON_FAST in
+   * create()); also useful for manual debug triggers.
+   */
+  forceFireJob(id: string): boolean {
+    const job = this.jobs.get(id);
+    if (!job || !this.onFire) return false;
+    job.lastFiredAt = Date.now();
+    debugLogger.debug(`forceFireJob: firing ${id} (${job.cronExpr})`);
+    this.onFire(job);
+    return true;
+  }
+
+  /**
    * Starts the scheduler tick. Calls `onFire` when a job is due.
    * Only fires when called — does not auto-fire missed intervals.
    */
@@ -1055,12 +1284,17 @@ export class CronScheduler {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
     }
+    // Clear any pending test-seam auto-fire timers so a torn-down
+    // scheduler never leaks a late forceFireJob call.
+    for (const timer of this.testFireTimers.values()) clearTimeout(timer);
+    this.testFireTimers.clear();
     if (this.wakeups.size > 0) {
       debugLogger.debug(`stop() discarding ${this.wakeups.size} wakeup(s)`);
       this.wakeups.clear();
     }
     this.wakeupChainStartedAt = null;
     this.onFire = null;
+    this.armedDurableOneShots.clear();
 
     if (this.durableEnabled) {
       // Invalidate in-flight durable continuations (see durableGeneration).
@@ -1137,6 +1371,21 @@ export class CronScheduler {
   }
 
   /**
+   * Whether THIS session should fire a given durable job:
+   *  - A session-bound task (`boundSessionId` set) fires only in its own
+   *    session, independent of the per-project lock — so each task's fires
+   *    land in its dedicated transcript and no two sessions race it.
+   *  - An unbound task fires only in the lock owner (the legacy shared model).
+   * A task bound to a *different* session is never fired here.
+   */
+  #shouldFireDurable(job: CronJob): boolean {
+    if (job.boundSessionId !== undefined) {
+      return job.boundSessionId === this.sessionId;
+    }
+    return this.isOwner;
+  }
+
+  /**
    * Manual tick — checks all jobs against the current time and fires those
    * that are due. Exported for testing.
    */
@@ -1150,10 +1399,11 @@ export class CronScheduler {
     const removedIds: string[] = []; // durable one-shot fires / expiries
 
     for (const job of this.jobs.values()) {
-      // Durable jobs fire only while this session holds the lock — never
-      // in non-owner sessions, where a persisted job would otherwise fire
-      // uncoordinated alongside the real owner's copy.
-      if (job.durable && !this.isOwner) continue;
+      // Durable jobs fire under one of two models (see #shouldFireDurable):
+      // a session-bound task fires only in its own session; an unbound task
+      // fires only in the per-project lock owner. Anything else is skipped so
+      // a persisted job never fires uncoordinated in the wrong session.
+      if (job.durable && !this.#shouldFireDurable(job)) continue;
       // A durable job this consumer can't run (e.g. a loop.md sentinel in a
       // headless run) is skipped BEFORE processJob stamps lastFiredAt — firing
       // it here would persist the stamp while the work is skipped downstream,
@@ -1178,16 +1428,48 @@ export class CronScheduler {
     // Persist durable changes in one write so the lastFiredAt update and
     // the removals can't clobber each other's read-modify-write cycle.
     if (this.projectRoot && (firedAt.size > 0 || removedIds.length > 0)) {
-      for (const id of removedIds) this.pendingRemoval.add(id);
+      for (const id of removedIds) {
+        this.pendingRemoval.add(id);
+        this.armedDurableOneShots.delete(id);
+      }
       const removed = new Set(removedIds);
+      // Guard the just-fired recurring ids against re-detection by a reload that
+      // races this async write (removed one-shots are already covered by
+      // pendingRemoval). Cleared when the write lands. Symmetric to the
+      // catch-up persist — see firePersistPending.
+      const guarded = [...firedAt.keys()];
+      this.markFirePersistPending(guarded);
       this.trackPersist(
         updateCronTasks(this.projectRoot, (tasks) =>
           tasks
             .filter((t) => !removed.has(t.id))
-            .map((t) =>
-              firedAt.has(t.id) ? { ...t, lastFiredAt: firedAt.get(t.id)! } : t,
-            ),
-        ),
+            // A recurring fire also appends a bounded run record. One-shots
+            // were routed to removedIds above and filtered out here, so they
+            // never accrue history — they're deleted the moment they fire.
+            .map((t) => {
+              const stamp = firedAt.get(t.id);
+              // Never regress lastFiredAt: a concurrent writer (a manual
+              // POST /run, or a catch-up persist) may have stamped a NEWER value
+              // between this tick's read and write; overwriting it with the older
+              // tick slot could re-open an already-covered slot. Mirrors the
+              // catch-up persist's equality guard.
+              if (stamp === undefined || (t.lastFiredAt ?? 0) >= stamp)
+                return t;
+              return {
+                ...t,
+                lastFiredAt: stamp,
+                runs: appendCronRun(t.runs, {
+                  at: stamp,
+                  kind: 'scheduled',
+                  // The owner session that ran this fire — links the run back
+                  // to its transcript. Set whenever a durable fire persists.
+                  ...(this.sessionId ? { sessionId: this.sessionId } : {}),
+                }),
+              };
+            }),
+        ).finally(() => {
+          this.clearFirePersistPending(guarded);
+        }),
       );
     }
 
@@ -1212,8 +1494,7 @@ export class CronScheduler {
     currentDate: Date,
     currentMs: number,
   ): 'fired' | 'fired-final' | 'none' {
-    const absJitter = Math.abs(job.jitterMs);
-    const windowMinutes = Math.ceil(absJitter / 60_000);
+    const windowMinutes = cronJitterWindowMinutes(job.jitterMs);
 
     const nowMinuteStart = new Date(currentDate);
     nowMinuteStart.setSeconds(0, 0);
@@ -1369,6 +1650,8 @@ function durableTaskToJob(
     lastFiredAt: task.lastFiredAt ?? undefined,
     jitterMs,
     durable: true,
+    ...(task.sessionId ? { boundSessionId: task.sessionId } : {}),
+    ...(task.delivery && task.sessionId ? { delivery: task.delivery } : {}),
   };
 }
 
@@ -1380,6 +1663,8 @@ function jobToDurableTask(job: CronJob): DurableCronTask {
     recurring: job.recurring,
     createdAt: job.createdAt,
     lastFiredAt: job.lastFiredAt ?? null,
+    ...(job.boundSessionId ? { sessionId: job.boundSessionId } : {}),
+    ...(job.delivery ? { delivery: job.delivery } : {}),
   };
 }
 
@@ -1399,4 +1684,47 @@ function computeNextFireMs(
   } catch {
     return null;
   }
+}
+
+/**
+ * The effective next fire time (epoch ms) the tick will ACTUALLY produce for a
+ * durable task — the same authority the scheduler's catch-up detection uses —
+ * so a UI countdown lines up with the real fire instead of the bare cron
+ * boundary. The tick fires a boundary slot at `slot + jitterMs` (see
+ * {@link processJob}); bare `nextFireTime` omits that jitter and would read up
+ * to the jitter window (≤15 min for recurring) early. Anchored on the last fire
+ * (recurring) / creation (one-shot), not on `now`, so a slot pending only its
+ * jitter isn't skipped to the following period. Returns null when the cron
+ * can't be projected. Callers should treat a disabled task as "no next fire".
+ */
+// Memoize the (expensive, up to three minute-stepping cron scans) computation:
+// deterministic per (id, cron, recurring, anchor), and the route recomputes it
+// per task on every GET/POST/PATCH/run response. A sparse cron (yearly, leap-day)
+// costs hundreds of ms per scan, so an un-memoized 50-task list could stall the
+// event loop for seconds. A task re-keys only when its anchor advances (a fire)
+// or its schedule is edited, so steady-state GETs are all cache hits.
+const nextDurableFireCache = new Map<string, number | null>();
+const NEXT_DURABLE_FIRE_CACHE_MAX = 512;
+
+export function nextDurableFireMs(
+  task: Pick<
+    DurableCronTask,
+    'id' | 'cron' | 'recurring' | 'lastFiredAt' | 'createdAt'
+  >,
+): number | null {
+  const anchor = task.recurring
+    ? (task.lastFiredAt ?? task.createdAt)
+    : task.createdAt;
+  const key = `${task.id}\x00${task.cron}\x00${task.recurring ? 1 : 0}\x00${anchor}`;
+  const cached = nextDurableFireCache.get(key);
+  if (cached !== undefined) return cached;
+  const jitter = computeJitter(task.id, task.cron, task.recurring);
+  const result = computeNextFireMs(task.cron, anchor, jitter);
+  // Clear wholesale on overflow (re-warms on the next request) rather than track
+  // LRU — the working set is the current task list, well under the cap.
+  if (nextDurableFireCache.size >= NEXT_DURABLE_FIRE_CACHE_MAX) {
+    nextDurableFireCache.clear();
+  }
+  nextDurableFireCache.set(key, result);
+  return result;
 }

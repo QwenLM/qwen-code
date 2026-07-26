@@ -33,9 +33,9 @@ export interface MouseEventsOptions {
   /**
    * Opt out of the VP gate. By default mouse tracking is enabled only in VP
    * mode (`ui.useTerminalBuffer`), so non-VP keeps native terminal scrollback.
-   * Set true for surfaces that own the wheel regardless — the VP viewport
-   * (ScrollableList) and alternate-screen modals (ThinkingViewer) — where
-   * there is no main-screen native scrollback to protect.
+   * Set true for surfaces that own the wheel regardless — e.g. the VP viewport
+   * (ScrollableList) — where there is no main-screen native scrollback to
+   * protect.
    */
   bypassVpGate?: boolean;
 }
@@ -157,7 +157,14 @@ export function useMouseEvents(
   const handlerRef = useRef(handler);
   handlerRef.current = handler;
 
-  const enabled = isActive && isRawModeSupported && vpGateOpen;
+  // Never write SGR mouse-mode escapes (?1002h ?1006h) unless stdout is a TTY.
+  // `isRawModeSupported` only reflects stdin; with stdout piped/redirected
+  // (`qwen | tee log`) an active, raw-mode-capable surface — e.g. the non-TTY
+  // transcript's focused ScrollableList (`bypassVpGate`) — would otherwise emit
+  // raw control bytes into the captured output. Mirrors AlternateScreen's
+  // `process.stdout.isTTY` guard so the non-TTY fallback stays byte-clean.
+  const enabled =
+    isActive && isRawModeSupported && vpGateOpen && Boolean(stdout.isTTY);
 
   useEffect(() => {
     if (!enabled) return;

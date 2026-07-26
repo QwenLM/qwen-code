@@ -21,6 +21,13 @@ import {
   parseLastEventId,
   parseMaxQueuedQuery,
 } from '../server/request-helpers.js';
+import { parseEventEpochHeader } from '../sse-last-event-id.js';
+import type { WorkspaceRegistry } from '../workspace-registry.js';
+import { requireSessionRuntime } from './session-runtime.js';
+import {
+  parseVirtualSubagentSessionId,
+  type VirtualSubagentSessions,
+} from '../virtual-subagent-sessions.js';
 
 let activeSseCount = 0;
 
@@ -30,9 +37,11 @@ export function getActiveSseCount(): number {
 
 interface RegisterSseEventsRoutesDeps {
   bridge: AcpSessionBridge;
+  workspaceRegistry: WorkspaceRegistry;
   daemonLog?: DaemonLogger;
   writerIdleTimeoutMs?: number;
   sendBridgeError: SendBridgeError;
+  virtualSubagentSessions?: VirtualSubagentSessions;
 }
 
 type OmitId<T> = Omit<T, 'id'>;
@@ -76,11 +85,16 @@ export function registerSseEventsRoutes(
   app: Application,
   deps: RegisterSseEventsRoutesDeps,
 ): void {
-  const { bridge, daemonLog, sendBridgeError, writerIdleTimeoutMs } = deps;
+  const { workspaceRegistry, daemonLog, sendBridgeError, writerIdleTimeoutMs } =
+    deps;
 
-  app.get('/session/:id/events', (req, res) => {
+  app.get('/session/:id/events', async (req, res) => {
     const sessionId = req.params['id'];
     const lastEventId = parseLastEventId(req.headers['last-event-id']);
+    // Epoch token accompanying the resume cursor (DAEMON-001). Invalid
+    // values degrade to "not provided" so the bus falls back to the
+    // numeric stale-cursor heuristic.
+    const eventEpoch = parseEventEpochHeader(req.headers['x-qwen-event-epoch']);
     const maxQueued = parseMaxQueuedQuery(req.query['maxQueued'], res);
     // `parseMaxQueuedQuery` sends its own 400 + JSON body on rejection
     // (returns `null`) so the SSE handshake doesn't get half-written.
@@ -89,16 +103,57 @@ export function registerSseEventsRoutes(
     if (maxQueued === null) return;
 
     let iter: AsyncIterator<BridgeEvent> | undefined;
+    let busEpoch: string | undefined;
     const abort = new AbortController();
     try {
-      const snapshot = req.query['snapshot'] === '1';
-      const iterable = bridge.subscribeEvents(sessionId, {
-        signal: abort.signal,
-        lastEventId,
-        ...(maxQueued !== undefined ? { maxQueued } : {}),
-        ...(snapshot ? { snapshot: true } : {}),
+      const virtualKey = parseVirtualSubagentSessionId(sessionId);
+      const runtime = requireSessionRuntime({
+        sessionId: virtualKey?.parentSessionId ?? sessionId,
+        route: 'GET /session/:id/events',
+        res,
+        workspaceRegistry,
+        daemonLog,
       });
+      if (!runtime) return;
+      const snapshot = req.query['snapshot'] === '1';
+      const iterable = virtualKey
+        ? await deps.virtualSubagentSessions?.subscribe(runtime, sessionId, {
+            signal: abort.signal,
+            lastEventId,
+            ...(maxQueued !== undefined ? { maxQueued } : {}),
+          })
+        : runtime.bridge.subscribeEvents(sessionId, {
+            signal: abort.signal,
+            lastEventId,
+            ...(eventEpoch !== undefined ? { epoch: eventEpoch } : {}),
+            ...(maxQueued !== undefined ? { maxQueued } : {}),
+            ...(snapshot ? { snapshot: true } : {}),
+          });
+      if (!iterable) {
+        res.status(404).json({
+          error: 'Subagent session not found',
+          code: 'session_not_found',
+          sessionId,
+        });
+        return;
+      }
       iter = iterable[Symbol.asyncIterator]();
+      // Captured while the session entry is known to exist so the header
+      // block below can advertise the current epoch without a throwing
+      // lookup after the stream is already committed. Virtual subagent
+      // sessions ride their own bus with no epoch/resume mechanism (same
+      // rationale the WS transport documents for ignoring the epoch), and
+      // their compound ids are not in the bridge's byId map — a direct
+      // lookup would throw and abort the subscription. A real session torn
+      // down between subscribeEvents and this lookup degrades to a
+      // headerless stream rather than an error (mirrors the /acp route).
+      if (!virtualKey) {
+        try {
+          busEpoch = runtime.bridge.getSessionEventEpoch(sessionId);
+        } catch {
+          busEpoch = undefined;
+        }
+      }
     } catch (err) {
       // `EventBus` throws `SubscriberLimitExceededError` when the
       // per-session subscriber cap (default 64) is reached.
@@ -159,6 +214,12 @@ export function registerSseEventsRoutes(
     // Disable proxy buffering (nginx); event-stream content type alone
     // doesn't always reach the client through every proxy.
     res.setHeader('X-Accel-Buffering', 'no');
+    // Advertise the bus epoch on EVERY subscription (including the first,
+    // cursor-less one) so clients can pair it with their resume cursor and
+    // detect a daemon restart on reconnect (DAEMON-001).
+    if (busEpoch !== undefined) {
+      res.setHeader('X-Qwen-Event-Epoch', busEpoch);
+    }
     // Always present on the supported Node versions (engines.node >=22).
     res.flushHeaders();
 
@@ -407,6 +468,7 @@ export function registerSseEventsRoutes(
               lastDeliveredId?: number;
               earliestAvailableId?: number;
               reason?: string;
+              detail?: string;
             };
             const gap =
               typeof data.earliestAvailableId === 'number' &&
@@ -418,8 +480,11 @@ export function registerSseEventsRoutes(
                 `lastEventId=${data.lastDeliveredId ?? '?'}, ` +
                 `earliestInRing=${data.earliestAvailableId ?? '?'}, ` +
                 `gap=${gap ?? '?'} events, ` +
-                `reason=${data.reason ?? '?'}. ` +
-                `Consumer must call loadSession to recover.`,
+                `reason=${data.reason ?? '?'}` +
+                (typeof data.detail === 'string'
+                  ? `, detail=${data.detail}`
+                  : '') +
+                `. Consumer must call loadSession to recover.`,
             );
           }
           await writeWithBackpressure(formatSseFrame(next.value));

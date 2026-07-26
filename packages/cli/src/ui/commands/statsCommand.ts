@@ -24,6 +24,7 @@ import {
   isSubpath,
   queryTokenUsage,
   type SkillMetrics,
+  type GenerationMetrics,
   type TokenUsageExportFormat,
   type TokenUsageGroupSummary,
   type TokenUsagePeriod,
@@ -38,6 +39,44 @@ const EMPTY_SKILL_METRICS: SkillMetrics = {
   totalFail: 0,
   byName: {},
 };
+
+function formatGenerationMetrics(metrics: GenerationMetrics | undefined) {
+  const last = metrics?.last;
+  if (!metrics || !last) {
+    return [];
+  }
+
+  const lastTps =
+    last.generationDurationMs > 0
+      ? last.outputTokens / (last.generationDurationMs / 1000)
+      : undefined;
+  const averageTtft =
+    metrics.timedRequests > 0
+      ? metrics.totalTtftMs / metrics.timedRequests
+      : undefined;
+  const sessionTps =
+    metrics.totalGenerationDurationMs > 0
+      ? metrics.totalThroughputOutputTokens /
+        (metrics.totalGenerationDurationMs / 1000)
+      : undefined;
+
+  return [
+    '',
+    `${t('Generation Metrics')} (${t('Latest Request')})`,
+    `${t('Model')}: ${last.model}`,
+    `TTFT: ${formatDuration(last.ttftMs)}`,
+    `${t('Generation Time')}: ${formatDuration(last.generationDurationMs)}`,
+    `${t('Output Tokens')}: ${formatInteger(last.outputTokens)}`,
+    `TPS: ${lastTps === undefined ? '—' : `${lastTps.toFixed(1)} tok/s`}`,
+    `${t('Requests')}: ${formatInteger(metrics.timedRequests)}`,
+    `${t('Average TTFT')}: ${
+      averageTtft === undefined ? '—' : formatDuration(averageTtft)
+    }`,
+    `${t('Session TPS')}: ${
+      sessionTps === undefined ? '—' : `${sessionTps.toFixed(1)} tok/s`
+    }`,
+  ];
+}
 
 type ParsedStatsExportArgs = {
   period: TokenUsagePeriod;
@@ -705,6 +744,7 @@ export const statsCommand: SlashCommand = {
             prompt: String(totalPromptTokens),
             output: String(totalCandidateTokens),
           }),
+          ...formatGenerationMetrics(metrics.generation),
           t('Tool calls: {{total}} ({{success}} ok, {{fail}} fail)', {
             total: String(metrics.tools.totalCalls),
             success: String(metrics.tools.totalSuccess),

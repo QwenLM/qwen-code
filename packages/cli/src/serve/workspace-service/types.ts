@@ -39,6 +39,17 @@ import type { WorkspaceVoiceStatus } from '../../services/voice-service.js';
 import type { VoiceMode } from '../../services/voice-settings.js';
 import type { WorkspaceProvidersStatusProvider } from '../workspace-providers-status.js';
 import type { WorkspaceSkillsStatusProvider } from '../workspace-skills-status.js';
+import type {
+  WorkspaceSkillInstallRequest,
+  WorkspaceSkillMutationResult,
+  WorkspaceSkillScope,
+} from '../workspace-skill-management.js';
+
+export type {
+  WorkspaceSkillInstallRequest,
+  WorkspaceSkillMutationResult,
+  WorkspaceSkillScope,
+} from '../workspace-skill-management.js';
 
 // ---------------------------------------------------------------------------
 // WorkspaceRequestContext
@@ -149,6 +160,17 @@ export interface DaemonWorkspaceService {
     ctx: WorkspaceRequestContext,
   ): Promise<QwenPermissionSettings>;
 
+  /** Start the ACP child/channel without creating a user-visible session. */
+  preheatAcpChild(
+    ctx: WorkspaceRequestContext,
+    opts?: { timeoutMs?: number },
+  ): Promise<WorkspaceAcpPreheatResult>;
+
+  /** Current ACP child/channel liveness for the bound workspace. */
+  getWorkspaceAcpStatus(
+    ctx: WorkspaceRequestContext,
+  ): Promise<WorkspaceAcpStatusResult>;
+
   /** Voice settings and selectable transcription models for the workspace. */
   getWorkspaceVoiceStatus(
     ctx: WorkspaceRequestContext,
@@ -181,6 +203,26 @@ export interface DaemonWorkspaceService {
     enabled: boolean,
   ): Promise<{ toolName: string; enabled: boolean }>;
 
+  /** Toggle a skill in the workspace skill settings. */
+  setWorkspaceSkillEnabled(
+    ctx: WorkspaceRequestContext,
+    skillName: string,
+    enabled: boolean,
+  ): Promise<WorkspaceSkillToggleResult>;
+
+  /** Install a project- or user-level Skill from a bounded package. */
+  installWorkspaceSkill(
+    ctx: WorkspaceRequestContext,
+    request: WorkspaceSkillInstallRequest,
+  ): Promise<WorkspaceSkillMutationResult>;
+
+  /** Delete a managed project- or user-level Skill. */
+  deleteWorkspaceSkill(
+    ctx: WorkspaceRequestContext,
+    skillName: string,
+    scope: WorkspaceSkillScope,
+  ): Promise<WorkspaceSkillMutationResult>;
+
   /** Scaffold (init) a QWEN.md file in the workspace. */
   initWorkspace(
     ctx: WorkspaceRequestContext,
@@ -196,6 +238,9 @@ export interface DaemonWorkspaceService {
 
   /** Reload all settings (env + model + permissions + tools + memory). */
   reload(ctx: WorkspaceRequestContext): Promise<ReloadResponse>;
+
+  /** Drop cached skill status so extension skill changes are re-enumerated. */
+  invalidateWorkspaceSkillsStatus(): void;
 
   /** Broadcast extension refresh to all active sessions (fire-and-forget). */
   refreshExtensionsForAllSessions(): Promise<{
@@ -215,6 +260,18 @@ export interface ReloadResponse {
   sessionsSkipped?: string[];
   childReloaded: boolean;
   childError?: string;
+}
+
+export interface WorkspaceAcpPreheatResult {
+  ready: boolean;
+  channelLive: boolean;
+  durationMs: number;
+  reason?: 'timeout' | 'error';
+  error?: string;
+}
+
+export interface WorkspaceAcpStatusResult {
+  channelLive: boolean;
 }
 
 export type WorkspaceTrustDesiredState = 'trusted' | 'untrusted';
@@ -274,6 +331,53 @@ export interface WorkspaceVoiceSettingsUpdate {
   voiceModel?: string;
 }
 
+export type WorkspaceSkillToggleActivation = 'applied' | 'deferred' | 'partial';
+
+export interface WorkspaceSkillToggleResult {
+  skillName: string;
+  enabled: boolean;
+  changed: boolean;
+  activation: WorkspaceSkillToggleActivation;
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+}
+
+export interface PersistDisabledSkillResult {
+  changed: boolean;
+  disabled: string[];
+  settingsChanges?: Array<{
+    key: 'skills.disabled' | 'skills.enabled';
+    value: string[] | undefined;
+  }>;
+}
+
+export type WorkspaceSkillNotToggleableReason =
+  | 'not_user_invocable'
+  | 'inactive_extension'
+  | 'locked';
+
+export class WorkspaceSkillNotFoundError extends Error {
+  constructor(readonly skillName: string) {
+    super(`Skill not found: ${skillName}`);
+    this.name = 'WorkspaceSkillNotFoundError';
+  }
+}
+
+export class WorkspaceSkillNotToggleableError extends Error {
+  constructor(
+    readonly skillName: string,
+    readonly reason: WorkspaceSkillNotToggleableReason,
+    readonly lockedScope?: 'system' | 'user' | 'systemDefaults',
+  ) {
+    super(
+      lockedScope
+        ? `Skill ${skillName} is locked by ${lockedScope} settings`
+        : `Skill ${skillName} is not toggleable: ${reason}`,
+    );
+    this.name = 'WorkspaceSkillNotToggleableError';
+  }
+}
+
 /** Discriminated union for MCP server restart outcomes. */
 export type RestartMcpServerResult =
   | { serverName: string; restarted: true; durationMs: number }
@@ -281,7 +385,11 @@ export type RestartMcpServerResult =
       serverName: string;
       restarted: false;
       skipped: true;
-      reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+      reason:
+        | 'in_flight'
+        | 'disabled'
+        | 'budget_would_exceed'
+        | 'authentication_required';
     }
   | {
       serverName: string;
@@ -307,6 +415,12 @@ export type RestartMcpServerResult =
 export interface DaemonWorkspaceServiceDeps {
   /** Canonical absolute path of the bound workspace. */
   boundWorkspace: string;
+
+  /** Trust captured by this immutable workspace runtime generation. */
+  isWorkspaceTrusted: () => boolean;
+
+  /** Rejects work after this runtime generation starts draining. */
+  assertGenerationOpen?: () => void;
 
   /** Context filename (e.g. 'QWEN.md') from workspace settings. */
   contextFilename: string;
@@ -346,22 +460,48 @@ export interface DaemonWorkspaceServiceDeps {
     workspace: string,
     toolName: string,
     enabled: boolean,
+    assertGenerationOpen?: () => void,
   ) => Promise<void>;
+
+  /** Persist a skill enable/disable change to workspace settings. */
+  persistDisabledSkills: (
+    workspace: string,
+    skillName: string,
+    enabled: boolean,
+    assertGenerationOpen?: () => void,
+  ) => Promise<PersistDisabledSkillResult>;
 
   persistSetting?: (
     workspace: string,
     scope: SettingScope,
     key: string,
     value: unknown,
+    assertGenerationOpen?: () => void,
   ) => Promise<void | LoadedSettings>;
 
   persistSettings?: (
     workspace: string,
     writes: WorkspaceSettingsWrite[],
+    assertGenerationOpen?: () => void,
   ) => Promise<void>;
 
+  /** Runtime-local environment used by workspace Voice operations. */
+  voiceEnv?: Readonly<Record<string, string | undefined>>;
+
+  /** Runtime-local environment used to authenticate GitHub Skill installs. */
+  skillInstallEnv?: Readonly<Record<string, string | undefined>>;
+
+  /** Force Voice settings writes into this scope for workspace-qualified ACP. */
+  voiceSettingsScope?: SettingScope;
+
   /** Reload daemon-side process.env from .env / settings.env. */
-  reloadDaemonEnv?: (workspace: string) => Promise<EnvReloadResult>;
+  reloadDaemonEnv?: (
+    workspace: string,
+    assertGenerationOpen?: () => void,
+  ) => Promise<EnvReloadResult>;
+
+  /** Eagerly start the ACP child/channel without creating a session. */
+  preheatAcpChild?: () => Promise<void>;
 
   /**
    * Query workspace status from the ACP child. The bridge owns the

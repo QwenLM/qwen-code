@@ -10,6 +10,7 @@ import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
+import { ToolNames } from '../tools/tool-names.js';
 import type { ForkedAgentResult } from '../utils/forkedAgent.js';
 import { runForkedAgent } from '../utils/forkedAgent.js';
 import {
@@ -36,11 +37,17 @@ vi.mock('./indexer.js', () => ({
   rebuildUserAutoMemoryIndex: vi.fn(),
 }));
 
-function createConfig(projectRoot: string, managed = true): Config {
+function createConfig(
+  projectRoot: string,
+  managed = true,
+  overrides: Partial<Config> = {},
+): Config {
   return {
     isManagedMemoryAvailable: vi.fn().mockReturnValue(managed),
     getProjectRoot: vi.fn().mockReturnValue(projectRoot),
     getUserMemory: vi.fn().mockReturnValue('QWEN/AGENTS guidance'),
+    getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
+    ...overrides,
   } as unknown as Config;
 }
 
@@ -144,6 +151,11 @@ describe('remember memory helper', () => {
       'edit',
     ]);
     expect(params.config.getUserMemory()).toBe('');
+    // The remember system prompt already embeds the full auto-memory section;
+    // the forked-agent config must report an empty auto-memory prompt so
+    // AgentCore does not append it a second time (duplication / blank-slate
+    // leak). See buildChatSystemPrompt in agent-core.ts.
+    expect(params.config.getAutoMemoryPrompt()).toBe('');
     expect(params.config.getDisableAllHooks()).toBe(true);
     expect(params.config.getHookSystem()).toBeUndefined();
     expect(params.config.getMessageBus()).toBeUndefined();
@@ -170,6 +182,105 @@ describe('remember memory helper', () => {
     expect(params.taskPrompt).toContain('Remember the project uses vitest.');
     expect(params.taskPrompt).toContain('<user-content>');
     expect(rebuildManagedAutoMemoryIndex).toHaveBeenCalledWith(projectRoot);
+  });
+
+  it('threads the configured memory agent timeout into the forked agent', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    } satisfies ForkedAgentResult);
+    const config = createConfig(projectRoot);
+    vi.mocked(config.getMemoryAgentTimeoutMinutes).mockReturnValue(30);
+
+    await runManagedRememberByAgent({
+      config,
+      projectRoot,
+      content: 'Remember this.',
+      contextMode: 'workspace',
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTimeMinutes: 30 }),
+    );
+    // Non-clean mode still suppresses the duplicate auto-memory append while
+    // keeping the session's context files (QWEN.md/AGENTS.md) intact.
+    const params = vi.mocked(runForkedAgent).mock.calls[0]?.[0] as {
+      config: Config;
+    };
+    expect(params.config.getAutoMemoryPrompt()).toBe('');
+    expect(params.config.getUserMemory()).toBe('QWEN/AGENTS guidance');
+  });
+
+  it('keeps the built-in 5-minute default when no timeout is configured', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    } satisfies ForkedAgentResult);
+
+    await runManagedRememberByAgent({
+      config: createConfig(projectRoot),
+      projectRoot,
+      content: 'Remember this.',
+      contextMode: 'workspace',
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTimeMinutes: 5 }),
+    );
+  });
+
+  it('lets managed-memory writes bypass base ask rules', async () => {
+    const touched = path.join(getUserAutoMemoryRoot(), 'user.md');
+    const basePm: Pick<
+      PermissionManager,
+      | 'evaluate'
+      | 'findMatchingDenyRule'
+      | 'hasMatchingAskRule'
+      | 'hasRelevantRules'
+      | 'isToolEnabled'
+    > = {
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      hasMatchingAskRule: vi.fn().mockReturnValue(true),
+      findMatchingDenyRule: vi.fn().mockReturnValue(undefined),
+      evaluate: vi.fn().mockResolvedValue('ask'),
+      isToolEnabled: vi.fn().mockResolvedValue(true),
+    };
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: 'Saved user memory.',
+      filesTouched: [touched],
+      filesWritten: [touched],
+    } satisfies ForkedAgentResult);
+
+    await runManagedRememberByAgent({
+      config: createConfig(projectRoot, true, {
+        getPermissionManager: () => basePm as PermissionManager,
+      }),
+      projectRoot,
+      content: 'Remember the user prefers quiet output.',
+      contextMode: 'clean',
+    });
+
+    const params = vi.mocked(runForkedAgent).mock.calls[0]?.[0] as {
+      config: Config;
+    };
+    const pm = params.config.getPermissionManager() as PermissionManager;
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: touched,
+      }),
+    ).resolves.toBe('allow');
+    await expect(
+      pm.evaluate({
+        toolName: ToolNames.WRITE_FILE,
+        filePath: path.join(projectRoot, 'README.md'),
+      }),
+    ).resolves.toBe('deny');
   });
 
   it('classifies only successful memory writes', async () => {

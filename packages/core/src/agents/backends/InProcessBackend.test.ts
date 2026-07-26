@@ -140,7 +140,6 @@ function createMockConfig() {
     getPlansDir: vi.fn().mockReturnValue('/tmp/plans'),
     getApprovalMode: vi.fn().mockReturnValue(DEFAULT_MODE),
     getPrePlanMode: vi.fn().mockReturnValue(DEFAULT_MODE),
-    getPlanGateState: vi.fn().mockReturnValue(undefined),
     setApprovalMode: vi.fn(),
     isTrustedFolder: vi.fn().mockReturnValue(true),
     getPermissionManager: vi.fn().mockReturnValue(null),

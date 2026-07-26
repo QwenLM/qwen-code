@@ -13,7 +13,15 @@ const skipPrepare = ['1', 'true'].includes(
 );
 
 if (skipPrepare) {
-  console.log('Skipping prepare because QWEN_SKIP_PREPARE is set.');
+  // The heavy build/bundle/husky are skipped, but git-commit.ts (gitignored,
+  // imported by e.g. cli's systemInfo) is still required to build or typecheck
+  // the packages that import it. Generate it here so a later per-workspace
+  // build/typecheck — such as the review tooling's — doesn't fail on the
+  // missing module. The non-skip path generates it via `npm run build`.
+  run('npm', ['run', 'generate']);
+  console.log(
+    'Skipping prepare build/bundle/husky because QWEN_SKIP_PREPARE is set.',
+  );
   process.exit(0);
 }
 

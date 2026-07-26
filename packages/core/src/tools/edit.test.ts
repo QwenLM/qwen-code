@@ -1313,6 +1313,39 @@ describe('EditTool', () => {
       expect(fs.readFileSync(filePath, 'utf8')).toBe('X\nline b\nline c\n');
     });
 
+    it('allows editing a large text file after a ranged read', async () => {
+      const initialContent = [
+        'target',
+        'context 1',
+        'context 2',
+        'context 3',
+        'context 4',
+        'x'.repeat(11 * 1024 * 1024),
+      ].join('\n');
+      fs.writeFileSync(filePath, initialContent, 'utf8');
+      const stats = fs.statSync(filePath);
+      fileReadCache.recordRead(filePath, stats, {
+        full: false,
+        cacheable: true,
+      });
+      (mockConfig.getApprovalMode as Mock).mockReturnValueOnce(
+        ApprovalMode.AUTO_EDIT,
+      );
+
+      const result = await tool
+        .build({
+          file_path: filePath,
+          old_string: 'target',
+          new_string: 'updated',
+        })
+        .execute(abortSignal);
+
+      expect(result.error).toBeUndefined();
+      expect(fs.readFileSync(filePath, 'utf8').startsWith('updated\n')).toBe(
+        true,
+      );
+    });
+
     it('rejects an edit when the previous read was non-cacheable (binary / pdf / image)', async () => {
       // ReadFile records every successful read into the cache,
       // including binary / PDF / image reads that produce a

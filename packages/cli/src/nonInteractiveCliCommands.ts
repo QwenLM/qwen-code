@@ -5,7 +5,10 @@
  */
 
 import type { PartListUnion } from '@google/genai';
-import { parseSlashCommand } from './utils/commands.js';
+import {
+  parseSlashCommand,
+  parseStackedSlashCommands,
+} from './utils/commands.js';
 import {
   Logger,
   uiTelemetryService,
@@ -396,6 +399,71 @@ export const handleSlashCommand = async (
     rawQuery,
     filteredCommands,
   );
+
+  // Handle stacked skill invocations (e.g. /feat-dev /e2e-testing implement X)
+  const stackedResult = parseStackedSlashCommands(rawQuery, filteredCommands);
+  if (stackedResult.skills.length >= 2) {
+    const combinedContent: PartListUnion[] = [];
+    let firstModelOverride: string | undefined;
+    const onCompleteCallbacks: Array<() => Promise<void>> = [];
+
+    for (const skill of stackedResult.skills) {
+      if (!skill.action) continue;
+      const skillContext = {
+        executionMode,
+        invocation: {
+          raw: `/${skill.name}`,
+          name: skill.name,
+          args: '',
+        },
+        services: { config, settings, logger: null },
+      } as unknown as CommandContext;
+
+      const skillResult = await skill.action(skillContext, '');
+      if (skillResult?.type === 'submit_prompt') {
+        combinedContent.push(skillResult.content);
+        firstModelOverride ??= skillResult.modelOverride;
+        if (skillResult.onComplete) {
+          onCompleteCallbacks.push(skillResult.onComplete);
+        }
+      }
+
+      recordSkillInvocation(config, {
+        skillName: getSkillCommandName(skill),
+        success: skillResult?.type === 'submit_prompt',
+      });
+    }
+
+    if (stackedResult.remainingText) {
+      combinedContent.push([{ text: stackedResult.remainingText }]);
+    }
+
+    const mergedContent: PartListUnion = combinedContent.flat();
+
+    const hookResult = await fireUserPromptExpansionHook(
+      config,
+      stackedResult.skills.map((s) => s.name).join(' '),
+      stackedResult.remainingText,
+      mergedContent,
+      abortController.signal,
+    );
+    if (hookResult.blockedResult) {
+      return hookResult.blockedResult;
+    }
+
+    return {
+      type: 'submit_prompt',
+      content: hookResult.content,
+      ...(firstModelOverride ? { modelOverride: firstModelOverride } : {}),
+      ...(onCompleteCallbacks.length
+        ? {
+            onComplete: async () => {
+              for (const cb of onCompleteCallbacks) await cb();
+            },
+          }
+        : {}),
+    };
+  }
 
   if (!commandToExecute) {
     // Check if this is a known command that's just not allowed

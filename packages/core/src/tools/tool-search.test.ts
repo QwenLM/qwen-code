@@ -40,11 +40,10 @@ function makeConfigWithRegistry(): {
   const config = new Config(baseConfigParams);
   const registry = new ToolRegistry(config);
   vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
-  // Stub out the chat client reference ToolSearch tries to refresh; we don't
-  // need end-to-end chat behaviour, just to confirm the call is tolerated.
+  // Stub out the chat client reference so ToolSearch can sync newly
+  // revealed tools via setTools() without a real GeminiClient.
   vi.spyOn(config, 'getGeminiClient').mockReturnValue({
     setTools: vi.fn().mockResolvedValue(undefined),
-    refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
   } as never);
   return { config, registry };
 }
@@ -602,7 +601,6 @@ describe('ToolSearchTool', () => {
     const setToolsSpy = vi.fn().mockResolvedValue(undefined);
     vi.spyOn(config, 'getGeminiClient').mockReturnValue({
       setTools: setToolsSpy,
-      refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
     } as never);
 
     const tool = new ToolSearchTool(config);
@@ -647,7 +645,6 @@ describe('ToolSearchTool', () => {
       const setToolsSpy = vi.fn().mockResolvedValue(undefined);
       vi.spyOn(config, 'getGeminiClient').mockReturnValue({
         setTools: setToolsSpy,
-        refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
       } as never);
 
       const tool = new ToolSearchTool(config);
@@ -848,17 +845,12 @@ describe('ToolSearchTool', () => {
     // First search uses keyword path (which calls loadAndReturnSchemas →
     // revealDeferredTool); confirm registry agrees.
     expect(registry.isDeferredToolRevealed('slack_send_message')).toBe(true);
-    const geminiClient = config.getGeminiClient() as unknown as {
-      refreshStartupContextReminder: ReturnType<typeof vi.fn>;
-    };
-    expect(geminiClient.refreshStartupContextReminder).toHaveBeenCalledTimes(1);
 
     // Second: same keyword search now finds nothing (tool excluded).
     const second = await tool
       .build({ query: 'slack' })
       .execute(new AbortController().signal);
     expect(String(second.llmContent)).toContain('No tools found matching');
-    expect(geminiClient.refreshStartupContextReminder).toHaveBeenCalledTimes(1);
   });
 
   it('returns an error result when setTools() throws — model must NOT see schemas as ready', async () => {
@@ -979,6 +971,126 @@ describe('ToolSearchTool', () => {
     expect(String(result.llmContent)).not.toContain('"name":"cron_create"');
     // Reveal rolled back so subsequent ToolSearch can find the tool.
     expect(registry.isDeferredToolRevealed('cron_create')).toBe(false);
+  });
+
+  it('excludes visibleTools from keyword-search candidates', async () => {
+    const visibleConfig = new Config({
+      ...baseConfigParams,
+      visibleTools: ['web_fetch'],
+    });
+    const visibleRegistry = new ToolRegistry(visibleConfig);
+    visibleRegistry.registerTool(
+      new MockTool({
+        name: 'web_fetch',
+        shouldDefer: true,
+        searchHint: 'fetch data from web',
+      }),
+    );
+    visibleRegistry.registerTool(
+      new MockTool({
+        name: 'monitor',
+        shouldDefer: true,
+        searchHint: 'fetch process output',
+      }),
+    );
+
+    vi.spyOn(visibleConfig, 'getToolRegistry').mockReturnValue(visibleRegistry);
+    vi.spyOn(visibleConfig, 'getGeminiClient').mockReturnValue({
+      setTools: vi.fn().mockResolvedValue(undefined),
+      refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    const tool = new ToolSearchTool(visibleConfig);
+    const result = await tool
+      .build({ query: 'fetch' })
+      .execute(new AbortController().signal);
+    const content = String(result.llmContent);
+
+    expect(content).toContain('monitor');
+    expect(content).not.toContain('web_fetch');
+  });
+
+  it('select: for a visibleTool does NOT trigger reveal/setTools', async () => {
+    const visibleConfig = new Config({
+      ...baseConfigParams,
+      visibleTools: ['web_fetch'],
+    });
+    const visibleRegistry = new ToolRegistry(visibleConfig);
+    visibleRegistry.registerTool(
+      new MockTool({ name: 'web_fetch', shouldDefer: true }),
+    );
+
+    vi.spyOn(visibleConfig, 'getToolRegistry').mockReturnValue(visibleRegistry);
+
+    const mockSetTools = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(visibleConfig, 'getGeminiClient').mockReturnValue({
+      setTools: mockSetTools,
+      refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    const tool = new ToolSearchTool(visibleConfig);
+    const result = await tool
+      .build({ query: 'select:web_fetch' })
+      .execute(new AbortController().signal);
+    const content = String(result.llmContent);
+
+    // Schema returned (model can inspect it)
+    expect(content).toContain('"name":"web_fetch"');
+    // But no reveal happened — tool is already visible
+    expect(visibleRegistry.isDeferredToolRevealed('web_fetch')).toBe(false);
+    // And setTools was NOT called — no KV-cache invalidation
+    expect(mockSetTools).not.toHaveBeenCalled();
+  });
+
+  it('select: for a non-visible deferred tool still triggers reveal', async () => {
+    const { config, registry } = makeConfigWithRegistry();
+    registry.registerTool(
+      new MockTool({ name: 'cron_create', shouldDefer: true }),
+    );
+
+    const tool = new ToolSearchTool(config);
+    await tool
+      .build({ query: 'select:cron_create' })
+      .execute(new AbortController().signal);
+
+    expect(registry.isDeferredToolRevealed('cron_create')).toBe(true);
+  });
+
+  it('select: mixed visible+non-visible only reveals the hidden ones', async () => {
+    const visibleConfig = new Config({
+      ...baseConfigParams,
+      visibleTools: ['web_fetch'],
+    });
+    const visibleRegistry = new ToolRegistry(visibleConfig);
+    visibleRegistry.registerTool(
+      new MockTool({ name: 'web_fetch', shouldDefer: true }),
+    );
+    visibleRegistry.registerTool(
+      new MockTool({ name: 'cron_create', shouldDefer: true }),
+    );
+
+    vi.spyOn(visibleConfig, 'getToolRegistry').mockReturnValue(visibleRegistry);
+
+    const mockSetTools = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(visibleConfig, 'getGeminiClient').mockReturnValue({
+      setTools: mockSetTools,
+      refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    const tool = new ToolSearchTool(visibleConfig);
+    const result = await tool
+      .build({ query: 'select:web_fetch,cron_create' })
+      .execute(new AbortController().signal);
+    const content = String(result.llmContent);
+
+    // Both schemas returned
+    expect(content).toContain('"name":"web_fetch"');
+    expect(content).toContain('"name":"cron_create"');
+    // web_fetch NOT revealed (visible), cron_create revealed
+    expect(visibleRegistry.isDeferredToolRevealed('web_fetch')).toBe(false);
+    expect(visibleRegistry.isDeferredToolRevealed('cron_create')).toBe(true);
+    // setTools called exactly once for cron_create
+    expect(mockSetTools).toHaveBeenCalledTimes(1);
   });
 });
 

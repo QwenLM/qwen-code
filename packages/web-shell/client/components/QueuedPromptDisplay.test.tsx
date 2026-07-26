@@ -2,6 +2,11 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import {
+  WebShellCustomizationProvider,
+  type WebShellCustomization,
+  type UserMessageContentParser,
+} from '../customization';
 import { getTranslator } from '../i18n';
 import { QueuedPromptDisplay, type QueuedPrompt } from './QueuedPromptDisplay';
 
@@ -30,6 +35,7 @@ afterEach(() => {
 
 function setup(
   overrides: Partial<React.ComponentProps<typeof QueuedPromptDisplay>> = {},
+  customization: WebShellCustomization = {},
 ) {
   const handlers = {
     onDelete: vi.fn(),
@@ -43,12 +49,14 @@ function setup(
         { id: 2, text: '排队消息二' },
       ];
   const container = render(
-    <QueuedPromptDisplay
-      prompts={prompts}
-      t={t}
-      {...handlers}
-      {...overrides}
-    />,
+    <WebShellCustomizationProvider value={customization}>
+      <QueuedPromptDisplay
+        prompts={prompts}
+        t={t}
+        {...handlers}
+        {...overrides}
+      />
+    </WebShellCustomizationProvider>,
   );
   return { container, handlers };
 }
@@ -63,6 +71,158 @@ describe('QueuedPromptDisplay', () => {
     const { container } = setup();
     expect(container.textContent).toContain('排队消息一');
     expect(container.textContent).toContain('排队消息二');
+  });
+
+  it('renders queued reference annotations as tags', () => {
+    const serialized = '<context id="orders">orders</context>';
+    const text = `inspect ${serialized} now`;
+    const start = text.indexOf(serialized);
+    const { container } = setup({
+      prompts: [
+        {
+          id: 1,
+          text,
+          inputAnnotations: [
+            {
+              type: 'reference',
+              start,
+              end: start + serialized.length,
+              text: serialized,
+              reference: {
+                id: 'orders',
+                kind: 'data-table',
+                label: 'Table',
+                value: 'orders',
+                serialized,
+              },
+            },
+          ],
+        },
+      ],
+    });
+
+    expect(container.textContent).toContain('inspect');
+    expect(container.textContent).toContain('Table');
+    expect(container.textContent).toContain('orders');
+    expect(container.textContent).not.toContain(serialized);
+  });
+
+  it('parses the complete legacy queued prompt before rendering its tag', () => {
+    const serialized = `<context>${'x'.repeat(300)}</context>`;
+    const text = `${serialized} explain the table`;
+    const parser = vi.fn(() => [
+      {
+        type: 'tag' as const,
+        tag: { id: 'orders', value: 'orders', serialized },
+      },
+      { type: 'text' as const, text: ' explain the table' },
+    ]);
+    const { container } = setup(
+      { prompts: [{ id: 1, text }] },
+      { parseUserMessageContent: parser },
+    );
+
+    expect(parser).toHaveBeenCalledWith(text);
+    expect(container.textContent).toContain('orders');
+    expect(container.textContent).not.toContain(serialized);
+  });
+
+  it('falls back to raw queued text when parser output cannot recreate it', () => {
+    const text = '<context id="orders">orders</context>';
+    const { container } = setup(
+      { prompts: [{ id: 1, text }] },
+      {
+        parseUserMessageContent: () => [
+          { type: 'text', text: 'different content' },
+        ],
+      },
+    );
+
+    expect(container.textContent).toContain(text);
+    expect(container.textContent).not.toContain('different content');
+  });
+
+  it('falls back to raw queued text when a tag field is malformed', () => {
+    const text = '<context id="orders">orders</context>';
+    const malformedParser = (() => [
+      {
+        type: 'tag',
+        tag: { id: 'orders', serialized: 1 },
+      },
+    ]) as unknown as UserMessageContentParser;
+    const { container } = setup(
+      { prompts: [{ id: 1, text }] },
+      { parseUserMessageContent: malformedParser },
+    );
+
+    expect(container.textContent).toContain(text);
+  });
+
+  it('omits an atomic tag that exceeds the visible preview budget', () => {
+    const visibleTag = 'x'.repeat(241);
+    const serialized = `<context>${visibleTag}</context>`;
+    const { container } = setup(
+      { prompts: [{ id: 1, text: serialized }] },
+      {
+        parseUserMessageContent: () => [
+          {
+            type: 'tag',
+            tag: { id: 'orders', value: visibleTag, serialized },
+          },
+        ],
+      },
+    );
+
+    expect(container.textContent).toContain('...');
+    expect(container.textContent).not.toContain(visibleTag);
+    expect(container.textContent).not.toContain(serialized);
+  });
+
+  it('truncates a text-only queued prompt at the visible preview budget', () => {
+    const text = 'x'.repeat(300);
+    const { container } = setup({ prompts: [{ id: 1, text }] });
+
+    expect(
+      container.querySelector('[class*="queuedPromptText"]')?.textContent,
+    ).toBe(`${text.slice(0, 240)}...`);
+  });
+
+  it('truncates trailing text after an atomic tag consumes the visible preview budget', () => {
+    const visibleTag = 'x'.repeat(240);
+    const serialized = `<context>${visibleTag}</context>`;
+    const trailingText = ' explain the table';
+    const { container } = setup(
+      { prompts: [{ id: 1, text: `${serialized}${trailingText}` }] },
+      {
+        parseUserMessageContent: () => [
+          {
+            type: 'tag',
+            tag: { id: 'orders', value: visibleTag, serialized },
+          },
+          { type: 'text', text: trailingText },
+        ],
+      },
+    );
+
+    expect(
+      container.querySelector('[class*="queuedPromptText"]')?.textContent,
+    ).toBe(`${visibleTag}...`);
+  });
+
+  it('falls back to raw queued text when parsing throws', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { container } = setup(
+      { prompts: [{ id: 1, text: 'raw <broken /> content' }] },
+      {
+        parseUserMessageContent: () => {
+          throw new Error('bad host payload');
+        },
+      },
+    );
+
+    expect(container.textContent).toContain('raw <broken /> content');
+    expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it('passes the prompt id to per-row delete', () => {

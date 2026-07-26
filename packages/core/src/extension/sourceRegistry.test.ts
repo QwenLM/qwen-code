@@ -184,6 +184,23 @@ describe('discoverPlugins', () => {
     expect(discovered.find((p) => p.name === 'docx')!.installed).toBe(true);
   });
 
+  it('passes the public network policy to marketplace loading', async () => {
+    vi.mocked(loadMarketplaceConfigFromSource).mockResolvedValue(
+      config('Skills', []),
+    );
+
+    await discoverPlugins(
+      [{ name: 'Skills', source: 'anthropics/skills', type: 'github' }],
+      new Set(),
+      'public',
+    );
+
+    expect(loadMarketplaceConfigFromSource).toHaveBeenCalledWith(
+      'anthropics/skills',
+      'public',
+    );
+  });
+
   it('surfaces declared components and lastUpdated for the detail view', async () => {
     vi.mocked(loadMarketplaceConfigFromSource).mockResolvedValue(
       config('Skills', [

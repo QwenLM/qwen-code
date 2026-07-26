@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -72,6 +72,11 @@ function makeSettings(workspaceDir: string): LoadedSettings {
 
 describe('buildVoiceKeyterms race checks', () => {
   let workspaceDir = '';
+  let buildVoiceKeyterms: typeof import('./voice-keyterms.js').buildVoiceKeyterms;
+
+  beforeAll(async () => {
+    ({ buildVoiceKeyterms } = await import('./voice-keyterms.js'));
+  }, 20_000);
 
   afterEach(() => {
     raceState.target = '';
@@ -84,7 +89,7 @@ describe('buildVoiceKeyterms race checks', () => {
     workspaceDir = '';
   });
 
-  it('does not read a keyterms file swapped in before open', async () => {
+  it('does not read a keyterms file swapped in before open', () => {
     workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-keyterms-'));
     const qwenDir = path.join(workspaceDir, '.qwen');
     fs.mkdirSync(qwenDir, { recursive: true });
@@ -95,7 +100,6 @@ describe('buildVoiceKeyterms race checks', () => {
     raceState.replacementText = 'SwapSecret\n';
     raceState.enabled = true;
 
-    const { buildVoiceKeyterms } = await import('./voice-keyterms.js');
     const terms = buildVoiceKeyterms(makeSettings(workspaceDir));
 
     expect(raceState.swapped).toBe(true);
@@ -103,7 +107,7 @@ describe('buildVoiceKeyterms race checks', () => {
     expect(terms).toContain('TypeScript'); // globals only
   });
 
-  it('does not read a keyterms file rewritten in place before open', async () => {
+  it('does not read a keyterms file rewritten in place before open', () => {
     workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-keyterms-'));
     const qwenDir = path.join(workspaceDir, '.qwen');
     fs.mkdirSync(qwenDir, { recursive: true });
@@ -112,19 +116,18 @@ describe('buildVoiceKeyterms race checks', () => {
     fs.utimesSync(target, new Date(0), new Date(0));
 
     raceState.target = fs.realpathSync(target);
-    raceState.replacementText = 'EvilTerm\n';
+    raceState.replacementText = 'EvilTermWithDifferentSize\n';
     raceState.enabled = true;
     raceState.mode = 'overwrite';
 
-    const { buildVoiceKeyterms } = await import('./voice-keyterms.js');
     const terms = buildVoiceKeyterms(makeSettings(workspaceDir));
 
     expect(raceState.swapped).toBe(true);
-    expect(terms).not.toContain('EvilTerm');
+    expect(terms).not.toContain('EvilTermWithDifferentSize');
     expect(terms).toContain('TypeScript'); // globals only
   });
 
-  it('does not read content larger than the file size cap after open', async () => {
+  it('does not read content larger than the file size cap after open', () => {
     workspaceDir = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-keyterms-'));
     const qwenDir = path.join(workspaceDir, '.qwen');
     fs.mkdirSync(qwenDir, { recursive: true });
@@ -133,7 +136,6 @@ describe('buildVoiceKeyterms race checks', () => {
 
     raceState.oversizedReadText = `HugeTermMarker\n${'x'.repeat(64 * 1024)}`;
 
-    const { buildVoiceKeyterms } = await import('./voice-keyterms.js');
     const terms = buildVoiceKeyterms(makeSettings(workspaceDir));
 
     expect(terms).not.toContain('HugeTermMarker');

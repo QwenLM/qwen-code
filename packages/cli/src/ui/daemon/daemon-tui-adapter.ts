@@ -9,7 +9,10 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
-import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  isVisionBridgeNoticeDisplay,
+} from '@qwen-code/qwen-code-core';
 import {
   ToolCallStatus,
   type HistoryItemToolGroup,
@@ -267,6 +270,11 @@ function formatToolResultDisplay(
   }
   if (typeof value === 'string') {
     return sanitizeDisplayText(value);
+  }
+  if (isVisionBridgeNoticeDisplay(value)) {
+    return sanitizeDaemonValue(
+      value,
+    ) as IndividualToolCallDisplay['resultDisplay'];
   }
   if (
     isRecord(value) &&

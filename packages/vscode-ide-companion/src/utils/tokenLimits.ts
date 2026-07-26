@@ -126,6 +126,7 @@ const INPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^minimax-/i, LIMITS['200k']],
 
   // Moonshot / Kimi
+  [/^kimi-k3/, LIMITS['1m']],
   [/^kimi-/, LIMITS['256k']],
 
   // ByteDance Seed-OSS
@@ -161,6 +162,7 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
 
   [/^minimax-m2\.5/i, LIMITS['64k']],
 
+  [/^kimi-k3/, LIMITS['128k']],
   [/^kimi-k2\.5/, LIMITS['32k']],
 ];
 

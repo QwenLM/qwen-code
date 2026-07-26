@@ -19,7 +19,7 @@ export const PROMPT_UNSAFE_INVISIBLES =
  * (e.g. an emoji \ud83c\udf89 = 2 units) leaves a lone surrogate that renders as `\ufffd`.
  * `Array.from` iterates by code point, so slicing it never splits a pair.
  */
-function truncateCodePoints(str: string, max: number): string {
+export function truncateCodePoints(str: string, max: number): string {
   const cp = Array.from(str);
   return cp.length > max ? cp.slice(0, max).join('') : str;
 }

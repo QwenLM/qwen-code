@@ -12,11 +12,21 @@ import styles from './StreamingStatus.module.css';
 
 interface StreamingStatusProps {
   startedAt?: number;
+  /**
+   * When false, hide the rotating "witty" loading phrase and skip its rotation
+   * timer entirely — the spinner, elapsed time, token count, and cancel hint
+   * still render. Split-view panes pass false to keep each pane's composer
+   * status compact. Defaults to true (the main chat shows the phrase).
+   */
+  showPhrase?: boolean;
 }
 
 const SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
-export function StreamingStatus({ startedAt }: StreamingStatusProps) {
+export function StreamingStatus({
+  startedAt,
+  showPhrase = true,
+}: StreamingStatusProps) {
   const streamingState = useStreamingState();
   const { estimatedOutputTokens, isReceivingContent } =
     useStreamingLoadingMetrics();
@@ -71,6 +81,10 @@ export function StreamingStatus({ startedAt }: StreamingStatusProps) {
   }, [isActive, startedAt]);
 
   useEffect(() => {
+    // Callers that hide the phrase (e.g. split-view panes) don't need the
+    // rotation timer at all — bail before arming it so panes don't each run a
+    // needless interval and re-render on every tick.
+    if (!showPhrase) return;
     if (streamingState === 'idle') {
       setLoadingPhrase(resolvePhrases(language)[0] ?? '');
       return;
@@ -90,7 +104,7 @@ export function StreamingStatus({ startedAt }: StreamingStatusProps) {
     pickPhrase();
     const interval = setInterval(pickPhrase, PHRASE_CHANGE_INTERVAL_MS);
     return () => clearInterval(interval);
-  }, [language, streamingState, resolvePhrases]);
+  }, [language, streamingState, resolvePhrases, showPhrase]);
 
   useEffect(() => {
     if (streamingState === 'idle') return;
@@ -113,7 +127,9 @@ export function StreamingStatus({ startedAt }: StreamingStatusProps) {
   return (
     <div className={styles.status}>
       <span className={styles.spinner}>{spinnerChar}</span>
-      {loadingPhrase && <span className={styles.label}>{loadingPhrase}</span>}
+      {showPhrase && loadingPhrase && (
+        <span className={styles.label}>{loadingPhrase}</span>
+      )}
       <span className={styles.meta}>
         ({timeStr}
         {tokenStr} · {t('stream.cancel')})

@@ -107,6 +107,39 @@ describe('AcpFileSystemService', () => {
       });
     });
 
+    it('converts core-only read params at the ACP boundary', async () => {
+      const mockResponse = {
+        content: 'slice',
+        _meta: { bom: false, encoding: 'utf-8' },
+      };
+      const client = {
+        readTextFile: vi.fn().mockResolvedValue(mockResponse),
+      } as unknown as AgentSideConnection;
+      const signal = new AbortController().signal;
+
+      const svc = new AcpFileSystemService(
+        client,
+        'session-1',
+        { readTextFile: true, writeTextFile: true },
+        createFallback(),
+      );
+
+      await svc.readTextFile({
+        path: '/some/file.txt',
+        line: 0,
+        limit: 5,
+        maxOutputBytes: 1024,
+        signal,
+      });
+
+      expect(client.readTextFile).toHaveBeenCalledWith({
+        path: '/some/file.txt',
+        line: 1,
+        limit: 5,
+        sessionId: 'session-1',
+      });
+    });
+
     it('converts RESOURCE_NOT_FOUND error to ENOENT', async () => {
       const resourceNotFoundError = {
         code: RESOURCE_NOT_FOUND_CODE,
@@ -953,11 +986,20 @@ describe('AcpFileSystemService', () => {
         fallback,
       );
 
-      const result = await svc.readTextFile({ path: '/some/file.txt' });
+      const signal = new AbortController().signal;
+      const result = await svc.readTextFile({
+        path: '/some/file.txt',
+        line: 0,
+        maxOutputBytes: 2048,
+        signal,
+      });
 
       expect(result).toEqual(fallbackResponse);
       expect(fallback.readTextFile).toHaveBeenCalledWith({
         path: '/some/file.txt',
+        line: 0,
+        maxOutputBytes: 2048,
+        signal,
       });
       expect(client.readTextFile).not.toHaveBeenCalled();
     });

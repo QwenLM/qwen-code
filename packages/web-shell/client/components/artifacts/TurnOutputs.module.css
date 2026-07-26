@@ -1,0 +1,182 @@
+.root {
+  margin: 8px 0 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+  overflow: hidden;
+}
+
+.summary {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px;
+}
+
+.icon {
+  width: 34px;
+  height: 34px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--muted-foreground);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.iconSvg {
+  width: 24px;
+  height: 24px;
+  display: block;
+}
+
+.title {
+  min-width: 0;
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 400;
+}
+
+.linkButton,
+.reviewButton,
+.showMoreButton {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  cursor: pointer;
+}
+
+.linkButton {
+  margin-top: 2px;
+  margin-left: 8px;
+  padding: 0;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.card:hover .linkButton,
+.linkButton:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.linkButton:hover,
+.showMoreButton:hover {
+  color: var(--foreground);
+}
+
+.actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.reviewButton {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 14px;
+  font-weight: 400;
+}
+
+.reviewButton:hover {
+  background: var(--accent);
+}
+
+.list {
+  display: grid;
+  gap: 0;
+  border-top: 1px solid var(--border);
+  padding: 0;
+}
+
+.fileRow {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  cursor: pointer;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  padding: 7px 14px;
+  text-align: left;
+}
+
+.fileRow:hover {
+  background: var(--accent);
+}
+
+.path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--foreground);
+  font-size: 13px;
+}
+
+.lineStats {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.additions {
+  color: #16a34a;
+}
+
+.deletions {
+  color: #dc2626;
+}
+
+.showMoreButton {
+  justify-self: start;
+  padding: 7px 14px;
+  color: var(--foreground);
+  font-weight: 400;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chevronIcon {
+  width: 14px;
+  height: 14px;
+  display: block;
+  color: var(--muted-foreground);
+  transition: transform 120ms ease;
+}
+
+.chevronIconOpen {
+  transform: rotate(180deg);
+}
+
+.artifactInfo {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.artifactMeta {
+  color: var(--muted-foreground);
+  font-size: 13px;
+  white-space: nowrap;
+}

@@ -292,4 +292,14 @@ describe('BuiltinCommandLoader', () => {
     const hooksCmd2 = commands2.find((c) => c.name === 'hooks');
     expect(hooksCmd2).toBeDefined();
   });
+
+  it('should register the /reload-plugins command', async () => {
+    const loader = new BuiltinCommandLoader(mockConfig);
+    const commands = await loader.loadCommands(new AbortController().signal);
+
+    const command = commands.find((c) => c.name === 'reload-plugins');
+
+    expect(command).toBeDefined();
+    expect(command?.kind).toBe(CommandKind.BUILT_IN);
+  });
 });

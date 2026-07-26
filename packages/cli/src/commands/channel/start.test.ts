@@ -4,16 +4,23 @@ import { pathToFileURL } from 'node:url';
 import type { ChannelBaseOptions } from '@qwen-code/channel-base';
 
 const mockSetGlobalDispatcher = vi.hoisted(() => vi.fn());
-const mockProxyAgent = vi.hoisted(() =>
-  vi.fn((url: string) => ({ proxyUrl: url })),
+const mockEnvHttpProxyAgent = vi.hoisted(() =>
+  vi.fn((opts: { httpProxy: string; httpsProxy: string }) => ({
+    proxyUrl: opts.httpProxy,
+  })),
 );
 const mockNormalizeProxyUrl = vi.hoisted(() => vi.fn((url?: string) => url));
 const mockStorageGetGlobalQwenDir = vi.hoisted(() =>
   vi.fn(() => '/tmp/qwen-home'),
 );
 const mockReadChannelMemory = vi.hoisted(() => vi.fn());
-const mockAppendChannelMemory = vi.hoisted(() => vi.fn());
+const mockGetChannelMemoryRevision = vi.hoisted(() => vi.fn());
+const mockListChannelMemoryEntries = vi.hoisted(() => vi.fn());
+const mockAddChannelMemoryEntries = vi.hoisted(() => vi.fn());
+const mockUpdateChannelMemoryEntry = vi.hoisted(() => vi.fn());
+const mockRemoveChannelMemoryEntries = vi.hoisted(() => vi.fn());
 const mockClearChannelMemory = vi.hoisted(() => vi.fn());
+const mockRecordChannelMemoryRecallMetrics = vi.hoisted(() => vi.fn());
 const mockParseCron = vi.hoisted(() => vi.fn());
 const mockNextFireTime = vi.hoisted(() =>
   vi.fn((cron: string) => {
@@ -58,7 +65,7 @@ const mockSanitizeLogText = vi.hoisted(() =>
 );
 const mockRouterClearAll = vi.hoisted(() => vi.fn());
 const mockRouterGetTarget = vi.hoisted(() => vi.fn());
-const mockRouterRemoveSessionId = vi.hoisted(() => vi.fn());
+const mockRouterHandleSessionDied = vi.hoisted(() => vi.fn());
 const mockRouterRestoreSessions = vi.hoisted(() => vi.fn());
 const mockRouterSetBridge = vi.hoisted(() => vi.fn());
 const mockRouterSetChannelScope = vi.hoisted(() => vi.fn());
@@ -86,7 +93,7 @@ const mockSessionRouter = vi.hoisted(() =>
   vi.fn(() => ({
     clearAll: mockRouterClearAll,
     getTarget: mockRouterGetTarget,
-    removeSessionId: mockRouterRemoveSessionId,
+    handleSessionDied: mockRouterHandleSessionDied,
     restoreSessions: mockRouterRestoreSessions,
     setBridge: mockRouterSetBridge,
     setChannelScope: mockRouterSetChannelScope,
@@ -94,17 +101,22 @@ const mockSessionRouter = vi.hoisted(() =>
 );
 
 vi.mock('undici', () => ({
-  ProxyAgent: mockProxyAgent,
+  EnvHttpProxyAgent: mockEnvHttpProxyAgent,
   setGlobalDispatcher: mockSetGlobalDispatcher,
 }));
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
-  appendChannelMemory: mockAppendChannelMemory,
+  addChannelMemoryEntries: mockAddChannelMemoryEntries,
   clearChannelMemory: mockClearChannelMemory,
+  getChannelMemoryRevision: mockGetChannelMemoryRevision,
+  listChannelMemoryEntries: mockListChannelMemoryEntries,
   nextFireTime: mockNextFireTime,
   normalizeProxyUrl: mockNormalizeProxyUrl,
   parseCron: mockParseCron,
   readChannelMemory: mockReadChannelMemory,
+  recordChannelMemoryRecallMetrics: mockRecordChannelMemoryRecallMetrics,
+  removeChannelMemoryEntries: mockRemoveChannelMemoryEntries,
+  updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,
   Storage: {
     getGlobalQwenDir: mockStorageGetGlobalQwenDir,
   },
@@ -214,39 +226,49 @@ beforeEach(() => {
 });
 
 describe('resolveProxy', () => {
-  it('prefers the CLI proxy over settings and environment proxies', () => {
+  it('prefers the CLI proxy over settings and environment proxies', async () => {
     process.env['HTTPS_PROXY'] = 'http://env.example.com:8080';
 
-    const proxy = resolveProxy(
+    const proxy = await resolveProxy(
       'http://cli.example.com:8080',
       'http://settings.example.com:8080',
     );
 
     expect(proxy).toBe('http://cli.example.com:8080');
-    expect(mockProxyAgent).toHaveBeenCalledWith('http://cli.example.com:8080');
+    expect(mockEnvHttpProxyAgent).toHaveBeenCalledWith({
+      httpProxy: 'http://cli.example.com:8080',
+      httpsProxy: 'http://cli.example.com:8080',
+    });
     expect(mockSetGlobalDispatcher).toHaveBeenCalledWith({
       proxyUrl: 'http://cli.example.com:8080',
     });
   });
 
-  it('prefers settings.proxy over environment proxies', () => {
+  it('prefers settings.proxy over environment proxies', async () => {
     process.env['HTTPS_PROXY'] = 'http://env.example.com:8080';
 
-    const proxy = resolveProxy(undefined, 'http://settings.example.com:8080');
-
-    expect(proxy).toBe('http://settings.example.com:8080');
-    expect(mockProxyAgent).toHaveBeenCalledWith(
+    const proxy = await resolveProxy(
+      undefined,
       'http://settings.example.com:8080',
     );
+
+    expect(proxy).toBe('http://settings.example.com:8080');
+    expect(mockEnvHttpProxyAgent).toHaveBeenCalledWith({
+      httpProxy: 'http://settings.example.com:8080',
+      httpsProxy: 'http://settings.example.com:8080',
+    });
   });
 
-  it('falls back to proxy environment variables', () => {
+  it('falls back to proxy environment variables', async () => {
     process.env['HTTP_PROXY'] = 'http://env.example.com:8080';
 
-    const proxy = resolveProxy();
+    const proxy = await resolveProxy();
 
     expect(proxy).toBe('http://env.example.com:8080');
-    expect(mockProxyAgent).toHaveBeenCalledWith('http://env.example.com:8080');
+    expect(mockEnvHttpProxyAgent).toHaveBeenCalledWith({
+      httpProxy: 'http://env.example.com:8080',
+      httpsProxy: 'http://env.example.com:8080',
+    });
   });
 });
 
@@ -310,8 +332,14 @@ describe('startCommand.handler', () => {
     }
 
     expect(mockLoadSettings).toHaveBeenCalledWith(process.cwd());
-    expect(mockProxyAgent).toHaveBeenCalledWith(settingsProxy);
-    expect(mockProxyAgent).not.toHaveBeenCalledWith(envProxy);
+    expect(mockEnvHttpProxyAgent).toHaveBeenCalledWith({
+      httpProxy: settingsProxy,
+      httpsProxy: settingsProxy,
+    });
+    expect(mockEnvHttpProxyAgent).not.toHaveBeenCalledWith({
+      httpProxy: envProxy,
+      httpsProxy: envProxy,
+    });
     expect(mockCreateChannel).toHaveBeenCalledWith(
       'telegram',
       mockParsedChannelConfig,
@@ -349,6 +377,29 @@ describe('startCommand.handler', () => {
     expect(options?.loopController?.createForTarget).toBeDefined();
     await options!.loopController!.createForTarget!(input, 3);
     expect(mockChannelLoopStoreCreateForTarget).toHaveBeenCalledWith(input, 3);
+  });
+
+  it('uses available env-var resolution for single-channel config', async () => {
+    const channels = { telegram: { type: 'telegram', token: '$BOT_TOKEN' } };
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockParseChannelConfig).toHaveBeenCalledWith(
+      'telegram',
+      channels.telegram,
+      process.cwd(),
+      { resolveEnvVars: 'available' },
+    );
   });
 
   it('rejects cron expressions that cannot fire', async () => {
@@ -614,9 +665,9 @@ describe('startCommand.handler', () => {
     expect(mockSanitizeLogText).toHaveBeenCalledWith('dead\nsession', 128);
     expect(mockSanitizeLogText).toHaveBeenCalledWith('boom\nreason', 512);
     expect(mockWriteStderrLine).toHaveBeenCalledWith(
-      '[Channel] Session dead\\nsession died (boom\\nreason), removing routing state',
+      '[Channel] Session dead\\nsession died (boom\\nreason), updating routing state',
     );
-    expect(mockRouterRemoveSessionId).toHaveBeenCalledWith('dead\nsession');
+    expect(mockRouterHandleSessionDied).toHaveBeenCalledWith('dead\nsession');
     expect(mockChannelOnSessionDied).not.toHaveBeenCalled();
   });
 
@@ -696,7 +747,7 @@ describe('startCommand.handler', () => {
     sessionDiedListener!({ sessionId: 'dead-session' });
 
     expect(mockChannelOnSessionDied).toHaveBeenCalledWith('dead-session');
-    expect(mockRouterRemoveSessionId).not.toHaveBeenCalled();
+    expect(mockRouterHandleSessionDied).not.toHaveBeenCalled();
   });
 
   it('registers session cleanup on the replacement bridge before restoring sessions', async () => {
@@ -742,7 +793,7 @@ describe('startCommand.handler', () => {
 
       restartedSessionDiedListener({ sessionId: 'dead-after-restart' });
 
-      expect(mockRouterRemoveSessionId).toHaveBeenCalledWith(
+      expect(mockRouterHandleSessionDied).toHaveBeenCalledWith(
         'dead-after-restart',
       );
     } finally {
@@ -827,10 +878,18 @@ describe('startCommand.handler', () => {
       expect.any(Object),
       expect.objectContaining({
         channelMemory: {
-          appendChannelMemory: mockAppendChannelMemory,
-          clearChannelMemory: mockClearChannelMemory,
           readChannelMemory: mockReadChannelMemory,
+          getChannelMemoryRevision: mockGetChannelMemoryRevision,
+          listChannelMemoryEntries: mockListChannelMemoryEntries,
+          addChannelMemoryEntries: mockAddChannelMemoryEntries,
+          updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,
+          removeChannelMemoryEntries: mockRemoveChannelMemoryEntries,
+          clearChannelMemory: mockClearChannelMemory,
         },
+        memoryIntentClassifier: expect.objectContaining({
+          classifyChannelMemoryIntent: expect.any(Function),
+        }),
+        channelMemoryRecallObserver: mockRecordChannelMemoryRecallMetrics,
       }),
     );
   });
@@ -862,10 +921,18 @@ describe('startCommand.handler', () => {
       expect.any(Object),
       expect.objectContaining({
         channelMemory: {
-          appendChannelMemory: mockAppendChannelMemory,
-          clearChannelMemory: mockClearChannelMemory,
           readChannelMemory: mockReadChannelMemory,
+          getChannelMemoryRevision: mockGetChannelMemoryRevision,
+          listChannelMemoryEntries: mockListChannelMemoryEntries,
+          addChannelMemoryEntries: mockAddChannelMemoryEntries,
+          updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,
+          removeChannelMemoryEntries: mockRemoveChannelMemoryEntries,
+          clearChannelMemory: mockClearChannelMemory,
         },
+        memoryIntentClassifier: expect.objectContaining({
+          classifyChannelMemoryIntent: expect.any(Function),
+        }),
+        channelMemoryRecallObserver: mockRecordChannelMemoryRecallMetrics,
       }),
     );
     expect(mockCreateChannel).toHaveBeenNthCalledWith(
@@ -875,9 +942,13 @@ describe('startCommand.handler', () => {
       expect.any(Object),
       expect.objectContaining({
         channelMemory: {
-          appendChannelMemory: mockAppendChannelMemory,
-          clearChannelMemory: mockClearChannelMemory,
           readChannelMemory: mockReadChannelMemory,
+          getChannelMemoryRevision: mockGetChannelMemoryRevision,
+          listChannelMemoryEntries: mockListChannelMemoryEntries,
+          addChannelMemoryEntries: mockAddChannelMemoryEntries,
+          updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,
+          removeChannelMemoryEntries: mockRemoveChannelMemoryEntries,
+          clearChannelMemory: mockClearChannelMemory,
         },
       }),
     );

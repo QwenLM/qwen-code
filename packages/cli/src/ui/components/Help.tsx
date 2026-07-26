@@ -160,6 +160,7 @@ const GeneralHelp: React.FC<{ width: number }> = ({ width }) => {
     ['Tab', t('Accept ghost text or completion')],
     ['Esc Esc', t('Clear input or cancel operation')],
     ['Ctrl+L', t('Clear the screen')],
+    ['Ctrl+Q', t('Queue message for the next turn')],
     [
       process.platform === 'win32' ? 'Ctrl+Enter' : 'Ctrl+J',
       t('Insert a newline'),

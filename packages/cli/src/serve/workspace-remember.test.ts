@@ -16,12 +16,27 @@ import type {
   BridgeWorkspaceMemoryRememberRequest,
   BridgeWorkspaceMemoryRememberResult,
 } from './acp-session-bridge.js';
+import { WorkspaceDrainingError } from './acp-session-bridge.js';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   mountWorkspaceMemoryRememberRoutes,
   WorkspaceRememberTaskLane,
+  type WorkspaceRememberRouteDeps,
 } from './workspace-remember.js';
 import { MAX_REMEMBER_CONTENT_BYTES } from './workspace-memory-remember-constants.js';
+
+const { mockDebugLogger } = vi.hoisted(() => ({
+  mockDebugLogger: {
+    debug: vi.fn(),
+    error: vi.fn(),
+    warn: vi.fn(),
+    info: vi.fn(),
+  },
+}));
+
+vi.mock('@qwen-code/qwen-code-core', () => ({
+  createDebugLogger: () => mockDebugLogger,
+}));
 
 type RecordedEvent = Omit<BridgeEvent, 'id' | 'v'>;
 
@@ -104,6 +119,7 @@ function buildBridgeStub(opts: {
         },
       ],
       touchedTopics: ['project'],
+      touchedScopes: ['project'],
     }));
   const dreamImpl =
     opts.dreamImpl ??
@@ -189,7 +205,7 @@ function buildBridgeStub(opts: {
     invokeWorkspaceCommand: async () => {
       throw new Error('not implemented');
     },
-    killSession: async () => {},
+    killSession: async () => true,
     detachClient: async () => {},
     sessionCount: 0,
     pendingPermissionCount: 0,
@@ -210,12 +226,14 @@ function buildApp(
     tokenConfigured: true,
     requireAuth: false,
   },
+  lane = new WorkspaceRememberTaskLane(bridge),
+  routeOverrides: Partial<WorkspaceRememberRouteDeps> = {},
 ) {
   const app = express();
   app.use(express.json({ limit: '1mb' }));
   mountWorkspaceMemoryRememberRoutes(app, {
     bridge,
-    lane: new WorkspaceRememberTaskLane(bridge),
+    lane,
     mutate: createMutationGate(auth),
     parseClientId: (req, res) => {
       const raw = req.get('x-qwen-client-id');
@@ -236,6 +254,7 @@ function buildApp(
       }
       return raw as Record<string, unknown>;
     },
+    ...routeOverrides,
   });
   return app;
 }
@@ -305,6 +324,7 @@ describe('workspace memory remember routes', () => {
             },
           ],
           touchedTopics: ['user', 'reference'],
+          touchedScopes: ['user'],
         }),
       ),
     });
@@ -331,6 +351,7 @@ describe('workspace memory remember routes', () => {
       result: {
         summary: 'forgot',
         touchedTopics: ['user', 'reference'],
+        touchedScopes: ['user'],
         removedEntries: [
           {
             topic: 'user',
@@ -348,7 +369,7 @@ describe('workspace memory remember routes', () => {
         scope: 'managed',
         source: 'workspace_memory_forget',
         taskId,
-        touchedScopes: ['user', 'project'],
+        touchedScopes: ['user'],
       },
     });
   });
@@ -603,6 +624,7 @@ describe('workspace memory remember routes', () => {
     pendingForget.resolve({
       removedEntries: [],
       touchedTopics: [],
+      touchedScopes: [],
     });
   });
 
@@ -629,6 +651,105 @@ describe('workspace memory remember routes', () => {
     });
 
     expect(lane.get(first.taskId)).toBeUndefined();
+  });
+
+  it('rolls back the enqueue gate and fails queued tasks on disposal', async () => {
+    const first = deferred<BridgeWorkspaceMemoryRememberResult>();
+    const bridge = buildBridgeStub({
+      rememberImpl: vi.fn(async () => first.promise),
+    });
+    const lane = new WorkspaceRememberTaskLane(bridge, '/work/remove-me');
+    const running = lane.enqueue({
+      content: 'running',
+      contextMode: 'workspace',
+    });
+    const queued = lane.enqueue({
+      content: 'queued',
+      contextMode: 'workspace',
+    });
+    await waitFor(() => lane.get(running.taskId)?.status === 'running');
+
+    lane.beginDrain();
+    expect(() =>
+      lane.enqueue({ content: 'blocked', contextMode: 'workspace' }),
+    ).toThrow(WorkspaceDrainingError);
+    lane.cancelDrain();
+    const queuedAfterRollback = lane.enqueue({
+      content: 'queued after rollback',
+      contextMode: 'workspace',
+    });
+
+    lane.dispose();
+    expect(lane.get(queued.taskId)).toMatchObject({
+      status: 'failed',
+      error: { code: 'workspace_removed' },
+    });
+    expect(lane.get(queuedAfterRollback.taskId)).toMatchObject({
+      status: 'failed',
+      error: { code: 'workspace_removed' },
+    });
+    expect(lane.pendingCount()).toBe(1);
+
+    first.reject(new Error('bridge closed'));
+    await waitFor(() => lane.get(running.taskId)?.status === 'failed');
+    expect(lane.get(running.taskId)).toMatchObject({
+      error: { code: 'workspace_removed' },
+    });
+    expect(bridge.events).toEqual([]);
+    expect(bridge.rememberCalls.map((call) => call.content)).toEqual([
+      'running',
+    ]);
+  });
+
+  it('fails a successful bridge result that settles after disposal', async () => {
+    const first = deferred<BridgeWorkspaceMemoryRememberResult>();
+    const bridge = buildBridgeStub({
+      rememberImpl: vi.fn(async () => first.promise),
+    });
+    const lane = new WorkspaceRememberTaskLane(bridge, '/work/remove-me');
+    const running = lane.enqueue({
+      content: 'running',
+      contextMode: 'workspace',
+    });
+    await waitFor(() => lane.get(running.taskId)?.status === 'running');
+
+    lane.dispose();
+    first.resolve({ filesTouched: [], touchedScopes: [] });
+
+    await waitFor(() => lane.get(running.taskId)?.status === 'failed');
+    expect(lane.get(running.taskId)).toMatchObject({
+      error: { code: 'workspace_removed' },
+    });
+    expect(bridge.events).toEqual([]);
+  });
+
+  it('does not run a queued task after its runtime generation closes', async () => {
+    const first = deferred<BridgeWorkspaceMemoryRememberResult>();
+    const bridge = buildBridgeStub({
+      rememberImpl: vi.fn(async () => first.promise),
+    });
+    const lane = new WorkspaceRememberTaskLane(bridge);
+    const running = lane.enqueue({
+      content: 'running',
+      contextMode: 'workspace',
+    });
+    let generationClosed = false;
+    const queued = lane.enqueue({
+      content: 'stale queued task',
+      contextMode: 'workspace',
+      assertGenerationOpen: () => {
+        if (generationClosed) throw new Error('generation closed');
+      },
+    });
+    await waitFor(() => lane.get(running.taskId)?.status === 'running');
+
+    generationClosed = true;
+    first.resolve({ filesTouched: [], touchedScopes: [] });
+
+    await waitFor(() => lane.get(queued.taskId)?.status === 'failed');
+    expect(bridge.rememberCalls.map((call) => call.content)).toEqual([
+      'running',
+    ]);
   });
 
   it('runs hidden remember tasks serially within the remember lane', async () => {
@@ -719,7 +840,11 @@ describe('workspace memory remember routes', () => {
     remember.resolve({ filesTouched: [], touchedScopes: [] });
     await waitFor(() => starts.length === 2);
     expect(starts).toEqual(['remember', 'forget']);
-    forget.resolve({ removedEntries: [], touchedTopics: [] });
+    forget.resolve({
+      removedEntries: [],
+      touchedTopics: [],
+      touchedScopes: [],
+    });
     await waitFor(() => starts.length === 3);
     expect(starts).toEqual(['remember', 'forget', 'dream']);
     dream.resolve({ touchedTopics: [], dedupedEntries: 0 });
@@ -754,6 +879,7 @@ describe('workspace memory remember routes', () => {
         summary: 'nothing matched',
         removedEntries: [],
         touchedTopics: [],
+        touchedScopes: [],
       })),
       dreamImpl: vi.fn(async () => ({
         summary: 'nothing changed',
@@ -854,13 +980,159 @@ describe('workspace memory remember routes', () => {
     expect(bridge.dreamCalls).toBe(0);
   });
 
+  it('returns runtime unavailable when the generation closes during availability checking', async () => {
+    const availability = deferred<boolean>();
+    const availableImpl = vi.fn(() => availability.promise);
+    const bridge = buildBridgeStub({ availableImpl });
+    let closed = false;
+    const app = buildApp(bridge, undefined, undefined, {
+      captureGenerationAssertion: () => () => {
+        if (closed) {
+          throw Object.assign(new Error('closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+      },
+    });
+    const responsePromise = request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'remember me' })
+      .then((response) => response);
+    await waitFor(() => availableImpl.mock.calls.length === 1);
+    closed = true;
+    availability.reject(new Error('bridge closed'));
+
+    const response = await responsePromise;
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('workspace_runtime_unavailable');
+  });
+
+  it.each(['remember', 'forget', 'dream'])(
+    'rejects untrusted %s task reads before task lookup',
+    async (kind) => {
+      const bridge = buildBridgeStub({});
+      const app = buildApp(bridge, undefined, undefined, {
+        isWorkspaceTrusted: () => false,
+      });
+
+      const response = await request(app).get(
+        `/workspace/memory/${kind}/missing`,
+      );
+
+      expect(response.status).toBe(403);
+      expect(response.body.code).toBe('untrusted_workspace');
+    },
+  );
+
+  it.each(['remember', 'forget', 'dream'])(
+    'rejects closed-generation %s task reads before task lookup',
+    async (kind) => {
+      const bridge = buildBridgeStub({});
+      const app = buildApp(bridge, undefined, undefined, {
+        captureGenerationAssertion: () => () => {
+          throw new Error('closed');
+        },
+      });
+
+      const response = await request(app).get(
+        `/workspace/memory/${kind}/missing`,
+      );
+
+      expect(response.status).toBe(503);
+      expect(response.body.code).toBe('workspace_runtime_unavailable');
+    },
+  );
+
+  it('falls back to kind-specific codes when enqueue code extraction throws', async () => {
+    mockDebugLogger.warn.mockClear();
+    const bridge = buildBridgeStub({});
+    const lane = new WorkspaceRememberTaskLane(bridge);
+    const err = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error('code getter failed');
+        },
+      },
+    );
+    vi.spyOn(lane, 'enqueue').mockImplementation(() => {
+      throw err;
+    });
+    vi.spyOn(lane, 'enqueueForget').mockImplementation(() => {
+      throw err;
+    });
+    vi.spyOn(lane, 'enqueueDream').mockImplementation(() => {
+      throw err;
+    });
+    const app = buildApp(bridge, undefined, lane);
+
+    await request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'remember me' })
+      .expect(500)
+      .expect((res) => {
+        expect(res.body).toEqual({
+          error: 'Workspace memory remember failed.',
+          code: 'remember_failed',
+        });
+      });
+    await request(app)
+      .post('/workspace/memory/forget')
+      .send({ query: 'old preference' })
+      .expect(500)
+      .expect((res) => {
+        expect(res.body).toEqual({
+          error: 'Workspace memory forget failed.',
+          code: 'forget_failed',
+        });
+      });
+    await request(app)
+      .post('/workspace/memory/dream')
+      .send({})
+      .expect(500)
+      .expect((res) => {
+        expect(res.body).toEqual({
+          error: 'Workspace memory dream failed.',
+          code: 'dream_failed',
+        });
+      });
+    expect(mockDebugLogger.warn).toHaveBeenCalledTimes(3);
+    expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+      'Failed to extract workspace memory error code:',
+      { extractionError: 'code getter failed' },
+    );
+  });
+
+  it('maps a draining workspace to a stable 503 response', async () => {
+    const bridge = buildBridgeStub({});
+    const lane = new WorkspaceRememberTaskLane(bridge, '/work/draining');
+    lane.beginDrain();
+    const app = buildApp(bridge, undefined, lane);
+
+    await request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'remember me' })
+      .expect(503)
+      .expect((res) => {
+        expect(res.body).toEqual({
+          error: 'Workspace runtime is being removed.',
+          code: 'workspace_draining',
+        });
+      });
+  });
+
   it('records bridge failures with stable public error codes', async () => {
     const bridge = buildBridgeStub({
       rememberImpl: vi
         .fn()
-        .mockRejectedValueOnce({ code: 'remember_path_escape' })
+        .mockRejectedValueOnce(
+          Object.assign(new Error('agent wrote /tmp/outside'), {
+            code: 'remember_path_escape',
+          }),
+        )
         .mockRejectedValueOnce({
           data: { errorKind: 'managed_memory_unavailable' },
+          message: 'internal managed memory config path',
         })
         .mockRejectedValueOnce({
           data: { errorKind: 'remember_timeout' },
@@ -881,6 +1153,7 @@ describe('workspace memory remember routes', () => {
         expect(res.body.error).toEqual({
           code: 'remember_path_escape',
           message: 'Remember agent touched a path outside managed memory.',
+          details: 'agent wrote /tmp/outside',
         });
       });
 
@@ -917,7 +1190,96 @@ describe('workspace memory remember routes', () => {
       });
   });
 
+  it('logs sanitized details for task-lane failures', async () => {
+    mockDebugLogger.error.mockClear();
+    const bridge = buildBridgeStub({
+      rememberImpl: vi
+        .fn()
+        .mockRejectedValue(
+          new Error('Authorization: Bearer secret-token-value'),
+        ),
+    });
+    const app = buildApp(bridge);
+
+    const post = await request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'secret' })
+      .expect(202);
+    await waitFor(() => bridge.rememberCalls.length === 1);
+    await request(app)
+      .get(`/workspace/memory/remember/${post.body.taskId}`)
+      .expect(200)
+      .expect((res) => {
+        expect(res.body.status).toBe('failed');
+        expect(res.body.error).toEqual({
+          code: 'remember_failed',
+          message: 'Workspace memory remember failed.',
+          details: 'Authorization: <redacted>',
+        });
+      });
+
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      'Workspace memory remember task failed:',
+      expect.objectContaining({
+        taskId: post.body.taskId,
+        code: 'remember_failed',
+        details: 'Authorization: <redacted>',
+        stack: expect.stringContaining('Authorization: <redacted>'),
+      }),
+    );
+    expect(JSON.stringify(mockDebugLogger.error.mock.calls)).not.toContain(
+      'secret-token-value',
+    );
+  });
+
+  it('falls back when task-lane error code extraction throws', async () => {
+    mockDebugLogger.error.mockClear();
+    mockDebugLogger.warn.mockClear();
+    const err = new Proxy(
+      {},
+      {
+        get() {
+          throw new Error('code getter failed');
+        },
+      },
+    );
+    const bridge = buildBridgeStub({
+      rememberImpl: vi.fn().mockRejectedValue(err),
+    });
+    const app = buildApp(bridge);
+
+    const post = await request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'proxy failure' })
+      .expect(202);
+    await waitFor(() => bridge.rememberCalls.length === 1);
+    await request(app)
+      .get(`/workspace/memory/remember/${post.body.taskId}`)
+      .expect(200)
+      .expect((res) => {
+        expect(res.body.status).toBe('failed');
+        expect(res.body.error).toEqual({
+          code: 'remember_failed',
+          message: 'Workspace memory remember failed.',
+        });
+      });
+
+    expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+      'Failed to extract workspace memory error code:',
+      { extractionError: 'code getter failed' },
+    );
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      'Workspace memory remember task failed:',
+      expect.objectContaining({
+        taskId: post.body.taskId,
+        code: 'remember_failed',
+        details: '<details unavailable>',
+      }),
+    );
+  });
+
   it('records forget and dream failures with kind-specific error codes', async () => {
+    mockDebugLogger.error.mockClear();
     const bridge = buildBridgeStub({
       forgetImpl: vi.fn().mockRejectedValue(new Error('forget failed')),
       dreamImpl: vi.fn().mockRejectedValue(new Error('dream failed')),
@@ -937,8 +1299,18 @@ describe('workspace memory remember routes', () => {
         expect(res.body.error).toEqual({
           code: 'forget_failed',
           message: 'Workspace memory forget failed.',
+          details: 'forget failed',
         });
       });
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      'Workspace memory forget task failed:',
+      expect.objectContaining({
+        taskId: forgetPost.body.taskId,
+        code: 'forget_failed',
+        details: 'forget failed',
+        stack: expect.stringContaining('forget failed'),
+      }),
+    );
 
     const dreamPost = await request(app)
       .post('/workspace/memory/dream')
@@ -953,7 +1325,17 @@ describe('workspace memory remember routes', () => {
         expect(res.body.error).toEqual({
           code: 'dream_failed',
           message: 'Workspace memory dream failed.',
+          details: 'dream failed',
         });
       });
+    expect(mockDebugLogger.error).toHaveBeenCalledWith(
+      'Workspace memory dream task failed:',
+      expect.objectContaining({
+        taskId: dreamPost.body.taskId,
+        code: 'dream_failed',
+        details: 'dream failed',
+        stack: expect.stringContaining('dream failed'),
+      }),
+    );
   });
 });

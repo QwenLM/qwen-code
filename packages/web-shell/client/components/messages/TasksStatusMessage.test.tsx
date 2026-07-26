@@ -148,15 +148,16 @@ describe('TasksStatusMessage nested-agent tree', () => {
       }),
     ]);
     // The global keydown listener attaches after a 50 ms guard delay.
+    // Use 200 ms to keep a generous margin on slow CI runners.
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 80));
+      await new Promise((r) => setTimeout(r, 200));
     });
     const press = (key: string) =>
       act(async () => {
         window.dispatchEvent(new KeyboardEvent('keydown', { key }));
         // Each state change re-arms the delayed listener (50 ms guard);
         // wait it out so the next press isn't swallowed mid-re-attach.
-        await new Promise((r) => setTimeout(r, 80));
+        await new Promise((r) => setTimeout(r, 200));
       });
     await press('ArrowDown'); // select the child (row 2)
     await press('x');
@@ -177,14 +178,14 @@ describe('TasksStatusMessage nested-agent tree', () => {
       }),
     ]);
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 80));
+      await new Promise((r) => setTimeout(r, 200));
     });
     const press = (key: string) =>
       act(async () => {
         window.dispatchEvent(new KeyboardEvent('keydown', { key }));
         // Each state change re-arms the delayed listener (50 ms guard);
         // wait it out so the next press isn't swallowed mid-re-attach.
-        await new Promise((r) => setTimeout(r, 80));
+        await new Promise((r) => setTimeout(r, 200));
       });
     await press('x'); // fully-foreground chain → arms the confirm instead
     expect(cancelTaskMock).not.toHaveBeenCalled();
@@ -210,5 +211,31 @@ describe('TasksStatusMessage nested-agent tree', () => {
     // not the user; must NOT be tagged.
     expect(text).not.toContain('[blocking] label-fg-child');
     expect(text).not.toContain('[blocking] label-bg-parent');
+  });
+
+  it('caps the detail progress list at the newest MAX_DISPLAYED_ACTIVITIES rows', async () => {
+    const recentActivities = Array.from({ length: 8 }, (_, i) => ({
+      name: 'read_file',
+      description: `activity-${i}.ts`,
+      at: i,
+    }));
+    const tasks = [agentTask('solo', { recentActivities })];
+    // The 3 s poll would otherwise replace state; return the same task.
+    getTasksMock.mockResolvedValue({ tasks });
+    const container = renderPanel(tasks);
+    // Global keydown listener attaches after a 50 ms guard delay.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 200));
+    });
+    // Enter opens the detail view for the selected (only) task.
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+      await new Promise((r) => setTimeout(r, 200));
+    });
+    const text = container.textContent ?? '';
+    // Only the newest five (activity-3 … activity-7) render; older drop.
+    expect(text).not.toContain('activity-2.ts');
+    expect(text).toContain('activity-3.ts');
+    expect(text).toContain('activity-7.ts');
   });
 });

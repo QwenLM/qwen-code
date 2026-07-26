@@ -7,7 +7,11 @@
 import { renderWithProviders } from '../../test-utils/render.js';
 import { waitFor, act } from '@testing-library/react';
 import type { InputPromptProps } from './InputPrompt.js';
-import { InputPrompt, classifyPastedImagePaths } from './InputPrompt.js';
+import {
+  InputPrompt,
+  classifyPastedImagePaths,
+  expandPendingPastePlaceholders,
+} from './InputPrompt.js';
 import { useTextBuffer, type TextBuffer } from './shared/text-buffer.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { ApprovalMode } from '@qwen-code/qwen-code-core';
@@ -42,6 +46,10 @@ import {
   useBackgroundTaskViewActions,
   useBackgroundTaskViewState,
 } from '../contexts/BackgroundTaskViewContext.js';
+import {
+  clearPromptStash,
+  savePromptStash,
+} from '../../services/prompt-stash.js';
 
 const mockViewActions = vi.hoisted(() => ({
   setAgentTabBarFocused: vi.fn(),
@@ -58,6 +66,7 @@ vi.mock('../hooks/useInputHistory.js');
 vi.mock('../hooks/useReverseSearchCompletion.js');
 vi.mock('../hooks/use-voice-input.js');
 vi.mock('../utils/clipboardUtils.js');
+vi.mock('../../services/prompt-stash.js');
 vi.mock('../contexts/UIStateContext.js', () => ({
   useUIState: vi.fn(() => ({ isFeedbackDialogOpen: false, messageQueue: [] })),
 }));
@@ -188,9 +197,13 @@ describe('InputPrompt', () => {
     useReverseSearchCompletion,
   );
   const mockedUseVoiceInput = vi.mocked(useVoiceInput);
+  const mockedSavePromptStash = vi.mocked(savePromptStash);
+  const mockedClearPromptStash = vi.mocked(clearPromptStash);
 
   beforeEach(() => {
     vi.resetAllMocks();
+    mockedSavePromptStash.mockReturnValue(true);
+    mockedClearPromptStash.mockReturnValue(true);
     mockViewActions.setAgentTabBarFocused.mockReset();
     mockViewActions.setBgPillFocused.mockReset();
     mockViewActions.setLivePanelFocused.mockReset();
@@ -304,6 +317,9 @@ describe('InputPrompt', () => {
       setActiveSuggestionIndex: vi.fn(),
       setShowSuggestions: vi.fn(),
       handleAutocomplete: vi.fn(),
+      activeCategory: 'all' as const,
+      availableCategories: ['all'] as Array<'all'>,
+      switchCategory: vi.fn(),
     };
     mockedUseCommandCompletion.mockReturnValue(mockCommandCompletion);
 
@@ -360,6 +376,71 @@ describe('InputPrompt', () => {
       focus: true,
       placeholder: '  Type your message or @path/to/file',
     };
+  });
+
+  it('stashes non-empty input on Ctrl+S', async () => {
+    props.buffer.setText('draft prompt');
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+    act(() => {
+      stdin.write('\x13');
+    });
+
+    await waitFor(() => {
+      expect(mockedSavePromptStash).toHaveBeenCalledWith(
+        path.join('test', 'project', 'src'),
+        'draft prompt',
+      );
+    });
+    expect(props.onSubmit).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('clears the stash when the prompt is submitted', async () => {
+    props.buffer.setText('send this');
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+    act(() => {
+      stdin.write('\r');
+    });
+
+    await waitFor(() => {
+      expect(mockedClearPromptStash).toHaveBeenCalledWith(
+        path.join('test', 'project', 'src'),
+      );
+      expect(props.onSubmit).toHaveBeenCalledWith('send this');
+    });
+    unmount();
+  });
+
+  it('queues the prompt for the next turn on Ctrl+Q', async () => {
+    props.buffer.setText('send this later');
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+
+    act(() => {
+      stdin.write('\x11');
+    });
+
+    await waitFor(() => {
+      expect(props.onSubmit).toHaveBeenCalledWith('send this later', {
+        deferUntilIdle: true,
+      });
+    });
+    expect(props.buffer.setText).toHaveBeenCalledWith('');
+    unmount();
+  });
+
+  it('expands large paste placeholders before stashing', () => {
+    const pending = new Map([
+      ['[Pasted Content 1200 chars]', 'full pasted content'],
+    ]);
+
+    expect(
+      expandPendingPastePlaceholders(
+        'before [Pasted Content 1200 chars] after',
+        pending,
+      ),
+    ).toBe('before full pasted content after');
   });
 
   it('routes Space through voice input when the prompt is empty', async () => {
@@ -1338,6 +1419,58 @@ describe('InputPrompt', () => {
       expect(clipboardUtils.saveClipboardImage).not.toHaveBeenCalled();
       expect(mockBuffer.setText).not.toHaveBeenCalled();
       unmount();
+    });
+
+    it('should show the native clipboard error only once across remounts', async () => {
+      const addItem = vi.fn();
+      const clipboardUnavailableShownRef = { current: false };
+      mockedUseUIState.mockReturnValue({
+        isFeedbackDialogOpen: false,
+        messageQueue: [],
+        pendingGeminiHistoryItems: [],
+        historyManager: { addItem },
+      } as unknown as ReturnType<typeof useUIState>);
+      vi.mocked(clipboardUtils.clipboardHasImage).mockImplementation(
+        async (onUnavailable) => {
+          onUnavailable?.();
+          return false;
+        },
+      );
+
+      const first = renderWithProviders(
+        <InputPrompt
+          {...props}
+          clipboardUnavailableShownRef={clipboardUnavailableShownRef}
+        />,
+      );
+      await wait();
+
+      const pasteKey = isWindows ? '\x1Bv' : '\x16';
+      first.stdin.write(pasteKey);
+      await wait();
+      first.stdin.write(pasteKey);
+      await wait();
+      first.unmount();
+
+      const second = renderWithProviders(
+        <InputPrompt
+          {...props}
+          clipboardUnavailableShownRef={clipboardUnavailableShownRef}
+        />,
+      );
+      await wait();
+      second.stdin.write(pasteKey);
+      await wait();
+
+      expect(addItem).toHaveBeenCalledTimes(1);
+      expect(addItem).toHaveBeenCalledWith(
+        {
+          type: 'error',
+          text: 'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
+        },
+        expect.any(Number),
+      );
+      second.unmount();
     });
 
     it('should handle image save failure gracefully', async () => {
@@ -2416,6 +2549,126 @@ describe('InputPrompt', () => {
     expect(mockCommandCompletion.resetCompletionState).not.toHaveBeenCalled();
     expect(mockCommandCompletion.dismissCompletion).not.toHaveBeenCalled();
     expect(props.onSubmit).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should NOT switch category on left/right when availableCategories <= 2', async () => {
+    const switchCategory = vi.fn();
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'file.ts', value: 'file.ts' },
+        { label: 'other.ts', value: 'other.ts' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      availableCategories: ['all'],
+      switchCategory,
+    });
+    props.buffer.setText('@file');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\x1b[C'); // right arrow
+    await wait();
+    stdin.write('\x1b[D'); // left arrow
+    await wait();
+
+    expect(switchCategory).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should NOT switch category on Ctrl+left/right when availableCategories is exactly 2', async () => {
+    const switchCategory = vi.fn();
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      suggestions: [{ label: 'file.ts', value: 'file.ts', category: 'file' }],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      availableCategories: ['all', 'file'],
+      switchCategory,
+    });
+    props.buffer.setText('@file');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\x1b[1;5C'); // Ctrl+right arrow
+    await wait();
+    stdin.write('\x1b[1;5D'); // Ctrl+left arrow
+    await wait();
+
+    // With only 2 entries (all + one real category) the tab bar is hidden,
+    // so Ctrl+arrows must not trigger category switching.
+    expect(switchCategory).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should switch category on Ctrl+left/right when availableCategories > 2', async () => {
+    const switchCategory = vi.fn();
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'file.ts', value: 'file.ts', category: 'file' },
+        { label: 'sess', value: 'sess', category: 'session' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      availableCategories: ['all', 'file', 'session'],
+      switchCategory,
+    });
+    props.buffer.setText('@');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\x1b[1;5C'); // Ctrl+right arrow
+    await wait();
+
+    expect(switchCategory).toHaveBeenCalledWith(1);
+
+    stdin.write('\x1b[1;5D'); // Ctrl+left arrow
+    await wait();
+
+    expect(switchCategory).toHaveBeenCalledWith(-1);
+    unmount();
+  });
+
+  it('should NOT switch category on plain left/right when availableCategories > 2 (caret stays free)', async () => {
+    const switchCategory = vi.fn();
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'file.ts', value: 'file.ts', category: 'file' },
+        { label: 'sess', value: 'sess', category: 'session' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      availableCategories: ['all', 'file', 'session'],
+      switchCategory,
+    });
+    props.buffer.setText('@');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\x1b[C'); // plain right arrow
+    await wait();
+    stdin.write('\x1b[D'); // plain left arrow
+    await wait();
+
+    // Plain arrows must not be hijacked for tab switching, so they remain
+    // available to move the caret in the editable buffer.
+    expect(switchCategory).not.toHaveBeenCalled();
     unmount();
   });
 

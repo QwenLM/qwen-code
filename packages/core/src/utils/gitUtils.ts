@@ -7,6 +7,7 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { execSync } from 'node:child_process';
+import { stripVTControlCharacters } from 'node:util';
 import { createDebugLogger } from './debugLogger.js';
 
 const debugLogger = createDebugLogger('GIT');
@@ -173,22 +174,32 @@ function formatGitPromptValue(value: string): string {
 export function getRecentGitStatus(cwd: string): string | null {
   if (!isGitRepository(cwd)) return null;
   try {
-    // Run each git command separately to avoid shell compatibility issues
-    // (e.g., cmd.exe on Windows doesn't have 'printf')
-    const branch =
-      execSync('git --no-optional-locks branch --show-current', {
+    // The branch header lets one Git process provide both values while the
+    // short status remainder keeps the existing path and color configuration.
+    const statusWithBranch = execSync(
+      'git --no-optional-locks status --short --branch',
+      {
         cwd,
         encoding: 'utf8',
+        env: { ...process.env, LC_ALL: 'C' },
         stdio: ['pipe', 'pipe', 'pipe'],
         timeout: GIT_STATUS_TIMEOUT_MS,
-      }).trim() || DETACHED_HEAD_LABEL;
-
-    const status = execSync('git --no-optional-locks status --short', {
-      cwd,
-      encoding: 'utf8',
-      stdio: ['pipe', 'pipe', 'pipe'],
-      timeout: GIT_STATUS_TIMEOUT_MS,
-    }).trim();
+      },
+    ).trimEnd();
+    const [branchLine, ...statusLines] = statusWithBranch.split(/\r?\n/);
+    const branchHeader = stripVTControlCharacters(branchLine ?? '');
+    if (!branchHeader.startsWith('## ')) {
+      throw new Error('Unexpected git status --branch output');
+    }
+    const branchDescription = branchHeader.slice(3);
+    const branchName = branchDescription
+      .replace(/^(?:No commits yet|Initial commit) on /, '')
+      .split('...')[0];
+    const branch =
+      branchDescription === 'HEAD (no branch)' || !branchName
+        ? DETACHED_HEAD_LABEL
+        : branchName;
+    const status = statusLines.join('\n').trim();
 
     const log = execSync('git --no-optional-locks log --oneline -n 5', {
       cwd,

@@ -21,7 +21,7 @@ export function sessionTools(state: BridgeState): any[] {
         workspace_cwd: z
           .string()
           .optional()
-          .describe('Workspace path. Defaults to daemon bound workspace.'),
+          .describe('Workspace path. Defaults to daemon primary workspace.'),
         model_service_id: z
           .string()
           .optional()

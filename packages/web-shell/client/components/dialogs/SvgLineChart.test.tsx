@@ -72,7 +72,9 @@ describe('SvgLineChart', () => {
 
   it('places a single-point series mid-width so its dot still renders', () => {
     const el = render(
-      <SvgLineChart series={[{ label: 'x', values: [42], color: 'var(--a)' }]} />,
+      <SvgLineChart
+        series={[{ label: 'x', values: [42], color: 'var(--a)' }]}
+      />,
     );
     // one moveto point, no line segment, but a visible dot
     const d = el.querySelector('path')?.getAttribute('d') ?? '';

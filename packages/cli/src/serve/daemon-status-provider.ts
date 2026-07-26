@@ -27,7 +27,7 @@ import {
   type ServeWorkspaceEnvStatus,
 } from '@qwen-code/acp-bridge';
 import { getGitVersion, getNpmVersion } from '../utils/systemInfo.js';
-import { buildEnvStatusFromProcess } from './env-snapshot.js';
+import { buildEnvStatusFromEnv, snapshotProcessEnv } from './env-snapshot.js';
 
 const REQUIRED_NODE_MAJOR = 22;
 
@@ -38,7 +38,12 @@ const REQUIRED_NODE_MAJOR = 22;
  * called only from the route handlers, so per-request allocation is
  * fine).
  */
-export function createDaemonStatusProvider(): DaemonStatusProvider {
+export function createDaemonStatusProvider(
+  options: {
+    env?: Readonly<Record<string, string | undefined>>;
+  } = {},
+): DaemonStatusProvider {
+  const readEnv = () => options.env ?? snapshotProcessEnv();
   return {
     async getEnvStatus(
       boundWorkspace: string,
@@ -48,13 +53,13 @@ export function createDaemonStatusProvider(): DaemonStatusProvider {
       // in a resolved Promise to match the async `DaemonStatusProvider`
       // contract. Future async-needing implementations (e.g. reading
       // a config file) get the seam without changing the bridge.
-      return buildEnvStatusFromProcess(boundWorkspace, acpChannelLive);
+      return buildEnvStatusFromEnv(boundWorkspace, acpChannelLive, readEnv());
     },
 
     async getDaemonPreflightCells(
       boundWorkspace: string,
     ): Promise<ServePreflightCell[]> {
-      return buildDaemonPreflightCells(boundWorkspace);
+      return buildDaemonPreflightCells(boundWorkspace, readEnv());
     },
   };
 }
@@ -75,6 +80,7 @@ export function createDaemonStatusProvider(): DaemonStatusProvider {
  */
 async function buildDaemonPreflightCells(
   boundWorkspace: string,
+  env: Readonly<Record<string, string | undefined>>,
 ): Promise<ServePreflightCell[]> {
   // Each builder returns (or eventually returns) one cell. We run them via
   // `Promise.allSettled` after wrapping every call in `Promise.resolve().then`
@@ -125,7 +131,7 @@ async function buildDaemonPreflightCells(
   // Mirrors `defaultSpawnChannelFactory`'s lookup so the preflight cell
   // reflects the path the child would actually be spawned from.
   const cliEntryCell = (): ServePreflightCell => {
-    const cliEntry = process.env['QWEN_CLI_ENTRY'] || process.argv[1] || '';
+    const cliEntry = env['QWEN_CLI_ENTRY'] || process.argv[1] || '';
     if (cliEntry) {
       return {
         kind: 'cli_entry',
@@ -133,9 +139,7 @@ async function buildDaemonPreflightCells(
         locality: 'daemon',
         detail: {
           path: cliEntry,
-          source: process.env['QWEN_CLI_ENTRY']
-            ? 'QWEN_CLI_ENTRY'
-            : 'process.argv[1]',
+          source: env['QWEN_CLI_ENTRY'] ? 'QWEN_CLI_ENTRY' : 'process.argv[1]',
         },
       };
     }

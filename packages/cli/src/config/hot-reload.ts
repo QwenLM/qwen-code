@@ -87,7 +87,7 @@ export function mcpGatingEqual(a: McpGating, b: McpGating): boolean {
  * The pending list is always recomputed per #4615 so a hot-reload never
  * connects an unapproved gated server.
  */
-function recomputeMcpGating(
+export function recomputeMcpGating(
   settings: LoadedSettings,
   assembled: Record<string, MCPServerConfig>,
   cwd: string,
