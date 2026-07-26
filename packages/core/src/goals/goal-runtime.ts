@@ -23,6 +23,7 @@ import {
   type GoalTerminalProposal,
   type GoalTurnPermit,
   type TranscriptCursor,
+  validateGoalProposalReason,
 } from './goal-protocol.js';
 import {
   elapsedActiveTime,
@@ -39,6 +40,9 @@ import {
   recoverGoalFromRecords,
   type GoalRecoveryRecord,
 } from './goal-persistence.js';
+
+export const GOAL_RUNTIME_DISPOSED_MESSAGE = 'Goal runtime has been disposed';
+export const STALE_GOAL_TURN_MESSAGE = 'Goal turn permit is no longer valid';
 
 export interface GoalJournal {
   getTranscriptCursor(): TranscriptCursor;
@@ -89,6 +93,7 @@ export interface GoalPendingProposal {
 
 export interface GoalRuntime {
   getSnapshot(): GoalSnapshotV2;
+  getSnapshotForPermit(permit: GoalTurnPermit): GoalSnapshotV2;
   subscribe(
     listener: (snapshot: GoalSnapshotV2, cause?: GoalStateCause) => void,
   ): () => void;
@@ -162,7 +167,7 @@ export function createGoalRuntime(
   type VerificationAttempt = NonNullable<typeof verificationAttempt>;
 
   const assertAvailable = () => {
-    if (disposed) throw new Error('Goal runtime has been disposed');
+    if (disposed) throw new Error(GOAL_RUNTIME_DISPOSED_MESSAGE);
   };
 
   const assertOperational = () => {
@@ -294,6 +299,14 @@ export function createGoalRuntime(
     currentPermit?.goalId === permit.goalId &&
     currentPermit.revision === permit.revision &&
     currentPermit.turnId === permit.turnId;
+
+  const getSnapshotForPermit = (permit: GoalTurnPermit): GoalSnapshotV2 => {
+    assertOperational();
+    if (!isCurrentPermit(permit) || !snapshot.goal) {
+      throw new Error(STALE_GOAL_TURN_MESSAGE);
+    }
+    return getSnapshot();
+  };
 
   const isCurrentVerificationAttempt = (attempt: VerificationAttempt) =>
     verificationAttempt === attempt &&
@@ -531,6 +544,7 @@ export function createGoalRuntime(
 
   return {
     getSnapshot,
+    getSnapshotForPermit,
     subscribe(
       listener: (value: GoalSnapshotV2, cause?: GoalStateCause) => void,
     ): () => void {
@@ -659,7 +673,7 @@ export function createGoalRuntime(
     getVerifierFeedback(permit: GoalTurnPermit): string | undefined {
       assertOperational();
       if (!isCurrentPermit(permit)) {
-        throw new Error('Goal turn permit is no longer valid');
+        throw new Error(STALE_GOAL_TURN_MESSAGE);
       }
       return currentTurnFeedback;
     },
@@ -668,7 +682,7 @@ export function createGoalRuntime(
         async (): Promise<VerificationAttempt | undefined> => {
           assertOperational();
           if (!isCurrentPermit(permit) || !snapshot.goal) {
-            throw new Error('Goal turn permit is no longer valid');
+            throw new Error(STALE_GOAL_TURN_MESSAGE);
           }
           const recordUuid = randomUUID();
           const nextGoal = reduceGoalTurnFinished(snapshot.goal, {
@@ -754,7 +768,7 @@ export function createGoalRuntime(
     async getGoalForWorker(permit: GoalTurnPermit): Promise<GoalWorkerView> {
       assertOperational();
       if (!isCurrentPermit(permit) || !snapshot.goal) {
-        throw new Error('Goal turn permit is no longer valid');
+        throw new Error(STALE_GOAL_TURN_MESSAGE);
       }
       const goal = structuredClone(snapshot.goal);
       const verifierFeedback = currentTurnFeedback;
@@ -776,7 +790,7 @@ export function createGoalRuntime(
         permit,
       });
       if (!isCurrentPermit(permit) || !snapshot.goal) {
-        throw new Error('Goal turn permit is no longer valid');
+        throw new Error(STALE_GOAL_TURN_MESSAGE);
       }
       return {
         goalId: goal.goalId,
@@ -793,8 +807,10 @@ export function createGoalRuntime(
     ): GoalProposalReceipt {
       assertOperational();
       if (!isCurrentPermit(permit)) {
-        throw new Error('Goal turn permit is no longer valid');
+        throw new Error(STALE_GOAL_TURN_MESSAGE);
       }
+      const reasonError = validateGoalProposalReason(proposal.reason);
+      if (reasonError) throw new Error(reasonError);
       if (currentProposal) {
         return {
           recorded: false,

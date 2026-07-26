@@ -20,7 +20,12 @@ import {
   type GoalToolConfig,
 } from './goal-tools.js';
 import { goalTurnContext } from './goal-turn-context.js';
-import type { GoalTurnPermit, TranscriptCursor } from './goal-protocol.js';
+import {
+  GOAL_PROPOSAL_REASON_MAX_BYTES,
+  GOAL_PROPOSAL_REASON_MAX_CHARACTERS,
+  type GoalTurnPermit,
+  type TranscriptCursor,
+} from './goal-protocol.js';
 
 const permit: GoalTurnPermit = {
   goalId: 'goal-1',
@@ -149,14 +154,17 @@ describe('GetGoalTool', () => {
       verifierFeedback: 'retry: missing edge case',
       fullTranscript: ['must not leak'],
     });
-    const getSnapshot = vi.fn(() => structuredClone(snapshot));
-    const tool = new GetGoalTool(makeConfig({ getGoalForWorker, getSnapshot }));
+    const getSnapshotForPermit = vi.fn(() => structuredClone(snapshot));
+    const tool = new GetGoalTool(
+      makeConfig({ getGoalForWorker, getSnapshotForPermit }),
+    );
     const invocation = goalTurnContext.run(permit, () => tool.build({}));
 
     const result = await invocation.execute(new AbortController().signal);
 
     expect(invocation.getDescription()).toBe('Read the current goal');
     expect(getGoalForWorker).toHaveBeenCalledWith(permit);
+    expect(getSnapshotForPermit).toHaveBeenCalledWith(permit);
     expect(JSON.parse(String(result.llmContent))).toEqual({
       active: true,
       snapshot,
@@ -184,10 +192,12 @@ describe('UpdateGoalTool', () => {
     const tool = new UpdateGoalTool(makeConfig({}));
     const schema = tool.schema.parametersJsonSchema as {
       properties: {
+        reason: { maxLength?: number };
         evidenceRefs: {
           description?: string;
           items?: { description?: string };
         };
+        blockerKind: { description?: string };
       };
     };
 
@@ -218,6 +228,12 @@ describe('UpdateGoalTool', () => {
     expect(schema.properties.evidenceRefs.items?.description).toContain(
       'not a turnId',
     );
+    expect(schema.properties.reason.maxLength).toBe(
+      GOAL_PROPOSAL_REASON_MAX_CHARACTERS,
+    );
+    expect(schema.properties.blockerKind.description).toContain(
+      'three consecutive Goal turns',
+    );
   });
 
   it('rejects lineage turn ids before recording a proposal', async () => {
@@ -240,7 +256,7 @@ describe('UpdateGoalTool', () => {
         lineageTurnIds: [permit.turnId],
       },
     });
-    const getSnapshot = vi.fn(() => ({
+    const getSnapshotForPermit = vi.fn(() => ({
       v: 2 as const,
       activity: 'running' as const,
       goal: {
@@ -256,7 +272,11 @@ describe('UpdateGoalTool', () => {
       },
     }));
     const tool = new UpdateGoalTool(
-      makeConfig({ getGoalForWorker, getSnapshot, recordTerminalProposal }),
+      makeConfig({
+        getGoalForWorker,
+        getSnapshotForPermit,
+        recordTerminalProposal,
+      }),
     );
     const invocation = goalTurnContext.run(permit, () =>
       tool.build({
@@ -311,7 +331,7 @@ describe('UpdateGoalTool', () => {
         lineageTurnIds: ['turn-1', permit.turnId],
       },
     });
-    const getSnapshot = vi.fn(() => ({
+    const getSnapshotForPermit = vi.fn(() => ({
       v: 2 as const,
       activity: 'running' as const,
       goal: {
@@ -327,7 +347,11 @@ describe('UpdateGoalTool', () => {
       },
     }));
     const tool = new UpdateGoalTool(
-      makeConfig({ getGoalForWorker, getSnapshot, recordTerminalProposal }),
+      makeConfig({
+        getGoalForWorker,
+        getSnapshotForPermit,
+        recordTerminalProposal,
+      }),
     );
     const invocation = goalTurnContext.run(permit, () =>
       tool.build({
@@ -401,7 +425,7 @@ describe('UpdateGoalTool', () => {
         readyForVerification: false,
         goalLifecycleChanged: false,
         nextAction:
-          'Continue this turn without claiming the Goal is complete or blocked. This proposal is not ready for independent verification.',
+          'Continue this turn without claiming the Goal is complete or blocked. A repeated-blocker audit requires the same blocker mode and materially identical reason across three consecutive Goal turns, with current evidence cited on each turn.',
       });
       expect(result.terminateTurn).toBeUndefined();
     }
@@ -500,6 +524,26 @@ describe('UpdateGoalTool', () => {
         }),
       ),
     ).toThrow('evidenceRefs must contain unique stable evidence references');
+    expect(() =>
+      goalTurnContext.run(permit, () =>
+        tool.build({
+          status: 'complete',
+          reason: 'x'.repeat(GOAL_PROPOSAL_REASON_MAX_CHARACTERS + 1),
+          evidenceRefs: ['evidence-1'],
+        }),
+      ),
+    ).toThrow(/characters/i);
+    expect(() =>
+      goalTurnContext.run(permit, () =>
+        tool.build({
+          status: 'complete',
+          reason: '界'.repeat(
+            Math.floor(GOAL_PROPOSAL_REASON_MAX_BYTES / 3) + 1,
+          ),
+          evidenceRefs: ['evidence-1'],
+        }),
+      ),
+    ).toThrow(/UTF-8 bytes/i);
   });
 
   it.each(['edit', 'replace', 'clear', 'finish'] as const)(
@@ -616,7 +660,7 @@ describe('UpdateGoalTool', () => {
     expect(runtime.recordTerminalProposal).not.toHaveBeenCalled();
   });
 
-  it.each(['missing snapshot API', 'mismatched session snapshot'] as const)(
+  it.each(['missing snapshot API', 'stale snapshot API'] as const)(
     'fails both tools closed with a stable stale-permit error for a %s',
     async (scenario) => {
       const getGoalForWorker = vi.fn().mockResolvedValue({
@@ -632,23 +676,11 @@ describe('UpdateGoalTool', () => {
       const runtime = {
         getGoalForWorker,
         recordTerminalProposal,
-        ...(scenario === 'mismatched session snapshot'
+        ...(scenario === 'stale snapshot API'
           ? {
-              getSnapshot: vi.fn(() => ({
-                v: 2 as const,
-                activity: 'running' as const,
-                goal: {
-                  goalId: 'new-goal',
-                  revision: 1,
-                  objective: 'new session',
-                  status: 'active' as const,
-                  evidenceCursor: { recordId: 'new-cursor' },
-                  turnCount: 0,
-                  activeTimeMs: 0,
-                  createdAt: 1,
-                  updatedAt: 1,
-                },
-              })),
+              getSnapshotForPermit: vi.fn(() => {
+                throw new Error('Goal turn permit is no longer valid');
+              }),
             }
           : {}),
       } as unknown as GoalRuntime;
@@ -673,6 +705,135 @@ describe('UpdateGoalTool', () => {
       expect(recordTerminalProposal).not.toHaveBeenCalled();
     },
   );
+
+  it.each([
+    ['get_goal', 'goalId'],
+    ['get_goal', 'revision'],
+    ['update_goal', 'goalId'],
+    ['update_goal', 'revision'],
+  ] as const)(
+    'rejects a %s worker view with a mismatched %s after an exact snapshot check',
+    async (toolName, mismatchedField) => {
+      const matchingSnapshot = {
+        v: 2 as const,
+        activity: 'running' as const,
+        goal: {
+          goalId: permit.goalId,
+          revision: permit.revision,
+          objective: 'permitted goal',
+          status: 'active' as const,
+          evidenceCursor: { recordId: 'cursor-1' },
+          turnCount: 1,
+          activeTimeMs: 0,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      };
+      const getGoalForWorker = vi.fn().mockResolvedValue({
+        goalId: mismatchedField === 'goalId' ? 'different-goal' : permit.goalId,
+        revision:
+          mismatchedField === 'revision'
+            ? permit.revision + 1
+            : permit.revision,
+        objective: 'wrong worker view',
+        evidenceCursor: { recordId: 'wrong-cursor' },
+      });
+      const recordTerminalProposal = vi.fn();
+      const runtime = {
+        getGoalForWorker,
+        getSnapshotForPermit: vi.fn(() => structuredClone(matchingSnapshot)),
+        recordTerminalProposal,
+      };
+      const config = makeConfig(runtime);
+      const invocation = goalTurnContext.run(permit, () =>
+        toolName === 'get_goal'
+          ? new GetGoalTool(config).build({})
+          : new UpdateGoalTool(config).build({
+              status: 'complete',
+              reason: 'done',
+              evidenceRefs: ['evidence-1'],
+            }),
+      );
+
+      await expect(
+        invocation.execute(new AbortController().signal),
+      ).rejects.toThrow('Goal turn permit is no longer valid');
+      expect(recordTerminalProposal).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['get_goal', 'update_goal'] as const)(
+    'normalizes disposal after the awaited %s worker read',
+    async (toolName) => {
+      const { runtime, permit: activePermit } = await activeRuntime();
+      const originalGetGoalForWorker = runtime.getGoalForWorker.bind(runtime);
+      vi.spyOn(runtime, 'getGoalForWorker').mockImplementation(
+        async (runtimePermit) => {
+          const view = await originalGetGoalForWorker(runtimePermit);
+          runtime.dispose();
+          return view;
+        },
+      );
+      const recordTerminalProposal = vi.spyOn(
+        runtime,
+        'recordTerminalProposal',
+      );
+      const invocation = goalTurnContext.run(activePermit, () =>
+        toolName === 'get_goal'
+          ? new GetGoalTool(makeConfig(runtime)).build({})
+          : new UpdateGoalTool(makeConfig(runtime)).build({
+              status: 'complete',
+              reason: 'done',
+              evidenceRefs: ['evidence-1'],
+            }),
+      );
+
+      await expect(
+        invocation.execute(new AbortController().signal),
+      ).rejects.toThrow('Goal turn permit is no longer valid');
+      expect(recordTerminalProposal).not.toHaveBeenCalled();
+    },
+  );
+
+  it('normalizes disposal from proposal recording', async () => {
+    const runtime = {
+      getGoalForWorker: vi.fn().mockResolvedValue({
+        goalId: permit.goalId,
+        revision: permit.revision,
+        objective: 'permitted goal',
+        evidenceCursor: { recordId: 'cursor-1' },
+      }),
+      getSnapshotForPermit: vi.fn(() => ({
+        v: 2 as const,
+        activity: 'running' as const,
+        goal: {
+          goalId: permit.goalId,
+          revision: permit.revision,
+          objective: 'permitted goal',
+          status: 'active' as const,
+          evidenceCursor: { recordId: 'cursor-1' },
+          turnCount: 1,
+          activeTimeMs: 0,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      })),
+      recordTerminalProposal: vi.fn(() => {
+        throw new Error('Goal runtime has been disposed');
+      }),
+    };
+    const invocation = goalTurnContext.run(permit, () =>
+      new UpdateGoalTool(makeConfig(runtime)).build({
+        status: 'complete',
+        reason: 'done',
+        evidenceRefs: ['evidence-1'],
+      }),
+    );
+
+    await expect(
+      invocation.execute(new AbortController().signal),
+    ).rejects.toThrow('Goal turn permit is no longer valid');
+  });
 
   it('does not expose Goal lifecycle controls through either invocation', async () => {
     const { runtime, permit: activePermit } = await activeRuntime();

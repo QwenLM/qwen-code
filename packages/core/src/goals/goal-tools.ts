@@ -11,12 +11,19 @@ import {
   BaseToolInvocation,
   Kind,
 } from '../tools/tools.js';
-import type { GoalRuntime, GoalWorkerView } from './goal-runtime.js';
+import {
+  GOAL_RUNTIME_DISPOSED_MESSAGE,
+  STALE_GOAL_TURN_MESSAGE,
+  type GoalRuntime,
+  type GoalWorkerView,
+} from './goal-runtime.js';
 import { goalTurnContext } from './goal-turn-context.js';
 import {
+  GOAL_PROPOSAL_REASON_MAX_CHARACTERS,
   type GoalSnapshotV2,
   type GoalTerminalProposal,
   type GoalTurnPermit,
+  validateGoalProposalReason,
 } from './goal-protocol.js';
 
 export interface GoalToolConfig {
@@ -36,13 +43,14 @@ export interface GoalToolResult extends ToolResult {
   terminateTurn?: boolean;
 }
 
-const STALE_GOAL_TURN_MESSAGE = 'Goal turn permit is no longer valid';
-
-type GetGoalRuntime = Pick<GoalRuntime, 'getGoalForWorker' | 'getSnapshot'>;
+type GetGoalRuntime = Pick<
+  GoalRuntime,
+  'getGoalForWorker' | 'getSnapshotForPermit'
+>;
 
 type UpdateGoalRuntime = Pick<
   GoalRuntime,
-  'getGoalForWorker' | 'getSnapshot' | 'recordTerminalProposal'
+  'getGoalForWorker' | 'getSnapshotForPermit' | 'recordTerminalProposal'
 >;
 
 class GetGoalInvocation extends BaseToolInvocation<
@@ -209,7 +217,11 @@ class UpdateGoalInvocation extends BaseToolInvocation<
         ? { blockerKind: this.params.blockerKind }
         : {}),
     };
-    const receipt = this.runtime.recordTerminalProposal(this.permit, proposal);
+    const receipt = recordTerminalProposalForPermit(
+      this.runtime,
+      this.permit,
+      proposal,
+    );
     const snapshot = snapshotForPermit(this.runtime, this.permit);
     const payload = {
       proposalRecorded: receipt.recorded,
@@ -217,7 +229,7 @@ class UpdateGoalInvocation extends BaseToolInvocation<
       goalLifecycleChanged: false,
       nextAction: receipt.readyForVerification
         ? 'End this turn without user-facing text. Do not claim the Goal is complete or blocked. The Goal status card will report the independent verification result.'
-        : 'Continue this turn without claiming the Goal is complete or blocked. This proposal is not ready for independent verification.',
+        : 'Continue this turn without claiming the Goal is complete or blocked. A repeated-blocker audit requires the same blocker mode and materially identical reason across three consecutive Goal turns, with current evidence cited on each turn.',
     };
     let returnDisplay: string;
     if (!receipt.recorded) {
@@ -254,13 +266,17 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
     super(
       UpdateGoalTool.Name,
       ToolDisplayNames.UPDATE_GOAL,
-      'Propose that the current Goal is complete or blocked. Before calling, call get_goal in the current turn and cite only values from evidenceCatalog.entries[].uuid, never goalId, turnId, or lineageTurnIds. If completion depends on user-facing content delivered in the current turn, emit only the content required by the objective, then call get_goal, wait for its result, and call update_goal in a later model step with the returned delivered_output UUID. Do not add progress or completion commentary when the objective requires an exact output format. Core records at most one proposal for the exact permitted turn and queues eligible proposals for independent verification. This tool never changes the Goal lifecycle or claims a terminal result. Do not tell the user the Goal is complete or blocked. If this tool reports readyForVerification, end the turn without additional user-facing text; otherwise continue the turn without claiming a terminal result. The Goal status card reports the independent verification result.',
+      'Propose that the current Goal is complete or blocked. Before calling, call get_goal in the current turn and cite only values from evidenceCatalog.entries[].uuid, never goalId, turnId, or lineageTurnIds. If completion depends on user-facing content delivered in the current turn, emit only the content required by the objective, then call get_goal, wait for its result, and call update_goal in a later model step with the returned delivered_output UUID. Do not add progress or completion commentary when the objective requires an exact output format. For blocked proposals, use authority when a user or maintainer decision or permission is required, external when an unavailable external resource or capability is evidenced, and repeated for the same evidenced blocker across three consecutive Goal turns with a materially identical reason; omitting blockerKind follows the repeated-blocker audit. Core records at most one proposal for the exact permitted turn and queues eligible proposals for independent verification. This tool never changes the Goal lifecycle or claims a terminal result. Do not tell the user the Goal is complete or blocked. If this tool reports readyForVerification, end the turn without additional user-facing text; otherwise continue the turn without claiming a terminal result. The Goal status card reports the independent verification result.',
       Kind.Think,
       {
         type: 'object',
         properties: {
           status: { type: 'string', enum: ['complete', 'blocked'] },
-          reason: { type: 'string', minLength: 1 },
+          reason: {
+            type: 'string',
+            minLength: 1,
+            maxLength: GOAL_PROPOSAL_REASON_MAX_CHARACTERS,
+          },
           evidenceRefs: {
             type: 'array',
             minItems: 1,
@@ -278,6 +294,8 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
           blockerKind: {
             type: 'string',
             enum: ['authority', 'external', 'repeated'],
+            description:
+              'authority: a user or maintainer decision or permission is required; external: an evidenced external resource or capability is unavailable; repeated: the same evidenced blocker with a materially identical reason across three consecutive Goal turns. Omission uses the repeated-blocker audit.',
           },
         },
         required: ['status', 'reason', 'evidenceRefs'],
@@ -289,7 +307,8 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
   protected override validateToolParamValues(
     params: UpdateGoalToolParams,
   ): string | null {
-    if (!params.reason.trim()) return 'reason must not be empty';
+    const reasonError = validateGoalProposalReason(params.reason);
+    if (reasonError) return reasonError;
     if (
       params.evidenceRefs.length === 0 ||
       params.evidenceRefs.some((reference) => !reference.trim())
@@ -316,21 +335,18 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
 }
 
 function snapshotForPermit(
-  runtime: { getSnapshot: () => GoalSnapshotV2 },
+  runtime: { getSnapshotForPermit: (permit: GoalTurnPermit) => GoalSnapshotV2 },
   permit: GoalTurnPermit,
 ): GoalSnapshotV2 {
-  const getSnapshot: unknown = runtime.getSnapshot;
-  if (typeof getSnapshot !== 'function') {
+  const getSnapshotForPermit: unknown = runtime.getSnapshotForPermit;
+  if (typeof getSnapshotForPermit !== 'function') {
     throw staleGoalTurnError();
   }
-  const snapshot = getSnapshot.call(runtime);
-  if (
-    snapshot.goal?.goalId !== permit.goalId ||
-    snapshot.goal.revision !== permit.revision
-  ) {
-    throw staleGoalTurnError();
+  try {
+    return getSnapshotForPermit.call(runtime, permit);
+  } catch (error) {
+    throwNormalizedRuntimeError(error);
   }
-  return snapshot;
 }
 
 async function workerViewForPermit(
@@ -340,25 +356,38 @@ async function workerViewForPermit(
   try {
     return await runtime.getGoalForWorker(permit);
   } catch (error) {
-    if (
-      error instanceof Error &&
-      (error.message === 'Goal runtime has been disposed' ||
-        error.message === STALE_GOAL_TURN_MESSAGE)
-    ) {
-      throw staleGoalTurnError();
-    }
-    throw error;
+    throwNormalizedRuntimeError(error);
   }
+}
+
+function recordTerminalProposalForPermit(
+  runtime: Pick<GoalRuntime, 'recordTerminalProposal'>,
+  permit: GoalTurnPermit,
+  proposal: GoalTerminalProposal,
+) {
+  try {
+    return runtime.recordTerminalProposal(permit, proposal);
+  } catch (error) {
+    throwNormalizedRuntimeError(error);
+  }
+}
+
+function throwNormalizedRuntimeError(error: unknown): never {
+  if (
+    error instanceof Error &&
+    (error.message === GOAL_RUNTIME_DISPOSED_MESSAGE ||
+      error.message === STALE_GOAL_TURN_MESSAGE)
+  ) {
+    throw staleGoalTurnError();
+  }
+  throw error;
 }
 
 function staleGoalTurnError(): Error {
   return new Error(STALE_GOAL_TURN_MESSAGE);
 }
 
-function projectWorkerView(
-  view: GoalWorkerView,
-  snapshot: ReturnType<GetGoalRuntime['getSnapshot']>,
-) {
+function projectWorkerView(view: GoalWorkerView, snapshot: GoalSnapshotV2) {
   return {
     active: true,
     snapshot: structuredClone(snapshot),
