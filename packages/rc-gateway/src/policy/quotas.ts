@@ -169,6 +169,84 @@ export class QuotaStore {
   }
 
   /**
+   * Atomically reserve one slot for `ruleId` at `nowMs` if room exists: pushes
+   * `nowMs` into the in-memory window IMMEDIATELY (synchronously — no `await`
+   * anywhere in this method) and returns true; returns false — no mutation —
+   * when exhausted or untracked.
+   *
+   * This closes the classic check-then-act race across concurrent callers of
+   * the SAME rule (e.g. two sessions' `webpush/pump.ts` event loops racing a
+   * shared `ruleId`, since quota state is keyed by ruleId alone, not
+   * session): `state()`/`remaining()` are read-only, so two concurrent
+   * decisions can both observe `'room'` before either commits. `reserve()` is
+   * the commit — callers must invoke it synchronously, right when a decision
+   * is made (before any `await`, e.g. the permission vote), so a second
+   * caller's own `state()`/`evaluate()` check — which can only run before
+   * this call's synchronous prefix starts or after it ends, never
+   * interleaved, by JS run-to-completion — is guaranteed to see the
+   * reservation already committed.
+   *
+   * A caller that reserves MUST follow up with EXACTLY ONE of:
+   * - {@link confirmReserved} — the reserved action succeeded; persist the
+   *   slot durably (WAL).
+   * - {@link releaseReserved} — the reserved action failed/threw; roll the
+   *   reservation back so it does not count against future decisions.
+   */
+  reserve(ruleId: string, nowMs: number): boolean {
+    const limit = this.limitsFor(ruleId);
+    if (!limit) return false; // untracked — nothing to reserve
+    const used = this.usedAfterPrune(ruleId, limit.windowSec, nowMs);
+    if (used >= limit.count) return false;
+    const arr = this.hits.get(ruleId);
+    if (arr) arr.push(nowMs);
+    else this.hits.set(ruleId, [nowMs]);
+    return true;
+  }
+
+  /**
+   * Durably persist a slot previously reserved via {@link reserve}. The
+   * in-memory count was already committed by `reserve()` itself, so this is
+   * WAL-append-only (never a second in-memory push). Never throws — mirrors
+   * {@link consume}'s persistence contract.
+   *
+   * NOTE (benign, documented): if this triggers the amortized `compact()`
+   * (walLines > floor) while ANOTHER rule/session has an in-flight
+   * *unconfirmed* reservation, that reservation's instant is still in
+   * `this.hits` and will be written to the WAL here. Should that other
+   * reservation later be released (vote failed), the WAL keeps a phantom
+   * record until the next compaction prunes it out by window age — a
+   * bounded, fail-closed over-count (fewer future auto-allows), never an
+   * under-count. Not fixed here: narrowing it needs compaction to snapshot
+   * only confirmed instants, out of scope for this race fix.
+   */
+  async confirmReserved(ruleId: string, nowMs: number): Promise<void> {
+    try {
+      await this.wal.append({ ruleId, ms: nowMs });
+      this.walLines += 1;
+      if (this.walLines > this.floor) await this.compact(nowMs);
+    } catch {
+      /* swallow — counter stands in memory; the lost line just won't persist */
+    }
+  }
+
+  /**
+   * Roll back one slot previously reserved via {@link reserve} that was never
+   * confirmed (e.g. a permission vote that failed or threw) — removes ONE
+   * matching instant from memory (the most recently pushed, LIFO, in case of
+   * duplicate `nowMs` values). Never persisted (confirmReserved wasn't
+   * called), so there is nothing to undo in the WAL. Synchronous — never
+   * throws.
+   */
+  releaseReserved(ruleId: string, nowMs: number): void {
+    const arr = this.hits.get(ruleId);
+    if (!arr) return;
+    const idx = arr.lastIndexOf(nowMs);
+    if (idx === -1) return;
+    arr.splice(idx, 1);
+    if (arr.length === 0) this.hits.delete(ruleId);
+  }
+
+  /**
    * Prune every rule to its window, DROP untracked rules (deleted/renamed), and
    * rewrite the WAL with only the survivors. Public for tests; also auto-invoked
    * by {@link consume}. Never throws.

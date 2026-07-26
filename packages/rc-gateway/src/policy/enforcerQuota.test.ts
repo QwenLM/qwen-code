@@ -189,3 +189,155 @@ describe('PolicyEnforcer + quota store (cycle 43 flip)', () => {
     expect(votes).toHaveLength(0); // never auto-voted
   });
 });
+
+/**
+ * A daemon whose `respondToSessionPermission` returns a Promise that only
+ * settles when the test explicitly resolves it (via the returned
+ * `resolvers` array, in call order) — lets a test hold two concurrent votes
+ * open simultaneously with no timers/sleeps, so ordering is deterministic.
+ */
+function controllableDaemon(): {
+  daemon: DaemonClient;
+  votes: Array<{ sessionId: string; requestId: string }>;
+  resolvers: Array<(ok: boolean) => void>;
+} {
+  const votes: Array<{ sessionId: string; requestId: string }> = [];
+  const resolvers: Array<(ok: boolean) => void> = [];
+  const daemon = {
+    respondToSessionPermission: (
+      sessionId: string,
+      requestId: string,
+    ): Promise<boolean> => {
+      votes.push({ sessionId, requestId });
+      return new Promise<boolean>((resolve) => {
+        resolvers.push(resolve);
+      });
+    },
+  } as unknown as DaemonClient;
+  return { daemon, votes, resolvers };
+}
+
+describe('PolicyEnforcer + quota store: concurrent cross-session race (check-then-consume)', () => {
+  it('two sessions racing the SAME count:1 rule: only one is voted-allow + consumed, the loser falls through to prompt', async () => {
+    const { daemon, votes, resolvers } = controllableDaemon();
+    const { entries, recorder } = fakeAudit();
+    const wal = new MemoryQuotaWal();
+    const store = await QuotaStore.create(wal, () => ({
+      count: 1,
+      windowSec: 60,
+    }));
+    const enf = new PolicyEnforcer(
+      daemon,
+      quotaRule(1),
+      recorder,
+      store,
+      () => NOW,
+    );
+
+    // Fire both concurrently, for two DIFFERENT sessions matching the same
+    // ruleId ('q'). Nothing here awaits a timer: handlePermission runs
+    // synchronously up to `await respondToSessionPermission`, and the fake
+    // daemon returns an externally-controlled Promise, so both calls reach
+    // (or, once fixed, are turned away by their own check before reaching)
+    // the vote deterministically, with no sleep involved.
+    const p1 = enf.handlePermission('s1', permEvent('execute', 'r1'));
+    const p2 = enf.handlePermission('s2', permEvent('execute', 'r2'));
+
+    // THE RACE, pinned: current (buggy) code lets BOTH calls read the quota
+    // as 'room' before either consumes, so both reach the daemon — votes
+    // would be length 2 here. The fix closes the window by committing
+    // (reserving) the slot synchronously the instant a decision is 'allow',
+    // before the vote's `await` — so the second session's OWN evaluate()
+    // check sees the slot already taken and never calls the daemon at all.
+    // This assertion is therefore a second, sharper RED signal (RED: 2)
+    // that also pins the fixed shape (GREEN: 1).
+    expect(votes).toHaveLength(1);
+
+    // Resolve whatever votes were actually cast (1 fixed / 2 unfixed) — both
+    // as a successful vote, the worst case for the race: if a check-then-
+    // consume gap still existed, both would now consume, exceeding count:1.
+    for (const resolve of resolvers) resolve(true);
+    const [h1, h2] = await Promise.all([p1, p2]);
+
+    const handledCount = [h1, h2].filter(Boolean).length;
+    expect(handledCount).toBe(1); // exactly one auto-handled (voted + consumed)
+
+    // The definitive consume counter: how many slots were actually persisted
+    // for rule 'q'. remaining() clamps at 0 and would hide a double-consume;
+    // the WAL record count cannot.
+    expect(await wal.load()).toHaveLength(1);
+
+    // The winner's audit record: voted allow, quota consumed.
+    const winnerRecord = entries.find(
+      (e) =>
+        e.action === 'policy_decision' &&
+        e.detail?.['action'] === 'allow' &&
+        e.detail?.['voted'] === true,
+    );
+    expect(winnerRecord?.detail).toMatchObject({
+      ruleId: 'q',
+      voted: true,
+      quotaRemaining: 0,
+    });
+
+    // The loser's audit record: never voted, fell through to the policy
+    // default (prompt) — proving it wasn't silently dropped, just correctly
+    // turned away by its own quota check.
+    const loserRecord = entries.find(
+      (e) =>
+        e.action === 'policy_decision' &&
+        e.detail?.['action'] === 'prompt' &&
+        e.detail?.['decisionSource'] === 'default',
+    );
+    expect(loserRecord?.detail).toMatchObject({
+      voted: false,
+      reason: 'default',
+    });
+  });
+
+  it('a vote that THROWS releases the reservation, and the freed slot is reusable by a later call', async () => {
+    const daemon = {
+      respondToSessionPermission: async (): Promise<boolean> => {
+        throw new Error('daemon connection reset');
+      },
+    } as unknown as DaemonClient;
+    const { recorder } = fakeAudit();
+    const wal = new MemoryQuotaWal();
+    const store = await QuotaStore.create(wal, () => ({
+      count: 1,
+      windowSec: 60,
+    }));
+    const enf = new PolicyEnforcer(
+      daemon,
+      quotaRule(1),
+      recorder,
+      store,
+      () => NOW,
+    );
+
+    // First call: the vote throws — must fall through, and must NOT leave the
+    // reserved slot stuck (unusable forever).
+    expect(await enf.handlePermission('s1', permEvent('execute', 'r1'))).toBe(
+      false,
+    );
+    expect(store.remaining('q', NOW)).toBe(1); // released back, not stuck at 0
+
+    // A fresh call at the SAME instant must be able to consume the freed slot
+    // (proves releaseReserved() actually frees a REUSABLE slot, not just that
+    // remaining() reports a number that looks right).
+    const { daemon: okDaemon, votes } = fakeDaemon(true);
+    const enf2 = new PolicyEnforcer(
+      okDaemon,
+      quotaRule(1),
+      recorder,
+      store,
+      () => NOW,
+    );
+    expect(await enf2.handlePermission('s2', permEvent('execute', 'r2'))).toBe(
+      true,
+    );
+    expect(votes).toHaveLength(1);
+    expect(await wal.load()).toHaveLength(1);
+    expect(store.remaining('q', NOW)).toBe(0);
+  });
+});

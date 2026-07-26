@@ -157,6 +157,29 @@ export class PolicyEnforcer {
 
     if (d.action === 'allow') {
       if (requestId && approveOptionId) {
+        // Reserve-at-decision (closes the maxPerWindow check-then-consume race
+        // across concurrent sessions, quotas.ts#reserve): commit the slot HERE,
+        // synchronously, the instant the decision is 'allow' — strictly before
+        // the vote's `await` below. Everything from the `evaluate()` call
+        // above through this line is synchronous (no `await`), so by JS
+        // run-to-completion no OTHER `handlePermission` call — even one
+        // racing the SAME ruleId from a different session — can run in
+        // between. That other call's own `evaluate()` check therefore either
+        // runs entirely before this reservation (and reserves the slot
+        // itself) or entirely after (and sees this reservation via the same
+        // oracle, i.e. 'exhausted' → falls through to prompt on its OWN
+        // check, never reaching its vote). Only ONE of two concurrent
+        // decisions on a count:1 rule can ever reserve.
+        let reservedRuleId: string | undefined;
+        if (
+          this.quota &&
+          d.ruleId &&
+          this.quota.remaining(d.ruleId, nowMs) !== undefined
+        ) {
+          reservedRuleId = this.quota.reserve(d.ruleId, nowMs)
+            ? d.ruleId
+            : undefined;
+        }
         try {
           const ok = await this.daemon.respondToSessionPermission(
             sessionId,
@@ -164,17 +187,13 @@ export class PolicyEnforcer {
             { outcome: { outcome: 'selected', optionId: approveOptionId } },
           );
           if (ok) {
-            // Consume the quota ONLY now — after a successful vote (the gateway's
-            // commit-to-invoke, design.md:68) — and ONLY for a tracked quota rule
-            // (remaining !== undefined), so non-quota allows don't churn the WAL.
+            // CONFIRM the reservation made above — persist it durably (WAL).
+            // The in-memory count was already committed by reserve(), so this
+            // is append-only, never a second in-memory consume.
             let quotaRemaining: number | undefined;
-            if (
-              this.quota &&
-              d.ruleId &&
-              this.quota.remaining(d.ruleId, nowMs) !== undefined
-            ) {
-              await this.quota.consume(d.ruleId, nowMs);
-              quotaRemaining = this.quota.remaining(d.ruleId, nowMs);
+            if (reservedRuleId) {
+              await this.quota!.confirmReserved(reservedRuleId, nowMs);
+              quotaRemaining = this.quota!.remaining(reservedRuleId, nowMs);
             }
             void this.audit?.record({
               action: 'policy_decision',
@@ -191,8 +210,18 @@ export class PolicyEnforcer {
             });
             return true;
           }
+          // Vote returned false (not thrown): RELEASE the reservation — a
+          // failed vote must not permanently consume a slot (fail-safe,
+          // preserved from before this fix).
+          if (reservedRuleId) {
+            this.quota!.releaseReserved(reservedRuleId, nowMs);
+          }
         } catch {
-          // Swallow — fall through to the fail-safe below.
+          // Swallow — a thrown vote is the same fail-safe as a `false` vote:
+          // release any reservation, then fall through to the audit below.
+          if (reservedRuleId) {
+            this.quota!.releaseReserved(reservedRuleId, nowMs);
+          }
         }
       }
       void this.audit?.record({
