@@ -160,6 +160,48 @@ describe('POST /rc/reviews (trigger saga)', () => {
     expect(JSON.stringify(auditFrame.record)).not.toContain('/review');
   });
 
+  it('owner triggers a path review → owner-stream frame and audit detail never carry the raw path', async () => {
+    const { url, tokens, frames } = await setup();
+    const res = await post(url, tokens.owner, {
+      target: { path: '/secret/xyz' },
+    });
+    expect(res.status).toBe(202);
+    const body = (await res.json()) as { reviewId: string };
+
+    const started = frames.find((f) => f.type === 'review_started') as Extract<
+      OwnerEvent,
+      { type: 'review_started' }
+    >;
+    expect(started).toBeDefined();
+    expect(started.review.target).not.toHaveProperty('path');
+    expect(started.review.target.kind).toBe('path');
+    expect(JSON.stringify(started)).not.toContain('/secret/xyz');
+
+    await waitFor(() =>
+      frames.some(
+        (f) =>
+          f.type === 'audit' &&
+          (f as Extract<OwnerEvent, { type: 'audit' }>).record.action ===
+            'review_started',
+      ),
+    );
+    const auditFrame = frames.find(
+      (f) =>
+        f.type === 'audit' &&
+        (f as Extract<OwnerEvent, { type: 'audit' }>).record.action ===
+          'review_started' &&
+        (f as Extract<OwnerEvent, { type: 'audit' }>).record.target ===
+          body.reviewId,
+    ) as Extract<OwnerEvent, { type: 'audit' }>;
+    expect(auditFrame).toBeDefined();
+    expect(JSON.stringify(auditFrame.record)).not.toContain('/secret/xyz');
+    const detail = auditFrame.record.detail as {
+      target?: { kind?: string; path?: string };
+    };
+    expect(detail.target).not.toHaveProperty('path');
+    expect(detail.target?.kind).toBe('path');
+  });
+
   it('read token → 403 scope_required (mount-level WRITE gate)', async () => {
     const { url, tokens, registry } = await setup();
     const res = await post(url, tokens.read, { target: { local: true } });

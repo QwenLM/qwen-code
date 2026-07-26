@@ -69,10 +69,18 @@ export class AgentLifecycle {
    * Emit one lifecycle frame on all three surfaces. Total: a throwing
    * notifier must never break the caller (notify is best-effort by contract;
    * the void + catch keeps rejections contained).
+   *
+   * The OWNER events stream (`/rc/events`) NEVER carries the agent's
+   * spawning-prompt `task` text — only ids/enums/counts. The parent
+   * session's own stream and the notifier both still receive the full
+   * `agent` object (the parent already knows the task it spawned with, and
+   * the notifier's `buildPayload` already strips to metadata before any push
+   * leaves the process — see webpush/payload.ts).
    */
   emit(type: AgentLifecycleEventType, record: AgentRecord): void {
     const agent = this.payloadFor(record);
-    this.ownerEvents.publish({ type, agent });
+    const { task: _task, ...ownerSafeAgent } = agent;
+    this.ownerEvents.publish({ type, agent: ownerSafeAgent });
     if (record.parentSessionId !== null) {
       this.promptEvents?.emit(record.parentSessionId, { type, data: agent });
     }

@@ -104,4 +104,30 @@ describe('ReviewLifecycle', () => {
     expect(seen.some((e) => e.type === 'review_failed')).toBe(true);
     expect(reg.get(rec.reviewId)?.status).toBe('failed');
   });
+
+  it('owner-stream frame never carries a path target raw path', async () => {
+    const { reg, bus, seen } = await fixture();
+    const rec = await reg.register({
+      sessionId: 's4',
+      target: { kind: 'path', path: '/secret/xyz' },
+      comment: false,
+      autofix: false,
+      approvalLeg: 'vote',
+      triggeredByTokenId: 'x',
+    });
+    const lc = new ReviewLifecycle(reg, bus);
+    await lc.handleSessionEvent('s4', { type: 'session_died', data: {} });
+    const frame = seen.find((e) => e.type === 'review_failed') as Extract<
+      OwnerEvent,
+      { type: 'review_failed' }
+    >;
+    expect(frame).toBeDefined();
+    expect(JSON.stringify(frame)).not.toContain('/secret/xyz');
+    expect(frame.review.target).not.toHaveProperty('path');
+    expect(frame.review.target.kind).toBe('path');
+    expect(reg.get(rec.reviewId)?.target).toEqual({
+      kind: 'path',
+      path: '/secret/xyz',
+    });
+  });
 });

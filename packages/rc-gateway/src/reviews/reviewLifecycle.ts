@@ -9,7 +9,11 @@ import type {
   ReviewLifecycleEventType,
   ReviewLifecyclePayload,
 } from '../ownerEvents.js';
-import type { ReviewRegistry, ReviewRecord } from './reviewRegistry.js';
+import {
+  sanitizeReviewTarget,
+  type ReviewRegistry,
+  type ReviewRecord,
+} from './reviewRegistry.js';
 
 /**
  * The notification sink the lifecycle hands frames to. Structurally satisfied
@@ -70,10 +74,19 @@ export class ReviewLifecycle {
    * Emit one lifecycle frame on both surfaces: the owner events stream and
    * (best-effort) the notification pipeline. A throwing notifier must never
    * break the caller — the void + catch keeps rejections contained.
+   *
+   * The OWNER events stream (`/rc/events`) never carries a `path` target's
+   * raw filesystem path — `sanitizeReviewTarget` reduces it to `{ kind:
+   * 'path' }`. The notifier still receives the full `target` (the
+   * notification pipeline's `buildPayload` already strips it to a PR number
+   * or nothing before any push leaves the process — see webpush/payload.ts).
    */
   emit(type: ReviewLifecycleEventType, record: ReviewRecord): void {
     const payload = this.payloadFor(record);
-    this.ownerEvents.publish({ type, review: payload });
+    this.ownerEvents.publish({
+      type,
+      review: { ...payload, target: sanitizeReviewTarget(record.target) },
+    });
     void this.notifier
       ?.notify({ type, data: payload }, { sessionId: record.sessionId })
       .catch(() => {});

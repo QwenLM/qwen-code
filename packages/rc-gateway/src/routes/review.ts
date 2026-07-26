@@ -9,6 +9,7 @@ import type { DaemonClient } from '@qwen-code/sdk';
 import type { AuditRecorder } from '../auditLog.js';
 import { OWNER, hasScope } from '../scopes.js';
 import {
+  sanitizeReviewTarget,
   TERMINAL_REVIEW_STATUSES,
   type ReviewRecord,
   type ReviewRegistry,
@@ -342,6 +343,8 @@ export function createTriggerReviewRoute(
         deps.registry.get(record.reviewId)!,
       );
       // Audit: ids + flags + approvalLeg ONLY — NEVER the prompt/diff/report.
+      // `target` is sanitized the same way as the owner-stream frame (a
+      // `path` target's raw filesystem path must never reach the audit log).
       void deps.audit?.record({
         action: 'review_started',
         actorTokenId: req.rcClient?.id,
@@ -349,7 +352,7 @@ export function createTriggerReviewRoute(
         target: record.reviewId,
         detail: {
           sessionId,
-          target,
+          target: sanitizeReviewTarget(target),
           comment,
           autofix,
           autoApprove,

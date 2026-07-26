@@ -35,6 +35,24 @@ export type ReviewTarget =
   | { kind: 'local' };
 
 /**
+ * Metadata-safe view of a `ReviewTarget` for any sink OUTSIDE the daemon that
+ * ran the review — the owner events stream and the audit log. A `pr` target's
+ * number is not sensitive and is kept; a `path` target's raw, caller-supplied
+ * filesystem path is dropped, leaving only its `kind` (mirrors
+ * `webpush/payload.ts`'s review branch, which likewise never lets a `path`
+ * target's path reach a push payload). Shared by reviewLifecycle.ts's `emit`
+ * (owner-stream frame) and routes/review.ts's `review_started` audit record so
+ * the two sinks can't drift apart.
+ */
+export function sanitizeReviewTarget(
+  target: ReviewTarget,
+): { kind: 'pr'; number: number } | { kind: 'path' } | { kind: 'local' } {
+  if (target.kind === 'pr') return { kind: 'pr', number: target.number };
+  if (target.kind === 'path') return { kind: 'path' };
+  return { kind: 'local' };
+}
+
+/**
  * One `/review` run, backed 1:1 by a daemon session (mirrors AgentRecord's
  * agents-as-sessions approach). Shape mirrors the approved design doc.
  */

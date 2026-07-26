@@ -73,16 +73,21 @@ export type AgentLifecycleEventType =
   | 'agent_cancelled';
 
 /**
- * Payload of a lifecycle frame (design: `{ agentId, sessionId,
- * parentSessionId, agentType, task, status, costMicrocents? }`). Also the
- * `data` of the same frames on the parent session's stream.
+ * Payload of an agent lifecycle frame on the OWNER events stream (design:
+ * `{ agentId, sessionId, parentSessionId, agentType, status,
+ * costMicrocents? }`). `task` is deliberately OPTIONAL and — per the
+ * metadata-only invariant this type enforces for `/rc/events` — the owner
+ * stream never actually sets it; the parent session's own stream (which
+ * already knows the task it spawned with) and the notification pipeline
+ * carry the full record separately as untyped `data`, outside this
+ * interface (see agentLifecycle.ts's `emit`).
  */
 export interface AgentLifecyclePayload {
   agentId: string;
   sessionId: string;
   parentSessionId: string | null;
   agentType: string;
-  task: string;
+  task?: string;
   status: string;
   costMicrocents?: number;
 }
@@ -96,14 +101,22 @@ export type ReviewLifecycleEventType =
 
 /**
  * Payload of a review lifecycle frame (design: `{ reviewId, sessionId, target,
- * status, reportPath?, summary? }`).
+ * status, reportPath?, summary? }`). On the OWNER events stream, `target`'s
+ * `path` branch is reduced to `{ kind: 'path' }` — a `path` target's raw
+ * filesystem path is caller-supplied and, mirroring
+ * `webpush/payload.ts`'s review branch, must never leave the daemon that ran
+ * the review (see `sanitizeReviewTarget` in reviewRegistry.ts, used by
+ * reviewLifecycle.ts's `emit` and routes/review.ts's audit record). `path` is
+ * therefore optional here so both the full record (still used for the
+ * notification pipeline's `data`) and the sanitized owner-stream view satisfy
+ * this one type.
  */
 export interface ReviewLifecyclePayload {
   reviewId: string;
   sessionId: string;
   target:
     | { kind: 'pr'; number: number }
-    | { kind: 'path'; path: string }
+    | { kind: 'path'; path?: string }
     | { kind: 'local' };
   status: string;
   reportPath?: string | null;

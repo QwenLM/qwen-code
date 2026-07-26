@@ -130,4 +130,44 @@ describe('AgentLifecycle', () => {
     });
     expect(ownerSeen).toHaveLength(0);
   });
+
+  it('owner-stream frame never carries the agent task text; the parent stream still does', async () => {
+    const SECRET_TASK = 'SECRET_SPAWN_PROMPT_MARKER: ' + 'x'.repeat(1900);
+    const { registry, lifecycle, ownerSeen, promptEvents } = await setup();
+    const parentSeen: GatewayEvent[] = [];
+    promptEvents.register('parent-1', (e) => parentSeen.push(e));
+    const rec = await registry.register({
+      sessionId: 's1',
+      parentSessionId: 'parent-1',
+      agentType: 'general',
+      task: SECRET_TASK,
+      spawnedByTokenId: 'tkn1',
+    });
+
+    await lifecycle.handleSessionEvent('s1', {
+      type: 'session_died',
+      data: {},
+    });
+
+    const frame = ownerSeen.find((e) => e.type === 'agent_failed') as Extract<
+      OwnerEvent,
+      { type: 'agent_failed' }
+    >;
+    expect(frame).toBeDefined();
+    expect(JSON.stringify(frame)).not.toContain('SECRET_SPAWN_PROMPT_MARKER');
+    expect(frame.agent).not.toHaveProperty('task');
+    // Only ids/enums/counts survive on the owner stream.
+    expect(frame.agent).toMatchObject({
+      agentId: rec.agentId,
+      sessionId: 's1',
+      parentSessionId: 'parent-1',
+      agentType: 'general',
+      status: 'failed',
+    });
+
+    // The parent session's own stream already knows the task it spawned with
+    // (it's the parent's own prompt content) — that surface is UNCHANGED.
+    const parentFrame = parentSeen.find((e) => e.type === 'agent_failed');
+    expect(JSON.stringify(parentFrame)).toContain('SECRET_SPAWN_PROMPT_MARKER');
+  });
 });
