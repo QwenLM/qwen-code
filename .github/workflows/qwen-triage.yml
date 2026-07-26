@@ -313,6 +313,7 @@ jobs:
           set -uo pipefail
           MARKER='<!-- qwen-triage lifecycle -->'
           LEGACY_MARKER='<!-- qwen-triage stage=status -->'
+          BOT_LOGIN="$(gh api user --jq '.login' 2>/dev/null || true)"
           printf -v BODY '%s\n\n%s\n\n%s' \
             "$MARKER" \
             "🔄 **Qwen Triage is running** — [watch live progress]($RUN_URL). Stage results will post in this thread as they complete." \
@@ -320,8 +321,8 @@ jobs:
           EXISTING_ID="$(
             gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
               --method GET --paginate -F per_page=100 |
-              jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" \
-                '[.[][] | select((.body | contains($m)) or (.body | contains($legacy)))] | last | .id // empty'
+              jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" --arg bot "$BOT_LOGIN" \
+                '[.[][] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))] | last | .id // empty'
           )" || EXISTING_ID=''
           if [ -n "$EXISTING_ID" ]; then
             gh api --method PATCH \
@@ -676,6 +677,7 @@ jobs:
           set -uo pipefail
           MARKER='<!-- qwen-triage lifecycle -->'
           LEGACY_MARKER='<!-- qwen-triage stage=status -->'
+          BOT_LOGIN="$(gh api user --jq '.login' 2>/dev/null || true)"
           if [ "${TRIAGE_OUTCOME:-}" = 'success' ]; then
             EN="✅ **Qwen Triage finished** — [view run]($RUN_URL). See the stage comments in this thread for the result."
             ZH="✅ **Qwen Triage 已完成** —— [查看运行]($RUN_URL)。结果见本线程中的各阶段评论。"
@@ -687,8 +689,8 @@ jobs:
           EXISTING_ID="$(
             gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments" \
               --method GET --paginate -F per_page=100 |
-              jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" \
-                '[.[][] | select((.body | contains($m)) or (.body | contains($legacy)))] | last | .id // empty'
+              jq -rs --arg m "$MARKER" --arg legacy "$LEGACY_MARKER" --arg bot "$BOT_LOGIN" \
+                '[.[][] | select(.user.login == $bot) | select((.body | startswith($m)) or (.body | startswith($legacy)))] | last | .id // empty'
           )" || EXISTING_ID=''
           if [ -n "$EXISTING_ID" ]; then
             gh api --method PATCH \

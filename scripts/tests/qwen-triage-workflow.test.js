@@ -225,7 +225,12 @@ describe('qwen-triage tmux workflow', () => {
     expect(statusStep).toContain('actions/runs/${{ github.run_id }}');
     expect(statusStep).toContain('watch live progress');
     // Upsert by marker so a re-run reuses the one comment instead of stacking.
-    expect(statusStep).toContain('contains($m)');
+    // startswith (not contains) prevents matching a comment that merely quotes
+    // the marker; the bot-author filter prevents matching a human's comment.
+    expect(statusStep).toContain("gh api user --jq '.login'");
+    expect(statusStep).toContain('select(.user.login == $bot)');
+    expect(statusStep).toContain('startswith($m)');
+    expect(statusStep).not.toContain('contains($m)');
     expect(statusStep).toContain('--method PATCH');
     // Best-effort: a failed status post warns and continues, never fails triage.
     expect(statusStep).toContain('set -uo pipefail');
@@ -241,6 +246,9 @@ describe('qwen-triage tmux workflow', () => {
     );
     expect(finalizeStep).toContain('success() || failure()');
     expect(finalizeStep).toContain('steps.triage.outcome');
+    expect(finalizeStep).toContain('select(.user.login == $bot)');
+    expect(finalizeStep).toContain('startswith($m)');
+    expect(finalizeStep).not.toContain('contains($m)');
     expect(finalizeStep).toContain('--method PATCH');
     expect(finalizeStep).toContain('Qwen Triage finished');
     expect(finalizeStep).toContain('ended early');
