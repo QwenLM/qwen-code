@@ -11,9 +11,11 @@ import * as os from 'node:os';
 import {
   updateSettingsFilePreservingFormat,
   applyUpdates,
-} from './commentJson.js';
+  parseJsoncObject,
+  updateJsoncContent,
+} from './jsonc-editor.js';
 
-describe('commentJson', () => {
+describe('jsonc editor', () => {
   let tempDir: string;
   let testFilePath: string;
 
@@ -170,6 +172,137 @@ describe('commentJson', () => {
   });
 });
 
+describe('updateJsoncContent', () => {
+  it('removes a deleted property with its trailing inline comment', () => {
+    const original = `{
+  "keep": true,
+  "remove": false // belongs to remove
+}`;
+
+    const updated = updateJsoncContent(original, { keep: true }, true);
+
+    expect(updated).toContain('"keep": true');
+    expect(updated).not.toContain('"remove"');
+    expect(updated).not.toContain('belongs to remove');
+    expect(updated.endsWith('\n')).toBe(false);
+  });
+
+  it('preserves CRLF, tab indentation, final newline, and a UTF-8 BOM', () => {
+    const original =
+      '\uFEFF{\r\n\t// Existing setting\r\n\t"model": "qwen"\r\n}\r\n';
+
+    const updated = updateJsoncContent(original, {
+      model: 'qwen',
+      approvalMode: 'default',
+    });
+
+    expect(updated.startsWith('\uFEFF')).toBe(true);
+    expect(updated).toContain('// Existing setting');
+    expect(updated).toContain('\r\n\t"approvalMode": "default"\r\n');
+    expect(updated.endsWith('\r\n')).toBe(true);
+  });
+
+  it('detects indentation from properties rather than quoted comments', () => {
+    const original = `{
+  /*
+    "example": true
+  */
+\t"model": "qwen"
+}`;
+
+    const updated = updateJsoncContent(original, {
+      model: 'qwen-3',
+      approvalMode: 'default',
+    });
+
+    expect(updated).toContain('\n\t"model": "qwen-3"');
+    expect(updated).toContain('\n\t"approvalMode": "default"');
+  });
+
+  it('normalizes duplicate keys before applying an effective update', () => {
+    const original = `{
+  // ignored duplicate
+  "model": "first", // ignored inline comment
+  // effective duplicate
+  "model": "second",
+  "nested": {
+    "value": 1,
+    "value": 2
+  }
+}`;
+
+    const updated = updateJsoncContent(original, {
+      model: 'updated',
+      nested: { value: 3 },
+    });
+
+    expect(parseJsoncObject(updated)).toEqual({
+      model: 'updated',
+      nested: { value: 3 },
+    });
+    expect(updated.match(/"model"/g)).toHaveLength(1);
+    expect(updated.match(/"value"/g)).toHaveLength(1);
+    expect(updated).not.toContain('ignored duplicate');
+    expect(updated).not.toContain('ignored inline comment');
+  });
+
+  it('leaves a semantic no-op byte-for-byte unchanged', () => {
+    const original = `{
+  // untouched
+  "model": "qwen",
+}`;
+
+    expect(updateJsoncContent(original, { model: 'qwen' })).toBe(original);
+  });
+
+  it('does not rewrite unchanged arrays containing objects', () => {
+    const original = `{
+  "items": [
+    // Preserve the original object text.
+    { "value": 1, "value": 2 },
+  ],
+  "model": "qwen"
+}`;
+
+    const updated = updateJsoncContent(original, { model: 'qwen-3' });
+
+    expect(updated).toContain('// Preserve the original object text.');
+    expect(updated.match(/"value"/g)).toHaveLength(2);
+  });
+
+  it('removes keys that collide with Object prototype names in sync mode', () => {
+    const original = `{
+  "toString": "remove",
+  "keep": true
+}`;
+
+    const updated = updateJsoncContent(original, { keep: true }, true);
+
+    expect(parseJsoncObject(updated)).toEqual({ keep: true });
+    expect(updated).not.toContain('"toString"');
+  });
+
+  it('parses prototype-named properties without changing object prototypes', () => {
+    const parsed = parseJsoncObject(`{
+  "__proto__": { "polluted": true },
+  "constructor": "value",
+  "prototype": "value"
+}`);
+
+    expect(Object.getPrototypeOf(parsed)).toBe(Object.prototype);
+    expect(Object.hasOwn(parsed, '__proto__')).toBe(true);
+    expect(parsed['__proto__']).toEqual({ polluted: true });
+    expect(Object.prototype).not.toHaveProperty('polluted');
+  });
+
+  it.each(['{ "model": "qwen"', '[]', '"hello"', '42', 'true', 'null'])(
+    'rejects malformed or non-object JSONC: %s',
+    (content) => {
+      expect(() => updateJsoncContent(content, { model: 'qwen' })).toThrow();
+    },
+  );
+});
+
 describe('applyUpdates', () => {
   it('should apply updates correctly', () => {
     const original = { a: 1, b: { c: 2 } };
@@ -182,6 +315,14 @@ describe('applyUpdates', () => {
     const updates = { b: {} };
     const result = applyUpdates(original, updates);
     expect(result).toEqual({ a: 1, b: {} });
+  });
+
+  it('should remove own keys that collide with Object prototype names', () => {
+    const original = { toString: 'remove', keep: true };
+
+    expect(applyUpdates(original, { keep: true }, true)).toEqual({
+      keep: true,
+    });
   });
 
   it('should replace the object at the exact replace path', () => {
@@ -345,7 +486,8 @@ describe('migration write-back via updateSettingsFilePreservingFormat', () => {
     expect(result).toContain('// inline comment');
     // Values updated
     expect(result).toContain('"model": "gemini-2.5-flash"');
-    expect(result).toContain('"theme": "light"');
+    expect(result).toContain('"theme": "light",');
+    expect(result.trimEnd().endsWith(',\n}')).toBe(true);
   });
 
   it('should remove nested zombie keys in sync mode', () => {

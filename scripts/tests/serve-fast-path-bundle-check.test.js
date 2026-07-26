@@ -545,6 +545,47 @@ describe('ACP import boundary check', () => {
     expect(findAcpImportBoundaryOffenders(metafile)).toEqual([]);
   });
 
+  it('reports legacy JSONC parser packages reached through static imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [staticImport('dist/chunks/settings-parser.js')],
+      }),
+      'dist/chunks/settings-parser.js': output({
+        inputs: [
+          'node_modules/comment-json/src/index.js',
+          'node_modules/esprima/dist/esprima.js',
+        ],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: 'comment-json parser' }),
+        expect.objectContaining({ label: 'esprima parser' }),
+      ]),
+    );
+  });
+
+  it('rejects the jsonc-parser UMD build from the ACP bundle', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [staticImport('dist/chunks/settings-parser.js')],
+      }),
+      'dist/chunks/settings-parser.js': output({
+        inputs: ['node_modules/jsonc-parser/lib/umd/main.js'],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual([
+      expect.objectContaining({
+        label: 'jsonc-parser UMD build',
+        matchedInput: 'node_modules/jsonc-parser/lib/umd/main.js',
+      }),
+    ]);
+  });
+
   it('reads a metafile path and returns ACP boundary offenders', () => {
     const tempDir = mkdtempSync(join(tmpdir(), 'acp-import-boundary-'));
     try {
