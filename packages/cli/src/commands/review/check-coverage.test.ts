@@ -868,6 +868,43 @@ describe('the roster — who should have been here', () => {
     expect(gap).not.toContain('every dimension');
   });
 
+  it('reads the effort from the plan: medium drops the personas, high still requires them', () => {
+    // coverageFromTranscripts passes the WHOLE plan to requiredAgents, which reads
+    // plan.effort. A medium run that launched the reduced set (no 6a/6b/6c) must
+    // pass; the SAME records under a high plan must fail for the missing personas.
+    // Drop the effort read and the medium case demands the personas too and exits 3,
+    // halting every medium review — this A/B is what would redden.
+    const p = join(dir, 'plan.json');
+    const base = {
+      diffPathAbsolute: DIFF,
+      srcDiffLines: 200,
+      diffLines: 300,
+      prNumber: '6766',
+      ownerRepo: 'QwenLM/qwen-code',
+      worktreePath: '.qwen/tmp/review-pr-6766',
+      files: [{ path: 'a.ts', kind: 'source', removedLines: 0, heavy: false }],
+      chunks: [
+        { id: 1, startLine: 1, endLine: 100 },
+        { id: 2, startLine: 101, endLine: 200 },
+      ],
+    };
+    const backdate = () =>
+      utimesSync(p, new Date(2020, 0, 1), new Date(2020, 0, 1));
+
+    // Medium: satisfyRoster launches exactly the reduced roster (personas dropped).
+    writeFileSync(p, JSON.stringify({ ...base, effort: 'medium' }));
+    satisfyRoster(p);
+    backdate();
+    expect(coverageFromTranscripts(p, ENV).missingRoles).toEqual([]);
+
+    // The SAME records, now a high plan: the personas are required and were never
+    // launched, so they are missing — proving the medium pass was the effort, not luck.
+    writeFileSync(p, JSON.stringify({ ...base, effort: 'high' }));
+    backdate();
+    const high = coverageFromTranscripts(p, ENV).missingRoles.join(' ');
+    expect(high).toMatch(/mindset|Undirected audit/);
+  });
+
   it('tells the operator where it looked, so a wrong --plan is not a missing file', () => {
     // "The builder never ran" and "the builder ran against a different --plan" reach
     // this check as the same thing: an absent record. They are fixed differently, so

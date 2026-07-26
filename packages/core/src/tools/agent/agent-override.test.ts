@@ -70,6 +70,28 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     return { stripDangerousRulesForAutoMode, restoreDangerousRules };
   }
 
+  it('copies the current plan-exit event before isolating approval mode', async () => {
+    const parent = await createParentWithRegistry();
+    parent.setApprovalMode(ApprovalMode.PLAN);
+    parent.setApprovalMode(ApprovalMode.DEFAULT);
+
+    const { config: child } = await createApprovalModeOverride(
+      parent,
+      ApprovalMode.AUTO_EDIT,
+    );
+
+    const childNotice = child.takePendingManualPlanExitNotice();
+    const parentNotice = parent.takePendingManualPlanExitNotice();
+    expect(childNotice?.version).toBe(parentNotice?.version);
+    expect(childNotice?.currentMode).toBe(ApprovalMode.AUTO_EDIT);
+    expect(parentNotice?.currentMode).toBe(ApprovalMode.DEFAULT);
+
+    parent.setApprovalMode(ApprovalMode.PLAN);
+    parent.setApprovalMode(ApprovalMode.DEFAULT);
+    expect(child.takePendingManualPlanExitNotice()).toBeUndefined();
+    expect(parent.takePendingManualPlanExitNotice()).toBeDefined();
+  });
+
   it('returns a Config whose registry is a distinct instance from the parent', async () => {
     const parent = new Config(baseParams);
     const parentRegistry = await parent.createToolRegistry(undefined, {
