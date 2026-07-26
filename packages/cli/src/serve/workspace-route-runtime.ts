@@ -309,3 +309,30 @@ export function resolveContainedCwd(
   }
   return workspaceCwd;
 }
+
+/**
+ * Strict variant of {@link resolveContainedCwd} for mutation routes. Returns
+ * `null` when a supplied `?cwd=` is invalid, inaccessible, or escapes the
+ * workspace boundary, so the caller can reject the request instead of
+ * silently operating on the workspace root.
+ */
+export function resolveContainedCwdOrFail(
+  req: Request,
+  workspaceCwd: string,
+): string | null {
+  const rawCwd = req.query['cwd'];
+  if (typeof rawCwd !== 'string' || rawCwd.length === 0) {
+    return workspaceCwd;
+  }
+  try {
+    const resolved = fs.realpathSync(path.resolve(rawCwd));
+    const root = fs.realpathSync(workspaceCwd);
+    const rel = path.relative(root, resolved);
+    if (!rel.startsWith('..') && !path.isAbsolute(rel)) {
+      return resolved;
+    }
+  } catch {
+    // Path doesn't exist or can't be resolved.
+  }
+  return null;
+}

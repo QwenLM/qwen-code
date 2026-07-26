@@ -41,11 +41,31 @@ export interface GitBranchesResult {
   detached: boolean;
 }
 
+// Repository-shifting variables that a daemon process may inherit from its
+// launch environment.  Clearing them prevents a trusted workspace request
+// from operating on a completely different repository despite the resolved
+// `cwd`.
+const GIT_ENV_VARS_TO_CLEAR = [
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_COMMON_DIR',
+  'GIT_INDEX_FILE',
+];
+
+function gitEnv(): Record<string, string | undefined> {
+  const env = { ...process.env };
+  for (const key of GIT_ENV_VARS_TO_CLEAR) {
+    delete env[key];
+  }
+  return env;
+}
+
 function runGit(cwd: string, args: string[]): Promise<string> {
   return execFileAsync('git', args, {
     cwd,
     timeout: GIT_TIMEOUT_MS,
     maxBuffer: 10 * 1024 * 1024,
+    env: gitEnv(),
   }).then(({ stdout }) => stdout);
 }
 
@@ -59,15 +79,20 @@ const SEPARATOR = '\x00';
 export async function fetchGitBranches(
   cwd: string,
 ): Promise<GitBranchesResult> {
+  // Defining probe: fail fast with a clear error when `cwd` is not inside a
+  // git repository, instead of letting every individual query swallow its
+  // error and returning an empty-but-"available" result.
+  await runGit(cwd, ['rev-parse', '--git-dir']);
+
   const [localRaw, remoteRaw, tagsRaw, headRaw, reflogRaw] = await Promise.all([
     runGit(cwd, [
       'for-each-ref',
-      '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)',
+      '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)%00%(symref)',
       'refs/heads/',
     ]).catch(() => ''),
     runGit(cwd, [
       'for-each-ref',
-      '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)',
+      '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)%00%(symref)',
       'refs/remotes/',
     ]).catch(() => ''),
     runGit(cwd, [
@@ -84,7 +109,7 @@ export async function fetchGitBranches(
         cwd,
         timeout: GIT_TIMEOUT_MS,
         maxBuffer: 10 * 1024 * 1024,
-        env: { ...process.env, LC_ALL: 'C', LANG: 'C' },
+        env: { ...gitEnv(), LC_ALL: 'C', LANG: 'C' },
       },
     )
       .then(({ stdout }) => stdout)
@@ -111,37 +136,45 @@ export async function fetchGitBranches(
 
 function parseBranchLines(raw: string): GitBranchInfo[] {
   if (!raw.trim()) return [];
-  return raw
-    .trim()
-    .split('\n')
-    .filter(Boolean)
-    .filter((line) => !line.split(SEPARATOR)[0]?.endsWith('/HEAD'))
-    .map((line) => {
-      const parts = line.split(SEPARATOR);
-      const name = parts[0] ?? '';
-      const isHead = parts[1] === '*';
-      const upstream = parts[2] || undefined;
-      const track = parts[3] ?? '';
-      const commitDate = parseInt(parts[4] ?? '0', 10) || 0;
-      const commitSubject = parts[5] ?? '';
+  return (
+    raw
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      // Filter symbolic refs (e.g. origin/HEAD → origin/main) by their symref
+      // target rather than by a /HEAD name suffix, which would also remove
+      // legitimate user branches like feature/HEAD.
+      .filter((line) => {
+        const parts = line.split(SEPARATOR);
+        return !(parts[6] ?? '');
+      })
+      .map((line) => {
+        const parts = line.split(SEPARATOR);
+        const name = parts[0] ?? '';
+        const isHead = parts[1] === '*';
+        const upstream = parts[2] || undefined;
+        const track = parts[3] ?? '';
+        const commitDate = parseInt(parts[4] ?? '0', 10) || 0;
+        const commitSubject = parts[5] ?? '';
 
-      let ahead = 0;
-      let behind = 0;
-      const aheadMatch = /ahead (\d+)/.exec(track);
-      const behindMatch = /behind (\d+)/.exec(track);
-      if (aheadMatch) ahead = parseInt(aheadMatch[1], 10);
-      if (behindMatch) behind = parseInt(behindMatch[1], 10);
+        let ahead = 0;
+        let behind = 0;
+        const aheadMatch = /ahead (\d+)/.exec(track);
+        const behindMatch = /behind (\d+)/.exec(track);
+        if (aheadMatch) ahead = parseInt(aheadMatch[1], 10);
+        if (behindMatch) behind = parseInt(behindMatch[1], 10);
 
-      return {
-        name,
-        isHead,
-        upstream,
-        ahead,
-        behind,
-        commitDate,
-        commitSubject,
-      };
-    });
+        return {
+          name,
+          isHead,
+          upstream,
+          ahead,
+          behind,
+          commitDate,
+          commitSubject,
+        };
+      })
+  );
 }
 
 function parseTagLines(raw: string): GitTagInfo[] {
@@ -269,8 +302,11 @@ export interface GitPushResult {
 }
 
 /**
- * Push the current branch. If `setUpstream` is true and no upstream is
- * configured, uses `--set-upstream origin <branch>`.
+ * Push the current branch. When `setUpstream` is requested and the branch
+ * already has an upstream, a plain `git push` is used so the configured
+ * remote is preserved. Only when no upstream exists does it fall back to
+ * `--set-upstream <remote> <branch>`, preferring the sole configured remote
+ * over a hardcoded `origin`.
  */
 export async function gitPush(
   cwd: string,
@@ -287,7 +323,27 @@ export async function gitPush(
         'cannot push with --set-upstream in detached HEAD state; check out a branch first',
       );
     }
-    args.push('--set-upstream', 'origin', branch);
+    // If the branch already tracks an upstream, push without rewriting it.
+    const hasUpstream = await runGit(cwd, [
+      'rev-parse',
+      '--abbrev-ref',
+      `${branch}@{u}`,
+    ]).catch(() => '');
+    if (hasUpstream.trim()) {
+      const output = await runGit(cwd, args);
+      return { success: true, output: output.trim() };
+    }
+    // No upstream — resolve the remote. Prefer the branch's configured
+    // remote, then the sole configured remote, then `origin`.
+    let remote = (
+      await runGit(cwd, ['config', `branch.${branch}.remote`]).catch(() => '')
+    ).trim();
+    if (!remote) {
+      const remotes = (await runGit(cwd, ['remote']).catch(() => '')).trim();
+      const remoteList = remotes ? remotes.split('\n') : [];
+      remote = remoteList.length === 1 ? (remoteList[0] ?? 'origin') : 'origin';
+    }
+    args.push('--set-upstream', remote, branch);
   }
   const output = await runGit(cwd, args);
   return { success: true, output: output.trim() };
@@ -321,15 +377,19 @@ export interface GitCommitResult {
 }
 
 /**
- * Commit staged changes (or all tracked changes with `all: true`).
+ * Commit changes. With `all: true`, stages every change in the working tree
+ * (including untracked files) via `git add -A` before committing, so the
+ * commit matches what the UI displays.
  */
 export async function gitCommit(
   cwd: string,
   message: string,
   opts?: { all?: boolean },
 ): Promise<GitCommitResult> {
+  if (opts?.all) {
+    await runGit(cwd, ['add', '-A']);
+  }
   const args = ['commit', '-m', message];
-  if (opts?.all) args.push('-a');
   await runGit(cwd, args);
   const sha = (await runGit(cwd, ['rev-parse', '--short', 'HEAD'])).trim();
   const subject = (await runGit(cwd, ['log', '-1', '--format=%s'])).trim();

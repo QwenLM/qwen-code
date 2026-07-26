@@ -262,41 +262,10 @@
   gap: 8px;
 }
 
-.prInputSmall {
-  width: 160px;
-  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
-  border-radius: 6px;
-  background: var(--background, transparent);
-  color: var(--foreground, #e0e0e0);
-  font-size: 12px;
-  padding: 5px 8px;
-  outline: none;
-}
 
-.prInputSmall:focus {
-  border-color: var(--primary, #3b82f6);
-}
 
-.prInputSmall::placeholder {
-  color: var(--muted-foreground, #666);
-}
 
-.prSelect {
-  min-width: 160px;
-  max-width: 240px;
-  border: 1px solid var(--border, rgba(128, 128, 128, 0.3));
-  border-radius: 6px;
-  background: var(--background, transparent);
-  color: var(--foreground, #e0e0e0);
-  font-size: 12px;
-  padding: 5px 8px;
-  outline: none;
-  cursor: pointer;
-}
 
-.prSelect:focus {
-  border-color: var(--primary, #3b82f6);
-}
 
 /* ── branch select (searchable) ─────────────── */
 .branchSelectTrigger {

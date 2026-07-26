@@ -158,6 +158,12 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
       res.status(400).json({ error: 'title is required' });
       return;
     }
+    for (const field of ['body', 'base', 'head'] as const) {
+      if (body[field] !== undefined && typeof body[field] !== 'string') {
+        res.status(400).json({ error: `${field} must be a string` });
+        return;
+      }
+    }
     const prBody = typeof body['body'] === 'string' ? body['body'] : undefined;
     const base = typeof body['base'] === 'string' ? body['base'] : undefined;
     const head = typeof body['head'] === 'string' ? body['head'] : undefined;

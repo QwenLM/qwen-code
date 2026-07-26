@@ -1492,7 +1492,7 @@ export async function fetchGitLog(
       ...(options?.range &&
       !options.range.startsWith('-') &&
       !options.range.startsWith('..') &&
-      /^[A-Za-z0-9_./~-]+$/.test(options.range)
+      /^[A-Za-z0-9_./~^-]+$/.test(options.range)
         ? [options.range, '--']
         : []),
     ],

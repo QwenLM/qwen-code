@@ -52,7 +52,10 @@ export function BranchPickerPopover({
 }: BranchPickerPopoverProps) {
   const { t } = useI18n();
   const { client } = useWorkspace();
-  const ws = client.workspaceByCwd(workspaceCwd);
+  const ws = useMemo(
+    () => client.workspaceByCwd(workspaceCwd),
+    [client, workspaceCwd],
+  );
   const [data, setData] = useState<DaemonGitBranchesResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -159,6 +162,7 @@ export function BranchPickerPopover({
   }, [checkoutRefValue, handleCheckout]);
 
   const handlePush = useCallback(async () => {
+    if (busyAction) return;
     setBusyAction('push');
     try {
       const result = await ws.workspaceGitPush({ setUpstream: true });
@@ -169,9 +173,10 @@ export function BranchPickerPopover({
     } finally {
       setBusyAction(null);
     }
-  }, [ws, onBranchChanged, showStatus, t]);
+  }, [ws, busyAction, onBranchChanged, showStatus, t]);
 
   const handlePull = useCallback(async () => {
+    if (busyAction) return;
     setBusyAction('pull');
     try {
       const result = await ws.workspaceGitPull();
@@ -182,7 +187,7 @@ export function BranchPickerPopover({
     } finally {
       setBusyAction(null);
     }
-  }, [ws, onBranchChanged, showStatus, t]);
+  }, [ws, busyAction, onBranchChanged, showStatus, t]);
 
   const q = search.toLowerCase().trim();
 

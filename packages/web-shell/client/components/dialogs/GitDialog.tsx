@@ -98,6 +98,8 @@ export function GitDialog({
   const genAbortRef = useRef<AbortController | null>(null);
   const resolveSessionRef = useRef(resolveSessionForWorkspace);
   resolveSessionRef.current = resolveSessionForWorkspace;
+  const sessionIdRef = useRef(sessionId);
+  sessionIdRef.current = sessionId;
 
   // btwSession with automatic retry: if the resolved session is stale
   // (daemon restarted, session evicted), force-create a new one and retry.
@@ -138,8 +140,8 @@ export function GitDialog({
 
     const resolveSession = resolveSessionRef.current
       ? resolveSessionRef.current(workspaceCwd)
-      : sessionId
-        ? Promise.resolve(sessionId)
+      : sessionIdRef.current
+        ? Promise.resolve(sessionIdRef.current)
         : Promise.resolve(undefined);
 
     resolveSession
@@ -155,16 +157,27 @@ export function GitDialog({
             setGenerating(false);
             return;
           }
-          const fileSummary = diff.files
-            .map((f: DaemonWorkspaceGitDiffFile) => {
-              const status = f.isUntracked
-                ? 'new'
-                : f.isDeleted
-                  ? 'deleted'
-                  : 'modified';
-              return `${status}: ${f.path}`;
-            })
-            .join('\n');
+          const MAX_SUMMARY_CHARS = 3500;
+          const fileLines = diff.files.map((f: DaemonWorkspaceGitDiffFile) => {
+            const status = f.isUntracked
+              ? 'new'
+              : f.isDeleted
+                ? 'deleted'
+                : 'modified';
+            return `${status}: ${f.path}`;
+          });
+          let fileSummary = fileLines.join('\n');
+          if (fileSummary.length > MAX_SUMMARY_CHARS) {
+            let truncated = '';
+            let included = 0;
+            for (const line of fileLines) {
+              if (truncated.length + line.length + 1 > MAX_SUMMARY_CHARS) break;
+              truncated += (truncated ? '\n' : '') + line;
+              included++;
+            }
+            fileSummary =
+              truncated + `\n(…and ${fileLines.length - included} more files)`;
+          }
           const prompt =
             `Generate a concise git commit message for these changes. ` +
             `Reply with ONLY the commit message text, no quotes, no explanation.\n\n${fileSummary}`;
@@ -186,7 +199,7 @@ export function GitDialog({
     return () => {
       abort.abort();
     };
-  }, [isCommit, sessionId, client, workspaceCwd, gitCwd]);
+  }, [isCommit, client, workspaceCwd, gitCwd]);
 
   // Clamp if the PR tab vanishes mid-session.
   const clampedTab = tabViews.includes(
@@ -297,8 +310,6 @@ export function GitDialog({
       .catch(() => setPrBranches(null));
 
     setPrGenerating(true);
-    setPrTitle('');
-    setPrBody('');
     const abort = new AbortController();
 
     // Resolve base branch, session, then generate — all chained.
@@ -309,8 +320,8 @@ export function GitDialog({
 
     const resolveSession = resolveSessionRef.current
       ? resolveSessionRef.current(workspaceCwd)
-      : sessionId
-        ? Promise.resolve(sessionId)
+      : sessionIdRef.current
+        ? Promise.resolve(sessionIdRef.current)
         : Promise.resolve(undefined);
 
     Promise.all([baseBranchPromise, resolveSession])
@@ -371,7 +382,7 @@ export function GitDialog({
             `### Tested on\n` +
             `|     OS     | Status |\n` +
             `| :--------: | :----: |\n` +
-            `|  macOS  | ✅ |\n` +
+            `|  macOS  | ⚠️ |\n` +
             `| Windows | ⚠️ |\n` +
             `|  Linux  | ⚠️ |\n\n` +
             `## Risk & Scope\n` +
@@ -417,7 +428,7 @@ export function GitDialog({
       });
 
     return () => abort.abort();
-  }, [prFormOpen, isCommit, sessionId, client, workspaceCwd, gitCwd]);
+  }, [prFormOpen, isCommit, client, workspaceCwd, gitCwd]);
 
   const doCreatePr = useCallback(async () => {
     if (!prTitle.trim()) return;
@@ -488,7 +499,9 @@ export function GitDialog({
               role="tab"
               aria-selected="true"
               aria-controls="git-dialog-panel"
+              tabIndex={0}
               className={`${styles.tab} ${styles.tabActive}`}
+              onKeyDown={onTabKeyDown}
             >
               {t('gitCommit.title')}
             </span>
@@ -740,7 +753,11 @@ function BranchSelect({
       }}
     >
       <PopoverTrigger asChild>
-        <button type="button" className={styles.branchSelectTrigger}>
+        <button
+          type="button"
+          className={styles.branchSelectTrigger}
+          aria-label={t('branchSelect.baseBranch')}
+        >
           <span className={styles.branchSelectValue}>{value || 'main'}</span>
           <ChevronDownIcon size={12} />
         </button>
@@ -757,6 +774,7 @@ function BranchSelect({
             ref={inputRef}
             className={styles.branchSelectInput}
             placeholder={t('branchSelect.search')}
+            aria-label={t('branchSelect.search')}
             value={search}
             onChange={(e) => setSearch(e.target.value)}
           />

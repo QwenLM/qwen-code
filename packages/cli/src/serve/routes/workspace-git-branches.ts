@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Application, Request, Response } from 'express';
+import type { Application, Request, RequestHandler, Response } from 'express';
 import {
   fetchGitBranches,
   gitCheckout,
@@ -24,6 +24,7 @@ import type {
 import {
   requireTrustedWorkspaceRuntime,
   resolveContainedCwd,
+  resolveContainedCwdOrFail,
   resolveWorkspaceRuntimeFromParam,
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
@@ -145,8 +146,16 @@ async function handleCreateBranch(
       .json({ error: 'invalid_branch_name', message: 'Invalid branch name' });
     return;
   }
+  const rawStartPoint = body['startPoint'];
+  if (rawStartPoint !== undefined && typeof rawStartPoint !== 'string') {
+    res.status(400).json({
+      error: 'invalid_start_point',
+      message: 'startPoint must be a string',
+    });
+    return;
+  }
   const startPoint =
-    typeof body['startPoint'] === 'string' ? body['startPoint'] : undefined;
+    typeof rawStartPoint === 'string' ? rawStartPoint : undefined;
   if (startPoint !== undefined && !isValidCheckoutRef(startPoint)) {
     res
       .status(400)
@@ -187,6 +196,22 @@ async function handlePull(
   route: string,
 ): Promise<void> {
   const body = safeBody(req);
+  if (body['rebase'] !== undefined && typeof body['rebase'] !== 'boolean') {
+    res
+      .status(400)
+      .json({ error: 'invalid_rebase', message: 'rebase must be a boolean' });
+    return;
+  }
+  if (
+    body['fetchOnly'] !== undefined &&
+    typeof body['fetchOnly'] !== 'boolean'
+  ) {
+    res.status(400).json({
+      error: 'invalid_fetch_only',
+      message: 'fetchOnly must be a boolean',
+    });
+    return;
+  }
   const rebase = body['rebase'] === true;
   const fetchOnly = body['fetchOnly'] === true;
   try {
@@ -227,6 +252,7 @@ export function registerWorkspaceGitBranchRoutes(
     boundWorkspace: string;
     sendBridgeError: SendBridgeError;
     isWorkspaceTrusted?: () => boolean;
+    mutate: (opts?: { strict?: boolean }) => RequestHandler;
   },
 ): void {
   app.get('/workspace/git/branches', (_req, res) => {
@@ -241,33 +267,41 @@ export function registerWorkspaceGitBranchRoutes(
       'GET /workspace/git/branches',
     );
   });
-  app.post('/workspace/git/checkout', (req, res) => {
-    if (deps.isWorkspaceTrusted?.() === false) {
-      sendUntrustedWorkspaceResponse(res);
-      return;
-    }
-    void handleCheckout(
-      req,
-      res,
-      deps.boundWorkspace,
-      deps.sendBridgeError,
-      'POST /workspace/git/checkout',
-    );
-  });
-  app.post('/workspace/git/branch', (req, res) => {
-    if (deps.isWorkspaceTrusted?.() === false) {
-      sendUntrustedWorkspaceResponse(res);
-      return;
-    }
-    void handleCreateBranch(
-      req,
-      res,
-      deps.boundWorkspace,
-      deps.sendBridgeError,
-      'POST /workspace/git/branch',
-    );
-  });
-  app.post('/workspace/git/push', (req, res) => {
+  app.post(
+    '/workspace/git/checkout',
+    deps.mutate({ strict: true }),
+    (req, res) => {
+      if (deps.isWorkspaceTrusted?.() === false) {
+        sendUntrustedWorkspaceResponse(res);
+        return;
+      }
+      void handleCheckout(
+        req,
+        res,
+        deps.boundWorkspace,
+        deps.sendBridgeError,
+        'POST /workspace/git/checkout',
+      );
+    },
+  );
+  app.post(
+    '/workspace/git/branch',
+    deps.mutate({ strict: true }),
+    (req, res) => {
+      if (deps.isWorkspaceTrusted?.() === false) {
+        sendUntrustedWorkspaceResponse(res);
+        return;
+      }
+      void handleCreateBranch(
+        req,
+        res,
+        deps.boundWorkspace,
+        deps.sendBridgeError,
+        'POST /workspace/git/branch',
+      );
+    },
+  );
+  app.post('/workspace/git/push', deps.mutate({ strict: true }), (req, res) => {
     if (deps.isWorkspaceTrusted?.() === false) {
       sendUntrustedWorkspaceResponse(res);
       return;
@@ -280,7 +314,7 @@ export function registerWorkspaceGitBranchRoutes(
       'POST /workspace/git/push',
     );
   });
-  app.post('/workspace/git/pull', (req, res) => {
+  app.post('/workspace/git/pull', deps.mutate({ strict: true }), (req, res) => {
     if (deps.isWorkspaceTrusted?.() === false) {
       sendUntrustedWorkspaceResponse(res);
       return;
@@ -293,19 +327,23 @@ export function registerWorkspaceGitBranchRoutes(
       'POST /workspace/git/pull',
     );
   });
-  app.post('/workspace/git/commit', (req, res) => {
-    if (deps.isWorkspaceTrusted?.() === false) {
-      sendUntrustedWorkspaceResponse(res);
-      return;
-    }
-    void handleCommit(
-      req,
-      res,
-      deps.boundWorkspace,
-      deps.sendBridgeError,
-      'POST /workspace/git/commit',
-    );
-  });
+  app.post(
+    '/workspace/git/commit',
+    deps.mutate({ strict: true }),
+    (req, res) => {
+      if (deps.isWorkspaceTrusted?.() === false) {
+        sendUntrustedWorkspaceResponse(res);
+        return;
+      }
+      void handleCommit(
+        req,
+        res,
+        deps.boundWorkspace,
+        deps.sendBridgeError,
+        'POST /workspace/git/commit',
+      );
+    },
+  );
 }
 
 export function registerWorkspaceQualifiedGitBranchRoutes(
@@ -313,6 +351,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
   deps: {
     workspaceRegistry: WorkspaceRegistry;
     sendBridgeError: SendBridgeError;
+    mutate: (opts?: { strict?: boolean }) => RequestHandler;
   },
 ): void {
   app.get('/workspaces/:workspace/git/branches', (req, res) => {
@@ -325,59 +364,159 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
       'GET /workspaces/:workspace/git/branches',
     );
   });
-  app.post('/workspaces/:workspace/git/checkout', (req, res) => {
-    const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
-    if (!runtime) return;
-    void handleCheckout(
-      req,
-      res,
-      resolveContainedCwd(req, runtime.workspaceCwd),
-      deps.sendBridgeError,
-      'POST /workspaces/:workspace/git/checkout',
-    );
-  });
-  app.post('/workspaces/:workspace/git/branch', (req, res) => {
-    const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
-    if (!runtime) return;
-    void handleCreateBranch(
-      req,
-      res,
-      resolveContainedCwd(req, runtime.workspaceCwd),
-      deps.sendBridgeError,
-      'POST /workspaces/:workspace/git/branch',
-    );
-  });
-  app.post('/workspaces/:workspace/git/push', (req, res) => {
-    const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
-    if (!runtime) return;
-    void handlePush(
-      req,
-      res,
-      resolveContainedCwd(req, runtime.workspaceCwd),
-      deps.sendBridgeError,
-      'POST /workspaces/:workspace/git/push',
-    );
-  });
-  app.post('/workspaces/:workspace/git/pull', (req, res) => {
-    const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
-    if (!runtime) return;
-    void handlePull(
-      req,
-      res,
-      resolveContainedCwd(req, runtime.workspaceCwd),
-      deps.sendBridgeError,
-      'POST /workspaces/:workspace/git/pull',
-    );
-  });
-  app.post('/workspaces/:workspace/git/commit', (req, res) => {
-    const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
-    if (!runtime) return;
-    void handleCommit(
-      req,
-      res,
-      resolveContainedCwd(req, runtime.workspaceCwd),
-      deps.sendBridgeError,
-      'POST /workspaces/:workspace/git/commit',
-    );
-  });
+  app.post(
+    '/workspaces/:workspace/git/checkout',
+    deps.mutate({ strict: true }),
+    (req, res) => {
+      const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
+      if (!runtime) return;
+      try {
+        runtime.generationGuard?.assertOpen();
+      } catch (err) {
+        deps.sendBridgeError(res, err, {
+          route: 'POST /workspaces/:workspace/git/checkout',
+        });
+        return;
+      }
+      const cwd = resolveContainedCwdOrFail(req, runtime.workspaceCwd);
+      if (cwd === null) {
+        res.status(400).json({
+          error: 'invalid_cwd',
+          message: 'The supplied cwd is invalid or outside the workspace',
+        });
+        return;
+      }
+      void handleCheckout(
+        req,
+        res,
+        cwd,
+        deps.sendBridgeError,
+        'POST /workspaces/:workspace/git/checkout',
+      );
+    },
+  );
+  app.post(
+    '/workspaces/:workspace/git/branch',
+    deps.mutate({ strict: true }),
+    (req, res) => {
+      const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
+      if (!runtime) return;
+      try {
+        runtime.generationGuard?.assertOpen();
+      } catch (err) {
+        deps.sendBridgeError(res, err, {
+          route: 'POST /workspaces/:workspace/git/branch',
+        });
+        return;
+      }
+      const cwd = resolveContainedCwdOrFail(req, runtime.workspaceCwd);
+      if (cwd === null) {
+        res.status(400).json({
+          error: 'invalid_cwd',
+          message: 'The supplied cwd is invalid or outside the workspace',
+        });
+        return;
+      }
+      void handleCreateBranch(
+        req,
+        res,
+        cwd,
+        deps.sendBridgeError,
+        'POST /workspaces/:workspace/git/branch',
+      );
+    },
+  );
+  app.post(
+    '/workspaces/:workspace/git/push',
+    deps.mutate({ strict: true }),
+    (req, res) => {
+      const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
+      if (!runtime) return;
+      try {
+        runtime.generationGuard?.assertOpen();
+      } catch (err) {
+        deps.sendBridgeError(res, err, {
+          route: 'POST /workspaces/:workspace/git/push',
+        });
+        return;
+      }
+      const cwd = resolveContainedCwdOrFail(req, runtime.workspaceCwd);
+      if (cwd === null) {
+        res.status(400).json({
+          error: 'invalid_cwd',
+          message: 'The supplied cwd is invalid or outside the workspace',
+        });
+        return;
+      }
+      void handlePush(
+        req,
+        res,
+        cwd,
+        deps.sendBridgeError,
+        'POST /workspaces/:workspace/git/push',
+      );
+    },
+  );
+  app.post(
+    '/workspaces/:workspace/git/pull',
+    deps.mutate({ strict: true }),
+    (req, res) => {
+      const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
+      if (!runtime) return;
+      try {
+        runtime.generationGuard?.assertOpen();
+      } catch (err) {
+        deps.sendBridgeError(res, err, {
+          route: 'POST /workspaces/:workspace/git/pull',
+        });
+        return;
+      }
+      const cwd = resolveContainedCwdOrFail(req, runtime.workspaceCwd);
+      if (cwd === null) {
+        res.status(400).json({
+          error: 'invalid_cwd',
+          message: 'The supplied cwd is invalid or outside the workspace',
+        });
+        return;
+      }
+      void handlePull(
+        req,
+        res,
+        cwd,
+        deps.sendBridgeError,
+        'POST /workspaces/:workspace/git/pull',
+      );
+    },
+  );
+  app.post(
+    '/workspaces/:workspace/git/commit',
+    deps.mutate({ strict: true }),
+    (req, res) => {
+      const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
+      if (!runtime) return;
+      try {
+        runtime.generationGuard?.assertOpen();
+      } catch (err) {
+        deps.sendBridgeError(res, err, {
+          route: 'POST /workspaces/:workspace/git/commit',
+        });
+        return;
+      }
+      const cwd = resolveContainedCwdOrFail(req, runtime.workspaceCwd);
+      if (cwd === null) {
+        res.status(400).json({
+          error: 'invalid_cwd',
+          message: 'The supplied cwd is invalid or outside the workspace',
+        });
+        return;
+      }
+      void handleCommit(
+        req,
+        res,
+        cwd,
+        deps.sendBridgeError,
+        'POST /workspaces/:workspace/git/commit',
+      );
+    },
+  );
 }

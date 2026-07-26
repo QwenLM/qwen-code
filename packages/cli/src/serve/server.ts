@@ -1376,10 +1376,12 @@ export function createServeApp(
     boundWorkspace: primaryBoundWorkspace,
     sendBridgeError,
     isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    mutate,
   });
   registerWorkspaceQualifiedGitBranchRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
+    mutate,
   });
   registerWorkspaceQualifiedGitHubPrsRoutes(app, {
     workspaceRegistry,

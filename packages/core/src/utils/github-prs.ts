@@ -263,7 +263,8 @@ function runGhPrCreate(
   opts: CreateGitHubPullRequestOptions,
 ): Promise<string> {
   const args = ['pr', 'create', '--title', opts.title];
-  if (opts.body) args.push('--body', opts.body);
+  // Always pass --body so gh never prompts interactively for one.
+  args.push('--body', opts.body ?? '');
   if (opts.base) args.push('--base', opts.base);
   if (opts.head) args.push('--head', opts.head);
   return new Promise((resolve, reject) => {
@@ -327,8 +328,8 @@ export async function getDefaultBranch(cwd: string): Promise<string | null> {
       ['symbolic-ref', 'refs/remotes/origin/HEAD', '--short'],
       { cwd: gitRoot, timeout: 5_000, encoding: 'utf8', windowsHide: true },
     );
-    return stdout.trim() || 'origin/main';
+    return stdout.trim() || null;
   } catch {
-    return 'origin/main';
+    return null;
   }
 }

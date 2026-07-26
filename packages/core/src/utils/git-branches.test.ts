@@ -11,7 +11,9 @@ import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
   gitCheckout,
+  gitCommit,
   gitCreateBranch,
+  gitPull,
   gitPush,
   isValidCheckoutRef,
 } from './git-branches.js';
@@ -157,6 +159,18 @@ describe('gitCreateBranch', () => {
       );
     },
   );
+
+  it('treats a tracked filename as a ref, not a pathspec (-- terminator)', async () => {
+    const dir = makeRepo();
+    // Without the trailing `--`, `git checkout -b a.txt` would error
+    // differently or create a branch from a pathspec interpretation.
+    // The `-b` flag already forces commit-ish interpretation, so this
+    // is defense-in-depth; the lock test ensures a refactor cannot
+    // silently drop the terminator.
+    const result = await gitCreateBranch(dir, 'a.txt');
+    expect(result.branch).toBe('a.txt');
+    expect(currentBranch(dir)).toBe('a.txt');
+  });
 });
 
 describe('gitPush', () => {
@@ -168,5 +182,51 @@ describe('gitPush', () => {
     await expect(gitPush(dir, { setUpstream: true })).rejects.toThrow(
       /detached HEAD/,
     );
+  });
+});
+
+describe('gitCommit', () => {
+  it('commits staged changes and returns sha and subject', async () => {
+    const dir = makeRepo();
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'two\n');
+    git(dir, 'add', '.');
+
+    const result = await gitCommit(dir, 'update a.txt');
+
+    expect(result.sha).toMatch(/^[0-9a-f]{7,40}$/);
+    expect(result.subject).toBe('update a.txt');
+  });
+
+  it('stages untracked files when all is true', async () => {
+    const dir = makeRepo();
+    fs.writeFileSync(path.join(dir, 'new.txt'), 'brand new\n');
+
+    const result = await gitCommit(dir, 'add new file', { all: true });
+
+    expect(result.subject).toBe('add new file');
+    const status = git(dir, 'status', '--porcelain');
+    expect(status.trim()).toBe('');
+  });
+
+  it('throws on a clean working tree', async () => {
+    const dir = makeRepo();
+
+    await expect(gitCommit(dir, 'noop', { all: true })).rejects.toThrow();
+  });
+});
+
+describe('gitPull', () => {
+  it('fetch-only does not merge', async () => {
+    const dir = makeRepo();
+    // Create a bare "remote" and push to it so fetch has something to do.
+    const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitremote-'));
+    tmpRoots.push(remote);
+    git(remote, 'init', '-q', '--bare');
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', 'origin', 'HEAD');
+
+    const result = await gitPull(dir, { fetchOnly: true });
+
+    expect(result.success).toBe(true);
   });
 });
