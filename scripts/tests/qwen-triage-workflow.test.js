@@ -1246,6 +1246,114 @@ describe('qwen-triage verify hardening round 2', () => {
     }
   });
 
+  // Every publish fixture returned [] for the comments listing, so the
+  // PATCH arm — the one that must reuse a live status comment instead of
+  // stranding it — was never executed by any test.
+  it('patches a live status comment instead of posting a duplicate', () => {
+    const publishStep = stepIn(
+      'publish-verify',
+      'Post verification report comment',
+    );
+    const script = publishStep
+      .match(/run: \|-\n([\s\S]*)$/)?.[1]
+      .replace(/^ {10}/gm, '');
+    const dir = mkdtempSync(join(tmpdir(), 'verify-upsert-'));
+    try {
+      // The stub records which HTTP verb the publisher used and against
+      // which comment id, and serves a comments listing from a fixture.
+      writeFileSync(
+        join(dir, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          'all="$*"',
+          'case "$all" in',
+          '  *"api user"*|*" user "*) echo qwen-code-ci-bot ;;',
+          '  *"-X PATCH"*) echo "PATCH $all" >> "$CALLS" ;;',
+          '  *comments*--method*GET*) cat "$LISTING" ;;',
+          '  *issues/*/comments*) echo "POST $all" >> "$CALLS" ;;',
+          'esac',
+          'exit 0',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      const art = join(dir, 'work', 'verify-results', 'prA-verify-1');
+      mkdirSync(art, { recursive: true });
+      writeFileSync(join(art, 'report.md'), '## real report\n');
+      writeFileSync(
+        join(art, 'assertions.json'),
+        '{"pass":3,"fail":0,"total":3}',
+      );
+      const listing = join(dir, 'listing.json');
+      const calls = join(dir, 'calls');
+      const M = '<!-- qwen-triage:verify -->';
+      const RUNNING = '<!-- qwen-triage:verify-state=running -->';
+      const run = (comments, env = {}) => {
+        writeFileSync(listing, JSON.stringify(comments));
+        writeFileSync(calls, '');
+        const res = spawnSync('bash', ['-c', script], {
+          cwd: join(dir, 'work'),
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            LISTING: listing,
+            CALLS: calls,
+            GH_STUB_OUT: join(dir, 'body.md'),
+            GH_TOKEN: 'x',
+            GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+            RUNNER_TEMP: dir,
+            GITHUB_STEP_SUMMARY: '/dev/null',
+            GITHUB_RUN_ID: '1',
+            GITHUB_RUN_ATTEMPT: '1',
+            PR_NUMBER: '7999',
+            RUN_URL: 'u',
+            VERIFY_RESULT: 'success',
+            DOWNLOAD_OUTCOME: 'success',
+            VERDICT: 'pass',
+            AGENT_VERDICT: 'findings',
+            SKIP_REASON: '',
+            PREPARE_FAILURE_PHASE: '',
+            VERIFY_ASSETS_REMOTE: join(dir, 'none.git'),
+            ...env,
+          },
+        });
+        expect(res.status).toBe(0);
+        return readFileSync(calls, 'utf8');
+      };
+
+      // A live status comment owned by the bot must be PATCHed, not
+      // duplicated — otherwise the "running" line is stranded forever.
+      // One page of comments, matching `gh --paginate` output shape.
+      const patched = run([
+        {
+          id: 555,
+          user: { login: 'qwen-code-ci-bot' },
+          body: `${M}\n${RUNNING}\n\nrunning`,
+        },
+      ]);
+      expect(patched).toContain('PATCH');
+      expect(patched).toContain('/issues/comments/555');
+      expect(patched).not.toContain('POST');
+
+      // No prior comment: post fresh.
+      expect(run([])).toContain('POST');
+
+      // A comment carrying the marker but owned by someone else must not be
+      // touched; the report is posted fresh instead.
+      const foreign = run([
+        {
+          id: 777,
+          user: { login: 'someone-else' },
+          body: `${M}\n${RUNNING}\n\nrunning`,
+        },
+      ]);
+      expect(foreign).toContain('POST');
+      expect(foreign).not.toContain('/issues/comments/777');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   // Only a validated assertions object counts as evidence.
   it('rejects inconsistent assertions objects', () => {
     const publishStep = step('Post verification report comment');
@@ -1945,9 +2053,16 @@ describe('qwen-triage verify maintainer-review round', () => {
         join(dir, 'gh'),
         [
           '#!/usr/bin/env bash',
-          'case "$*" in',
-          '  *"pr view"*|*"--json title"*) echo "${FAKE_PR_TITLE:-Some PR title}" ;;',
-          '  *workflows/qwen-triage.yml/runs*) echo "${FAKE_IN_FLIGHT:-0}" ;;',
+          // Join first: ${*#pat} applies the pattern to each positional
+          // parameter separately, which silently yielded a wrong run id
+          // while this stub was being written.
+          'all="$*"',
+          'case "$all" in',
+          '  *"pr view"*) echo "${FAKE_PR_TITLE-Some PR title}" ;;',
+          '  *workflows/qwen-triage.yml/runs*) printf "%s\\n" ${FAKE_RUN_IDS:-} ;;',
+          '  *actions/runs/*/jobs*)',
+          '    rid="${all#*actions/runs/}"; rid="${rid%%/jobs*}"',
+          '    case " ${FAKE_VERIFY_RUNS:-} " in *" $rid "*) echo 1 ;; *) echo 0 ;; esac ;;',
           '  *) for a in "$@"; do case "$a" in body=*) echo posted >> "$POSTED";; esac; done ;;',
           'esac',
           'exit 0',
@@ -1955,7 +2070,7 @@ describe('qwen-triage verify maintainer-review round', () => {
         { mode: 0o755 },
       );
       const posted = join(dir, 'posted');
-      const run = (inFlight) => {
+      const run = (runIds, verifyRuns, extra = {}) => {
         writeFileSync(posted, '');
         spawnSync('bash', ['-c', script], {
           encoding: 'utf8',
@@ -1966,26 +2081,30 @@ describe('qwen-triage verify maintainer-review round', () => {
             GITHUB_REPOSITORY: 'QwenLM/qwen-code',
             NUMBER: '7710',
             RUN_ID: '99',
-            FAKE_IN_FLIGHT: inFlight,
+            FAKE_RUN_IDS: runIds,
+            FAKE_VERIFY_RUNS: verifyRuns,
             POSTED: posted,
+            ...extra,
           },
         });
         return readFileSync(posted, 'utf8').trim().length > 0;
       };
-      // One in-flight run still leaves a pending slot; two do not.
-      expect(run('0')).toBe(false);
-      expect(run('1')).toBe(false);
-      expect(run('2')).toBe(true);
-      expect(run('5')).toBe(true);
-      // An API hiccup must not deny an otherwise-valid request.
-      expect(run('')).toBe(false);
-      expect(run('junk')).toBe(false);
-      // The count is scoped to THIS PR (concurrency is per-PR), so the
-      // query must carry a resolved title; without one it stays silent
-      // rather than warning about other PRs' runs.
-      expect(stepIn('authorize', 'Report saturated verify queue')).toContain(
-        '.display_title == $ENV.PR_TITLE',
-      );
+      // Nothing else in flight.
+      expect(run('', '')).toBe(false);
+      // Two runs in flight, but both are /triage or /tmux. Those live in
+      // their own concurrency groups, so the verify slot is free and a
+      // warning here would describe a queue that does not exist.
+      expect(run('101 102', '')).toBe(false);
+      // One verify run still leaves a pending slot; two do not.
+      expect(run('101 102', '101')).toBe(false);
+      expect(run('101 102', '101 102')).toBe(true);
+      expect(run('101 102 103', '101 103')).toBe(true);
+      // Without a resolvable PR title there is no per-PR scope, so it stays
+      // silent rather than warning about other PRs' runs.
+      expect(run('101 102', '101 102', { FAKE_PR_TITLE: '' })).toBe(false);
+      const notice = stepIn('authorize', 'Report saturated verify queue');
+      expect(notice).toContain('.display_title == $ENV.PR_TITLE');
+      expect(notice).toContain('select(.name == "verify")');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

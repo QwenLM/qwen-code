@@ -265,13 +265,33 @@ jobs:
           if [ -z "$PR_TITLE" ]; then
             exit 0
           fi
-          IN_FLIGHT="$(
+          # Runs are narrowed twice: to THIS pull request (display_title is
+          # the only per-PR handle an issue_comment run record carries) and
+          # to /verify runs specifically. /triage and /tmux live in their own
+          # concurrency groups, so counting them would warn about a verify
+          # queue that is actually empty. The command is not on the run
+          # record, so it is read from each run's triggering comment.
+          IN_FLIGHT=0
+          CANDIDATES="$(
             PR_TITLE="$PR_TITLE" gh api "repos/$GITHUB_REPOSITORY/actions/workflows/qwen-triage.yml/runs?event=issue_comment&per_page=100" \
               --jq '[.workflow_runs[]
                      | select(.status == "queued" or .status == "in_progress")
                      | select((.id | tostring) != $ENV.RUN_ID)
-                     | select(.display_title == $ENV.PR_TITLE)] | length' 2>/dev/null
-          )" || IN_FLIGHT=''
+                     | select(.display_title == $ENV.PR_TITLE)
+                     | .id] | .[]' 2>/dev/null
+          )" || CANDIDATES=''
+          for rid in $CANDIDATES; do
+            case "$rid" in ''|*[!0-9]*) continue ;; esac
+            # display_title is the issue title for issue_comment runs, so it
+            # cannot discriminate the command. The run's JOBS can: only a
+            # /verify run has a job named 'verify' (the others resolve to
+            # triage/tmux-testing), and a queued run already lists its jobs.
+            if gh api "repos/$GITHUB_REPOSITORY/actions/runs/$rid/jobs?per_page=100" \
+                 --jq '[.jobs[] | select(.name == "verify")] | length' 2>/dev/null \
+                 | grep -qE '^[1-9]'; then
+              IN_FLIGHT=$((IN_FLIGHT + 1))
+            fi
+          done
           case "$IN_FLIGHT" in
             ''|*[!0-9]*) exit 0 ;;
           esac
