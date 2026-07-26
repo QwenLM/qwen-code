@@ -7,6 +7,7 @@
 import type { SandboxConfig } from '@qwen-code/qwen-code-core';
 import { FatalSandboxError } from '@qwen-code/qwen-code-core';
 import commandExists from 'command-exists';
+import { spawnSync } from 'node:child_process';
 import * as os from 'node:os';
 import { getPackageJson } from '../utils/package.js';
 import type { Settings } from './settings.js';
@@ -26,6 +27,51 @@ const VALID_SANDBOX_COMMANDS: ReadonlyArray<SandboxConfig['command']> = [
 
 function isSandboxCommand(value: string): value is SandboxConfig['command'] {
   return (VALID_SANDBOX_COMMANDS as readonly string[]).includes(value);
+}
+
+const SANDBOX_PROBE_TIMEOUT_MS = 10_000;
+
+/**
+ * Confirms that a sandbox command can actually run, not merely that it is on
+ * PATH. A present container CLI is not a usable one: Docker Desktop may be
+ * stopped, the daemon may be unreachable, or the user may not be in the
+ * `docker` group. `version` is the cheapest command that still contacts the
+ * daemon, so it fails exactly when the runtime would fail later.
+ *
+ * `sandbox-exec` is a kernel facility rather than a daemon-backed client, so
+ * its presence on PATH is already sufficient.
+ *
+ * @returns The first line of the failure output when the command cannot run,
+ *          or undefined when it is usable.
+ */
+function probeSandboxCommand(
+  command: SandboxConfig['command'],
+): string | undefined {
+  if (command === 'sandbox-exec') {
+    return undefined;
+  }
+
+  try {
+    const result = spawnSync(command, ['version'], {
+      encoding: 'utf8',
+      stdio: 'pipe',
+      timeout: SANDBOX_PROBE_TIMEOUT_MS,
+    });
+    if (result.error) {
+      return result.error.message;
+    }
+    if (result.status === 0) {
+      return undefined;
+    }
+    const output = `${result.stderr ?? ''}\n${result.stdout ?? ''}`;
+    const firstLine = output
+      .split('\n')
+      .map((line) => line.trim())
+      .find((line) => line.length > 0);
+    return firstLine ?? `'${command} version' exited with ${result.status}`;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
 }
 
 function getSandboxCommand(
@@ -60,6 +106,15 @@ function getSandboxCommand(
     }
     // confirm that specified command exists
     if (commandExists.sync(sandbox)) {
+      // An explicit choice is never silently overridden — but it is still
+      // probed, so the failure names the runtime instead of surfacing later as
+      // an opaque container error.
+      const failure = probeSandboxCommand(sandbox);
+      if (failure) {
+        throw new FatalSandboxError(
+          `Sandbox command '${sandbox}' (from QWEN_SANDBOX) is installed but cannot run: ${failure}`,
+        );
+      }
       return sandbox;
     }
     throw new FatalSandboxError(
@@ -69,16 +124,39 @@ function getSandboxCommand(
 
   // look for seatbelt, docker, or podman, in that order
   // for container-based sandboxing, require sandbox to be enabled explicitly
+  const candidates: Array<SandboxConfig['command']> = [];
   if (os.platform() === 'darwin' && commandExists.sync('sandbox-exec')) {
-    return 'sandbox-exec';
-  } else if (commandExists.sync('docker') && sandbox === true) {
-    return 'docker';
-  } else if (commandExists.sync('podman') && sandbox === true) {
-    return 'podman';
+    candidates.push('sandbox-exec');
+  }
+  if (sandbox === true) {
+    candidates.push('docker', 'podman');
+  }
+
+  // Selecting on presence alone would stop at an installed-but-unusable
+  // runtime and leave a working one below it unreachable, so each candidate is
+  // probed and the first one that actually runs wins.
+  let firstFailure: { command: string; detail: string } | undefined;
+  for (const candidate of candidates) {
+    if (candidate !== 'sandbox-exec' && !commandExists.sync(candidate)) {
+      continue;
+    }
+    const failure = probeSandboxCommand(candidate);
+    if (!failure) {
+      return candidate;
+    }
+    firstFailure ??= { command: candidate, detail: failure };
   }
 
   // throw an error if user requested sandbox but no command was found
   if (sandbox === true) {
+    // Report the runtime that actually broke rather than a generic
+    // "nothing installed", which would send the user down the wrong path.
+    if (firstFailure) {
+      throw new FatalSandboxError(
+        `QWEN_SANDBOX is true and '${firstFailure.command}' is installed but cannot run: ` +
+          `${firstFailure.detail}; start it, install another runtime, or specify command in QWEN_SANDBOX`,
+      );
+    }
     throw new FatalSandboxError(
       'QWEN_SANDBOX is true but failed to determine command for sandbox; ' +
         'install docker or podman or specify command in QWEN_SANDBOX',
