@@ -485,6 +485,28 @@ describe('AgentTool', () => {
       );
     });
 
+    it('removes the model property when grades become empty', async () => {
+      vi.mocked(mockSubagentManager.getAvailableModelGrades).mockReturnValue(
+        new Map([['small', 'fast']]),
+      );
+      await agentTool.refreshSubagents();
+
+      const withGrades = agentTool.schema.parametersJsonSchema as {
+        properties: { model?: { enum?: string[] } };
+      };
+      expect(withGrades.properties.model?.enum).toEqual(['small']);
+
+      vi.mocked(mockSubagentManager.getAvailableModelGrades).mockReturnValue(
+        new Map(),
+      );
+      await agentTool.refreshSubagents();
+
+      const withoutGrades = agentTool.schema.parametersJsonSchema as {
+        properties: { model?: { enum?: string[] } };
+      };
+      expect(withoutGrades.properties.model).toBeUndefined();
+    });
+
     it('declares the background default and foreground opt-out', () => {
       const properties = agentTool.schema.parametersJsonSchema as {
         properties: {

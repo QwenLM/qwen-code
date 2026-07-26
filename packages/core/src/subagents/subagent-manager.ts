@@ -176,14 +176,16 @@ export class SubagentManager {
     }
 
     return new Map(
-      Object.entries(modelGrades).flatMap(([grade, model]) =>
-        grade.trim() !== '' &&
-        typeof model === 'string' &&
-        model.trim() !== '' &&
-        (allowedGrades === undefined || allowedGrades.includes(grade))
-          ? [[grade, model.trim()] as const]
-          : [],
-      ),
+      Object.entries(modelGrades).flatMap(([grade, model]) => {
+        const normalizedGrade = grade.trim();
+        return normalizedGrade !== '' &&
+          typeof model === 'string' &&
+          model.trim() !== '' &&
+          (allowedGrades === undefined ||
+            allowedGrades.includes(normalizedGrade))
+          ? [[normalizedGrade, model.trim()] as const]
+          : [];
+      }),
     );
   }
 

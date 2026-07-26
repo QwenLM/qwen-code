@@ -319,6 +319,24 @@ describe('SubagentManager', () => {
       );
     });
 
+    it('trims grade keys before publishing and resolving', () => {
+      const configuredManager = new SubagentManager(
+        makeFakeConfig({
+          agents: {
+            modelGrades: { ' small ': 'fast', high: 'qwen-max' },
+            allowedGrades: ['small', 'high'],
+          },
+        }),
+      );
+
+      const grades = configuredManager.getAvailableModelGrades();
+      expect([...grades.keys()]).toEqual(['small', 'high']);
+      expect(grades.get('small')).toBe('fast');
+      expect(configuredManager.resolveModelGrade('small', builtinConfig)).toBe(
+        'fast',
+      );
+    });
+
     it('ignores malformed grade settings', () => {
       const malformedGrades = new SubagentManager(
         makeFakeConfig({
