@@ -665,6 +665,42 @@ describe('useComposerCore history and drafts', () => {
     expect(latest!.searchState.searchMode).toBe(false);
     expect(latest!.searchState.searchMatches).toEqual([]);
   });
+
+  it('flushes the draft to localStorage on visibilitychange and pagehide', async () => {
+    vi.useFakeTimers();
+    await mount({
+      sessionId: 'vis-session',
+      atWorkspaceCwd: '/workspace/vis',
+    });
+
+    act(() => latest!.setText('draft before hide'));
+    expect(localStorage.getItem(getSessionDraftKey('vis-session'))).toBeNull();
+
+    const originalVisibility = document.visibilityState;
+    Object.defineProperty(document, 'visibilityState', {
+      value: 'hidden',
+      configurable: true,
+    });
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(localStorage.getItem(getSessionDraftKey('vis-session'))).toBe(
+      'draft before hide',
+    );
+
+    act(() => latest!.setText('draft before pagehide'));
+    act(() => {
+      window.dispatchEvent(new PageTransitionEvent('pagehide'));
+    });
+    expect(localStorage.getItem(getSessionDraftKey('vis-session'))).toBe(
+      'draft before pagehide',
+    );
+
+    Object.defineProperty(document, 'visibilityState', {
+      value: originalVisibility,
+      configurable: true,
+    });
+  });
 });
 
 describe('useComposerCore tags', () => {

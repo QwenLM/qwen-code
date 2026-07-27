@@ -2231,6 +2231,7 @@ export function useComposerCore(
         composerTagsRef.current === composerTagsAtSubmit &&
         pastedImagesRef.current === pastedImagesAtSubmit &&
         shellModeRef.current === shellModeAtSubmit;
+      historyBrowseActiveRef.current = false;
       if (!composerUnchanged) return;
 
       saveComposerDraft(submissionIdentity.draftStorageKey, '');
@@ -2241,7 +2242,6 @@ export function useComposerCore(
       onDismissFollowupRef.current?.();
       pendingPastesRef.current.clear();
       nextPasteIdRef.current = 1;
-      historyBrowseActiveRef.current = false;
       clearPromptHistoryDraftTags();
       setComposerTags([]);
       setPastedImages([]);
@@ -2515,6 +2515,7 @@ export function useComposerCore(
           if (multilineBoundary === 'editor') return false;
           if (shellModeRef.current) {
             const current = view.state.doc.toString();
+            if (!isBrowsingHistory) saveCurrentDraftRef.current();
             const prev = history.navigateUp(current);
             if (prev === null) return true;
             historyBrowseActiveRef.current = true;
