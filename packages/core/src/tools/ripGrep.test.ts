@@ -300,7 +300,65 @@ describe('RipGrepTool', () => {
       const result = await invocation.execute(abortSignal);
 
       expect(result.returnDisplay).toBe('Found 1 match (truncated)');
-      expect(result.llmContent).toContain('[0 lines truncated] ...');
+      // The count is derived from the lines ripgrep returned, so when ripgrep
+      // itself stopped early there is no honest number to print. This used to
+      // read `[0 lines truncated]`, contradicting the `(truncated)` above it.
+      expect(result.llmContent).toContain("ripgrep's output limit");
+      expect(result.llmContent).not.toContain('[0 lines truncated]');
+    });
+
+    it('still reports an exact count when only the line limit truncates', async () => {
+      const lines = Array.from(
+        { length: 5 },
+        (_, i) => `fileA.txt${sep}${i + 1}${sep}hello ${i}`,
+      ).join(EOL);
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: lines + EOL,
+        truncated: false,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({ pattern: 'hello', limit: 2 });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.llmContent).toContain('[3 lines truncated] ...');
+      expect(result.llmContent).not.toContain("ripgrep's output limit");
+    });
+
+    it('prefers the uncertainty notice when both limits truncate', async () => {
+      const lines = Array.from(
+        { length: 5 },
+        (_, i) => `fileA.txt${sep}${i + 1}${sep}hello ${i}`,
+      ).join(EOL);
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: lines + EOL,
+        truncated: true,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({ pattern: 'hello', limit: 2 });
+      const result = await invocation.execute(abortSignal);
+
+      // A count here would be measured against a total ripgrep already cut
+      // short, so it would understate rather than merely read as zero.
+      expect(result.llmContent).toContain("ripgrep's output limit");
+      expect(result.llmContent).not.toContain('lines truncated] ...');
+    });
+
+    // Guard against over-correcting: an untruncated result carries no notice
+    // at all. Passes both before and after.
+    it('adds no truncation notice when nothing truncated', async () => {
+      (runRipgrep as Mock).mockResolvedValue({
+        stdout: `fileA.txt${sep}1${sep}hello world${EOL}`,
+        truncated: false,
+        error: undefined,
+      });
+
+      const invocation = grepTool.build({ pattern: 'hello' });
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.returnDisplay).toBe('Found 1 match');
+      expect(result.llmContent).not.toContain('truncated');
     });
 
     it('should preserve absolute result paths reported by ripgrep', async () => {

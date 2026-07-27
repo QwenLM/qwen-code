@@ -380,11 +380,15 @@ class GrepToolInvocation extends BaseToolInvocation<
       let llmContent = header + grepOutput;
 
       // Add truncation notice if needed
-      if (
-        truncatedByLineLimit ||
-        truncatedByCharLimit ||
-        truncatedBySystemLimit
-      ) {
+      if (truncatedBySystemLimit) {
+        // `totalMatches` counts the lines ripgrep actually returned, and this
+        // flag means ripgrep stopped early -- so the omitted count is measured
+        // against a total that is itself short. When nothing else truncated it
+        // came out as `[0 lines truncated]`, telling the model nothing was
+        // dropped in the one case where an unknown amount was. Report the
+        // uncertainty instead of a number that cannot be right.
+        llmContent += `\n---\n[Truncated by ripgrep's output limit: an unknown number of further matches were not returned. Narrow the pattern or the search path.] ...`;
+      } else if (truncatedByLineLimit || truncatedByCharLimit) {
         const omittedMatches = totalMatches - includedLines;
         llmContent += `\n---\n[${omittedMatches} ${omittedMatches === 1 ? 'line' : 'lines'} truncated] ...`;
       }
