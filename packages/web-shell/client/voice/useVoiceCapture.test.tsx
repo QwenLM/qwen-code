@@ -542,6 +542,39 @@ describe('useVoiceCapture', () => {
     expect(capture?.status).toBe('idle');
   });
 
+  it('clears the start timeout when stop is deferred until connect', async () => {
+    vi.useFakeTimers();
+    const result = await renderHookHost();
+
+    await act(async () => {
+      result.start();
+    });
+    const ws = MockWebSocket.latest;
+    if (!ws) throw new Error('WebSocket was not created');
+    ws.readyState = 0;
+
+    await act(async () => {
+      result.stop();
+    });
+    expect(capture?.status).toBe('connecting');
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(capture?.status).toBe('connecting');
+
+    ws.readyState = MockWebSocket.OPEN;
+    await act(async () => {
+      ws.onopen?.();
+    });
+
+    expect(ws.sent[0]).toBe(JSON.stringify({ type: 'start' }));
+    expect(ws.sent[1]).toBe(JSON.stringify({ type: 'stop' }));
+    expect(capture?.status).toBe('transcribing');
+  });
+
   it('does not leak a transcription timer when stop is called twice', async () => {
     vi.useFakeTimers();
     const result = await renderHookHost();

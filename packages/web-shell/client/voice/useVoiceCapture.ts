@@ -579,6 +579,7 @@ export function useVoiceCapture({
       if (snapshot && statusRef.current === 'connecting') {
         if (resourcesRef.current.processor) teardownAudio();
         stopWhenConnectedRef.current = true;
+        clearTranscribeTimeout();
         return;
       }
       abort();
@@ -586,7 +587,7 @@ export function useVoiceCapture({
     }
     if (statusRef.current === 'transcribing') return;
     finalize(ws, snapshot);
-  }, [abort, finalize, teardownAudio]);
+  }, [abort, clearTranscribeTimeout, finalize, teardownAudio]);
 
   useEffect(() => {
     mountedRef.current = true;
