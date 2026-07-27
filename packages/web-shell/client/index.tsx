@@ -172,6 +172,7 @@ export type {
   UserMessageContentRenderInfo,
   UserMessageContentParser,
   ComposerHeaderRenderer,
+  ComposerFooterRenderer,
   ComposerToolbarStartRenderer,
   ComposerToolbarRightRenderer,
   WebShellAtItemRenderInfo,

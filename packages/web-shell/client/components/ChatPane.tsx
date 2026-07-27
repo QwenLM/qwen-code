@@ -25,6 +25,7 @@ import type {
 import type { ACPToolCall } from '../adapters/types';
 import { SubagentDetailsProvider } from '../subagentDetailsContext';
 import { useI18n } from '../i18n';
+import { useWebShellCustomization } from '../customization';
 import { SESSION_TRANSCRIPT_PAGINATION_FEATURE } from '../constants/sessions';
 import { useMessages } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
@@ -149,6 +150,8 @@ export function ChatPane({
   voiceWorkspaces,
 }: ChatPaneProps) {
   const { t } = useI18n();
+  const { renderComposerFooter: CustomComposerFooter } =
+    useWebShellCustomization();
   const connection = useConnection();
   const actions = useActions();
   const workspaceActions = useWorkspaceActions();
@@ -731,6 +734,15 @@ export function ChatPane({
           onDismissFollowup={onDismissFollowup}
           placeholderText={t('splitView.composerPlaceholder')}
         />
+        {CustomComposerFooter && (
+          <CustomComposerFooter
+            disabled={false}
+            isRunning={isResponding}
+            currentMode={connection.currentMode ?? 'default'}
+            currentModel={connection.currentModel ?? ''}
+            sessionName={connection.displayName}
+          />
+        )}
       </div>
     </section>
   );

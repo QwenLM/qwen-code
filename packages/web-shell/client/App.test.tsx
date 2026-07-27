@@ -14,6 +14,7 @@ import type {
   VoiceStatusRevision,
   VoiceWorkspaceTarget,
 } from './voice/voice-workspace-target';
+import type { WebShellComposerToolbarRenderInfo } from './customization';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 
 type StreamingState = 'idle' | 'responding';
@@ -420,8 +421,8 @@ vi.mock('./components/ChatEditor', async () => {
         focus: editorFocus,
       }));
       return React.createElement(
-        React.Fragment,
-        null,
+        'div',
+        { 'data-web-shell-composer': '' },
         React.createElement(
           'button',
           {
@@ -1467,6 +1468,8 @@ beforeEach(() => {
   mockConnection.workspaceCwd = '/tmp/project';
   mockConnection.status = 'connected';
   mockConnection.displayName = 'Session One';
+  mockConnection.currentMode = 'default';
+  mockConnection.currentModel = 'qwen';
   mockConnection.error = undefined;
   mockConnection.errorStatus = undefined;
   mockConnection.missingSession = false;
@@ -1610,6 +1613,134 @@ afterEach(() => {
   }
   vi.useRealTimers();
   vi.restoreAllMocks();
+});
+
+describe('App composer footer renderer', () => {
+  it('passes composer state and keeps the header, composer, and footers ordered', async () => {
+    const composerFooterProps: WebShellComposerToolbarRenderInfo[] = [];
+    const ComposerFooter = (props: WebShellComposerToolbarRenderInfo) => {
+      composerFooterProps.push(props);
+      return <div data-testid="composer-footer">composer footer</div>;
+    };
+    const { container } = renderApp({
+      renderComposerHeader: () => (
+        <div data-testid="composer-header">composer header</div>
+      ),
+      renderComposerFooter: ComposerFooter,
+      renderFooter: () => <div data-testid="shell-footer">shell footer</div>,
+    });
+    await flush();
+
+    expect(composerFooterProps.at(-1)).toEqual({
+      disabled: false,
+      isRunning: false,
+      currentMode: 'default',
+      currentModel: 'qwen',
+      sessionName: 'Session One',
+    });
+
+    const composer = container.querySelector('[data-web-shell-composer]');
+    const composerHeader = container.querySelector(
+      '[data-testid="composer-header"]',
+    );
+    const composerFooter = container.querySelector(
+      '[data-testid="composer-footer"]',
+    );
+    const shellFooter = container.querySelector('[data-testid="shell-footer"]');
+
+    expect(composer).not.toBeNull();
+    expect(composerHeader?.parentElement?.nextElementSibling).toBe(composer);
+    expect(composer?.nextElementSibling).toBe(composerFooter);
+    expect(composerFooter?.parentElement).toBe(composer?.parentElement);
+    expect(composer?.parentElement?.nextElementSibling).toBe(shellFooter);
+  });
+
+  it('updates composer footer state and renders it in the empty welcome state', async () => {
+    const composerFooterProps: WebShellComposerToolbarRenderInfo[] = [];
+    const ComposerFooter = (props: WebShellComposerToolbarRenderInfo) => {
+      composerFooterProps.push(props);
+      return <div data-testid="composer-footer" />;
+    };
+    const { container, rerender } = renderApp({
+      renderComposerFooter: ComposerFooter,
+    });
+    await flush();
+
+    testState.streamingState = 'responding';
+    mockConnection.currentMode = 'plan';
+    mockConnection.currentModel = 'qwen-next';
+    mockConnection.displayName = 'Session Two';
+    rerender({ renderComposerFooter: ComposerFooter });
+    await flush();
+
+    expect(composerFooterProps.at(-1)).toEqual({
+      disabled: false,
+      isRunning: true,
+      currentMode: 'plan',
+      currentModel: 'qwen-next',
+      sessionName: 'Session Two',
+    });
+
+    mockConnection.catchingUp = true;
+    rerender({ renderComposerFooter: ComposerFooter });
+    await flush();
+
+    expect(composerFooterProps.at(-1)).toEqual({
+      disabled: true,
+      isRunning: true,
+      currentMode: 'plan',
+      currentModel: 'qwen-next',
+      sessionName: 'Session Two',
+    });
+
+    mockConnection.catchingUp = false;
+    testState.streamingState = 'idle';
+    mockConnection.sessionId = undefined;
+    mockConnection.displayName = undefined;
+    rerender({ renderComposerFooter: ComposerFooter });
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="composer-footer"]'),
+    ).not.toBeNull();
+    expect(composerFooterProps.at(-1)).toEqual({
+      disabled: false,
+      isRunning: false,
+      currentMode: 'plan',
+      currentModel: 'qwen-next',
+      sessionName: undefined,
+    });
+  });
+
+  it('does not add composer footer DOM when omitted or when the renderer returns null', async () => {
+    const { container, rerender } = renderApp();
+    await flush();
+
+    const composer = container.querySelector('[data-web-shell-composer]');
+    const composerChildren = Array.from(
+      composer?.parentElement?.children ?? [],
+    );
+    expect(composer?.nextElementSibling).toBeNull();
+
+    rerender({ renderComposerFooter: () => null });
+    await flush();
+
+    const nullComposer = container.querySelector('[data-web-shell-composer]');
+    const nullComposerChildren = Array.from(
+      nullComposer?.parentElement?.children ?? [],
+    );
+    expect(nullComposer?.nextElementSibling).toBeNull();
+    expect(nullComposerChildren).toHaveLength(composerChildren.length);
+    expect(
+      nullComposerChildren.map((child) =>
+        child.getAttribute('data-web-shell-composer'),
+      ),
+    ).toEqual(
+      composerChildren.map((child) =>
+        child.getAttribute('data-web-shell-composer'),
+      ),
+    );
+  });
 });
 
 describe('App shell command queueing', () => {
