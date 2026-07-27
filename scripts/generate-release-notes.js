@@ -496,7 +496,7 @@ export function createOpenAiCompleter({
           throw new Error('Model generation time budget exhausted.');
         }
         console.error(
-          `Model request retry ${attempt}/${maxRetries} after ${error.message}; backing off ${Math.round(delayMs)}ms.`,
+          `Model request retry ${attempt}/${maxRetries} after ${escapeWorkflowCommand(error.message)}; backing off ${Math.round(delayMs)}ms.`,
         );
         await sleep(delayMs);
       }

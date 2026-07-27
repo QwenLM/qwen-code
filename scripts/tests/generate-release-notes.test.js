@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   appendFileSync,
   chmodSync,
@@ -469,6 +469,7 @@ describe('generateReleaseNotes', () => {
     try {
       const gh = join(dir, 'gh');
       const output = join(dir, 'notes.md');
+      const summaryPath = join(dir, 'summary.md');
       writeFileSync(
         gh,
         [
@@ -487,7 +488,7 @@ describe('generateReleaseNotes', () => {
       );
       chmodSync(gh, 0o755);
 
-      execFileSync(
+      const cli = spawnSync(
         process.execPath,
         [
           'scripts/generate-release-notes.js',
@@ -496,9 +497,11 @@ describe('generateReleaseNotes', () => {
           `--output=${output}`,
         ],
         {
+          encoding: 'utf8',
           env: {
             ...process.env,
             PATH: `${dir}:${process.env.PATH}`,
+            GITHUB_STEP_SUMMARY: summaryPath,
             GITHUB_REPOSITORY: 'QwenLM/qwen-code',
             OPENAI_API_KEY: '',
             OPENAI_BASE_URL: '',
@@ -507,6 +510,13 @@ describe('generateReleaseNotes', () => {
         },
       );
 
+      expect(cli.status).toBe(0);
+      expect(cli.stderr).toContain(
+        '::warning::Model configuration is unavailable.',
+      );
+      expect(readFileSync(summaryPath, 'utf8')).toContain(
+        'Release notes: AI generation degraded',
+      );
       const markdown = readFileSync(output, 'utf8');
       expect(markdown).toContain('### Features');
       expect(markdown).toContain(
@@ -618,7 +628,9 @@ describe('createOpenAiCompleter retries', () => {
       baseDelayMs: 1,
       fetchImpl: async () => {
         calls += 1;
-        return calls === 1 ? { ok: false, status: 500 } : okResponse;
+        return calls === 1
+          ? new Response('\n::error::forged', { status: 200 })
+          : okResponse;
       },
     });
 
@@ -627,9 +639,8 @@ describe('createOpenAiCompleter retries', () => {
       .map((args) => args[0])
       .find((line) => String(line).startsWith('Model request retry '));
     expect(retryLine).toBeDefined();
-    expect(retryLine).toMatch(
-      /retry 1\/2 after .*HTTP 500.*; backing off \d+ms/,
-    );
+    expect(retryLine).not.toContain('\n');
+    expect(retryLine).toContain('%0A::error::forged');
     errSpy.mockRestore();
   });
 
@@ -737,13 +748,13 @@ describe('generateAiContent circuit breaker', () => {
   });
 
   it('recovers without the breaker when a later batch succeeds', async () => {
-    let calls = 0;
+    const calls = [];
+    let summaryCalls = 0;
     const flaky = async (request) => {
-      calls += 1;
-      if (request.kind === 'summaries' && calls === 1) {
-        throw new Error('transient');
-      }
+      calls.push(request.kind);
       if (request.kind === 'summaries') {
+        summaryCalls += 1;
+        if (summaryCalls !== 3) throw new Error('transient');
         return JSON.stringify({
           summaries: request.entries.map((entry) => ({
             pr: entry.number,
@@ -753,15 +764,24 @@ describe('generateAiContent circuit breaker', () => {
       }
       return JSON.stringify({ highlights: [] });
     };
-    const entries = [entry(1, 'one'), entry(2, 'two')];
+    const entries = [1, 2, 3, 4, 5].map((number) =>
+      entry(number, String(number)),
+    );
 
     const result = await generateAiContent(entries, flaky, { batchSize: 1 });
 
-    expect(calls).toBe(3); // batch1 fails, batch2 ok, highlights attempted
+    expect(calls).toEqual([
+      'summaries',
+      'summaries',
+      'summaries',
+      'summaries',
+      'summaries',
+      'highlights',
+    ]);
     expect(
       result.warnings.some((warning) => warning.includes('stopped after')),
     ).toBe(false);
-    expect(result.summaries.get(2)).toBe('two summary');
+    expect(result.summaries.get(3)).toBe('3 summary');
   });
 });
 
