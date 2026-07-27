@@ -40,6 +40,23 @@ for required_path in "${pool_bin}" "${python_bin}" "${dataset_root}" "${agent_ca
     exit 2
   fi
 done
+agent_cache_dirs=(
+  "${agent_cache_root}"
+  "${agent_cache_root}/node"
+  "${agent_cache_root}/nvm"
+  "${agent_cache_root}/npm"
+  "${agent_cache_root}/qwen-code"
+)
+for cache_dir in "${agent_cache_dirs[@]}"; do
+  if [[ ! -d "${cache_dir}" ]]; then
+    echo "::error::Benchmark cache directory is missing: ${cache_dir}" >&2
+    exit 2
+  fi
+  if [[ ! -w "${cache_dir}" ]]; then
+    echo "::error::Benchmark cache directory is not writable by $(id -un): ${cache_dir}" >&2
+    exit 2
+  fi
+done
 
 mkdir -p "${output_root}"
 manifest_path="${output_root}/manifest.json"
