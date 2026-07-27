@@ -698,6 +698,41 @@ describe('createOpenAiCompleter retries', () => {
     );
   });
 
+  it('preserves original error when the deadline expires after backoff', async () => {
+    let now = 0;
+    let calls = 0;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0);
+    const timeout = vi
+      .spyOn(globalThis, 'setTimeout')
+      .mockImplementation((callback) => {
+        now = 1001;
+        callback();
+        return 0;
+      });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      baseDelayMs: 100,
+      totalTimeoutMs: 1000,
+      fetchImpl: async () => {
+        calls += 1;
+        return { ok: false, status: 500 };
+      },
+    });
+
+    await expect(complete({ kind: 'summaries', entries: [] })).rejects.toThrow(
+      /budget exhausted.*HTTP 500/,
+    );
+    expect(calls).toBe(1);
+    clock.mockRestore();
+    random.mockRestore();
+    timeout.mockRestore();
+    errSpy.mockRestore();
+  });
+
   it('logs a retry line when backing off', async () => {
     let calls = 0;
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
