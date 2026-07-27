@@ -894,6 +894,9 @@ jobs:
     # host filesystem across workflow runs.
     container:
       image: 'node:22-bookworm'
+    defaults:
+      run:
+        shell: 'bash'
     permissions:
       contents: 'read'
     outputs:
@@ -1788,6 +1791,9 @@ jobs:
     # host filesystem across workflow runs.
     container:
       image: 'node:22-bookworm'
+    defaults:
+      run:
+        shell: 'bash'
     permissions:
       contents: 'read'
     outputs:
