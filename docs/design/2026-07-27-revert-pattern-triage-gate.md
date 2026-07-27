@@ -2,7 +2,7 @@
 
 Date: 2026-07-27
 Status: Proposed
-Area: CI triage — `.github/workflows/qwen-code-pr-review.yml`, `.qwen/skills/triage/`
+Area: CI triage — `.github/workflows/qwen-triage.yml`, `.qwen/skills/triage/`
 
 ## Problem
 
@@ -13,7 +13,7 @@ live backlog showed only a ~2% hit rate — the feature targeted a near-nonexist
 problem.
 
 Meanwhile, the repo has **111 revert commits** across its history (19 in July
-2026 alone), and **71% of reverts occur within 24 hours of merge** — meaning
+2026 alone), and **61.5% of reverts occur within 24 hours of merge** — meaning
 the problem is caught quickly but after it's already on `main`. The real cost
 is not reviewing harmless PRs; it's merging PRs that have to be rolled back.
 
@@ -63,6 +63,16 @@ Scripts and raw data (local analysis artifacts, not committed):
 | `fast_revert_24h`            | 100.0%    | 25.8%  | 8               | 0              |
 | `self_reverted`              | 100.0%    | 9.7%   | 3               | 0              |
 
+**Sampling caveat:** precision is computed on a 1:1.9 case-control ratio (31
+reverted vs 60 control), while the repo's actual base rate is ~1.37% (46/3358).
+Precision (PPV) is the metric most sensitive to this enrichment — the true
+positive predictive value at the repo base rate is much lower (e.g. ~5% for
+`touches_high_risk`). Sensitivity (recall) and specificity are invariant to
+the sampling ratio and are the appropriate metrics for comparing signals.
+The _ranking_ of signals by precision is still valid (it is monotone in the
+likelihood ratio at fixed n), but the absolute values should not be quoted
+to contributors as posterior probabilities.
+
 `fast_revert_24h` and `self_reverted` have 100% precision but are
 **post-merge signals** — they cannot be used as triage gates because they are
 only observable after the PR is already merged and reverted. They confirm the
@@ -109,7 +119,7 @@ the damage is already on `main`.
 
 ### Flip-flop PRs
 
-10 PRs were reverted multiple times (revert → re-revert cycles), indicating
+8 PRs were reverted multiple times (revert → re-revert cycles), indicating
 unresolved contention:
 
 - PR #6754 (3 reverts), PR #6751 (3 reverts), PR #3433 (3 reverts)
@@ -128,8 +138,9 @@ Stage 1 triage escalates the PR to the deepest review tier instead of the
 normal path. This does **not** block or close the PR — it ensures the full
 `/review` pipeline runs with maximum agent coverage.
 
-This is the strongest triage-time signal: 66.7% of PRs touching these paths
-were reverted, vs 8.3% of control-group PRs.
+This is the strongest triage-time signal: 10 of 31 reverted PRs (32.3%
+sensitivity) touched these paths, vs 5 of 60 control PRs (91.7% specificity;
+Fisher p = 0.006).
 
 Implementation: the Stage 1e skill text instructs the triage model to run
 `gh pr view --json files | grep -E '...'` against the high-risk path patterns.
@@ -138,13 +149,15 @@ not as a separate workflow step.
 
 ### Rule 2: Contested-merge detection (precision 50.0%, recall 19.4%)
 
-When a PR has a CHANGES_REQUESTED → APPROVE cycle in its review history and
+When a PR has a CHANGES_REQUESTED → APPROVED cycle in its review history and
 touches core paths, Stage 1 applies `need-discussion` and posts a summary
 recommending maintainer sign-off before merge.
 
 This targets the flip-flop pattern: PRs that went through multiple review
-rounds with disagreements are 50% likely to be reverted (vs ~20% baseline for
-contested PRs in the control group).
+rounds with disagreements have 50% precision (6 of 12 such PRs reverted),
+versus a 10% prevalence of the same signal in the control group (6/60).
+Note: this signal is not statistically significant at n = 31 (Fisher
+p = 0.33) — see the follow-up note below.
 
 Implementation: the Stage 1e skill text instructs the triage model to fetch
 the PR's review state sequence via `gh pr view --json reviews` and check for
@@ -156,11 +169,14 @@ sign-off. No workflow YAML change is needed.
 
 A non-maintainer PR touching high-risk paths gets the highest-risk tier:
 full `/review` depth + `need-discussion` until a maintainer reviews. This
-is Rule 1 + Rule 2 combined, targeting the intersection that has 58.3%
-precision.
+combines the `non_maintainer` and `touches_high_risk` signals (Rule 1's
+high-risk path escalation restricted to non-maintainer authors), the
+intersection measured at 58.3% precision in the table above. Note: this
+signal does not reach significance at n = 31 (Fisher p = 0.098).
 
-This replaces PR #7414's behavior-neutral filter (2% recall) with a signal
-that has 22.6% recall — over 10× more effective at catching dangerous PRs.
+This replaces PR #7414's behavior-neutral filter (~2% live-backlog hit
+rate; revert recall unmeasured) with a signal whose revert recall is
+measured at 22.6% — targeting the PRs that actually cause reverts.
 
 ### What this design does NOT do
 
@@ -171,18 +187,19 @@ that has 22.6% recall — over 10× more effective at catching dangerous PRs.
   too noisy to gate on.
 - **Does not filter by PR size alone.** `large_diff_gt_200` has 37.0%
   precision — size without context is not predictive.
-- **Does not require E2E verification for all PRs.** `no_e2e` has 13.0%
-  precision because 100% of the control group also lacks E2E comments.
+- **Does not require E2E verification for all PRs.** `no_e2e` is not
+  discriminative — 100% of the control group also lacks E2E comments, so
+  the signal cannot distinguish revert-prone PRs from safe ones.
 
 ## Comparison to PR #7414
 
-|                         | PR #7414 (behavior-neutral)         | This design (revert-pattern)               |
-| ----------------------- | ----------------------------------- | ------------------------------------------ |
-| Signal                  | "diff is entirely behavior-neutral" | "touches high-risk paths"                  |
-| Hit rate (reverted PRs) | ~2% (2/102 live backlog)            | 32.3% (10/31)                              |
-| Precision               | unmeasured (no reverts to compare)  | 66.7%                                      |
-| Targets                 | harmless PRs (cost: low)            | dangerous PRs (cost: high)                 |
-| False positive cost     | skips review on a useful PR         | escalates review depth (extra review time) |
+|                     | PR #7414 (behavior-neutral)         | This design (revert-pattern)               |
+| ------------------- | ----------------------------------- | ------------------------------------------ |
+| Signal              | "diff is entirely behavior-neutral" | "touches high-risk paths"                  |
+| Revert recall       | unmeasured (no reverts to compare)  | 32.3% (10/31)                              |
+| Specificity         | n/a                                 | 91.7% (55/60)                              |
+| Targets             | harmless PRs (cost: low)            | dangerous PRs (cost: high)                 |
+| False positive cost | skips review on a useful PR         | escalates review depth (extra review time) |
 
 ## Files changed
 
@@ -194,6 +211,8 @@ that has 22.6% recall — over 10× more effective at catching dangerous PRs.
 - `scripts/tests/qwen-triage-workflow.test.js` — assert the high-risk path,
   contested-merge, and non-maintainer + high-risk routing strings exist in
   the triage skill markdown.
+- `.github/scripts/qwen-triage-workflow.test.mjs` — the same assertions in
+  the node:test runner.
 
 ## Non-goals / follow-ups
 
@@ -215,6 +234,13 @@ that has 22.6% recall — over 10× more effective at catching dangerous PRs.
   flip-flops retrospectively (after multiple reverts). A real-time version
   would monitor for revert→re-revert patterns on `main` and alert maintainers.
   This requires a separate monitoring workflow, not a triage gate.
+- **Statistical significance of Rules 2–3.** `core + contested` (Rule 2)
+  has Fisher p = 0.33 and `non_maintainer + high_risk` (Rule 3) has
+  p = 0.098 at n = 31 — neither reaches the 0.05 threshold. Only Rule 1
+  (`touches_high_risk`, p = 0.006) is well-supported. Rules 2–3 are
+  shipped as escalate-only signals (they add review friction but never
+  block), but if a future re-analysis with more data does not confirm
+  them, they should be removed.
 - **Expanding the high-risk path list.** The current list is manually curated
   from the reverted PR file paths. As the codebase evolves, new high-risk
   paths may emerge. A periodic re-run of the analysis scripts would keep the

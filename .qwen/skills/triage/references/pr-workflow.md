@@ -229,33 +229,33 @@ Implementation-level concerns (over-abstraction, code duplication, "10 lines vs 
 
 **1e. High-risk path and contested-merge detection (data-backed escalation):**
 
-A revert-history analysis of this repo (111 revert commits, 46 unique reverted PRs) found that certain file paths and review patterns are strongly correlated with post-merge reverts. Check for these signals before proceeding to Stage 2 — they do NOT block or close the PR, but they determine the review depth and whether a maintainer sign-off is recommended.
+A revert-history analysis of this repo (111 revert commits, 46 unique reverted PRs) found that certain file paths and review patterns are correlated with post-merge reverts. Check for these signals before proceeding to Stage 2 — they do NOT block or close the PR, but they determine the review depth and whether a maintainer sign-off is recommended.
 
 **High-risk paths** — check the PR's changed files against these patterns:
 
 ```bash
-gh pr view "$PR_NUMBER" --repo "$REPO" --json files --jq '.files[].path' | grep -E 'openaiContentGenerator|streamingToolCallParser|geminiChat|acpConnection|shell\.ts$|shellExecutionService|mcp-client|mcp-pool|LspServer|acp-integration|relaunch\.ts$|sandbox\.ts$|electron-run-as-node'
+gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq '.[].filename' | grep -E 'openaiContentGenerator|streamingToolCallParser|geminiChat|acpConnection|(^|/)shell\.ts$|shellExecutionService|mcp-client|mcp-pool|LspServer|acp-integration|(^|/)relaunch\.ts$|(^|/)sandbox\.ts$|electron-run-as-node' || true
 ```
 
-If any file matches (66.7% revert precision, 32.3% recall in the analysis):
+If any file matches (the strongest triage-time signal — 10 of 31 reverted PRs touched these paths vs 5 of 60 control PRs, p = 0.006):
 
-- For non-maintainer PRs: escalate to the deepest review tier — do not skip any review stage, run full `/review` with maximum agent coverage.
+- For non-maintainer PRs: do not skip any Stage 2 enrichment (2a-bis); require Stage 2b CI evidence before approving.
 - Flag the high-risk paths in the Stage 1 comment so the reviewer knows where to focus.
-- Recommend E2E verification in tmux (Stage 2c) before approval.
+- If the PR author has write access, recommend E2E verification in tmux (Stage 2c) before approval. If the author lacks write access, the sandboxed lanes are unavailable — recommend that a maintainer check the PR out in a disposable container or reproduce the specific behavioural claim by hand (see Stage 2c).
 
-**Contested-merge pattern** — check the PR's review history for reviewer disagreement (a CHANGES_REQUESTED entry that is not the first review):
+**Contested-merge pattern** — check the PR's review history for human reviewer disagreement (a CHANGES_REQUESTED entry that is not the first review, excluding bot reviews):
 
 ```bash
-gh pr view "$PR_NUMBER" --repo "$REPO" --json reviews --jq '[.reviews[] | select(.state != "PENDING" and .state != "COMMENTED") | .state]'
+gh pr view "$PR_NUMBER" --repo "$REPO" --json reviews --jq '[.reviews[] | select(.state != "PENDING" and .state != "COMMENTED") | select(.author.login != "qwen-code-ci-bot") | .state]'
 ```
 
-If the review state array has a `CHANGES_REQUESTED` entry after position 0 (a prior review preceded the disagreement) AND the PR touches core paths as defined in Stage 0 (50.0% revert precision, 19.4% recall):
+If the review state array has a `CHANGES_REQUESTED` entry after position 0 (a prior review preceded the disagreement) AND the PR touches core paths (`packages/core/src/**`, `packages/*/src/auth/**`, `packages/*/src/providers/**`, `packages/*/src/models/**`, `packages/*/src/config/**`, `packages/*/src/tools/**`, `packages/*/src/services/**`):
 
-- Apply `need-discussion` label via `gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label need-discussion` (if the label exists).
+- Apply `need-discussion` label via `gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label need-discussion` (if the label exists). A maintainer removes it once the discussion resolves.
 - Recommend maintainer sign-off before merge in the Stage 1 comment.
-- Do not auto-approve even if Stage 2 and Stage 3 are clean.
+- Do not auto-approve even if Stage 2 and Stage 3 are clean (this feeds the Stage 3 approval guardrail — see below).
 
-**Non-maintainer + high-risk** (58.3% revert precision, 22.6% recall): a non-maintainer PR that matches the high-risk path patterns above is the highest-risk tier. Apply all actions: deepest review depth, flag the high-risk paths in the Stage 1 comment, recommend E2E verification, apply `need-discussion` label (if it exists), recommend maintainer sign-off, and do not auto-approve even if Stage 2 and Stage 3 are clean.
+**Non-maintainer + high-risk**: a non-maintainer PR that matches the high-risk path patterns above is the highest-risk tier. Apply all actions: do not skip any Stage 2 enrichment, require Stage 2b CI evidence, flag the high-risk paths in the Stage 1 comment, recommend E2E verification (scoped to write-access authors per Stage 2c), apply `need-discussion` label (if it exists), recommend maintainer sign-off, and do not auto-approve even if Stage 2 and Stage 3 are clean.
 
 These signals are NOT terminal gates — they do not stop the review or close the PR. They escalate review depth and flag risk so the reviewer knows where to focus. A PR that touches high-risk paths but passes full review with clean E2E verification can still be approved.
 
@@ -629,7 +629,7 @@ GUARD=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json isCrossRepository,title \
   --jq 'if (.isCrossRepository and (.title | test("^\\s*refactor"; "i"))) then "block" else "ok" end')
 ```
 
-Emit the marker only when ALL of these hold: the verdict is approve, `PENDING` is greater than 0, `GUARD` is `ok`, and Stage 0 raised no maintainer escalation. A fork `refactor` or an escalated PR never carries the marker — those cap at 3/5 and take the defer path, with or without CI. (The finalize workflow independently re-asserts the fork-refactor guardrail before approving, but that is a backstop, not the mechanism.)
+Emit the marker only when ALL of these hold: the verdict is approve, `PENDING` is greater than 0, `GUARD` is `ok`, Stage 0 raised no maintainer escalation, and Stage 1e raised no do-not-auto-approve signal. A fork `refactor` or an escalated PR never carries the marker — those cap at 3/5 and take the defer path, with or without CI. (The finalize workflow independently re-asserts the fork-refactor guardrail before approving, but that is a backstop, not the mechanism.)
 
 When the marker is warranted, state it plainly in the comment — "approval deferred until CI lands green on `<HEAD_SHA>`" — and include it on its own line (full OID, the same one the footer attests):
 
@@ -646,6 +646,8 @@ The finalize workflow honors the marker only in comments authored by the bot its
 If `GUARD` is `block`: do **not** run `gh pr review --approve` no matter how clean every stage looked. Escalate to the maintainer instead (the "Genuinely unsure" path below, using `$QWEN_MAINTAINER_HANDLE` if set), and only `--request-changes` if you actually found blocking issues. This overrides the "approve" path.
 
 If Stage 0 escalated the PR for maintainer awareness, do **not** approve automatically; use the "Genuinely unsure" path below.
+
+If Stage 1e flagged a contested-merge or non-maintainer + high-risk signal, do **not** approve automatically; use the "Genuinely unsure" path below. A Stage 1e flag is a data-backed risk signal, not a hygiene concern — the re-run rule below does not override it.
 
 **Re-runs (manually triggered via `@qwen-code /triage`):** hygiene concerns (scope mismatch, undocumented changes, naming) that don't block the PR are not a valid reason to defer. Note them in the comment and approve. Only defer if you have genuine blocking uncertainty — something you cannot resolve from the diff, tests, and PR description.
 

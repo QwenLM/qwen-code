@@ -658,35 +658,44 @@ describe('qwen-triage tmux workflow', () => {
     expect(prSkill).toContain('streamingToolCallParser');
     expect(prSkill).toContain('geminiChat');
     expect(prSkill).toContain('acpConnection');
-    expect(prSkill).toContain('shell\\.ts$');
+    expect(prSkill).toContain('(^|/)shell\\.ts$');
     expect(prSkill).toContain('shellExecutionService');
     expect(prSkill).toContain('mcp-client');
     expect(prSkill).toContain('mcp-pool');
     expect(prSkill).toContain('LspServer');
     expect(prSkill).toContain('acp-integration');
-    expect(prSkill).toContain('relaunch\\.ts$');
-    expect(prSkill).toContain('sandbox\\.ts$');
+    expect(prSkill).toContain('(^|/)relaunch\\.ts$');
+    expect(prSkill).toContain('(^|/)sandbox\\.ts$');
     expect(prSkill).toContain('electron-run-as-node');
-    expect(prSkill).toContain('66.7% revert precision');
-    expect(prSkill).toContain('deepest review tier');
+    expect(prSkill).toContain('p = 0.006');
+    expect(prSkill).toContain('do not skip any Stage 2 enrichment');
+    expect(prSkill).toContain('gh api --paginate');
+    expect(prSkill).toContain('|| true');
   });
 
   it('includes contested-merge detection in the triage skill', () => {
     expect(prSkill).toContain('Contested-merge pattern');
-    expect(prSkill).toContain('CHANGES_REQUESTED');
-    expect(prSkill).toContain('APPROVE');
+    expect(prSkill).toContain('`CHANGES_REQUESTED` entry after position 0');
     expect(prSkill).toContain('after position 0');
-    expect(prSkill).toContain('50.0% revert precision');
     expect(prSkill).toContain('need-discussion');
     expect(prSkill).not.toContain('status/on-hold');
     expect(prSkill).toContain('maintainer sign-off');
+    expect(prSkill).toContain('qwen-code-ci-bot');
+    expect(prSkill).toContain('packages/core/src/**');
+    expect(prSkill).toContain(
+      'A maintainer removes it once the discussion resolves',
+    );
   });
 
   it('includes non-maintainer high-risk tier in the triage skill', () => {
     expect(prSkill).toContain('Non-maintainer + high-risk');
-    expect(prSkill).toContain('58.3% revert precision');
     expect(prSkill).toContain('highest-risk tier');
     expect(prSkill).toContain('do not auto-approve');
+    expect(prSkill).toContain('Stage 3 approval guardrail');
+  });
+
+  it('includes Risk field in the Stage 1 comment template', () => {
+    expect(prSkill).toContain('Risk: <if Stage 1e signals matched');
   });
 });
 

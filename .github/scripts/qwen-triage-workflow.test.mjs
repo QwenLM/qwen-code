@@ -278,32 +278,41 @@ describe('qwen-triage: Stage 1e revert-pattern signals', () => {
     assert.ok(prSkill.includes('streamingToolCallParser'));
     assert.ok(prSkill.includes('geminiChat'));
     assert.ok(prSkill.includes('acpConnection'));
-    assert.ok(prSkill.includes('shell\\.ts$'));
+    assert.ok(prSkill.includes('(^|/)shell\\.ts$'));
     assert.ok(prSkill.includes('shellExecutionService'));
     assert.ok(prSkill.includes('mcp-client'));
     assert.ok(prSkill.includes('mcp-pool'));
     assert.ok(prSkill.includes('LspServer'));
     assert.ok(prSkill.includes('acp-integration'));
-    assert.ok(prSkill.includes('relaunch\\.ts$'));
-    assert.ok(prSkill.includes('sandbox\\.ts$'));
+    assert.ok(prSkill.includes('(^|/)relaunch\\.ts$'));
+    assert.ok(prSkill.includes('(^|/)sandbox\\.ts$'));
     assert.ok(prSkill.includes('electron-run-as-node'));
-    assert.ok(prSkill.includes('66.7% revert precision'));
+    assert.ok(prSkill.includes('p = 0.006'));
+    assert.ok(prSkill.includes('do not skip any Stage 2 enrichment'));
+    assert.ok(prSkill.includes('gh api --paginate'));
+    assert.ok(prSkill.includes('|| true'));
   });
 
   it('includes contested-merge detection', () => {
     assert.ok(prSkill.includes('Contested-merge pattern'));
-    assert.ok(prSkill.includes('CHANGES_REQUESTED'));
+    assert.ok(prSkill.includes('`CHANGES_REQUESTED` entry after position 0'));
     assert.ok(prSkill.includes('after position 0'));
-    assert.ok(prSkill.includes('50.0% revert precision'));
     assert.ok(prSkill.includes('need-discussion'));
     assert.ok(!prSkill.includes('status/on-hold'));
     assert.ok(prSkill.includes('maintainer sign-off'));
+    assert.ok(prSkill.includes('qwen-code-ci-bot'));
+    assert.ok(prSkill.includes('packages/core/src/**'));
+    assert.ok(prSkill.includes('A maintainer removes it once the discussion resolves'));
   });
 
   it('includes non-maintainer high-risk tier', () => {
     assert.ok(prSkill.includes('Non-maintainer + high-risk'));
-    assert.ok(prSkill.includes('58.3% revert precision'));
     assert.ok(prSkill.includes('highest-risk tier'));
     assert.ok(prSkill.includes('do not auto-approve'));
+    assert.ok(prSkill.includes('Stage 3 approval guardrail'));
+  });
+
+  it('includes Risk field in the Stage 1 comment template', () => {
+    assert.ok(prSkill.includes('Risk: <if Stage 1e signals matched'));
   });
 });
