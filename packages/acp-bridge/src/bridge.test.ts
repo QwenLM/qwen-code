@@ -1955,6 +1955,65 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('allows client MCP discovery during session pre-registration only', async () => {
+    const contexts: unknown[] = [];
+    const send = vi.fn().mockImplementation(async (_payload, context) => {
+      contexts.push(context);
+      return { jsonrpc: '2.0', id: 1, result: {} };
+    });
+    const handles: ChannelHandle[] = [];
+    const handle = makeChannel({
+      newSessionImpl: async (params) => {
+        const sessionId = `sess:${params.cwd}`;
+        await expect(
+          handles[0]!.agentConnection.extMethod(
+            SERVE_CONTROL_EXT_METHODS.clientMcpMessage,
+            {
+              server: 'channel-loop',
+              sessionId,
+              payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+            },
+          ),
+        ).resolves.toEqual({
+          payload: { jsonrpc: '2.0', id: 1, result: {} },
+        });
+        return { sessionId };
+      },
+    });
+    handles.push(handle);
+    const bridge = makeBridge({
+      channelFactory: vi.fn().mockResolvedValue(handle.channel),
+      clientMcpSender: () => send,
+    });
+
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(contexts).toEqual([undefined]);
+
+    await handle.agentConnection.extMethod(
+      SERVE_CONTROL_EXT_METHODS.clientMcpMessage,
+      {
+        server: 'channel-loop',
+        sessionId: session.sessionId,
+        payload: { jsonrpc: '2.0', id: 2, method: 'tools/list' },
+      },
+    );
+    expect(contexts).toEqual([undefined, { sessionId: session.sessionId }]);
+
+    await expect(
+      handle.agentConnection.extMethod(
+        SERVE_CONTROL_EXT_METHODS.clientMcpMessage,
+        {
+          server: 'channel-loop',
+          sessionId: 'foreign-session',
+          payload: { jsonrpc: '2.0', id: 3, method: 'tools/list' },
+        },
+      ),
+    ).rejects.toMatchObject({ code: -32602 });
+    expect(send).toHaveBeenCalledTimes(2);
+
+    await bridge.shutdown();
+  });
+
   it('refreshes extensions across live sessions and broadcasts merged results', async () => {
     const handles: ChannelHandle[] = [];
     const bridge = makeBridge({
@@ -11873,6 +11932,175 @@ describe('createAcpSessionBridge', () => {
       expect(next.value?.originatorClientId).toBe(session.clientId);
       abort.abort();
       await bridge.shutdown();
+    });
+  });
+
+  describe('session-scoped runtime MCP servers', () => {
+    it('routes add and remove to the selected live session only', async () => {
+      const calls: Array<{
+        method: string;
+        params: Record<string, unknown>;
+      }> = [];
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const agent = new FakeAgent({
+          extMethodImpl: (method, params) => {
+            calls.push({ method, params });
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeAdd) {
+              return Promise.resolve({
+                name: params['name'],
+                transport: 'sdk',
+                replaced: false,
+                shadowedSettings: false,
+                toolCount: 1,
+                originatorClientId: params['originatorClientId'],
+              });
+            }
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeRemove) {
+              return Promise.resolve({
+                name: params['name'],
+                removed: true,
+                wasShadowingSettings: false,
+                originatorClientId: params['originatorClientId'],
+              });
+            }
+            return Promise.resolve({});
+          },
+        });
+        new AgentSideConnection(() => agent as Agent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | { exitCode: number | null; signalCode: NodeJS.Signals | null }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({
+        sessionScope: 'thread',
+        channelFactory: factory,
+      });
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const target = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.addSessionRuntimeMcpServer(
+        target.sessionId,
+        'channel-loop',
+        { type: 'sdk' },
+        'daemon-channel',
+      );
+      await bridge.removeSessionRuntimeMcpServer(
+        target.sessionId,
+        'channel-loop',
+        'daemon-channel',
+      );
+
+      expect(calls.slice(-2)).toEqual([
+        {
+          method: SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeAdd,
+          params: {
+            sessionId: target.sessionId,
+            name: 'channel-loop',
+            config: { type: 'sdk' },
+            originatorClientId: 'daemon-channel',
+          },
+        },
+        {
+          method: SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeRemove,
+          params: {
+            sessionId: target.sessionId,
+            name: 'channel-loop',
+            originatorClientId: 'daemon-channel',
+          },
+        },
+      ]);
+      await bridge.shutdown();
+    });
+
+    it('rejects an unknown session without falling back to a live channel', async () => {
+      const extMethodImpl = vi.fn().mockResolvedValue({});
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel({ extMethodImpl }).channel,
+      });
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.addSessionRuntimeMcpServer('missing-session', 'channel-loop', {
+          type: 'sdk',
+        }),
+      ).rejects.toBeInstanceOf(SessionNotFoundError);
+      expect(extMethodImpl).not.toHaveBeenCalledWith(
+        SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeAdd,
+        expect.anything(),
+      );
+      await bridge.shutdown();
+    });
+
+    it('allows session MCP mutations to outlive the initialize timeout', async () => {
+      const add = deferred<Record<string, unknown>>();
+      const remove = deferred<Record<string, unknown>>();
+      const bridge = makeBridge({
+        initializeTimeoutMs: 5,
+        channelFactory: async () =>
+          makeChannel({
+            extMethodImpl: (method) => {
+              if (method === SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeAdd) {
+                return add.promise;
+              }
+              if (
+                method === SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeRemove
+              ) {
+                return remove.promise;
+              }
+              return Promise.resolve({});
+            },
+          }).channel,
+      });
+      const target = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      vi.useFakeTimers();
+      try {
+        const addResult = bridge.addSessionRuntimeMcpServer(
+          target.sessionId,
+          'channel-loop',
+          {
+            type: 'sdk',
+          },
+        );
+        await vi.advanceTimersByTimeAsync(6);
+        add.resolve({
+          name: 'channel-loop',
+          transport: 'sdk',
+          replaced: false,
+          shadowedSettings: false,
+          toolCount: 1,
+          originatorClientId: 'daemon',
+        });
+        await expect(addResult).resolves.toMatchObject({
+          name: 'channel-loop',
+        });
+
+        const removeResult = bridge.removeSessionRuntimeMcpServer(
+          target.sessionId,
+          'channel-loop',
+        );
+        await vi.advanceTimersByTimeAsync(6);
+        remove.resolve({
+          name: 'channel-loop',
+          removed: true,
+          wasShadowingSettings: false,
+          originatorClientId: 'daemon',
+        });
+        await expect(removeResult).resolves.toMatchObject({
+          name: 'channel-loop',
+          removed: true,
+        });
+      } finally {
+        vi.useRealTimers();
+        await bridge.shutdown();
+      }
     });
   });
 

@@ -135,6 +135,8 @@ import type {
   BridgeSessionTranscriptPageRequest,
   BridgeGenerationStreamEvent,
   BridgeWorkspaceGenerationStreamEvent,
+  RuntimeMcpServerAddResult,
+  RuntimeMcpServerRemoveResult,
 } from './bridgeTypes.js';
 import type {
   BridgeFreshSessionAdmissionContext,
@@ -2278,6 +2280,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             .catch(() => undefined);
         },
         opts.onChannelDelivery,
+        () =>
+          channelInfo?.sessionIds === sessionIds &&
+          channelInfo.sessionSpawnsInFlight > 0,
       );
       const connection = new ClientSideConnection(() => client, channel.stream);
 
@@ -3487,6 +3492,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     sessionId: string,
     method: string,
     params: Record<string, unknown> = {},
+    timeoutMs = initTimeoutMs,
   ): Promise<T> => {
     const entry = byId.get(sessionId);
     if (!entry) throw new SessionNotFoundError(sessionId);
@@ -3495,7 +3501,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     const response = await Promise.race([
       withTimeout(
         entry.connection.extMethod(method, { ...params, sessionId }),
-        initTimeoutMs,
+        timeoutMs,
         method,
       ),
       getTransportClosedReject(entry),
@@ -8191,6 +8197,29 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         });
       }
       return response;
+    },
+
+    async addSessionRuntimeMcpServer(
+      sessionId,
+      name,
+      config,
+      originatorClientId,
+    ) {
+      return requestSessionStatus<RuntimeMcpServerAddResult>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeAdd,
+        { name, config, originatorClientId },
+        MCP_RESTART_SERVER_DEADLINE_MS,
+      );
+    },
+
+    async removeSessionRuntimeMcpServer(sessionId, name, originatorClientId) {
+      return requestSessionStatus<RuntimeMcpServerRemoveResult>(
+        sessionId,
+        SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeRemove,
+        { name, originatorClientId },
+        MCP_RESTART_SERVER_DEADLINE_MS,
+      );
     },
 
     async killSession(sessionId, opts) {
