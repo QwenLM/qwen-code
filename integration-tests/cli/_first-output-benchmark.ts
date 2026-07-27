@@ -813,9 +813,15 @@ export function validateExpectedFinalText(
 
 export interface SingleBundlePrototypeGateInput {
   complete: boolean;
+  /** Per-process cold-minus-warm deltas. Cold and warm share a process, so
+   * they are paired; the gate is decided on their median, not on a difference
+   * of two independent P50s. */
+  coldWarmPairedDeltasMs: readonly number[];
+  seed: number;
   coldPromptToProviderRequestP50Ms: number | null;
   warmPromptToProviderRequestP50Ms: number | null;
   coldPromptToFirstModelOutputP50Ms: number | null;
+  bootstrapIterations?: number;
   absoluteThresholdMs?: number;
   relativeThresholdRatio?: number;
 }
@@ -823,6 +829,8 @@ export interface SingleBundlePrototypeGateInput {
 export interface SingleBundlePrototypeGateResult {
   passed: boolean;
   providerDeltaMs: number | null;
+  pairedMedianDeltaMs: number | null;
+  bootstrapMedianCi95: BootstrapMedianConfidenceInterval | null;
   absoluteThresholdMs: number;
   relativeThresholdRatio: number;
 }
@@ -832,6 +840,7 @@ export function evaluateSingleBundlePrototypeGate(
 ): SingleBundlePrototypeGateResult {
   const absoluteThresholdMs = input.absoluteThresholdMs ?? 25;
   const relativeThresholdRatio = input.relativeThresholdRatio ?? 0.1;
+  const iterations = input.bootstrapIterations ?? DEFAULT_BOOTSTRAP_ITERATIONS;
   if (
     !Number.isFinite(absoluteThresholdMs) ||
     absoluteThresholdMs < 0 ||
@@ -840,22 +849,39 @@ export function evaluateSingleBundlePrototypeGate(
   ) {
     throw new TypeError('gate thresholds must be finite and non-negative');
   }
+  if (!Number.isInteger(iterations) || iterations < 1) {
+    throw new TypeError('bootstrapIterations must be a positive integer');
+  }
+  if (!Number.isFinite(input.seed)) {
+    throw new TypeError('seed must be finite');
+  }
+  assertFiniteValues([...input.coldWarmPairedDeltasMs]);
   const providerDeltaMs =
     input.coldPromptToProviderRequestP50Ms === null ||
     input.warmPromptToProviderRequestP50Ms === null
       ? null
       : input.coldPromptToProviderRequestP50Ms -
         input.warmPromptToProviderRequestP50Ms;
+  const pairedMedianDeltaMs = median(input.coldWarmPairedDeltasMs);
+  const ci = bootstrapMedianCi95(
+    input.coldWarmPairedDeltasMs,
+    iterations,
+    input.seed,
+  );
+  // The lower CI bound, not the point estimate, must clear the threshold: a
+  // delta that only just exceeds it is not distinguishable from noise.
   const passed =
     input.complete &&
-    providerDeltaMs !== null &&
+    ci !== null &&
     input.coldPromptToFirstModelOutputP50Ms !== null &&
-    (providerDeltaMs >= absoluteThresholdMs ||
-      providerDeltaMs >=
+    (ci.lowMs >= absoluteThresholdMs ||
+      ci.lowMs >=
         relativeThresholdRatio * input.coldPromptToFirstModelOutputP50Ms);
   return {
     passed,
     providerDeltaMs,
+    pairedMedianDeltaMs,
+    bootstrapMedianCi95: ci,
     absoluteThresholdMs,
     relativeThresholdRatio,
   };
@@ -876,6 +902,8 @@ export interface FirstOutputSessionTimestamps {
 
 export interface FirstOutputSessionTimings {
   processToSessionReadyMs: number | null;
+  /** Idle window actually granted by the configured post-session dwell. */
+  sseReadyToPromptMs: number | null;
   promptToProviderRequestArrivalMs: number | null;
   promptToFirstModelOutputMs: number | null;
   promptToFirstAnswerTextMs: number | null;
@@ -1023,6 +1051,8 @@ export interface FirstOutputSingleBenchmarkArtifactV1
         coldPromptToProviderRequestP50Ms: number | null;
         warmPromptToProviderRequestP50Ms: number | null;
         providerDeltaMs: number | null;
+        pairedMedianDeltaMs: number | null;
+        bootstrapMedianCi95: BootstrapMedianConfidenceInterval | null;
         coldPromptToFirstModelOutputP50Ms: number | null;
         absoluteThresholdMs: number;
         relativeThresholdRatio: number;

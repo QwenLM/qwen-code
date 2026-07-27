@@ -11,8 +11,13 @@
  * comparison mode runs paired control/candidate processes in balanced AB/BA
  * order. Every process, workspace, home, qwen home, and listener is isolated.
  *
- * Enable with QWEN_FIRST_OUTPUT_BENCHMARK=1. See readBenchmarkConfig() for the
- * intentionally strict bundle-path contract.
+ * Latency figures are only meaningful when nothing else competes for the host,
+ * so this file is excluded from the shared integration config and must run
+ * under its own serial config:
+ *   QWEN_FIRST_OUTPUT_BENCHMARK=1 QWEN_SANDBOX=false BENCHMARK_CLI_PATH=... \
+ *     npx vitest run --config integration-tests/vitest.firstoutput.config.ts
+ *
+ * See readBenchmarkConfig() for the intentionally strict bundle-path contract.
  */
 
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
@@ -982,7 +987,16 @@ async function runSession(
         { cause: error },
       );
     }
-    const promptNotBefore = timestamps.sessionReady + postSessionDwellMs;
+    // The dwell exists to give a candidate genuinely idle time before the
+    // prompt, so it is anchored to SSE readiness rather than session readiness.
+    // The SSE connect sits between the two: anchoring to sessionReady lets a
+    // slow connect consume the whole window, silently degrading the scenario
+    // into an immediate-prompt run that still reports its configured dwell.
+    const dwellAnchor = Math.max(
+      timestamps.sessionReady,
+      timestamps.sseReady ?? 0,
+    );
+    const promptNotBefore = dwellAnchor + postSessionDwellMs;
     if (performance.now() < promptNotBefore) {
       await sleep(promptNotBefore - performance.now());
     }
@@ -1119,13 +1133,15 @@ async function runSession(
   timestamps.firstAnswerText = tracked.firstAnswer?.receivedAtMs ?? null;
   timestamps.terminal = tracked.terminal?.receivedAtMs ?? null;
   const timings = computeSessionTimings(timestamps, daemon.processStartedAtMs);
-  const invalidMetric = findInvalidTiming(timings);
-  if (invalidMetric) {
+  const invalidMetrics = findInvalidTimings(timings);
+  if (invalidMetrics.length > 0) {
     failure ??= {
       code: 'harness_error',
-      message: `Invalid ${invalidMetric[0]} duration: ${invalidMetric[1]}`,
+      message: `Invalid durations: ${invalidMetrics
+        .map(([key, value]) => `${key}=${value}`)
+        .join(', ')}`,
     };
-    timings[invalidMetric[0]] = null;
+    for (const [key] of invalidMetrics) timings[key] = null;
   }
 
   return {
@@ -1161,18 +1177,20 @@ async function runSession(
   };
 }
 
-function findInvalidTiming(
+function findInvalidTimings(
   timings: FirstOutputSessionRunResult['timings'],
-): [keyof FirstOutputSessionRunResult['timings'], number] | null {
+): Array<[keyof FirstOutputSessionRunResult['timings'], number]> {
+  const invalid: Array<[keyof FirstOutputSessionRunResult['timings'], number]> =
+    [];
   for (const key of Object.keys(timings) as Array<
     keyof FirstOutputSessionRunResult['timings']
   >) {
     const value = timings[key];
     if (value !== null && (!Number.isFinite(value) || value < 0)) {
-      return [key, value];
+      invalid.push([key, value]);
     }
   }
-  return null;
+  return invalid;
 }
 
 function computeSessionTimings(
@@ -1184,6 +1202,7 @@ function computeSessionTimings(
       timestamps.sessionReady,
       processStartedAtMs,
     ),
+    sseReadyToPromptMs: duration(timestamps.promptStart, timestamps.sseReady),
     promptToProviderRequestArrivalMs: duration(
       timestamps.providerRequestArrival,
       timestamps.promptStart,
@@ -1990,6 +2009,8 @@ function buildSingleArtifact(
   const complete = warmupsValid && measuredValid;
   const gate = evaluateSingleBundlePrototypeGate({
     complete,
+    coldWarmPairedDeltasMs: coldWarmProviderDeltas(runs),
+    seed: BOOTSTRAP_SEED,
     coldPromptToProviderRequestP50Ms: coldProviderP50,
     warmPromptToProviderRequestP50Ms: warmProviderP50,
     coldPromptToFirstModelOutputP50Ms: coldFirstOutputP50,
@@ -2025,10 +2046,14 @@ function buildSingleArtifact(
             ? `All ${SINGLE_MEASURED} measured processes ran.`
             : `Only ${runs.length}/${SINGLE_MEASURED} measured processes ran before the first invalid process stopped sampling.`,
           measuredValid
-            ? `Cold-minus-warm Provider-arrival P50: ${
-                providerDeltaMs === null
+            ? `Paired cold-minus-warm Provider-arrival median: ${
+                gate.pairedMedianDeltaMs === null
                   ? 'n/a'
-                  : `${providerDeltaMs.toFixed(1)}ms`
+                  : `${gate.pairedMedianDeltaMs.toFixed(1)}ms`
+              }, 95% CI ${
+                gate.bootstrapMedianCi95 === null
+                  ? 'n/a'
+                  : `[${gate.bootstrapMedianCi95.lowMs.toFixed(1)}, ${gate.bootstrapMedianCi95.highMs.toFixed(1)}]`
               }.`
             : `Only ${successfulRuns}/${SINGLE_MEASURED} measured processes were valid.`,
           warmupsComplete
@@ -2046,6 +2071,8 @@ function buildSingleArtifact(
           coldPromptToProviderRequestP50Ms: coldProviderP50,
           warmPromptToProviderRequestP50Ms: warmProviderP50,
           providerDeltaMs,
+          pairedMedianDeltaMs: gate.pairedMedianDeltaMs,
+          bootstrapMedianCi95: gate.bootstrapMedianCi95,
           coldPromptToFirstModelOutputP50Ms: coldFirstOutputP50,
           absoluteThresholdMs: gate.absoluteThresholdMs,
           relativeThresholdRatio: gate.relativeThresholdRatio,
@@ -2146,6 +2173,20 @@ function buildPairedArtifact(
       },
     },
   };
+}
+
+function coldWarmProviderDeltas(
+  runs: readonly FirstOutputProcessRunResult[],
+): number[] {
+  const deltas: number[] = [];
+  for (const run of runs.filter(isSuccessfulRun)) {
+    const cold = run.sessions.find((session) => session.ordinal === 1);
+    const warm = run.sessions.find((session) => session.ordinal === 2);
+    const coldMs = cold?.timings.promptToProviderRequestArrivalMs ?? null;
+    const warmMs = warm?.timings.promptToProviderRequestArrivalMs ?? null;
+    if (coldMs !== null && warmMs !== null) deltas.push(coldMs - warmMs);
+  }
+  return deltas;
 }
 
 function isSuccessfulRun(run: FirstOutputProcessRunResult): boolean {

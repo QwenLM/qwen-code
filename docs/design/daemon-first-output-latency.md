@@ -31,6 +31,15 @@ The runner is disabled unless `QWEN_FIRST_OUTPUT_BENCHMARK=1`. Its two input mod
 
 `BENCHMARK_POST_SESSION_DWELL_MS` is comparison-only, accepts exactly `0`, `100`, or `500`, and defaults to `0`. `BENCHMARK_MEASURED_PAIRS` is also comparison-only and accepts exactly `10` or `30`; it defaults to `10` for the 500 ms diagnostic and `30` otherwise. A 500 ms run requires 10 pairs and the 0/100 ms runs require 30, so a diagnostic cannot be mislabeled as decision-bearing. Formal Phase 2 runs invoke the runner separately for the three dwell scenarios; samples from different dwell values are never pooled. Missing or mixed modes, identical comparison bundles, unreadable paths, unsupported dwell or pair counts, and mismatched dwell/sample plans fail as `invalid_configuration` before sampling.
 
+The dwell is anchored to SSE readiness rather than session readiness. The SSE connect sits between the two, so anchoring to `sessionReady` would let a slow connect consume the whole window and silently reduce a 100 ms scenario to an immediate-prompt run that still reported its configured dwell. `sseReadyToPromptMs` records the idle window each sample actually received.
+
+Millisecond-scale figures are only meaningful when nothing else competes for the host, so the runner is excluded from the shared integration config and has its own serial config at `integration-tests/vitest.firstoutput.config.ts` (`fileParallelism: false`, one thread, `retry: 0`). The pure helper tests continue to run in the shared suite. Run the benchmark with:
+
+```text
+QWEN_FIRST_OUTPUT_BENCHMARK=1 QWEN_SANDBOX=false BENCHMARK_CLI_PATH=... \
+  npx vitest run --config integration-tests/vitest.firstoutput.config.ts
+```
+
 Artifacts are written below `.qwen/investigations/daemon-first-output-benchmark/`, outside the integration harness's disposable run directory. This keeps successful, failed, and negative-result runs after global teardown without requiring `KEEP_OUTPUT`.
 
 ## Measurement contract
@@ -56,6 +65,7 @@ The raw timestamps produce these exact metrics:
 | Metric                              | Calculation                                     |
 | ----------------------------------- | ----------------------------------------------- |
 | `processToSessionReadyMs`           | `sessionReadyAt - processSpawnAt`               |
+| `sseReadyToPromptMs`                | `promptStartedAt - sseReadyAt`, diagnostic      |
 | `promptToProviderRequestArrivalMs`  | `providerRequestArrivalAt - promptStartedAt`    |
 | `promptToFirstModelOutputMs`        | `firstModelOutputAt - promptStartedAt`          |
 | `promptToFirstAnswerTextMs`         | `firstAnswerTextAt - promptStartedAt`, nullable |
@@ -104,25 +114,29 @@ Run 2 excluded warmup processes, then 50 measured processes. Each measured proce
 
 The runner records the ACP child PID after both turns and invalidates the sample unless exactly one unchanged child served them. Only after the second turn does it close both sessions. The second session therefore has a fresh per-session lazy Provider wrapper but warm ACP process-wide ESM/runtime caches. The pair estimates cold process-level Provider loading without conversation-history confounding. Both sessions still construct their own Provider on prompt, so work the prototype may move into the dwell is not credited; the gate is conservative. Second-session process-to metrics are diagnostic.
 
-The baseline expects exactly two Provider requests per process. All 50 cold/warm pairs must be valid. With:
+The baseline expects exactly two Provider requests per process. All 50 cold/warm pairs must be valid. Cold and warm share a process, so their deltas are paired rather than independent samples, and the gate is decided on the paired median with its seeded bootstrap 95% interval:
 
 ```text
-providerDelta =
-  P50(cold promptToProviderRequestArrivalMs) -
-  P50(warm promptToProviderRequestArrivalMs)
+providerDelta[i] =
+  cold promptToProviderRequestArrivalMs[i] -
+  warm promptToProviderRequestArrivalMs[i]
+
+providerDeltaCiLow = lower bound of the 95% CI of median(providerDelta)
 ```
 
 Phase 1 passes when either:
 
 ```text
-providerDelta >= 25 ms
+providerDeltaCiLow >= 25 ms
 ```
 
 or:
 
 ```text
-providerDelta >= 10% * P50(cold promptToFirstModelOutputMs)
+providerDeltaCiLow >= 10% * P50(cold promptToFirstModelOutputMs)
 ```
+
+The lower bound rather than the point estimate must clear the threshold, so a delta that only just exceeds it cannot authorize a prototype on the strength of noise. The difference of the two P50s is still recorded for continuity but no longer decides anything. Cold is always the first session, so the pair cannot be order-balanced the way a Phase 2 comparison is; this is a known limitation of the construct, not an omission.
 
 Otherwise the artifact is retained and production work stops.
 

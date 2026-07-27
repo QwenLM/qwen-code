@@ -622,38 +622,92 @@ describe('runner decision contracts', () => {
   });
 
   it('applies the absolute and relative prototype gates only to complete baselines', () => {
+    const tightAround = (centre: number) =>
+      Array.from({ length: 30 }, (_, index) => centre - 1 + (index % 3));
+
     expect(
       evaluateSingleBundlePrototypeGate({
         complete: true,
-        coldPromptToProviderRequestP50Ms: 125,
+        coldWarmPairedDeltasMs: tightAround(30),
+        seed: 7264,
+        coldPromptToProviderRequestP50Ms: 130,
         warmPromptToProviderRequestP50Ms: 100,
         coldPromptToFirstModelOutputP50Ms: 400,
       }),
-    ).toMatchObject({ passed: true, providerDeltaMs: 25 });
+    ).toMatchObject({
+      passed: true,
+      providerDeltaMs: 30,
+      pairedMedianDeltaMs: 30,
+    });
     expect(
       evaluateSingleBundlePrototypeGate({
         complete: true,
-        coldPromptToProviderRequestP50Ms: 110,
+        coldWarmPairedDeltasMs: tightAround(12),
+        seed: 7264,
+        coldPromptToProviderRequestP50Ms: 112,
         warmPromptToProviderRequestP50Ms: 100,
         coldPromptToFirstModelOutputP50Ms: 100,
       }),
-    ).toMatchObject({ passed: true, providerDeltaMs: 10 });
+    ).toMatchObject({ passed: true, pairedMedianDeltaMs: 12 });
     expect(
       evaluateSingleBundlePrototypeGate({
         complete: true,
+        coldWarmPairedDeltasMs: tightAround(9),
+        seed: 7264,
         coldPromptToProviderRequestP50Ms: 109,
         warmPromptToProviderRequestP50Ms: 100,
         coldPromptToFirstModelOutputP50Ms: 100,
       }),
-    ).toMatchObject({ passed: false, providerDeltaMs: 9 });
+    ).toMatchObject({ passed: false, pairedMedianDeltaMs: 9 });
     expect(
       evaluateSingleBundlePrototypeGate({
         complete: false,
+        coldWarmPairedDeltasMs: tightAround(30),
+        seed: 7264,
         coldPromptToProviderRequestP50Ms: 130,
         warmPromptToProviderRequestP50Ms: 100,
         coldPromptToFirstModelOutputP50Ms: 100,
       }),
     ).toMatchObject({ passed: false });
+  });
+
+  it('fails the prototype gate when a passing point estimate has a CI that crosses the threshold', () => {
+    // Median 30 ms, but the samples are bimodal at -40 and 100 ms.
+    const noisy = Array.from({ length: 30 }, (_, index) =>
+      index % 2 === 0 ? -40 : 100,
+    );
+    const gate = evaluateSingleBundlePrototypeGate({
+      complete: true,
+      coldWarmPairedDeltasMs: noisy,
+      seed: 7264,
+      coldPromptToProviderRequestP50Ms: 130,
+      warmPromptToProviderRequestP50Ms: 100,
+      coldPromptToFirstModelOutputP50Ms: 400,
+    });
+
+    expect(gate.providerDeltaMs).toBe(30);
+    expect(gate.pairedMedianDeltaMs).toBe(30);
+    expect(gate.bootstrapMedianCi95?.lowMs).toBeLessThan(25);
+    expect(gate.passed).toBe(false);
+  });
+
+  it('produces a deterministic prototype-gate interval for a fixed seed', () => {
+    const deltas = Array.from({ length: 30 }, (_, index) => 29 + (index % 3));
+    const input = {
+      complete: true,
+      coldWarmPairedDeltasMs: deltas,
+      seed: 7264,
+      coldPromptToProviderRequestP50Ms: 130,
+      warmPromptToProviderRequestP50Ms: 100,
+      coldPromptToFirstModelOutputP50Ms: 400,
+    };
+
+    expect(evaluateSingleBundlePrototypeGate(input)).toEqual(
+      evaluateSingleBundlePrototypeGate(input),
+    );
+    expect(
+      evaluateSingleBundlePrototypeGate(input).bootstrapMedianCi95,
+    ).toMatchObject({ iterations: DEFAULT_BOOTSTRAP_ITERATIONS, seed: 7264 });
   });
 
   it('maps a mismatched final answer to the stable failure code', () => {
