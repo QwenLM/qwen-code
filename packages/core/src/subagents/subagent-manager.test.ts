@@ -9,7 +9,11 @@ import * as fs from 'fs/promises';
 import * as path from 'path';
 import * as os from 'os';
 import { SubagentManager } from './subagent-manager.js';
-import { type SubagentConfig, SubagentError } from './types.js';
+import {
+  type SubagentConfig,
+  SubagentError,
+  SubagentErrorCode,
+} from './types.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
 import type { Config } from '../config/config.js';
 import { makeFakeConfig } from '../test-utils/config.js';
@@ -247,6 +251,111 @@ describe('SubagentManager', () => {
     });
 
     manager = new SubagentManager(mockConfig);
+  });
+
+  describe('resolveModelGrade', () => {
+    const builtinConfig: SubagentConfig = {
+      name: 'Explore',
+      description: 'Explore files',
+      systemPrompt: 'Explore.',
+      level: 'builtin',
+      isBuiltin: true,
+      model: 'fast',
+    };
+
+    it('resolves only available grades and preserves custom defaults', () => {
+      const configuredManager = new SubagentManager(
+        makeFakeConfig({
+          agents: {
+            modelGrades: { small: 'fast', high: 'qwen-max' },
+            allowedGrades: ['high'],
+          },
+        }),
+      );
+
+      expect(configuredManager.getAvailableModelGrades()).toEqual(
+        new Map([['high', 'qwen-max']]),
+      );
+      expect(configuredManager.resolveModelGrade('high', builtinConfig)).toBe(
+        'qwen-max',
+      );
+      expect(
+        configuredManager.resolveModelGrade('small', builtinConfig),
+      ).toBeUndefined();
+      expect(
+        configuredManager.resolveModelGrade('missing', builtinConfig),
+      ).toBeUndefined();
+
+      expect(
+        configuredManager.resolveModelGrade('high', {
+          ...builtinConfig,
+          level: 'project',
+          isBuiltin: false,
+          model: 'custom-model',
+        }),
+      ).toBeUndefined();
+      expect(
+        configuredManager.resolveModelGrade('high', {
+          ...builtinConfig,
+          level: 'project',
+          isBuiltin: false,
+          model: 'inherit',
+        }),
+      ).toBe('qwen-max');
+    });
+
+    it('exposes every valid grade without an allowlist', () => {
+      const configuredManager = new SubagentManager(
+        makeFakeConfig({
+          agents: { modelGrades: { small: 'fast', high: 'qwen-max' } },
+        }),
+      );
+
+      expect(configuredManager.getAvailableModelGrades()).toEqual(
+        new Map([
+          ['small', 'fast'],
+          ['high', 'qwen-max'],
+        ]),
+      );
+    });
+
+    it('trims grade keys before publishing and resolving', () => {
+      const configuredManager = new SubagentManager(
+        makeFakeConfig({
+          agents: {
+            modelGrades: { ' small ': 'fast', high: 'qwen-max' },
+            allowedGrades: [' small ', 'high'],
+          },
+        }),
+      );
+
+      const grades = configuredManager.getAvailableModelGrades();
+      expect([...grades.keys()]).toEqual(['small', 'high']);
+      expect(grades.get('small')).toBe('fast');
+      expect(configuredManager.resolveModelGrade('small', builtinConfig)).toBe(
+        'fast',
+      );
+    });
+
+    it('ignores malformed grade settings', () => {
+      const malformedGrades = new SubagentManager(
+        makeFakeConfig({
+          agents: {
+            modelGrades: {
+              valid: 'qwen-max',
+              invalid: 42 as unknown as string,
+              blank: '  ',
+              '  ': 'qwen-max',
+            },
+            allowedGrades: ['valid', 'invalid', 'blank', '  '],
+          },
+        }),
+      );
+
+      expect(malformedGrades.getAvailableModelGrades()).toEqual(
+        new Map([['valid', 'qwen-max']]),
+      );
+    });
   });
 
   afterEach(() => {
@@ -1130,6 +1239,22 @@ You are weird.
       );
     });
 
+    it('rejects creation at the commit boundary without writing', async () => {
+      const commitError = new Error('generation closed');
+
+      await expect(
+        manager.createSubagent(validConfig, {
+          level: 'project',
+          assertCanCommit: () => {
+            throw commitError;
+          },
+        }),
+      ).rejects.toBe(commitError);
+
+      expect(fs.mkdir).not.toHaveBeenCalled();
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
     it('should throw error if file already exists and overwrite is false', async () => {
       vi.mocked(fs.access).mockResolvedValue(undefined); // File exists
 
@@ -1455,6 +1580,20 @@ You are a helpful assistant.`;
       );
     });
 
+    it('rejects updates at the commit boundary without writing', async () => {
+      const commitError = new Error('generation closed');
+
+      await expect(
+        manager.updateSubagent('test-agent', {}, undefined, {
+          assertCanCommit: () => {
+            throw commitError;
+          },
+        }),
+      ).rejects.toBe(commitError);
+
+      expect(fs.writeFile).not.toHaveBeenCalled();
+    });
+
     it('should throw error if subagent not found', async () => {
       vi.mocked(fs.readdir).mockRejectedValue(new Error('Directory not found'));
 
@@ -1466,6 +1605,47 @@ You are a helpful assistant.`;
         /not found/,
       );
     });
+
+    it.each([undefined, 'extension'] as const)(
+      'should reject updates to extension-provided subagents when level is %s',
+      async (level) => {
+        vi.spyOn(mockConfig, 'getActiveExtensions').mockReturnValue([
+          {
+            id: 'test-extension',
+            name: 'test-extension',
+            version: '1.0.0',
+            isActive: true,
+            path: '/extension',
+            config: { name: 'test-extension', version: '1.0.0' },
+            contextFiles: [],
+            agents: [
+              {
+                name: 'extension-agent',
+                description: 'Provided by an extension',
+                systemPrompt: 'Review the code.',
+                level: 'extension',
+                filePath: '/extension/agents/extension-agent.md',
+              },
+            ],
+          },
+        ]);
+
+        await expect(
+          manager.updateSubagent(
+            'extension-agent',
+            { description: 'Updated description' },
+            level,
+          ),
+        ).rejects.toMatchObject({
+          code: SubagentErrorCode.INVALID_CONFIG,
+          subagentName: 'extension-agent',
+          message:
+            'Cannot update extension-provided subagent "extension-agent"',
+        });
+        expect(mockValidateOrThrow).not.toHaveBeenCalled();
+        expect(fs.writeFile).not.toHaveBeenCalled();
+      },
+    );
 
     it('should throw error on write failure', async () => {
       vi.mocked(fs.writeFile).mockRejectedValue(new Error('Write failed'));
@@ -1492,6 +1672,23 @@ You are a helpful assistant.`;
       expect(fs.unlink).toHaveBeenCalledWith(
         path.normalize('/test/project/.qwen/agents/test-agent.md'),
       );
+    });
+
+    it('rejects deletion at the commit boundary without unlinking', async () => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      vi.mocked(fs.readdir).mockResolvedValue(['test-agent.md'] as any);
+      vi.mocked(fs.readFile).mockResolvedValue(validMarkdown);
+      const commitError = new Error('generation closed');
+
+      await expect(
+        manager.deleteSubagent('test-agent', 'project', undefined, {
+          assertCanCommit: () => {
+            throw commitError;
+          },
+        }),
+      ).rejects.toBe(commitError);
+
+      expect(fs.unlink).not.toHaveBeenCalled();
     });
 
     it('should delete from both levels if no level specified', async () => {
@@ -2147,6 +2344,27 @@ bad`);
         await manager.createAgentHeadless(config, mockConfig);
 
         expect(mockCreateContentGenerator).not.toHaveBeenCalled();
+      });
+
+      it('should snapshot the launch provider when inherit receives a concrete model override', async () => {
+        const config = { ...agentConfig, model: 'inherit' };
+
+        await manager.createAgentHeadless(config, mockConfig, {
+          modelConfigOverrides: { model: 'launch-model' },
+          runtimeAuthOverrides: {
+            authType: AuthType.USE_ANTHROPIC,
+            baseUrl: 'https://launch-provider.example.com',
+          },
+        });
+
+        expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+          expect.objectContaining({
+            model: 'launch-model',
+            authType: AuthType.USE_ANTHROPIC,
+            baseUrl: 'https://launch-provider.example.com',
+          }),
+          mockConfig,
+        );
       });
 
       it('should NOT create a new ContentGenerator when model is omitted', async () => {

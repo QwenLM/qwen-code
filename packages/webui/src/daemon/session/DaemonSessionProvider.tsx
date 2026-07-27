@@ -119,6 +119,7 @@ export interface DaemonTranscriptHistory {
   hasMore: boolean;
   loading: boolean;
   capacityReached: boolean;
+  paginationError: boolean;
   loadMore(): Promise<void>;
 }
 
@@ -443,11 +444,18 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     hasMore: boolean;
     loading: boolean;
     capacityReached: boolean;
-  }>({ hasMore: false, loading: false, capacityReached: false });
+    paginationError: boolean;
+  }>({
+    hasMore: false,
+    loading: false,
+    capacityReached: false,
+    paginationError: false,
+  });
   const [transcriptHistoryState, setTranscriptHistoryState] = useState({
     hasMore: false,
     loading: false,
     capacityReached: false,
+    paginationError: false,
   });
   const eventStreamRef = useRef<
     | {
@@ -1150,11 +1158,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             hasMore: historyHasMore,
             loading: false,
             capacityReached: false,
+            paginationError: false,
           };
           setTranscriptHistoryState({
             hasMore: historyHasMore,
             loading: false,
             capacityReached: false,
+            paginationError: false,
           });
           const replayInjected =
             shouldInjectReplaySnapshot && replayEvents.length > 0;
@@ -1247,6 +1257,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 hasMore: false,
                 loading: false,
                 capacityReached: true,
+                paginationError: false,
               });
             }
             for (const replayEvent of replayEvents) {
@@ -2281,7 +2292,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           workspaceCwd?: string,
           overrides?: Pick<
             CreateSessionRequest,
-            'approvalMode' | 'sourceType' | 'worktree'
+            'approvalMode' | 'sourceType' | 'worktree' | 'branch'
           >,
         ) => {
           const client =
@@ -2305,6 +2316,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               : {}),
             ...(overrides?.worktree !== undefined
               ? { worktree: overrides.worktree }
+              : {}),
+            ...(overrides?.branch !== undefined
+              ? { branch: overrides.branch }
               : {}),
           };
           const requestClientId = clientId
@@ -2342,6 +2356,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     if (
       !history.hasMore ||
       history.loading ||
+      history.paginationError ||
       !activeSession ||
       activeSession.sessionId !== history.sessionId
     ) {
@@ -2353,6 +2368,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       hasMore: true,
       loading: true,
       capacityReached: false,
+      paginationError: false,
     });
     let terminalFailure = false;
     try {
@@ -2434,6 +2450,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           hasMore: false,
           loading: false,
           capacityReached: true,
+          paginationError: false,
         });
         return;
       }
@@ -2447,6 +2464,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         hasMore: history.hasMore,
         loading: false,
         capacityReached: history.capacityReached,
+        paginationError: false,
       });
     } catch (error) {
       if (
@@ -2464,20 +2482,24 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       history.hasMore = retryable;
       history.loading = false;
       history.capacityReached = false;
+      history.paginationError = !retryable;
       setTranscriptHistoryState({
         hasMore: retryable,
         loading: false,
         capacityReached: false,
+        paginationError: !retryable,
       });
-      addNotice({
-        severity: 'warning',
-        category: 'user_action',
-        operation: 'load_session',
-        code: 'daemon.transcript_history.failed',
-        message: 'Failed to load earlier session history',
-        debugMessage: error instanceof Error ? error.message : String(error),
-        recoverable: retryable,
-      });
+      if (retryable) {
+        addNotice({
+          severity: 'warning',
+          category: 'user_action',
+          operation: 'load_session',
+          code: 'daemon.transcript_history.failed',
+          message: 'Failed to load earlier session history',
+          debugMessage: error instanceof Error ? error.message : String(error),
+          recoverable: retryable,
+        });
+      }
       throw error;
     }
   }, [addNotice, dismissNotice, maxBlocks, store]);
@@ -2489,6 +2511,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       hasMore: active && transcriptHistoryState.hasMore,
       loading: active && transcriptHistoryState.loading,
       capacityReached: active && transcriptHistoryState.capacityReached,
+      paginationError: active && transcriptHistoryState.paginationError,
       loadMore: loadMoreTranscript,
     };
   }, [connection.sessionId, loadMoreTranscript, transcriptHistoryState]);

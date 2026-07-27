@@ -74,6 +74,7 @@ export default {
   'Type your message or @path/to/file':
     'Escriviu el vostre missatge o @camí/al/fitxer',
   '? for shortcuts': '? per a dreceres',
+  'Pasting…': 'Enganxant…',
   "Press 'i' for INSERT mode and 'Esc' for NORMAL mode.":
     "Premeu 'i' per al mode INSERCIÓ i 'Esc' per al mode NORMAL.",
   'Cancel operation / Clear input (double press)':
@@ -1505,6 +1506,11 @@ export default {
   reviewed: 'revisades',
   'Code Changes:': 'Canvis de codi:',
   Performance: 'Rendiment',
+  'Generation Metrics': 'Mètriques de generació',
+  'Latest Request': 'Darrera sol·licitud',
+  'Generation Time': 'Temps de generació',
+  'Average TTFT': 'TTFT mitjà',
+  'Session TPS': 'TPS de la sessió',
   'Wall Time:': 'Temps real:',
   'Agent Active:': 'Agent actiu:',
   'API Time:': "Temps de l'API:",
@@ -2381,6 +2387,7 @@ export default {
   'toolDisplayName.CronDelete': 'Suprimeix tasca programada',
   'toolDisplayName.LoopWakeup': 'Desperta el bucle',
   'toolDisplayName.CreateSubSession': 'Crea subsessió',
+  'toolDisplayName.ListAgents': "Llista d'agents",
   'toolDisplayName.TaskCreate': 'Crea tasca',
   'toolDisplayName.TaskUpdate': 'Actualitza tasca',
   'toolDisplayName.TaskList': 'Llista tasques',

@@ -30,6 +30,10 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { getErrorMessage, isAbortError } from '../utils/errors.js';
 import { getMCPServerStatus, MCPServerStatus } from './mcp-status.js';
 import {
+  getInvocationContext,
+  INVOCATION_CONTEXT_META_KEY,
+} from '../utils/invocation-context.js';
+import {
   generateLegacyMcpToolName,
   normalizeToolNameForProvider,
 } from '../utils/tool-name-utils.js';
@@ -57,7 +61,11 @@ type ToolParams = Record<string, unknown>;
  */
 export interface McpDirectClient {
   callTool(
-    params: { name: string; arguments?: Record<string, unknown> },
+    params: {
+      name: string;
+      arguments?: Record<string, unknown>;
+      _meta?: Record<string, unknown>;
+    },
     resultSchema?: unknown,
     options?: {
       onprogress?: (progress: {
@@ -150,6 +158,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     private readonly mcpTimeout?: number,
     private readonly mcpToolIdleTimeoutMs?: number,
     private readonly annotations?: McpToolAnnotations,
+    private readonly allowInvocationContext: boolean = false,
     private readonly retryCount: number = 0,
   ) {
     super(params);
@@ -274,6 +283,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           this.mcpTimeout,
           this.mcpToolIdleTimeoutMs,
           this.annotations,
+          newTool['allowInvocationContext'] === true,
           this.retryCount + 1,
         );
         return newInvocation.execute(signal, updateOutput);
@@ -358,10 +368,20 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       // Start the idle timeout
       resetIdleTimeout();
 
+      const invocationContext = this.allowInvocationContext
+        ? getInvocationContext()
+        : undefined;
       const callToolResult = await this.mcpClient!.callTool(
         {
           name: this.serverToolName,
           arguments: this.params as Record<string, unknown>,
+          ...(invocationContext
+            ? {
+                _meta: {
+                  [INVOCATION_CONTEXT_META_KEY]: invocationContext,
+                },
+              }
+            : {}),
         },
         undefined,
         {
@@ -613,6 +633,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
     private readonly mcpToolIdleTimeoutMs?: number,
     readonly annotations?: McpToolAnnotations,
     alwaysLoad = false,
+    private readonly allowInvocationContext: boolean = false,
   ) {
     super(
       nameOverride ??
@@ -647,6 +668,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.mcpToolIdleTimeoutMs,
       this.annotations,
       this.alwaysLoad,
+      this.allowInvocationContext,
     );
   }
 
@@ -684,6 +706,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.mcpToolIdleTimeoutMs,
       this.annotations,
       this.alwaysLoad,
+      this.allowInvocationContext,
     );
   }
 
@@ -704,6 +727,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       this.mcpTimeout,
       this.mcpToolIdleTimeoutMs,
       this.annotations,
+      this.allowInvocationContext,
     );
   }
 }

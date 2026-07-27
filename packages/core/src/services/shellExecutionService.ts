@@ -11,21 +11,25 @@ import { spawn as cpSpawn, spawnSync } from 'node:child_process';
 import { TextDecoder } from 'node:util';
 import os from 'node:os';
 import type { IPty } from '@lydell/node-pty';
+import type { Terminal } from '@xterm/headless';
 import { getCachedEncodingForBuffer } from '../utils/systemEncoding.js';
 import { isBinary } from '../utils/textUtils.js';
 import { getShellConfiguration, type ShellType } from '../utils/shell-utils.js';
-import pkg from '@xterm/headless';
+import {
+  loadXtermHeadless,
+  type XtermHeadlessModule,
+} from '../utils/load-xterm-headless.js';
 import {
   serializeTerminalToObject,
   serializeTerminalToText,
   type AnsiOutput,
 } from '../utils/terminalSerializer.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
+import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { getShellPagerEnv } from '../utils/shell-pager-env.js';
-const { Terminal } = pkg;
 
 const debugLogger = createDebugLogger('SHELL_EXECUTION');
 
@@ -346,7 +350,7 @@ export type ShellOutputEvent =
 
 interface ActivePty {
   ptyProcess: IPty;
-  headlessTerminal: pkg.Terminal;
+  headlessTerminal: Terminal;
 }
 
 const getErrnoCode = (error: unknown): string | undefined => {
@@ -387,6 +391,7 @@ const replayTerminalOutput = async (
   output: string,
   cols: number,
   rows: number,
+  Terminal: XtermHeadlessModule['Terminal'],
 ): Promise<string> => {
   const replayTerminal = new Terminal({
     allowProposedApi: true,
@@ -394,6 +399,8 @@ const replayTerminalOutput = async (
     rows,
     scrollback: 10000,
     convertEol: true,
+    // This headless terminal only captures output, so suppress parser diagnostics.
+    logLevel: 'off',
   });
 
   try {
@@ -469,7 +476,7 @@ const createPlainAnsiLine = (text: string) => [
 ];
 
 const serializePlainViewportToAnsiOutput = (
-  terminal: pkg.Terminal,
+  terminal: Terminal,
   unwrapWrappedLines = false,
 ): AnsiOutput => {
   const buffer = terminal.buffer.active;
@@ -707,6 +714,10 @@ export class ShellExecutionService {
       const ptyInfo = ptyOutcome.value;
       if (ptyInfo) {
         try {
+          const { Terminal } = await loadXtermHeadless();
+          if (abortSignal.aborted) {
+            return createPreSpawnAbortedHandle();
+          }
           return this.executeWithPty(
             commandToExecute,
             cwd,
@@ -714,6 +725,7 @@ export class ShellExecutionService {
             abortSignal,
             shellExecutionConfig,
             ptyInfo,
+            Terminal,
             options.postPromote,
           );
         } catch (_e) {
@@ -764,7 +776,7 @@ export class ShellExecutionService {
         detached: !isWindows,
         windowsHide: isWindows,
         env: {
-          ...normalizePathEnvForWindows(process.env),
+          ...normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
           ...getShellPagerEnv(pager, {
@@ -1434,6 +1446,7 @@ export class ShellExecutionService {
     abortSignal: AbortSignal,
     shellExecutionConfig: ShellExecutionConfig,
     ptyInfo: PtyImplementation,
+    Terminal: XtermHeadlessModule['Terminal'],
     postPromote?: ShellPostPromoteHandlers,
   ): ShellExecutionHandle {
     if (!ptyInfo) {
@@ -1467,7 +1480,7 @@ export class ShellExecutionService {
         cols,
         rows,
         env: {
-          ...normalizePathEnvForWindows(process.env),
+          ...normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
           QWEN_CODE: '1',
           TERM: 'xterm-256color',
           ...getShellPagerEnv(shellExecutionConfig.pager, {
@@ -1485,6 +1498,8 @@ export class ShellExecutionService {
           cols,
           rows,
           scrollback: MAX_LIVE_TERMINAL_SCROLLBACK_LINES,
+          // This headless terminal only captures output, so suppress parser diagnostics.
+          logLevel: 'off',
         });
         headlessTerminal.scrollToTop();
 
@@ -1850,6 +1865,7 @@ export class ShellExecutionService {
                       decodedOutput,
                       cols,
                       rows,
+                      Terminal,
                     );
                   } else {
                     fullOutput = serializeTerminalToText(headlessTerminal);
@@ -2200,7 +2216,12 @@ export class ShellExecutionService {
               const decodedOutput = new TextDecoder(finalEncoding).decode(
                 finalBuffer,
               );
-              snapshot = await replayTerminalOutput(decodedOutput, cols, rows);
+              snapshot = await replayTerminalOutput(
+                decodedOutput,
+                cols,
+                rows,
+                Terminal,
+              );
             } else {
               snapshot = serializeTerminalToText(headlessTerminal) ?? '';
             }

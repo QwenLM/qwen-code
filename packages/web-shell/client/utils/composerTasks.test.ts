@@ -12,7 +12,7 @@ const base = {
 };
 
 describe('isComposerTask', () => {
-  it('shows non-agent tasks and only backgrounded agents', () => {
+  it('shows non-agent tasks and excludes agents', () => {
     const tasks: Array<[DaemonSessionTaskStatus, boolean]> = [
       [
         {
@@ -30,7 +30,7 @@ describe('isComposerTask', () => {
           isBackgrounded: true,
           subagentType: 'general-purpose',
         },
-        true,
+        false,
       ],
       [
         {

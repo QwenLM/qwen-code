@@ -15,6 +15,7 @@ import {
   type AgentTaskRegistration,
   type BackgroundApproval,
   type BackgroundTaskEntry,
+  type ResidentBackgroundAgent,
 } from './background-tasks.js';
 import {
   getCurrentAgentId,
@@ -226,6 +227,235 @@ describe('BackgroundTaskRegistry', () => {
     expect(callback).toHaveBeenCalledOnce();
     const [displayText] = callback.mock.calls[0] as [string, string];
     expect(displayText).toContain('failed');
+  });
+
+  describe('resident background agents', () => {
+    function makeResident(
+      overrides: Partial<ResidentBackgroundAgent> = {},
+    ): ResidentBackgroundAgent {
+      return {
+        continue: vi.fn(() => true),
+        dispose: vi.fn(),
+        ...overrides,
+      };
+    }
+
+    it('continues only completed resident agents and supports guarded unregister', async () => {
+      registry.register(makeRegistration('resident-1'));
+      const resident = makeResident();
+      registry.registerResidentAgent('resident-1', resident);
+
+      expect(registry.continueResidentAgent('resident-1', 'too early')).toBe(
+        false,
+      );
+
+      registry.complete('resident-1', 'first result');
+      expect(registry.continueResidentAgent('resident-1', 'keep going')).toBe(
+        true,
+      );
+      expect(resident.continue).toHaveBeenCalledWith('keep going');
+
+      const staleHandle = makeResident();
+      expect(registry.unregisterResidentAgent('resident-1', staleHandle)).toBe(
+        false,
+      );
+      expect(registry.unregisterResidentAgent('resident-1', resident)).toBe(
+        true,
+      );
+      expect(resident.dispose).not.toHaveBeenCalled();
+      expect(
+        registry.continueResidentAgent('resident-1', 'after unregister'),
+      ).toBe(false);
+    });
+
+    it('disposes a replaced resident without letting its stale handle remove the replacement', () => {
+      registry.register(makeRegistration('resident-1'));
+      const first = makeResident();
+      const second = makeResident();
+
+      registry.registerResidentAgent('resident-1', first);
+      registry.registerResidentAgent('resident-1', second);
+
+      expect(first.dispose).toHaveBeenCalledOnce();
+      expect(registry.disposeResidentAgent('resident-1', first)).toBe(false);
+      expect(second.dispose).not.toHaveBeenCalled();
+      expect(registry.disposeResidentAgent('resident-1', second)).toBe(true);
+      expect(second.dispose).toHaveBeenCalledOnce();
+    });
+
+    it('disposes the resident when a cold task registration replaces its entry', () => {
+      registry.register(makeRegistration('resident-1'));
+      const resident = makeResident();
+      registry.registerResidentAgent('resident-1', resident);
+      registry.complete('resident-1', 'done');
+      const completed = registry.get('resident-1')!;
+
+      registry.register({
+        ...completed,
+        status: 'paused',
+        abortController: new AbortController(),
+      });
+
+      expect(resident.dispose).toHaveBeenCalledOnce();
+    });
+
+    it('restarts a completed entry with clean turn state and normal callbacks', () => {
+      const onRegister = vi.fn();
+      const onStatusChange = vi.fn();
+      registry.setRegisterCallback(onRegister);
+      registry.setStatusChangeCallback(onStatusChange);
+      const originalController = new AbortController();
+      registry.register(
+        makeRegistration('resident-1', {
+          abortController: originalController,
+          recentActivities: [
+            { name: 'Read', description: 'old activity', at: 1 },
+          ],
+          pendingMessages: ['already queued'],
+        }),
+      );
+      registry.complete('resident-1', 'first result', {
+        totalTokens: 10,
+        outputTokens: 4,
+        toolUses: 1,
+        durationMs: 20,
+      });
+      const completed = registry.get('resident-1')!;
+      completed.error = 'stale error';
+      completed.resumeBlockedReason = 'stale block';
+      completed.persistedCancellationStatus = 'cancelled';
+      const completedAt = completed.endTime;
+      const nextController = new AbortController();
+
+      const restarted = registry.restartCompletedAgent(
+        'resident-1',
+        nextController,
+      );
+
+      expect(restarted).toBe(completed);
+      expect(restarted).toMatchObject({
+        status: 'running',
+        abortController: nextController,
+        recentActivities: [],
+        pendingApprovals: [],
+        pendingMessages: ['already queued'],
+        notified: false,
+        outputOffset: 0,
+      });
+      expect(restarted?.startTime).toBeGreaterThan(0);
+      expect(restarted?.endTime).toBeUndefined();
+      expect(restarted?.result).toBeUndefined();
+      expect(restarted?.error).toBeUndefined();
+      expect(restarted?.resumeBlockedReason).toBeUndefined();
+      expect(restarted?.stats).toBeUndefined();
+      expect(restarted?.persistedCancellationStatus).toBeUndefined();
+      expect(completedAt).toBeDefined();
+      expect(onRegister).toHaveBeenCalledTimes(2);
+      expect(onStatusChange).toHaveBeenCalledTimes(3);
+    });
+
+    it('leaves a completed entry unchanged when restart capacity is full', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+      registry.register(makeRegistration('resident-1'));
+      registry.complete('resident-1', 'first result', {
+        totalTokens: 10,
+        outputTokens: 4,
+        toolUses: 1,
+        durationMs: 20,
+      });
+      const completed = registry.get('resident-1')!;
+      const completedController = completed.abortController;
+      const completedAt = completed.endTime;
+      registry.register(makeRegistration('busy'));
+
+      expect(() =>
+        registry.restartCompletedAgent('resident-1', new AbortController()),
+      ).toThrow('maximum concurrent background agents (1) reached');
+      expect(completed).toMatchObject({
+        status: 'completed',
+        abortController: completedController,
+        result: 'first result',
+        endTime: completedAt,
+        notified: true,
+      });
+      expect(completed.stats).toEqual({
+        totalTokens: 10,
+        outputTokens: 4,
+        toolUses: 1,
+        durationMs: 20,
+      });
+    });
+
+    it('keeps a successful runtime resident but disposes failed and cancelled runtimes', () => {
+      registry.register(makeRegistration('completed'));
+      const completedResident = makeResident();
+      registry.registerResidentAgent('completed', completedResident);
+      registry.complete('completed', 'done');
+      expect(completedResident.dispose).not.toHaveBeenCalled();
+
+      registry.register(makeRegistration('failed'));
+      const failedResident = makeResident();
+      registry.registerResidentAgent('failed', failedResident);
+      registry.fail('failed', 'boom');
+      expect(failedResident.dispose).toHaveBeenCalledOnce();
+
+      registry.register(makeRegistration('cancelled'));
+      const cancelledResident = makeResident();
+      registry.registerResidentAgent('cancelled', cancelledResident);
+      registry.cancel('cancelled');
+      expect(cancelledResident.dispose).toHaveBeenCalledOnce();
+      registry.finalizeCancelled('cancelled', 'partial');
+      expect(cancelledResident.dispose).toHaveBeenCalledOnce();
+    });
+
+    it('removes a cancelled resident before publishing a raced completion', () => {
+      registry.register(makeRegistration('cancelled-completion'));
+      const resident = makeResident();
+      registry.registerResidentAgent('cancelled-completion', resident);
+      let continuation: boolean | undefined;
+      registry.setNotificationCallback(() => {
+        continuation = registry.continueResidentAgent(
+          'cancelled-completion',
+          'do not restart the cancelled runtime',
+        );
+      });
+
+      registry.cancel('cancelled-completion');
+      registry.complete('cancelled-completion', 'finished while cancelling');
+
+      expect(continuation).toBe(false);
+      expect(resident.continue).not.toHaveBeenCalled();
+      expect(resident.dispose).toHaveBeenCalledOnce();
+    });
+
+    it('disposes all resident runtimes on abortAll and reset', () => {
+      registry.register(makeRegistration('running'));
+      const runningResident = makeResident();
+      registry.registerResidentAgent('running', runningResident);
+      registry.register(
+        makeRegistration('completed', {
+          status: 'completed',
+        }),
+      );
+      const completedResident = makeResident();
+      registry.registerResidentAgent('completed', completedResident);
+
+      registry.abortAll({ notify: false });
+
+      expect(runningResident.dispose).toHaveBeenCalledOnce();
+      expect(completedResident.dispose).toHaveBeenCalledOnce();
+
+      registry.register(makeRegistration('next'));
+      const nextResident = makeResident();
+      registry.registerResidentAgent('next', nextResident);
+      registry.complete('next', 'done');
+
+      registry.reset();
+
+      expect(nextResident.dispose).toHaveBeenCalledOnce();
+    });
   });
 
   it('cancels a running background agent without emitting a notification', () => {
@@ -539,6 +769,7 @@ describe('BackgroundTaskRegistry', () => {
       registry = new BackgroundTaskRegistry({
         maxConcurrentBackgroundAgents: 2,
       });
+      expect(registry.getMaxConcurrentBackgroundAgents()).toBe(2);
 
       registry.register(makeRegistration('bg-1'));
       registry.register(makeRegistration('bg-2'));
@@ -1570,6 +1801,24 @@ describe('BackgroundTaskRegistry', () => {
       ).toBeDefined();
     });
 
+    it('disposes a resident runtime when its terminal entry is evicted', () => {
+      registry.register(makeRegisteredEntry('resident-oldest', 0));
+      const resident = {
+        continue: vi.fn(() => true),
+        dispose: vi.fn(),
+      };
+      registry.registerResidentAgent('resident-oldest', resident);
+      registry.complete('resident-oldest', 'done');
+
+      for (let i = 0; i < MAX_RETAINED_TERMINAL_AGENTS; i++) {
+        registry.register(makeRegisteredEntry(`newer-${i}`, 1000 + i));
+        registry.complete(`newer-${i}`, 'done');
+      }
+
+      expect(registry.get('resident-oldest')).toBeUndefined();
+      expect(resident.dispose).toHaveBeenCalledOnce();
+    });
+
     it('never evicts running entries even when terminal entries blow past the cap', () => {
       // The user's only handle on a live subagent is its row in the
       // dialog; a prune that drops a running entry would silently
@@ -1728,6 +1977,30 @@ describe('BackgroundTaskRegistry', () => {
 
     it('returns empty array for non-existent agent', () => {
       expect(registry.drainMessages('nope')).toEqual([]);
+    });
+
+    it('rejects new messages after finalization begins and releases waiters on completion', async () => {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/test.jsonl',
+      });
+
+      expect(registry.beginFinishing('test-1')).toBe(true);
+      expect(registry.queueMessage('test-1', 'late correction')).toBe(false);
+
+      const settled = registry.waitForFinishing(
+        'test-1',
+        new AbortController().signal,
+      );
+      registry.complete('test-1', 'done');
+
+      await expect(settled).resolves.toBe(true);
+      expect(registry.get('test-1')!.pendingMessages).toEqual([]);
     });
   });
 

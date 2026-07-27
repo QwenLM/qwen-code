@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest';
 
 import { AlertDialogContent, AlertDialogOverlay } from './alert-dialog';
 import { Button } from './button';
+import { Checkbox } from './checkbox';
 import { DialogContent, DialogOverlay } from './dialog';
 import { DrawerContent, DrawerOverlay } from './drawer';
 import { DropdownMenuSubTrigger, DropdownMenuTrigger } from './dropdown-menu';
@@ -22,6 +23,7 @@ describe('React 18 ref compatibility', () => {
     ['AlertDialogContent', AlertDialogContent],
     ['AlertDialogOverlay', AlertDialogOverlay],
     ['Button', Button],
+    ['Checkbox', Checkbox],
     ['DialogContent', DialogContent],
     ['DialogOverlay', DialogOverlay],
     ['DrawerContent', DrawerContent],
@@ -44,6 +46,19 @@ describe('React 18 ref compatibility', () => {
     const root = createRoot(container);
 
     act(() => root.render(<Button ref={ref}>Button</Button>));
+    expect(ref.current).toBeInstanceOf(HTMLButtonElement);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('forwards a Checkbox ref to its DOM element', () => {
+    const ref = React.createRef<HTMLButtonElement>();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => root.render(<Checkbox ref={ref} />));
     expect(ref.current).toBeInstanceOf(HTMLButtonElement);
 
     act(() => root.unmount());

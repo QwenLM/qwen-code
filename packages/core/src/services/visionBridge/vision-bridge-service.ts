@@ -40,6 +40,7 @@ export interface VisionModelCandidate {
   capabilities?: { agent?: boolean };
   fastOnly?: boolean;
   voiceOnly?: boolean;
+  imageOnly?: boolean;
 }
 
 /** The model/endpoint selected for a vision bridge call. */
@@ -66,6 +67,7 @@ export function isFullTurnVisionCapable(model: VisionModelCandidate): boolean {
   return (
     !model.fastOnly &&
     !model.voiceOnly &&
+    !model.imageOnly &&
     model.capabilities?.agent === true &&
     isImageCapable(model)
   );

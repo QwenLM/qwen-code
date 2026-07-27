@@ -17,7 +17,7 @@
  * `buildComment`) are exported and tested. The file also runs as a CLI for the
  * workflow:
  *   node web-shell-visuals-publish.mjs stage   <screenshotsDir> <gifsDir> <stageDir>
- *   node web-shell-visuals-publish.mjs comment <stageDir> <rawBase> <shortSha> <runUrl> <bodyFile> [changedPathsFile]
+ *   node web-shell-visuals-publish.mjs comment <stageDir> <rawBase> <shortSha> <runUrl> <bodyFile> [changedPathsFile] [renderStatusFile]
  */
 
 import {
@@ -190,15 +190,21 @@ const codePath = (p) => `\`${esc(String(p).replace(/[`\r\n]/g, ''))}\``;
 
 /**
  * Pure comment builder. `files` is the list of staged filenames (png + gif).
- * `ctx` is `{ rawBase, shortSha, runUrl, changedPaths }`, where `changedPaths`
- * is the PR's full changed-file list (used only to triage an empty preview).
- * Returns the markdown body.
+ * `ctx` is `{ rawBase, shortSha, runUrl, changedPaths, renderIncomplete }`:
+ * `changedPaths` is the PR's full changed-file list (used only to triage an
+ * empty preview), and `renderIncomplete` is true when >=1 scenario failed to
+ * render on the PR head — in which case a missing view may be a render failure,
+ * not "no change", and the comment must say so instead of a clean bill of
+ * health. Returns the markdown body.
  */
 export function buildComment(files, ctx = {}) {
   const rawBase = ctx.rawBase ?? '';
   const shortSha = ctx.shortSha ?? '';
   const runUrl = ctx.runUrl ?? '';
+  const renderIncomplete = ctx.renderIncomplete === true;
   const url = (name) => `${rawBase}/${encodeURIComponent(name)}`;
+  // A "see the run" pointer for the render-failure notes (omitted if unknown).
+  const runLink = runUrl ? ` — see the [workflow run](${esc(runUrl)})` : '';
 
   // Screenshots are before/after COMPOSITES (`<view>-<theme>.png`), one per
   // changed view+theme. The compositor already dropped unchanged views, so an
@@ -218,12 +224,30 @@ export function buildComment(files, ctx = {}) {
   out.push('#### Screenshots · before / after');
   out.push('');
   if (shots.length > 0) {
+    // Some views rendered. If others FAILED, say so first: the set below is
+    // partial, and a view a reviewer expects but doesn't see may have crashed
+    // rather than stayed unchanged.
+    if (renderIncomplete) {
+      out.push(
+        `⚠️ _One or more scenarios failed to render_ on this head, so this preview may be missing views${runLink}. The composites below are the scenarios that did render.`,
+      );
+      out.push('');
+    }
     for (const f of shots) {
       out.push(
         `<img src="${url(f)}" width="900" alt="${esc(f.replace(/\.png$/i, ''))} before/after">`,
       );
       out.push('');
     }
+  } else if (renderIncomplete) {
+    // No composites AND the render failed: this is NOT "no visual change". A
+    // scenario that times out or throws produces no image, so treat the empty
+    // set as a render failure — never the reassuring green check or the
+    // coverage-gap prompt, both of which would imply the render actually ran.
+    out.push(
+      `⚠️ _No preview: one or more scenarios failed to render_ on this head${runLink}. This is not "no visual change" — a scenario that times out or throws produces no image. Fix the failing scenario (or a genuine regression it caught) and the preview returns on the next push.`,
+    );
+    out.push('');
   } else {
     // An empty preview is ambiguous, so say WHICH of the two things it means.
     // "No view changed" is only a clean bill of health if nothing that shapes a
@@ -333,7 +357,15 @@ function stageCli(screenshotsDir, gifsDir, stageDir) {
   process.stdout.write(`${accepted.length}\n`);
 }
 
-function commentCli(stageDir, rawBase, shortSha, runUrl, bodyFile, pathsFile) {
+function commentCli(
+  stageDir,
+  rawBase,
+  shortSha,
+  runUrl,
+  bodyFile,
+  pathsFile,
+  renderStatusFile,
+) {
   let files = [];
   try {
     files = readdirSync(stageDir);
@@ -352,7 +384,26 @@ function commentCli(stageDir, rawBase, shortSha, runUrl, bodyFile, pathsFile) {
       // Unreadable → treat as "unknown", not as "nothing changed".
     }
   }
-  const body = buildComment(files, { rawBase, shortSha, runUrl, changedPaths });
+  // Render status written by the capture job. Anything other than the literal
+  // 'success' is treated as incomplete; a MISSING/empty file (older run, no arg)
+  // means "unknown" and defaults to complete so this never fabricates a failure
+  // warning on a preview that actually rendered fine.
+  let renderIncomplete = false;
+  if (renderStatusFile) {
+    try {
+      renderIncomplete =
+        readFileSync(renderStatusFile, 'utf8').trim() !== 'success';
+    } catch {
+      // Unreadable → leave complete (fail open toward the normal preview).
+    }
+  }
+  const body = buildComment(files, {
+    rawBase,
+    shortSha,
+    runUrl,
+    changedPaths,
+    renderIncomplete,
+  });
   writeFileSync(bodyFile, body);
   process.stderr.write(`Comment body: ${body.split('\n').length} lines.\n`);
 }
@@ -362,7 +413,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   if (cmd === 'stage') {
     stageCli(rest[0], rest[1], rest[2]);
   } else if (cmd === 'comment') {
-    commentCli(rest[0], rest[1], rest[2], rest[3], rest[4], rest[5]);
+    commentCli(rest[0], rest[1], rest[2], rest[3], rest[4], rest[5], rest[6]);
   } else {
     process.stderr.write(`unknown command: ${cmd ?? '(none)'}\n`);
     process.exit(2);

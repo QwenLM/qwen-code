@@ -231,7 +231,12 @@ export function splitCommands(command: string): string[] {
       continue;
     }
 
-    if (char === '\\' && i < command.length - 1) {
+    // Inside single quotes the shell treats a backslash as a literal
+    // character — it escapes nothing, so `'a\'` closes the quote. Consuming
+    // the following character here would keep the parser "inside" the quote
+    // and swallow every separator to the end of the line, hiding whole
+    // commands from the permission checks that consume these segments.
+    if (!inSingleQuotes && char === '\\' && i < command.length - 1) {
       currentCommand += char + command[i + 1];
       i += 2;
       continue;

@@ -161,6 +161,39 @@ describe('tool group summary logic', () => {
     expect(formatToolGroupSummary(tools, t)).toBe('Running ReadFile · 2 tools');
   });
 
+  it('uses a static summary when only background agents remain active', () => {
+    const tools = [
+      makeTool({ callId: 'done', status: 'completed' }),
+      makeTool({
+        callId: 'background',
+        toolName: 'agent',
+        status: 'pending',
+        args: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+    ];
+
+    expect(formatToolGroupSummary(tools, t)).toBe('subagent.background');
+  });
+
+  it('keeps a foreground active tool ahead of a background agent', () => {
+    const tools = [
+      makeTool({
+        callId: 'background',
+        toolName: 'agent',
+        status: 'pending',
+        args: { run_in_background: true },
+      }),
+      makeTool({
+        callId: 'foreground',
+        toolName: 'ReadFile',
+        status: 'in_progress',
+      }),
+    ];
+
+    expect(formatToolGroupSummary(tools, t)).toBe('Running ReadFile · 2 tools');
+  });
+
   it('localizes active tool names in running summaries', () => {
     const tools = [
       makeTool({
@@ -556,6 +589,115 @@ describe('tool row rendering', () => {
     expect(card).not.toBeNull();
     expect(card?.textContent).toContain('working through the issue');
     expect(container.querySelector('[class*="expandedCardHeader"]')).toBeNull();
+  });
+
+  it('opens a single foreground agent from the tool summary', () => {
+    const onOpen = vi.fn();
+    const tool = makeTool({
+      toolName: 'agent',
+      status: 'completed',
+      args: {
+        subagent_type: 'Explore',
+        run_in_background: false,
+      },
+      subContent: 'investigation complete',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ToolGroup tools={[tool]} />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    expect(summary.hasAttribute('aria-expanded')).toBe(false);
+    act(() => summary.click());
+
+    expect(onOpen).toHaveBeenCalledWith(tool);
+  });
+
+  it('opens a running background agent from the tool summary', () => {
+    const onOpen = vi.fn();
+    const tool = makeTool({
+      toolName: 'agent',
+      status: 'pending',
+      args: {
+        subagent_type: 'Explore',
+        run_in_background: true,
+      },
+      rawOutput: { type: 'task_execution', status: 'background' },
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ToolGroup tools={[tool]} />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    expect(container.textContent).toContain('background task');
+    expect(container.textContent).not.toContain('running');
+    expect(container.textContent).not.toMatch(/\b\d+s\b/);
+    expect(
+      container.querySelector('[class*="chatSummaryTextActive"]'),
+    ).toBeNull();
+    act(() => (container.querySelector('button') as HTMLButtonElement).click());
+
+    expect(onOpen).toHaveBeenCalledWith(tool);
+  });
+
+  it('keeps a mixed group static when only its background agent is active', () => {
+    const container = renderToolGroup([
+      makeTool({ callId: 'done', toolName: 'ReadFile', status: 'completed' }),
+      makeTool({
+        callId: 'background',
+        toolName: 'agent',
+        status: 'pending',
+        args: { run_in_background: true },
+        rawOutput: { type: 'task_execution', status: 'background' },
+      }),
+    ]);
+
+    expect(container.textContent).toContain('background task');
+    expect(container.textContent).not.toContain('Running');
+    expect(container.textContent).not.toMatch(/\b\d+s\b/);
+    expect(
+      container.querySelector('[class*="chatSummaryTextActive"]'),
+    ).toBeNull();
+  });
+
+  it('keeps a mixed group animated while a foreground tool is active', () => {
+    const container = renderToolGroup([
+      makeTool({
+        callId: 'background',
+        toolName: 'agent',
+        status: 'pending',
+        args: { run_in_background: true },
+      }),
+      makeTool({
+        callId: 'foreground',
+        toolName: 'ReadFile',
+        status: 'in_progress',
+      }),
+    ]);
+
+    expect(container.textContent).toContain('Running ReadFile');
+    expect(
+      container.querySelector('[class*="chatSummaryTextActive"]'),
+    ).not.toBeNull();
   });
 
   it('opens on-demand agent details without mounting inline content', () => {

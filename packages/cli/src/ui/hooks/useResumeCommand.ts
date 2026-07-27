@@ -107,6 +107,7 @@ export function useResumeCommand(
       const oldSessionId = config.getSessionId();
       let coreSwapped = false;
       let uiSwapped = false;
+      let recoveredBackgroundAgentsNotice: string | null = null;
 
       try {
         const cwd = config.getTargetDir();
@@ -179,13 +180,9 @@ export function useResumeCommand(
 
         const recovered = await config.loadPausedBackgroundAgents(sessionId);
         if (recovered.length > 0) {
-          const recoveredMessage: HistoryItemWithoutId = {
-            type: MessageType.INFO,
-            text: config
-              .getBackgroundAgentResumeService()
-              .buildRecoveredBackgroundAgentsNotice(recovered.length),
-          };
-          addItem(recoveredMessage, Date.now());
+          recoveredBackgroundAgentsNotice = config
+            .getBackgroundAgentResumeService()
+            .buildRecoveredBackgroundAgentsNotice(recovered.length);
         }
 
         // 2. Swap UI. Once this commits, rolling core back is unsafe —
@@ -195,6 +192,15 @@ export function useResumeCommand(
         setSessionName?.(customTitle ?? null);
         clearItems();
         loadHistory(uiHistoryItems);
+        if (recoveredBackgroundAgentsNotice) {
+          addItem(
+            {
+              type: MessageType.INFO,
+              text: recoveredBackgroundAgentsNotice,
+            },
+            Date.now(),
+          );
+        }
         uiSwapped = true;
 
         // SessionStart hook is handled during chat initialization so its
@@ -209,7 +215,20 @@ export function useResumeCommand(
           // recorder would keep writing new user messages into the
           // orphaned session JSONL while UI still shows the old session.
           try {
+            resetBackgroundStateForSessionSwitch(config);
             config.startNewSession(oldSessionId, undefined);
+            // The forward path cleared the old session's in-memory
+            // background agents (resetBackgroundStateForSessionSwitch above,
+            // ~L158) before swapping core. After rolling core back to the old
+            // session, reload them so `list_agents` reflects the old session's
+            // still-on-disk sidecars again; otherwise the user lands back on
+            // the old session with an empty roster until the next process
+            // start or successful /resume. Best-effort — the guard inside
+            // loadPausedBackgroundAgents requires the session to already be
+            // current, which the startNewSession above satisfies.
+            await config
+              .loadPausedBackgroundAgents(oldSessionId)
+              .catch(() => {});
           } catch (rollbackErr) {
             config
               .getDebugLogger()

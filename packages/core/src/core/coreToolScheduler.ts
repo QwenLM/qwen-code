@@ -61,6 +61,9 @@ import type {
 } from '@google/genai';
 import { fileURLToPath } from 'node:url';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
+import { PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES } from '../tools/exitPlanMode.js';
+import { approvedPlanRedactionText } from './geminiChat.js';
+import * as fsSync from 'node:fs';
 import {
   collectAvailableSkillEntries,
   renderAvailableSkillsBlock,
@@ -147,15 +150,14 @@ import {
   endToolBlockedOnUserSpan,
   startHookSpan,
   endHookSpan,
-  addToolInputAttributes,
-  addToolResultAttributes,
+  addToolArgumentsAttributes,
+  addToolCallResultAttributes,
   truncateSpanError,
   type ToolBlockedDecision,
   type ToolBlockedSource,
   type StartHookSpanOptions,
   type HookSpanMetadata,
 } from '../telemetry/index.js';
-import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
 import {
   getRuntimeContentGenerator,
@@ -167,6 +169,10 @@ import {
   normalizeParts,
 } from '../services/visionBridge/image-part-utils.js';
 import { bridgeToolResultImages } from '../services/visionBridge/tool-result-vision-bridge.js';
+import {
+  getInvocationContext,
+  runWithInvocationContext,
+} from '../utils/invocation-context.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 
@@ -2339,19 +2345,24 @@ export class CoreToolScheduler {
         // Phase 2). Every cancel/error path below — and the existing
         // success path in executeSingleToolCall — must call
         // finalizeToolSpan(callId, ...) to avoid leaking spans.
-        // `tool.name` is set automatically by startToolSpan from the first
-        // arg; only namespaced extras go in attrs. `call_id` (non-namespaced)
+        // `gen_ai.tool.name` is set automatically by startToolSpan from the
+        // first arg; only call-id aliases go in attrs. `call_id` (non-namespaced)
         // is dual-emitted for one release as a backwards-compat shim for
         // pre-Phase-2 dashboards/alerts that grep the old key — drop after
         // operators migrate (#4321 review). `tool_name` is dual-emitted on
         // the same migration window (review-2 DeepSeek Suggestion) so
         // pre-Phase-2 dashboards filtering on it don't silently stop
         // matching during the rollout.
-        const toolSpan = startToolSpan(canonicalName, {
-          'tool.call_id': reqInfo.callId,
-          call_id: reqInfo.callId,
-          tool_name: canonicalName,
-        });
+        const toolSpan = startToolSpan(
+          canonicalName,
+          {
+            'tool.call_id': reqInfo.callId,
+            'gen_ai.tool.call.id': reqInfo.providerCallId ?? reqInfo.callId,
+            call_id: reqInfo.callId,
+            tool_name: canonicalName,
+          },
+          toolCall.tool.description,
+        );
         this.toolSpans.set(reqInfo.callId, toolSpan);
         batchState.callIds.add(reqInfo.callId);
         this.callIdToBatch.set(reqInfo.callId, batchState);
@@ -3040,6 +3051,7 @@ export class CoreToolScheduler {
             }
 
             const originalOnConfirm = confirmationDetails.onConfirm;
+            const invocationContext = getInvocationContext();
             let planShellResponseClaimed = false;
             const wrappedConfirmationDetails: ToolCallConfirmationDetails = {
               ...confirmationDetails,
@@ -3052,45 +3064,46 @@ export class CoreToolScheduler {
               onConfirm: async (
                 outcome: ToolConfirmationOutcome,
                 payload?: ToolConfirmationPayload,
-              ) => {
-                if (planShellDecision.classification !== 'not-applicable') {
-                  if (planShellResponseClaimed) return;
-                  planShellResponseClaimed = true;
-                  const currentCall = this.toolCalls.find(
-                    (call) =>
-                      call.request.callId === reqInfo.callId &&
-                      call.status === 'awaiting_approval',
-                  ) as WaitingToolCall | undefined;
-                  if (!currentCall) return;
-                  const approval = await validatePlanModeShellApproval({
-                    config: this.config,
-                    decision: planShellDecision,
-                    requestArgs: currentCall.request.args,
-                    invocationParams: currentCall.invocation.params as Record<
-                      string,
-                      unknown
-                    >,
-                    signal,
-                    outcome,
-                    payload,
-                  });
+              ) =>
+                runWithInvocationContext(invocationContext, async () => {
+                  if (planShellDecision.classification !== 'not-applicable') {
+                    if (planShellResponseClaimed) return;
+                    planShellResponseClaimed = true;
+                    const currentCall = this.toolCalls.find(
+                      (call) =>
+                        call.request.callId === reqInfo.callId &&
+                        call.status === 'awaiting_approval',
+                    ) as WaitingToolCall | undefined;
+                    if (!currentCall) return;
+                    const approval = await validatePlanModeShellApproval({
+                      config: this.config,
+                      decision: planShellDecision,
+                      requestArgs: currentCall.request.args,
+                      invocationParams: currentCall.invocation.params as Record<
+                        string,
+                        unknown
+                      >,
+                      signal,
+                      outcome,
+                      payload,
+                    });
+                    await this.handleConfirmationResponse(
+                      reqInfo.callId,
+                      originalOnConfirm,
+                      approval.outcome,
+                      signal,
+                      approval.payload,
+                    );
+                    return;
+                  }
                   await this.handleConfirmationResponse(
                     reqInfo.callId,
                     originalOnConfirm,
-                    approval.outcome,
+                    outcome,
                     signal,
-                    approval.payload,
+                    payload,
                   );
-                  return;
-                }
-                await this.handleConfirmationResponse(
-                  reqInfo.callId,
-                  originalOnConfirm,
-                  outcome,
-                  signal,
-                  payload,
-                );
-              },
+                }),
             };
             this.setStatusInternal(
               reqInfo.callId,
@@ -3721,11 +3734,16 @@ export class CoreToolScheduler {
       // grouping by span name don't see two entries for migrated/MCP tools
       // when this defensive fallback fires (#4321 review).
       const canonical = canonicalToolName(toolName);
-      toolSpan = startToolSpan(canonical, {
-        'tool.call_id': callId,
-        call_id: callId, // legacy alias — see _schedule for context
-        tool_name: canonical, // legacy alias — see _schedule for context
-      });
+      toolSpan = startToolSpan(
+        canonical,
+        {
+          'tool.call_id': callId,
+          'gen_ai.tool.call.id': scheduledCall.request.providerCallId ?? callId,
+          call_id: callId, // legacy alias — see _schedule for context
+          tool_name: canonical, // legacy alias — see _schedule for context
+        },
+        scheduledCall.tool.description,
+      );
       this.toolSpans.set(callId, toolSpan);
     }
     try {
@@ -3876,27 +3894,22 @@ export class CoreToolScheduler {
     }
   }
 
-  private safelyAddToolInputAttributes(
+  private safelyAddToolArgumentsAttributes(
     span: Span,
-    toolName: string,
-    toolInput: string,
+    argumentsValue: unknown,
   ): void {
     try {
-      addToolInputAttributes(this.config, span, toolName, toolInput);
+      addToolArgumentsAttributes(this.config, span, argumentsValue);
     } catch (error) {
-      debugLogger.warn('Failed to add tool input span attributes:', error);
+      debugLogger.warn('Failed to add tool arguments span attribute:', error);
     }
   }
 
-  private safelyAddToolResultAttributes(
-    span: Span,
-    toolName: string,
-    toolResult: string,
-  ): void {
+  private safelyAddToolCallResultAttributes(span: Span, result: unknown): void {
     try {
-      addToolResultAttributes(this.config, span, toolName, toolResult);
+      addToolCallResultAttributes(this.config, span, result);
     } catch (error) {
-      debugLogger.warn('Failed to add tool result span attributes:', error);
+      debugLogger.warn('Failed to add tool result span attribute:', error);
     }
   }
 
@@ -3927,17 +3940,6 @@ export class CoreToolScheduler {
           toolInput[key] = unescapePath(String(toolInput[key]).trim());
         }
       }
-    }
-
-    // Guard the JSON serialization — addToolInputAttributes early-returns
-    // when sensitive attributes are off, but the argument is computed
-    // before the call.
-    if (this.config.getTelemetryIncludeSensitiveSpanAttributes?.()) {
-      this.safelyAddToolInputAttributes(
-        span,
-        toolName,
-        safeJsonStringify(toolInput) ?? '{}',
-      );
     }
 
     // Generate unique tool_use_id for hook tracking. On a post-'ask'
@@ -4025,11 +4027,6 @@ export class CoreToolScheduler {
           scheduledCall.request,
           new Error(blockMessage),
           ToolErrorType.EXECUTION_DENIED,
-        );
-        this.safelyAddToolResultAttributes(
-          span,
-          toolName,
-          `BLOCKED: ${blockMessage}`,
         );
         this.setStatusInternal(callId, 'error', errorResponse);
         setToolSpanFailure(
@@ -4165,6 +4162,7 @@ export class CoreToolScheduler {
             promotableShells[0]?.request.callId === callId
           );
         };
+        this.safelyAddToolArgumentsAttributes(span, invocation.params);
         promise = invocation.execute(
           execSignal,
           liveOutputCallback,
@@ -4174,6 +4172,7 @@ export class CoreToolScheduler {
           canPromoteForegroundShell,
         );
       } else {
+        this.safelyAddToolArgumentsAttributes(span, invocation.params);
         promise = invocation.execute(
           execSignal,
           liveOutputCallback,
@@ -4272,11 +4271,6 @@ export class CoreToolScheduler {
           }
           failureHookArtifacts = failureHookResult.artifacts;
         }
-        this.safelyAddToolResultAttributes(
-          span,
-          toolName,
-          `CANCELLED: ${cancelMessage}`,
-        );
         this.setStatusInternal(
           callId,
           'cancelled',
@@ -4373,11 +4367,6 @@ export class CoreToolScheduler {
               scheduledCall.request,
               new Error(stopMessage),
               ToolErrorType.EXECUTION_DENIED,
-            );
-            this.safelyAddToolResultAttributes(
-              span,
-              toolName,
-              `STOPPED: ${stopMessage}`,
             );
             this.setStatusInternal(callId, 'error', errorResponse);
             setToolSpanFailure(
@@ -4624,19 +4613,6 @@ export class CoreToolScheduler {
           }
         }
 
-        // Guard the JSON serialization for non-string content. Tool
-        // results can contain Part[] with large inlineData/media payloads
-        // that we don't want to serialize when telemetry is off.
-        if (this.config.getTelemetryIncludeSensitiveSpanAttributes?.()) {
-          this.safelyAddToolResultAttributes(
-            span,
-            toolName,
-            typeof content === 'string'
-              ? content
-              : (safeJsonStringify(content) ?? ''),
-          );
-        }
-
         // Recompute AFTER truncation so it reflects the model-facing length;
         // the final batch pass recomputes it again after aggregate reduction.
         contentLength =
@@ -4683,6 +4659,60 @@ export class CoreToolScheduler {
               : {}),
           ...(artifacts.length > 0 ? { artifacts } : {}),
         };
+        // After an APPROVED exit_plan_mode, swap the large `plan` argument
+        // still sitting in the model turn's functionCall for a pointer to the
+        // saved plan file. The blob otherwise stays in the model's attention
+        // window and gets regurgitated into later responses (#6237). Keyed off
+        // the approval llmContent prefixes (not just tool success) so
+        // rejected/no-action results keep their plan text for revision. Must
+        // run BEFORE setStatusInternal: completion callbacks may submit the
+        // continuation turn synchronously, and it should already see the
+        // sanitized history.
+        if (
+          canonicalName === ToolNames.EXIT_PLAN_MODE &&
+          typeof toolResult.llmContent === 'string' &&
+          PLAN_EXIT_APPROVED_LLM_CONTENT_PREFIXES.some((prefix) =>
+            (toolResult.llmContent as string).startsWith(prefix),
+          )
+        ) {
+          try {
+            const planPath = this.config.getPlanFilePath();
+            // Gate on the on-disk plan actually matching the in-history
+            // text: savePlanBestEffort swallows filesystem errors, and the
+            // pointer must never claim a save that failed or reference a
+            // file holding a different plan. A missing/unreadable file
+            // throws here and skips the redaction entirely.
+            const savedPlan = fsSync.readFileSync(planPath, 'utf-8');
+            const redacted = this.config
+              .getGeminiClient?.()
+              ?.getChat()
+              .redactApprovedPlanFromHistory(
+                callId,
+                approvedPlanRedactionText(planPath),
+                savedPlan,
+              );
+            // The rewrite declines silently on a no-match call id, a
+            // non-string plan argument, or in-history text differing from
+            // the saved file — trace those so a "plan still in history"
+            // report can tell a skipped rewrite from a run one.
+            if (redacted === false) {
+              debugLogger.debug(
+                `Approved-plan redaction left history unchanged for ` +
+                  `${callId}: no matching exit_plan_mode call, or its ` +
+                  `plan text does not match ${planPath}.`,
+              );
+            }
+          } catch (redactErr) {
+            debugLogger.warn(
+              `Skipping approved-plan redaction for ${callId} (plan file ` +
+                `unavailable?): ${
+                  redactErr instanceof Error
+                    ? redactErr.message
+                    : String(redactErr)
+                }`,
+            );
+          }
+        }
         this.setStatusInternal(callId, 'success', successResponse);
         safeSetStatus(span, { code: SpanStatusCode.OK });
         // Mirrors setToolSpanFailure/setToolSpanCancelled — every tool span
@@ -4692,6 +4722,12 @@ export class CoreToolScheduler {
           span.setAttribute('success', true);
         } catch {
           // OTel errors must not block API behavior.
+        }
+        const result = response.find(
+          (part) => part.functionResponse !== undefined,
+        )?.functionResponse?.response;
+        if (result !== undefined) {
+          this.safelyAddToolCallResultAttributes(span, result);
         }
       } else {
         // It is a failure
@@ -4767,11 +4803,6 @@ export class CoreToolScheduler {
             const error = part.functionResponse?.response?.['error'];
             return total + (typeof error === 'string' ? error.length : 0);
           }, 0);
-          this.safelyAddToolResultAttributes(
-            span,
-            toolName,
-            `ERROR: ${operationalErrorMessage}`,
-          );
           const artifacts = [
             ...(toolResult.artifacts ?? []),
             ...(failureHookArtifacts ?? []),
@@ -4832,12 +4863,6 @@ export class CoreToolScheduler {
             ]),
           );
         }
-
-        this.safelyAddToolResultAttributes(
-          span,
-          toolName,
-          `ERROR: ${errorMessage}`,
-        );
 
         const error = new Error(errorMessage);
         let errorResponse = createErrorResponse(
@@ -4959,11 +4984,6 @@ export class CoreToolScheduler {
           }
           failureHookArtifacts = failureHookResult.artifacts;
         }
-        this.safelyAddToolResultAttributes(
-          span,
-          toolName,
-          `CANCELLED: ${cancelMessage}`,
-        );
         this.setStatusInternal(
           callId,
           'cancelled',
@@ -5009,11 +5029,6 @@ export class CoreToolScheduler {
           }
           failureHookArtifacts = failureHookResult.artifacts;
         }
-        this.safelyAddToolResultAttributes(
-          span,
-          toolName,
-          `EXCEPTION: ${exceptionErrorMessage}`,
-        );
         this.setStatusInternal(
           callId,
           'error',

@@ -21,6 +21,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
+import type { ReviewEffort } from './parse-args.js';
 import { captureLocalDiff, type SkippedFile } from './lib/local-diff.js';
 import { buildDiffPlan, READ_FILE_CHAR_CAP } from './lib/diff-plan.js';
 import {
@@ -35,9 +36,12 @@ interface CaptureLocalArgs {
   file?: string;
   target: string;
   untracked: boolean;
+  effort?: ReviewEffort;
 }
 
 type CaptureLocalResult = PlanReport & {
+  /** The review's effort, recorded so the roster reads one value everywhere. */
+  effort?: ReviewEffort;
   diffPath: string;
   diffPathAbsolute: string;
   /** Untracked files whose contents are in the diff — `git diff` shows none. */
@@ -92,6 +96,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     ...buildPlanReport(plan, null),
     untrackedFiles: capture.untracked,
     skippedFiles: capture.skipped,
+    ...(args.effort ? { effort: args.effort } : {}),
   };
 
   writeFileSync(out, stringifyPlanReport(result), 'utf8');
@@ -171,6 +176,15 @@ export const captureLocalCommand: CommandModule = {
         default: true,
         describe:
           'Include untracked, non-ignored files. On by default: `git diff` cannot see them, so without this a brand-new file goes unreviewed.',
+      })
+      .option('effort', {
+        type: 'string',
+        choices: ['low', 'medium', 'high'],
+        describe:
+          'The review effort. `medium` (balanced) drops the adversarial ' +
+          'personas from the required roster; recorded in the plan so ' +
+          'check-coverage, agent-prompt --roster and compose-review all read ' +
+          'one value. Omit for the full (high) roster.',
       }),
   handler: (argv) => {
     runCaptureLocal(argv as unknown as CaptureLocalArgs);

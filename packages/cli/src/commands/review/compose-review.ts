@@ -22,7 +22,7 @@
 
 import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   coverageFromTranscripts,
@@ -30,6 +30,14 @@ import {
   TranscriptsUnavailableError,
 } from './lib/coverage.js';
 import { shellQuotePath } from './lib/shell-quote.js';
+import { gh, setGhHost } from './lib/gh.js';
+import {
+  isPositivePrNumber,
+  hasExecutableScript,
+  reviewMode,
+  type RosterPlan,
+} from './lib/roster.js';
+import { diffHashOf, type ScriptLintReport } from './script-lint.js';
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
@@ -39,6 +47,13 @@ import {
 } from './lib/inline-counts.js';
 
 export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
+
+/**
+ * Reads a PR's description body, given its `owner/repo` and number. The one
+ * production implementation calls `gh pr view`; the bilingual fallback uses it
+ * to recover the Han signal from the live PR when the plan does not carry it.
+ */
+export type PrBodyFetcher = (ownerRepo: string, prNumber: string) => string;
 
 export interface ComposeReviewInput {
   /**
@@ -95,6 +110,18 @@ export interface ComposeReviewInput {
    * anything that would change where the transcripts are found on a real run.
    */
   env?: NodeJS.ProcessEnv;
+  /**
+   * How the bilingual fallback reads the live PR body when the plan carries a
+   * PR identity but no `prDescriptionHasHan` (a `plan-diff` plan, or one an
+   * improvising orchestrator wired in place of `fetch-pr`'s report). A test
+   * seam ONLY: production leaves it undefined and the CLI reads the PR with
+   * `gh pr view`. The handler **strips it from the input JSON** before use (the
+   * same way it strips `env`), so a model cannot supply one — not even a
+   * non-function value that would throw past the default and drop the fold. It
+   * can neither force nor suppress the Chinese fold, which is the whole point of
+   * keeping the signal the CLI's own.
+   */
+  prBodyFetcher?: PrBodyFetcher;
   /** Step 1's lightweight `pr-context` fetch failed. */
   contextUnavailable?: boolean;
   presubmit?: {
@@ -207,7 +234,17 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // The coverage-derived disclosures, kept STRUCTURAL ({subject, reason})
   // from the site that knows the boundary — reparsing the rendered prose for
   // it was the bug. `unreviewed` above stays what the caller wrote, verbatim.
-  const coverageEntries: Array<{ subject: string; reason: string }> = [];
+  // The `public*` fields are the body's register (`Brief.publicLabel`, a
+  // path-free reason); `subject`/`reason` stay the internal keys every dedup
+  // and certification check below matches on.
+  const coverageEntries: Array<{
+    subject: string;
+    reason: string;
+    publicSubject?: string;
+    publicReason?: string;
+    subjectZh?: string;
+    reasonZh?: string;
+  }> = [];
   // The fixes for the gaps above, for stderr — never for the body. The gap says
   // what the review cannot certify, to the PR author; the remediation names the
   // command that repairs it, to the orchestrator. #7012's public body was fourteen
@@ -232,13 +269,49 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // the author a false cause.
   const missingReceipts: number[] = [];
 
-  // The Criticals a verifier must have ruled on before this review may post
-  // them as blockers. Deterministic `[build]`/`[test]` body findings are
-  // pre-confirmed and skip verification by design; every other Critical —
-  // anchored or body — is a claim, and a claim is confirmed by Step 4 or it
-  // is not confirmed at all.
-  const nonDeterministicBodyCriticals = bodyCriticals.filter(
-    (x) => !/\[(?:build|test)\]/i.test(x),
+  // The plan's chunk→files table and the chunks somebody demonstrably read,
+  // for the body renderer and the opener. Empty when no plan could be used —
+  // `describeChunkGap` then counts against nothing, and the opener's
+  // zero-certified test falls to the `coverage` disclosure instead.
+  let plannedChunks: Array<{ id: number; files: string[] }> = [];
+  let coveredChunks: number[] = [];
+
+  // The deterministic script-lint gate. `compose-review` is the authority here:
+  // it reads the report the orchestrator's `qwen review script-lint` step wrote
+  // and turns it into the verdict itself, so neither the existence of a blocker
+  // nor its severity depends on a model. A finding on a changed line (above
+  // cosmetic `style`) is a pre-confirmed `[lint]` Critical; an uninstalled or
+  // crashed checker is unreviewed scope; and — the proof it ran — a diff that
+  // carries an executable script but has no readable report is itself unreviewed
+  // (fail closed). The report path is derived from the plan, not the input JSON a
+  // model wrote, and the plan decides whether the lint was owed.
+  // The gate's own body Criticals are deterministic by PROVENANCE — `scriptLintGate`
+  // ran the linter — so they never need a verifier. Track them as a SEPARATE list
+  // rather than mix them into the model's criticals and subtract a COUNT: a count
+  // subtraction misfires when a model claim happens to carry a `[build]`/`[test]`/
+  // `[probe]` tag (filtered out before the subtract) or a gate finding's own text
+  // contains one, erasing an unrelated claim's verification requirement. Identity,
+  // not arithmetic, decides provenance.
+  const modelBodyCriticals = [...bodyCriticals]; // input's, captured before the gate
+  // Disclosed-but-non-capping notes from the gate (a deferred checker). Rendered
+  // in the body on every verdict, but never fed into the cap.
+  const gateDisclosed: string[] = [];
+  if (input.planPath) {
+    const gate = scriptLintGate(input.planPath);
+    bodyCriticals.push(...gate.criticals); // render + count toward `c`, deterministic
+    unreviewed.push(...gate.unreviewed);
+    gateDisclosed.push(...gate.disclosed);
+  }
+
+  // The Criticals a verifier must have ruled on before this review may post them as
+  // blockers. Only the MODEL's criticals are candidates — the gate's are excluded by
+  // construction (they are not in `modelBodyCriticals`). Of the model's, `[build]`/
+  // `[test]` (Agent 7 ran the tool) and `[probe]` (the verifier ran a probe) are
+  // pre-confirmed and skip verification. `[lint]` is NOT trusted as a tag — a
+  // model-written string containing it must not launder an unverified claim into a
+  // blocker (that is what the gate's provenance-tracked criticals are for).
+  const nonDeterministicBodyCriticals = modelBodyCriticals.filter(
+    (x) => !/\[(?:build|test|probe)\]/i.test(x),
   ).length;
   const criticalsNeedingVerify =
     criticalsInline + nonDeterministicBodyCriticals;
@@ -267,11 +340,15 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       reason:
         'no plan was given, so this run cannot show that any of the diff ' +
         'was read',
+      subjectZh: '覆盖情况',
+      reasonZh: '未提供 plan，本次运行无法证明 diff 的任何部分被读过',
     });
     criticalsUnverified = criticalsNeedingVerify >= 1;
   } else {
     try {
       const cov = coverageFromTranscripts(input.planPath, input.env);
+      plannedChunks = cov.plannedChunks;
+      coveredChunks = cov.coveredChunks;
       for (const id of cov.missingChunks) missingReceipts.push(id);
       for (const id of cov.uncoverableChunks) {
         // The caller may already have named this chunk, but in a richer form:
@@ -288,6 +365,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
         coverageEntries.push({
           subject: label,
           reason: 'the agent made no tool call: it read nothing',
+          reasonZh: '该 agent 未发起任何工具调用：它什么都没读',
         });
       }
       if (cov.idleAgents.length > 0) {
@@ -310,6 +388,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
           reason:
             'launched with a prompt that never named the diff file, so it ' +
             'could not have read it',
+          reasonZh: '启动 prompt 从未提到 diff 文件，它不可能读过 diff',
         });
       }
       if (cov.blindAgents.length > 0) {
@@ -330,6 +409,8 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
           reason:
             'pointed at diff lines it never opened: it made tool calls, but ' +
             'none of them read the diff',
+          reasonZh:
+            '它被指向 diff 的行却从未打开：有工具调用，但没有一次读取 diff',
         });
       }
       if (cov.unopenedAgents.length > 0) {
@@ -394,18 +475,25 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
         err instanceof TranscriptsUnavailableError
           ? `could not read the agents' transcripts (${err.message})`
           : `the plan could not be used (${(err as Error).message})`;
+      const whyZh =
+        err instanceof TranscriptsUnavailableError
+          ? `无法读取 agent 的运行记录（${err.message}）`
+          : `plan 无法使用（${(err as Error).message}）`;
       coverageEntries.push({
         subject: 'coverage',
         reason: `${why}, so this run cannot show that any of the diff was read`,
+        subjectZh: '覆盖情况',
+        reasonZh: `${whyZh}，本次运行无法证明 diff 的任何部分被读过`,
       });
     }
 
     // Step 4 (verify) and Step 5 (reverse audit) ran, and read their briefs?
     // `check-coverage` proves Step 3, but it runs at Step 3D — before these exist —
     // and their count is not in the plan, so its roster cannot reach them. This is
-    // the floor that does, and only `compose-review` asks it, which runs only at
-    // high effort — the only effort at which verify and reverse audit run at all.
-    // Reverse audit is required on every high-effort review; verify once the review
+    // the floor that does, and only `compose-review` asks it, which runs at high
+    // and medium effort. Reverse audit is required only at high; medium skips it by
+    // design, and `verificationGaps` caps a clean medium verdict at Comment instead
+    // of flagging it as missing. Verify runs at both, once the review
     // has non-deterministic findings to verify. Deterministic `[build]`/`[test]`
     // findings are pre-confirmed and skip verification by design, so they do not
     // demand a verifier — including a body Critical that carries their source tag.
@@ -419,18 +507,15 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
         { postsFindings: findingsToVerify > 0 },
         input.env,
       );
+      // Structural, both languages — no boundary is recovered from rendered
+      // prose (reparsing was the bug the disclosure entries already fixed).
       for (const gap of verification.gaps) {
-        // The machine's own two subjects ('verification', 'reverse audit'),
-        // dash-free by construction — the first separator is the boundary.
-        const cut = gap.indexOf(' — ');
-        coverageEntries.push(
-          cut === -1
-            ? { subject: gap, reason: '' }
-            : {
-                subject: gap.slice(0, cut),
-                reason: gap.slice(cut + ' — '.length),
-              },
-        );
+        coverageEntries.push({
+          subject: gap.subject,
+          reason: gap.reason,
+          subjectZh: gap.subjectZh,
+          reasonZh: gap.reasonZh,
+        });
       }
       remediation.push(...verification.remediation);
       criticalsUnverified =
@@ -441,6 +526,8 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
         reason:
           `could not check that Step 4 and Step 5 ran ` +
           `(${(err as Error).message})`,
+        subjectZh: '验证',
+        reasonZh: `无法检查步骤 4 与步骤 5 是否运行（${(err as Error).message}）`,
       });
       // Fail closed: a verification that cannot be CHECKED is not a
       // verification that happened.
@@ -555,13 +642,32 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   }
 
   const footer = `_— ${modelId} via Qwen Code /review_`;
-  const finish = (text: string): string =>
-    text === '' ? '' : `${text}\n\n${footer}`;
+  // Bilingual rendering: when the plan (fetch-pr's report) says the PR
+  // description contains Han characters, the posted body carries the complete
+  // Chinese version collapsed under the English one — the shape this repo's
+  // own PR descriptions use, decided by the plan the CLI wrote, never by the
+  // caller. When the plan does not record the signal but still names the PR,
+  // the switch recovers it from the live description (see `bilingualFromPlan`).
+  // Fragments with no deterministic translation (model-written findings, caller
+  // echoes, error interpolations) ride verbatim in both halves. The footer
+  // stays outside the fold, once. A `zh === en` body has nothing translated, so
+  // no empty fold is published.
+  const bilingual = bilingualFromPlan(input.planPath, input.prBodyFetcher);
+  const render = (parts: Bi[], sep: string): string => {
+    const en = parts.map((p) => p.en).join(sep);
+    if (en === '') return '';
+    const zh = parts.map((p) => p.zh).join(sep);
+    const text =
+      bilingual && zh !== en
+        ? `${en}\n\n<details>\n<summary>中文说明</summary>\n\n${zh}\n\n</details>`
+        : en;
+    return `${text}\n\n${footer}`;
+  };
 
   // Clause 6 — scope nobody reviewed. Legal on COMMENT and (alongside body
   // Criticals) on REQUEST_CHANGES: the blocker must not squeeze out the
   // disclosure of what was never read.
-  const notReviewedParts: string[] = [];
+  const notReviewedParts: Bi[] = [];
   if (missingReceipts.length > 0) {
     // One block for both channels, so an edit cannot touch the disclosure and
     // miss its repair (or vice versa) — the drift the rest of this file exists
@@ -590,17 +696,35 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       (id) => !disclosedSubjects.has(`chunk ${id}`),
     );
     if (unexplainedReceipts.length > 0) {
-      notReviewedParts.push(
-        `Not reviewed: ${unexplainedReceipts
-          .map((id) => `chunk ${id}`)
-          .join(', ')} — no agent reported covering these; nobody read them.`,
-      );
+      const gap = describeChunkGap(unexplainedReceipts, plannedChunks);
+      const pron = gap.plural ? 'them' : 'it';
+      notReviewedParts.push({
+        en: `Not reviewed: ${gap.phrase} — no agent reported covering ${pron}; nobody read ${pron}.`,
+        zh: `未审查：${gap.phraseZh}——没有 agent 报告覆盖过这部分，也没有人读过它。`,
+      });
     }
   }
   if (uncoverable.length > 0) {
-    notReviewedParts.push(
-      `Not reviewed: ${uncoverable.join(', ')} — a line there exceeds the read limit.`,
-    );
+    // The CLI's own entries are bare `chunk <id>` (pushed above, from the
+    // report) and render through the same translation as every other chunk
+    // gap; a caller's entry may already carry the file (`chunk 5
+    // (src/big.min.js)`) and renders verbatim — its structure is not ours to
+    // reparse.
+    const bareIds: number[] = [];
+    const callerNamed: string[] = [];
+    for (const e of uncoverable) {
+      const m = /^chunk (\d+)$/.exec(e);
+      if (m) bareIds.push(Number(m[1]));
+      else callerNamed.push(e);
+    }
+    const bareGap =
+      bareIds.length > 0 ? describeChunkGap(bareIds, plannedChunks) : null;
+    const shown = [...(bareGap ? [bareGap.phrase] : []), ...callerNamed];
+    const shownZh = [...(bareGap ? [bareGap.phraseZh] : []), ...callerNamed];
+    notReviewedParts.push({
+      en: `Not reviewed: ${shown.join(', ')} — a line there exceeds the read limit.`,
+      zh: `未审查：${shownZh.join('、')}——其中有一行超出单次读取上限。`,
+    });
   }
   // One disclosure per subject, one sentence per cause — structurally, not by
   // reparsing prose. The first cut recovered a subject/reason boundary from
@@ -632,12 +756,17 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   const whiffedDimensions = callerLeft.filter((d) => !d.includes(' — '));
   const explainedCaller = callerLeft.filter((d) => d.includes(' — '));
   if (whiffedDimensions.length > 0) {
-    notReviewedParts.push(
-      `Not reviewed: ${whiffedDimensions.join(', ')} — the agent returned no evidence of its walk twice.`,
-    );
+    notReviewedParts.push({
+      en: `Not reviewed: ${whiffedDimensions.join(', ')} — the agent returned no evidence of its walk twice.`,
+      zh: `未审查：${whiffedDimensions.join('、')}——该 agent 连续两次未返回任何检查过程的证据。`,
+    });
   }
   for (const d of explainedCaller) {
-    notReviewedParts.push(`Not reviewed: ${d}.`);
+    // Caller prose, untranslatable by construction — quoted as-is in both.
+    notReviewedParts.push({
+      en: `Not reviewed: ${d}.`,
+      zh: `未审查：${d}。`,
+    });
   }
   // Same cause, one sentence: forty-three chunks launched with rewritten
   // prompts are one failure with forty-three subjects, not forty-three
@@ -651,38 +780,106 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // cause would tell the author "no agent was launched" about an agent that
   // demonstrably ran.
   const seenSubjects = new Set<string>();
-  const byReason = new Map<string, string[]>();
-  for (const { subject, reason } of covEntries) {
-    if (seenSubjects.has(subject)) continue;
-    seenSubjects.add(subject);
-    const subjects = byReason.get(reason) ?? [];
-    subjects.push(subject);
-    byReason.set(reason, subjects);
+  const byReason = new Map<
+    string,
+    Array<{ subject: string; publicSubject?: string; subjectZh?: string }>
+  >();
+  const reasonZhOf = new Map<string, string>();
+  for (const e of covEntries) {
+    if (seenSubjects.has(e.subject)) continue;
+    seenSubjects.add(e.subject);
+    // Keyed on the reason the body will PRINT — public over internal. Two
+    // unread briefs differ internally only by their brief paths; grouped on
+    // those, the path-free public sentence would render once per role, which
+    // is the per-subject repetition this map exists to kill.
+    const key = e.publicReason ?? e.reason;
+    const group = byReason.get(key) ?? [];
+    group.push({
+      subject: e.subject,
+      publicSubject: e.publicSubject,
+      subjectZh: e.subjectZh,
+    });
+    byReason.set(key, group);
+    // One printed reason, one translation: entries sharing the printed
+    // English reason share the Chinese one by construction (both derive from
+    // the same source string). Entries with none fall back to the English.
+    if (e.reasonZh !== undefined && !reasonZhOf.has(key)) {
+      reasonZhOf.set(key, e.reasonZh);
+    }
   }
-  for (const [reason, subjects] of byReason) {
-    notReviewedParts.push(
-      reason
-        ? `Not reviewed: ${subjects.join(', ')} — ${reason}.`
-        : `Not reviewed: ${subjects.join(', ')}.`,
-    );
+  for (const [reason, entries] of byReason) {
+    // Chunk subjects leave in the author's units, not the run's. `chunk 28`
+    // is bookkeeping — the id selects a rebuild command on stderr, and
+    // nothing on the PR page maps it to code. #7268's posted body enumerated
+    // all 49 of them, unsorted, across two of these sentences; the author's
+    // units are their files and, at the limit, the diff itself, which is what
+    // `describeChunkGap` renders. Role subjects ride their `publicSubject`
+    // (`Brief.publicLabel`) — the codename stays on stderr, where it is the
+    // selector — and the partition below keys on the INTERNAL subject, so a
+    // public phrase can never shadow a chunk id out of the chunk collapse.
+    const chunkIds: number[] = [];
+    const named: string[] = [];
+    const namedZh: string[] = [];
+    for (const e of entries) {
+      const m = /^chunk (\d+)$/.exec(e.subject);
+      if (m) chunkIds.push(Number(m[1]));
+      else {
+        named.push(e.publicSubject ?? e.subject);
+        namedZh.push(e.subjectZh ?? e.publicSubject ?? e.subject);
+      }
+    }
+    const gap =
+      chunkIds.length > 0 ? describeChunkGap(chunkIds, plannedChunks) : null;
+    const shown = [...(gap ? [gap.phrase] : []), ...named];
+    const shownZh = [...(gap ? [gap.phraseZh] : []), ...namedZh];
+    const reasonZh = reasonZhOf.get(reason) ?? reason;
+    notReviewedParts.push({
+      en: reason
+        ? `Not reviewed: ${shown.join(', ')} — ${reason}.`
+        : `Not reviewed: ${shown.join(', ')}.`,
+      zh: reason
+        ? `未审查：${shownZh.join('、')}——${reasonZh}。`
+        : `未审查：${shownZh.join('、')}。`,
+    });
   }
 
   // Clause 5 — blockers the review could neither confirm nor clear. They
   // survive every event shape: erasing one is how a review approves the
   // very thing it is asking about.
-  const cannotTellBlock =
+  const cannotTellBlock: Bi[] =
     cannotTell.length === 0
       ? []
       : [
-          `Unresolved, please confirm: ${cannotTell
-            .map((l) => withMarker(l))
-            .join(' ')}`,
+          {
+            en: `Unresolved, please confirm: ${cannotTell
+              .map((l) => withMarker(l))
+              .join(' ')}`,
+            zh: `未决，请确认：${cannotTell.map((l) => withMarker(l)).join(' ')}`,
+          },
         ];
 
-  const bodyCriticalBlock = bodyCriticals.map((l) => withMarker(l));
+  // Model-written blockers: quoted as-is in both halves.
+  const bodyCriticalBlock: Bi[] = bodyCriticals
+    .map((l) => withMarker(l))
+    .map((l) => ({ en: l, zh: l }));
 
-  const contextUnavailableClause =
-    'Reviewed diff-only — the PR’s existing discussion could not be fetched, so this is not an approval and not a no-blockers claim.';
+  const contextUnavailableClause: Bi = {
+    en: 'Reviewed diff-only — the PR’s existing discussion could not be fetched, so this is not an approval and not a no-blockers claim.',
+    zh: '仅审查了 diff——无法获取 PR 已有的讨论，因此这不构成批准，也不构成"无阻断问题"的结论。',
+  };
+
+  // A deferred checker (actionlint's embedded shell): disclosed on EVERY verdict —
+  // including Approve — so the reader knows a workflow's shell was not linted, but
+  // it does not cap the verdict (it is a tool limitation, not a finding or an
+  // unrun-checker gap). This is the "disclosed but not capping" half.
+  const deferredBlock: Bi[] = gateDisclosed.length
+    ? [
+        {
+          en: `Not linted (tool limitation, not a blocker): ${gateDisclosed.join('; ')}.`,
+          zh: `未检查（工具限制，非阻断）：${gateDisclosed.join('; ')}。`,
+        },
+      ]
+    : [];
 
   if (event === 'REQUEST_CHANGES') {
     // Empty body, except the disclosures: every clause whose state holds
@@ -693,11 +890,12 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       ...(contextUnavailable ? [contextUnavailableClause] : []),
       ...cannotTellBlock,
       ...notReviewedParts,
+      ...deferredBlock,
       ...bodyCriticalBlock,
     ];
     return {
       event,
-      body: finish(parts.join('\n\n')),
+      body: render(parts, '\n\n'),
       baseEvent,
       cappedBy,
       downgraded,
@@ -709,7 +907,13 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   if (event === 'APPROVE') {
     return {
       event,
-      body: finish('No issues found. LGTM! ✅'),
+      body: render(
+        [
+          { en: 'No issues found. LGTM! ✅', zh: '未发现问题。LGTM！✅' },
+          ...deferredBlock,
+        ],
+        deferredBlock.length ? '\n\n' : ' ',
+      ),
       baseEvent,
       cappedBy,
       downgraded,
@@ -720,14 +924,16 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
 
   // COMMENT: ordered clause composition — each clause present iff its
   // condition holds, nothing else.
-  const clauses: string[] = [];
+  const clauses: Bi[] = [];
 
   // 1. Downgrade sentence (only when a presubmit flag changed the event).
   if (downgraded && downgradedFrom) {
     const reasons = downgradeReasons.join('; ');
-    clauses.push(
-      `⚠️ Downgraded from ${downgradedFrom} to Comment${reasons ? `: ${reasons}` : ''}.`,
-    );
+    const fromZh = downgradedFrom === 'Approve' ? '批准' : '请求修改';
+    clauses.push({
+      en: `⚠️ Downgraded from ${downgradedFrom} to Comment${reasons ? `: ${reasons}` : ''}.`,
+      zh: `⚠️ 已从${fromZh}降级为评论${reasons ? `：${reasons}` : ''}。`,
+    });
   }
 
   // 2. Context-unavailable clause — when present, it opens the body and no
@@ -753,7 +959,35 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       // body could open "Reviewed — no blockers." two lines above "nobody read
       // them." Nothing nobody read can be certified blocker-free.
       missingReceipts.length === 0;
-    clauses.push(canCertify ? 'Reviewed — no blockers.' : 'Reviewed.');
+    // The opener may not say "Reviewed." over a disclosure set that denies it.
+    // #7268's posted body opened exactly that way — "Reviewed. Suggestions are
+    // inline." above two sentences disclosing all 49 chunks — and the author's
+    // first sentence certified the thing every following one took back. A
+    // chunk counts as certified only when an agent read it AND no disclosure
+    // names it: the rewritten launches on that run had demonstrably read their
+    // chunks, which is why `coveredChunks` alone is not the test. The
+    // `coverage` subject is the no-plan/unreadable-transcripts family — there
+    // is no chunk universe to count, and what cannot be counted cannot be
+    // certified.
+    const disclosedChunkIds = new Set<number>();
+    for (const e of coverageEntries) {
+      const m = /^chunk (\d+)$/.exec(e.subject);
+      if (m) disclosedChunkIds.add(Number(m[1]));
+    }
+    const nothingCertified =
+      coverageEntries.some((e) => e.subject === 'coverage') ||
+      (plannedChunks.length > 0 &&
+        coveredChunks.every((id) => disclosedChunkIds.has(id)));
+    clauses.push(
+      nothingCertified
+        ? {
+            en: '⚠️ This run could not certify that any of this diff was reviewed.',
+            zh: '⚠️ 本次运行无法证明这个 diff 的任何部分经过了审查。',
+          }
+        : canCertify
+          ? { en: 'Reviewed — no blockers.', zh: '已审查——无阻断问题。' }
+          : { en: 'Reviewed.', zh: '已审查。' },
+    );
   }
 
   // 4. Suggestions clause — keyed off the POSTED count, not `s`: an
@@ -761,17 +995,23 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   //    the discarded sentence says the opposite is the round-6 collision
   //    this module exists to kill. (`s` stays right for the event — see
   //    above.)
-  if (suggestionsInline > 0) clauses.push('Suggestions are inline.');
+  if (suggestionsInline > 0) {
+    clauses.push({ en: 'Suggestions are inline.', zh: '建议见行内评论。' });
+  }
   if (suggestionsDiscarded > 0) {
     // Self-contained: this lands in the posted body, and "see the terminal
     // output" pointed the PR author at a terminal only the operator has —
     // eight hours of real bot reviews carried that dead reference on five
     // different pull requests.
-    clauses.push(
-      `${suggestionsDiscarded} Suggestion-level finding(s) could not be ` +
+    clauses.push({
+      en:
+        `${suggestionsDiscarded} Suggestion-level finding(s) could not be ` +
         `anchored to a changed line and were dropped; nothing further to act ` +
         `on here.`,
-    );
+      zh:
+        `${suggestionsDiscarded} 条建议级发现无法锚定到改动行，已丢弃；` +
+        `此处无需进一步处理。`,
+    });
   }
 
   // 5. Unresolved existing Criticals.
@@ -779,6 +1019,10 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
 
   // 6. Not-reviewed disclosure.
   clauses.push(...notReviewedParts);
+
+  // 6b. Deferred-checker disclosure (non-capping) — a workflow whose embedded
+  //     shell actionlint would lint but we do not yet trust.
+  clauses.push(...deferredBlock);
 
   // 7. Body Criticals — on a COMMENT that stands where a REQUEST_CHANGES
   //    would have been: the presubmit carve-out, and the unverified-blockers
@@ -790,7 +1034,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
 
   return {
     event,
-    body: finish(clauses.join(' ')),
+    body: render(clauses, ' '),
     baseEvent,
     cappedBy,
     downgraded,
@@ -799,10 +1043,314 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   };
 }
 
+/**
+ * A set of unreviewed chunk ids, said in the PR author's units.
+ *
+ * `chunk 28` is the run's own bookkeeping: the id selects a rebuild command
+ * on stderr, and nothing on the PR page maps it to code. #7268's posted body
+ * was two sentences enumerating all 49 of them — unsorted, because the first
+ * group rode transcript order — and the one fact they carried (nothing was
+ * certified) is the opener's job, not an enumeration's. The author's units
+ * are their files and, at the limit, the diff itself, so the ids collapse to
+ * whichever of those fits:
+ *
+ * - every planned chunk → `the entire diff`;
+ * - a gap whose files are known and few → the files, named;
+ * - anything wider (or a plan whose chunks carry no files) → a count against
+ *   the plan's total.
+ *
+ * The ids never render. They stay in the structural entries — the caps, the
+ * caller-echo dedup and the certification test all key on `chunk <id>` — and
+ * in the stderr remediation, where the id is the selector a reader can act
+ * on. `plural` is the phrase's grammatical number, for the one caller whose
+ * sentence carries a pronoun; `phraseZh` is the same phrase for the Chinese
+ * half of a bilingual body.
+ */
+export function describeChunkGap(
+  ids: readonly number[],
+  planned: ReadonlyArray<{ id: number; files: string[] }>,
+): { phrase: string; phraseZh: string; plural: boolean } {
+  const uniq = [...new Set(ids)].sort((a, b) => a - b);
+  const inGap = new Set(uniq);
+  if (planned.length > 0 && planned.every((p) => inGap.has(p.id))) {
+    return { phrase: 'the entire diff', phraseZh: '整个 diff', plural: false };
+  }
+  // The union of the gap's files, in plan order. One unknown chunk poisons
+  // the list: naming three files over a gap that also covers a fourth,
+  // unnameable one would tell the author the rest of their diff was read.
+  const byId = new Map(planned.map((p) => [p.id, p.files]));
+  const files: string[] = [];
+  let allKnown = planned.length > 0;
+  for (const id of uniq) {
+    const f = byId.get(id) ?? [];
+    if (f.length === 0) allKnown = false;
+    for (const p of f) {
+      if (!files.includes(p)) files.push(p);
+    }
+  }
+  if (allKnown && files.length <= 4) {
+    return {
+      phrase: `the diff ${uniq.length === 1 ? 'section' : 'sections'} covering ${files.join(', ')}`,
+      phraseZh: `涉及 ${files.join('、')} 的 diff 片段`,
+      plural: uniq.length > 1,
+    };
+  }
+  return {
+    phrase:
+      planned.length > 0
+        ? `${uniq.length} of the diff's ${planned.length} sections`
+        : `${uniq.length} ${uniq.length === 1 ? 'section' : 'sections'} of the diff`,
+    phraseZh:
+      planned.length > 0
+        ? `diff ${planned.length} 个片段中的 ${uniq.length} 个`
+        : `diff 中的 ${uniq.length} 个片段`,
+    plural: uniq.length > 1,
+  };
+}
+
+/**
+ * One body fragment, in the two languages a posted body can carry.
+ *
+ * `zh` renders only when `bilingualFromPlan` says the PR author writes
+ * Chinese; a fragment with no deterministic translation — a model-written
+ * finding, a caller echo, an interpolated error — carries the same text in
+ * both, and the Chinese section quotes it as it is.
+ */
+interface Bi {
+  en: string;
+  zh: string;
+}
+
+/** The production reader: one `gh pr view` for the description body. */
+const fetchPrBodyViaGh: PrBodyFetcher = (ownerRepo, prNumber) => {
+  const json = gh(
+    'pr',
+    'view',
+    prNumber,
+    '--repo',
+    ownerRepo,
+    '--json',
+    'body',
+  );
+  return (JSON.parse(json) as { body?: string }).body ?? '';
+};
+
+/**
+ * Read the script-lint report the orchestrator wrote and turn it into verdict
+ * inputs, deterministically. Returns the pre-confirmed `[lint]` Criticals (a
+ * finding on a changed line, above cosmetic `style`) and the unreviewed-scope
+ * entries (a checker not installed or crashed, or — owed but absent — a report
+ * the run never produced). The path is DERIVED from the plan, never taken from
+ * the model's input JSON, and the plan itself decides whether the lint was owed:
+ * this is what takes the model out of both the block decision and the proof it ran.
+ */
+export function scriptLintGate(planPath: string): {
+  criticals: string[];
+  unreviewed: string[];
+  disclosed: string[];
+} {
+  const criticals: string[] = [];
+  const unreviewed: string[] = [];
+  // Disclosed-but-NOT-capping: a `deferred` checker (actionlint) is a known tool
+  // limitation, not a finding and not an unrun-checker gap — the reader is told a
+  // workflow's embedded shell was not linted, but the verdict is not capped on it.
+  const disclosed: string[] = [];
+  let plan: {
+    prNumber?: unknown;
+    files?: unknown;
+    diffPathAbsolute?: unknown;
+  };
+  try {
+    plan = JSON.parse(readFileSync(planPath, 'utf8'));
+  } catch {
+    // Fail CLOSED, like every other gate path: an unreadable plan means we cannot
+    // tell whether the lint was owed, and "cannot tell" must not open the gate.
+    unreviewed.push(
+      'the executable-script lint — could not read the plan to check the gate',
+    );
+    return { criticals, unreviewed, disclosed };
+  }
+  // A diff-only (cross-repo lightweight) review has no worktree, so the
+  // orchestrator could not have run script-lint — do not fail it closed for a
+  // command it cannot run, exactly as the roster never owed it there.
+  if (reviewMode(plan as RosterPlan) === 'diff-only') {
+    return { criticals, unreviewed, disclosed };
+  }
+  const owed = hasExecutableScript(plan as RosterPlan);
+  const reportPath = join(
+    dirname(planPath),
+    scriptLintReportName(plan.prNumber),
+  );
+  let report: ScriptLintReport;
+  try {
+    report = JSON.parse(readFileSync(reportPath, 'utf8')) as ScriptLintReport;
+  } catch {
+    // No report. Fail closed ONLY when the diff carried a path-detected script
+    // (owed) — otherwise a diff with no scripts would be capped for a command it
+    // had no reason to run.
+    //
+    // The one gap this leaves — a SHEBANG-only script (`hasExecutableScript` is
+    // path-only, so `owed` is false for it) whose command was skipped — is closed by
+    // a CONTRACT, not by this predicate: SKILL.md has the orchestrator run
+    // `qwen review script-lint` on EVERY same-repo review, unconditionally. So a
+    // compliant run always writes a report (even "nothing to lint"), the shebang
+    // script is linted and appears in it, and it is handled below on its own
+    // findings regardless of `owed`. "No report" therefore means the command did not
+    // run — the `owed` cap covers the path-detectable case; the shebang case relies
+    // on the always-run contract above, which is why it is stated there in prose.
+    if (owed) {
+      unreviewed.push(
+        'the executable-script lint — `qwen review script-lint` produced no report',
+      );
+    }
+    return { criticals, unreviewed, disclosed };
+  }
+  // Fail closed on a STALE report — bound to the diff's CONTENT, not a commit. The
+  // report carries a hash of the diff it ran against; we re-hash the plan's current
+  // diff. A mismatch means it is not this review's report: a later PR commit
+  // (different diff), OR — the local case HEAD cannot see — an uncommitted edit that
+  // changes the working-tree diff. An absent hash on EITHER side (the diff could not
+  // be read here or there) is unverifiable and also fails closed — `!planDiffHash`
+  // handles that explicitly, because `undefined !== undefined` is FALSE and would
+  // otherwise accept an arbitrary hashless report. Only both sides present and equal
+  // is fresh.
+  const planDiffHash = diffHashOf(plan.diffPathAbsolute);
+  if (!planDiffHash || report.diffHash !== planDiffHash) {
+    unreviewed.push(
+      'the executable-script lint — the report is stale or its diff could not be verified; re-run `qwen review script-lint`',
+    );
+    return { criticals, unreviewed, disclosed };
+  }
+  // Process the report's findings REGARDLESS of the path-only owed predicate: the
+  // report can name a shebang script (`hook.sh` by its `#!`) that `pathTool` could
+  // not, and returning early on the predicate would drop exactly those findings.
+  for (const file of report.checked ?? []) {
+    for (const f of file.findings ?? []) {
+      if (f.inDiff && f.level !== 'style') {
+        criticals.push(
+          `${mdField(file.path)}:${f.line} ${f.code} — ${mdField(f.message)} [lint]`,
+        );
+      }
+    }
+  }
+  // Each skipped entry carries its OWN reason (not installed, or an irregular file
+  // like a symlink) — surface it, rather than hard-coding "not installed". A
+  // deferred checker is NOT here: it is its own state, disclosed below without capping.
+  for (const s of report.skipped ?? []) {
+    unreviewed.push(
+      `the executable-script lint — ${mdField(s.path)}: ${s.reason ?? `${s.tool} unavailable`}`,
+    );
+  }
+  for (const e of report.errored ?? []) {
+    unreviewed.push(
+      `the executable-script lint — ${e.tool} errored on ${mdField(e.path)}`,
+    );
+  }
+  // A deferred checker (actionlint) is disclosed but does not cap — the reader is
+  // told the workflow's embedded shell was not linted, without making every
+  // workflow PR un-Approvable on a checker we deliberately decline to run.
+  for (const d of report.deferred ?? []) {
+    disclosed.push(
+      `the executable-script lint — ${mdField(d.path)}: ${d.reason ?? `${d.tool} deferred`}`,
+    );
+  }
+  return { criticals, unreviewed, disclosed };
+}
+
+/**
+ * Render a PR-controlled segment — a diff file path, a linter's message — safe to
+ * splice into the review body we POST to GitHub. Git allows almost any byte in a
+ * filename, so an unescaped path could carry `@mentions`, HTML, Markdown, or a
+ * newline that forges body structure. An inline code span makes Markdown/HTML/`@`
+ * inert; stripping backticks and newlines stops the value breaking out of the span
+ * or forging new lines. (`capture-local`'s `display()` does the terminal-side
+ * equivalent for stderr; this is the Markdown-body side.)
+ */
+function mdField(s: unknown): string {
+  return (
+    '`' +
+    String(s)
+      .replace(/[`\r\n]+/g, ' ')
+      .trim() +
+    '`'
+  );
+}
+
+/**
+ * The report filename the orchestrator writes and this derives — pr-numbered
+ * when the plan resolved a PR, a stable local name otherwise (matching the old
+ * `agent-prompt` convention so a mid-flight upgrade finds the same file).
+ */
+function scriptLintReportName(pr: unknown): string {
+  const positive =
+    (typeof pr === 'number' && Number.isInteger(pr) && pr > 0) ||
+    (typeof pr === 'string' && /^\d+$/.test(pr) && Number(pr) > 0);
+  return positive
+    ? `qwen-review-pr-${pr}-script-lint.json`
+    : 'qwen-review-script-lint.json';
+}
+
+/**
+ * Whether the posted body carries the collapsed Chinese version: the plan
+ * (fetch-pr's report) recorded Han characters in the PR description. The
+ * signal is the CLI's own — never the caller's, who could otherwise toggle
+ * the register of a certified body. A local plan has no such field, and a
+ * plan that cannot be read defaults to English-only: the language must never
+ * take the review down.
+ *
+ * A recorded `false` is authoritative: `fetch-pr` fetched the body and found
+ * no Han, so English-only is the answer and no network is spent — every
+ * English-authored PR review takes this path.
+ *
+ * The field being *absent* is a different state, and the one that shipped an
+ * English-only review over a Chinese-authored PR (#7686): `fetch-pr` always
+ * writes it, but a `plan-diff` plan never does, and an orchestrator that
+ * improvises the pipeline can wire `compose-review` at a plan that is not
+ * `fetch-pr`'s report at all. So when the flag is missing yet the plan still
+ * carries the PR's identity, recover the signal from the live PR — the real
+ * description, which the caller cannot fake, so this hardens the "signal is
+ * the CLI's own" property rather than loosening it. Any failure of that fetch
+ * falls back to English: the language must never take the review down.
+ */
+function bilingualFromPlan(
+  planPath: string | undefined,
+  fetchPrBody: PrBodyFetcher = fetchPrBodyViaGh,
+): boolean {
+  if (!planPath) return false;
+  let plan: {
+    prDescriptionHasHan?: unknown;
+    ownerRepo?: unknown;
+    prNumber?: unknown;
+  };
+  try {
+    plan = JSON.parse(readFileSync(planPath, 'utf8'));
+  } catch {
+    return false;
+  }
+  if (typeof plan?.prDescriptionHasHan === 'boolean') {
+    return plan.prDescriptionHasHan;
+  }
+  const ownerRepo =
+    typeof plan?.ownerRepo === 'string' && plan.ownerRepo
+      ? plan.ownerRepo
+      : undefined;
+  const prNumber = isPositivePrNumber(plan?.prNumber)
+    ? String(plan.prNumber)
+    : undefined;
+  if (!ownerRepo || !prNumber) return false;
+  try {
+    return /\p{Script=Han}/u.test(fetchPrBody(ownerRepo, prNumber));
+  } catch {
+    return false;
+  }
+}
+
 interface ComposeReviewCliArgs {
   input: string | undefined;
   comments: string;
   out: string | undefined;
+  /** GitHub Enterprise host — routes this command's `gh` calls via GH_HOST. */
+  host?: string;
 }
 
 /**
@@ -878,9 +1426,22 @@ export const composeReviewCommand: CommandModule = {
       .option('out', {
         type: 'string',
         describe: 'Also write the {event, body} JSON to this path',
+      })
+      .option('host', {
+        type: 'string',
+        describe:
+          'GitHub Enterprise host (routes gh via GH_HOST) — needed only when ' +
+          'the bilingual body-language recovery has to fetch the PR description',
       }),
   handler: (argv) => {
-    const { input, comments, out } = argv as unknown as ComposeReviewCliArgs;
+    const { input, comments, out, host } =
+      argv as unknown as ComposeReviewCliArgs;
+    // Route this command's own `gh` call — the bilingual recovery's `gh pr view`
+    // (see `fetchPrBodyViaGh`) — via the PR's host, exactly as fetch-pr and submit
+    // do. Without it a GHE review whose plan lacks the Han flag fetches the body
+    // from github.com, fails, and composes an English-only body that disagrees
+    // with what `submit` (which routes by host) posts.
+    setGhHost(host);
     // yargs enforces --comments on the real command line; this covers every
     // other way in (tests, programmatic calls) with the same sentence instead
     // of an ENOENT on `undefined`.
@@ -900,6 +1461,13 @@ export const composeReviewCommand: CommandModule = {
     // always resolves the transcripts from the environment the CLI exported.
     const parsed = JSON.parse(raw) as ComposeReviewInput;
     delete parsed.env;
+    // Same reasoning for the bilingual body-language fetcher: it is a unit-test
+    // seam (production reads the PR with `gh pr view`). A state JSON carrying it —
+    // even a non-function value like `"suppress"` — would otherwise reach
+    // `bilingualFromPlan`, be called, throw, and drop the Chinese fold through the
+    // fail-safe. Stripping it here keeps the register the CLI's own, not the
+    // caller's, which is the whole point of the seam.
+    delete parsed.prBodyFetcher;
     // The inline counts are counted, not accepted — `submit` has refused them
     // since the count-beside-the-comments bug, and this boundary refusing them
     // too is what makes the Step 6 line and the posted verdict the same
