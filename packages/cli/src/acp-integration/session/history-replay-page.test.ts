@@ -6,6 +6,7 @@
 
 import type {
   ChatRecord,
+  GoalSnapshotV2,
   SessionTranscriptCursorState,
   SessionTranscriptRecordPage,
 } from '@qwen-code/qwen-code-core';
@@ -19,6 +20,21 @@ import {
 
 const SESSION_ID = '550e8400-e29b-41d4-a716-446655440000';
 const TIMESTAMP = '2026-07-12T00:00:00.000Z';
+const GOAL_STATE: GoalSnapshotV2 = {
+  v: 2,
+  activity: 'idle',
+  goal: {
+    goalId: 'goal-1',
+    revision: 1,
+    objective: 'ship it',
+    status: 'active',
+    evidenceCursor: { recordId: 'goal-state' },
+    turnCount: 2,
+    activeTimeMs: 1000,
+    createdAt: 1,
+    updatedAt: 2,
+  },
+};
 
 function userRecord(): ChatRecord {
   return {
@@ -183,6 +199,36 @@ describe('history replay page', () => {
       gaps: [],
     });
     expect(encodeCursor).toHaveBeenCalledWith(cursorState());
+  });
+
+  it('passes authoritative Goal state into backward replay', async () => {
+    const replayPage = vi
+      .spyOn(HistoryReplayer.prototype, 'replayPage')
+      .mockResolvedValueOnce({
+        pendingToolCalls: [],
+        replay: {
+          v: 1,
+          pendingToolCalls: [],
+          cumulativeUsage: createReplayCumulativeUsage(),
+          goalState: GOAL_STATE,
+        },
+      });
+
+    await replayTranscriptRecordPage({
+      sessionId: SESSION_ID,
+      page: recordPage({
+        direction: 'backward',
+        replay: { goalState: GOAL_STATE },
+      }),
+      encodeCursor: vi.fn(),
+    });
+
+    expect(replayPage).toHaveBeenCalledWith([], {
+      pendingToolCalls: [],
+      finalizeDangling: true,
+      gaps: [],
+      goalState: GOAL_STATE,
+    });
   });
 
   it('terminates pagination when replay conversion fails', async () => {
