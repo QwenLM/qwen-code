@@ -85,6 +85,20 @@ describe('stable release notes workflow', () => {
     );
   });
 
+  it('comments released-in version only for squash-merge PR trailers', () => {
+    const step = getStep(
+      finalizeWorkflow,
+      'Comment released-in version on merged PRs',
+    );
+
+    expect(step).toContain("grep -oE '\\(#[0-9]+\\)$'");
+    expect(step).toContain("tr -d '()#'");
+    expect(step).not.toContain("grep -oE '#[0-9]+'");
+    expect(step).toContain("marker='<!-- qwen-release-comment:v1 -->'");
+    expect(step).toContain('gh pr view "${num}" --json comments');
+    expect(step).toContain('gh pr comment "${num}" --body "${body}"');
+  });
+
   it('does not recreate an already merged release PR during retries', () => {
     const pr = getStep(
       finalizeWorkflow,

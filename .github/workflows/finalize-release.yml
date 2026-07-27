@@ -154,7 +154,7 @@ jobs:
           set -euo pipefail
           # Squash-merge commit subjects carry the PR as "(#NNN)"; collect those between the two tags.
           # The trailing "|| true" keeps "no matches" (empty range) from failing under pipefail.
-          pr_numbers="$(git log --pretty=format:'%s' "${PREVIOUS_TAG}..${RELEASE_TAG}" | grep -oE '#[0-9]+' | tr -d '#' | sort -un || true)"
+          pr_numbers="$(git log --pretty=format:'%s' "${PREVIOUS_TAG}..${RELEASE_TAG}" | grep -oE '\(#[0-9]+\)$' | tr -d '()#' | sort -un || true)"
           if [[ -z "${pr_numbers}" ]]; then
             echo "No PR references found between ${PREVIOUS_TAG} and ${RELEASE_TAG}."
             exit 0
