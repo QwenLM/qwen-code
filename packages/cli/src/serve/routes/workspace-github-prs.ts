@@ -18,6 +18,7 @@ import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
+  sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
 import { applyReadHeaders } from './workspace-file-read.js';
 
@@ -55,6 +56,7 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
 
   const getPullRequests = (
     workspaceCwd: string,
+    env?: Readonly<Record<string, string | undefined>>,
   ): Promise<FetchGitHubPullRequestsResult> => {
     const now = Date.now();
     const existing = cache.get(workspaceCwd);
@@ -63,7 +65,7 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
       (existing.settledAt === null || now - existing.settledAt < ttlMs);
     if (!fresh) {
       const entry: PrsCacheEntry = {
-        promise: fetchGitHubPullRequests(workspaceCwd),
+        promise: fetchGitHubPullRequests(workspaceCwd, env),
         settledAt: null,
       };
       cache.set(workspaceCwd, entry);
@@ -93,7 +95,10 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
 
     applyReadHeaders(res);
     try {
-      const result = await getPullRequests(runtime.workspaceCwd);
+      const result = await getPullRequests(
+        runtime.workspaceCwd,
+        runtime.env.effectiveEnv,
+      );
       switch (result.kind) {
         case 'ok':
           res.status(200).json({
@@ -180,12 +185,16 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
       const head = typeof body['head'] === 'string' ? body['head'] : undefined;
 
       try {
-        const result = await createGitHubPullRequest(runtime.workspaceCwd, {
-          title: title.trim(),
-          body: prBody,
-          base,
-          head,
-        });
+        const result = await createGitHubPullRequest(
+          runtime.workspaceCwd,
+          {
+            title: title.trim(),
+            body: prBody,
+            base,
+            head,
+          },
+          runtime.env.effectiveEnv,
+        );
         switch (result.kind) {
           case 'ok':
             res.status(201).json({ url: result.url, number: result.number });
@@ -231,9 +240,15 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
     if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
 
     try {
-      const branch = await getDefaultBranch(runtime.workspaceCwd);
+      runtime.generationGuard?.assertOpen();
+      const branch = await getDefaultBranch(
+        runtime.workspaceCwd,
+        runtime.env.effectiveEnv,
+      );
+      runtime.generationGuard?.assertOpen();
       res.status(200).json({ branch: branch ?? 'origin/main' });
     } catch (err) {
+      if (sendGenerationClosedError(res, err)) return;
       deps.sendBridgeError(res, err, { route });
     }
   });

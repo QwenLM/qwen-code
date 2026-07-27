@@ -164,7 +164,10 @@ export function parseGhPrList(stdout: string): GitHubPullRequest[] {
     .sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
-function runGhPrList(gitRoot: string): Promise<string> {
+function runGhPrList(
+  gitRoot: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
   return new Promise((resolve, reject) => {
     execFile(
       'gh',
@@ -184,6 +187,7 @@ function runGhPrList(gitRoot: string): Promise<string> {
         maxBuffer: GH_MAX_BUFFER,
         windowsHide: true,
         encoding: 'utf8',
+        env: gitEnv(env),
       },
       (error, stdout) => {
         if (error) reject(error);
@@ -217,17 +221,20 @@ function ghErrorMessage(
  * List open pull requests for the GitHub repo containing `cwd`, newest
  * `updatedAt` first. Shells out to the `gh` CLI so the user's existing
  * `gh auth` login applies; returns a discriminated union instead of throwing
- * so route layers can map each failure mode to a distinct wire code.
+ * so route layers can map each failure mode to a distinct wire code. The
+ * optional `env` supplies workspace credentials (e.g. GH_TOKEN / GH_CONFIG_DIR)
+ * while the denylist still strips repository selectors.
  */
 export async function fetchGitHubPullRequests(
   cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
 ): Promise<FetchGitHubPullRequestsResult> {
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return { kind: 'not_a_repo' };
 
   let stdout: string;
   try {
-    stdout = await runGhPrList(gitRoot);
+    stdout = await runGhPrList(gitRoot, env);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return { kind: 'cli_unavailable' };
@@ -262,6 +269,7 @@ const GH_CREATE_TIMEOUT_MS = 30_000;
 function runGhPrCreate(
   gitRoot: string,
   opts: CreateGitHubPullRequestOptions,
+  env?: Readonly<Record<string, string | undefined>>,
 ): Promise<string> {
   const args = ['pr', 'create', '--title', opts.title];
   // Always pass --body so gh never prompts interactively for one.
@@ -278,7 +286,7 @@ function runGhPrCreate(
         maxBuffer: GH_MAX_BUFFER,
         windowsHide: true,
         encoding: 'utf8',
-        env: gitEnv(),
+        env: gitEnv(env),
       },
       (error, stdout) => {
         if (error) reject(error);
@@ -294,13 +302,14 @@ function runGhPrCreate(
 export async function createGitHubPullRequest(
   cwd: string,
   opts: CreateGitHubPullRequestOptions,
+  env?: Readonly<Record<string, string | undefined>>,
 ): Promise<CreateGitHubPullRequestResult> {
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return { kind: 'not_a_repo' };
 
   let stdout: string;
   try {
-    stdout = await runGhPrCreate(gitRoot, opts);
+    stdout = await runGhPrCreate(gitRoot, opts, env);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
       return { kind: 'cli_unavailable' };
@@ -323,7 +332,10 @@ export async function createGitHubPullRequest(
  * Get the default branch as a fully-qualified remote ref (e.g.
  * "origin/main").
  */
-export async function getDefaultBranch(cwd: string): Promise<string | null> {
+export async function getDefaultBranch(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string | null> {
   const gitRoot = findGitRoot(cwd);
   if (!gitRoot) return null;
   try {
@@ -335,7 +347,7 @@ export async function getDefaultBranch(cwd: string): Promise<string | null> {
         timeout: 5_000,
         encoding: 'utf8',
         windowsHide: true,
-        env: gitEnv(),
+        env: gitEnv(env),
       },
     );
     const raw = stdout.trim();

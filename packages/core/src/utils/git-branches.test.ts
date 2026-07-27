@@ -10,9 +10,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import {
+  fetchGitBranches,
   gitCheckout,
   gitCommit,
   gitCreateBranch,
+  gitEnv,
   gitPull,
   gitPush,
   isValidCheckoutRef,
@@ -87,6 +89,50 @@ describe('isValidCheckoutRef', () => {
   });
 });
 
+describe('gitEnv (R12 env isolation)', () => {
+  it('strips repository-shaping variables from the child environment', () => {
+    const env = gitEnv({
+      PATH: '/usr/bin',
+      GH_REPO: 'evil/repo',
+      GIT_DIR: '/elsewhere/.git',
+      GIT_CONFIG_COUNT: '1',
+      GIT_CONFIG_KEY_0: 'url.https://evil.insteadOf',
+      GIT_CONFIG_VALUE_0: 'https://github.com/',
+      GIT_CONFIG_PARAMETERS: "'foo=bar'",
+      GIT_OBJECT_DIRECTORY: '/tmp/objects',
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: '/tmp/alt',
+    });
+    expect(env['PATH']).toBe('/usr/bin');
+    expect(env['LC_ALL']).toBe('C');
+    for (const key of [
+      'GH_REPO',
+      'GIT_DIR',
+      'GIT_CONFIG_COUNT',
+      'GIT_CONFIG_KEY_0',
+      'GIT_CONFIG_VALUE_0',
+      'GIT_CONFIG_PARAMETERS',
+      'GIT_OBJECT_DIRECTORY',
+      'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+    ]) {
+      expect(env[key]).toBeUndefined();
+    }
+  });
+
+  it('keeps repository discovery on the cwd even with a hostile GIT_DIR', async () => {
+    const dir = makeRepo();
+    git(dir, 'branch', 'feature');
+    const saved = process.env['GIT_DIR'];
+    process.env['GIT_DIR'] = '/definitely/not/a/repo/.git';
+    try {
+      const result = await fetchGitBranches(dir);
+      expect(result.local.map((b) => b.name)).toContain('feature');
+    } finally {
+      if (saved === undefined) delete process.env['GIT_DIR'];
+      else process.env['GIT_DIR'] = saved;
+    }
+  });
+});
+
 describe('gitCheckout', () => {
   it('switches to an existing branch', async () => {
     const dir = makeRepo();
@@ -105,6 +151,22 @@ describe('gitCheckout', () => {
     const result = await gitCheckout(dir, 'v1.0');
 
     expect(result.detached).toBe(true);
+  });
+
+  it('checks out the tag, not a same-named branch, via refs/tags/', async () => {
+    const dir = makeRepo();
+    // Tag the initial commit, then advance the branch and create a same-named branch.
+    git(dir, 'tag', 'release');
+    const tagCommit = headSha(dir);
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'second');
+    git(dir, 'branch', 'release'); // refs/heads/release now differs from refs/tags/release
+
+    const result = await gitCheckout(dir, 'refs/tags/release');
+
+    expect(result.detached).toBe(true);
+    expect(headSha(dir)).toBe(tagCommit);
   });
 
   it('rejects a pathspec ref that would discard working-tree changes', async () => {
@@ -185,6 +247,29 @@ describe('gitCreateBranch', () => {
   });
 });
 
+describe('gitCreateBranch rollback (R12)', () => {
+  it('rolls back a branch created before a failing post-checkout hook', async () => {
+    const dir = makeRepo();
+    const before = currentBranch(dir);
+    const hookDir = path.join(dir, '.git', 'hooks');
+    fs.mkdirSync(hookDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(hookDir, 'post-checkout'),
+      '#!/bin/sh\nexit 1\n',
+      {
+        mode: 0o755,
+      },
+    );
+
+    await expect(gitCreateBranch(dir, 'topic')).rejects.toThrow();
+
+    // HEAD is restored and the half-created branch is removed.
+    expect(currentBranch(dir)).toBe(before);
+    const branches = git(dir, 'branch', '--format=%(refname:short)');
+    expect(branches.split('\n').map((s) => s.trim())).not.toContain('topic');
+  });
+});
+
 describe('gitPush', () => {
   it('throws a clear error when setUpstream is used in detached HEAD', async () => {
     const dir = makeRepo();
@@ -246,6 +331,57 @@ describe('gitPush', () => {
       `${branch}@{u}`,
     ).trim();
     expect(tracking).toBe(`myfork/${branch}`);
+  });
+});
+
+describe('gitPush push-remote precedence (R12)', () => {
+  it('honors remote.pushDefault over the sole/origin remote', async () => {
+    const dir = makeRepo();
+    const origin = makeBareRemote();
+    const fork = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', origin);
+    git(dir, 'remote', 'add', 'fork', fork);
+    git(dir, 'config', 'remote.pushDefault', 'fork');
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'second');
+
+    await gitPush(dir, { setUpstream: true });
+
+    const branch = currentBranch(dir);
+    const tracking = git(
+      dir,
+      'rev-parse',
+      '--abbrev-ref',
+      `${branch}@{u}`,
+    ).trim();
+    expect(tracking).toBe(`fork/${branch}`);
+  });
+
+  it('honors branch.<name>.pushRemote over branch.<name>.remote', async () => {
+    const dir = makeRepo();
+    const origin = makeBareRemote();
+    const fork = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', origin);
+    git(dir, 'remote', 'add', 'fork', fork);
+    const branch = currentBranch(dir);
+    // Pull remote is origin but there is no upstream tracking (@{u} fails),
+    // and the push remote is explicitly the fork.
+    git(dir, 'config', `branch.${branch}.remote`, 'origin');
+    git(dir, 'config', `branch.${branch}.pushRemote`, 'fork');
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'second');
+
+    await gitPush(dir, { setUpstream: true });
+
+    const tracking = git(
+      dir,
+      'rev-parse',
+      '--abbrev-ref',
+      `${branch}@{u}`,
+    ).trim();
+    expect(tracking).toBe(`fork/${branch}`);
   });
 });
 

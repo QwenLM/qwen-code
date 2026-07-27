@@ -27,6 +27,7 @@ import {
   resolveContainedCwd,
   resolveContainedCwdOrFail,
   resolveWorkspaceRuntimeFromParam,
+  sendGenerationClosedError,
   sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
 
@@ -109,9 +110,12 @@ async function handleBranches(
   cwd: string,
   sendBridgeError: SendBridgeError,
   route: string,
+  assertGenerationOpen?: () => void,
 ): Promise<void> {
   try {
+    assertGenerationOpen?.();
     const result = await fetchGitBranches(cwd);
+    assertGenerationOpen?.();
     res.status(200).json({
       v: 1,
       workspaceCwd: cwd,
@@ -124,6 +128,7 @@ async function handleBranches(
       detached: result.detached,
     });
   } catch (err) {
+    if (sendGenerationClosedError(res, err)) return;
     sendGitError(res, err, route, sendBridgeError, cwd);
   }
 }
@@ -414,6 +419,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
       resolveContainedCwd(req, runtime.workspaceCwd),
       deps.sendBridgeError,
       'GET /workspaces/:workspace/git/branches',
+      () => runtime.generationGuard?.assertOpen(),
     );
   });
   app.post(

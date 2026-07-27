@@ -3265,8 +3265,12 @@ export function App({
     async (cwd: string, forceCreate?: boolean): Promise<string | undefined> => {
       try {
         if (!forceCreate) {
-          // If the connected session is for this workspace, use it directly.
-          if (connection.sessionId && activeWorkspaceCwd === cwd) {
+          // Reuse the connected session only when it owns the target checkout.
+          // For a linked-worktree session the owned checkout is the worktree
+          // path, not the base workspace (activeWorkspaceCwd), so a Commit
+          // opened on the base workspace must not borrow the worktree session.
+          const sessionOwnerCwd = sessionWorktree?.path ?? activeWorkspaceCwd;
+          if (connection.sessionId && sessionOwnerCwd === cwd) {
             return connection.sessionId;
           }
           // Fetch the most recent session for this workspace.
@@ -3289,6 +3293,7 @@ export function App({
       activeWorkspaceCwd,
       workspace.client,
       sessionActions,
+      sessionWorktree,
     ],
   );
 

@@ -112,7 +112,10 @@ export function GitDialog({
           // Session is stale — force-create via the workspace resolver.
           // The resolver's listWorkspaceSessions path returned a dead id;
           // calling createSession directly guarantees a live session.
-          const fresh = await resolveSessionRef.current(workspaceCwd, true);
+          const fresh = await resolveSessionRef.current(
+            gitCwd ?? workspaceCwd,
+            true,
+          );
           if (fresh && fresh !== sid && !signal.aborted) {
             return client.btwSession(fresh, prompt, { signal });
           }
@@ -120,7 +123,7 @@ export function GitDialog({
         throw err;
       }
     },
-    [client, workspaceCwd],
+    [client, workspaceCwd, gitCwd],
   );
   const btwWithRetryRef = useRef(btwWithRetry);
   btwWithRetryRef.current = btwWithRetry;
@@ -137,7 +140,7 @@ export function GitDialog({
     setCommitMsg('');
 
     const resolveSession = resolveSessionRef.current
-      ? resolveSessionRef.current(workspaceCwd)
+      ? resolveSessionRef.current(gitCwd ?? workspaceCwd)
       : sessionIdRef.current
         ? Promise.resolve(sessionIdRef.current)
         : Promise.resolve(undefined);
@@ -247,7 +250,7 @@ export function GitDialog({
 
   const doCommit = useCallback(
     async (andPush: boolean) => {
-      if (commitBusy || !commitMsg.trim()) return;
+      if (commitBusy || prBusy || !commitMsg.trim()) return;
       setCommitBusy(andPush ? 'push' : 'commit');
       setCommitStatus(null);
       try {
@@ -289,7 +292,7 @@ export function GitDialog({
         setCommitBusy(null);
       }
     },
-    [client, workspaceCwd, commitMsg, commitBusy, t],
+    [client, workspaceCwd, commitMsg, commitBusy, prBusy, t],
   );
 
   // Auto-fill PR form when it opens.
@@ -327,7 +330,7 @@ export function GitDialog({
       .catch(() => 'origin/main');
 
     const resolveSession = resolveSessionRef.current
-      ? resolveSessionRef.current(workspaceCwd)
+      ? resolveSessionRef.current(gitCwd ?? workspaceCwd)
       : sessionIdRef.current
         ? Promise.resolve(sessionIdRef.current)
         : Promise.resolve(undefined);
@@ -449,7 +452,7 @@ export function GitDialog({
   }, [prFormOpen, isCommit, client, workspaceCwd, gitCwd, t]);
 
   const doCreatePr = useCallback(async () => {
-    if (!prTitle.trim()) return;
+    if (!prTitle.trim() || prGenerating) return;
     setPrBusy(true);
     setPrStatus(null);
     try {
@@ -484,7 +487,16 @@ export function GitDialog({
     } finally {
       setPrBusy(false);
     }
-  }, [client, workspaceCwd, prTitle, prBody, prBase, prBranches, t]);
+  }, [
+    client,
+    workspaceCwd,
+    prTitle,
+    prBody,
+    prBase,
+    prBranches,
+    prGenerating,
+    t,
+  ]);
 
   return (
     <DialogShell
@@ -589,7 +601,7 @@ export function GitDialog({
               <button
                 type="button"
                 className={`${styles.commitBtn} ${styles.commitBtnPrimary}`}
-                disabled={!commitMsg.trim() || !!commitBusy}
+                disabled={!commitMsg.trim() || !!commitBusy || prBusy}
                 onClick={() => void doCommit(false)}
               >
                 {commitBusy === 'commit' && (
@@ -600,7 +612,7 @@ export function GitDialog({
               <button
                 type="button"
                 className={`${styles.commitBtn} ${styles.commitBtnSecondary}`}
-                disabled={!commitMsg.trim() || !!commitBusy}
+                disabled={!commitMsg.trim() || !!commitBusy || prBusy}
                 onClick={() => void doCommit(true)}
               >
                 {commitBusy === 'push' && (
@@ -684,7 +696,9 @@ export function GitDialog({
                   <button
                     type="button"
                     className={`${styles.commitBtn} ${styles.commitBtnPrimary}`}
-                    disabled={!prTitle.trim() || prBusy || !!commitBusy}
+                    disabled={
+                      !prTitle.trim() || prBusy || prGenerating || !!commitBusy
+                    }
                     onClick={() => void doCreatePr()}
                   >
                     {prBusy && (

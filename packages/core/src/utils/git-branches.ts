@@ -50,12 +50,32 @@ const GIT_ENV_VARS_TO_CLEAR = [
   'GIT_WORK_TREE',
   'GIT_COMMON_DIR',
   'GIT_INDEX_FILE',
+  // Repository selectors that an inherited daemon environment could use to
+  // redirect a trusted-workspace git/gh invocation to a different repository
+  // or object database despite the resolved cwd.
+  'GH_REPO',
+  'GIT_CONFIG_COUNT',
+  'GIT_CONFIG_PARAMETERS',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
 ];
 
-export function gitEnv(): Record<string, string | undefined> {
-  const env = { ...process.env };
+// Command-scope config injection uses numbered GIT_CONFIG_KEY_<n> /
+// GIT_CONFIG_VALUE_<n> pairs (an inherited `url.<base>.insteadOf` can retarget
+// a clone/push). The index count is unbounded, so strip them by prefix.
+const GIT_ENV_PREFIXES_TO_CLEAR = ['GIT_CONFIG_KEY_', 'GIT_CONFIG_VALUE_'];
+
+export function gitEnv(
+  base?: Readonly<Record<string, string | undefined>>,
+): Record<string, string | undefined> {
+  const env = { ...(base ?? process.env) };
   for (const key of GIT_ENV_VARS_TO_CLEAR) {
     delete env[key];
+  }
+  for (const key of Object.keys(env)) {
+    if (GIT_ENV_PREFIXES_TO_CLEAR.some((prefix) => key.startsWith(prefix))) {
+      delete env[key];
+    }
   }
   env['LC_ALL'] = 'C';
   env['LANG'] = 'C';
@@ -324,7 +344,38 @@ export async function gitCreateBranch(
     args.push(startPoint);
   }
   args.push('--');
-  await runGit(cwd, args);
+  // `git checkout -b` creates the ref and switches HEAD before running the
+  // post-checkout hook. If that hook fails the call throws even though the
+  // workspace is already on the new branch; capture the previous HEAD so we
+  // can roll the half-created branch back instead of leaving it in place.
+  const originalRef = (
+    await runGit(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(
+      () => '',
+    )
+  ).trim();
+  const originalCommit = originalRef
+    ? ''
+    : (await runGit(cwd, ['rev-parse', 'HEAD']).catch(() => '')).trim();
+  try {
+    await runGit(cwd, args);
+  } catch (err) {
+    const nowOn = (
+      await runGit(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(
+        () => '',
+      )
+    ).trim();
+    if (nowOn === name) {
+      if (originalRef) {
+        await runGit(cwd, ['checkout', originalRef, '--']).catch(() => {});
+      } else if (originalCommit) {
+        await runGit(cwd, ['checkout', '--detach', originalCommit, '--']).catch(
+          () => {},
+        );
+      }
+      await runGit(cwd, ['branch', '-D', name]).catch(() => {});
+    }
+    throw err;
+  }
   return { branch: name, detached: false };
 }
 
@@ -337,8 +388,9 @@ export interface GitPushResult {
  * Push the current branch. When `setUpstream` is requested and the branch
  * already has an upstream, a plain `git push` is used so the configured
  * remote is preserved. Only when no upstream exists does it fall back to
- * `--set-upstream <remote> <branch>`, preferring the sole configured remote
- * over a hardcoded `origin`.
+ * `--set-upstream <remote> <branch>`, resolving the push remote with Git's
+ * precedence (branch.<name>.pushRemote, remote.pushDefault,
+ * branch.<name>.remote, sole remote, then origin).
  */
 export async function gitPush(
   cwd: string,
@@ -365,11 +417,26 @@ export async function gitPush(
       const output = await runGit(cwd, args);
       return { success: true, output: output.trim() };
     }
-    // No upstream — resolve the remote. Prefer the branch's configured
-    // remote, then the sole configured remote, then `origin`.
+    // No upstream — resolve the push remote using Git's precedence:
+    // branch.<name>.pushRemote, then remote.pushDefault, then the branch's
+    // pull remote, then the sole configured remote, then `origin`. Pushing
+    // with the pull remote when a push remote is configured would publish to
+    // the wrong repository (e.g. the shared upstream instead of a fork).
     let remote = (
-      await runGit(cwd, ['config', `branch.${branch}.remote`]).catch(() => '')
+      await runGit(cwd, ['config', `branch.${branch}.pushRemote`]).catch(
+        () => '',
+      )
     ).trim();
+    if (!remote) {
+      remote = (
+        await runGit(cwd, ['config', 'remote.pushDefault']).catch(() => '')
+      ).trim();
+    }
+    if (!remote) {
+      remote = (
+        await runGit(cwd, ['config', `branch.${branch}.remote`]).catch(() => '')
+      ).trim();
+    }
     if (!remote) {
       const remotes = (await runGit(cwd, ['remote']).catch(() => '')).trim();
       const remoteList = remotes ? remotes.split('\n') : [];

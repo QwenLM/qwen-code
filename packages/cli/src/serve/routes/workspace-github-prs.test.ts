@@ -14,6 +14,7 @@ import {
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { sendBridgeError } from '../server/error-response.js';
 import {
+  createWorkspaceGenerationGuard,
   createWorkspaceRegistry,
   type WorkspaceRegistry,
   type WorkspaceRuntime,
@@ -42,8 +43,9 @@ function runtime(
     workspaceCwd,
     primary: workspaceId === 'primary',
     trusted,
+    env: { mode: 'parent-process', overlayKeys: [] },
     bridge: { publishWorkspaceEvent: vi.fn() } as unknown as AcpSessionBridge,
-  } as WorkspaceRuntime;
+  } as unknown as WorkspaceRuntime;
 }
 
 function registry(runtimes: WorkspaceRuntime[]): WorkspaceRegistry {
@@ -101,7 +103,10 @@ describe('workspace GitHub PR routes', () => {
       available: true,
       pullRequests: [PR],
     });
-    expect(fetchGitHubPullRequestsMock).toHaveBeenCalledWith('/work/secondary');
+    expect(fetchGitHubPullRequestsMock).toHaveBeenCalledWith(
+      '/work/secondary',
+      undefined,
+    );
   });
 
   it('returns available:false when the workspace is not a git repository', async () => {
@@ -263,6 +268,28 @@ describe('workspace GitHub PR routes', () => {
 
     expect(response.status).toBe(500);
     expect(response.body.error).toBe('boom');
+  });
+
+  it('returns runtime-unavailable on default-branch when the generation is closed', async () => {
+    const generationGuard = createWorkspaceGenerationGuard();
+    generationGuard.close();
+    const guarded = {
+      ...runtime('primary', '/work/main', true),
+      generationGuard,
+    };
+    const app = express();
+    registerWorkspaceQualifiedGitHubPrsRoutes(app, {
+      workspaceRegistry: registry([guarded]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app).get(
+      '/workspaces/primary/github/default-branch',
+    );
+
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('workspace_runtime_unavailable');
   });
 });
 

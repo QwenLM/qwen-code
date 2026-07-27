@@ -321,8 +321,15 @@ export function resolveContainedCwdOrFail(
   workspaceCwd: string,
 ): string | null {
   const rawCwd = req.query['cwd'];
-  if (typeof rawCwd !== 'string' || rawCwd.length === 0) {
+  // Default to the workspace root only when the parameter is genuinely
+  // absent. A supplied-but-malformed value — an array (a duplicated
+  // ?cwd= param), an object, or an empty string — must fail closed so a
+  // mutation never silently runs in the registered root.
+  if (rawCwd === undefined) {
     return workspaceCwd;
+  }
+  if (typeof rawCwd !== 'string' || rawCwd.length === 0) {
+    return null;
   }
   try {
     const resolved = fs.realpathSync(path.resolve(rawCwd));

@@ -10,9 +10,18 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import express from 'express';
 import request from 'supertest';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { sendBridgeError } from '../server/error-response.js';
-import { registerWorkspaceGitBranchRoutes } from './workspace-git-branches.js';
+import {
+  createWorkspaceGenerationGuard,
+  createWorkspaceRegistry,
+  type WorkspaceRuntime,
+} from '../workspace-registry.js';
+import {
+  registerWorkspaceGitBranchRoutes,
+  registerWorkspaceQualifiedGitBranchRoutes,
+} from './workspace-git-branches.js';
 
 const passthroughMutate = () =>
   ((_req: unknown, _res: unknown, next: () => void) => next()) as never;
@@ -161,5 +170,42 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
 
     expect(response.status).toBe(400);
     expect(response.body.error).toBe('no_upstream');
+  });
+});
+
+describe('workspace qualified Git branch routes (generation guard)', () => {
+  function qualifiedRuntime(
+    workspaceId: string,
+    workspaceCwd: string,
+    trusted: boolean,
+  ): WorkspaceRuntime {
+    return {
+      workspaceId,
+      workspaceCwd,
+      primary: workspaceId === 'primary',
+      trusted,
+      bridge: { publishWorkspaceEvent: vi.fn() } as unknown as AcpSessionBridge,
+    } as WorkspaceRuntime;
+  }
+
+  it('returns runtime-unavailable when the generation is already closed', async () => {
+    const generationGuard = createWorkspaceGenerationGuard();
+    generationGuard.close();
+    const guarded = {
+      ...qualifiedRuntime('primary', '/work/main', true),
+      generationGuard,
+    };
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceQualifiedGitBranchRoutes(app, {
+      workspaceRegistry: createWorkspaceRegistry([guarded]),
+      sendBridgeError,
+      mutate: passthroughMutate,
+    });
+
+    const response = await request(app).get('/workspaces/primary/git/branches');
+
+    expect(response.status).toBe(503);
+    expect(response.body.code).toBe('workspace_runtime_unavailable');
   });
 });

@@ -77,17 +77,23 @@ export function BranchPickerPopover({
   });
   const searchRef = useRef<HTMLInputElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
+  const requestIdRef = useRef(0);
 
   const fetchBranches = useCallback(async () => {
+    const requestId = ++requestIdRef.current;
     setLoading(true);
     setError(null);
     try {
       const result = await ws.workspaceGitBranches();
+      if (requestId !== requestIdRef.current) return;
       setData(result);
     } catch (err) {
+      if (requestId !== requestIdRef.current) return;
       setError(err instanceof Error ? err.message : String(err));
     } finally {
-      setLoading(false);
+      if (requestId === requestIdRef.current) {
+        setLoading(false);
+      }
     }
   }, [ws]);
 
@@ -524,7 +530,9 @@ export function BranchPickerPopover({
                       key={tg.name}
                       type="button"
                       className={styles.item}
-                      onClick={() => void handleCheckout(tg.name)}
+                      onClick={() =>
+                        void handleCheckout(`refs/tags/${tg.name}`)
+                      }
                     >
                       <TagIcon size={13} className={styles.itemIcon} />
                       <span className={styles.itemName}>{tg.name}</span>
