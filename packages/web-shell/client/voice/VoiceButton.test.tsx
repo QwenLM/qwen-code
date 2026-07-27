@@ -4,7 +4,10 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { VoiceButton } from './VoiceButton';
-import type { UseVoiceCaptureReturn } from './useVoiceCapture';
+import type {
+  UseVoiceCaptureOptions,
+  UseVoiceCaptureReturn,
+} from './useVoiceCapture';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -13,6 +16,7 @@ import type { UseVoiceCaptureReturn } from './useVoiceCapture';
 const mocks = vi.hoisted(() => ({
   settingsVersion: 0,
   workspaceVoice: vi.fn(),
+  onFinal: undefined as UseVoiceCaptureOptions['onFinal'] | undefined,
   workspace: {
     baseUrl: 'http://127.0.0.1:1234',
     token: undefined as string | undefined,
@@ -40,8 +44,10 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
 }));
 
 vi.mock('./useVoiceCapture', () => ({
-  useVoiceCapture: (): UseVoiceCaptureReturn =>
-    mocks.capture as unknown as UseVoiceCaptureReturn,
+  useVoiceCapture: (options: UseVoiceCaptureOptions): UseVoiceCaptureReturn => {
+    mocks.onFinal = options.onFinal;
+    return mocks.capture as unknown as UseVoiceCaptureReturn;
+  },
 }));
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
@@ -58,12 +64,18 @@ function voiceStatus(enabled: boolean) {
   };
 }
 
-function mount(disabled: boolean) {
+function mount(disabled: boolean, onActiveChange?: (active: boolean) => void) {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
   act(() => {
-    root.render(<VoiceButton disabled={disabled} onInsert={() => {}} />);
+    root.render(
+      <VoiceButton
+        disabled={disabled}
+        onInsert={() => {}}
+        onActiveChange={onActiveChange}
+      />,
+    );
   });
   mounted.push({ root, container });
   return { root, container };
@@ -97,6 +109,7 @@ beforeEach(() => {
   };
   mocks.workspaceVoice.mockReset();
   mocks.workspaceVoice.mockResolvedValue(voiceStatus(true));
+  mocks.onFinal = undefined;
   mocks.capture.status = 'idle';
   mocks.capture.interimText = '';
   mocks.capture.audioLevel = 0;
@@ -111,6 +124,7 @@ afterEach(() => {
     act(() => root.unmount());
     container.remove();
   }
+  vi.useRealTimers();
 });
 
 describe('VoiceButton', () => {
@@ -267,6 +281,55 @@ describe('VoiceButton', () => {
     click(button);
 
     expect(mocks.capture.abort).toHaveBeenCalledOnce();
+  });
+
+  it('reports whether voice capture is active', async () => {
+    const onActiveChange = vi.fn();
+    const { root } = mount(false, onActiveChange);
+    await flush();
+    expect(onActiveChange).toHaveBeenLastCalledWith(false);
+
+    mocks.capture.status = 'connecting';
+    act(() => {
+      root.render(
+        <VoiceButton
+          disabled={false}
+          onInsert={() => {}}
+          onActiveChange={onActiveChange}
+        />,
+      );
+    });
+    expect(onActiveChange).toHaveBeenLastCalledWith(true);
+
+    mocks.capture.status = 'idle';
+    act(() => {
+      root.render(
+        <VoiceButton
+          disabled={false}
+          onInsert={() => {}}
+          onActiveChange={onActiveChange}
+        />,
+      );
+    });
+    expect(onActiveChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('clears the no-speech notice after two seconds', async () => {
+    vi.useFakeTimers();
+    const { container } = mount(false);
+    await flush();
+
+    act(() => {
+      mocks.onFinal?.('');
+    });
+    expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      'voice.noSpeech',
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(2_000);
+    });
+    expect(container.querySelector('[role="status"]')).toBeNull();
   });
 
   it('keeps disabled idle dictation from starting', async () => {
