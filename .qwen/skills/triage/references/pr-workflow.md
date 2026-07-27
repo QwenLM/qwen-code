@@ -234,7 +234,7 @@ A revert-history analysis of this repo (111 revert commits, 46 unique reverted P
 **High-risk paths** — check the PR's changed files against these patterns:
 
 ```bash
-gh pr view "$PR_NUMBER" --repo "$REPO" --json files --jq '.files[].path' | grep -E 'openaiContentGenerator|streamingToolCallParser|geminiChat|acpConnection|shell\.ts$|shellExecutionService|mcp-client|mcp-pool|LspServer|acp-integration|ELECTRON_RUN_AS_NODE'
+gh pr view "$PR_NUMBER" --repo "$REPO" --json files --jq '.files[].path' | grep -E 'openaiContentGenerator|streamingToolCallParser|geminiChat|acpConnection|shell\.ts$|shellExecutionService|mcp-client|mcp-pool|LspServer|acp-integration|relaunch\.ts|sandbox\.ts|electron-run-as-node'
 ```
 
 If any file matches (66.7% revert precision, 32.3% recall in the analysis):
@@ -248,12 +248,12 @@ If any file matches (66.7% revert precision, 32.3% recall in the analysis):
 gh pr view "$PR_NUMBER" --repo "$REPO" --json reviews --jq '[.reviews[] | select(.state != "PENDING" and .state != "COMMENTED") | .state]'
 ```
 
-If `CHANGES_REQUESTED` appears after the first review (not at position 0) AND the PR touches core paths (50.0% revert precision, 19.4% recall):
+If the review state array contains both `CHANGES_REQUESTED` and `APPROVE` entries (in any order) AND the PR touches core paths (50.0% revert precision, 19.4% recall):
 - Apply `need-discussion` label via `gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label need-discussion` (if the label exists).
 - Recommend maintainer sign-off before merge in the Stage 1 comment.
 - Do not auto-approve even if Stage 2 and Stage 3 are clean.
 
-**Non-maintainer + high-risk** (58.3% revert precision, 22.6% recall): the intersection of both signals above is the highest-risk tier. Apply both actions: deepest review depth AND recommend maintainer sign-off.
+**Non-maintainer + high-risk** (58.3% revert precision, 22.6% recall): a non-maintainer PR that matches the high-risk path patterns above is the highest-risk tier. Apply all actions: deepest review depth, recommend E2E verification, apply `need-discussion` label (if it exists), recommend maintainer sign-off, and do not auto-approve even if Stage 2 and Stage 3 are clean.
 
 These signals are NOT terminal gates — they do not stop the review or close the PR. They escalate review depth and flag risk so the reviewer knows where to focus. A PR that touches high-risk paths but passes full review with clean E2E verification can still be approved.
 

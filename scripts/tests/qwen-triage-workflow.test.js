@@ -655,45 +655,35 @@ describe('qwen-triage tmux workflow', () => {
   );
 
   it('includes high-risk path detection in the triage skill', () => {
-    const prWorkflow = readFileSync(
-      '.qwen/skills/triage/references/pr-workflow.md',
-      'utf8',
-    );
-
-    expect(prWorkflow).toContain('1e. High-risk path');
-    expect(prWorkflow).toContain('openaiContentGenerator');
-    expect(prWorkflow).toContain('streamingToolCallParser');
-    expect(prWorkflow).toContain('acpConnection');
-    expect(prWorkflow).toContain('shellExecutionService');
-    expect(prWorkflow).toContain('mcp-client');
-    expect(prWorkflow).toContain('LspServer');
-    expect(prWorkflow).toContain('66.7% revert precision');
-    expect(prWorkflow).toContain('deepest review tier');
+    expect(prSkill).toContain('1e. High-risk path');
+    expect(prSkill).toContain('openaiContentGenerator');
+    expect(prSkill).toContain('streamingToolCallParser');
+    expect(prSkill).toContain('acpConnection');
+    expect(prSkill).toContain('shellExecutionService');
+    expect(prSkill).toContain('mcp-client');
+    expect(prSkill).toContain('LspServer');
+    expect(prSkill).toContain('relaunch\\.ts');
+    expect(prSkill).toContain('sandbox\\.ts');
+    expect(prSkill).toContain('66.7% revert precision');
+    expect(prSkill).toContain('deepest review tier');
   });
 
   it('includes contested-merge detection in the triage skill', () => {
-    const prWorkflow = readFileSync(
-      '.qwen/skills/triage/references/pr-workflow.md',
-      'utf8',
-    );
-
-    expect(prWorkflow).toContain('Contested-merge pattern');
-    expect(prWorkflow).toContain('CHANGES_REQUESTED');
-    expect(prWorkflow).toContain('50.0% revert precision');
-    expect(prWorkflow).toContain('need-discussion');
-    expect(prWorkflow).not.toContain('status/on-hold');
-    expect(prWorkflow).toContain('maintainer sign-off');
+    expect(prSkill).toContain('Contested-merge pattern');
+    expect(prSkill).toContain('CHANGES_REQUESTED');
+    expect(prSkill).toContain('APPROVE');
+    expect(prSkill).toContain('in any order');
+    expect(prSkill).toContain('50.0% revert precision');
+    expect(prSkill).toContain('need-discussion');
+    expect(prSkill).not.toContain('status/on-hold');
+    expect(prSkill).toContain('maintainer sign-off');
   });
 
   it('includes non-maintainer high-risk tier in the triage skill', () => {
-    const prWorkflow = readFileSync(
-      '.qwen/skills/triage/references/pr-workflow.md',
-      'utf8',
-    );
-
-    expect(prWorkflow).toContain('Non-maintainer + high-risk');
-    expect(prWorkflow).toContain('58.3% revert precision');
-    expect(prWorkflow).toContain('highest-risk tier');
+    expect(prSkill).toContain('Non-maintainer + high-risk');
+    expect(prSkill).toContain('58.3% revert precision');
+    expect(prSkill).toContain('highest-risk tier');
+    expect(prSkill).toContain('do not auto-approve');
   });
 });
 
