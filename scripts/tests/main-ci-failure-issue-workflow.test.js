@@ -58,10 +58,12 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).toContain(
       '--search "\\"Main CI failed: ${WORKFLOW_NAME}\\" in:title"',
     );
+    expect(workflow).toContain('--title "Main CI failed: ${WORKFLOW_NAME}');
     expect(workflow).toContain('gh issue comment "${existing_workflow_issue}"');
     expect(workflow).toContain('## Additional CI Failure');
     expect(workflow).toContain('${WORKFLOW_RUN_URL}');
     expect(workflow).toContain('${HEAD_SHA}');
+    expect(workflow.match(/exit 0/g)?.length).toBeGreaterThanOrEqual(2);
   });
 
   it('does not check out repository code', () => {
