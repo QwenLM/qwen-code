@@ -96,6 +96,11 @@ export interface WorkspaceRuntimeRemovalController {
 
 export interface WorkspaceManagementHandle {
   sealAndWait(): Promise<void>;
+  publishOwnedRuntime(
+    canonicalCwd: string,
+    provenance: Exclude<WorkspaceRuntimeProvenance, 'existing'>,
+    validate: (runtime: WorkspaceRuntime) => void | Promise<void>,
+  ): Promise<WorkspaceRuntime>;
 }
 
 export function registerWorkspaceManagementRoutes(
@@ -185,6 +190,106 @@ export function registerWorkspaceManagementRoutes(
       if (operation === 'addition') cwdSet.add(cwd);
     }
     return cwdSet.size + pendingScratchCreations;
+  };
+
+  const assertOwnedRuntimeAdmission = (canonical: string): void => {
+    if (sealed) throw new Error('Daemon is shutting down');
+    if (inFlight.has(canonical)) {
+      throw new Error('Workspace registration is already in progress');
+    }
+    if (workspaceRegistry.getManagedByWorkspaceCwd(canonical)) {
+      throw new Error('Workspace is already registered');
+    }
+    const nested = [
+      ...workspaceRegistry.listManaged().map((runtime) => runtime.workspaceCwd),
+      ...[...inFlight].flatMap(([cwd, operation]) =>
+        operation === 'addition' ? [cwd] : [],
+      ),
+    ].some(
+      (cwd) =>
+        cwd !== canonical &&
+        (isWithinRoot(canonical, cwd) || isWithinRoot(cwd, canonical)),
+    );
+    if (nested) {
+      throw new Error('Workspace path nests with an existing workspace');
+    }
+    if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
+      throw new Error('Workspace registration limit reached');
+    }
+  };
+
+  const publishOwnedRuntime = async (
+    canonicalCwd: string,
+    provenance: Exclude<WorkspaceRuntimeProvenance, 'existing'>,
+    validate: (runtime: WorkspaceRuntime) => void | Promise<void>,
+  ): Promise<WorkspaceRuntime> => {
+    if (!createWorkspaceRuntime || !runtimeRemoval) {
+      throw new Error('Managed workspace runtime publication is unavailable');
+    }
+    assertOwnedRuntimeAdmission(canonicalCwd);
+    inFlight.set(canonicalCwd, 'addition');
+    operationStarted();
+    let runtime: WorkspaceRuntime | undefined;
+    let registered = false;
+    try {
+      runtime = await createWorkspaceRuntime(canonicalCwd, { provenance });
+      await validate(runtime);
+      const publish = async () => {
+        if (sealed) throw new Error('Daemon is shutting down');
+        if (workspaceRegistry.getManagedByWorkspaceCwd(canonicalCwd)) {
+          throw new Error('Workspace is already registered');
+        }
+        const nested = workspaceRegistry
+          .listManaged()
+          .some(
+            (entry) =>
+              entry.workspaceCwd !== canonicalCwd &&
+              (isWithinRoot(canonicalCwd, entry.workspaceCwd) ||
+                isWithinRoot(entry.workspaceCwd, canonicalCwd)),
+          );
+        if (nested) {
+          throw new Error('Workspace path nests with an existing workspace');
+        }
+        if (projectedWorkspaceCount() > MAX_REGISTERED_WORKSPACES) {
+          throw new Error('Workspace registration limit reached');
+        }
+        workspaceRegistry.add(runtime!);
+        registered = true;
+        try {
+          await runtimeRemoval.runtimeAdded?.(runtime!);
+        } catch (error) {
+          try {
+            writeStderrLine(
+              `qwen serve: workspace runtime adapter notification failed after registry add: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          } catch {
+            // The runtime is registered; diagnostics are best-effort.
+          }
+        }
+      };
+      if (runWorkspaceTrustOperation) {
+        await runWorkspaceTrustOperation(publish);
+      } else {
+        await publish();
+      }
+      return runtime;
+    } finally {
+      if (runtime && !registered) {
+        await runtimeRemoval
+          .disposeRuntime(runtime, 'workspace_removed')
+          .catch(() => {
+            try {
+              runtime?.bridge.killAllSync();
+            } catch {
+              // Preserve the publication failure.
+            }
+          });
+      }
+      inFlight.delete(canonicalCwd);
+      operationFinished();
+    }
   };
 
   /** Creates and registers one trusted, process-local daemon-owned workspace. */
@@ -1551,6 +1656,7 @@ export function registerWorkspaceManagementRoutes(
   );
 
   return {
+    publishOwnedRuntime,
     async sealAndWait() {
       sealed = true;
       if (activeOperations === 0) return;

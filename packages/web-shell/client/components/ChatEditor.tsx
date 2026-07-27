@@ -50,6 +50,7 @@ import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { VoiceButton } from '../voice/VoiceButton';
+import { LiveVoiceButton } from '../live/LiveVoiceButton';
 import { GitBranchChipContent, GitBranchIndicator } from './GitBranchIndicator';
 import { GitModePopover, type SessionGitIntent } from './GitModePopover';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
@@ -2326,16 +2327,20 @@ export const ChatEditor = memo(
                     </button>
                   )}
                 {showToolbarAction('voice') && (
-                  <VoiceButton
-                    disabled={disabled}
-                    onActiveChange={setVoiceActive}
-                    onInsert={(text) => {
-                      const existing = core.getText();
-                      const sep = existing && !/\s$/.test(existing) ? ' ' : '';
-                      core.insertText(`${sep}${text} `);
-                      core.focus();
-                    }}
-                  />
+                  <>
+                    <LiveVoiceButton />
+                    <VoiceButton
+                      disabled={disabled}
+                      onActiveChange={setVoiceActive}
+                      onInsert={(text) => {
+                        const existing = core.getText();
+                        const sep =
+                          existing && !/\s$/.test(existing) ? ' ' : '';
+                        core.insertText(`${sep}${text} `);
+                        core.focus();
+                      }}
+                    />
+                  </>
                 )}
                 <button
                   className={

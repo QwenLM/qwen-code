@@ -139,6 +139,10 @@ vi.mock('../voice/VoiceButton', () => ({
   },
 }));
 
+vi.mock('../live/LiveVoiceButton', () => ({
+  LiveVoiceButton: () => <span data-testid="live-voice-button" />,
+}));
+
 const mounted: Array<{
   root: Root;
   container: HTMLDivElement;

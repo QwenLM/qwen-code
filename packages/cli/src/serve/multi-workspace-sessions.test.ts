@@ -38,6 +38,8 @@ import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,
 } from './workspace-registry.js';
+import type { WorkspaceRuntimeProvenance } from './managed-scratch-workspace.js';
+import type { LiveConversationWorkspace } from './live/conversation-workspace.js';
 import { createSessionOrganizationService } from './session-organization-helpers.js';
 import {
   serializeWorkspaceTranscriptResponseForTesting,
@@ -156,6 +158,12 @@ interface FakeBridge extends AcpSessionBridge {
     route: 'branch' | 'fork' | 'cd';
     sessionId: string;
   }>;
+  readonly cwdChangeCalls: Array<{
+    sessionId: string;
+    request: Parameters<AcpSessionBridge['changeSessionCwd']>[1];
+  }>;
+  readonly killCalls: string[];
+  readonly operationLog: string[];
 }
 
 function makeSummary(
@@ -255,6 +263,11 @@ function makeBridge(
     channelLive?: boolean;
     rewindImpl?: AcpSessionBridge['rewindSession'];
     shellImpl?: AcpSessionBridge['executeShellCommand'];
+    changeSessionCwdImpl?: AcpSessionBridge['changeSessionCwd'];
+    operationLog?: string[];
+    restoreAttached?: boolean;
+    restoreHasActivePrompt?: boolean;
+    killSessionResult?: boolean;
   } = {},
 ): FakeBridge {
   const live = new Map(
@@ -289,6 +302,9 @@ function makeBridge(
   const rewindCalls: FakeBridge['rewindCalls'] = [];
   const shellCalls: FakeBridge['shellCalls'] = [];
   const primaryOnlyMutationCalls: FakeBridge['primaryOnlyMutationCalls'] = [];
+  const cwdChangeCalls: FakeBridge['cwdChangeCalls'] = [];
+  const killCalls: string[] = [];
+  const operationLog = options.operationLog ?? [];
   const bridge = {
     permissionPolicy: 'first-responder' as const,
     spawnCalls,
@@ -320,6 +336,9 @@ function makeBridge(
     rewindCalls,
     shellCalls,
     primaryOnlyMutationCalls,
+    cwdChangeCalls,
+    killCalls,
+    operationLog,
     get sessionCount() {
       return live.size;
     },
@@ -371,26 +390,30 @@ function makeBridge(
       return {
         sessionId,
         workspaceCwd: req.workspaceCwd,
-        attached: false,
+        attached: options.restoreAttached ?? false,
         clientId: `client-${spawnCalls.length}`,
       };
     },
     async loadSession(req: BridgeRestoreSessionRequest) {
+      operationLog.push(`load:${req.sessionId}`);
       restoreCalls.push({ action: 'load', req });
       return {
         sessionId: req.sessionId,
         workspaceCwd: req.workspaceCwd,
-        attached: false,
+        attached: options.restoreAttached ?? false,
         clientId: 'restore-client',
+        hasActivePrompt: options.restoreHasActivePrompt ?? false,
       };
     },
     async resumeSession(req: BridgeRestoreSessionRequest) {
+      operationLog.push(`resume:${req.sessionId}`);
       restoreCalls.push({ action: 'resume', req });
       return {
         sessionId: req.sessionId,
         workspaceCwd: req.workspaceCwd,
-        attached: false,
+        attached: options.restoreAttached ?? false,
         clientId: 'restore-client',
+        hasActivePrompt: options.restoreHasActivePrompt ?? false,
       };
     },
     listWorkspaceSessions(cwd: string) {
@@ -626,9 +649,25 @@ function makeBridge(
       primaryOnlyMutationCalls.push({ route: 'fork', sessionId });
       throw new Error('Unexpected launchSessionForkAgent call');
     },
-    async changeSessionCwd(sessionId: string) {
+    async changeSessionCwd(
+      sessionId: string,
+      req: Parameters<AcpSessionBridge['changeSessionCwd']>[1],
+      context?: BridgeClientRequestContext,
+    ) {
+      if (options.changeSessionCwdImpl) {
+        operationLog.push(`change:${sessionId}`);
+        cwdChangeCalls.push({ sessionId, request: req });
+        return options.changeSessionCwdImpl(sessionId, req, context);
+      }
       primaryOnlyMutationCalls.push({ route: 'cd', sessionId });
       throw new Error('Unexpected changeSessionCwd call');
+    },
+    async killSession(sessionId: string) {
+      operationLog.push(`kill:${sessionId}`);
+      killCalls.push(sessionId);
+      const killed = options.killSessionResult ?? true;
+      if (killed) live.delete(sessionId);
+      return killed;
     },
     async cancelSession(sessionId: string) {
       cancelCalls.push(sessionId);
@@ -699,6 +738,7 @@ function makeRuntime(input: {
   primary: boolean;
   trusted: boolean;
   bridge: AcpSessionBridge;
+  provenance?: WorkspaceRuntimeProvenance;
 }): WorkspaceRuntime {
   return {
     ...input,
@@ -742,6 +782,13 @@ function makeHarness(opts?: {
   token?: string;
   secondaryRewindImpl?: AcpSessionBridge['rewindSession'];
   secondaryShellImpl?: AcpSessionBridge['executeShellCommand'];
+  secondaryChangeSessionCwdImpl?: AcpSessionBridge['changeSessionCwd'];
+  secondaryOperationLog?: string[];
+  secondaryRestoreAttached?: boolean;
+  secondaryRestoreHasActivePrompt?: boolean;
+  secondaryKillSessionResult?: boolean;
+  secondaryProvenance?: WorkspaceRuntimeProvenance;
+  liveConversationWorkspace?: LiveConversationWorkspace;
   serveOptions?: Partial<ServeOptions>;
 }) {
   const primaryBridge = makeBridge(
@@ -762,6 +809,21 @@ function makeHarness(opts?: {
       ...(opts?.secondaryShellImpl
         ? { shellImpl: opts.secondaryShellImpl }
         : {}),
+      ...(opts?.secondaryChangeSessionCwdImpl
+        ? { changeSessionCwdImpl: opts.secondaryChangeSessionCwdImpl }
+        : {}),
+      ...(opts?.secondaryOperationLog
+        ? { operationLog: opts.secondaryOperationLog }
+        : {}),
+      ...(opts?.secondaryRestoreAttached !== undefined
+        ? { restoreAttached: opts.secondaryRestoreAttached }
+        : {}),
+      ...(opts?.secondaryRestoreHasActivePrompt !== undefined
+        ? { restoreHasActivePrompt: opts.secondaryRestoreHasActivePrompt }
+        : {}),
+      ...(opts?.secondaryKillSessionResult !== undefined
+        ? { killSessionResult: opts.secondaryKillSessionResult }
+        : {}),
     },
   );
   const registry = createWorkspaceRegistry([
@@ -779,6 +841,9 @@ function makeHarness(opts?: {
       primary: false,
       trusted: opts?.secondaryTrusted ?? true,
       bridge: secondaryBridge,
+      ...(opts?.secondaryProvenance
+        ? { provenance: opts.secondaryProvenance }
+        : {}),
     }),
   ]);
   const app = createServeApp(
@@ -792,6 +857,9 @@ function makeHarness(opts?: {
     {
       workspaceRegistry: registry,
       ...(opts?.daemonLog ? { daemonLog: opts.daemonLog } : {}),
+      ...(opts?.liveConversationWorkspace
+        ? { liveConversationWorkspace: opts.liveConversationWorkspace }
+        : {}),
     },
   );
   return { app, registry, primaryBridge, secondaryBridge };
@@ -1567,6 +1635,214 @@ describe('multi-workspace session dispatch', () => {
         }),
       },
     ]);
+    expect(secondaryBridge.cwdChangeCalls).toEqual([]);
+  });
+
+  it('restores cold Live load and resume sessions into their server-derived conversation directories', async () => {
+    const operationLog: string[] = [];
+    const materializeConversationDirectory = vi.fn(
+      async (sessionId: string) => {
+        operationLog.push(`materialize:${sessionId}`);
+        return path.join(SECONDARY_CWD, `conversation-${sessionId}`);
+      },
+    );
+    const { app, secondaryBridge } = makeHarness({
+      secondaryProvenance: 'live-conversation',
+      secondaryOperationLog: operationLog,
+      secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
+        sessionId,
+        previousCwd: SECONDARY_CWD,
+        newCwd: req.path,
+        warnings: [],
+      }),
+      liveConversationWorkspace: {
+        materializeConversationDirectory,
+      } as unknown as LiveConversationWorkspace,
+    });
+
+    for (const action of ['load', 'resume'] as const) {
+      const response = await request(app)
+        .post(`/session/live-cold-${action}/${action}`)
+        .set('Host', host())
+        .send({ cwd: SECONDARY_CWD });
+
+      expect(response.status).toBe(200);
+      expect(response.body.workspaceCwd).toBe(SECONDARY_CWD);
+    }
+
+    expect(operationLog).toEqual([
+      'materialize:live-cold-load',
+      'load:live-cold-load',
+      'change:live-cold-load',
+      'materialize:live-cold-resume',
+      'resume:live-cold-resume',
+      'change:live-cold-resume',
+    ]);
+    expect(secondaryBridge.cwdChangeCalls).toEqual([
+      {
+        sessionId: 'live-cold-load',
+        request: {
+          path: path.join(SECONDARY_CWD, 'conversation-live-cold-load'),
+          allowedRoots: [SECONDARY_CWD],
+          managedRelocation: 'live-conversation',
+        },
+      },
+      {
+        sessionId: 'live-cold-resume',
+        request: {
+          path: path.join(SECONDARY_CWD, 'conversation-live-cold-resume'),
+          allowedRoots: [SECONDARY_CWD],
+          managedRelocation: 'live-conversation',
+        },
+      },
+    ]);
+    expect(materializeConversationDirectory).toHaveBeenCalledTimes(2);
+  });
+
+  it('opens attached active Live workers without waiting for cwd relocation', async () => {
+    const materializeConversationDirectory = vi.fn(async (sessionId: string) =>
+      path.join(SECONDARY_CWD, `conversation-${sessionId}`),
+    );
+    const { app, secondaryBridge } = makeHarness({
+      secondaryProvenance: 'live-conversation',
+      secondaryRestoreAttached: true,
+      secondaryRestoreHasActivePrompt: true,
+      liveConversationWorkspace: {
+        materializeConversationDirectory,
+      } as unknown as LiveConversationWorkspace,
+    });
+
+    for (const action of ['load', 'resume'] as const) {
+      const response = await request(app)
+        .post(`/session/live-active-${action}/${action}`)
+        .set('Host', host())
+        .send({ cwd: SECONDARY_CWD });
+
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        attached: true,
+        hasActivePrompt: true,
+      });
+    }
+
+    expect(secondaryBridge.cwdChangeCalls).toEqual([]);
+    expect(materializeConversationDirectory).toHaveBeenCalledTimes(2);
+  });
+
+  it('fails closed and rolls back a cold Live restore when conversation relocation is rejected', async () => {
+    const operationLog: string[] = [];
+    const { app, secondaryBridge } = makeHarness({
+      secondaryProvenance: 'live-conversation',
+      secondaryOperationLog: operationLog,
+      secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
+        sessionId,
+        previousCwd: SECONDARY_CWD,
+        newCwd: `${req.path}-rejected`,
+        warnings: [],
+      }),
+      liveConversationWorkspace: {
+        materializeConversationDirectory: async (sessionId: string) => {
+          operationLog.push(`materialize:${sessionId}`);
+          return path.join(SECONDARY_CWD, `conversation-${sessionId}`);
+        },
+      } as unknown as LiveConversationWorkspace,
+    });
+
+    const response = await request(app)
+      .post('/session/live-cold-rejected/resume')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+
+    expect(response.status).toBe(500);
+    expect(secondaryBridge.killCalls).toEqual(['live-cold-rejected']);
+    expect(operationLog).toEqual([
+      'materialize:live-cold-rejected',
+      'resume:live-cold-rejected',
+      'change:live-cold-rejected',
+      'kill:live-cold-rejected',
+    ]);
+    expect(secondaryBridge.closeCalls).toEqual([]);
+    expect(secondaryBridge.detachCalls).toEqual([]);
+  });
+
+  it('only detaches its lease when an attached cold Live restore relocation is rejected', async () => {
+    const { app, secondaryBridge } = makeHarness({
+      secondaryProvenance: 'live-conversation',
+      secondaryRestoreAttached: true,
+      secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
+        sessionId,
+        previousCwd: SECONDARY_CWD,
+        newCwd: `${req.path}-rejected`,
+        warnings: [],
+      }),
+      liveConversationWorkspace: {
+        materializeConversationDirectory: async (sessionId: string) =>
+          path.join(SECONDARY_CWD, `conversation-${sessionId}`),
+      } as unknown as LiveConversationWorkspace,
+    });
+
+    const response = await request(app)
+      .post('/session/live-cold-attached/resume')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+
+    expect(response.status).toBe(500);
+    expect(secondaryBridge.detachCalls).toEqual(['live-cold-attached']);
+    expect(secondaryBridge.killCalls).toEqual([]);
+    expect(secondaryBridge.closeCalls).toEqual([]);
+  });
+
+  it('does not force-close a cold Live restore when zero-attach reap is rejected', async () => {
+    const { app, secondaryBridge } = makeHarness({
+      secondaryProvenance: 'live-conversation',
+      secondaryKillSessionResult: false,
+      secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
+        sessionId,
+        previousCwd: SECONDARY_CWD,
+        newCwd: `${req.path}-rejected`,
+        warnings: [],
+      }),
+      liveConversationWorkspace: {
+        materializeConversationDirectory: async (sessionId: string) =>
+          path.join(SECONDARY_CWD, `conversation-${sessionId}`),
+      } as unknown as LiveConversationWorkspace,
+    });
+
+    const response = await request(app)
+      .post('/session/live-cold-reap-rejected/resume')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+
+    expect(response.status).toBe(500);
+    expect(secondaryBridge.killCalls).toEqual(['live-cold-reap-rejected']);
+    expect(secondaryBridge.closeCalls).toEqual([]);
+  });
+
+  it('does not restore a cold Live session when conversation workspace validation fails', async () => {
+    const { app, secondaryBridge } = makeHarness({
+      secondaryProvenance: 'live-conversation',
+      secondaryChangeSessionCwdImpl: async (sessionId, req) => ({
+        sessionId,
+        previousCwd: SECONDARY_CWD,
+        newCwd: req.path,
+        warnings: [],
+      }),
+      liveConversationWorkspace: {
+        materializeConversationDirectory: async () => {
+          throw new Error('Live conversation child was replaced by a symlink.');
+        },
+      } as unknown as LiveConversationWorkspace,
+    });
+
+    const response = await request(app)
+      .post('/session/live-invalid-child/load')
+      .set('Host', host())
+      .send({ cwd: SECONDARY_CWD });
+
+    expect(response.status).toBe(500);
+    expect(secondaryBridge.restoreCalls).toEqual([]);
+    expect(secondaryBridge.cwdChangeCalls).toEqual([]);
+    expect(secondaryBridge.killCalls).toEqual([]);
   });
 
   it('rejects unknown and untrusted restore cwd before touching a bridge', async () => {
@@ -4495,6 +4771,121 @@ describe('multi-workspace session dispatch', () => {
       });
       expect(primaryBridge.closeCalls).toEqual([]);
       expect(secondaryBridge.closeCalls).toEqual([archiveId, deleteId]);
+    });
+  });
+
+  it('recycles only removed sessions owned by the Live conversation runtime', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440150';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:15:00.000Z',
+        prompt: 'live conversation cleanup target',
+        mtime: new Date('2026-07-08T00:15:00.000Z'),
+      });
+      const recycleConversationDirectory = vi.fn(async () => '/trash/item');
+      const liveConversationWorkspace = {
+        recycleConversationDirectory,
+      } as unknown as LiveConversationWorkspace;
+      const { app } = makeHarness({
+        secondarySummaries: [],
+        secondaryProvenance: 'live-conversation',
+        liveConversationWorkspace,
+      });
+
+      const response = await request(app)
+        .post('/workspaces/secondary-id/sessions/delete')
+        .set('Host', host())
+        .send({ sessionIds: [sessionId, 'missing-live-session'] })
+        .expect(200);
+
+      expect(response.body).toMatchObject({
+        removed: [sessionId],
+        notFound: ['missing-live-session'],
+        errors: [],
+      });
+      expect(response.body.cleanupErrors).toBeUndefined();
+      expect(recycleConversationDirectory).toHaveBeenCalledOnce();
+      expect(recycleConversationDirectory).toHaveBeenCalledWith(sessionId);
+    });
+  });
+
+  it('does not recycle a removed session from another runtime provenance', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440151';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:16:00.000Z',
+        prompt: 'ordinary workspace cleanup target',
+        mtime: new Date('2026-07-08T00:16:00.000Z'),
+      });
+      const recycleConversationDirectory = vi.fn(async () => '/trash/item');
+      const { app } = makeHarness({
+        secondarySummaries: [],
+        secondaryProvenance: 'existing',
+        liveConversationWorkspace: {
+          recycleConversationDirectory,
+        } as unknown as LiveConversationWorkspace,
+      });
+
+      const response = await request(app)
+        .post('/workspaces/secondary-id/sessions/delete')
+        .set('Host', host())
+        .send({ sessionIds: [sessionId] })
+        .expect(200);
+
+      expect(response.body).toMatchObject({
+        removed: [sessionId],
+        notFound: [],
+        errors: [],
+      });
+      expect(recycleConversationDirectory).not.toHaveBeenCalled();
+    });
+  });
+
+  it('reports partial cleanup when a removed Live directory cannot be recycled', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440152';
+      await writeStoredSession({
+        sessionId,
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:17:00.000Z',
+        prompt: 'cleanup failure target',
+        mtime: new Date('2026-07-08T00:17:00.000Z'),
+      });
+      const daemonLog = makeDaemonLog();
+      const { app } = makeHarness({
+        secondarySummaries: [],
+        secondaryProvenance: 'live-conversation',
+        daemonLog,
+        liveConversationWorkspace: {
+          recycleConversationDirectory: vi.fn(async () => {
+            throw new Error('conversation child was replaced');
+          }),
+        } as unknown as LiveConversationWorkspace,
+      });
+
+      const response = await request(app)
+        .post('/workspaces/secondary-id/sessions/delete')
+        .set('Host', host())
+        .send({ sessionIds: [sessionId] })
+        .expect(200);
+
+      const cleanupError = {
+        sessionId,
+        error:
+          'Live conversation directory cleanup failed: conversation child was replaced',
+      };
+      expect(response.body.removed).toEqual([sessionId]);
+      expect(response.body.cleanupErrors).toEqual([cleanupError]);
+      expect(response.body.errors).toEqual([cleanupError]);
+      expect(daemonLog.error).toHaveBeenCalledWith(
+        'live conversation directory cleanup failed',
+        expect.objectContaining({ message: 'conversation child was replaced' }),
+        expect.objectContaining({ sessionId }),
+      );
     });
   });
 

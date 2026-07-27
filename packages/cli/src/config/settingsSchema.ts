@@ -468,6 +468,66 @@ const SETTINGS_SCHEMA = {
           },
         },
       },
+      liveVoice: {
+        type: 'object',
+        label: 'Live Voice',
+        category: 'General',
+        requiresRestart: true,
+        default: {},
+        description: 'Realtime voice conversation settings for Qwen Live Host.',
+        showInDialog: false,
+        properties: {
+          enabled: {
+            type: 'boolean',
+            label: 'Live Voice',
+            category: 'General',
+            requiresRestart: true,
+            default: false,
+            description:
+              'Enable realtime voice conversations through the installed Qwen Live Host.',
+            showInDialog: false,
+          },
+          model: {
+            type: 'string',
+            label: 'Live Voice Model',
+            category: 'General',
+            requiresRestart: true,
+            default: 'qwen3.5-omni-plus-realtime' as string,
+            description: 'Upstream Realtime model used for Live Voice.',
+            showInDialog: false,
+          },
+          providerModel: {
+            type: 'string',
+            label: 'Live Voice Provider Model',
+            category: 'General',
+            requiresRestart: true,
+            default: 'openai:qwen3.8-max-preview' as string,
+            description:
+              'Explicit modelProviders selector whose endpoint and credential authorize Realtime requests.',
+            showInDialog: false,
+          },
+          endpoint: {
+            type: 'string',
+            label: 'Live Voice Endpoint',
+            category: 'General',
+            requiresRestart: true,
+            default:
+              'wss://dashscope.aliyuncs.com/api-ws/v1/realtime' as string,
+            description:
+              'Advanced override for the DashScope Realtime WebSocket endpoint.',
+            showInDialog: false,
+          },
+          voice: {
+            type: 'string',
+            label: 'Live Voice Output Voice',
+            category: 'General',
+            requiresRestart: true,
+            default: 'Tina' as string,
+            description: 'Voice used for Realtime model audio output.',
+            showInDialog: false,
+          },
+        },
+      },
       enableAutoUpdate: {
         type: 'boolean',
         label: 'Enable Auto Update',

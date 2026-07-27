@@ -138,7 +138,7 @@ export function createServeFeatures(
           scratchWorkspaceRegistrationAvailable(),
         workspaceRuntimeRemovalAvailable,
         workspaceTrustHotReloadAvailable,
-        acpHttpEnabled: resolveAcpHttpEnabled(),
+        acpHttpEnabled: resolveAcpHttpEnabled(env as NodeJS.ProcessEnv),
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,
         cdpTunnelOverWsEnabled: opts.cdpTunnelOverWs === true,
         browserAutomationMcpAvailable: isBrowserAutomationMcpAvailable(

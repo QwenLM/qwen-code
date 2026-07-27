@@ -243,6 +243,52 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('recordNotificationStrict', () => {
+    it('resolves only after the notification is durably appended', async () => {
+      const pending = chatRecordingService.recordNotificationStrict(
+        [{ text: '<task-notification />' }],
+        'Worker completed.',
+        {
+          taskId: 'worker-1',
+          status: 'completed',
+          kind: 'agent',
+        },
+      );
+
+      await expect(pending).resolves.toBeUndefined();
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record).toMatchObject({
+        type: 'user',
+        subtype: 'notification',
+        systemPayload: {
+          displayText: 'Worker completed.',
+          backgroundTask: {
+            taskId: 'worker-1',
+            status: 'completed',
+            kind: 'agent',
+          },
+        },
+      });
+    });
+
+    it('rejects instead of acknowledging an inactive recorder', async () => {
+      const inactive = new ChatRecordingService(mockConfig);
+
+      await expect(
+        inactive.recordNotificationStrict(
+          [{ text: '<task-notification />' }],
+          'Worker completed.',
+          {
+            taskId: 'worker-1',
+            status: 'completed',
+            kind: 'agent',
+          },
+        ),
+      ).rejects.toMatchObject({ name: 'SessionWriterUnavailableError' });
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+  });
+
   describe('rewindRecording', () => {
     it('preserves a resumed user turn parent when rebuilding rewind boundaries', async () => {
       vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({

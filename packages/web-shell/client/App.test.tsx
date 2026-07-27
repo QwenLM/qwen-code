@@ -3628,6 +3628,30 @@ describe('App session callbacks', () => {
     expect(editorFocus).toHaveBeenCalledOnce();
   });
 
+  it('opens a Live session in its owning Conversations workspace', async () => {
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('qwen:open-session', {
+          detail: {
+            sessionId: 'live-coordinator',
+            workspaceCwd: '/Users/test/Documents/Qwen Code/Conversations',
+          },
+        }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith(
+      'live-coordinator',
+      {
+        workspaceCwd: '/Users/test/Documents/Qwen Code/Conversations',
+      },
+    );
+  });
+
   it('does not steal focus when an approval appears before deferred session focus', async () => {
     vi.useFakeTimers();
     const { container, rerender } = renderApp();

@@ -88,6 +88,37 @@
             }
           }
         },
+        "liveVoice": {
+          "description": "Realtime voice conversation settings for Qwen Live Host.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Enable realtime voice conversations through the installed Qwen Live Host.",
+              "type": "boolean",
+              "default": false
+            },
+            "model": {
+              "description": "Upstream Realtime model used for Live Voice.",
+              "type": "string",
+              "default": "qwen3.5-omni-plus-realtime"
+            },
+            "providerModel": {
+              "description": "Explicit modelProviders selector whose endpoint and credential authorize Realtime requests.",
+              "type": "string",
+              "default": "openai:qwen3.8-max-preview"
+            },
+            "endpoint": {
+              "description": "Advanced override for the DashScope Realtime WebSocket endpoint.",
+              "type": "string",
+              "default": "wss://dashscope.aliyuncs.com/api-ws/v1/realtime"
+            },
+            "voice": {
+              "description": "Voice used for Realtime model audio output.",
+              "type": "string",
+              "default": "Tina"
+            }
+          }
+        },
         "enableAutoUpdate": {
           "description": "Enable automatic update checks and installations on startup.",
           "type": "boolean",

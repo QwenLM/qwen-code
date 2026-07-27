@@ -388,6 +388,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // would make the envelope depend on the user's home config). `modes`
   // enumerates the two transcription paths (realtime vs. on-stop batch).
   voice_transcribe: { since: 'v1', modes: ['streaming', 'batch'] },
+  // Process-global Live Voice control plane. The Host WebSocket shares the ACP
+  // HTTP upgrade server, so advertisement is conditional on that transport.
+  // `/live/status` remains the dynamic readiness gate for Host, permissions,
+  // self-checks, and provider configuration.
+  realtime_voice: { since: 'v1' },
 } as const satisfies Record<string, ServeCapabilityDescriptor>;
 
 export type ServeFeature = keyof typeof SERVE_CAPABILITY_REGISTRY;
@@ -596,6 +601,7 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     'voice_transcribe',
     (toggles) => toggles.voiceWsAvailable !== false,
   ],
+  ['realtime_voice', (toggles) => toggles.acpHttpEnabled === true],
 ]);
 
 export const SERVE_FEATURES = Object.freeze(

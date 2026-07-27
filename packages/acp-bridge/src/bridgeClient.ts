@@ -1399,6 +1399,7 @@ export class BridgeClient implements Client {
    * `qwen/notify/session/prompt-suggestion` (followup assist),
    * `qwen/notify/session/artifact-event` (hook artifacts),
    * `qwen/notify/session/terminal-sequence`, and
+   * `_qwencode/end_turn` (background-notification turns), and
    * `qwen/notify/session/mcp-budget-event` — each translated into a
    * session-scoped SSE frame. Unknown methods are dropped silently for
    * forward-compat.
@@ -1407,6 +1408,27 @@ export class BridgeClient implements Client {
     method: string,
     params: Record<string, unknown>,
   ): Promise<void> {
+    if (method === '_qwencode/end_turn') {
+      const sessionId = params['sessionId'];
+      const reason = params['reason'];
+      if (
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0 ||
+        typeof reason !== 'string' ||
+        reason.length === 0 ||
+        reason.length > 128 ||
+        params['source'] !== 'background_notification'
+      ) {
+        return;
+      }
+      const entry = this.resolveEntry(sessionId);
+      if (!entry || !this.ownsSession(sessionId)) return;
+      entry.events.publish({
+        type: 'background_notification_turn_complete',
+        data: { sessionId, reason },
+      });
+      return;
+    }
     if (method === 'qwen/notify/session/generation/event') {
       const sessionId = params['sessionId'];
       const requestId = params['requestId'];

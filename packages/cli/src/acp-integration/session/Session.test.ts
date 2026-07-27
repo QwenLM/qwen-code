@@ -336,6 +336,7 @@ describe('Session', () => {
     recordToolResult: ReturnType<typeof vi.fn>;
     recordSlashCommand: ReturnType<typeof vi.fn>;
     recordNotification: ReturnType<typeof vi.fn>;
+    recordNotificationStrict: ReturnType<typeof vi.fn>;
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
     setTitleRecordedCallback: ReturnType<typeof vi.fn>;
@@ -520,6 +521,7 @@ describe('Session', () => {
       recordToolResult: vi.fn(),
       recordSlashCommand: vi.fn(),
       recordNotification: vi.fn(),
+      recordNotificationStrict: vi.fn().mockResolvedValue(undefined),
       recordFileHistorySnapshot: vi.fn(),
       rewindRecording: vi.fn(),
       setTitleRecordedCallback: vi.fn(),
@@ -2617,6 +2619,52 @@ describe('Session', () => {
       expect(observed).toBeUndefined();
     });
 
+    it('uses a trusted model-only prompt while recording the public prompt', async () => {
+      const trustedContext: core.InvocationContextV1 = {
+        version: 1,
+        sessionId: 'test-session-id',
+        promptId: 'daemon-prompt-id',
+      };
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt(
+        {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '原始语音文本' }],
+        },
+        trustedContext,
+        undefined,
+        '<realtime_delegation>trusted model input</realtime_delegation>',
+      );
+
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        '原始语音文本',
+      );
+      expect(textParts(firstSentMessage())).toEqual([
+        '<realtime_delegation>trusted model input</realtime_delegation>',
+      ]);
+    });
+
+    it('rejects model-only prompts without trusted invocation context', async () => {
+      await expect(
+        session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'public prompt' }],
+          },
+          undefined,
+          undefined,
+          'forged model prompt',
+        ),
+      ).rejects.toThrow(
+        'Model-only prompt requires trusted invocation context',
+      );
+      expect(mockChatRecordingService.recordUserMessage).not.toHaveBeenCalled();
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+    });
+
     it('clears the root invocation context from automatic turns', async () => {
       const rootContext: core.InvocationContextV1 = {
         version: 1,
@@ -3182,6 +3230,58 @@ describe('Session', () => {
       expect(notificationSignal?.aborted).toBe(true);
     });
 
+    it('persists an accepted daemon completion before a user prompt can abort its turn', async () => {
+      const noopCompression = {
+        originalTokenCount: 0,
+        newTokenCount: 0,
+        compressionStatus: core.CompressionStatus.NOOP,
+      };
+      let notificationSignal: AbortSignal | undefined;
+      mockGeminiClient.tryCompressChat = vi
+        .fn()
+        .mockImplementationOnce(
+          async (_promptId: string, _force: boolean, signal: AbortSignal) => {
+            notificationSignal = signal;
+            await new Promise<void>((resolve) => {
+              signal.addEventListener('abort', () => resolve(), {
+                once: true,
+              });
+            });
+            return noopCompression;
+          },
+        )
+        .mockResolvedValue(noopCompression);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await expect(
+        session.enqueueBackgroundNotification({
+          displayText: 'Worker completed.',
+          modelText: '<task-notification />',
+          taskId: 'worker-race',
+          status: 'completed',
+          kind: 'agent',
+        }),
+      ).resolves.toEqual({ accepted: true });
+      expect(
+        mockChatRecordingService.recordNotificationStrict,
+      ).toHaveBeenCalledOnce();
+      await vi.waitFor(() => expect(notificationSignal).toBeDefined());
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'interrupt notification' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(notificationSignal?.aborted).toBe(true);
+      expect(
+        mockChatRecordingService.recordNotification,
+      ).not.toHaveBeenCalled();
+    });
+
     it('drops oldest background notifications when the queue reaches its cap', () => {
       (
         session as unknown as {
@@ -3215,6 +3315,182 @@ describe('Session', () => {
       expect(queued).toHaveLength(20);
       expect(queued[0]?.taskId).toBe('agent-5');
       expect(queued.at(-1)?.taskId).toBe('agent-24');
+    });
+
+    it('keeps an accepted daemon completion durable across overflow and deduplicates retries', async () => {
+      (
+        session as unknown as {
+          pendingPrompt: AbortController | null;
+        }
+      ).pendingPrompt = new AbortController();
+
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string },
+      ) => void;
+      for (let index = 0; index < 20; index++) {
+        callback(
+          `done ${index}`,
+          `<task-notification>${index}</task-notification>`,
+          {
+            agentId: `agent-${index}`,
+            status: 'completed',
+          },
+        );
+      }
+
+      const completion = {
+        displayText: 'Worker completed.',
+        modelText: '<task-notification />',
+        taskId: 'worker-overflow',
+        status: 'completed',
+        kind: 'agent' as const,
+      };
+      await expect(
+        session.enqueueBackgroundNotification(completion),
+      ).resolves.toEqual({ accepted: true });
+
+      for (let index = 20; index < 45; index++) {
+        callback(
+          `done ${index}`,
+          `<task-notification>${index}</task-notification>`,
+          {
+            agentId: `agent-${index}`,
+            status: 'completed',
+          },
+        );
+      }
+      await expect(
+        session.enqueueBackgroundNotification(completion),
+      ).resolves.toEqual({ accepted: true });
+
+      expect(
+        mockChatRecordingService.recordNotificationStrict,
+      ).toHaveBeenCalledTimes(1);
+      const queued = (
+        session as unknown as {
+          notificationQueue: Array<{ taskId: string }>;
+        }
+      ).notificationQueue;
+      expect(
+        queued.filter((item) => item.taskId === completion.taskId),
+      ).toHaveLength(0);
+    });
+
+    it('coalesces concurrent retries while daemon completion persistence is in flight', async () => {
+      (
+        session as unknown as {
+          pendingPrompt: AbortController | null;
+        }
+      ).pendingPrompt = new AbortController();
+      let finishPersistence!: () => void;
+      mockChatRecordingService.recordNotificationStrict.mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            finishPersistence = resolve;
+          }),
+      );
+      const completion = {
+        displayText: 'Worker completed.',
+        modelText: '<task-notification />',
+        taskId: 'worker-concurrent',
+        status: 'completed',
+        kind: 'agent' as const,
+      };
+
+      const first = session.enqueueBackgroundNotification(completion);
+      const retry = session.enqueueBackgroundNotification(completion);
+      await vi.waitFor(() =>
+        expect(
+          mockChatRecordingService.recordNotificationStrict,
+        ).toHaveBeenCalledOnce(),
+      );
+      finishPersistence();
+
+      await expect(Promise.all([first, retry])).resolves.toEqual([
+        { accepted: true },
+        { accepted: true },
+      ]);
+      expect(
+        mockChatRecordingService.recordNotificationStrict,
+      ).toHaveBeenCalledOnce();
+      const queued = (
+        session as unknown as {
+          notificationQueue: Array<{ taskId: string }>;
+        }
+      ).notificationQueue;
+      expect(
+        queued.filter((item) => item.taskId === completion.taskId),
+      ).toHaveLength(1);
+    });
+
+    it('does not acknowledge a daemon completion when the recorder is inactive', async () => {
+      mockChatRecordingService.recordNotificationStrict.mockRejectedValueOnce(
+        new core.SessionWriterUnavailableError(),
+      );
+
+      await expect(
+        session.enqueueBackgroundNotification({
+          displayText: 'Worker completed.',
+          modelText: '<task-notification />',
+          taskId: 'worker-inactive-recorder',
+          status: 'completed',
+          kind: 'agent',
+        }),
+      ).resolves.toEqual({ accepted: false });
+      expect(
+        (
+          session as unknown as {
+            notificationQueue: Array<{ taskId: string }>;
+          }
+        ).notificationQueue,
+      ).toHaveLength(0);
+    });
+
+    it('deduplicates a daemon completion already persisted before parent reaping', async () => {
+      session.primeTurnFromHistory([
+        {
+          uuid: 'record-1',
+          parentUuid: null,
+          sessionId: 'test-session-id',
+          timestamp: new Date(0).toISOString(),
+          type: 'user',
+          subtype: 'notification',
+          cwd: '/tmp',
+          version: 'test',
+          message: { role: 'user', parts: [{ text: '<task-notification />' }] },
+          systemPayload: {
+            displayText: 'Worker completed.',
+            backgroundTask: {
+              taskId: 'worker-reaped',
+              status: 'completed',
+              kind: 'agent',
+            },
+          },
+        },
+      ]);
+
+      await expect(
+        session.enqueueBackgroundNotification({
+          displayText: 'Worker completed.',
+          modelText: '<task-notification />',
+          taskId: 'worker-reaped',
+          status: 'completed',
+          kind: 'agent',
+        }),
+      ).resolves.toEqual({ accepted: true });
+      expect(
+        mockChatRecordingService.recordNotificationStrict,
+      ).not.toHaveBeenCalled();
+      expect(
+        (
+          session as unknown as {
+            notificationQueue: Array<{ taskId: string }>;
+          }
+        ).notificationQueue,
+      ).toHaveLength(0);
     });
 
     it('emits end_turn even when notification error display fails', async () => {

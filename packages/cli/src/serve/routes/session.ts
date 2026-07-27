@@ -145,6 +145,10 @@ interface RegisterSessionRoutesDeps {
   sessionShellCommandEnabled: boolean;
   languageCodes: string[];
   virtualSubagentSessions?: VirtualSubagentSessions;
+  recycleLiveConversationDirectory?: (
+    sessionId: string,
+  ) => Promise<string | undefined>;
+  materializeLiveConversationDirectory?: (sessionId: string) => Promise<string>;
 }
 
 const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
@@ -1163,6 +1167,41 @@ export function registerSessionRoutes(
       error: e.error instanceof Error ? e.error.message : String(e.error),
     }));
 
+  const recycleRemovedLiveConversationDirectories = async (
+    removed: string[],
+    runtime: WorkspaceRuntime,
+    route: string,
+  ): Promise<Array<{ sessionId: string; error: string }>> => {
+    const recycle = deps.recycleLiveConversationDirectory;
+    if (runtime.provenance !== 'live-conversation' || !recycle) return [];
+
+    const outcomes = await Promise.all(
+      removed.map(async (sessionId) => {
+        try {
+          await recycle(sessionId);
+          return undefined;
+        } catch (error) {
+          const message = `Live conversation directory cleanup failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`;
+          writeStderrLine(
+            `qwen serve: cleanupSession failed for ${safeLogValue(sessionId)}: ${safeLogValue(message)}`,
+          );
+          daemonLog?.error(
+            'live conversation directory cleanup failed',
+            error instanceof Error ? error : new Error(String(error)),
+            { route, sessionId },
+          );
+          return { sessionId, error: message };
+        }
+      }),
+    );
+    return outcomes.filter(
+      (entry): entry is { sessionId: string; error: string } =>
+        entry !== undefined,
+    );
+  };
+
   const resolveWorkspaceParam = (
     req: Request,
     res: Response,
@@ -1905,24 +1944,77 @@ export function registerSessionRoutes(
             const metadata = await new SessionService(
               workspaceCwd,
             ).readCreationMetadata(sessionId);
+            let liveConversationCwd: string | undefined;
+            if (runtime.provenance === 'live-conversation') {
+              const materialize = deps.materializeLiveConversationDirectory;
+              if (!materialize) {
+                throw new Error('Live conversation workspace is unavailable.');
+              }
+              liveConversationCwd = await materialize(sessionId);
+            }
             runtime.generationGuard?.assertOpen();
-            return action === 'load'
-              ? await runtime.bridge.loadSession({
+            const restored =
+              action === 'load'
+                ? await runtime.bridge.loadSession({
+                    sessionId,
+                    workspaceCwd,
+                    historyReplay: 'response',
+                    ...(historyPageSize !== undefined
+                      ? { historyPageSize }
+                      : {}),
+                    ...(clientId !== undefined ? { clientId } : {}),
+                    ...(approvalMode !== undefined ? { approvalMode } : {}),
+                    ...metadata,
+                  })
+                : await runtime.bridge.resumeSession({
+                    sessionId,
+                    workspaceCwd,
+                    ...(clientId !== undefined ? { clientId } : {}),
+                    ...(approvalMode !== undefined ? { approvalMode } : {}),
+                    ...metadata,
+                  });
+            // A live entry with an active prompt was relocated before that
+            // prompt started. Re-queuing cd here would block load/resume behind
+            // a worker that may itself be waiting for Web Shell approval.
+            if (
+              liveConversationCwd !== undefined &&
+              !restored.hasActivePrompt
+            ) {
+              try {
+                const changed = await runtime.bridge.changeSessionCwd(
                   sessionId,
-                  workspaceCwd,
-                  historyReplay: 'response',
-                  ...(historyPageSize !== undefined ? { historyPageSize } : {}),
-                  ...(clientId !== undefined ? { clientId } : {}),
-                  ...(approvalMode !== undefined ? { approvalMode } : {}),
-                  ...metadata,
-                })
-              : await runtime.bridge.resumeSession({
-                  sessionId,
-                  workspaceCwd,
-                  ...(clientId !== undefined ? { clientId } : {}),
-                  ...(approvalMode !== undefined ? { approvalMode } : {}),
-                  ...metadata,
-                });
+                  {
+                    path: liveConversationCwd,
+                    allowedRoots: [runtime.workspaceCwd],
+                    managedRelocation: 'live-conversation',
+                  },
+                );
+                if (changed.newCwd !== liveConversationCwd) {
+                  throw new Error(
+                    'Live conversation directory relocation was rejected.',
+                  );
+                }
+              } catch (error) {
+                try {
+                  if (restored.attached) {
+                    if (restored.clientId) {
+                      await runtime.bridge.detachClient(
+                        restored.sessionId,
+                        restored.clientId,
+                      );
+                    }
+                  } else {
+                    await runtime.bridge.killSession(restored.sessionId, {
+                      requireZeroAttaches: true,
+                    });
+                  }
+                } catch {
+                  // Preserve the relocation error.
+                }
+                throw error;
+              }
+            }
+            return restored;
           },
         );
         try {
@@ -3311,7 +3403,20 @@ export function registerSessionRoutes(
       for (const removedId of result.removed) {
         clearBranchSessionEntry(removedId);
       }
-      res.status(200).json(result);
+      const cleanupErrors = await recycleRemovedLiveConversationDirectories(
+        result.removed,
+        workspaceRegistry.primary,
+        'POST /sessions/delete',
+      );
+      res.status(200).json({
+        ...result,
+        ...(cleanupErrors.length > 0
+          ? {
+              cleanupErrors,
+              errors: [...result.errors, ...cleanupErrors],
+            }
+          : {}),
+      });
     } catch (err) {
       sendBridgeError(res, err, { route: 'POST /sessions/delete' });
     }
@@ -3395,7 +3500,20 @@ export function registerSessionRoutes(
         for (const removedId of result.removed) {
           clearBranchSessionEntry(removedId);
         }
-        res.status(200).json(result);
+        const cleanupErrors = await recycleRemovedLiveConversationDirectories(
+          result.removed,
+          runtime,
+          route,
+        );
+        res.status(200).json({
+          ...result,
+          ...(cleanupErrors.length > 0
+            ? {
+                cleanupErrors,
+                errors: [...result.errors, ...cleanupErrors],
+              }
+            : {}),
+        });
       } catch (err) {
         sendBridgeError(res, err, { route });
       }

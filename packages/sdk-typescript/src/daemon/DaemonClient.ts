@@ -184,6 +184,8 @@ import type {
   DaemonWorkspaceVoiceTranscribeOptions,
   DaemonWorkspaceVoiceTranscriptionResult,
   DaemonWorkspaceVoiceUpdate,
+  DaemonLiveMuteUpdate,
+  DaemonLiveStatus,
   DaemonWorkspaceTrustChangeRequest,
   DaemonWorkspaceTrustChangeResult,
   DaemonWorkspaceTrustStatus,
@@ -3104,6 +3106,47 @@ export class DaemonClient {
     );
   }
 
+  async liveStatus(clientId?: string): Promise<DaemonLiveStatus> {
+    return await this.jsonRequest<DaemonLiveStatus>(
+      '/live/status',
+      'GET /live/status',
+      {
+        clientId,
+      },
+    );
+  }
+
+  async startLive(
+    mode: 'resume' | 'new' = 'resume',
+    clientId?: string,
+  ): Promise<DaemonLiveStatus> {
+    const path = mode === 'new' ? '/live/new' : '/live/start';
+    return await this.jsonRequest<DaemonLiveStatus>(
+      path,
+      mode === 'new' ? 'POST /live/new' : 'POST /live/start',
+      { method: 'POST', body: {}, clientId },
+    );
+  }
+
+  async stopLive(clientId?: string): Promise<DaemonLiveStatus> {
+    return await this.jsonRequest<DaemonLiveStatus>(
+      '/live/stop',
+      'POST /live/stop',
+      { method: 'POST', body: {}, clientId },
+    );
+  }
+
+  async setLiveMute(
+    update: DaemonLiveMuteUpdate,
+    clientId?: string,
+  ): Promise<DaemonLiveStatus> {
+    return await this.jsonRequest<DaemonLiveStatus>(
+      '/live/mute',
+      'POST /live/mute',
+      { method: 'POST', body: update, clientId },
+    );
+  }
+
   /** @internal */
   async workspaceVoiceTranscriptionRequest(
     workspaceSelector: string,
@@ -4739,6 +4782,28 @@ export class WorkspaceDaemonClient {
       audio,
       opts,
     );
+  }
+
+  liveStatus(clientId?: string): Promise<DaemonLiveStatus> {
+    return this.client.liveStatus(clientId);
+  }
+
+  startLive(
+    mode: 'resume' | 'new' = 'resume',
+    clientId?: string,
+  ): Promise<DaemonLiveStatus> {
+    return this.client.startLive(mode, clientId);
+  }
+
+  stopLive(clientId?: string): Promise<DaemonLiveStatus> {
+    return this.client.stopLive(clientId);
+  }
+
+  setLiveMute(
+    update: DaemonLiveMuteUpdate,
+    clientId?: string,
+  ): Promise<DaemonLiveStatus> {
+    return this.client.setLiveMute(update, clientId);
   }
 
   workspaceGit(opts?: {

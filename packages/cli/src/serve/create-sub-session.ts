@@ -35,9 +35,15 @@
 import { randomUUID } from 'node:crypto';
 import {
   createDebugLogger,
+  escapeXml,
   stripTerminalControlSequences,
 } from '@qwen-code/qwen-code-core';
-import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
+import type {
+  AcpSessionBridge,
+  BridgeBackgroundNotification,
+  BridgeSession,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import type {
   CreateSubSessionInfo,
   CreateSubSessionResult,
@@ -76,9 +82,21 @@ const FIRST_TURN_TIMEOUT_MS = 5 * 60_000;
  * "actively" running from the daemon's perspective). */
 const SENT_MODE_DRAIN_TIMEOUT_MS = 30 * 60_000;
 
+/** Recovery only applies while this daemon process still owns the sent-mode
+ * drain. A daemon restart loses that in-memory drain, so there is no completion
+ * to redeliver until sent workers themselves gain a durable job registry. */
+const RECOVERED_PARENT_NOTIFICATION_TIMEOUT_MS = 30 * 60_000;
+
+const SENT_COMPLETION_DELIVERY_RETRY_MS = 100;
+
 /** Cap on returned first-turn text so a runaway sub-session can't flood the
  * caller's context. Excess is dropped with a truncation marker. */
 const MAX_RESULT_CHARS = 32_000;
+
+/** Agent-side validation applies to the fully serialized model text. */
+const MAX_SENT_COMPLETION_MODEL_TEXT_CHARS = 32_768;
+
+const SENT_COMPLETION_RESULT_TRUNCATION_MARKER = '\n[…result truncated]';
 
 /** Cap on the session display name (a label, not the full prompt). */
 const MAX_NAME_LENGTH = 60;
@@ -99,6 +117,10 @@ export interface SubSessionLauncher {
 export interface CreateSubSessionLauncherOptions {
   getBridge: () => AcpSessionBridge | undefined;
   boundWorkspace: string;
+  isolatedWorkspace?: {
+    materializeDirectory(sessionId: string): Promise<string>;
+    discardEmptyDirectory(sessionId: string): Promise<unknown>;
+  };
   /** Per-request `first-turn` wall-clock timeout; defaults to
    * {@link FIRST_TURN_TIMEOUT_MS}. Exposed for tests. */
   firstTurnTimeoutMs?: number;
@@ -106,6 +128,10 @@ export interface CreateSubSessionLauncherOptions {
    * {@link SENT_MODE_DRAIN_TIMEOUT_MS}. Exposed for tests. */
   sentModeDrainTimeoutMs?: number;
 }
+
+type IsolatedWorkspace = NonNullable<
+  CreateSubSessionLauncherOptions['isolatedWorkspace']
+>;
 
 /** A readable, control-char-free session name (the bridge's title guard rejects
  * control chars, silently dropping an unsanitized rename). Prefixed with a
@@ -133,6 +159,328 @@ function subSessionName(label: string): string {
     short = `${cleaned.slice(0, cut)}…`;
   }
   return `🧵 ${short}`;
+}
+
+function sentCompletionStatus(
+  stopReason: string,
+): 'completed' | 'failed' | 'cancelled' {
+  if (stopReason === 'end_turn') return 'completed';
+  if (stopReason === 'cancelled' || stopReason === 'shutdown') {
+    return 'cancelled';
+  }
+  return 'failed';
+}
+
+function truncateCodePoints(value: string, max: number): string {
+  const codePoints = Array.from(value);
+  if (codePoints.length <= max) return value;
+  return `${codePoints.slice(0, Math.max(0, max - 1)).join('')}…`;
+}
+
+function escapeXmlWithinBudget(value: string, budget: number): string {
+  if (budget <= 0) return '';
+  const escapedCodePoints: string[] = [];
+  let length = 0;
+  let truncated = false;
+  for (const codePoint of value) {
+    const escaped = escapeXml(codePoint);
+    if (length + escaped.length > budget) {
+      truncated = true;
+      break;
+    }
+    escapedCodePoints.push(escaped);
+    length += escaped.length;
+  }
+  if (!truncated) return escapedCodePoints.join('');
+
+  while (
+    escapedCodePoints.length > 0 &&
+    length + SENT_COMPLETION_RESULT_TRUNCATION_MARKER.length > budget
+  ) {
+    length -= escapedCodePoints.pop()!.length;
+  }
+  return `${escapedCodePoints.join('')}${
+    SENT_COMPLETION_RESULT_TRUNCATION_MARKER.length <= budget - length
+      ? SENT_COMPLETION_RESULT_TRUNCATION_MARKER
+      : ''
+  }`;
+}
+
+function buildSentCompletionNotification(
+  sessionId: string,
+  label: string,
+  result: string,
+  stopReason: string,
+) {
+  const status = sentCompletionStatus(stopReason);
+  const boundedStopReason = truncateCodePoints(stopReason, 128);
+  const statusText =
+    status === 'completed'
+      ? 'completed'
+      : status === 'cancelled'
+        ? 'was cancelled'
+        : `failed (${boundedStopReason})`;
+  const sessionLink = `[🧵 ${sessionId.slice(0, 8)}](qwen-session://${sessionId})`;
+  const safeResult =
+    result.trim() || `No text output (stopReason: ${stopReason}).`;
+  const modelSessionId = truncateCodePoints(sessionId, 256);
+  const modelLabel = truncateCodePoints(label, 256);
+  const modelTextPrefix = [
+    '<task-notification>',
+    `<task-id>${escapeXml(modelSessionId)}</task-id>`,
+    `<status>${status}</status>`,
+    `<summary>Sub-session &quot;${escapeXml(modelLabel)}&quot; ${escapeXml(statusText)}.</summary>`,
+    `<session-link>qwen-session://${escapeXml(modelSessionId)}</session-link>`,
+    '<result>',
+  ].join('');
+  const modelTextSuffix = '</result></task-notification>';
+  const resultBudget = Math.max(
+    0,
+    MAX_SENT_COMPLETION_MODEL_TEXT_CHARS -
+      modelTextPrefix.length -
+      modelTextSuffix.length,
+  );
+  const modelText = `${modelTextPrefix}${escapeXmlWithinBudget(
+    safeResult,
+    resultBudget,
+  )}${modelTextSuffix}`;
+  return {
+    displayText: `Sub-session ${sessionLink} ${statusText}.`,
+    modelText,
+    taskId: sessionId,
+    status,
+    kind: 'agent' as const,
+  };
+}
+
+function isBackgroundNotificationForTask(
+  event: { type: string; data: unknown },
+  taskId: string,
+): boolean {
+  if (event.type !== 'session_update') return false;
+  const update = (
+    event.data as
+      | {
+          update?: {
+            _meta?: {
+              source?: unknown;
+              backgroundTask?: { taskId?: unknown };
+            };
+          };
+        }
+      | null
+      | undefined
+  )?.update;
+  return (
+    update?._meta?.source === 'background_notification' &&
+    update._meta.backgroundTask?.taskId === taskId
+  );
+}
+
+async function awaitRecoveredParentNotification(
+  bridge: AcpSessionBridge,
+  sessionId: string,
+  notification: BridgeBackgroundNotification,
+  lastEventId: number,
+  eventEpoch: string,
+  stopSignal: AbortSignal,
+): Promise<boolean> {
+  const timeoutAc = new AbortController();
+  const timer = setTimeout(
+    () => timeoutAc.abort(),
+    RECOVERED_PARENT_NOTIFICATION_TIMEOUT_MS,
+  );
+  if (typeof timer.unref === 'function') timer.unref();
+  const signal = AbortSignal.any([stopSignal, timeoutAc.signal]);
+  let observedOwnNotification = false;
+
+  try {
+    for await (const event of bridge.subscribeEvents(sessionId, {
+      lastEventId,
+      epoch: eventEpoch,
+      signal,
+    })) {
+      if (isBackgroundNotificationForTask(event, notification.taskId)) {
+        observedOwnNotification = true;
+      } else if (
+        observedOwnNotification &&
+        event.type === 'background_notification_turn_complete'
+      ) {
+        return true;
+      }
+    }
+  } finally {
+    clearTimeout(timer);
+    timeoutAc.abort();
+  }
+
+  return false;
+}
+
+async function waitForSentCompletionRetry(signal: AbortSignal): Promise<void> {
+  if (signal.aborted) throw signal.reason;
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, SENT_COMPLETION_DELIVERY_RETRY_MS);
+    if (typeof timer.unref === 'function') timer.unref();
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+async function awaitSentCompletionAcceptance(
+  bridge: AcpSessionBridge,
+  parentSessionId: string,
+  notification: BridgeBackgroundNotification,
+  stopSignal: AbortSignal,
+  deadline: number,
+): Promise<'accepted' | 'missing'> {
+  let lastError: unknown;
+  while (!stopSignal.aborted) {
+    try {
+      const acknowledgement = await bridge.enqueueBackgroundNotification(
+        parentSessionId,
+        notification,
+      );
+      if (acknowledgement.accepted) return 'accepted';
+    } catch (error) {
+      if (error instanceof SessionNotFoundError) return 'missing';
+      lastError = error;
+    }
+
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `Parent ${parentSessionId} did not durably accept completion for sub-session ${notification.taskId}.`,
+        lastError === undefined ? undefined : { cause: lastError },
+      );
+    }
+    await waitForSentCompletionRetry(stopSignal);
+  }
+  throw stopSignal.reason;
+}
+
+async function deliverSentCompletion(
+  bridge: AcpSessionBridge,
+  boundWorkspace: string,
+  parentSessionId: string,
+  notification: BridgeBackgroundNotification,
+  stopSignal: AbortSignal,
+  isolatedWorkspace?: IsolatedWorkspace,
+): Promise<void> {
+  const deadline = Date.now() + RECOVERED_PARENT_NOTIFICATION_TIMEOUT_MS;
+  const initialDelivery = await awaitSentCompletionAcceptance(
+    bridge,
+    parentSessionId,
+    notification,
+    stopSignal,
+    deadline,
+  );
+  if (initialDelivery === 'accepted') return;
+
+  let restoredParent: BridgeSession | undefined;
+  try {
+    // Materialize before restore so the first synchronous operation after the
+    // bridge registers the parent can reserve its prompt queue for relocation.
+    // That keeps a concurrently arriving prompt behind the cwd change.
+    const isolatedCwd = isolatedWorkspace
+      ? await isolatedWorkspace.materializeDirectory(parentSessionId)
+      : undefined;
+    restoredParent = await bridge.resumeSession({
+      sessionId: parentSessionId,
+      workspaceCwd: boundWorkspace,
+    });
+    if (isolatedCwd !== undefined) {
+      const changed = await bridge.changeSessionCwd(parentSessionId, {
+        path: isolatedCwd,
+        allowedRoots: [boundWorkspace],
+        managedRelocation: 'live-conversation',
+      });
+      if (changed.newCwd !== isolatedCwd) {
+        throw new Error(
+          'Restored parent workspace directory relocation was rejected.',
+        );
+      }
+    }
+    const lastEventId = bridge.getSessionLastEventId(parentSessionId);
+    const eventEpoch = bridge.getSessionEventEpoch(parentSessionId);
+    const recoveredDelivery = await awaitSentCompletionAcceptance(
+      bridge,
+      parentSessionId,
+      notification,
+      stopSignal,
+      deadline,
+    );
+    if (recoveredDelivery === 'missing') {
+      throw new SessionNotFoundError(parentSessionId);
+    }
+
+    // Keep the recovery registration until the ordinary idle reaper removes it.
+    // `background_notification_turn_complete` is emitted just before the child
+    // finishes its notification-drain cleanup, and another worker completion may
+    // already be queued behind it. An immediate detach can therefore close the
+    // only restored parent underneath either operation. The bridge reaper ignores
+    // stale client registrations and provides the bounded cleanup path here.
+    void awaitRecoveredParentNotification(
+      bridge,
+      parentSessionId,
+      notification,
+      lastEventId,
+      eventEpoch,
+      stopSignal,
+    ).then(
+      (continuationCompleted) => {
+        if (!continuationCompleted && !stopSignal.aborted) {
+          writeStderrLine(
+            `qwen serve: restored parent ${parentSessionId} accepted completion ` +
+              `for sub-session ${notification.taskId}, but its automatic continuation ` +
+              `did not reach an end-turn boundary; leaving recovery attachment for ` +
+              `the idle reaper`,
+          );
+        }
+      },
+      (error) => {
+        if (!stopSignal.aborted) {
+          writeStderrLine(
+            `qwen serve: restored parent ${parentSessionId} accepted completion ` +
+              `for sub-session ${notification.taskId}, but its automatic continuation ` +
+              `could not be observed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      },
+    );
+  } catch (error) {
+    let recoveredParentClosed = false;
+    if (restoredParent !== undefined) {
+      try {
+        if (restoredParent.attached) {
+          if (restoredParent.clientId) {
+            await bridge.detachClient(
+              restoredParent.sessionId,
+              restoredParent.clientId,
+            );
+          }
+        } else {
+          recoveredParentClosed = await bridge.killSession(
+            restoredParent.sessionId,
+            { requireZeroAttaches: true },
+          );
+        }
+      } catch {
+        recoveredParentClosed = false;
+      }
+    }
+    if (isolatedWorkspace && recoveredParentClosed) {
+      await isolatedWorkspace
+        .discardEmptyDirectory(parentSessionId)
+        .catch(() => {});
+    }
+    throw error;
+  }
 }
 
 /** Accumulate the sub-session's first-turn text from its event stream, stopping
@@ -246,7 +594,7 @@ async function awaitFirstTurn(
 export function createSubSessionLauncher(
   opts: CreateSubSessionLauncherOptions,
 ): SubSessionLauncher {
-  const { getBridge, boundWorkspace } = opts;
+  const { getBridge, boundWorkspace, isolatedWorkspace } = opts;
   const firstTurnTimeoutMs = opts.firstTurnTimeoutMs ?? FIRST_TURN_TIMEOUT_MS;
   const sentModeDrainTimeoutMs =
     opts.sentModeDrainTimeoutMs ?? SENT_MODE_DRAIN_TIMEOUT_MS;
@@ -340,9 +688,9 @@ export function createSubSessionLauncher(
       release(key);
     };
     // Set after a successful spawnOrAttach; if a later step fails the launch
-    // we close this session so it isn't orphaned (the slot was consumed and
+    // we roll this session back so it isn't orphaned (the slot was consumed and
     // the prompt may have been dispatched, but launch() reports failure).
-    let spawnedSessionId: string | undefined;
+    let spawnedSession: BridgeSession | undefined;
 
     try {
       const sub = await bridge.spawnOrAttach({
@@ -353,8 +701,22 @@ export function createSubSessionLauncher(
         parentSessionId: info.callerSessionId,
         ...(info.model ? { modelServiceId: info.model } : {}),
       });
-      spawnedSessionId = sub.sessionId;
+      spawnedSession = sub;
       const sessionId = sub.sessionId;
+      if (isolatedWorkspace) {
+        const isolatedCwd =
+          await isolatedWorkspace.materializeDirectory(sessionId);
+        const changed = await bridge.changeSessionCwd(sessionId, {
+          path: isolatedCwd,
+          allowedRoots: [boundWorkspace],
+          managedRelocation: 'live-conversation',
+        });
+        if (changed.newCwd !== isolatedCwd) {
+          throw new Error(
+            'Sub-session workspace directory relocation was rejected.',
+          );
+        }
+      }
       rememberSpawned(sessionId);
 
       try {
@@ -397,66 +759,74 @@ export function createSubSessionLauncher(
         // before the sub-session has done any work, letting a looping
         // isolated task exhaust the daemon's session pool.
         const drainAc = new AbortController();
-        // Recorded in the timer, not read off `drainAc.signal.aborted`: the
-        // `finally` below aborts that controller on every exit path, so the
-        // signal cannot tell a 30-minute hang from a clean drain.
-        let drainTimedOut = false;
-        const drainTimer = setTimeout(() => {
-          drainTimedOut = true;
-          drainAc.abort();
-        }, sentModeDrainTimeoutMs);
-        if (typeof drainTimer.unref === 'function') drainTimer.unref();
         const drainSignal = AbortSignal.any([stopAc.signal, drainAc.signal]);
         void (async () => {
           try {
-            // Race the turn promise against the drain: if sendPrompt rejects
-            // (API 429, network timeout), the turn will never emit
-            // turn_complete/turn_error, so abort the drain immediately.
-            const turnSettled = turn.then(
-              () => 'ok' as const,
-              () => 'rejected' as const,
-            );
-            const drainDone = (async () => {
-              for await (const e of bridge.subscribeEvents(sessionId, {
-                lastEventId,
-                signal: drainSignal,
-              })) {
-                if (e.type === 'turn_complete' || e.type === 'turn_error') {
-                  const d = e.data as { promptId?: string };
-                  if (d?.promptId === promptId) break;
-                }
-              }
-              return 'drained' as const;
-            })();
-            await Promise.race([turnSettled, drainDone]);
-          } catch (err) {
-            // AbortError from stop()/timeout or bus closure is expected.
-            // Other errors (bus corruption, internal bridge failures) are
-            // real and should surface — don't silently swallow them.
-            if (
-              !(err instanceof Error && err.name === 'AbortError') &&
-              !(stopAc.signal.aborted || drainAc.signal.aborted)
-            ) {
-              log.debug(
-                'sub-session: sent-mode drain error',
-                sessionId,
-                String(err),
+            let notification: ReturnType<
+              typeof buildSentCompletionNotification
+            >;
+            try {
+              const turnError: Promise<never> = turn.then(
+                () => new Promise<never>(() => {}),
+                (err) =>
+                  Promise.reject(
+                    new Error(
+                      `sub-session dispatch failed: ${err instanceof Error ? err.message : String(err)}`,
+                    ),
+                  ),
               );
+              const completion = await Promise.race([
+                awaitFirstTurn(
+                  bridge,
+                  sessionId,
+                  promptId,
+                  lastEventId,
+                  sentModeDrainTimeoutMs,
+                  drainSignal,
+                ),
+                turnError,
+              ]);
+              if (stopAc.signal.aborted) return;
+              if (completion.stopReason === 'timeout') {
+                writeStderrLine(
+                  `qwen serve: sub-session ${sessionId} drain timed out after ` +
+                    `${Math.round(sentModeDrainTimeoutMs / 60_000)}min; releasing its ` +
+                    `concurrency slot (the sub-session may still be running)`,
+                );
+              }
+              notification = buildSentCompletionNotification(
+                sessionId,
+                subSessionName(info.name ?? info.prompt),
+                completion.result,
+                completion.stopReason,
+              );
+            } catch (err) {
+              if (stopAc.signal.aborted) return;
+              const message = err instanceof Error ? err.message : String(err);
+              notification = buildSentCompletionNotification(
+                sessionId,
+                subSessionName(info.name ?? info.prompt),
+                message,
+                'error',
+              );
+            }
+            try {
+              await deliverSentCompletion(
+                bridge,
+                boundWorkspace,
+                info.callerSessionId,
+                notification,
+                stopAc.signal,
+                isolatedWorkspace,
+              );
+            } catch (notificationError) {
+              if (!stopAc.signal.aborted) {
+                writeStderrLine(
+                  `qwen serve: sub-session ${sessionId} completion could not be returned to parent ${info.callerSessionId}: ${notificationError instanceof Error ? notificationError.message : String(notificationError)}`,
+                );
+              }
             }
           } finally {
-            clearTimeout(drainTimer);
-            if (drainTimedOut) {
-              // The slot is about to be freed while the sub-session is very
-              // likely still running (`sendPrompt` has no abort seam), so it
-              // keeps burning a bridge session and model quota with nobody
-              // watching. `log.debug` is a no-op unless a debug log session is
-              // active — this has to reach stderr or it leaves no trace at all.
-              writeStderrLine(
-                `qwen serve: sub-session ${sessionId} drain timed out after ` +
-                  `${Math.round(sentModeDrainTimeoutMs / 60_000)}min; releasing its ` +
-                  `concurrency slot (the sub-session may still be running)`,
-              );
-            }
             drainAc.abort();
             // Use releaseOnce (not raw release) — if spawn succeeded but the
             // outer catch also fires release, using raw release would double-
@@ -515,19 +885,54 @@ export function createSubSessionLauncher(
       // Spawn/admission failure — surface it as the tool's error.
       releaseOnce();
       // If the spawn succeeded but a later step failed (e.g. sendPrompt threw
-      // synchronously), close the orphaned session so it doesn't leak a slot
+      // synchronously), roll back the orphaned session so it doesn't leak a slot
       // in the bridge's session pool while this launch reports failure.
-      if (spawnedSessionId !== undefined) {
+      if (spawnedSession !== undefined && isolatedWorkspace) {
+        let sessionClosed = false;
+        try {
+          if (spawnedSession.attached) {
+            if (spawnedSession.clientId) {
+              await bridge.detachClient(
+                spawnedSession.sessionId,
+                spawnedSession.clientId,
+              );
+            }
+          } else {
+            sessionClosed = await bridge.killSession(spawnedSession.sessionId, {
+              requireZeroAttaches: true,
+            });
+          }
+        } catch (cleanupError) {
+          log.debug(
+            'sub-session: isolated session rollback failed',
+            spawnedSession.sessionId,
+            cleanupError,
+          );
+        }
+        if (sessionClosed) {
+          try {
+            await isolatedWorkspace.discardEmptyDirectory(
+              spawnedSession.sessionId,
+            );
+          } catch (cleanupError) {
+            log.debug(
+              'sub-session: isolated workspace cleanup failed',
+              spawnedSession.sessionId,
+              cleanupError,
+            );
+          }
+        }
+      } else if (spawnedSession !== undefined) {
         // Both guards are load-bearing. `.catch()` swallows the async
         // rejection; the try/catch contains a SYNCHRONOUS throw. We are already
         // inside the catch block, so an escaping throw here would replace `err`
         // — the real launch failure — with the cleanup failure.
         try {
-          void bridge.closeSession(spawnedSessionId).catch(() => {});
+          void bridge.closeSession(spawnedSession.sessionId).catch(() => {});
         } catch (closeErr) {
           log.debug(
             'sub-session: closeSession threw',
-            spawnedSessionId,
+            spawnedSession.sessionId,
             closeErr,
           );
         }

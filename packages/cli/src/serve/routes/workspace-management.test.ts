@@ -157,6 +157,73 @@ function createRemovalController(
   };
 }
 
+describe('owned workspace runtime publication', () => {
+  it('shares registry publication and runtime-added hooks', async () => {
+    const registry = createMockRegistry([
+      makeRuntime('/primary', { primary: true }),
+    ]);
+    const runtime = makeRuntime('/owned-live', {
+      provenance: 'live-conversation',
+      removable: false,
+    });
+    const runtimeRemoval = createRemovalController();
+    runtimeRemoval.runtimeAdded = vi.fn().mockResolvedValue(undefined);
+    const { handle } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime: vi.fn().mockResolvedValue(runtime),
+      runtimeRemoval,
+    });
+
+    await expect(
+      handle.publishOwnedRuntime(
+        runtime.workspaceCwd,
+        'live-conversation',
+        (candidate) => {
+          expect(candidate).toBe(runtime);
+        },
+      ),
+    ).resolves.toBe(runtime);
+
+    expect(registry.getByWorkspaceCwd(runtime.workspaceCwd)).toBe(runtime);
+    expect(runtimeRemoval.runtimeAdded).toHaveBeenCalledWith(runtime);
+    expect(runtimeRemoval.disposeRuntime).not.toHaveBeenCalled();
+  });
+
+  it('immediately disposes a candidate rejected before publication', async () => {
+    const registry = createMockRegistry([
+      makeRuntime('/primary', { primary: true }),
+    ]);
+    const runtime = makeRuntime('/owned-invalid', {
+      provenance: 'live-conversation',
+      removable: false,
+    });
+    const runtimeRemoval = createRemovalController();
+    const { handle } = createApp({
+      workspaceRegistry: registry,
+      createWorkspaceRuntime: vi.fn().mockResolvedValue(runtime),
+      runtimeRemoval,
+    });
+
+    await expect(
+      handle.publishOwnedRuntime(
+        runtime.workspaceCwd,
+        'live-conversation',
+        () => {
+          throw new Error('ownership rejected');
+        },
+      ),
+    ).rejects.toThrow('ownership rejected');
+
+    expect(registry.getManagedByWorkspaceCwd(runtime.workspaceCwd)).toBe(
+      undefined,
+    );
+    expect(runtimeRemoval.disposeRuntime).toHaveBeenCalledWith(
+      runtime,
+      'workspace_removed',
+    );
+  });
+});
+
 describe('POST /workspaces', () => {
   beforeEach(() => {
     vi.clearAllMocks();

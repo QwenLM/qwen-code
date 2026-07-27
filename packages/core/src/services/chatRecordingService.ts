@@ -1203,6 +1203,26 @@ export class ChatRecordingService {
     );
   }
 
+  /**
+   * Durably records a daemon-delivered notification before its sender is
+   * acknowledged. Unlike the ordinary in-process notification path, this
+   * rejects when the writer is unavailable or the append fails.
+   */
+  async recordNotificationStrict(
+    message: PartListUnion,
+    displayText?: string,
+    backgroundTask?: NotificationRecordPayload['backgroundTask'],
+  ): Promise<void> {
+    await this.appendRecordStrict(
+      this.createNotificationRecord(
+        message,
+        'notification',
+        displayText,
+        backgroundTask,
+      ),
+    );
+  }
+
   private recordNotificationLike(
     message: PartListUnion,
     subtype: 'notification' | 'cron',
@@ -1210,18 +1230,32 @@ export class ChatRecordingService {
     backgroundTask?: NotificationRecordPayload['backgroundTask'],
   ): void {
     try {
-      const record: ChatRecord = {
-        ...this.createBaseRecord('user'),
+      const record = this.createNotificationRecord(
+        message,
         subtype,
-        message: createUserContent(message),
-        systemPayload: displayText
-          ? ({ displayText, backgroundTask } as NotificationRecordPayload)
-          : undefined,
-      };
+        displayText,
+        backgroundTask,
+      );
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error(`Error saving ${subtype} record:`, error);
     }
+  }
+
+  private createNotificationRecord(
+    message: PartListUnion,
+    subtype: 'notification' | 'cron',
+    displayText?: string,
+    backgroundTask?: NotificationRecordPayload['backgroundTask'],
+  ): ChatRecord {
+    return {
+      ...this.createBaseRecord('user'),
+      subtype,
+      message: createUserContent(message),
+      systemPayload: displayText
+        ? ({ displayText, backgroundTask } as NotificationRecordPayload)
+        : undefined,
+    };
   }
 
   /**

@@ -163,6 +163,7 @@ import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { pipeline } from 'node:stream/promises';
+import type { Stats } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -294,6 +295,7 @@ import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
+  DAEMON_MODEL_PROMPT_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_META_KEY,
   LOAD_REPLAY_MODE_META_KEY,
@@ -301,6 +303,7 @@ import {
   LOAD_REPLAY_VERSION,
   PROMPT_CANCEL_METHOD,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+  isValidTrustedModelPrompt,
   type ClientMcpOverWsRuntimeConfig,
   type BridgeLoadReplayEnvelope,
 } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -3042,6 +3045,18 @@ interface ActivePromptCall {
   settled: Promise<void>;
 }
 
+function isOwnerOnlyDirectory(stats: Stats): boolean {
+  if (stats.isSymbolicLink() || !stats.isDirectory()) return false;
+  if (
+    process.platform !== 'win32' &&
+    typeof process.getuid === 'function' &&
+    stats.uid !== process.getuid()
+  ) {
+    return false;
+  }
+  return process.platform === 'win32' || (stats.mode & 0o077) === 0;
+}
+
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
   private activePromptCalls = new Map<string, Set<ActivePromptCall>>();
@@ -4461,7 +4476,9 @@ class QwenAgent implements Agent {
         ? { ...params._meta }
         : {};
     const suppliedContext = meta[INVOCATION_CONTEXT_META_KEY];
+    const suppliedModelPrompt = meta[DAEMON_MODEL_PROMPT_META_KEY];
     delete meta[INVOCATION_CONTEXT_META_KEY];
+    delete meta[DAEMON_MODEL_PROMPT_META_KEY];
     delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
     if (Object.keys(meta).length > 0) {
       sanitizedParams._meta = meta;
@@ -4483,6 +4500,22 @@ class QwenAgent implements Agent {
         'Invalid trusted ACP invocation context',
       );
     }
+    const modelPrompt =
+      this.privateParentState === 'trusted' &&
+      suppliedModelPrompt !== undefined &&
+      isValidTrustedModelPrompt(suppliedModelPrompt)
+        ? suppliedModelPrompt
+        : undefined;
+    if (
+      this.privateParentState === 'trusted' &&
+      suppliedModelPrompt !== undefined &&
+      modelPrompt === undefined
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid trusted ACP model prompt',
+      );
+    }
     let settleCall = () => {};
     const call: ActivePromptCall = {
       controller: new AbortController(),
@@ -4501,6 +4534,7 @@ class QwenAgent implements Agent {
         sanitizedParams,
         invocationContext,
         call.controller.signal,
+        modelPrompt,
       );
     } finally {
       calls.delete(call);
@@ -5960,14 +5994,24 @@ class QwenAgent implements Agent {
 
       const disabled = config.getDisabledTools();
       const tools: ServeWorkspaceToolStatus[] = registry
-        .getAllTools()
-        .filter((tool) => !('serverName' in tool))
-        .map((tool) => ({
-          name: tool.name,
-          displayName: tool.displayName,
-          description: tool.description,
-          enabled: !disabled.has(tool.name),
-        }));
+        .getAllToolNames()
+        .flatMap((name) => {
+          const tool = registry.getTool(name);
+          if (tool && 'serverName' in tool) return [];
+          return [
+            {
+              name,
+              ...(tool
+                ? {
+                    displayName: tool.displayName,
+                    description: tool.description,
+                  }
+                : {}),
+              enabled: !disabled.has(name),
+            },
+          ];
+        })
+        .sort((left, right) => left.name.localeCompare(right.name));
 
       return {
         v: STATUS_SCHEMA_VERSION,
@@ -6751,6 +6795,15 @@ class QwenAgent implements Agent {
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     try {
+      if (
+        method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification &&
+        this.privateParentState !== 'trusted'
+      ) {
+        throw RequestError.invalidParams(
+          undefined,
+          'Background notifications require a trusted private ACP parent',
+        );
+      }
       return await this.extMethodInternal(method, params);
     } catch (error) {
       const writerError = getSessionWriterError(error);
@@ -8371,6 +8424,88 @@ class QwenAgent implements Agent {
           persisted: ok,
         };
       }
+      case SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification: {
+        const sessionId = params['sessionId'];
+        const displayText = params['displayText'];
+        const modelText = params['modelText'];
+        const taskId = params['taskId'];
+        const status = params['status'];
+        const kind = params['kind'];
+        const toolUseId = params['toolUseId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (
+          typeof displayText !== 'string' ||
+          displayText.length === 0 ||
+          displayText.length > 8_192
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing background notification displayText',
+          );
+        }
+        if (
+          typeof modelText !== 'string' ||
+          modelText.length === 0 ||
+          modelText.length > 32_768
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing background notification modelText',
+          );
+        }
+        if (
+          typeof taskId !== 'string' ||
+          taskId.length === 0 ||
+          taskId.length > 256
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing background notification taskId',
+          );
+        }
+        if (
+          status !== 'completed' &&
+          status !== 'failed' &&
+          status !== 'cancelled'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid background notification status',
+          );
+        }
+        if (kind !== 'agent') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid background notification kind',
+          );
+        }
+        if (
+          toolUseId !== undefined &&
+          (typeof toolUseId !== 'string' ||
+            toolUseId.length === 0 ||
+            toolUseId.length > 256)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid background notification toolUseId',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        const result = await session.enqueueBackgroundNotification({
+          displayText,
+          modelText,
+          taskId,
+          status,
+          kind,
+          ...(typeof toolUseId === 'string' ? { toolUseId } : {}),
+        });
+        return { sessionId, accepted: result.accepted };
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionClose: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
@@ -8420,6 +8555,17 @@ class QwenAgent implements Agent {
             'Invalid or missing path (must be an absolute path)',
           );
         }
+        const managedRelocation = params['managedRelocation'];
+        if (
+          managedRelocation !== undefined &&
+          managedRelocation !== 'live-conversation'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid managed relocation capability',
+          );
+        }
+        const allowedRoots = params['allowedRoots'];
 
         const session = this.sessionOrThrow(sessionId);
         const config = session.getConfig();
@@ -8451,12 +8597,116 @@ class QwenAgent implements Agent {
         // Canonicalize path
         const canonicalPath = await fs.realpath(targetPath);
 
+        let containmentRoots = allowedRoots;
+        let managedTrustAllowed = false;
+        if (managedRelocation === 'live-conversation') {
+          if (this.privateParentState !== 'trusted') {
+            throw RequestError.invalidParams(
+              undefined,
+              'Live managed relocation requires a trusted private ACP parent',
+            );
+          }
+          if (
+            !Array.isArray(allowedRoots) ||
+            allowedRoots.length !== 1 ||
+            typeof allowedRoots[0] !== 'string' ||
+            !path.isAbsolute(allowedRoots[0]) ||
+            allowedRoots[0].includes('\0')
+          ) {
+            throw RequestError.invalidParams(
+              undefined,
+              'Live managed relocation requires one absolute allowed root',
+            );
+          }
+
+          const rootPath = allowedRoots[0];
+          let rootBefore: Stats;
+          let canonicalRoot: string;
+          let rootAfter: Stats;
+          try {
+            rootBefore = await fs.lstat(rootPath);
+            canonicalRoot = await fs.realpath(rootPath);
+            rootAfter = await fs.lstat(canonicalRoot);
+          } catch {
+            throw new RequestError(
+              -32004,
+              'Live managed relocation requires an owner-only allowed root',
+              { errorKind: 'containment_violation', path: rootPath },
+            );
+          }
+          if (
+            !isOwnerOnlyDirectory(rootBefore) ||
+            !isOwnerOnlyDirectory(rootAfter) ||
+            rootBefore.dev !== rootAfter.dev ||
+            rootBefore.ino !== rootAfter.ino
+          ) {
+            throw new RequestError(
+              -32004,
+              'Live managed relocation requires an owner-only allowed root',
+              { errorKind: 'containment_violation', path: rootPath },
+            );
+          }
+
+          let targetBefore: Stats;
+          let targetAfter: Stats;
+          try {
+            targetBefore = await fs.lstat(targetPath);
+            targetAfter = await fs.lstat(canonicalPath);
+          } catch {
+            throw new RequestError(
+              -32004,
+              'Live managed relocation requires an owner-only direct child',
+              { errorKind: 'containment_violation', path: canonicalPath },
+            );
+          }
+          const relativeTarget = path.relative(canonicalRoot, canonicalPath);
+          if (
+            !isOwnerOnlyDirectory(targetBefore) ||
+            !isOwnerOnlyDirectory(targetAfter) ||
+            targetBefore.dev !== targetAfter.dev ||
+            targetBefore.ino !== targetAfter.ino ||
+            relativeTarget.length === 0 ||
+            relativeTarget.startsWith('..') ||
+            path.isAbsolute(relativeTarget) ||
+            relativeTarget.includes(path.sep)
+          ) {
+            throw new RequestError(
+              -32004,
+              'Live managed relocation requires an owner-only direct child',
+              { errorKind: 'containment_violation', path: canonicalPath },
+            );
+          }
+
+          let rootFinal: Stats;
+          try {
+            rootFinal = await fs.lstat(canonicalRoot);
+          } catch {
+            throw new RequestError(
+              -32004,
+              'Live managed relocation allowed root changed during validation',
+              { errorKind: 'containment_violation', path: canonicalRoot },
+            );
+          }
+          if (
+            !isOwnerOnlyDirectory(rootFinal) ||
+            rootFinal.dev !== rootAfter.dev ||
+            rootFinal.ino !== rootAfter.ino
+          ) {
+            throw new RequestError(
+              -32004,
+              'Live managed relocation allowed root changed during validation',
+              { errorKind: 'containment_violation', path: canonicalRoot },
+            );
+          }
+          containmentRoots = [canonicalRoot];
+          managedTrustAllowed = true;
+        }
+
         // Server-controlled containment check (worktree create/restore).
         // Must run BEFORE the no-op check: a no-op cd to a directory
         // outside the allowed roots must still be rejected.
-        const allowedRoots = params['allowedRoots'];
-        if (Array.isArray(allowedRoots) && allowedRoots.length > 0) {
-          const contained = allowedRoots.some((root: unknown) => {
+        if (Array.isArray(containmentRoots) && containmentRoots.length > 0) {
+          const contained = containmentRoots.some((root: unknown) => {
             if (typeof root !== 'string') return false;
             const rel = path.relative(root, canonicalPath);
             return !rel.startsWith('..') && !path.isAbsolute(rel);
@@ -8477,7 +8727,10 @@ class QwenAgent implements Agent {
         }
 
         // Trust check
-        if (isFolderTrustEnabled(this.settings.merged)) {
+        if (
+          isFolderTrustEnabled(this.settings.merged) &&
+          !managedTrustAllowed
+        ) {
           const trustedFolders = loadTrustedFolders();
           if (trustedFolders.isPathTrusted(canonicalPath) !== true) {
             throw new RequestError(

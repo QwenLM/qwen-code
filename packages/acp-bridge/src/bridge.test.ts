@@ -61,6 +61,7 @@ import { TurnBoundaryCompactionEngine } from './compactionEngine.js';
 import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
+  DAEMON_MODEL_PROMPT_META_KEY,
 } from './bridgeTypes.js';
 import {
   ApprovalMode,
@@ -644,6 +645,44 @@ describe('createAcpSessionBridge', () => {
       },
     ]);
 
+    await bridge.shutdown();
+  });
+
+  it('forwards the Live managed relocation capability to the ACP child', async () => {
+    const target = path.join(WS_A, 'conversation-managed');
+    const sessionCdCalls: unknown[] = [];
+    const handle = makeChannel({
+      extMethodImpl: async (method, params) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionCd) {
+          sessionCdCalls.push(params);
+          return {
+            previousCwd: WS_A,
+            newCwd: target,
+            warnings: [],
+          };
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: vi.fn().mockResolvedValue(handle.channel),
+    });
+
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await bridge.changeSessionCwd(session.sessionId, {
+      path: target,
+      allowedRoots: [WS_A],
+      managedRelocation: 'live-conversation',
+    });
+
+    expect(sessionCdCalls).toEqual([
+      {
+        sessionId: session.sessionId,
+        path: target,
+        allowedRoots: [WS_A],
+        managedRelocation: 'live-conversation',
+      },
+    ]);
     await bridge.shutdown();
   });
 
@@ -5213,6 +5252,8 @@ describe('createAcpSessionBridge', () => {
         promptId: 'forged-prompt',
         originatorClientId: 'forged-client',
       };
+      const forgedModelPrompt = 'forged model-only prompt';
+      const trustedModelPrompt = 'trusted model-only prompt';
 
       expect(() =>
         bridge.sendPrompt(
@@ -5228,6 +5269,19 @@ describe('createAcpSessionBridge', () => {
       ).toThrow(InvalidClientIdError);
       expect(handle.agent.promptCalls).toHaveLength(0);
 
+      expect(() =>
+        bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'invalid internal prompt' }],
+          },
+          undefined,
+          { clientId: session.clientId, modelPrompt: '   ' },
+        ),
+      ).toThrow('Bridge modelPrompt must be a non-empty bounded string');
+      expect(handle.agent.promptCalls).toHaveLength(0);
+
       await bridge.sendPrompt(
         session.sessionId,
         {
@@ -5237,10 +5291,15 @@ describe('createAcpSessionBridge', () => {
             keep: true,
             'qwen-code/invocation': forgedInvocation,
             'qwen-code/private-parent-capability': 'forged-capability',
+            [DAEMON_MODEL_PROMPT_META_KEY]: forgedModelPrompt,
           },
         },
         undefined,
-        { clientId: session.clientId, promptId: 'server-prompt' },
+        {
+          clientId: session.clientId,
+          promptId: 'server-prompt',
+          modelPrompt: trustedModelPrompt,
+        },
       );
 
       expect(handle.agent.promptCalls[0]?._meta).toMatchObject({
@@ -5251,11 +5310,29 @@ describe('createAcpSessionBridge', () => {
           promptId: 'server-prompt',
           originatorClientId: session.clientId,
         },
+        [DAEMON_MODEL_PROMPT_META_KEY]: trustedModelPrompt,
       });
+      expect(handle.agent.promptCalls[0]?.prompt).toEqual([
+        { type: 'text', text: 'accepted' },
+      ]);
       expect(
         handle.agent.promptCalls[0]?._meta?.[
           'qwen-code/private-parent-capability'
         ],
+      ).toBeUndefined();
+
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'spoof-only' }],
+          _meta: { [DAEMON_MODEL_PROMPT_META_KEY]: forgedModelPrompt },
+        },
+        undefined,
+        { clientId: session.clientId, promptId: 'spoof-only-prompt' },
+      );
+      expect(
+        handle.agent.promptCalls[1]?._meta?.[DAEMON_MODEL_PROMPT_META_KEY],
       ).toBeUndefined();
 
       await bridge.shutdown();
@@ -5740,7 +5817,11 @@ describe('createAcpSessionBridge', () => {
           _meta: { inputAnnotations, privateRequestId: 'hidden' },
         },
         undefined,
-        { clientId: session.clientId, promptId: 'prompt-echo' },
+        {
+          clientId: session.clientId,
+          promptId: 'prompt-echo',
+          modelPrompt: 'hidden internal prompt',
+        },
       );
 
       const [aChunk, bChunk] = await Promise.all([aPromise, bPromise]);
@@ -17786,6 +17867,81 @@ describe('activePromptCount and lastActivityAt', () => {
       expect(bridge.sessionCount).toBe(0);
     });
 
+    await bridge.shutdown();
+  });
+});
+
+describe('createAcpSessionBridge — background notifications', () => {
+  it('forwards a daemon-owned worker completion to the live parent session', async () => {
+    const handle = makeChannel({
+      extMethodImpl: async (method, params) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification
+          ? { sessionId: params['sessionId'], accepted: true }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await expect(
+      bridge.enqueueBackgroundNotification(session.sessionId, {
+        displayText: 'Worker completed.',
+        modelText: '<task-notification />',
+        taskId: 'worker-1',
+        status: 'completed',
+        kind: 'agent',
+      }),
+    ).resolves.toEqual({ sessionId: session.sessionId, accepted: true });
+
+    expect(handle.agent.extMethodCalls).toContainEqual({
+      method: SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification,
+      params: {
+        sessionId: session.sessionId,
+        displayText: 'Worker completed.',
+        modelText: '<task-notification />',
+        taskId: 'worker-1',
+        status: 'completed',
+        kind: 'agent',
+      },
+    });
+    await bridge.shutdown();
+  });
+
+  it('propagates a parent that did not accept the completion', async () => {
+    const handle = makeChannel({
+      extMethodImpl: async (method, params) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification
+          ? { sessionId: params['sessionId'], accepted: false }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await expect(
+      bridge.enqueueBackgroundNotification(session.sessionId, {
+        displayText: 'Worker completed.',
+        modelText: '<task-notification />',
+        taskId: 'worker-1',
+        status: 'completed',
+        kind: 'agent',
+      }),
+    ).resolves.toEqual({ sessionId: session.sessionId, accepted: false });
+
+    await bridge.shutdown();
+  });
+
+  it('rejects a worker completion for an unknown parent session', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    await expect(
+      bridge.enqueueBackgroundNotification('missing', {
+        displayText: 'Worker completed.',
+        modelText: '<task-notification />',
+        taskId: 'worker-1',
+        status: 'completed',
+        kind: 'agent',
+      }),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
     await bridge.shutdown();
   });
 });

@@ -166,6 +166,7 @@ import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/b
 import {
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   MID_TURN_QUEUE_DRAIN_METHOD,
+  isValidTrustedModelPrompt,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
@@ -767,13 +768,17 @@ class MidTurnDrainTimeoutError extends Error {
   }
 }
 
-interface BackgroundNotificationQueueItem {
+export interface BackgroundNotificationQueueItem {
   displayText: string;
   modelText: string;
   taskId: string;
   status: string;
   kind: 'agent' | 'monitor' | 'shell';
   toolUseId?: string;
+}
+
+interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
+  persisted?: true;
 }
 
 /** The slice of `CronJob` a fire delivers to this session. Structural, not the
@@ -1236,10 +1241,15 @@ export class Session implements SessionContext {
 
   // Background notification drain state. ACP does not have the TUI's idle
   // hook, so the session serializes registry callbacks through this queue.
-  private notificationQueue: BackgroundNotificationQueueItem[] = [];
+  private notificationQueue: QueuedBackgroundNotification[] = [];
   private notificationProcessing = false;
   private notificationAbortController: AbortController | null = null;
   private notificationCompletion: Promise<void> | null = null;
+  private readonly persistedBackgroundNotificationTaskIds = new Set<string>();
+  private readonly backgroundNotificationAcceptances = new Map<
+    string,
+    Promise<boolean>
+  >();
 
   // Set true in dispose(). Guards #drainCronQueue and #drainNotificationQueue
   // against the race where #drainNotificationQueue's finally block kicks off
@@ -1835,6 +1845,17 @@ export class Session implements SessionContext {
    * Delegates to HistoryReplayer for consistent event emission.
    */
   primeTurnFromHistory(records: ChatRecord[]): void {
+    for (const record of records) {
+      if (record.subtype !== 'notification') continue;
+      const backgroundTask = (
+        record.systemPayload as
+          | { backgroundTask?: { taskId?: unknown } }
+          | undefined
+      )?.backgroundTask;
+      if (typeof backgroundTask?.taskId === 'string') {
+        this.persistedBackgroundNotificationTaskIds.add(backgroundTask.taskId);
+      }
+    }
     this.turn = Math.max(
       this.turn,
       computeInitialTurnFromHistory(records, this.config.getSessionId()),
@@ -2063,9 +2084,22 @@ export class Session implements SessionContext {
     params: PromptRequest,
     invocationContext?: InvocationContextV1,
     admissionCancellation?: AbortSignal,
+    modelPrompt?: string,
   ): Promise<PromptResponse> {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
+    }
+    if (modelPrompt !== undefined && invocationContext === undefined) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Model-only prompt requires trusted invocation context',
+      );
+    }
+    if (modelPrompt !== undefined && !isValidTrustedModelPrompt(modelPrompt)) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid trusted model-only prompt',
+      );
     }
     await this.assertCanStartTurn();
     if (admissionCancellation?.aborted) {
@@ -2175,6 +2209,7 @@ export class Session implements SessionContext {
         pendingSend,
         channelDeliveryCapture,
         invocationContext,
+        modelPrompt,
       );
       releasePendingSend();
       // Drain any cron prompts that queued while the prompt was active
@@ -2388,6 +2423,7 @@ export class Session implements SessionContext {
     pendingSend: AbortController,
     channelDeliveryCapture?: ChannelDeliveryCapture,
     invocationContext?: InvocationContextV1,
+    modelPrompt?: string,
   ): Promise<PromptResponse> {
     const sessionId = this.config.getSessionId();
     if (
@@ -2405,7 +2441,12 @@ export class Session implements SessionContext {
     // the first session created in this process.
     return runWithInvocationContext(invocationContext, () =>
       sessionIdContext.run(sessionId, () =>
-        this.#executePromptInner(params, pendingSend, channelDeliveryCapture),
+        this.#executePromptInner(
+          params,
+          pendingSend,
+          channelDeliveryCapture,
+          modelPrompt,
+        ),
       ),
     );
   }
@@ -2414,6 +2455,7 @@ export class Session implements SessionContext {
     params: PromptRequest,
     pendingSend: AbortController,
     channelDeliveryCapture?: ChannelDeliveryCapture,
+    modelPrompt?: string,
   ): Promise<PromptResponse> {
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
@@ -2453,6 +2495,10 @@ export class Session implements SessionContext {
               .filter((block) => block.type === 'text')
               .map((block) => (block.type === 'text' ? block.text : ''))
               .join(' ');
+            const modelPromptBlocks: PromptRequest['prompt'] =
+              modelPrompt === undefined
+                ? params.prompt
+                : [{ type: 'text', text: modelPrompt }];
 
             // Log user prompt
             logUserPrompt(
@@ -2544,7 +2590,7 @@ export class Session implements SessionContext {
 
             // Check if the input contains a slash command
             // Extract text from the first text block if present
-            const firstTextBlock = params.prompt.find(
+            const firstTextBlock = modelPromptBlocks.find(
               (block) => block.type === 'text',
             );
             const inputText = firstTextBlock?.text || '';
@@ -2575,7 +2621,7 @@ export class Session implements SessionContext {
 
               parts = await this.#processSlashCommandResult(
                 slashCommandResult,
-                params.prompt,
+                modelPromptBlocks,
                 pendingSend.signal,
                 onFullTurnModel,
               );
@@ -2590,7 +2636,7 @@ export class Session implements SessionContext {
               // user's instruction the final, prominent part when referenced
               // file/editor content is appended (issue: ACP + local qwen).
               parts = await this.#resolvePrompt(
-                params.prompt,
+                modelPromptBlocks,
                 pendingSend.signal,
                 { promptLast: true, onFullTurnModel },
               );
@@ -5163,7 +5209,7 @@ export class Session implements SessionContext {
     }
   }
 
-  #enqueueBackgroundNotification(item: BackgroundNotificationQueueItem): void {
+  #enqueueBackgroundNotification(item: QueuedBackgroundNotification): void {
     while (this.notificationQueue.length >= MAX_NOTIFICATION_QUEUE) {
       let evictedIndex = 0;
       if (
@@ -5196,6 +5242,59 @@ export class Session implements SessionContext {
     }
     this.notificationQueue.push(item);
     void this.#drainNotificationQueue();
+  }
+
+  async enqueueBackgroundNotification(
+    item: BackgroundNotificationQueueItem,
+  ): Promise<{ accepted: boolean }> {
+    if (this.persistedBackgroundNotificationTaskIds.has(item.taskId)) {
+      return { accepted: true };
+    }
+    const existing = this.backgroundNotificationAcceptances.get(item.taskId);
+    if (existing) return { accepted: await existing };
+
+    const acceptance = this.#persistDaemonBackgroundNotification(item);
+    this.backgroundNotificationAcceptances.set(item.taskId, acceptance);
+    try {
+      return { accepted: await acceptance };
+    } finally {
+      if (
+        this.backgroundNotificationAcceptances.get(item.taskId) === acceptance
+      ) {
+        this.backgroundNotificationAcceptances.delete(item.taskId);
+      }
+    }
+  }
+
+  async #persistDaemonBackgroundNotification(
+    item: BackgroundNotificationQueueItem,
+  ): Promise<boolean> {
+    if (this.disposed || this.closing) return false;
+    const recording = this.config.getChatRecordingService();
+    if (!recording) return false;
+    try {
+      await recording.recordNotificationStrict(
+        [{ text: item.modelText }],
+        item.displayText,
+        {
+          taskId: item.taskId,
+          status: item.status,
+          kind: item.kind,
+          toolUseId: item.toolUseId,
+        },
+      );
+    } catch (error) {
+      debugLogger.warn(
+        `Daemon notification persistence rejected [session ${this.sessionId}, task ${item.taskId}]: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return false;
+    }
+
+    this.persistedBackgroundNotificationTaskIds.add(item.taskId);
+    if (!this.disposed && !this.closing) {
+      this.#enqueueBackgroundNotification({ ...item, persisted: true });
+    }
+    return true;
   }
 
   async #drainNotificationQueue(): Promise<void> {
@@ -5287,7 +5386,7 @@ export class Session implements SessionContext {
   }
 
   async #executeBackgroundNotificationPromptInner(
-    item: BackgroundNotificationQueueItem,
+    item: QueuedBackgroundNotification,
   ): Promise<void> {
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
@@ -5306,14 +5405,16 @@ export class Session implements SessionContext {
           await this.#emitBackgroundNotificationDisplay(item);
 
           const notificationParts: Part[] = [{ text: item.modelText }];
-          this.config
-            .getChatRecordingService()
-            ?.recordNotification(notificationParts, item.displayText, {
-              taskId: item.taskId,
-              status: item.status,
-              kind: item.kind,
-              toolUseId: item.toolUseId,
-            });
+          if (!item.persisted) {
+            this.config
+              .getChatRecordingService()
+              ?.recordNotification(notificationParts, item.displayText, {
+                taskId: item.taskId,
+                status: item.status,
+                kind: item.kind,
+                toolUseId: item.toolUseId,
+              });
+          }
 
           const notificationReminders =
             await this.#buildInitialSystemReminders();

@@ -95,6 +95,68 @@ function makeClient(fileSystem?: BridgeFileSystem): BridgeClient {
   );
 }
 
+describe('BridgeClient — background notification turn boundary', () => {
+  it('publishes the child end-turn signal for the owned live session', async () => {
+    const sessionId = 'session-background';
+    const publish = vi.fn().mockReturnValue(true);
+    const entry = { sessionId, events: { publish } };
+    const noFlow = () => {
+      throw new Error('test: permission flow should not run');
+    };
+    const client = new BridgeClient(
+      ((id: string) => (id === sessionId ? entry : undefined)) as never,
+      noFlow as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+    );
+
+    await client.extNotification('_qwencode/end_turn', {
+      sessionId,
+      reason: 'end_turn',
+      source: 'background_notification',
+    });
+
+    expect(publish).toHaveBeenCalledWith({
+      type: 'background_notification_turn_complete',
+      data: { sessionId, reason: 'end_turn' },
+    });
+  });
+
+  it('drops malformed or foreign end-turn signals', async () => {
+    const publish = vi.fn();
+    const entry = { sessionId: 'owned', events: { publish } };
+    const noFlow = () => {
+      throw new Error('test: permission flow should not run');
+    };
+    const client = new BridgeClient(
+      ((id: string) => (id === 'owned' ? entry : undefined)) as never,
+      noFlow as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (id) => id === 'owned',
+    );
+
+    await client.extNotification('_qwencode/end_turn', {
+      sessionId: 'owned',
+      reason: 'end_turn',
+      source: 'forged',
+    });
+    await client.extNotification('_qwencode/end_turn', {
+      sessionId: 'foreign',
+      reason: 'end_turn',
+      source: 'background_notification',
+    });
+
+    expect(publish).not.toHaveBeenCalled();
+  });
+});
+
 describe('BridgeClient — recording degradation ownership', () => {
   it('keeps session-level recording degradation prompt-neutral', async () => {
     const sessionId = 'session-with-active-prompt';

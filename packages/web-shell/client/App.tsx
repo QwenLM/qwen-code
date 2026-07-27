@@ -4765,11 +4765,13 @@ export function App({
   // to that session. loadSidebarSession already closes the panel, so this just
   // returns to the chat view and reports load failures.
   const handleOpenSessionFromOverview = useCallback(
-    (sessionId: string) => {
+    (sessionId: string, workspaceCwd?: string) => {
       setMainView('chat');
-      void loadSidebarSession(sessionId).catch((error: unknown) => {
-        reportError(error, 'Failed to open session');
-      });
+      void loadSidebarSession(sessionId, workspaceCwd).catch(
+        (error: unknown) => {
+          reportError(error, 'Failed to open session');
+        },
+      );
     },
     [loadSidebarSession, reportError],
   );
@@ -4778,9 +4780,20 @@ export function App({
   // when a `qwen-session://<id>` link is clicked. Navigate to the session.
   useEffect(() => {
     const handler = (e: Event) => {
-      const sessionId = (e as CustomEvent<string>).detail;
+      const detail = (
+        e as CustomEvent<
+          string | { sessionId?: unknown; workspaceCwd?: unknown }
+        >
+      ).detail;
+      const sessionId = typeof detail === 'string' ? detail : detail?.sessionId;
+      const workspaceCwd =
+        typeof detail === 'object' &&
+        detail !== null &&
+        typeof detail.workspaceCwd === 'string'
+          ? detail.workspaceCwd
+          : undefined;
       if (typeof sessionId === 'string' && sessionId) {
-        handleOpenSessionFromOverview(sessionId);
+        handleOpenSessionFromOverview(sessionId, workspaceCwd);
       }
     };
     window.addEventListener('qwen:open-session', handler);

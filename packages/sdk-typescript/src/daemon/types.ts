@@ -2453,6 +2453,83 @@ export interface DaemonWorkspaceVoiceTranscriptionResult {
   transport: DaemonVoiceTransport;
 }
 
+export type DaemonLiveState =
+  | 'unavailable'
+  | 'idle'
+  | 'starting'
+  | 'listening'
+  | 'thinking'
+  | 'speaking'
+  | 'stopping'
+  | 'error';
+
+export type DaemonLiveBlocker =
+  | 'host_missing'
+  | 'host_disconnected'
+  | 'host_version'
+  | 'microphone_permission'
+  | 'input_monitoring_permission'
+  | 'accessibility_permission'
+  | 'screen_recording_permission'
+  | 'audio_input'
+  | 'audio_output'
+  | 'global_shortcut'
+  | 'appshot'
+  | 'provider_config'
+  | 'provider_unreachable';
+
+export type DaemonLiveRequirementState =
+  | 'ready'
+  | 'missing'
+  | 'denied'
+  | 'unavailable'
+  | 'checking';
+
+export interface DaemonLiveSessionLocator {
+  workspaceCwd: string;
+  sessionId: string;
+}
+
+/** Process-global Live Voice state. It never contains provider credentials. */
+export interface DaemonLiveStatus {
+  v: 1;
+  available: boolean;
+  state: DaemonLiveState;
+  blocker?: DaemonLiveBlocker;
+  message?: string;
+  callId?: string;
+  inputMuted?: boolean;
+  outputMuted?: boolean;
+  transcript?: string;
+  coordinator?: DaemonLiveSessionLocator;
+  workers?: DaemonLiveSessionLocator[];
+  requirements?: Partial<
+    Record<
+      | 'host'
+      | 'microphone'
+      | 'inputMonitoring'
+      | 'accessibility'
+      | 'screenRecording'
+      | 'audioInput'
+      | 'audioOutput'
+      | 'globalShortcut'
+      | 'appshot'
+      | 'provider',
+      DaemonLiveRequirementState
+    >
+  >;
+  host?: {
+    version?: string;
+    protocolVersion?: number;
+  };
+  installUrl?: string;
+}
+
+export interface DaemonLiveMuteUpdate {
+  inputMuted?: boolean;
+  outputMuted?: boolean;
+}
+
 export type DaemonWorkspaceTrustState = 'trusted' | 'untrusted' | 'unknown';
 
 export type DaemonWorkspaceTrustSource = 'disabled' | 'ide' | 'file' | 'none';

@@ -292,11 +292,17 @@ export interface ChangeSessionCwdRequest {
   /**
    * Server-controlled containment roots. When present, the agent-side
    * sessionCd handler verifies (after its own realpath) that the
-   * canonical target is under one of these roots. Only set by the
-   * daemon's worktree create/restore paths; direct user cd omits this
-   * field, preserving existing behavior.
+   * canonical target is under one of these roots. Only set by daemon-owned
+   * relocation paths; direct user cd omits this field, preserving existing
+   * behavior.
    */
   allowedRoots?: string[];
+  /**
+   * Private daemon capability for a Live conversation directory. The ACP
+   * child validates the authenticated parent, private root, and direct child
+   * before this may bypass the independent global folder-trust registry.
+   */
+  managedRelocation?: 'live-conversation';
 }
 
 export interface ChangeSessionCwdResult {
@@ -499,6 +505,12 @@ export interface BridgeClientRequestContext {
    * SSE event to the pending HTTP 202 request.
    */
   promptId?: string;
+  /**
+   * Internal model input that replaces the public prompt only inside the
+   * trusted ACP child. The bridge still echoes and persists `PromptRequest`
+   * unchanged. HTTP routes never populate this from request input.
+   */
+  modelPrompt?: string;
   /** Trusted Channel delivery correlation injected by the daemon prompt
    * route. Never populated from caller-controlled ACP metadata. */
   channelDelivery?: {
@@ -524,6 +536,17 @@ export interface BridgeClientRequestContext {
    * REST prompt route from `resolvePromptDeadlineMs(serverMs, requestMs)`.
    */
   deadlineMs?: number;
+}
+
+export const DAEMON_MODEL_PROMPT_META_KEY = 'qwen.daemon.modelPrompt';
+export const MAX_TRUSTED_MODEL_PROMPT_CHARS = 64 * 1024;
+
+export function isValidTrustedModelPrompt(value: unknown): value is string {
+  return (
+    typeof value === 'string' &&
+    value.trim().length > 0 &&
+    value.length <= MAX_TRUSTED_MODEL_PROMPT_CHARS
+  );
 }
 
 export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
@@ -781,6 +804,16 @@ export type BridgeWorkspaceGenerationNotificationEvent = Exclude<
   BridgeWorkspaceGenerationStreamEvent,
   { type: 'done' }
 >;
+
+/** A daemon-owned worker completion injected into its parent session. */
+export interface BridgeBackgroundNotification {
+  displayText: string;
+  modelText: string;
+  taskId: string;
+  status: 'completed' | 'failed' | 'cancelled';
+  kind: 'agent';
+  toolUseId?: string;
+}
 
 export interface AcpSessionBridge {
   /** Read-only daemon diagnostics for status endpoints. */
@@ -1348,6 +1381,16 @@ export interface AcpSessionBridge {
     message: string,
     context?: BridgeClientRequestContext,
   ): { accepted: boolean };
+
+  /**
+   * Queue a daemon-owned worker completion in its live parent session. The
+   * session records the notification and runs its normal automatic follow-up
+   * turn, matching the return path used by in-process background agents.
+   */
+  enqueueBackgroundNotification(
+    sessionId: string,
+    notification: BridgeBackgroundNotification,
+  ): Promise<{ sessionId: string; accepted: boolean }>;
 
   /**
    * Execute a shell command directly on the daemon (no LLM involvement).

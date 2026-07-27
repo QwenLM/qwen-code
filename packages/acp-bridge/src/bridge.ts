@@ -99,6 +99,7 @@ import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
+  DAEMON_MODEL_PROMPT_META_KEY,
   LOAD_REPLAY_BULK_MODE,
   LOAD_REPLAY_META_KEY,
   LOAD_REPLAY_MODE_META_KEY,
@@ -106,6 +107,7 @@ import {
   LOAD_REPLAY_VERSION,
   PROMPT_CANCEL_METHOD,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
+  isValidTrustedModelPrompt,
 } from './bridgeTypes.js';
 import { getChannelStartupProfileAttributes } from './channel-startup-profile.js';
 import type {
@@ -5204,6 +5206,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         entry,
         context?.clientId,
       );
+      const modelPrompt = context?.modelPrompt;
+      if (
+        modelPrompt !== undefined &&
+        !isValidTrustedModelPrompt(modelPrompt)
+      ) {
+        throw new TypeError(
+          'Bridge modelPrompt must be a non-empty bounded string.',
+        );
+      }
       // Pre-aborted: skip the queue entirely. Without this the prompt
       // chains onto promptQueue, waits its turn, and the FIFO worker
       // checks `signal.aborted` only AFTER reaching the head — wasted
@@ -5442,6 +5453,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   // below) re-arms it after this strip.
                   delete meta[DAEMON_CONTINUE_META_KEY];
                   delete meta[DAEMON_CHANNEL_DELIVERY_META_KEY];
+                  delete meta[DAEMON_MODEL_PROMPT_META_KEY];
                   if (isRetry) {
                     meta[DAEMON_RETRY_META_KEY] = true;
                   }
@@ -5451,6 +5463,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   if (context?.channelDelivery) {
                     meta[DAEMON_CHANNEL_DELIVERY_META_KEY] =
                       context.channelDelivery;
+                  }
+                  if (modelPrompt !== undefined) {
+                    meta[DAEMON_MODEL_PROMPT_META_KEY] = modelPrompt;
                   }
                   meta[INVOCATION_CONTEXT_META_KEY] = invocationContext;
                   if (Object.keys(meta).length > 0) {
@@ -6196,6 +6211,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             sessionId,
             path: req.path,
             ...(req.allowedRoots ? { allowedRoots: req.allowedRoots } : {}),
+            ...(req.managedRelocation
+              ? { managedRelocation: req.managedRelocation }
+              : {}),
           },
         );
         const extResult = raw as {
@@ -7447,6 +7465,25 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       entry.midTurnMessageQueue.push({ text: trimmed, originatorClientId });
       return { accepted: true };
+    },
+
+    async enqueueBackgroundNotification(sessionId, notification) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+      const response = await Promise.race([
+        withTimeout(
+          entry.connection.extMethod(
+            SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification,
+            { sessionId, ...notification },
+          ),
+          initTimeoutMs,
+          SERVE_CONTROL_EXT_METHODS.sessionBackgroundNotification,
+        ),
+        getTransportClosedReject(entry),
+      ]);
+      return { sessionId, accepted: response['accepted'] === true };
     },
 
     async generateSessionBtw(sessionId, question, signal, _context) {
