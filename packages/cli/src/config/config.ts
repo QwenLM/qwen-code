@@ -2016,12 +2016,14 @@ export async function loadCliConfig(
     bareMode || safeMode
       ? { ...topTierMcpServers }
       : assembleMcpServers(settings.mcpServers, cwd, topTierMcpServers);
-  // Top-tier servers are never gated (#4615, see the comment above), so
-  // running this under safe mode is a harmless no-op for them today — kept
-  // enabled (only `bareMode`/YOLO skip it) rather than special-cased, so a
-  // future gated top-tier source doesn't silently bypass approval.
+  // Top-tier servers are never gated (#4615, see the comment above), so this
+  // is a no-op for them either way today. Skipped under safe mode anyway
+  // (Copilot review, PR #7827): getPendingGatedMcpServers reads the local
+  // mcpApprovals.json file, and safe mode shouldn't touch local/ambient
+  // state at all, not even a read with no behavioral effect. Revisit if a
+  // future gated top-tier source needs this to run under safe mode too.
   const pendingMcpServers =
-    bareMode || approvalMode === ApprovalMode.YOLO
+    bareMode || safeMode || approvalMode === ApprovalMode.YOLO
       ? undefined
       : getPendingGatedMcpServers(mcpServers, cwd);
 

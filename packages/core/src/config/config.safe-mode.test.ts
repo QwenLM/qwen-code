@@ -318,6 +318,25 @@ describe('Config safe mode', () => {
         probe: { command: 'probe', args: [] },
       });
     });
+
+    it('still applies allowedMcpServers to top-tier servers in safe mode (Copilot review, PR #7827)', () => {
+      // Safe mode is not an exemption from a session's own
+      // --allowed-mcp-server-names upper bound — a caller-supplied server
+      // outside that allow-list must still be filtered out, exactly like the
+      // non-safe-mode path a few lines below does.
+      const config = new Config({
+        ...baseParams,
+        safeMode: true,
+        allowedMcpServers: ['probe'],
+        topTierMcpServers: {
+          probe: { command: 'probe', args: [] },
+          notAllowed: { command: 'not-allowed', args: [] },
+        },
+      });
+      expect(config.getMcpServers()).toEqual({
+        probe: { command: 'probe', args: [] },
+      });
+    });
   });
 
   describe('safe mode skips context file loading', () => {

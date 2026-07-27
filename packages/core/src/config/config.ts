@@ -4815,8 +4815,12 @@ export class Config {
     // request. `topTierMcpServers` (ACP `session/new`'s `mcpServers` field,
     // `--mcp-config`) is that explicit request, so it survives safe mode;
     // everything `getMergedMcpServers()` would otherwise fold in does not.
-    if (this.isSafeMode()) return { ...this.topTierMcpServers };
-    let mcpServers = this.getMergedMcpServers();
+    // Still runs through the `allowedMcpServers` filter below like any other
+    // source — safe mode isn't an exemption from a session's own
+    // `--allowed-mcp-server-names` upper bound (Copilot review, PR #7827).
+    let mcpServers = this.isSafeMode()
+      ? { ...this.topTierMcpServers }
+      : this.getMergedMcpServers();
 
     if (this.allowedMcpServers) {
       mcpServers = Object.fromEntries(
