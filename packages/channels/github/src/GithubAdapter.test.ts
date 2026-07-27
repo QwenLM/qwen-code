@@ -615,6 +615,10 @@ describe('GithubChannel', () => {
       expect(env.threadId).toBe('pr:99');
       expect(env.text).toBe('implement division');
       expect(env.senderId).toBe('alice');
+      // review_requested is a directed trigger — isMentioned must be true so
+      // the default requireMention group gate lets it through instead of
+      // dropping it as 'mention_required'.
+      expect(env.isMentioned).toBe(true);
       expect(env.metadata).toContain('review_requested');
       expect(env.metadata).toContain(
         'Author: alice | State: open | Draft: false',
@@ -675,6 +679,9 @@ describe('GithubChannel', () => {
       const env = channel.inboundEnvelopes[0]!;
       expect(env.text).toBe('the build is broken');
       expect(env.senderId).toBe('bob');
+      // assign is a directed trigger — isMentioned must be true so the default
+      // requireMention group gate lets it through.
+      expect(env.isMentioned).toBe(true);
       expect(env.metadata).toContain('Trigger: assign.');
       expect(env.metadata).toContain('Author: bob | State: open');
     });

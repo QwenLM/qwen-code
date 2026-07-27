@@ -416,7 +416,10 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       messageId: `${kind}-body-${issueNumber}`,
       text,
       isGroup: true,
-      isMentioned: false,
+      // review_requested / assign are explicit, directed triggers (the bot was
+      // asked to review or assigned) — equivalent to a mention, so the default
+      // requireMention group gate must let them through instead of dropping.
+      isMentioned: true,
       isReplyToBot: false,
       metadata,
     };
