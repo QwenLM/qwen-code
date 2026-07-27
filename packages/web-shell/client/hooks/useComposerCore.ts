@@ -2675,7 +2675,20 @@ export function useComposerCore(
     };
 
     const composerUpdateListener = EditorView.updateListener.of((update) => {
-      if (update.docChanged && pendingPastesRef.current.size > 0) {
+      // A genuine edit (typing/deleting/pasting) ends history-browse mode, so
+      // arrows go back to driving any open menu. Programmatic history recall
+      // dispatches carry no user event, so they do not clear the flag.
+      const userEdited = update.transactions.some(
+        (tr) => tr.isUserEvent('input') || tr.isUserEvent('delete'),
+      );
+      // Prune only on genuine user edits: undo/redo also change the doc, and
+      // pruning during an undo would drop the paste mapping a redo needs to
+      // re-expand the placeholder.
+      if (
+        update.docChanged &&
+        userEdited &&
+        pendingPastesRef.current.size > 0
+      ) {
         const nextPasteId = prunePendingPastes(
           pendingPastesRef.current,
           getDocText(update.state),
@@ -2684,12 +2697,6 @@ export function useComposerCore(
           nextPasteIdRef.current = nextPasteId;
         }
       }
-      // A genuine edit (typing/deleting/pasting) ends history-browse mode, so
-      // arrows go back to driving any open menu. Programmatic history recall
-      // dispatches carry no user event, so they do not clear the flag.
-      const userEdited = update.transactions.some(
-        (tr) => tr.isUserEvent('input') || tr.isUserEvent('delete'),
-      );
       if (userEdited) {
         historyBrowseActiveRef.current = false;
       }
@@ -2996,6 +3003,8 @@ export function useComposerCore(
 
     const storedDraft = loadComposerDraft(composerDraftStorageKey);
     const adoptUnscopedInMemoryDraft =
+      !wasBrowsingHistory &&
+      !wasSearchingHistory &&
       previousDraftIdentity.sessionId === undefined &&
       sessionId === undefined &&
       previousDraftIdentity.workspaceCwd === undefined &&

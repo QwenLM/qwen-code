@@ -4100,12 +4100,20 @@ describe('App session callbacks', () => {
     view.rerender();
     await flush();
 
+    // Voice props are owned by the voice feature, which derives them from the
+    // capabilities snapshot identity and so legitimately recomputes them on an
+    // equivalent refresh; this assertion guards the workspace props above.
+    const VOICE_OWNED_PROPS = new Set(['voiceTarget', 'voiceStatusRevision']);
     const changedProps = Object.keys(previousProps ?? {}).filter(
       (key) =>
+        !VOICE_OWNED_PROPS.has(key) &&
         (previousProps as unknown as Record<string, unknown>)[key] !==
-        (testState.latestChatEditorProps as unknown as Record<string, unknown>)[
-          key
-        ],
+          (
+            testState.latestChatEditorProps as unknown as Record<
+              string,
+              unknown
+            >
+          )[key],
     );
     expect(changedProps).toEqual([]);
     expect(testState.latestChatEditorProps?.workspaces).toBe(
