@@ -394,6 +394,57 @@ describe('Config safe mode', () => {
         getMcpManagerMock(config).discoverAllMcpToolsIncremental,
       ).not.toHaveBeenCalled();
     });
+
+    // The safe-mode half of this gate (`!this.isSafeMode() || getMcpServers()
+    // non-empty`) shipped in the commit above; the bare-mode half
+    // (`!this.getBareMode()`, unconditional) was left unfixed despite
+    // `loadCliConfig` feeding top-tier servers into bare mode's `mcpServers`
+    // param exactly the same way it does safe mode's `topTierMcpServers`
+    // field (`packages/cli/src/config/config.ts`'s `bareMode || safeMode ?
+    // { ...topTierMcpServers } : assembleMcpServers(...)`) — found
+    // live-testing `qwen --bare --mcp-config`, same stranded-server symptom.
+    // Unlike the safe-mode tests above, bare mode has no redundant
+    // `getMcpServers()`-level short-circuit of its own — bare mode's
+    // "local sources dropped" guarantee lives entirely in that CLI-layer
+    // assembly, so these tests set `mcpServers` directly (what `loadCliConfig`
+    // would have already produced by the time `Config` is constructed), not
+    // `topTierMcpServers` (only consulted by `getMcpServers()`'s safe-mode
+    // branch).
+    it('still kicks off background MCP discovery in bare mode when a top-tier server is present', async () => {
+      const config = new Config({
+        ...baseParams,
+        bareMode: true,
+        mcpServers: { probe: { command: 'probe', args: [] } },
+      });
+      await config.initialize();
+      expect(
+        getMcpManagerMock(config).discoverAllMcpToolsIncremental,
+      ).toHaveBeenCalledWith(config);
+    });
+
+    it('does not kick off background MCP discovery in bare mode when nothing was supplied (no wasted work)', async () => {
+      const config = new Config({
+        ...baseParams,
+        bareMode: true,
+      });
+      await config.initialize();
+      expect(
+        getMcpManagerMock(config).discoverAllMcpToolsIncremental,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('does not kick off background MCP discovery in bare mode when the only supplied server is filtered out by allowedMcpServers', async () => {
+      const config = new Config({
+        ...baseParams,
+        bareMode: true,
+        allowedMcpServers: ['nope'],
+        mcpServers: { probe: { command: 'probe', args: [] } },
+      });
+      await config.initialize();
+      expect(
+        getMcpManagerMock(config).discoverAllMcpToolsIncremental,
+      ).not.toHaveBeenCalled();
+    });
   });
 
   describe('safe mode skips context file loading', () => {

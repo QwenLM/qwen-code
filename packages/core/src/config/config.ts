@@ -2803,19 +2803,23 @@ export class Config {
     // bootstrap path passes `skipMcpDiscovery: true` so the bootstrap
     // config doesn't run discovery under its pool-less manager.
     //
-    // Safe mode still skips discovery when there's nothing to discover (the
-    // common case: no top-tier servers supplied) — this block predates the
-    // safe-mode `getMcpServers()` fix (PR #7827) and was written when
-    // `getMcpServers()` always returned `{}` under safe mode, making this a
-    // harmless no-op regardless. Now that caller-supplied top-tier servers
-    // survive safe mode, unconditionally skipping discovery here would
-    // silently strand them: `getMcpServers()` reports them as configured,
-    // but nothing ever connects to them or registers their tools. Checking
-    // `getMcpServers()` (not `topTierMcpServers` directly) also respects the
-    // `allowedMcpServers` filter already applied there.
+    // Safe/bare mode still skip discovery when there's nothing to discover
+    // (the common case: no top-tier servers supplied) — this block predates
+    // the safe-mode `getMcpServers()` fix (PR #7827) and was written when
+    // `getMcpServers()` always returned `{}` under both modes, making the
+    // unconditional skip a harmless no-op regardless. Now that
+    // caller-supplied top-tier servers survive safe mode AND bare mode,
+    // unconditionally skipping discovery in either would silently strand
+    // them: `getMcpServers()` reports them as configured, but nothing ever
+    // connects to them or registers their tools (a live repro of exactly
+    // this — `qwen --bare --mcp-config` with a top-tier server — surfaced
+    // the bare-mode half of this gate was never updated alongside safe
+    // mode's). Checking `getMcpServers()` (not `topTierMcpServers` directly)
+    // also respects the `allowedMcpServers` filter already applied there.
     if (
       skipInlineMcpDiscovery &&
-      !this.getBareMode() &&
+      (!this.getBareMode() ||
+        Object.keys(this.getMcpServers() ?? {}).length > 0) &&
       (!this.isSafeMode() ||
         Object.keys(this.getMcpServers() ?? {}).length > 0) &&
       !options?.skipMcpDiscovery
