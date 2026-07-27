@@ -2258,6 +2258,56 @@ describe('App shell command queueing', () => {
 
     expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
   });
+
+  it('reports an error when sendShellCommand rejects with an existing session', async () => {
+    mockSessionActions.sendShellCommand.mockRejectedValueOnce(
+      new Error('daemon rejected'),
+    );
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const onToast = vi.fn();
+    renderApp({ onToast });
+    await flush();
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('!ls');
+      await vi.waitFor(() => {
+        expect(onToast).toHaveBeenCalledWith('error', expect.any(String));
+      });
+    });
+
+    expect(accepted).toBe(true);
+    expect(consoleError).toHaveBeenCalledWith(
+      '[web-shell]',
+      'daemon rejected',
+      expect.anything(),
+    );
+
+    consoleError.mockRestore();
+  });
+
+  it('returns false for bare ! or whitespace-only ! commands', async () => {
+    renderApp({});
+    await flush();
+
+    let accepted: boolean | void;
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('!');
+      await Promise.resolve();
+    });
+    expect(accepted).toBe(false);
+
+    await act(async () => {
+      accepted = testState.latestChatEditorProps?.onSubmit('!   ');
+      await Promise.resolve();
+    });
+    expect(accepted).toBe(false);
+
+    expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
+    expect(mockSessionActions.createSession).not.toHaveBeenCalled();
+  });
 });
 
 describe('App session callbacks', () => {
