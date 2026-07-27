@@ -1189,9 +1189,17 @@ export function scriptLintGate(planPath: string): {
   } catch {
     // No report. Fail closed ONLY when the diff carried a path-detected script
     // (owed) — otherwise a diff with no scripts would be capped for a command it
-    // had no reason to run. A shebang-only script the path predicate cannot see
-    // also lands here, but the orchestrator runs script-lint on every same-repo
-    // review, so a real run has a report and is handled below on its own findings.
+    // had no reason to run.
+    //
+    // The one gap this leaves — a SHEBANG-only script (`hasExecutableScript` is
+    // path-only, so `owed` is false for it) whose command was skipped — is closed by
+    // a CONTRACT, not by this predicate: SKILL.md has the orchestrator run
+    // `qwen review script-lint` on EVERY same-repo review, unconditionally. So a
+    // compliant run always writes a report (even "nothing to lint"), the shebang
+    // script is linted and appears in it, and it is handled below on its own
+    // findings regardless of `owed`. "No report" therefore means the command did not
+    // run — the `owed` cap covers the path-detectable case; the shebang case relies
+    // on the always-run contract above, which is why it is stated there in prose.
     if (owed) {
       unreviewed.push(
         'the executable-script lint — `qwen review script-lint` produced no report',

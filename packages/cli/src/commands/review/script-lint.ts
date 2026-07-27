@@ -37,7 +37,7 @@ import {
   closeSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join, resolve, basename } from 'node:path';
+import { dirname, join, resolve, basename, sep } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { parseDiff } from './lib/diff-plan.js';
 
@@ -167,6 +167,11 @@ export function pathTool(path: string): LintTool | null {
 export function toolFor(path: string, firstLine: string): LintTool | null {
   const byPath = pathTool(path);
   if (byPath) return byPath;
+  // Only the shells shellcheck actually supports. zsh and fish are deliberately
+  // excluded: shellcheck refuses both (`SC1071: ShellCheck only supports
+  // sh/bash/dash/ksh`), so routing a `#!/usr/bin/env zsh` hook here would make every
+  // zsh file a bogus SC1071 "[lint]" Critical on its shebang line. A zsh/fish script
+  // is simply not owed — the same as a Python or Ruby script we have no linter for.
   if (/^#!.*\b(sh|bash|dash|ksh)\b/.test(firstLine)) return 'shellcheck';
   return null;
 }
@@ -513,12 +518,24 @@ export function runScriptLint(
   }
   const files = Array.isArray(plan.files) ? plan.files : [];
   // The lines this PR actually added or changed, context excluded — keyed off the
-  // diff, not the plan's context-inclusive hunks. Empty when the diff is absent,
-  // in which case each file falls back to its (over-inclusive) plan hunks below.
+  // diff, not the plan's context-inclusive hunks. Empty when the diff is absent or
+  // unreadable, in which case each file falls back to its (over-inclusive) plan
+  // hunks below — but a report produced without a readable diff carries no
+  // `diffHash`, so `compose-review`'s freshness guard rejects it as stale before it
+  // can reach a verdict; the fallback exists for the test fixtures, not production.
   const addedRanges =
     typeof plan.diffPathAbsolute === 'string'
       ? addedRangesByPath(plan.diffPathAbsolute)
       : new Map<string, Array<[number, number]>>();
+  if (typeof plan.diffPathAbsolute === 'string' && addedRanges.size === 0) {
+    // A diff was expected but could not be parsed. Make the degraded path visible
+    // rather than silently classifying every finding against context-inclusive hunks.
+    writeStderrLine(
+      'WARNING: script-lint could not parse the diff for added-line ranges; ' +
+        'findings fall back to context-inclusive hunks and this report will be ' +
+        'rejected as stale by the review gate.',
+    );
+  }
 
   const checked: FileLint[] = [];
   const skipped: ScriptLintReport['skipped'] = [];
@@ -530,6 +547,23 @@ export function runScriptLint(
     const path = typeof f?.path === 'string' ? f.path : '';
     if (!path) continue;
     const abs = resolve(join(args.worktree, path));
+    // Defence-in-depth: the plan is a file the orchestrator writes, not fully
+    // trusted input, and a `../../etc/passwd`-style path (or any `..` escape) would
+    // resolve OUTSIDE the tree we were asked to review. Refuse to stat or lint
+    // anything that leaves the worktree; disclose it as skipped if a linter owned it
+    // by name, rather than reading a file the review has no business touching.
+    const wt = resolve(args.worktree);
+    if (abs !== wt && !abs.startsWith(wt + sep)) {
+      const byName = pathTool(path);
+      if (byName) {
+        skipped.push({
+          path,
+          tool: byName,
+          reason: 'path resolves outside the worktree — not linted',
+        });
+      }
+      continue;
+    }
     const first = firstLineOf(abs);
     if (first.kind === 'missing') continue; // deleted on the new side — nothing to lint
     if (first.kind === 'irregular') {
@@ -597,10 +631,14 @@ export function runScriptLint(
       });
       continue;
     }
-    // Prefer the diff's added-line ranges (context excluded); fall back to the
-    // plan's context-inclusive hunks only when the diff was unavailable. A file
-    // present in the diff with no added lines yields `[]` — correctly nothing.
-    const ranges = addedRanges.get(path) ?? hunksOf(f);
+    // Prefer the diff's added-line ranges (context excluded). A path the PARSED diff
+    // does not mention yields `[]` (nothing added → nothing blocks) — NOT the plan's
+    // context-inclusive hunks, which would false-positive a pre-existing finding on a
+    // context line into a blocker. The context-inclusive `hunksOf` fallback is used
+    // ONLY when no diff was parsed at all (`addedRanges` empty), a report the gate
+    // then rejects as stale anyway.
+    const ranges =
+      addedRanges.get(path) ?? (addedRanges.size > 0 ? [] : hunksOf(f));
     const findings = parsed.map((x) => ({
       ...x,
       inDiff: inAnyHunk(x.line, ranges),

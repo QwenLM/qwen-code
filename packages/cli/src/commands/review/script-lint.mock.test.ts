@@ -222,6 +222,67 @@ describe('runScriptLint — inDiff uses added lines, not hunk context', () => {
     expect(sc!.inDiff).toBe(false); // line 3 is context, not an added line
     expect(r.ok).toBe(true);
   });
+
+  it('a path the PARSED diff does not mention is inDiff:false, not context-hunk true', () => {
+    // The diff adds line 2 of a.sh only. b.sh is in the plan (a finding on it) but
+    // absent from the diff — so its finding must be inDiff:false (nothing added for
+    // it), NOT promoted via b.sh's context-inclusive plan hunks. Regression guard for
+    // the false-positive-blocker the `?? hunksOf` fallback could produce.
+    const diff = [
+      'diff --git a/a.sh b/a.sh',
+      '--- a/a.sh',
+      '+++ b/a.sh',
+      '@@ -1,1 +1,2 @@',
+      ' #!/bin/bash',
+      '+rm $X',
+      '',
+    ].join('\n');
+    const diffPath = join(dir, 'pr.diff');
+    writeFileSync(diffPath, diff);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'a.sh'), '#!/bin/bash\nrm $X\n');
+    writeFileSync(join(dir, 'b.sh'), '#!/bin/bash\nrm $Y\n');
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        diffPathAbsolute: diffPath,
+        files: [
+          { path: 'a.sh', kind: 'source', hunks: [{ newStart: 2, newEnd: 2 }] },
+          // b.sh is NOT in the diff; its plan hunks would (wrongly) cover line 2.
+          { path: 'b.sh', kind: 'source', hunks: [{ newStart: 2, newEnd: 2 }] },
+        ],
+      }),
+    );
+    const r = runScriptLint(
+      { plan: planPath, worktree: dir },
+      shellcheckRunner([{ line: 2, code: 2086, level: 'info' }]),
+    );
+    const a = r.checked.find((c) => c.path === 'a.sh')!;
+    const b = r.checked.find((c) => c.path === 'b.sh')!;
+    expect(a.findings[0].inDiff).toBe(true); // added line — blocks
+    expect(b.findings[0].inDiff).toBe(false); // not in the parsed diff — must not block
+  });
+});
+
+describe('runScriptLint — refuses a path that escapes the worktree', () => {
+  it('records an outside-worktree path as skipped, never stats or lints it', () => {
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        // `..` escape: resolves to the parent of the worktree.
+        files: [{ path: '../escape.sh', kind: 'source' }],
+      }),
+    );
+    const runner = () => {
+      throw new Error('runner must not be called for an out-of-worktree path');
+    };
+    const r = runScriptLint({ plan: planPath, worktree: dir }, runner);
+    expect(r.checked).toEqual([]);
+    expect(r.skipped).toHaveLength(1);
+    expect(r.skipped[0].reason).toContain('outside the worktree');
+  });
 });
 
 describe('runScriptLint — the report is bound to the diff it ran against', () => {
