@@ -537,13 +537,7 @@ describe('ChatPane', () => {
     render({ workspaceCwd: '/work/other' });
     expect(latestChatEditorProps.voiceTarget).toBeUndefined();
 
-    act(() => {
-      root?.render(
-        <I18nProvider language="en">
-          <ChatPane workspaceCwd="/work/api" hidden />
-        </I18nProvider>,
-      );
-    });
+    rerender({ workspaceCwd: '/work/api', hidden: true });
     expect(latestChatEditorProps.voiceTarget).toBeUndefined();
   });
 
