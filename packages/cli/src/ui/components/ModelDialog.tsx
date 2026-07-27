@@ -594,12 +594,28 @@ export function ModelDialog({
                 model.baseUrl === parsedImageModelValue.baseUrl),
           )
       : undefined;
-  const preferredCompactionModelEntry = isCompactionModelMode
-    ? availableModelEntries.find(({ model }) => {
-        const compactionModel = settings?.merged?.compactionModel?.trim();
-        return compactionModel && model.id === compactionModel;
-      })
-    : undefined;
+  const parsedCompactionSetting = useMemo(() => {
+    if (!isCompactionModelMode) return undefined;
+    const raw = settings?.merged?.compactionModel?.trim();
+    if (!raw) return undefined;
+    try {
+      return resolveModelId(raw);
+    } catch {
+      return undefined;
+    }
+  }, [settings?.merged?.compactionModel, isCompactionModelMode]);
+  const preferredCompactionModelEntry =
+    isCompactionModelMode && parsedCompactionSetting
+      ? parsedCompactionSetting.authType
+        ? availableModelEntries.find(
+            ({ authType: t2, model }) =>
+              t2 === parsedCompactionSetting.authType &&
+              model.id === parsedCompactionSetting.modelId,
+          )
+        : availableModelEntries.find(
+            ({ model }) => model.id === parsedCompactionSetting.modelId,
+          )
+      : undefined;
   const preferredKey = activeRuntimeSnapshot
     ? activeRuntimeSnapshot.id
     : preferredVoiceModelEntry
@@ -648,6 +664,7 @@ export function ModelDialog({
           (isFastModelMode ||
             isVoiceModelMode ||
             isVisionModelMode ||
+            isCompactionModelMode ||
             isImageModelMode))
       ) {
         onClose();

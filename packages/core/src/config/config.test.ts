@@ -3969,20 +3969,14 @@ describe('Server Config (config.ts)', () => {
         expect(config.getCompactionModel()).toBe('compaction-model');
       });
 
-      it('resolves a bare compaction model under the current auth type', async () => {
+      it('resolves an authType-qualified compaction model selector', async () => {
         const config = new Config({
           ...baseParams,
-          authType: AuthType.USE_OPENAI,
-          model: 'gpt-4',
-          compactionModel: 'compaction-model',
+          authType: AuthType.USE_ANTHROPIC,
+          model: 'claude-opus-4-7',
+          compactionModel: 'openai:compaction-model',
           modelProvidersConfig: {
             [AuthType.USE_OPENAI]: [
-              {
-                id: 'gpt-4',
-                name: 'GPT-4',
-                baseUrl: 'https://api.openai.com/v1',
-                envKey: 'OPENAI_API_KEY',
-              },
               {
                 id: 'compaction-model',
                 name: 'Compaction Model',
@@ -3990,12 +3984,20 @@ describe('Server Config (config.ts)', () => {
                 envKey: 'OPENAI_API_KEY',
               },
             ],
+            [AuthType.USE_ANTHROPIC]: [
+              {
+                id: 'claude-opus-4-7',
+                name: 'claude-opus-4-7',
+                baseUrl: 'https://idealab.alibaba-inc.com/api/anthropic',
+                envKey: 'IDEALAB_OPUS_API_KEY',
+              },
+            ],
           },
         });
 
-        await config.refreshAuth(AuthType.USE_OPENAI);
+        await config.refreshAuth(AuthType.USE_ANTHROPIC);
 
-        expect(config.getCompactionModel()).toBe('compaction-model');
+        expect(config.getCompactionModel()).toBe('openai:compaction-model');
       });
 
       it('falls back to fastModel when compactionModel is not set', async () => {

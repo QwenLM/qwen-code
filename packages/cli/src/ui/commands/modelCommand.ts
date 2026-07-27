@@ -632,7 +632,7 @@ export const modelCommand: SlashCommand = {
         selector.authType
           ? config.getAvailableModelsForAuthType(selector.authType)
           : config.getAllConfiguredModels()
-      ).filter((m) => !m.voiceOnly && !m.imageOnly);
+      ).filter((m) => !m.voiceOnly && !m.imageOnly && !m.visionOnly);
       if (!availableModels.some((model) => model.id === selector.modelId)) {
         return {
           type: 'message',
@@ -783,6 +783,15 @@ export const modelCommand: SlashCommand = {
     if (isCompactionModelCommand) {
       const modelName = args.replace('--compaction', '').trim();
       if (!modelName) {
+        if (args.startsWith('--compaction ') && settings) {
+          persistSetting(settings, 'compactionModel', undefined, scopeOverride);
+          config.setCompactionModel(undefined);
+          return {
+            type: 'message',
+            messageType: 'info',
+            content: t('Compaction model override cleared') + scopeSuffix,
+          };
+        }
         if (context.executionMode !== 'interactive') {
           const compactionModel =
             context.services.settings?.merged?.compactionModel?.trim() ||
@@ -829,7 +838,9 @@ export const modelCommand: SlashCommand = {
         selector.authType
           ? config.getAvailableModelsForAuthType(selector.authType)
           : config.getAllConfiguredModels()
-      ).filter((m) => !m.voiceOnly && !m.imageOnly && !m.visionOnly);
+      ).filter(
+        (m) => !m.fastOnly && !m.voiceOnly && !m.imageOnly && !m.visionOnly,
+      );
       if (!availableModels.some((model) => model.id === selector.modelId)) {
         return {
           type: 'message',
