@@ -163,6 +163,105 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `extensions-manager-${theme}`);
     });
 
+    test(`Channel manager`, async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: [
+            'session_events',
+            'permission_vote',
+            'session_permission_vote',
+            'session_scope_override',
+            'session_source_metadata',
+            'workspace_settings',
+            'workspace_voice',
+            'channel_management',
+          ],
+        },
+        channelTypes: [
+          {
+            type: 'dingtalk',
+            displayName: 'DingTalk',
+            manageable: true,
+            fields: [],
+          },
+          {
+            type: 'wecom',
+            displayName: 'WeCom',
+            manageable: true,
+            fields: [],
+          },
+          {
+            type: 'feishu',
+            displayName: 'Feishu',
+            manageable: true,
+            fields: [],
+          },
+          {
+            type: 'telegram',
+            displayName: 'Telegram',
+            manageable: true,
+            fields: [],
+          },
+        ],
+        channels: {
+          revision: '1',
+          instances: {
+            dingtalk: {
+              name: 'dingtalk',
+              config: { type: 'dingtalk' },
+              secrets: {
+                clientSecret: { present: true, source: 'literal' },
+              },
+              startsWithServe: true,
+              runtime: { state: 'connected' },
+            },
+            feishu: {
+              name: 'release-notifier',
+              config: { type: 'feishu' },
+              secrets: {
+                appSecret: { present: true, source: 'environment' },
+              },
+              startsWithServe: false,
+              runtime: {
+                state: 'error',
+                lastError: 'The app credentials were rejected.',
+              },
+            },
+            hidden: {
+              name: 'hidden-telegram',
+              config: { type: 'telegram' },
+              secrets: {},
+              startsWithServe: false,
+              runtime: { state: 'stopped' },
+            },
+          },
+        },
+      });
+      await page.addInitScript(() => {
+        window.sessionStorage.setItem('qwen-daemon-token', 'visual-token');
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+
+      await page.getByRole('button', { name: 'Channels' }).click();
+      await expect(
+        page.getByRole('heading', { name: 'Channels', level: 1 }),
+      ).toBeVisible();
+      const configuredChannels = page.getByLabel('Configured channels');
+      await expect(
+        configuredChannels.getByText('dingtalk', { exact: true }),
+      ).toBeVisible();
+      await expect(
+        configuredChannels.getByText('release-notifier', { exact: true }),
+      ).toBeVisible();
+      await expect(page.getByText('hidden-telegram')).toHaveCount(0);
+      await captureScreenshot(page, `channel-manager-${theme}`);
+    });
+
     test(`mermaid diagram`, async ({ page }, testInfo) => {
       const scenario = createWebShellDaemonScenario({
         events: [
