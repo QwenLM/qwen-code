@@ -446,7 +446,10 @@ export function useVoiceCapture({
             if (ws.readyState === WebSocket.OPEN) ws.send(pcm);
           } else {
             if (bufferedPcmBytes + pcm.byteLength > MAX_BUFFERED_PCM_BYTES) {
-              fail('Voice capture timed out while starting.', snapshot);
+              fail(
+                'Voice capture buffer limit reached while starting.',
+                snapshot,
+              );
               return;
             }
             bufferedPcm.push(pcm);

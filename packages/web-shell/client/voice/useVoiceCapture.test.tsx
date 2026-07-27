@@ -470,7 +470,7 @@ describe('useVoiceCapture', () => {
 
     expect(onError).toHaveBeenCalledOnce();
     expect(onError).toHaveBeenCalledWith(
-      'Voice capture timed out while starting.',
+      'Voice capture buffer limit reached while starting.',
     );
     expect(capture?.status).toBe('error');
     expect(processor.onaudioprocess).toBeNull();

@@ -710,6 +710,30 @@ describe('VoiceButton', () => {
     expect(mocks.capture.abort).toHaveBeenCalledOnce();
   });
 
+  it('aborts a hold cancelled during recording', async () => {
+    const { root, container } = mount(false);
+    await flush();
+    let button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    pointer(button, 'pointerdown');
+
+    mocks.capture.status = 'recording';
+    act(() => {
+      root.render(
+        <VoiceButton
+          disabled={false}
+          onInsert={() => {}}
+          target={legacyTarget}
+        />,
+      );
+    });
+    button = container.querySelector('button');
+    if (!button) throw new Error('VoiceButton did not render');
+    pointer(button, 'pointercancel');
+
+    expect(mocks.capture.abort).toHaveBeenCalledOnce();
+  });
+
   it('ignores a pointerup from a different pointer', async () => {
     const { root, container } = mount(false);
     await flush();
