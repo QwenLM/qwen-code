@@ -671,6 +671,7 @@ describe('qwen-triage tmux workflow', () => {
     expect(prSkill).toContain('do not skip any Stage 2 enrichment');
     expect(prSkill).toContain('gh api --paginate');
     expect(prSkill).toContain('|| true');
+    expect(prSkill).toContain('WARNING: could not fetch PR files');
   });
 
   it('includes contested-merge detection in the triage skill', () => {
@@ -685,6 +686,7 @@ describe('qwen-triage tmux workflow', () => {
     expect(prSkill).toContain(
       'A maintainer removes it once the discussion resolves',
     );
+    expect(prSkill).toContain('different reviewer');
   });
 
   it('includes non-maintainer high-risk tier in the triage skill', () => {
@@ -692,6 +694,7 @@ describe('qwen-triage tmux workflow', () => {
     expect(prSkill).toContain('highest-risk tier');
     expect(prSkill).toContain('do not auto-approve');
     expect(prSkill).toContain('Stage 3 approval guardrail');
+    expect(prSkill).toContain('no Stage 1e do-not-auto-approve signal');
   });
 
   it('includes Risk field in the Stage 1 comment template', () => {

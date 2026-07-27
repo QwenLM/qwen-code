@@ -234,7 +234,12 @@ A revert-history analysis of this repo (111 revert commits, 46 unique reverted P
 **High-risk paths** — check the PR's changed files against these patterns:
 
 ```bash
-gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq '.[].filename' | grep -E 'openaiContentGenerator|streamingToolCallParser|geminiChat|acpConnection|(^|/)shell\.ts$|shellExecutionService|mcp-client|mcp-pool|LspServer|acp-integration|(^|/)relaunch\.ts$|(^|/)sandbox\.ts$|electron-run-as-node' || true
+FILES=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq '.[].filename')
+if [ -n "$FILES" ]; then
+  echo "$FILES" | grep -E 'openaiContentGenerator|streamingToolCallParser|geminiChat|acpConnection|(^|/)shell\.ts$|shellExecutionService|mcp-client|mcp-pool|LspServer|acp-integration|(^|/)relaunch\.ts$|(^|/)sandbox\.ts$|electron-run-as-node' || true
+else
+  echo "WARNING: could not fetch PR files"
+fi
 ```
 
 If any file matches (the strongest triage-time signal — 10 of 31 reverted PRs touched these paths vs 5 of 60 control PRs, p = 0.006):
@@ -246,10 +251,10 @@ If any file matches (the strongest triage-time signal — 10 of 31 reverted PRs 
 **Contested-merge pattern** — check the PR's review history for human reviewer disagreement (a CHANGES_REQUESTED entry that is not the first review, excluding bot reviews):
 
 ```bash
-gh pr view "$PR_NUMBER" --repo "$REPO" --json reviews --jq '[.reviews[] | select(.state != "PENDING" and .state != "COMMENTED") | select(.author.login != "qwen-code-ci-bot") | .state]'
+gh pr view "$PR_NUMBER" --repo "$REPO" --json reviews --jq '[.reviews[] | select(.state != "PENDING" and .state != "COMMENTED") | select(.author.login != "qwen-code-ci-bot") | {state: .state, author: .author.login}]'
 ```
 
-If the review state array has a `CHANGES_REQUESTED` entry after position 0 (a prior review preceded the disagreement) AND the PR touches core paths (`packages/core/src/**`, `packages/*/src/auth/**`, `packages/*/src/providers/**`, `packages/*/src/models/**`, `packages/*/src/config/**`, `packages/*/src/tools/**`, `packages/*/src/services/**`):
+If the review array has a `CHANGES_REQUESTED` entry after position 0 from a different reviewer than the entries before it (genuine cross-reviewer disagreement, not same-reviewer iteration) AND the PR touches core paths (`packages/core/src/**`, `packages/*/src/auth/**`, `packages/*/src/providers/**`, `packages/*/src/models/**`, `packages/*/src/config/**`, `packages/*/src/tools/**`, `packages/*/src/services/**`):
 
 - Apply `need-discussion` label via `gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label need-discussion` (if the label exists). A maintainer removes it once the discussion resolves.
 - Recommend maintainer sign-off before merge in the Stage 1 comment.
@@ -651,7 +656,7 @@ If Stage 1e flagged a contested-merge or non-maintainer + high-risk signal, do *
 
 **Re-runs (manually triggered via `@qwen-code /triage`):** hygiene concerns (scope mismatch, undocumented changes, naming) that don't block the PR are not a valid reason to defer. Note them in the comment and approve. Only defer if you have genuine blocking uncertainty — something you cannot resolve from the diff, tests, and PR description.
 
-All stages genuinely clean, `GUARD` is `ok`, and no Stage 0 maintainer escalation remains — how you approve depends on the `PENDING` count computed in Step 1:
+All stages genuinely clean, `GUARD` is `ok`, no Stage 0 maintainer escalation remains, and no Stage 1e do-not-auto-approve signal — how you approve depends on the `PENDING` count computed in Step 1:
 
 - `PENDING` = 0 → approve now, pinned to the reviewed commit (see the Approval note above) — never `gh pr review --approve`, which binds to no SHA:
 

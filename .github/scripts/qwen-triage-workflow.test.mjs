@@ -291,6 +291,7 @@ describe('qwen-triage: Stage 1e revert-pattern signals', () => {
     assert.ok(prSkill.includes('do not skip any Stage 2 enrichment'));
     assert.ok(prSkill.includes('gh api --paginate'));
     assert.ok(prSkill.includes('|| true'));
+    assert.ok(prSkill.includes('WARNING: could not fetch PR files'));
   });
 
   it('includes contested-merge detection', () => {
@@ -303,6 +304,7 @@ describe('qwen-triage: Stage 1e revert-pattern signals', () => {
     assert.ok(prSkill.includes('qwen-code-ci-bot'));
     assert.ok(prSkill.includes('packages/core/src/**'));
     assert.ok(prSkill.includes('A maintainer removes it once the discussion resolves'));
+    assert.ok(prSkill.includes('different reviewer'));
   });
 
   it('includes non-maintainer high-risk tier', () => {
@@ -310,6 +312,7 @@ describe('qwen-triage: Stage 1e revert-pattern signals', () => {
     assert.ok(prSkill.includes('highest-risk tier'));
     assert.ok(prSkill.includes('do not auto-approve'));
     assert.ok(prSkill.includes('Stage 3 approval guardrail'));
+    assert.ok(prSkill.includes('no Stage 1e do-not-auto-approve signal'));
   });
 
   it('includes Risk field in the Stage 1 comment template', () => {
