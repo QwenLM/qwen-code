@@ -2738,4 +2738,39 @@ export default {
     'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.',
+
+  // ==========================================================================
+  // Auto-skill curator (/curator command)
+  // ==========================================================================
+  'Maintain project auto-skills based on recent use.':
+    'Maintain project auto-skills based on recent use.',
+  'Show project auto-skill lifecycle status.':
+    'Show project auto-skill lifecycle status.',
+  'Run project auto-skill lifecycle maintenance.':
+    'Run project auto-skill lifecycle maintenance.',
+  'Restore an archived project auto-skill.':
+    'Restore an archived project auto-skill.',
+  'Auto-skill curator': 'Auto-skill curator',
+  'Last run: {{time}}': 'Last run: {{time}}',
+  'Active: {{count}}': 'Active: {{count}}',
+  'Stale: {{count}}': 'Stale: {{count}}',
+  'Archived: {{count}}': 'Archived: {{count}}',
+  'Stale skills:': 'Stale skills:',
+  'Archived skills:': 'Archived skills:',
+  'Dry run complete.': 'Dry run complete.',
+  'Curator run complete.': 'Curator run complete.',
+  'Checked: {{count}}': 'Checked: {{count}}',
+  'Marked stale: {{count}}': 'Marked stale: {{count}}',
+  '{{verb}}: {{count}}': '{{verb}}: {{count}}',
+  'Would archive': 'Would archive',
+  Archived: 'Archived',
+  'Failed to read auto-skill curator status: {{message}}':
+    'Failed to read auto-skill curator status: {{message}}',
+  'Usage: /curator run [--dry-run]': 'Usage: /curator run [--dry-run]',
+  'Failed to run auto-skill curator: {{message}}':
+    'Failed to run auto-skill curator: {{message}}',
+  'Usage: /curator restore <directory>': 'Usage: /curator restore <directory>',
+  'Restored auto-skill: {{name}}': 'Restored auto-skill: {{name}}',
+  'Failed to restore auto-skill: {{message}}':
+    'Failed to restore auto-skill: {{message}}',
 };
