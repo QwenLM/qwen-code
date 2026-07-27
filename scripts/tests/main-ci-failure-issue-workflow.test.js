@@ -56,10 +56,11 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).toContain(
       'apply_autofix_route "${existing_workflow_issue}"',
     );
+    expect(workflow).toContain('title_prefix="Main CI failed:"');
     expect(workflow).toContain(
-      '--search "\\"Main CI failed: ${WORKFLOW_NAME}\\" in:title"',
+      '--search "\\"${title_prefix} ${WORKFLOW_NAME}\\" in:title"',
     );
-    expect(workflow).toContain('--title "Main CI failed: ${WORKFLOW_NAME}');
+    expect(workflow).toContain('--title "${title_prefix} ${WORKFLOW_NAME}');
     expect(workflow).toContain('gh issue comment "${existing_workflow_issue}"');
     expect(workflow).toContain('## Additional CI Failure');
     expect(workflow).toContain('${WORKFLOW_RUN_URL}');

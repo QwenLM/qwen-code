@@ -38,6 +38,7 @@ jobs:
         run: |-
           short_sha="${HEAD_SHA:0:12}"
           marker="qwen-main-ci-failure:${HEAD_SHA}"
+          title_prefix="Main CI failed:"
 
           apply_autofix_route() {
             gh issue edit "$1" \
@@ -69,7 +70,7 @@ jobs:
             gh issue list \
               --repo "${REPO}" \
               --state open \
-              --search "\"Main CI failed: ${WORKFLOW_NAME}\" in:title" \
+              --search "\"${title_prefix} ${WORKFLOW_NAME}\" in:title" \
               --json number,title \
               --jq '.[0].number // ""'
           )"
@@ -116,7 +117,7 @@ jobs:
           issue_url="$(
             gh issue create \
               --repo "${REPO}" \
-              --title "Main CI failed: ${WORKFLOW_NAME} on ${short_sha}" \
+              --title "${title_prefix} ${WORKFLOW_NAME} on ${short_sha}" \
               --body-file "${body_file}"
           )"
 
