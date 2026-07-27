@@ -22,7 +22,7 @@
 
 import type { CommandModule } from 'yargs';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   coverageFromTranscripts,
@@ -31,7 +31,13 @@ import {
 } from './lib/coverage.js';
 import { shellQuotePath } from './lib/shell-quote.js';
 import { gh, setGhHost } from './lib/gh.js';
-import { isPositivePrNumber } from './lib/roster.js';
+import {
+  isPositivePrNumber,
+  hasExecutableScript,
+  reviewMode,
+  type RosterPlan,
+} from './lib/roster.js';
+import { diffHashOf, type ScriptLintReport } from './script-lint.js';
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
@@ -270,13 +276,41 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   let plannedChunks: Array<{ id: number; files: string[] }> = [];
   let coveredChunks: number[] = [];
 
-  // The Criticals a verifier must have ruled on before this review may post
-  // them as blockers. Deterministic `[build]`/`[test]`/`[probe]` body findings
-  // are pre-confirmed and skip verification by design — `[probe]` is a finding
-  // the verifier confirmed by *running* a probe against the code, so its evidence
-  // is an observed behaviour, not a re-reading; every other Critical — anchored or
-  // body — is a claim, and a claim is confirmed by Step 4 or it is not at all.
-  const nonDeterministicBodyCriticals = bodyCriticals.filter(
+  // The deterministic script-lint gate. `compose-review` is the authority here:
+  // it reads the report the orchestrator's `qwen review script-lint` step wrote
+  // and turns it into the verdict itself, so neither the existence of a blocker
+  // nor its severity depends on a model. A finding on a changed line (above
+  // cosmetic `style`) is a pre-confirmed `[lint]` Critical; an uninstalled or
+  // crashed checker is unreviewed scope; and — the proof it ran — a diff that
+  // carries an executable script but has no readable report is itself unreviewed
+  // (fail closed). The report path is derived from the plan, not the input JSON a
+  // model wrote, and the plan decides whether the lint was owed.
+  // The gate's own body Criticals are deterministic by PROVENANCE — `scriptLintGate`
+  // ran the linter — so they never need a verifier. Track them as a SEPARATE list
+  // rather than mix them into the model's criticals and subtract a COUNT: a count
+  // subtraction misfires when a model claim happens to carry a `[build]`/`[test]`/
+  // `[probe]` tag (filtered out before the subtract) or a gate finding's own text
+  // contains one, erasing an unrelated claim's verification requirement. Identity,
+  // not arithmetic, decides provenance.
+  const modelBodyCriticals = [...bodyCriticals]; // input's, captured before the gate
+  // Disclosed-but-non-capping notes from the gate (a deferred checker). Rendered
+  // in the body on every verdict, but never fed into the cap.
+  const gateDisclosed: string[] = [];
+  if (input.planPath) {
+    const gate = scriptLintGate(input.planPath);
+    bodyCriticals.push(...gate.criticals); // render + count toward `c`, deterministic
+    unreviewed.push(...gate.unreviewed);
+    gateDisclosed.push(...gate.disclosed);
+  }
+
+  // The Criticals a verifier must have ruled on before this review may post them as
+  // blockers. Only the MODEL's criticals are candidates — the gate's are excluded by
+  // construction (they are not in `modelBodyCriticals`). Of the model's, `[build]`/
+  // `[test]` (Agent 7 ran the tool) and `[probe]` (the verifier ran a probe) are
+  // pre-confirmed and skip verification. `[lint]` is NOT trusted as a tag — a
+  // model-written string containing it must not launder an unverified claim into a
+  // blocker (that is what the gate's provenance-tracked criticals are for).
+  const nonDeterministicBodyCriticals = modelBodyCriticals.filter(
     (x) => !/\[(?:build|test|probe)\]/i.test(x),
   ).length;
   const criticalsNeedingVerify =
@@ -834,6 +868,19 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     zh: '仅审查了 diff——无法获取 PR 已有的讨论，因此这不构成批准，也不构成"无阻断问题"的结论。',
   };
 
+  // A deferred checker (actionlint's embedded shell): disclosed on EVERY verdict —
+  // including Approve — so the reader knows a workflow's shell was not linted, but
+  // it does not cap the verdict (it is a tool limitation, not a finding or an
+  // unrun-checker gap). This is the "disclosed but not capping" half.
+  const deferredBlock: Bi[] = gateDisclosed.length
+    ? [
+        {
+          en: `Not linted (tool limitation, not a blocker): ${gateDisclosed.join('; ')}.`,
+          zh: `未检查（工具限制，非阻断）：${gateDisclosed.join('; ')}。`,
+        },
+      ]
+    : [];
+
   if (event === 'REQUEST_CHANGES') {
     // Empty body, except the disclosures: every clause whose state holds
     // appears on every event — a confirmed blocker must not squeeze out the
@@ -843,6 +890,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       ...(contextUnavailable ? [contextUnavailableClause] : []),
       ...cannotTellBlock,
       ...notReviewedParts,
+      ...deferredBlock,
       ...bodyCriticalBlock,
     ];
     return {
@@ -860,8 +908,11 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     return {
       event,
       body: render(
-        [{ en: 'No issues found. LGTM! ✅', zh: '未发现问题。LGTM！✅' }],
-        ' ',
+        [
+          { en: 'No issues found. LGTM! ✅', zh: '未发现问题。LGTM！✅' },
+          ...deferredBlock,
+        ],
+        deferredBlock.length ? '\n\n' : ' ',
       ),
       baseEvent,
       cappedBy,
@@ -968,6 +1019,10 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
 
   // 6. Not-reviewed disclosure.
   clauses.push(...notReviewedParts);
+
+  // 6b. Deferred-checker disclosure (non-capping) — a workflow whose embedded
+  //     shell actionlint would lint but we do not yet trust.
+  clauses.push(...deferredBlock);
 
   // 7. Body Criticals — on a COMMENT that stands where a REQUEST_CHANGES
   //    would have been: the presubmit carve-out, and the unverified-blockers
@@ -1079,6 +1134,161 @@ const fetchPrBodyViaGh: PrBodyFetcher = (ownerRepo, prNumber) => {
   );
   return (JSON.parse(json) as { body?: string }).body ?? '';
 };
+
+/**
+ * Read the script-lint report the orchestrator wrote and turn it into verdict
+ * inputs, deterministically. Returns the pre-confirmed `[lint]` Criticals (a
+ * finding on a changed line, above cosmetic `style`) and the unreviewed-scope
+ * entries (a checker not installed or crashed, or — owed but absent — a report
+ * the run never produced). The path is DERIVED from the plan, never taken from
+ * the model's input JSON, and the plan itself decides whether the lint was owed:
+ * this is what takes the model out of both the block decision and the proof it ran.
+ */
+export function scriptLintGate(planPath: string): {
+  criticals: string[];
+  unreviewed: string[];
+  disclosed: string[];
+} {
+  const criticals: string[] = [];
+  const unreviewed: string[] = [];
+  // Disclosed-but-NOT-capping: a `deferred` checker (actionlint) is a known tool
+  // limitation, not a finding and not an unrun-checker gap — the reader is told a
+  // workflow's embedded shell was not linted, but the verdict is not capped on it.
+  const disclosed: string[] = [];
+  let plan: {
+    prNumber?: unknown;
+    files?: unknown;
+    diffPathAbsolute?: unknown;
+  };
+  try {
+    plan = JSON.parse(readFileSync(planPath, 'utf8'));
+  } catch {
+    // Fail CLOSED, like every other gate path: an unreadable plan means we cannot
+    // tell whether the lint was owed, and "cannot tell" must not open the gate.
+    unreviewed.push(
+      'the executable-script lint — could not read the plan to check the gate',
+    );
+    return { criticals, unreviewed, disclosed };
+  }
+  // A diff-only (cross-repo lightweight) review has no worktree, so the
+  // orchestrator could not have run script-lint — do not fail it closed for a
+  // command it cannot run, exactly as the roster never owed it there.
+  if (reviewMode(plan as RosterPlan) === 'diff-only') {
+    return { criticals, unreviewed, disclosed };
+  }
+  const owed = hasExecutableScript(plan as RosterPlan);
+  const reportPath = join(
+    dirname(planPath),
+    scriptLintReportName(plan.prNumber),
+  );
+  let report: ScriptLintReport;
+  try {
+    report = JSON.parse(readFileSync(reportPath, 'utf8')) as ScriptLintReport;
+  } catch {
+    // No report. Fail closed ONLY when the diff carried a path-detected script
+    // (owed) — otherwise a diff with no scripts would be capped for a command it
+    // had no reason to run.
+    //
+    // The one gap this leaves — a SHEBANG-only script (`hasExecutableScript` is
+    // path-only, so `owed` is false for it) whose command was skipped — is closed by
+    // a CONTRACT, not by this predicate: SKILL.md has the orchestrator run
+    // `qwen review script-lint` on EVERY same-repo review, unconditionally. So a
+    // compliant run always writes a report (even "nothing to lint"), the shebang
+    // script is linted and appears in it, and it is handled below on its own
+    // findings regardless of `owed`. "No report" therefore means the command did not
+    // run — the `owed` cap covers the path-detectable case; the shebang case relies
+    // on the always-run contract above, which is why it is stated there in prose.
+    if (owed) {
+      unreviewed.push(
+        'the executable-script lint — `qwen review script-lint` produced no report',
+      );
+    }
+    return { criticals, unreviewed, disclosed };
+  }
+  // Fail closed on a STALE report — bound to the diff's CONTENT, not a commit. The
+  // report carries a hash of the diff it ran against; we re-hash the plan's current
+  // diff. A mismatch means it is not this review's report: a later PR commit
+  // (different diff), OR — the local case HEAD cannot see — an uncommitted edit that
+  // changes the working-tree diff. An absent hash on EITHER side (the diff could not
+  // be read here or there) is unverifiable and also fails closed — `!planDiffHash`
+  // handles that explicitly, because `undefined !== undefined` is FALSE and would
+  // otherwise accept an arbitrary hashless report. Only both sides present and equal
+  // is fresh.
+  const planDiffHash = diffHashOf(plan.diffPathAbsolute);
+  if (!planDiffHash || report.diffHash !== planDiffHash) {
+    unreviewed.push(
+      'the executable-script lint — the report is stale or its diff could not be verified; re-run `qwen review script-lint`',
+    );
+    return { criticals, unreviewed, disclosed };
+  }
+  // Process the report's findings REGARDLESS of the path-only owed predicate: the
+  // report can name a shebang script (`hook.sh` by its `#!`) that `pathTool` could
+  // not, and returning early on the predicate would drop exactly those findings.
+  for (const file of report.checked ?? []) {
+    for (const f of file.findings ?? []) {
+      if (f.inDiff && f.level !== 'style') {
+        criticals.push(
+          `${mdField(file.path)}:${f.line} ${f.code} — ${mdField(f.message)} [lint]`,
+        );
+      }
+    }
+  }
+  // Each skipped entry carries its OWN reason (not installed, or an irregular file
+  // like a symlink) — surface it, rather than hard-coding "not installed". A
+  // deferred checker is NOT here: it is its own state, disclosed below without capping.
+  for (const s of report.skipped ?? []) {
+    unreviewed.push(
+      `the executable-script lint — ${mdField(s.path)}: ${s.reason ?? `${s.tool} unavailable`}`,
+    );
+  }
+  for (const e of report.errored ?? []) {
+    unreviewed.push(
+      `the executable-script lint — ${e.tool} errored on ${mdField(e.path)}`,
+    );
+  }
+  // A deferred checker (actionlint) is disclosed but does not cap — the reader is
+  // told the workflow's embedded shell was not linted, without making every
+  // workflow PR un-Approvable on a checker we deliberately decline to run.
+  for (const d of report.deferred ?? []) {
+    disclosed.push(
+      `the executable-script lint — ${mdField(d.path)}: ${d.reason ?? `${d.tool} deferred`}`,
+    );
+  }
+  return { criticals, unreviewed, disclosed };
+}
+
+/**
+ * Render a PR-controlled segment — a diff file path, a linter's message — safe to
+ * splice into the review body we POST to GitHub. Git allows almost any byte in a
+ * filename, so an unescaped path could carry `@mentions`, HTML, Markdown, or a
+ * newline that forges body structure. An inline code span makes Markdown/HTML/`@`
+ * inert; stripping backticks and newlines stops the value breaking out of the span
+ * or forging new lines. (`capture-local`'s `display()` does the terminal-side
+ * equivalent for stderr; this is the Markdown-body side.)
+ */
+function mdField(s: unknown): string {
+  return (
+    '`' +
+    String(s)
+      .replace(/[`\r\n]+/g, ' ')
+      .trim() +
+    '`'
+  );
+}
+
+/**
+ * The report filename the orchestrator writes and this derives — pr-numbered
+ * when the plan resolved a PR, a stable local name otherwise (matching the old
+ * `agent-prompt` convention so a mid-flight upgrade finds the same file).
+ */
+function scriptLintReportName(pr: unknown): string {
+  const positive =
+    (typeof pr === 'number' && Number.isInteger(pr) && pr > 0) ||
+    (typeof pr === 'string' && /^\d+$/.test(pr) && Number(pr) > 0);
+  return positive
+    ? `qwen-review-pr-${pr}-script-lint.json`
+    : 'qwen-review-script-lint.json';
+}
 
 /**
  * Whether the posted body carries the collapsed Chinese version: the plan

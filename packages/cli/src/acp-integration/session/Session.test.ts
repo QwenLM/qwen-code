@@ -2867,6 +2867,12 @@ describe('Session', () => {
           },
         ],
         'Background agent "worker" completed.',
+        {
+          taskId: 'agent-1',
+          status: 'completed',
+          kind: 'agent',
+          toolUseId: 'tool-1',
+        },
       );
       expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
         sessionId: 'test-session-id',

@@ -5,7 +5,7 @@
  */
 
 import { execSync, spawn } from 'node:child_process';
-import { mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdirSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { env } from 'node:process';
@@ -167,6 +167,11 @@ export class TestRig {
     this.testName = testName;
     const sanitizedName = sanitizeTestName(testName);
     this.testDir = join(env['INTEGRATION_TEST_FILE_DIR']!, sanitizedName);
+    // Two cases that set up under the same name share this directory, and
+    // cleanup() below keeps it whenever KEEP_OUTPUT is set — which CI always
+    // sets. Reset it so a case never inherits the previous one's files; see the
+    // SDK helper, where exactly that made a suite pass locally and fail in CI.
+    rmSync(this.testDir, { recursive: true, force: true });
     mkdirSync(this.testDir, { recursive: true });
 
     // Create a settings file to point the CLI to the local collector

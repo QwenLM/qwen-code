@@ -182,6 +182,13 @@ const systemMsg = (id: string): SystemMessage => ({
   variant: 'warning',
   source: 'prompt_cancelled',
 });
+const backgroundNotificationMsg = (id: string): SystemMessage => ({
+  id,
+  role: 'system',
+  content: 'background task completed',
+  variant: 'info',
+  source: 'background_notification',
+});
 const thinkingMsg = (id: string): ThinkingMessage => ({
   id,
   role: 'thinking',
@@ -450,6 +457,32 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(has(c, 'a1')).toBe(true);
     expect(isCollapsed(c, 'g1')).toBe(true);
     expect(toggleRow(c, 'u1').getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('collapses a background notification before the final assistant content', () => {
+    const c = mount([
+      userMsg('u1'),
+      backgroundNotificationMsg('bg1'),
+      asstMsg('a1'),
+    ]);
+
+    expect(has(c, 'bg1')).toBe(false);
+    expect(has(c, 'a1')).toBe(true);
+    click(toggle(c, 'u1'));
+    expect(has(c, 'bg1')).toBe(true);
+  });
+
+  it('keeps a background notification when it is the final content', () => {
+    const c = mount([
+      userMsg('u1'),
+      asstMsg('a1'),
+      backgroundNotificationMsg('bg1'),
+    ]);
+
+    expect(has(c, 'a1')).toBe(false);
+    expect(has(c, 'bg1')).toBe(true);
+    click(toggle(c, 'u1'));
+    expect(has(c, 'a1')).toBe(true);
   });
 
   it('renders collapse metrics in the standalone turn row', () => {
