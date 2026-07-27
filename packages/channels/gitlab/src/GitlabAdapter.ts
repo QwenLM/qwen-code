@@ -150,12 +150,14 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
         (todo.target_type !== 'Issue' && todo.target_type !== 'MergeRequest')
       ) {
         this.cursor.lastProcessedAt = todo.updated_at;
+        this.saveCursor();
         continue;
       }
 
       const template = templates[todo.action_name];
       if (!template) {
         this.cursor.lastProcessedAt = todo.updated_at;
+        this.saveCursor();
         continue;
       }
 
