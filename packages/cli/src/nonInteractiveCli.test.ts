@@ -1344,6 +1344,86 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('rejects a conflicting tool-selected full-turn model within a batch', async () => {
+    setupMetricsMock();
+    const first = 'qwen3-vl-plus\0';
+    const second = 'qwen3-vl-max\0';
+    const accepted: Record<string, boolean> = {};
+    mockCoreExecuteToolCall.mockImplementation(
+      async (_config, request, _signal, options) => {
+        if (request.callId === 'tool-image-a') {
+          accepted['a'] = options.onToolResultFullTurnModel?.(first) ?? false;
+          return {
+            responseParts: [{ text: 'first image' }],
+            modelOverride: first,
+          };
+        }
+        if (request.callId === 'tool-image-b') {
+          accepted['b'] = options.onToolResultFullTurnModel?.(second) ?? false;
+          return {
+            responseParts: [{ text: 'second image' }],
+            modelOverride: second,
+          };
+        }
+        return { responseParts: [{ text: 'other' }], modelOverride: undefined };
+      },
+    );
+    mockGeminiClient.sendMessageStream
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-image-a',
+              name: 'screenshot_tool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-tool-image',
+            },
+          },
+          {
+            type: GeminiEventType.ToolCallRequest,
+            value: {
+              callId: 'tool-image-b',
+              name: 'screenshot_tool',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-tool-image',
+            },
+          },
+        ]),
+      )
+      .mockReturnValueOnce(
+        createStreamFromEvents([
+          { type: GeminiEventType.Content, value: 'Image understood' },
+          {
+            type: GeminiEventType.Finished,
+            value: {
+              reason: undefined,
+              usageMetadata: { totalTokenCount: 1 },
+            },
+          },
+        ]),
+      );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Use the screenshot tool',
+      'prompt-tool-image',
+    );
+
+    expect(accepted['a']).toBe(true);
+    expect(accepted['b']).toBe(false);
+    expect(mockGeminiClient.sendMessageStream).toHaveBeenNthCalledWith(
+      2,
+      [{ text: 'first image' }, { text: 'second image' }],
+      expect.any(AbortSignal),
+      'prompt-tool-image',
+      { type: SendMessageType.ToolResult, modelOverride: first },
+    );
+  });
+
   describe('parallel tool execution', () => {
     const finishTurn: ServerGeminiStreamEvent[] = [
       { type: GeminiEventType.Content, value: 'done' },

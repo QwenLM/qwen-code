@@ -5,7 +5,7 @@
  */
 
 import type { Part } from '@google/genai';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../../config/config.js';
 import { bridgeToolResultImages } from './tool-result-vision-bridge.js';
 
@@ -50,6 +50,10 @@ beforeEach(() => {
   bridgeMocks.runVisionBridge.mockReset();
   bridgeMocks.shouldRunVisionBridge.mockReset();
   bridgeMocks.shouldRunVisionBridge.mockReturnValue(true);
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 describe('bridgeToolResultImages', () => {
@@ -333,5 +337,27 @@ describe('bridgeToolResultImages', () => {
       /vision bridge was cancelled/i,
     );
     expect(result.functionResponse).not.toHaveProperty('parts');
+  });
+
+  it('fails closed when the only tool image is oversized for the full-turn route', async () => {
+    vi.stubEnv('QWEN_CODE_MAX_INLINE_MEDIA_BYTES', '1');
+    getDefaultVisionBridgeModel.mockReturnValue({
+      id: 'qwen3-vl-plus',
+      agentCapable: true,
+    });
+    const onFullTurnModel = vi.fn().mockReturnValue(true);
+
+    const [result] = await bridgeToolResultImages({
+      config,
+      responseParts: [toolResponse()],
+      signal: signal(),
+      onFullTurnModel,
+    });
+
+    expect(onFullTurnModel).not.toHaveBeenCalled();
+    expect(bridgeMocks.runVisionBridge).not.toHaveBeenCalled();
+    const nested = result.functionResponse?.parts ?? [];
+    expect(nested.some((part) => part.inlineData !== undefined)).toBe(false);
+    expect(JSON.stringify(nested)).toContain('Media omitted:');
   });
 });

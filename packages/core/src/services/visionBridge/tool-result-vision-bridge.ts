@@ -33,6 +33,8 @@ function getNestedParts(part: Part): Part[] | undefined {
   return Array.isArray(parts) ? (parts as Part[]) : undefined;
 }
 
+// `error` is only ever a string from the function-response producers; a
+// non-string error object falls through to `output` rather than nesting text.
 function appendResponseText(
   response: Record<string, unknown> | undefined,
   text: string,
@@ -114,8 +116,12 @@ async function bridgeFunctionResponse(
     if (!result.applied || replacement.length === 0) {
       replacement = unavailableNote(part, signal.aborted);
     }
-  } catch {
-    debugLogger.warn('vision bridge failed before replacing tool images');
+  } catch (error) {
+    debugLogger.warn(
+      `vision bridge failed before replacing tool images: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
     replacement = unavailableNote(part, signal.aborted);
   }
 

@@ -15123,6 +15123,58 @@ describe('Session', () => {
       expect(result.parts[0].functionResponse?.parts).toHaveLength(1);
     });
 
+    it('keeps a full-turn model selected across parallel tool images', async () => {
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: [
+          { text: 'captured screen' },
+          { inlineData: { mimeType: 'image/png', data: 'aW1hZ2U=' } },
+        ],
+        returnDisplay: 'captured screen',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('screenshot_tool', execute),
+      );
+      const selections: boolean[] = [];
+      bridgeToolResultImagesSpy.mockImplementation(
+        async ({
+          responseParts,
+          onFullTurnModel: selectFullTurnModel,
+        }: {
+          responseParts: Part[];
+          onFullTurnModel?: (model: string) => boolean;
+        }) => {
+          selections.push(selectFullTurnModel?.('qwen3-vl-plus\0') ?? false);
+          return responseParts;
+        },
+      );
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                functionCalls: [
+                  { id: 'call-screen-1', name: 'screenshot_tool', args: {} },
+                  { id: 'call-screen-2', name: 'screenshot_tool', args: {} },
+                ],
+              },
+            },
+          ]),
+        )
+        .mockResolvedValueOnce(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'capture two screens' }],
+      });
+
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(selections).toHaveLength(2);
+      expect(selections.every((accepted) => accepted)).toBe(true);
+    });
+
     it('uses the provider tool-call id for the GenAI field only', async () => {
       const execute = vi.fn().mockResolvedValue({
         llmContent: 'read',

@@ -4920,10 +4920,10 @@ export class CoreToolScheduler {
                 const text = response?.['error'] ?? response?.['output'];
                 return total + (typeof text === 'string' ? text.length : 0);
               }, 0),
+              ...(processedImages.modelOverride !== undefined
+                ? { modelOverride: processedImages.modelOverride }
+                : {}),
             };
-          }
-          if (processedImages.modelOverride !== undefined) {
-            errorResponse.modelOverride = processedImages.modelOverride;
           }
         }
         this.setStatusInternal(callId, 'error', errorResponse);

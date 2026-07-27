@@ -412,11 +412,10 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       );
 
       if (this.isMCPToolError(rawResponseParts)) {
-        const errorResult = await this.buildMcpToolError(rawResponseParts, {
+        return await this.buildMcpToolError(rawResponseParts, {
           name: this.serverToolName,
           args: this.params,
         });
-        return errorResult;
       }
 
       const transformedParts = transformMcpContentToParts(rawResponseParts);
@@ -487,11 +486,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       });
 
       if (this.isMCPToolError(rawResponseParts)) {
-        const errorResult = await this.buildMcpToolError(
-          rawResponseParts,
-          functionCalls[0],
-        );
-        return errorResult;
+        return await this.buildMcpToolError(rawResponseParts, functionCalls[0]);
       }
 
       const transformedParts = transformMcpContentToParts(rawResponseParts);

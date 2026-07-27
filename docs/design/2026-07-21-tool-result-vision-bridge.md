@@ -18,7 +18,7 @@ Only inline image bytes are converted. Image `fileData`, URLs, path-only text, a
 
 ## Compatibility and failure behavior
 
-The public tool schemas do not change. Existing user-input and PDF Vision Bridge behavior remains intact. Configurations without a vision model retain their current unsupported-image or MIME-placeholder behavior. A successful tool call is not converted into a tool error solely because the bridge fails; the model receives the original text plus a sanitized image-unavailable note. Provider error details are logged but never inserted into the function response.
+The public tool schemas do not change. Existing user-input and PDF Vision Bridge behavior remains intact. Configurations without a vision model retain their current unsupported-image or MIME-placeholder behavior. A successful tool call is not converted into a tool error solely because the bridge fails; the model receives the original text plus a sanitized image-unavailable note. Provider error details are logged but never inserted into the function response. The per-turn image budget is shared across every bridge path in a turn: the running count is keyed on the turn's abort signal, so user-input, PDF, and tool-result bridges draw from the same cap rather than each getting a fresh one. With a configured-but-not-agent-capable vision model, a turn that exhausts the cap early leaves later tool images transcribed as budget-exhausted; agent-capable takeover is unaffected because it preserves the raw images instead of transcribing them.
 
 ## Verification
 
