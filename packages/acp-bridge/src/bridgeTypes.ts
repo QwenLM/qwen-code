@@ -792,6 +792,30 @@ export type BridgeWorkspaceGenerationNotificationEvent = Exclude<
   { type: 'done' }
 >;
 
+export type RuntimeMcpServerAddResult =
+  | {
+      name: string;
+      transport: string;
+      replaced: boolean;
+      shadowedSettings: boolean;
+      toolCount: number;
+      originatorClientId: string;
+    }
+  | {
+      name: string;
+      skipped: true;
+      reason: 'budget_warning_only' | 'runtime_name_conflict';
+    };
+
+export type RuntimeMcpServerRemoveResult =
+  | {
+      name: string;
+      removed: true;
+      wasShadowingSettings: boolean;
+      originatorClientId: string;
+    }
+  | { name: string; skipped: true; reason: 'not_present' };
+
 export interface AcpSessionBridge {
   /** Read-only daemon diagnostics for status endpoints. */
   getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot;
@@ -1410,21 +1434,7 @@ export interface AcpSessionBridge {
     name: string,
     config: Record<string, unknown>,
     originatorClientId?: string,
-  ): Promise<
-    | {
-        name: string;
-        transport: string;
-        replaced: boolean;
-        shadowedSettings: boolean;
-        toolCount: number;
-        originatorClientId: string;
-      }
-    | {
-        name: string;
-        skipped: true;
-        reason: 'budget_warning_only' | 'runtime_name_conflict';
-      }
-  >;
+  ): Promise<RuntimeMcpServerAddResult>;
 
   /**
    * Remove a runtime MCP server through the ACP child's
@@ -1437,15 +1447,26 @@ export interface AcpSessionBridge {
   removeRuntimeMcpServer(
     name: string,
     originatorClientId?: string,
-  ): Promise<
-    | {
-        name: string;
-        removed: true;
-        wasShadowingSettings: boolean;
-        originatorClientId: string;
-      }
-    | { name: string; skipped: true; reason: 'not_present' }
-  >;
+  ): Promise<RuntimeMcpServerRemoveResult>;
+
+  /**
+   * Add a runtime MCP server to one live session only. This does not mutate
+   * workspace bootstrap state, affect sibling sessions, or emit a workspace
+   * event.
+   */
+  addSessionRuntimeMcpServer(
+    sessionId: string,
+    name: string,
+    config: Record<string, unknown>,
+    originatorClientId?: string,
+  ): Promise<RuntimeMcpServerAddResult>;
+
+  /** Remove a runtime MCP server from one live session only. */
+  removeSessionRuntimeMcpServer(
+    sessionId: string,
+    name: string,
+    originatorClientId?: string,
+  ): Promise<RuntimeMcpServerRemoveResult>;
 
   manageMcpServer(
     serverName: string,
