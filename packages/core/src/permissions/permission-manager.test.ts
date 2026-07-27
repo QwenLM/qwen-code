@@ -478,7 +478,16 @@ describe('splitCompoundCommand', () => {
   });
 
   it('handles escaped characters', async () => {
-    expect(splitCompoundCommand('echo a \\&& b')).toEqual(['echo a \\&& b']);
+    // A backslash escapes exactly one character, so `\&` is a literal
+    // ampersand argument and the command really is a single one.
+    expect(splitCompoundCommand('echo a \\& b')).toEqual(['echo a \\& b']);
+  });
+
+  it('escapes only the first of two ampersands', async () => {
+    // `echo a \&& b` is not an escaped `&&`: the backslash consumes the first
+    // ampersand and the second is a live async operator. `bash -x` runs it as
+    // two commands, `echo a '&'` and `b`, so the splitter has to see two.
+    expect(splitCompoundCommand('echo a \\&& b')).toEqual(['echo a \\&', 'b']);
   });
 
   it('trims whitespace around sub-commands', async () => {
@@ -486,6 +495,63 @@ describe('splitCompoundCommand', () => {
       'git status',
       'rm -rf /',
     ]);
+  });
+
+  // The async operator. Everything after a bare `&` is a separate command that
+  // the shell will run, so leaving it joined let one segment's allow rule
+  // authorise whatever followed it.
+  it('splits on the async operator', async () => {
+    expect(splitCompoundCommand('git status & rm -rf /tmp/x')).toEqual([
+      'git status',
+      'rm -rf /tmp/x',
+    ]);
+  });
+
+  it('splits on repeated async operators', async () => {
+    expect(splitCompoundCommand('a & b & c')).toEqual(['a', 'b', 'c']);
+  });
+
+  it('drops the empty segment after a trailing async operator', async () => {
+    expect(splitCompoundCommand('npm test &')).toEqual(['npm test']);
+  });
+
+  it('splits an unquoted URL query the way the shell does', async () => {
+    // Not a special case: an unquoted `&` in a URL really is the async
+    // operator, and bash runs `b=2` as its own command.
+    expect(splitCompoundCommand('curl http://x?a=1&b=2')).toEqual([
+      'curl http://x?a=1',
+      'b=2',
+    ]);
+  });
+
+  it.each([
+    ['build &> log.txt'],
+    ['build &>> log.txt'],
+    ['ls /nope 2>&1'],
+    ['echo err >&2'],
+    ['ls /nope > out.txt 2>& 1'],
+  ])('does not split %s, where & belongs to a redirection', async (command) => {
+    expect(splitCompoundCommand(command)).toEqual([command]);
+  });
+
+  it.each([["echo 'x & y'"], ['echo "x & y"']])(
+    'does not split %s, where & is quoted',
+    async (command) => {
+      expect(splitCompoundCommand(command)).toEqual([command]);
+    },
+  );
+
+  // Over-correction guard: the longer operators must keep winning over the
+  // bare `&`, so these two pass both before and after the change.
+  it.each([
+    ['a && b', ['a', 'b']],
+    ['a |& b', ['a', 'b']],
+  ])('keeps %s splitting on the longer operator', async (command, expected) => {
+    expect(splitCompoundCommand(command)).toEqual(expected);
+  });
+
+  it('splits a mix of long and bare operators', async () => {
+    expect(splitCompoundCommand('a && b & c')).toEqual(['a', 'b', 'c']);
   });
 });
 

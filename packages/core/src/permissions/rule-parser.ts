@@ -662,7 +662,31 @@ export function buildHumanReadableRuleLabel(rules: string[]): string {
  * Shell operator tokens that act as command boundaries.
  * Ordered by length (longest first) for correct multi-char operator detection.
  */
-const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';', '\n'];
+const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';', '&', '\n'];
+
+/**
+ * Whether the `&` at `index` is the async (background) operator rather than
+ * part of a redirection.
+ *
+ * `&&` and `|&` never reach here — they are longer, so they match first — which
+ * leaves three forms to exclude: `&>` and `&>>` redirect both streams, and
+ * `>&` / `<&` duplicate a descriptor (`2>&1`, `>&2`). Confirmed against bash:
+ * `echo hi &> out` writes the file and backgrounds nothing, while
+ * `echo one & echo two` really does run two commands.
+ */
+function isAsyncOperator(command: string, index: number): boolean {
+  if (command[index + 1] === '>') {
+    return false;
+  }
+  for (let j = index - 1; j >= 0; j--) {
+    const ch = command[j]!;
+    if (/\s/.test(ch)) {
+      continue;
+    }
+    return ch !== '>' && ch !== '<';
+  }
+  return true;
+}
 
 /**
  * Split a compound shell command into its individual simple commands
@@ -676,6 +700,8 @@ const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';', '\n'];
  *   "ls -la | grep foo"      → ["ls -la", "grep foo"]
  *   "echo 'a && b'"          → ["echo 'a && b'"]  (inside quotes)
  *   "a && b || c"            → ["a", "b", "c"]
+ *   "git status & rm -rf /"  → ["git status", "rm -rf /"]  (async operator)
+ *   "build &> log.txt"       → ["build &> log.txt"]  (redirection, not async)
  */
 export function splitCompoundCommand(command: string): string[] {
   const commands: string[] = [];
@@ -709,15 +735,21 @@ export function splitCompoundCommand(command: string): string[] {
 
     // Check for shell operators (longest match first)
     for (const op of SHELL_OPERATORS) {
-      if (command.substring(i, i + op.length) === op) {
-        const segment = command.substring(lastSplit, i).trim();
-        if (segment) {
-          commands.push(segment);
-        }
-        lastSplit = i + op.length;
-        i = lastSplit - 1; // -1 because the loop will i++
-        break;
+      if (command.substring(i, i + op.length) !== op) {
+        continue;
       }
+      // A bare `&` bounds a command only when it is the async operator; its
+      // other spellings belong to a redirection and stay in the segment.
+      if (op === '&' && !isAsyncOperator(command, i)) {
+        continue;
+      }
+      const segment = command.substring(lastSplit, i).trim();
+      if (segment) {
+        commands.push(segment);
+      }
+      lastSplit = i + op.length;
+      i = lastSplit - 1; // -1 because the loop will i++
+      break;
     }
   }
 
