@@ -70,7 +70,9 @@ export interface WorkspaceManagementRouteDeps {
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
   getAcpHandle?: () => AcpHttpHandle | undefined;
   runtimeRemoval?: WorkspaceRuntimeRemovalController;
-  pickWorkspaceDirectory?: () => Promise<string | undefined>;
+  pickWorkspaceDirectory?: (
+    signal?: AbortSignal,
+  ) => Promise<string | undefined>;
 }
 
 export interface WorkspaceRemovalActivity {
@@ -443,9 +445,11 @@ export function registerWorkspaceManagementRoutes(
   app.post(
     '/workspace-directory-picker',
     mutate(),
-    async (_req: Request, res: Response) => {
+    async (req: Request, res: Response) => {
+      const controller = new AbortController();
+      req.on('close', () => controller.abort());
       try {
-        const path = await pickWorkspaceDirectory();
+        const path = await pickWorkspaceDirectory(controller.signal);
         res.status(200).json({
           kind: 'workspace-directory-picker',
           selected: path !== undefined,

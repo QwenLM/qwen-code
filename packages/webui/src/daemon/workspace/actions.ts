@@ -1007,7 +1007,7 @@ export function createDaemonWorkspaceActions({
       const result = await withActionTimeout(
         client.workspaceDirectoryPicker(),
         'Open directory picker timed out',
-        300_000,
+        320_000,
       );
       return result as DaemonWorkspaceDirectoryPickerResult;
     },

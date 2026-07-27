@@ -2486,4 +2486,15 @@ describe('POST /workspace-directory-picker', () => {
       expect.stringContaining('native directory picker failed: boom'),
     );
   });
+
+  it('passes an abort signal to the picker', async () => {
+    const pickWorkspaceDirectory = vi.fn().mockResolvedValue('/tmp');
+    const { app } = createApp({ pickWorkspaceDirectory });
+
+    await request(app).post('/workspace-directory-picker');
+
+    expect(pickWorkspaceDirectory).toHaveBeenCalledWith(
+      expect.any(AbortSignal),
+    );
+  });
 });

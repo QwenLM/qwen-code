@@ -1668,7 +1668,7 @@ export class DaemonClient {
       {
         method: 'POST',
         body: {},
-        timeoutMs: 300_000,
+        timeoutMs: 310_000,
         mode: 'rest',
       },
     );

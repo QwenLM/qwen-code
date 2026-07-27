@@ -150,4 +150,18 @@ describe('pickNativeDirectory', () => {
     );
     expect(execFileAsyncMock).not.toHaveBeenCalled();
   });
+
+  it('forwards the abort signal to the child process', async () => {
+    setPlatform('darwin');
+    const controller = new AbortController();
+    execFileAsyncMock.mockResolvedValue({ stdout: '/tmp\n' });
+
+    await pickNativeDirectory(controller.signal);
+
+    expect(execFileAsyncMock).toHaveBeenCalledWith(
+      'osascript',
+      expect.any(Array),
+      { timeout: 300_000, signal: controller.signal },
+    );
+  });
 });

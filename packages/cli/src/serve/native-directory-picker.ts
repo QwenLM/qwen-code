@@ -16,7 +16,9 @@ const PICKER_TIMEOUT_MS = 300_000;
 
 export class NativeDirectoryPickerUnavailableError extends Error {}
 
-export async function pickNativeDirectory(): Promise<string | undefined> {
+export async function pickNativeDirectory(
+  signal?: AbortSignal,
+): Promise<string | undefined> {
   try {
     if (process.platform === 'darwin') {
       const script = [
@@ -29,7 +31,7 @@ export async function pickNativeDirectory(): Promise<string | undefined> {
       const { stdout } = await execFileAsync(
         'osascript',
         ['-l', 'JavaScript', '-e', script],
-        { timeout: PICKER_TIMEOUT_MS },
+        { timeout: PICKER_TIMEOUT_MS, signal },
       );
       return stdout.trim() || undefined;
     }
@@ -45,7 +47,7 @@ export async function pickNativeDirectory(): Promise<string | undefined> {
       const { stdout } = await execFileAsync(
         'powershell.exe',
         ['-NoProfile', '-STA', '-Command', script],
-        { timeout: PICKER_TIMEOUT_MS },
+        { timeout: PICKER_TIMEOUT_MS, signal },
       );
       return stdout.trim() || undefined;
     }
@@ -58,7 +60,7 @@ export async function pickNativeDirectory(): Promise<string | undefined> {
           '--directory',
           '--title=Select a workspace folder',
         ],
-        { timeout: PICKER_TIMEOUT_MS },
+        { timeout: PICKER_TIMEOUT_MS, signal },
       );
       return stdout.trim() || undefined;
     }
