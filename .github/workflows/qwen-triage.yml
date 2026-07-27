@@ -2100,7 +2100,7 @@ jobs:
             wt_abs="$(cd "$wt" 2>/dev/null && pwd -P || echo '')"
             case "$wt_abs" in
               "$WS_ABS"/tmp/*) git worktree remove --force "$wt_abs" 2>/dev/null || rm -rf "$wt_abs" ;;
-              *) [ -n "$wt_abs" ] && echo "::warning::skipping worktree outside the workspace: $wt_abs" ;;
+              *) if [ -n "$wt_abs" ]; then echo "::warning::skipping worktree outside the workspace: $wt_abs"; fi ;;
             esac
           done
           if [ -L tmp/base-tree ]; then
@@ -2773,7 +2773,7 @@ jobs:
             wt_abs="$(cd "$wt" 2>/dev/null && pwd -P || echo '')"
             case "$wt_abs" in
               "$WS_ABS"/tmp/*) git worktree remove --force "$wt_abs" 2>/dev/null || rm -rf "$wt_abs" ;;
-              *) [ -n "$wt_abs" ] && echo "::warning::skipping worktree outside the workspace: $wt_abs" ;;
+              *) if [ -n "$wt_abs" ]; then echo "::warning::skipping worktree outside the workspace: $wt_abs"; fi ;;
             esac
           done
           git worktree prune -v || true
