@@ -51,7 +51,15 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).toContain('qwen-main-ci-failure:${HEAD_SHA}');
     expect(workflow).toContain('gh issue list');
     expect(workflow).toContain('gh issue create');
-    expect(workflow).toContain('apply_autofix_route "${existing_issue}"');
+    expect(workflow).toContain('apply_autofix_route "${existing_sha_issue}"');
+    expect(workflow).toContain(
+      'apply_autofix_route "${existing_workflow_issue}"',
+    );
+    expect(workflow).toContain(
+      '--search "\\"Main CI failed: ${WORKFLOW_NAME}\\" in:title"',
+    );
+    expect(workflow).toContain('gh issue comment "${existing_workflow_issue}"');
+    expect(workflow).toContain('## Additional CI Failure');
     expect(workflow).toContain('${WORKFLOW_RUN_URL}');
     expect(workflow).toContain('${HEAD_SHA}');
   });

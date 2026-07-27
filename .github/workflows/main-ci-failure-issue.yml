@@ -69,14 +69,14 @@ jobs:
             gh issue list \
               --repo "${REPO}" \
               --state open \
-              --search "Main CI failed: ${WORKFLOW_NAME} in:title" \
+              --search "\"Main CI failed: ${WORKFLOW_NAME}\" in:title" \
               --json number,title \
               --jq '.[0].number // ""'
           )"
 
           if [[ -n "${existing_workflow_issue}" ]]; then
             echo "Found existing issue #${existing_workflow_issue} for ${WORKFLOW_NAME} failure. Adding comment instead of creating new issue."
-            
+
             # Add a comment with the new failure details
             comment_file="$(mktemp)"
             {
@@ -89,11 +89,11 @@ jobs:
               echo ""
               echo "<!-- ${marker} -->"
             } > "${comment_file}"
-            
+
             gh issue comment "${existing_workflow_issue}" \
               --repo "${REPO}" \
               --body-file "${comment_file}"
-            
+
             apply_autofix_route "${existing_workflow_issue}"
             exit 0
           fi
