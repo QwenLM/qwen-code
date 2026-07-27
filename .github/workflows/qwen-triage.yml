@@ -894,6 +894,7 @@ jobs:
     # host filesystem across workflow runs.
     container:
       image: 'node:22-bookworm'
+      options: '--init'
     defaults:
       run:
         shell: 'bash'
@@ -1792,6 +1793,7 @@ jobs:
     # host filesystem across workflow runs.
     container:
       image: 'node:22-bookworm'
+      options: '--init'
     defaults:
       run:
         shell: 'bash'
