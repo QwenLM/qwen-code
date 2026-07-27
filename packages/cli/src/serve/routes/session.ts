@@ -132,6 +132,11 @@ const GIT_RESERVED_BRANCH = 'HEAD';
 const MAX_BRANCH_NAME_BYTES = 1000;
 const MAX_BRANCH_COMPONENT_BYTES = 200;
 
+// Stricter than config.ts's isValidSessionId: no `-agent-{suffix}` because
+// SessionService.SESSION_FILE_PATTERN only accepts 32-36 hex/hyphen chars.
+const HTTP_SESSION_ID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 interface RegisterSessionRoutesDeps {
   boundWorkspace: string;
   bridge: AcpSessionBridge;
@@ -1262,16 +1267,12 @@ export function registerSessionRoutes(
     // Optional caller-supplied session id. Validated at the route boundary
     // so a 400 surfaces before touching the bridge. The core Config
     // constructor uses it verbatim (falling back to randomUUID when absent).
-    // UUID format is enforced to prevent path traversal and to stay
-    // compatible with SessionService's SESSION_FILE_PATTERN.
     const rawSessionId = body['sessionId'];
     let requestedSessionId: string | undefined;
     if (rawSessionId !== undefined && rawSessionId !== null) {
       if (
         typeof rawSessionId !== 'string' ||
-        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
-          rawSessionId,
-        )
+        !HTTP_SESSION_ID_REGEX.test(rawSessionId)
       ) {
         res.status(400).json({
           error:

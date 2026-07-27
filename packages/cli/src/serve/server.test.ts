@@ -8640,7 +8640,13 @@ describe('createServeApp', () => {
         undefined,
         { bridge },
       );
-      const bad = ['../../etc/cron.d/evil', 'my-feature-branch', 123, ''];
+      const bad = [
+        '../../etc/cron.d/evil',
+        'my-feature-branch',
+        123,
+        '',
+        '550e8400-e29b-41d4-a716-446655440000-agent-foo',
+      ];
       for (const sessionId of bad) {
         const res = await request(app)
           .post('/session')
