@@ -249,6 +249,10 @@ In `cli.ts`, inside the `createGatewayApp({ … })` deps object (alongside the o
 
 (`loadBonjourFactory`, `browseDaemons`, and `BrowserFactory` are already imported/defined in `cli.ts`; the cast mirrors the existing `daemons discover` call site.)
 
+**Note — the ~5 s browse (production behavior, deliberately untested here):** `PEERS_BROWSE_TIMEOUT_MS = 5000` means the real provider holds each `GET /rc/peers` request open for ~5 s while the mDNS browse runs. This is intended (inherent to mDNS; matches the CLI). BOTH test layers inject a stub `browsePeers` that resolves instantly, so the 5 s block is bypassed by design — do **not** add a test that runs a real 5 s browse (it would make the suite crawl for no coverage gain). Leave the timing untested.
+
+**Note — concurrency:** each `browseDaemons` call constructs a fresh bonjour instance via `factory()` and `destroy()`s it in a `finally`; `loadBonjourFactory` is a cached dynamic import. Confirm concurrent/overlapping `GET /rc/peers` calls are safe (mDNS uses `SO_REUSEADDR` on UDP 5353, so multiple short-lived browsers normally coexist). If — and only if — you find concurrent browses are actually unsafe (a bind/socket conflict), add single-flight to the provider (share one in-flight browse promise across overlapping requests, which also gives overlapping callers the same LAN snapshot). Do not add single-flight speculatively; this endpoint is owner-only and low-traffic.
+
 - [ ] **Step 3: Typecheck the wiring**
 
 Run: `cd packages/rc-gateway && npx tsc --noEmit -p tsconfig.json`
