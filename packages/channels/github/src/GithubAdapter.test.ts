@@ -800,7 +800,11 @@ describe('GithubChannel', () => {
     it('aggregates only comments from allowed senders', async () => {
       channel = new TestableGithubChannel(
         'test-github',
-        makeConfig({ senderPolicy: 'allowlist', allowedUsers: ['bob'] }),
+        makeConfig({
+          senderPolicy: 'allowlist',
+          allowedUsers: ['bob'],
+          groups: { '*': { requireMention: false } },
+        }),
         makeBridge(),
       );
       await initWithoutLoop();
@@ -830,7 +834,7 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes).toHaveLength(1);
       expect(channel.inboundEnvelopes[0]).toMatchObject({
         senderId: 'bob',
-        isMentioned: true,
+        isMentioned: false,
       });
       expect(channel.inboundEnvelopes[0]!.text).not.toContain('@alice');
       expect(channel.inboundEnvelopes[0]!.text).toContain(

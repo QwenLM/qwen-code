@@ -517,11 +517,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       messageId: String(first.id),
       text: `New comments were added to this thread.\n\n${summary}`,
       isGroup: true,
-      isMentioned: newComments.some((comment) =>
-        this.botUsername
-          ? testBotMention(comment.body || '', this.botUsername)
-          : false,
-      ),
+      isMentioned: false,
       isReplyToBot: false,
       metadata,
     };
