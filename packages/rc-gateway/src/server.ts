@@ -92,6 +92,8 @@ import { createRewindRoute } from './routes/rewind.js';
 import { createApprovalModeRoute } from './routes/approvalMode.js';
 import { createPolicyExplainRoute } from './routes/policyExplain.js';
 import type { PolicyExplainAccess } from './routes/policyExplain.js';
+import { createPeersRoute } from './routes/peers.js';
+import type { BrowsePeers } from './routes/peers.js';
 import {
   createIdleToggleRoute,
   createIdleStatusRoute,
@@ -204,6 +206,8 @@ export interface GatewayDeps {
   walDir?: string;
   /** Live policy access for POST /policy/explain (P4). Absent → route not mounted. */
   policyExplain?: PolicyExplainAccess;
+  /** LAN daemon discovery for GET /rc/peers. Absent → route not mounted. */
+  browsePeers?: BrowsePeers;
   /**
    * Per-sub-actor write cap within the limiter's rolling window (bridge
    * fan-in protection). Defaults to {@link DEFAULT_SUB_ACTOR_CAP}. Falls back to
@@ -1101,6 +1105,19 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       '/policy/explain',
       requireScope(OWNER, audit),
       createPolicyExplainRoute(deps.policyExplain, { audit }),
+    );
+  }
+
+  // GET /rc/peers — gateway-global (no :id), OWNER-scoped, read-only LAN
+  // daemon discovery over the optional mDNS browse. No session lock (not
+  // session-scoped) and no daemon call — mirrors the /policy/explain mount
+  // just above. Absent dep (bonjour-service optional, or no browse wired) →
+  // route not mounted at all (404, not a 503 at request time).
+  if (deps.browsePeers) {
+    app.get(
+      '/rc/peers',
+      requireScope(OWNER, audit),
+      createPeersRoute(deps.browsePeers),
     );
   }
 

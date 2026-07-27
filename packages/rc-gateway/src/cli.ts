@@ -591,6 +591,16 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       mdnsAdvertiser?.advertising
         ? { advertising: true, instanceName: mdnsAdvertiser.instanceName }
         : { advertising: false },
+    // GET /rc/peers: browse the LAN via the OPTIONAL bonjour-service factory
+    // (same pair behind `qwen-rc daemons discover`). null → dependency absent.
+    browsePeers: async (timeoutMs: number) => {
+      const factory = await loadBonjourFactory();
+      if (!factory) return null;
+      return browseDaemons({
+        factory: factory as unknown as BrowserFactory,
+        timeoutMs,
+      });
+    },
     policyExplain: {
       policy: () => currentPolicy,
       projectRoot: () => workspaceCwd ?? process.cwd(),
