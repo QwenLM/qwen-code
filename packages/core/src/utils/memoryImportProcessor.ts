@@ -237,7 +237,8 @@ export async function processImports(
 
   // --- FLAT FORMAT LOGIC ---
   if (importFormat === 'flat') {
-    // Use a queue to process files in order of first encounter, and a set to avoid duplicates
+    // Collect files in order of first encounter, deduplicated by the depth map
+    // below rather than by a plain set.
     const flatFiles: Array<{ path: string; content: string }> = [];
     // Track the shallowest depth each file has been expanded at, rather than a
     // plain "seen" set. Once a depth limit exists the two differ: a file first
@@ -277,7 +278,7 @@ export async function processImports(
       // still included, its own imports are simply not expanded.
       if (depth >= importState.maxDepth) {
         logger.warn(
-          `Maximum import depth (${importState.maxDepth}) reached. Stopping import processing.`,
+          `Maximum import depth (${importState.maxDepth}) reached at ${normalizedPath}. Stopping import processing.`,
         );
         return;
       }
