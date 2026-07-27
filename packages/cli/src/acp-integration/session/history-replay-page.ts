@@ -183,7 +183,6 @@ export async function collectHistoryReplayUpdates({
   records,
   gaps,
   cumulativeUsage,
-  goalState,
   logger,
   supersedeUnrestorableGoal,
 }: {
@@ -192,7 +191,6 @@ export async function collectHistoryReplayUpdates({
   records: ChatRecord[];
   gaps?: HistoryGap[];
   cumulativeUsage: CumulativeUsage;
-  goalState?: GoalSnapshotV2;
   logger?: ReplayLogger;
   /**
    * Forwarded to `HistoryReplayer`. Only the resume path, where
@@ -206,7 +204,7 @@ export async function collectHistoryReplayUpdates({
     await new HistoryReplayer(
       replayContext(sessionId, updates, cumulativeUsage, config),
       { supersedeUnrestorableGoal },
-    ).replay(records, gaps, goalState);
+    ).replay(records, gaps);
   } catch (error) {
     const replayError = error instanceof Error ? error.message : String(error);
     logger?.warn(

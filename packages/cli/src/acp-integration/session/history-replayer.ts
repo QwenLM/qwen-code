@@ -108,16 +108,11 @@ export class HistoryReplayer {
     this.machine = this.createMachine();
   }
 
-  async replay(
-    records: ChatRecord[],
-    gaps?: HistoryGap[],
-    goalState?: GoalSnapshotV2,
-  ): Promise<void> {
+  async replay(records: ChatRecord[], gaps?: HistoryGap[]): Promise<void> {
     try {
       await this.replayPage(records, {
         finalizeDangling: true,
         gaps,
-        ...(goalState ? { goalState } : {}),
       });
       await this.supersedeUnrestorableGoal(records);
     } finally {

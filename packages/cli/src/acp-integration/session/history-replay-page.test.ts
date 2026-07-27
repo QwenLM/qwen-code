@@ -231,6 +231,38 @@ describe('history replay page', () => {
     });
   });
 
+  it('drops a malformed goalState from replay state and warns', async () => {
+    const logger = { warn: vi.fn() };
+    const replayPage = vi
+      .spyOn(HistoryReplayer.prototype, 'replayPage')
+      .mockResolvedValueOnce({
+        pendingToolCalls: [],
+        replay: {
+          v: 1,
+          pendingToolCalls: [],
+          cumulativeUsage: createReplayCumulativeUsage(),
+        },
+      });
+
+    await replayTranscriptRecordPage({
+      sessionId: SESSION_ID,
+      page: recordPage({
+        replay: { goalState: { v: 2, activity: 'bogus', goal: null } },
+      }),
+      encodeCursor: vi.fn(),
+      logger,
+    });
+
+    expect(logger.warn).toHaveBeenCalledWith(
+      '[transcript] replay state dropped a malformed Goal state',
+    );
+    expect(replayPage).toHaveBeenCalledWith([], {
+      pendingToolCalls: [],
+      finalizeDangling: true,
+      gaps: [],
+    });
+  });
+
   it('seeds backward replay so a cleared Goal keeps its prior condition', async () => {
     // Drives the real (unspied) replayPage: the authoritative pre-page Goal
     // state must seed the replay machine so a `clear` record still projects its

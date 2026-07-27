@@ -356,6 +356,33 @@ describe('createTranscriptReplayMachine', () => {
     ).toThrow('Unsupported transcript replay state version');
   });
 
+  it('drops a malformed goalState from initialState and reports it', () => {
+    const onDiagnostic = vi.fn();
+    const machine = createTranscriptReplayMachine({
+      onDiagnostic,
+      initialState: {
+        v: 1,
+        pendingToolCalls: [],
+        cumulativeUsage: {
+          promptTokens: 0,
+          cachedTokens: 0,
+          candidateTokens: 0,
+          apiTimeMs: 0,
+        },
+        goalState: { v: 2, activity: 'bogus', goal: null },
+      } as unknown as TranscriptReplayStateV1,
+    });
+
+    expect(onDiagnostic).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'invalid_replay_state',
+        message: 'Dropped a malformed Goal state from replay state.',
+        affectsCompleteness: true,
+      }),
+    );
+    expect(machine.snapshot().goalState).toBeUndefined();
+  });
+
   it('emits gaps, todo plans, and cumulative usage deterministically', () => {
     const machine = createTranscriptReplayMachine({
       gaps: [{ childUuid: 'assistant-1', missingParentUuid: 'missing' }],
