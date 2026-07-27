@@ -20,6 +20,7 @@ import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 const IMAGE_VIEW_MAX_EDGE = 1568;
 const IMAGE_VIEW_MAX_PATCHES = 1568;
 const IMAGE_PATCH_SIZE = 28;
+const IMAGE_MAX_UPSCALE = 8;
 const IMAGE_JPEG_QUALITY = 92;
 const IMAGE_MAX_SOURCE_BYTES = 100 * 1024 * 1024;
 const IMAGE_MAX_OUTPUT_BYTES = 9 * 1024 * 1024;
@@ -58,8 +59,12 @@ function fitsVisualBudget({ width, height }: ImageSize): boolean {
 
 function magnifiedSize(width: number, height: number): ImageSize {
   const widthIsLongEdge = width >= height;
+  const maxLongEdge = Math.min(
+    IMAGE_VIEW_MAX_EDGE,
+    Math.max(width, height) * IMAGE_MAX_UPSCALE,
+  );
   let low = 1;
-  let high = IMAGE_VIEW_MAX_EDGE;
+  let high = maxLongEdge;
   let best: ImageSize = { width: 1, height: 1 };
 
   while (low <= high) {
@@ -115,6 +120,12 @@ class ZoomImageInvocation extends BaseToolInvocation<
 
   override async execute(signal: AbortSignal): Promise<ToolResult> {
     signal.throwIfAborted();
+    if (this.config.getEffectiveInputModalities().image !== true) {
+      return failureResult(
+        'zoom_image requires a model that accepts image inputs, but the current model does not. Switch to an image-capable model to zoom images.',
+        ToolErrorType.READ_CONTENT_FAILURE,
+      );
+    }
     let sharp: typeof import('sharp');
     try {
       // sharp is a CJS `export =` module: at runtime the dynamic-import
@@ -337,10 +348,9 @@ export class ZoomImageTool extends BaseDeclarativeTool<
     if (params.y1 >= params.y2) {
       return 'y1 must be less than y2.';
     }
-    if (this.config.getFileService().shouldQwenIgnoreFile(params.file_path)) {
-      return `File path '${params.file_path}' is ignored by ${this.config
-        .getFileService()
-        .getQwenIgnoreFileDisplayForPath(params.file_path)} pattern(s).`;
+    const fileService = this.config.getFileService();
+    if (fileService.shouldQwenIgnoreFile(params.file_path)) {
+      return `File path '${params.file_path}' is ignored by ${fileService.getQwenIgnoreFileDisplayForPath(params.file_path)} pattern(s).`;
     }
     return null;
   }

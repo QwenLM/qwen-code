@@ -26,6 +26,7 @@ describe('ZoomImageTool', () => {
     const config = {
       getFileService: () => new FileDiscoveryService(root),
       getTargetDir: () => root,
+      getEffectiveInputModalities: () => ({ image: true }),
       getPlansDir: () => path.join(root, '.plans'),
       getWorkspaceContext: () => createMockWorkspaceContext(root),
       storage: {
@@ -525,5 +526,80 @@ describe('ZoomImageTool', () => {
     expect(result.error).toMatchObject({
       type: ToolErrorType.READ_CONTENT_FAILURE,
     });
+  });
+
+  it('returns a bounded error when the model does not accept image inputs', async () => {
+    const textOnlyConfig = {
+      getFileService: () => new FileDiscoveryService(root),
+      getTargetDir: () => root,
+      getEffectiveInputModalities: () => ({}),
+    } as unknown as Config;
+    const textOnlyTool = new ZoomImageTool(textOnlyConfig);
+    const imagePath = path.join(root, 'gated.png');
+    await sharp({
+      create: {
+        width: 20,
+        height: 20,
+        channels: 3,
+        background: '#000000',
+      },
+    })
+      .png()
+      .toFile(imagePath);
+
+    const result = await textOnlyTool
+      .build({
+        file_path: imagePath,
+        x1: 0,
+        y1: 0,
+        x2: 1000,
+        y2: 1000,
+      })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toMatchObject({
+      type: ToolErrorType.READ_CONTENT_FAILURE,
+    });
+    expect(result.llmContent).toMatch(
+      /requires a model that accepts image inputs/i,
+    );
+  });
+
+  it('caps the upscale factor instead of inflating a tiny crop to the budget', async () => {
+    const imagePath = path.join(root, 'tiny-crop.png');
+    await sharp({
+      create: {
+        width: 400,
+        height: 400,
+        channels: 3,
+        background: '#306090',
+      },
+    })
+      .png()
+      .toFile(imagePath);
+
+    // Normalized (0,0)-(25,25) of a 400x400 source is a 10x10 pixel crop.
+    const result = await tool
+      .build({
+        file_path: imagePath,
+        x1: 0,
+        y1: 0,
+        x2: 25,
+        y2: 25,
+      })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    const parts = result.llmContent as Array<{
+      inlineData?: { data: string };
+    }>;
+    const metadata = await sharp(
+      Buffer.from(parts[1]!.inlineData!.data, 'base64'),
+    ).metadata();
+
+    // The 8x cap bounds a 10x10 crop to 80x80 rather than the ~1092x1092 the
+    // unconstrained visual budget would have produced.
+    expect(metadata.width).toBeLessThanOrEqual(80);
+    expect(metadata.height).toBeLessThanOrEqual(80);
   });
 });
