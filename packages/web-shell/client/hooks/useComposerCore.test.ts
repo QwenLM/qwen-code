@@ -175,6 +175,21 @@ describe('large paste helpers', () => {
     expect(pending.size).toBe(0);
   });
 
+  it('prunes by exact placeholder match, not substring', () => {
+    const pending = new Map<string, string>([
+      ['[Pasted Content 5 chars]', 'aaaaa'],
+      ['[Pasted Content 5 chars] #2', 'bbbbb'],
+    ]);
+    // Only the longer placeholder is in the doc; the shorter one must be
+    // pruned even though it is a substring of the longer one.
+    expect(
+      prunePendingPastes(pending, '[Pasted Content 5 chars] #2'),
+    ).toBeNull();
+    expect(pending.size).toBe(1);
+    expect(pending.has('[Pasted Content 5 chars]')).toBe(false);
+    expect(pending.has('[Pasted Content 5 chars] #2')).toBe(true);
+  });
+
   it('expands placeholders back to their pasted content', () => {
     const pending = new Map<string, string>([
       ['[Pasted Content 5 chars]', 'hello'],

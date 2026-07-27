@@ -494,10 +494,17 @@ export function prunePendingPastes(
   pendingPastes: Map<string, string>,
   docText: string,
 ): number | null {
-  for (const placeholderText of pendingPastes.keys()) {
-    if (!docText.includes(placeholderText)) {
-      pendingPastes.delete(placeholderText);
-    }
+  if (pendingPastes.size === 0) return null;
+  const placeholders = [...pendingPastes.keys()].sort(
+    (a, b) => b.length - a.length,
+  );
+  const pattern = new RegExp(placeholders.map(escapeRegExp).join('|'), 'g');
+  const found = new Set<string>();
+  for (const match of docText.matchAll(pattern)) {
+    found.add(match[0]);
+  }
+  for (const key of pendingPastes.keys()) {
+    if (!found.has(key)) pendingPastes.delete(key);
   }
   return pendingPastes.size === 0 ? 1 : null;
 }
@@ -1406,6 +1413,12 @@ export function useComposerCore(
       scheduleDraftSaveRef.current();
     }
     onInputTextChangeRef.current?.(text);
+  }, []);
+  useEffect(() => {
+    if (isTouchComposer && mobileTextRef.current) {
+      onInputTextChangeRef.current?.(mobileTextRef.current);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const onCycleModeRef = useRef(onCycleMode);
   onCycleModeRef.current = onCycleMode;
@@ -2681,14 +2694,13 @@ export function useComposerCore(
       const userEdited = update.transactions.some(
         (tr) => tr.isUserEvent('input') || tr.isUserEvent('delete'),
       );
-      // Prune only on genuine user edits: undo/redo also change the doc, and
-      // pruning during an undo would drop the paste mapping a redo needs to
-      // re-expand the placeholder.
-      if (
-        update.docChanged &&
-        userEdited &&
-        pendingPastesRef.current.size > 0
-      ) {
+      // Prune only on input events (not delete): deleting a placeholder
+      // removes the mapping, but Ctrl+Z restores the text without restoring
+      // the React ref, so the mapping would be permanently lost.
+      const userInput = update.transactions.some((tr) =>
+        tr.isUserEvent('input'),
+      );
+      if (update.docChanged && userInput && pendingPastesRef.current.size > 0) {
         const nextPasteId = prunePendingPastes(
           pendingPastesRef.current,
           getDocText(update.state),
@@ -2952,6 +2964,7 @@ export function useComposerCore(
 
     return () => {
       view.dom.removeEventListener('blur', handleDraftBlur, true);
+      saveCurrentDraftRef.current();
       view.dispatch({ effects: clearInlineTagsEffect.of() });
       view.destroy();
       viewRef.current = null;
