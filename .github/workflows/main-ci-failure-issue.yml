@@ -52,7 +52,7 @@ jobs:
             gh issue list \
               --repo "${REPO}" \
               --state open \
-              --search "${marker} in:body,comments" \
+              --search "${marker} in:body" \
               --json number \
               --jq '.[0].number // ""'
           )"

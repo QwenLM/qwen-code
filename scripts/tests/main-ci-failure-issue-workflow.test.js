@@ -49,7 +49,7 @@ describe('main CI failure issue workflow', () => {
 
   it('deduplicates failures for the same commit and includes run context', () => {
     expect(workflow).toContain('qwen-main-ci-failure:${HEAD_SHA}');
-    expect(workflow).toContain('--search "${marker} in:body,comments"');
+    expect(workflow).toContain('--search "${marker} in:body"');
     expect(workflow).toContain('gh issue list');
     expect(workflow).toContain('gh issue create');
     expect(workflow).toContain('apply_autofix_route "${existing_sha_issue}"');
