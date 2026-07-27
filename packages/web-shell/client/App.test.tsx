@@ -1340,11 +1340,13 @@ describe('App shell command queueing', () => {
       rerender({ onToast });
     });
 
+    let accepted: boolean | void;
     await act(async () => {
-      testState.latestChatEditorProps?.onSubmit('!echo queued');
+      accepted = testState.latestChatEditorProps?.onSubmit('!echo queued');
       await Promise.resolve();
     });
 
+    expect(accepted).toBe(true);
     expect(mockSessionActions.sendShellCommand).not.toHaveBeenCalled();
     expect(onToast).toHaveBeenCalledWith('info', expect.any(String));
 

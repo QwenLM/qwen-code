@@ -3021,7 +3021,9 @@ export function App({
     setCurrentMode(modeId);
   }, []);
   const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
-  const createSessionPromiseRef = useRef<Promise<void> | null>(null);
+  const createSessionPromiseRef = useRef<Promise<string | undefined> | null>(
+    null,
+  );
   const preparingSessionIdRef = useRef<string | null>(null);
   /** Git mode intent for the next lazily-created session (branch or worktree). */
   const [gitModeIntent, setGitModeIntent] = useState<SessionGitIntent>({
@@ -3073,10 +3075,11 @@ export function App({
       ) {
         return createSessionPromiseRef.current;
       }
-      return Promise.resolve();
+      return Promise.resolve(undefined);
     }
-    if (currentSessionId) return Promise.resolve();
+    if (currentSessionId) return Promise.resolve(undefined);
     const promise = (async () => {
+      let allocatedSessionId: string | undefined;
       const modelId =
         currentModelRef.current || connectionRef.current.currentModel;
       const modeId =
@@ -3109,6 +3112,7 @@ export function App({
         onSessionCreated: onSessionCreatedRef.current,
         onSessionAllocated: (sessionId) => {
           preparingSessionIdRef.current = sessionId;
+          allocatedSessionId = sessionId;
         },
         getCurrentSessionId: () => connectionRef.current.sessionId,
       }).then((result) => {
@@ -3127,6 +3131,7 @@ export function App({
       // it after creation. The next new chat defaults back to the primary
       // workspace unless the user picks one again.
       setSelectedWorkspaceCwd(undefined);
+      return allocatedSessionId;
     })();
     createSessionPromiseRef.current = promise;
     const clearPreparation = () => {
@@ -3954,7 +3959,10 @@ export function App({
             try {
               await sessionActions.sendShellCommand(batch[i]);
             } catch (error: unknown) {
-              reportError(error, 'Failed to execute shell command');
+              reportError(
+                error,
+                `Failed to execute shell command: !${batch[i]}`,
+              );
             }
           }
           batch = queuedShellCommandsRef.current;
@@ -5981,9 +5989,9 @@ export function App({
               shellSubmitInFlightRef.current = false;
             }
           })
-          .then(() => {
+          .then((createdSessionId) => {
             if (drainGenerationRef.current !== generationAtSubmit) return;
-            if (needsSession && connectionRef.current.sessionId) {
+            if (needsSession && createdSessionId) {
               sessionCreated = true;
               if (commitComposerAccepted) {
                 commitComposerAccepted();
@@ -5992,7 +6000,7 @@ export function App({
               }
               dispatchSessionChangeRef.current?.({
                 type: 'submit',
-                sessionId: connectionRef.current.sessionId,
+                sessionId: createdSessionId,
                 prompt: `!${cmd}`,
                 queued: false,
               });
