@@ -24,9 +24,43 @@ interface GithubCursor {
    * fetch and mark). Bounded to the most recent entries so the cursor stays small.
    */
   dispatchedBodies?: string[];
+  /**
+   * Comment `node_id`s (falling back to numeric `id`) already dispatched. Survives
+   * a `markNotificationsAsRead` failure that leaves the cursor un-advanced and
+   * causes the next poll to re-fetch the same thread.
+   */
+  dispatchedComments?: string[];
+  /**
+   * Notification `id`s already processed. Prevents re-dispatch when a failed
+   * `markNotificationsAsRead` aborts the poll before the cursor advances and the
+   * next poll re-fetches the same notifications.
+   */
+  dispatchedNotifications?: string[];
 }
 
-const MAX_DISPATCHED_BODIES = 500;
+const MAX_DISPATCHED = 500;
+
+type DispatchRoute = 'mention' | 'review' | 'assign' | 'aggregate' | 'generic';
+
+interface GithubComment {
+  id: number;
+  node_id?: string;
+  body?: string;
+  created_at?: string | null;
+  updated_at?: string | null;
+  user?: { id?: number; login?: string } | null;
+}
+
+interface LaneContext {
+  chatId: string;
+  threadId: string;
+  issueNumber: number;
+  lastReadAt: string | null;
+  windowSince: string;
+  maxUpdatedAt: string;
+  subjectTitle: string;
+  reason: string;
+}
 
 export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private octokit!: Octokit;
@@ -50,11 +84,15 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const base = super.validateCursor(parsed);
     if (!base || typeof base.lastProcessedAt !== 'string') return null;
     if (Number.isNaN(new Date(base.lastProcessedAt).getTime())) return null;
-    if (
-      base.dispatchedBodies !== undefined &&
-      !Array.isArray(base.dispatchedBodies)
-    ) {
-      base.dispatchedBodies = [];
+    for (const key of [
+      'dispatchedBodies',
+      'dispatchedComments',
+      'dispatchedNotifications',
+    ] as const) {
+      const value = base[key];
+      if (value !== undefined && !Array.isArray(value)) {
+        (base[key] as string[]) = [];
+      }
     }
     return base;
   }
@@ -168,101 +206,293 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         continue;
       }
 
+      const notifId = String(notification.id);
+      if (this.isDispatched(this.cursor.dispatchedNotifications, notifId)) {
+        continue;
+      }
+
       const { chatId, threadId, issueNumber } = extracted;
       const lastReadAt = notification.last_read_at;
+      const route = this.routeByReason(notification.reason, threadId);
+
+      const ctx: LaneContext = {
+        chatId,
+        threadId,
+        issueNumber,
+        lastReadAt,
+        windowSince,
+        maxUpdatedAt,
+        subjectTitle: notification.subject.title || '',
+        reason: notification.reason,
+      };
 
       try {
-        const comments = await this.githubApi(
-          () =>
-            this.octokit.paginate(this.octokit.rest.issues.listComments, {
-              owner: chatId.split('/')[0],
-              repo: chatId.split('/')[1],
-              issue_number: issueNumber,
-              since: windowSince,
-              per_page: 100,
-            }),
-          `listComments(${threadId})`,
-        );
-
-        comments.sort((a, b) =>
-          (a.created_at || '').localeCompare(b.created_at || ''),
-        );
-
-        const newComments = comments.filter((c) => {
-          if (c.user?.login === this.botUsername) {
-            return false;
-          }
-          if (c.created_at && c.created_at > maxUpdatedAt) {
-            return false;
-          }
-          if (c.created_at && c.created_at <= windowSince) {
-            return false;
-          }
-          return true;
-        });
-
-        let dispatchedMention = false;
-
-        for (const comment of newComments) {
-          const body = comment.body || '';
-          const isMentioned = this.botUsername
-            ? testBotMention(body, this.botUsername)
-            : false;
-
-          const text = this.botUsername
-            ? stripBotMention(body, this.botUsername)
-            : body;
-
-          const envelope: Envelope = {
-            channelName: this.name,
-            senderId: (comment.user?.login || 'unknown').toLowerCase(),
-            senderName: comment.user?.login || 'unknown',
-            chatId,
-            threadId,
-            messageId: String(comment.id),
-            text,
-            isGroup: true,
-            isMentioned,
-            isReplyToBot: false,
-            metadata: this.buildMetadata(chatId, threadId, notification),
-          };
-
-          try {
-            await this.handleInbound(envelope);
-            if (isMentioned && this.gate.isAllowed(envelope.senderId))
-              dispatchedMention = true;
-          } catch (err) {
-            process.stderr.write(
-              `[Channel:${this.name}] handleInbound failed for comment ${comment.id}: ${err}\n`,
-            );
-            await this.postErrorComment(chatId, issueNumber);
-            dispatchedMention = true;
-            break;
-          }
-        }
-
-        if (!dispatchedMention && !lastReadAt) {
-          await this.tryFirstContactBody(
-            chatId,
-            threadId,
-            issueNumber,
-            notification,
-          );
-        }
+        await this.processByRoute(route, ctx);
+        this.recordDispatched('dispatchedNotifications', notifId);
       } catch (err) {
         process.stderr.write(
-          `[Channel:${this.name}] API error processing ${threadId}, skipping: ${err}\n`,
+          `[Channel:${this.name}] API error processing ${threadId} (${notification.reason}), skipping: ${err}\n`,
         );
         continue;
       }
     }
   }
 
+  private routeByReason(reason: string, threadId: string): DispatchRoute {
+    switch (reason) {
+      case 'mention':
+        return 'mention';
+      case 'review_requested':
+        return threadId.startsWith('pr:') ? 'review' : 'generic';
+      case 'assign':
+        return 'assign';
+      case 'author':
+      case 'comment':
+        return 'aggregate';
+      default:
+        return 'generic';
+    }
+  }
+
+  private async processByRoute(
+    route: DispatchRoute,
+    ctx: LaneContext,
+  ): Promise<void> {
+    switch (route) {
+      case 'mention':
+        return this.processPerCommentLane(
+          ctx,
+          true,
+          'Trigger: mention. You were @mentioned in this thread.',
+        );
+      case 'generic':
+        return this.processPerCommentLane(
+          ctx,
+          false,
+          `Trigger: ${ctx.reason}.`,
+        );
+      case 'review':
+        return this.processMetaLane(
+          ctx,
+          'pull',
+          'Trigger: review_requested. You were asked to review this pull request.',
+        );
+      case 'assign':
+        return this.processMetaLane(
+          ctx,
+          'issue',
+          'Trigger: assign. You were assigned to this issue.',
+        );
+      case 'aggregate':
+        return this.processAggregateLane(ctx);
+      default:
+        return;
+    }
+  }
+
+  private async processPerCommentLane(
+    ctx: LaneContext,
+    onlyMentioned: boolean,
+    framing: string,
+  ): Promise<void> {
+    const {
+      chatId,
+      threadId,
+      issueNumber,
+      lastReadAt,
+      windowSince,
+      maxUpdatedAt,
+      subjectTitle,
+    } = ctx;
+    const comments = await this.fetchNewComments(
+      chatId,
+      threadId,
+      issueNumber,
+      windowSince,
+      maxUpdatedAt,
+    );
+    let dispatchedMention = false;
+    for (const comment of comments) {
+      const dedupKey = this.commentDedupKey(comment);
+      if (this.isDispatched(this.cursor.dispatchedComments, dedupKey)) continue;
+      const body = comment.body || '';
+      const isMentioned = this.botUsername
+        ? testBotMention(body, this.botUsername)
+        : false;
+      if (onlyMentioned && !isMentioned) continue;
+      const text = this.botUsername
+        ? stripBotMention(body, this.botUsername)
+        : body;
+      const envelope: Envelope = {
+        channelName: this.name,
+        senderId: (comment.user?.login || 'unknown').toLowerCase(),
+        senderName: comment.user?.login || 'unknown',
+        chatId,
+        threadId,
+        messageId: String(comment.id),
+        text,
+        isGroup: true,
+        isMentioned,
+        isReplyToBot: false,
+        metadata: this.appendFraming(
+          this.buildMetadata(chatId, threadId, subjectTitle),
+          framing,
+        ),
+      };
+      try {
+        await this.handleInbound(envelope);
+        this.recordDispatched('dispatchedComments', dedupKey);
+        if (isMentioned && this.gate.isAllowed(envelope.senderId))
+          dispatchedMention = true;
+      } catch (err) {
+        process.stderr.write(
+          `[Channel:${this.name}] handleInbound failed for comment ${comment.id}: ${err}\n`,
+        );
+        await this.postErrorComment(chatId, issueNumber);
+        this.recordDispatched('dispatchedComments', dedupKey);
+        dispatchedMention = true;
+        break;
+      }
+    }
+    if (!dispatchedMention && !lastReadAt) {
+      await this.tryFirstContactBody(ctx, framing);
+    }
+  }
+
+  private async processMetaLane(
+    ctx: LaneContext,
+    kind: 'pull' | 'issue',
+    framing: string,
+  ): Promise<void> {
+    const {
+      chatId,
+      threadId,
+      issueNumber,
+      windowSince,
+      maxUpdatedAt,
+      subjectTitle,
+    } = ctx;
+    const meta =
+      kind === 'pull'
+        ? await this.fetchPrMeta(chatId, threadId, issueNumber)
+        : await this.fetchIssueMeta(chatId, threadId, issueNumber);
+    if (meta.user?.login === this.botUsername) return;
+    const comments = await this.fetchNewComments(
+      chatId,
+      threadId,
+      issueNumber,
+      windowSince,
+      maxUpdatedAt,
+    );
+    const rawBody = meta.body || '';
+    let text = this.botUsername
+      ? stripBotMention(rawBody, this.botUsername)
+      : rawBody;
+    if (!text.trim() && comments.length > 0) {
+      const firstBody = comments[0]?.body || '';
+      text = this.botUsername
+        ? stripBotMention(firstBody, this.botUsername)
+        : firstBody;
+    }
+    if (!text.trim())
+      text =
+        kind === 'pull'
+          ? 'Please review this pull request.'
+          : 'Please triage this issue.';
+    const detail = this.buildMetaDetail(kind, meta);
+    const summary = this.buildCommentsSummary(comments);
+    const metadata = this.appendFraming(
+      this.buildMetadata(chatId, threadId, subjectTitle),
+      framing,
+      detail,
+      summary,
+    );
+    const envelope: Envelope = {
+      channelName: this.name,
+      senderId: (meta.user?.login || 'unknown').toLowerCase(),
+      senderName: meta.user?.login || 'unknown',
+      chatId,
+      threadId,
+      messageId: `${kind}-body-${issueNumber}`,
+      text,
+      isGroup: true,
+      isMentioned: false,
+      isReplyToBot: false,
+      metadata,
+    };
+    try {
+      await this.handleInbound(envelope);
+    } catch (err) {
+      process.stderr.write(
+        `[Channel:${this.name}] handleInbound failed for ${kind} ${issueNumber}: ${err}\n`,
+      );
+      await this.postErrorComment(chatId, issueNumber);
+    }
+  }
+
+  private async processAggregateLane(ctx: LaneContext): Promise<void> {
+    const {
+      chatId,
+      threadId,
+      issueNumber,
+      windowSince,
+      maxUpdatedAt,
+      subjectTitle,
+    } = ctx;
+    const comments = await this.fetchNewComments(
+      chatId,
+      threadId,
+      issueNumber,
+      windowSince,
+      maxUpdatedAt,
+    );
+    const newComments = comments.filter(
+      (c) =>
+        !this.isDispatched(
+          this.cursor.dispatchedComments,
+          this.commentDedupKey(c),
+        ),
+    );
+    if (newComments.length === 0) return;
+    const first = newComments[0]!;
+    const framing =
+      'Trigger: new comments on a thread you follow. Review the comments below and respond only if a response is needed.';
+    const summary = this.buildCommentsSummary(newComments);
+    const metadata = this.appendFraming(
+      this.buildMetadata(chatId, threadId, subjectTitle),
+      framing,
+      summary,
+    );
+    const envelope: Envelope = {
+      channelName: this.name,
+      senderId: (first.user?.login || 'unknown').toLowerCase(),
+      senderName: first.user?.login || 'unknown',
+      chatId,
+      threadId,
+      messageId: String(first.id),
+      text: 'New comments were added to this thread. See the comment list below.',
+      isGroup: true,
+      isMentioned: false,
+      isReplyToBot: false,
+      metadata,
+    };
+    try {
+      await this.handleInbound(envelope);
+      for (const c of newComments)
+        this.recordDispatched('dispatchedComments', this.commentDedupKey(c));
+    } catch (err) {
+      process.stderr.write(
+        `[Channel:${this.name}] handleInbound failed for aggregated comments on ${threadId}: ${err}\n`,
+      );
+      await this.postErrorComment(chatId, issueNumber);
+      for (const c of newComments)
+        this.recordDispatched('dispatchedComments', this.commentDedupKey(c));
+    }
+  }
+
   private async tryFirstContactBody(
-    chatId: string,
-    threadId: string,
-    issueNumber: number,
-    notification: { subject: { title?: string } },
+    ctx: LaneContext,
+    framing: string,
   ): Promise<void> {
     // First contact is gated by `last_read_at` in the caller, but a thread can
     // be re-fetched with `last_read_at` still null if marking it read failed
@@ -270,31 +500,19 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     // of which bodies we have already fed, so that re-fetch never feeds the body
     // twice. Unlike a `created_at <= cursor` guard, this also feeds bodies whose
     // notification arrived late — after the cursor had advanced past created_at.
+    const { chatId, threadId, issueNumber, subjectTitle } = ctx;
     const bodyKey = `${chatId}|${threadId}`;
-    if (this.cursor.dispatchedBodies?.includes(bodyKey)) return;
+    if (this.isDispatched(this.cursor.dispatchedBodies, bodyKey)) return;
     try {
-      const { data: issue } = await this.githubApi(
-        () =>
-          this.octokit.rest.issues.get({
-            owner: chatId.split('/')[0],
-            repo: chatId.split('/')[1],
-            issue_number: issueNumber,
-          }),
-        `issues.get(${threadId})`,
-      );
-
+      const issue = await this.fetchIssueMeta(chatId, threadId, issueNumber);
       const body = issue.body || '';
-
       if (issue.user?.login === this.botUsername) return;
-
       const isMentioned = this.botUsername
         ? testBotMention(body, this.botUsername)
         : false;
-
       const text = this.botUsername
         ? stripBotMention(body, this.botUsername)
         : body;
-
       const envelope: Envelope = {
         channelName: this.name,
         senderId: (issue.user?.login || 'unknown').toLowerCase(),
@@ -306,20 +524,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         isGroup: true,
         isMentioned,
         isReplyToBot: false,
-        metadata: this.buildMetadata(chatId, threadId, {
-          subject: { title: notification.subject.title },
-        }),
+        metadata: this.appendFraming(
+          this.buildMetadata(chatId, threadId, subjectTitle),
+          framing,
+        ),
       };
-
       try {
         await this.handleInbound(envelope);
-        this.recordDispatchedBody(bodyKey);
+        this.recordDispatched('dispatchedBodies', bodyKey);
       } catch (err) {
         process.stderr.write(
           `[Channel:${this.name}] handleInbound failed for issue body ${issueNumber}: ${err}\n`,
         );
         await this.postErrorComment(chatId, issueNumber);
-        this.recordDispatchedBody(bodyKey);
+        this.recordDispatched('dispatchedBodies', bodyKey);
       }
     } catch (err) {
       process.stderr.write(
@@ -328,10 +546,135 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     }
   }
 
-  private recordDispatchedBody(key: string): void {
-    const list = this.cursor.dispatchedBodies ?? [];
+  private async fetchNewComments(
+    chatId: string,
+    threadId: string,
+    issueNumber: number,
+    windowSince: string,
+    maxUpdatedAt: string,
+  ): Promise<GithubComment[]> {
+    const [owner, repo] = chatId.split('/');
+    const comments = await this.githubApi(
+      () =>
+        this.octokit.paginate(this.octokit.rest.issues.listComments, {
+          owner,
+          repo,
+          issue_number: issueNumber,
+          since: windowSince,
+          per_page: 100,
+        }),
+      `listComments(${threadId})`,
+    );
+    comments.sort((a, b) =>
+      (a.created_at || '').localeCompare(b.created_at || ''),
+    );
+    return comments.filter((c) => {
+      if (c.user?.login === this.botUsername) return false;
+      if (c.created_at && c.created_at > maxUpdatedAt) return false;
+      if (c.created_at && c.created_at <= windowSince) return false;
+      return true;
+    }) as GithubComment[];
+  }
+
+  private async fetchIssueMeta(
+    chatId: string,
+    threadId: string,
+    issueNumber: number,
+  ): Promise<{
+    body?: string | null;
+    state?: string;
+    user?: { login?: string } | null;
+  }> {
+    const { data: issue } = await this.githubApi(
+      () =>
+        this.octokit.rest.issues.get({
+          owner: chatId.split('/')[0],
+          repo: chatId.split('/')[1],
+          issue_number: issueNumber,
+        }),
+      `issues.get(${threadId})`,
+    );
+    return issue;
+  }
+
+  private async fetchPrMeta(
+    chatId: string,
+    threadId: string,
+    issueNumber: number,
+  ): Promise<{
+    title?: string;
+    body?: string | null;
+    state?: string;
+    draft?: boolean;
+    user?: { login?: string } | null;
+    head?: { ref?: string } | null;
+    base?: { ref?: string } | null;
+  }> {
+    const { data: pr } = await this.githubApi(
+      () =>
+        this.octokit.rest.pulls.get({
+          owner: chatId.split('/')[0],
+          repo: chatId.split('/')[1],
+          pull_number: issueNumber,
+        }),
+      `pulls.get(${threadId})`,
+    );
+    return pr;
+  }
+
+  private buildMetaDetail(
+    kind: 'pull' | 'issue',
+    meta: {
+      state?: string;
+      draft?: boolean;
+      user?: { login?: string } | null;
+      head?: { ref?: string } | null;
+      base?: { ref?: string } | null;
+    },
+  ): string {
+    const author = meta.user?.login || 'unknown';
+    const state = meta.state || 'unknown';
+    if (kind === 'pull') {
+      const draft = meta.draft ? 'true' : 'false';
+      const headRef = meta.head?.ref || 'unknown';
+      const baseRef = meta.base?.ref || 'unknown';
+      return `Author: ${author} | State: ${state} | Draft: ${draft} | branch: ${headRef} → ${baseRef}`;
+    }
+    return `Author: ${author} | State: ${state}`;
+  }
+
+  private buildCommentsSummary(comments: GithubComment[]): string {
+    if (comments.length === 0) return '';
+    const lines = comments.map((c) => {
+      const who = c.user?.login || 'unknown';
+      const body = (c.body || '').trim();
+      return `- @${who}: ${body}`;
+    });
+    return `New comments (${comments.length}):\n${lines.join('\n')}`;
+  }
+
+  private appendFraming(base: string, ...parts: string[]): string {
+    return [base, ...parts.filter((p) => p && p.trim())].join('\n');
+  }
+
+  private commentDedupKey(comment: GithubComment): string {
+    return comment.node_id || String(comment.id);
+  }
+
+  private isDispatched(list: string[] | undefined, key: string): boolean {
+    return list?.includes(key) ?? false;
+  }
+
+  private recordDispatched(
+    field:
+      | 'dispatchedBodies'
+      | 'dispatchedComments'
+      | 'dispatchedNotifications',
+    key: string,
+  ): void {
+    const list = this.cursor[field] ?? [];
     list.push(key);
-    this.cursor.dispatchedBodies = list.slice(-MAX_DISPATCHED_BODIES);
+    this.cursor[field] = list.slice(-MAX_DISPATCHED);
   }
 
   private extractFromSubjectUrl(
@@ -349,12 +692,11 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private buildMetadata(
     chatId: string,
     threadId: string,
-    notification: { subject: { title?: string } },
+    subjectTitle: string,
   ): string {
     const type = threadId.startsWith('pr:') ? 'Pull Request' : 'Issue';
-    const title = notification.subject.title || '';
     const url = `${this.webOrigin}/${chatId}/${threadId.startsWith('pr:') ? 'pull' : 'issues'}/${threadId.split(':')[1]}`;
-    return `Type: ${type} | Title: ${title} | URL: ${url}`;
+    return `Type: ${type} | Title: ${subjectTitle} | URL: ${url}`;
   }
 
   private async githubApi<T>(
