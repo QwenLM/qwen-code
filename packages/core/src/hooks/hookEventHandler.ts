@@ -157,10 +157,15 @@ export class HookEventHandler {
   async fireUserPromptSubmitEvent(
     prompt: string,
     signal?: AbortSignal,
+    submittedPrompt?: string,
   ): Promise<AggregatedHookResult> {
     const input: UserPromptSubmitInput = {
       ...this.createBaseInput(HookEventName.UserPromptSubmit),
       prompt,
+      ...(typeof submittedPrompt === 'string' &&
+      submittedPrompt.trim().length > 0
+        ? { submitted_prompt: submittedPrompt }
+        : {}),
     };
 
     return this.executeHooks(

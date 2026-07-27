@@ -355,6 +355,12 @@ export interface ChatRecord {
 
 export interface NotificationRecordPayload {
   displayText: string;
+  backgroundTask?: {
+    taskId: string;
+    status: string;
+    kind: 'agent' | 'monitor' | 'shell';
+    toolUseId?: string;
+  };
 }
 
 export interface AgentBootstrapRecordPayload {
@@ -1184,14 +1190,24 @@ export class ChatRecordingService {
    * Stored as a user-role message with subtype 'notification' so the
    * UI restores it as an info item, not a user turn.
    */
-  recordNotification(message: PartListUnion, displayText?: string): void {
-    this.recordNotificationLike(message, 'notification', displayText);
+  recordNotification(
+    message: PartListUnion,
+    displayText?: string,
+    backgroundTask?: NotificationRecordPayload['backgroundTask'],
+  ): void {
+    this.recordNotificationLike(
+      message,
+      'notification',
+      displayText,
+      backgroundTask,
+    );
   }
 
   private recordNotificationLike(
     message: PartListUnion,
     subtype: 'notification' | 'cron',
     displayText?: string,
+    backgroundTask?: NotificationRecordPayload['backgroundTask'],
   ): void {
     try {
       const record: ChatRecord = {
@@ -1199,7 +1215,7 @@ export class ChatRecordingService {
         subtype,
         message: createUserContent(message),
         systemPayload: displayText
-          ? ({ displayText } as NotificationRecordPayload)
+          ? ({ displayText, backgroundTask } as NotificationRecordPayload)
           : undefined,
       };
       this.appendRecord(record);
