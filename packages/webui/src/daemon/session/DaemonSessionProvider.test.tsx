@@ -3762,6 +3762,106 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
+  it('uses history_truncated marker recordId as pagination anchor when session_updates lack one', async () => {
+    // Regression coverage: a live-journal truncation during a single long
+    // in-flight turn can leave the retained window with no
+    // `session_update` carrying a `qwen.session.recordId`. The daemon's
+    // compaction engine now stamps the last-seen recordId on the
+    // `history_truncated` marker itself; the client must fall back to
+    // that anchor so `loadMore()` keeps working instead of rendering the
+    // banner with no recovery path.
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const session = createMockSession({
+      replaySnapshot: {
+        compactedReplay: [],
+        liveJournal: [
+          {
+            v: 1,
+            type: 'history_truncated',
+            data: {
+              reason: 'replay_window_exceeded',
+              scope: 'live_journal',
+              truncatedEvents: 7602,
+              retainedEvents: 10000,
+              maxBytes: 8 * 1024 * 1024,
+              maxEvents: 10000,
+              fullTranscriptAvailable: true,
+              recordId: 'record-anchor',
+            },
+          },
+          {
+            id: 9001,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'streaming chunk 1' },
+              },
+            },
+          },
+          {
+            id: 9002,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'streaming chunk 2' },
+              },
+            },
+          },
+        ],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: session.sessionId,
+      events: [],
+      hasMore: false,
+    });
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      history = useDaemonTranscriptHistory();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 25,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    // Banner is NOT rendered: marker's recordId unlocked historyHasMore.
+    expect(history?.hasMore).toBe(true);
+    expect(blocks).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'status',
+          text: expect.stringContaining('History truncated'),
+        }),
+      ]),
+    );
+    await act(async () => history?.loadMore());
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledWith(
+      session.sessionId,
+      {
+        beforeRecordId: 'record-anchor',
+        limit: 25,
+        clientId: session.clientId,
+      },
+    );
+  });
+
   it('renders bounded replay truncation when no pagination anchor is available', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       workspaceCwd: '/mock-workspace',

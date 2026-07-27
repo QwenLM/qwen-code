@@ -689,6 +689,77 @@ describe('TurnBoundaryCompactionEngine', () => {
       expect(markerOf(snap)).toBeUndefined();
       expect(snap.liveJournal).toHaveLength(2);
     });
+
+    it('marker carries the last-seen recordId as a pagination anchor when the journal overflows', () => {
+      // Regression coverage: a single long in-flight turn can push the
+      // liveJournal past its caps with only streaming `session_update`s
+      // (no recordId). The marker must still carry the recordId of the
+      // most recent prior turn-boundary event so the client can anchor
+      // transcript pagination at `beforeRecordId`.
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 3,
+      });
+      const turnBounded: BridgeEvent = {
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'prior-turn' },
+            _meta: { 'qwen.session.recordId': 'record-anchor' },
+          },
+        },
+      };
+      engine.ingest(turnBounded);
+      engine.ingest(makeTextChunk(2, 'a'));
+      engine.ingest(makeTextChunk(3, 'b'));
+      engine.ingest(makeTextChunk(4, 'c'));
+      engine.ingest(makeTextChunk(5, 'd'));
+
+      const snap = engine.snapshot();
+      const marker = markerOf(snap);
+      expect(marker).toBeDefined();
+      expect(marker?.data).toMatchObject({
+        reason: 'replay_window_exceeded',
+        scope: 'live_journal',
+        truncatedEvents: 2,
+        retainedEvents: 3,
+        recordId: 'record-anchor',
+      });
+    });
+
+    it('seeded engine stamps marker with recordId observed on post-seed ingest', () => {
+      // A seed resets activeRecordId; subsequent ingest must rebuild it.
+      const engine = new TurnBoundaryCompactionEngine({
+        maxJournalEvents: 2,
+      });
+      engine.seed({
+        compactedTurns: [makeTextChunk(1, 'seeded')],
+        lastEventId: 1,
+      });
+      const bounded: BridgeEvent = {
+        id: 2,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'post-seed' },
+            _meta: { 'qwen.session.recordId': 'record-post-seed' },
+          },
+        },
+      };
+      engine.ingest(bounded);
+      engine.ingest(makeTextChunk(3, 'x'));
+      engine.ingest(makeTextChunk(4, 'y'));
+
+      const snap = engine.snapshot();
+      const marker = markerOf(snap);
+      expect(marker?.data).toMatchObject({
+        recordId: 'record-post-seed',
+      });
+    });
   });
 
   describe('multi-turn sessions', () => {
@@ -1170,6 +1241,49 @@ describe('EventBus + CompactionEngine integration', () => {
     expect(snapshot.compactedTurns[0]?.data).toMatchObject({
       truncatedEvents: 2,
       retainedEvents: 2,
+      // Last-seen recordId before the retained window — `new-record`
+      // lives inside the retained window, so it's also the last-seen
+      // value across the whole seed. Stamped as a pagination anchor so
+      // the client can issue `beforeRecordId: 'new-record'` even when
+      // no session_update on the retained suffix carries one.
+      recordId: 'new-record',
+    });
+  });
+
+  it('seedReplayEvents marker carries recordId from evicted head when retained records lack one', () => {
+    // Critical regression case: only the EVICTED records carry a
+    // recordId. The retained suffix has no recordId-bearing events. The
+    // pre-scan must still capture the evicted recordId so the marker
+    // ships with a pagination anchor — otherwise the client has no way
+    // to page the transcript backward.
+    const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 512 });
+    const bus = new EventBus(100, undefined, engine);
+    bus.seedReplayEvents([
+      {
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `old-${'x'.repeat(600)}` },
+            _meta: { 'qwen.session.recordId': 'evicted-record' },
+          },
+        },
+      },
+      {
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `new-${'y'.repeat(600)}` },
+          },
+        },
+      },
+    ]);
+    const snapshot = bus.snapshotReplay()!;
+    expect(snapshot.compactedTurns[0]?.type).toBe('history_truncated');
+    expect(snapshot.compactedTurns[0]?.data).toMatchObject({
+      truncatedEvents: 1,
+      recordId: 'evicted-record',
     });
   });
 

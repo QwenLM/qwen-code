@@ -141,6 +141,21 @@ function assistantDoneFromTurnEvent(
 }
 
 function getPersistedReplayRecordId(event: DaemonEvent): string | undefined {
+  // A `history_truncated` marker may carry a `recordId` anchor stamped by
+  // the daemon's compaction engine — the last recordId it saw before the
+  // truncation point. This is the fallback used when the retained window
+  // lost every turn-boundary `session_update` (e.g. live-journal cap hit
+  // during a single long in-flight turn) and the client would otherwise
+  // have no `beforeRecordId` for transcript pagination.
+  if (event.type === 'history_truncated') {
+    try {
+      if (!isRecord(event.data)) return undefined;
+      const id = event.data['recordId'];
+      return typeof id === 'string' ? id : undefined;
+    } catch {
+      return undefined;
+    }
+  }
   if (event.type !== 'session_update') {
     return undefined;
   }
