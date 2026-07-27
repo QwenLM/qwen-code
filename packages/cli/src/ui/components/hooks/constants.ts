@@ -234,7 +234,7 @@ export function getHookDescription(eventName: string): string {
       'Input to command is JSON with file_path, memory_type, load_reason, and optional trigger_file_path and parent_file_path.',
     ),
     [HookEventName.UserPromptSubmit]: t(
-      'Input to command is JSON with original user prompt text.',
+      'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).',
     ),
     [HookEventName.UserPromptExpansion]: t(
       'Input to command is JSON with command_name, command_args, and expanded prompt text.',

@@ -73,6 +73,9 @@ vi.mock('./ChatPane', () => ({
         data-maximized={props.isMaximized ? 'true' : 'false'}
         data-pane-restart-sse={props.restartSseOnPrompt ? 'true' : 'false'}
         data-slash-handler={props.onSlashCommand ? 'true' : 'false'}
+        data-hidden={props.hidden ? 'true' : 'false'}
+        data-voice-user-revision={String(props.voiceUserRevision ?? 0)}
+        data-voice-workspace-count={String(props.voiceWorkspaces?.length ?? 0)}
       >
         <span data-testid="pane-title">{props.title}</span>
         {props.onToggleMaximize && (
@@ -447,11 +450,38 @@ describe('SplitView', () => {
     expect(panes()).toHaveLength(3);
     // …but the two non-maximized slots are hidden, leaving one visible.
     expect(hiddenSlots()).toHaveLength(2);
+    expect(container!.querySelectorAll('[data-hidden="true"]')).toHaveLength(2);
     // The maximized pane reflects its state down to ChatPane.
     const maximized = container!.querySelector('[data-maximized="true"]');
     expect(
       maximized?.querySelector('[data-testid="pane-title"]')?.textContent,
     ).toBe('One');
+  });
+
+  it('forwards Voice revision state to every pane', () => {
+    render({
+      sessionIds: ['s1', 's2'],
+      voiceUserRevision: 4,
+      voiceWorkspaceRevisions: { workspace: 7 },
+    });
+
+    expect(
+      container!.querySelectorAll('[data-voice-user-revision="4"]'),
+    ).toHaveLength(2);
+  });
+
+  it('forwards the merged Voice workspace list to every pane', () => {
+    render({
+      sessionIds: ['s1', 's2'],
+      voiceWorkspaces: [
+        { id: 'primary', cwd: '/w', primary: true },
+        { id: 'secondary', cwd: '/other', primary: false, trusted: true },
+      ],
+    });
+
+    expect(
+      container!.querySelectorAll('[data-voice-workspace-count="2"]'),
+    ).toHaveLength(2);
   });
 
   it('toggles back to the tiled layout when the maximized pane’s button is clicked again', () => {

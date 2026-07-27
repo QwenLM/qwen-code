@@ -56,6 +56,7 @@ vi.mock('../contexts/UIActionsContext.js', () => ({
     handleRetryLastPrompt: vi.fn(),
     temporaryCloseFeedbackDialog: vi.fn(),
     popAllQueuedMessages: vi.fn(() => null),
+    invalidateSubmittedPromptProvenance: vi.fn(),
   })),
 }));
 vi.mock('../contexts/AgentViewContext.js', () => ({
@@ -233,7 +234,10 @@ describe('InputPrompt suggestion mouse routing', () => {
       (captured.props!['onSelectIndex'] as (i: number) => void)(0);
     });
     expect(mockCommandCompletion.handleAutocomplete).toHaveBeenCalledWith(0);
-    expect(props.onSubmit).toHaveBeenCalledWith('/skills');
+    expect(props.onSubmit).toHaveBeenCalledWith('/skills', {
+      deferUntilIdle: false,
+      submittedPrompt: '/skills',
+    });
     unmount();
   });
 

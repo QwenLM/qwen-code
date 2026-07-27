@@ -93,10 +93,6 @@ import type {
 } from '../customization';
 import { useWebShellPortalRoot } from '../portalRoot';
 
-// ---- Large paste handling (shared utilities) ----
-
-const LARGE_PASTE_CHAR_THRESHOLD = 1000;
-const LARGE_PASTE_LINE_THRESHOLD = 10;
 const TOOLTIP_STYLE_ID = 'web-shell-tooltip-styles';
 const TOOLTIP_STYLES = `
 [data-web-shell-tooltip-portal] {
@@ -452,65 +448,6 @@ function renderCompletionHoverInfo(completion: Completion): HTMLElement | null {
     });
   });
   return anchor;
-}
-
-export function normalizePastedText(text: string): string {
-  return text.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
-}
-
-export function isLargePaste(text: string): boolean {
-  return (
-    [...text].length > LARGE_PASTE_CHAR_THRESHOLD ||
-    text.split('\n').length > LARGE_PASTE_LINE_THRESHOLD
-  );
-}
-
-function escapeRegExp(text: string): string {
-  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-export interface LargePastePlaceholderResult {
-  placeholderText: string;
-  nextPasteId: number;
-}
-
-export function createLargePastePlaceholder(
-  pendingPastes: Map<string, string>,
-  nextPasteId: number,
-  pasted: string,
-): LargePastePlaceholderResult {
-  const charCount = [...pasted].length;
-  const base = `[Pasted Content ${charCount} chars]`;
-  const placeholderText = nextPasteId === 1 ? base : `${base} #${nextPasteId}`;
-  pendingPastes.set(placeholderText, pasted);
-  return { placeholderText, nextPasteId: nextPasteId + 1 };
-}
-
-export function prunePendingPastes(
-  pendingPastes: Map<string, string>,
-  docText: string,
-): number | null {
-  for (const placeholderText of pendingPastes.keys()) {
-    if (!docText.includes(placeholderText)) {
-      pendingPastes.delete(placeholderText);
-    }
-  }
-  return pendingPastes.size === 0 ? 1 : null;
-}
-
-export function expandLargePastePlaceholders(
-  pendingPastes: Map<string, string>,
-  text: string,
-): string {
-  if (pendingPastes.size === 0) return text;
-  const placeholders = [...pendingPastes.keys()].sort(
-    (a, b) => b.length - a.length,
-  );
-  const pattern = new RegExp(placeholders.map(escapeRegExp).join('|'), 'g');
-  return text.replace(
-    pattern,
-    (placeholderText) => pendingPastes.get(placeholderText) ?? placeholderText,
-  );
 }
 
 // ---- Tag serialization (shared) ----
@@ -1491,8 +1428,6 @@ export function useComposerCore(
   const searchDraftRef = useRef('');
   const [pastedImages, setPastedImages] = useState<PromptImage[]>([]);
   const pastedImagesRef = useRef<PromptImage[]>([]);
-  const pendingPastesRef = useRef<Map<string, string>>(new Map());
-  const nextPasteIdRef = useRef(1);
   const [composerTags, setComposerTags] = useState<WebShellComposerTag[]>([]);
   const composerTagsRef = useRef<WebShellComposerTag[]>([]);
   composerTagsRef.current = composerTags;
@@ -1935,8 +1870,7 @@ export function useComposerCore(
       const hasImage = collectClipboardImages(items, (image) =>
         setPastedImages((prev) => [...prev, image]),
       );
-      // Plain text falls through to the native paste. Large-paste
-      // placeholders are a CodeMirror-only affordance.
+      // Plain text falls through to the native paste.
       if (hasImage) {
         event.preventDefault();
       }
@@ -1985,14 +1919,10 @@ export function useComposerCore(
         : [];
     const tags = tagsOverride ?? composerTagsRef.current;
     if (!rawText && tags.length === 0 && inlineTags.length === 0) return true;
-    const textWithInlineTags =
+    const text =
       tagsOverride === undefined
         ? replaceInlineTagPlacements(rawText, normalizedInlineTags)
         : rawText;
-    const text = expandLargePastePlaceholders(
-      pendingPastesRef.current,
-      textWithInlineTags,
-    );
     const prompt = buildComposerPrompt(text, tags);
     const images = pastedImagesRef.current;
     const isShellMode = shellModeRef.current;
@@ -2010,8 +1940,6 @@ export function useComposerCore(
         onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
       }
       onDismissFollowupRef.current?.();
-      pendingPastesRef.current.clear();
-      nextPasteIdRef.current = 1;
       if (isShellMode) {
         shellHistoryActionsRef.current.push(text);
         shellHistoryActionsRef.current.reset();
@@ -2439,15 +2367,6 @@ export function useComposerCore(
     ]);
 
     const composerUpdateListener = EditorView.updateListener.of((update) => {
-      if (update.docChanged && pendingPastesRef.current.size > 0) {
-        const nextPasteId = prunePendingPastes(
-          pendingPastesRef.current,
-          update.state.doc.toString(),
-        );
-        if (nextPasteId !== null) {
-          nextPasteIdRef.current = nextPasteId;
-        }
-      }
       // A genuine edit (typing/deleting/pasting) ends history-browse mode, so
       // arrows go back to driving any open menu. Programmatic history recall
       // dispatches carry no user event, so they do not clear the flag.
@@ -2637,36 +2556,7 @@ export function useComposerCore(
               event.preventDefault();
               return true;
             }
-            const pasted = normalizePastedText(
-              event.clipboardData?.getData('text/plain') ?? '',
-            );
-            if (!pasted || !isLargePaste(pasted)) return false;
-
-            event.preventDefault();
-            if (
-              view.state.doc.toString() === '' &&
-              followupStateRef.current?.isVisible
-            ) {
-              onDismissFollowupRef.current?.();
-            }
-            const { placeholderText: pt, nextPasteId } =
-              createLargePastePlaceholder(
-                pendingPastesRef.current,
-                nextPasteIdRef.current,
-                pasted,
-              );
-            nextPasteIdRef.current = nextPasteId;
-            const selection = view.state.selection.main;
-            view.dispatch({
-              changes: {
-                from: selection.from,
-                to: selection.to,
-                insert: pt,
-              },
-              selection: { anchor: selection.from + pt.length },
-              scrollIntoView: true,
-            });
-            return true;
+            return false;
           },
         }),
         EditorView.theme(editorTheme),
@@ -3104,8 +2994,6 @@ export function useComposerCore(
       }
       if (clearTextOpt) {
         setPastedImages([]);
-        pendingPastesRef.current.clear();
-        nextPasteIdRef.current = 1;
       }
       if (clearTags) {
         setComposerTags([]);

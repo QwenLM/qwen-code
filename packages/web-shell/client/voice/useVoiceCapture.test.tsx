@@ -49,6 +49,7 @@ function node() {
 }
 
 class MockAudioContext {
+  static latest: MockAudioContext | undefined;
   static latestProcessor:
     | (ReturnType<typeof node> & {
         onaudioprocess: ((event: AudioProcessingEvent) => void) | null;
@@ -69,6 +70,10 @@ class MockAudioContext {
   close = vi.fn(async () => {
     this.state = 'closed';
   });
+
+  constructor() {
+    MockAudioContext.latest = this;
+  }
 }
 
 let root: Root | null = null;
@@ -76,9 +81,12 @@ let container: HTMLDivElement | null = null;
 let capture: UseVoiceCaptureReturn | undefined;
 const onFinal = vi.fn();
 const onError = vi.fn();
+const onUnexpectedClose = vi.fn();
 const track = { stop: vi.fn() };
 let baseUrl = 'http://127.0.0.1:1234';
 let token: string | undefined;
+let ownerKey = 'workspace-a:session-a';
+let streamPath = 'voice/stream';
 
 /** Decode a `qwen-bearer.<base64url>` subprotocol back to the raw token. */
 function decodeBearerSubprotocol(proto: string): string {
@@ -95,8 +103,10 @@ function TestHost() {
   capture = useVoiceCapture({
     baseUrl,
     token,
+    target: { ownerKey, streamPath },
     onFinal,
     onError,
+    onUnexpectedClose,
   });
   return null;
 }
@@ -116,10 +126,14 @@ beforeEach(() => {
   capture = undefined;
   onFinal.mockReset();
   onError.mockReset();
+  onUnexpectedClose.mockReset();
   track.stop.mockReset();
   baseUrl = 'http://127.0.0.1:1234';
   token = undefined;
+  ownerKey = 'workspace-a:session-a';
+  streamPath = 'voice/stream';
   MockWebSocket.latest = undefined;
+  MockAudioContext.latest = undefined;
   MockAudioContext.latestProcessor = undefined;
   Object.defineProperty(globalThis, 'WebSocket', {
     value: MockWebSocket,
@@ -162,6 +176,20 @@ describe('useVoiceCapture', () => {
 
     expect(MockWebSocket.latest?.url).toBe(
       'wss://example.test/qwen/voice/stream',
+    );
+  });
+
+  it('uses a workspace-qualified stream path without double encoding', async () => {
+    baseUrl = 'https://example.test/qwen/';
+    streamPath = 'workspaces/%2Frepo%2F%E4%BA%8C%20%E6%AC%A1/voice/stream';
+    const result = await renderHookHost();
+
+    await act(async () => {
+      result.start();
+    });
+
+    expect(MockWebSocket.latest?.url).toBe(
+      'wss://example.test/qwen/workspaces/%2Frepo%2F%E4%BA%8C%20%E6%AC%A1/voice/stream',
     );
   });
 
@@ -345,6 +373,36 @@ describe('useVoiceCapture', () => {
       'Voice connection closed (code=1006, reason=none).',
     );
     expect(capture?.status).toBe('error');
+  });
+
+  it('cleans up when the unexpected-close callback throws', async () => {
+    onUnexpectedClose.mockImplementation(() => {
+      throw new Error('close callback failed');
+    });
+    const result = await renderHookHost();
+
+    await act(async () => {
+      result.start();
+    });
+    const ws = MockWebSocket.latest;
+    const context = MockAudioContext.latest;
+    if (!ws || !context) throw new Error('capture resources were not created');
+
+    await act(async () => {
+      ws.onopen?.();
+    });
+    await act(async () => {
+      ws.onclose?.({ code: 1006, reason: '' } as CloseEvent);
+    });
+
+    expect(onUnexpectedClose).toHaveBeenCalledWith({
+      code: 1006,
+      reason: 'none',
+    });
+    expect(capture?.status).toBe('error');
+    expect(track.stop).toHaveBeenCalledOnce();
+    expect(context.close).toHaveBeenCalledOnce();
+    expect(ws.readyState).toBe(3);
   });
 
   it('flushes buffered audio before a pending stop when the socket opens', async () => {
@@ -565,5 +623,167 @@ describe('useVoiceCapture', () => {
     expect(capture?.status).toBe('connecting');
     expect(secondWs.readyState).toBe(MockWebSocket.OPEN);
     expect(onFinal).not.toHaveBeenCalled();
+  });
+
+  it('aborts and drops an old final when the owner changes', async () => {
+    const result = await renderHookHost();
+    await act(async () => {
+      result.start();
+    });
+    const firstWs = MockWebSocket.latest;
+    const staleMessage = firstWs?.onmessage;
+    if (!firstWs || !staleMessage) throw new Error('socket was not ready');
+
+    ownerKey = 'workspace-b:session-b';
+    await act(async () => {
+      root?.render(React.createElement(TestHost));
+    });
+
+    expect(firstWs.sent).toContain(JSON.stringify({ type: 'abort' }));
+    expect(track.stop).toHaveBeenCalled();
+    expect(capture?.status).toBe('idle');
+
+    await act(async () => {
+      staleMessage({
+        data: JSON.stringify({ type: 'final', text: 'wrong owner' }),
+      } as MessageEvent);
+    });
+    expect(onFinal).not.toHaveBeenCalled();
+  });
+
+  it('clears an old owner error before the new owner can retry', async () => {
+    const result = await renderHookHost();
+    await act(async () => {
+      result.start();
+    });
+    const firstWs = MockWebSocket.latest;
+    if (!firstWs) throw new Error('socket was not ready');
+    await act(async () => {
+      firstWs.onmessage?.({
+        data: JSON.stringify({ type: 'error', message: 'owner A failed' }),
+      } as MessageEvent);
+    });
+    expect(capture?.status).toBe('error');
+
+    ownerKey = 'workspace-b:session-b';
+    await act(async () => {
+      root?.render(React.createElement(TestHost));
+    });
+
+    expect(capture?.status).toBe('idle');
+    expect(capture?.errorMessage).toBeUndefined();
+  });
+
+  it('stops a pending microphone stream after the owner changes', async () => {
+    let resolveStream:
+      | ((stream: { getTracks: () => Array<typeof track> }) => void)
+      | undefined;
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: vi.fn(
+          () =>
+            new Promise<{ getTracks: () => Array<typeof track> }>((resolve) => {
+              resolveStream = resolve;
+            }),
+        ),
+      },
+      configurable: true,
+    });
+    const result = await renderHookHost();
+    await act(async () => {
+      result.start();
+    });
+
+    ownerKey = 'workspace-b:session-b';
+    await act(async () => {
+      root?.render(React.createElement(TestHost));
+    });
+    await act(async () => {
+      resolveStream?.({ getTracks: () => [track] });
+    });
+
+    expect(track.stop).toHaveBeenCalledTimes(1);
+    expect(MockWebSocket.latest).toBeUndefined();
+    expect(onFinal).not.toHaveBeenCalled();
+  });
+
+  it('releases an active capture when the hook unmounts', async () => {
+    vi.useFakeTimers();
+    const result = await renderHookHost();
+    await act(async () => {
+      result.start();
+    });
+    const ws = MockWebSocket.latest;
+    const context = MockAudioContext.latest;
+    if (!ws || !context) throw new Error('capture resources were not created');
+    const staleMessage = ws.onmessage;
+    const source = context.createMediaStreamSource.mock.results[0]?.value;
+    const processor = context.createScriptProcessor.mock.results[0]?.value;
+    const sink = context.createGain.mock.results[0]?.value;
+
+    await act(async () => {
+      ws.onopen?.();
+    });
+    expect(capture?.status).toBe('recording');
+    expect(vi.getTimerCount()).toBe(1);
+
+    await act(async () => {
+      root?.unmount();
+    });
+    root = null;
+
+    expect(track.stop).toHaveBeenCalledTimes(1);
+    expect(source?.disconnect).toHaveBeenCalledOnce();
+    expect(processor?.disconnect).toHaveBeenCalledOnce();
+    expect(sink?.disconnect).toHaveBeenCalledOnce();
+    expect(context.close).toHaveBeenCalledOnce();
+    expect(ws.readyState).toBe(3);
+    expect(ws.onmessage).toBeNull();
+    expect(ws.onerror).toBeNull();
+    expect(ws.onclose).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+
+    staleMessage?.({
+      data: JSON.stringify({ type: 'final', text: 'after unmount' }),
+    } as MessageEvent);
+    expect(onFinal).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('stops a microphone stream that resolves after unmount', async () => {
+    let resolveStream:
+      | ((stream: { getTracks: () => Array<typeof track> }) => void)
+      | undefined;
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: vi.fn(
+          () =>
+            new Promise<{ getTracks: () => Array<typeof track> }>((resolve) => {
+              resolveStream = resolve;
+            }),
+        ),
+      },
+      configurable: true,
+    });
+    const result = await renderHookHost();
+    await act(async () => {
+      result.start();
+    });
+    const context = MockAudioContext.latest;
+    if (!context) throw new Error('audio context was not created');
+    await act(async () => {
+      root?.unmount();
+    });
+    root = null;
+
+    await act(async () => {
+      resolveStream?.({ getTracks: () => [track] });
+    });
+
+    expect(track.stop).toHaveBeenCalledTimes(1);
+    expect(MockWebSocket.latest).toBeUndefined();
+    expect(context.close).toHaveBeenCalledOnce();
+    expect(onFinal).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
   });
 });

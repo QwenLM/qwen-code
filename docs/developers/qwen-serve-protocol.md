@@ -172,7 +172,7 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'auth_provider_install', 'workspace_memory',
  'workspace_agents', 'workspace_agent_generate', 'workspace_env',
  'workspace_preflight', 'session_context', 'session_context_usage',
- 'session_supported_commands', 'session_tasks', 'session_stats',
+ 'session_supported_commands', 'session_tasks', 'session_monitor_tool_correlation', 'session_stats',
  'session_lsp', 'session_status',
  'session_close', 'session_metadata', 'session_organization',
  'session_archive', 'mcp_guardrails',
@@ -1063,6 +1063,8 @@ Capability tags:
 - `session_context` → `GET /session/:id/context`
 - `session_supported_commands` → `GET /session/:id/supported-commands`
 - `session_tasks` → `GET /session/:id/tasks`
+- `session_monitor_tool_correlation` → monitor entries from `GET /session/:id/tasks`
+  include `toolUseId` for transcript-to-task correlation
 - `session_status` → `GET /session/:id/status`
 - `session_info` → `GET /workspace/:id/session-info` and `GET /workspaces/:workspace/session-info`
 - `session_transcript` → `GET /session/:id/transcript`
