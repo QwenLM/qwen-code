@@ -7,12 +7,13 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { GoalEvidenceRecord } from './goal-evidence.js';
 import type { GoalRecoveryRecord } from './goal-persistence.js';
-import type {
-  GoalSnapshotV2,
-  GoalStateCause,
-  GoalStateRecordPayloadV2,
-  GoalTurnPermit,
-  TranscriptCursor,
+import {
+  GOAL_PROPOSAL_REASON_MAX_BYTES,
+  type GoalSnapshotV2,
+  type GoalStateCause,
+  type GoalStateRecordPayloadV2,
+  type GoalTurnPermit,
+  type TranscriptCursor,
 } from './goal-protocol.js';
 import {
   createGoalRuntime,
@@ -257,7 +258,13 @@ describe('goal runtime', () => {
     await runtime.finishTurn(permit);
 
     expect(evidenceSource.flush).toHaveBeenCalledOnce();
-    expect(verifier).toHaveBeenCalledOnce();
+    expect(verifier).toHaveBeenCalledWith(
+      expect.objectContaining({
+        currentTurnId: permit.turnId,
+        currentDeliveredOutput: ['Delivered result'],
+      }),
+      expect.any(AbortSignal),
+    );
     expect(journal.appended.map((payload) => payload.cause)).toEqual([
       'create',
       'turn_finished',
@@ -1538,7 +1545,7 @@ describe('goal runtime', () => {
     });
   });
 
-  it('returns a defensive worker view and rejects it after permit invalidation', async () => {
+  it('returns defensive worker state and checks the complete permit atomically', async () => {
     const journal = fakeGoalJournal();
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({ journal });
@@ -1547,12 +1554,20 @@ describe('goal runtime', () => {
     const permit = host.started[0];
 
     const view = await runtime.getGoalForWorker(permit);
+    const permittedSnapshot = runtime.getSnapshotForPermit(permit);
     view.objective = 'mutated';
     view.evidenceCursor.recordId = 'mutated';
+    permittedSnapshot.goal!.objective = 'mutated snapshot';
     expect(runtime.getSnapshot().goal).toMatchObject({
       objective: 'ship',
       evidenceCursor: { recordId: expect.not.stringContaining('mutated') },
     });
+    expect(() =>
+      runtime.getSnapshotForPermit({
+        ...permit,
+        turnId: 'different-turn',
+      }),
+    ).toThrow('Goal turn permit is no longer valid');
 
     await runtime.dispatch({
       action: 'edit',
@@ -1563,23 +1578,49 @@ describe('goal runtime', () => {
     await expect(runtime.getGoalForWorker(permit)).rejects.toThrow(
       'Goal turn permit is no longer valid',
     );
+    expect(() => runtime.getSnapshotForPermit(permit)).toThrow(
+      'Goal turn permit is no longer valid',
+    );
   });
 
-  it('requires three repeated blocked turns and resets that audit on resume', async () => {
+  it('rejects an oversized proposal reason before consuming the turn proposal slot', async () => {
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal: fakeGoalJournal() });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+    const permit = host.started[0];
+
+    expect(() =>
+      runtime.recordTerminalProposal(permit, {
+        status: 'complete',
+        reason: '界'.repeat(Math.floor(GOAL_PROPOSAL_REASON_MAX_BYTES / 3) + 1),
+        evidenceRefs: ['oversized'],
+      }),
+    ).toThrow(/UTF-8 bytes/i);
+    expect(
+      runtime.recordTerminalProposal(permit, {
+        status: 'complete',
+        reason: 'valid reason',
+        evidenceRefs: ['valid'],
+      }),
+    ).toEqual({ recorded: true, readyForVerification: true });
+  });
+
+  it('normalizes omitted blocker kinds in the repeated audit and resets it on resume', async () => {
     const journal = fakeGoalJournal();
     const host = fakeGoalTurnHost();
     const runtime = createGoalRuntime({ journal });
     runtime.bindHost(host);
     await runtime.dispatch({ action: 'create', objective: 'ship' });
 
-    for (let index = 0; index < 2; index += 1) {
+    for (const blockerKind of [undefined, 'repeated'] as const) {
       const permit = host.started.at(-1)!;
       expect(
         runtime.recordTerminalProposal(permit, {
           status: 'blocked',
           reason: 'waiting for access',
           evidenceRefs: [],
-          blockerKind: 'repeated',
+          ...(blockerKind ? { blockerKind } : {}),
         }),
       ).toEqual({ recorded: true, readyForVerification: false });
       await runtime.finishTurn(permit);
@@ -1591,7 +1632,6 @@ describe('goal runtime', () => {
         status: 'blocked',
         reason: 'waiting for access',
         evidenceRefs: [],
-        blockerKind: 'repeated',
       }),
     ).toEqual({ recorded: true, readyForVerification: true });
     await runtime.dispatch({
@@ -1636,10 +1676,17 @@ describe('goal runtime', () => {
 
     const restoredHost = fakeGoalTurnHost();
     const restored = createGoalRuntime({ journal: fakeGoalJournal() });
+    const recoveredPayload = journal.appended.at(-1)!;
     await restored.restore([
       {
-        ...goalStateRecord(journal.appended.at(-1)!.snapshot),
-        systemPayload: journal.appended.at(-1)!,
+        ...goalStateRecord(recoveredPayload.snapshot),
+        systemPayload: {
+          ...recoveredPayload,
+          blockedAudit: {
+            ...recoveredPayload.blockedAudit!,
+            fingerprint: '\nwaiting for access',
+          },
+        },
       },
     ]);
     restored.bindHost(restoredHost);
