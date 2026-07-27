@@ -4538,6 +4538,20 @@ describe('qwen-autofix workflow', () => {
     expect(repairDeterministicRejectionStep).toContain(
       "QWEN_TIMEOUT_MS: '1080000'",
     );
+    const settingsJson = (step) =>
+      step.match(/SETTINGS_JSON: \|-\n([\s\S]*?)\n {8}run: \|-/)?.[1] ?? '';
+    expect(settingsJson(repairDeterministicRejectionStep)).toBe(
+      settingsJson(triageAndAddressStep),
+    );
+    expect(settingsJson(repairDeterministicRejectionStep)).toContain(
+      '"sandbox": "docker"',
+    );
+    expect(repairDeterministicRejectionStep).toContain(
+      'mkdir -p .qwen "${QWEN_HOME}"',
+    );
+    expect(repairDeterministicRejectionStep).toContain(
+      'printf \'%s\\n\' "${SETTINGS_JSON}" > .qwen/settings.json',
+    );
     expect(repairDeterministicRejectionStep).toContain(
       'echo "attempted=true" >> "${GITHUB_OUTPUT}"',
     );
@@ -4547,6 +4561,11 @@ describe('qwen-autofix workflow', () => {
     expect(repairDeterministicRejectionStep).toContain(
       'Keep that commit and add one follow-up commit',
     );
+    const repairCleanup =
+      repairDeterministicRejectionStep.match(
+        /rm -f \\\n([\s\S]*?)\n {10}rm -rf "\$\{QWEN_HOME\}"/,
+      )?.[1] ?? '';
+    expect(repairCleanup).not.toContain('gate-rejection.md');
     expect(repairDeterministicRejectionStep).not.toContain(
       '"${WORKDIR}/resolved-comments.txt"',
     );
