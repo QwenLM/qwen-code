@@ -1463,6 +1463,8 @@ export default {
   'Image Model': '图像模型',
   'Compaction Model': '压缩模型',
   'Selected compaction model is unavailable.': '所选压缩模型不可用。',
+  'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --compaction without a model to choose from configured models.':
+    '在 settings.modelProviders 中配置模型并确保设置了所需的环境变量。在交互模式下，运行 /auth 配置或切换 provider，或运行 /model --compaction（不带模型参数）从已配置的模型中选择。',
   'Voice Model': '语音模型',
   'Selected voice model is unavailable.': '所选语音模型不可用。',
   'Selected image model is unavailable.': '所选图像模型不可用。',

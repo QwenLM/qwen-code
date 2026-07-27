@@ -1350,6 +1350,8 @@ export default {
   'Compaction Model': '壓縮模型',
   'Voice Model': '語音模型',
   'Selected compaction model is unavailable.': '所選壓縮模型不可用。',
+  'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --compaction without a model to choose from configured models.':
+    '在 settings.modelProviders 中配置模型並確保設置了所需的環境變量。在交互模式下，運行 /auth 配置或切換 provider，或運行 /model --compaction（不帶模型參數）從已配置的模型中選擇。',
   'Selected voice model is unavailable.': '所選語音模型不可用。',
   'Selected image model is unavailable.': '所選圖像模型不可用。',
   "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":

@@ -1519,6 +1519,7 @@ export default {
   'Select Fast Model': 'Select Fast Model',
   'Select Vision Model': 'Select Vision Model',
   'Select Image Model': 'Select Image Model',
+  'Select Compaction Model': 'Select Compaction Model',
   'Select Voice Model': 'Select Voice Model',
   'Vision Model': 'Vision Model',
   'Image Model': 'Image Model',
@@ -1530,6 +1531,8 @@ export default {
   'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --compaction without a model to choose from configured models.':
     'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --compaction without a model to choose from configured models.',
   'Voice Model': 'Voice Model',
+  'Selected compaction model is unavailable.':
+    'Selected compaction model is unavailable.',
   'Selected voice model is unavailable.':
     'Selected voice model is unavailable.',
   'Selected image model is unavailable.':
