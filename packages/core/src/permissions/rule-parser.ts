@@ -75,6 +75,11 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   ReadFileTool: 'read_file',
   Read: 'read_file',
 
+  // Zoom Image tool — also matched by "Read" meta-category rules
+  zoom_image: 'zoom_image',
+  ZoomImage: 'zoom_image',
+  ZoomImageTool: 'zoom_image',
+
   // Grep tool — also matched by "Read" meta-category rules
   grep_search: 'grep_search',
   Grep: 'grep_search',
@@ -171,6 +176,7 @@ export const SHELL_TOOL_NAMES: ReadonlySet<string> = new Set([
  */
 const READ_TOOLS = new Set([
   'read_file',
+  'zoom_image',
   'grep_search',
   'glob',
   'list_directory',
@@ -222,7 +228,8 @@ export function getSpecifierKind(canonicalToolName: string): SpecifierKind {
  * Check whether a given tool (by canonical name) is covered by a rule's tool name,
  * taking meta-categories into account.
  *
- * "Read" → resolves to "read_file", but also covers grep_search, glob, list_directory
+ * "Read" → resolves to "read_file", but also covers zoom_image, grep_search,
+ * glob, and list_directory
  * "Edit" → resolves to "edit", but also covers write_file
  * "Bash" → resolves to "run_shell_command", but also covers monitor
  * "Monitor" → resolves to "monitor" only; it does not cover shell
@@ -393,13 +400,14 @@ export function parseRules(raws: string[]): PermissionRule[] {
  * permission rule strings.
  *
  * Read tools all map to "Read" (meta-category) so a single rule covers the
- * entire family (read_file, grep_search, glob, list_directory).
+ * entire family (read_file, zoom_image, grep_search, glob, list_directory).
  * Edit tools map to "Edit" (meta-category) covering edit + write_file.
  * Other tools use their individual display alias.
  */
 const CANONICAL_TO_RULE_DISPLAY: Readonly<Record<string, string>> = {
   // Read meta-category
   read_file: 'Read',
+  zoom_image: 'Read',
   grep_search: 'Read',
   glob: 'Read',
   list_directory: 'Read',
@@ -441,13 +449,14 @@ export function getRuleDisplayName(canonicalToolName: string): string {
  *
  * For these tools the minimum-scope rule uses `path.dirname()` so the rule
  * covers the containing directory rather than a single file — e.g.
- *   read_file("/Users/alice/.secrets") → `Read(//Users/alice)`
+ *   zoom_image("/Users/alice/chart.png") → `Read(//Users/alice)`
  *
  * Directory-targeted tools (list_directory, grep_search, glob) already receive
  * a directory path, so they use it as-is.
  */
 const FILE_TARGETED_TOOLS = new Set([
   'read_file',
+  'zoom_image',
   'edit',
   'write_file',
   'notebook_edit',
@@ -463,8 +472,9 @@ const FILE_TARGETED_TOOLS = new Set([
  *
  * Specifier selection by tool category:
  *   - **path** tools (Read/Edit):
- *       File-targeted tools (read_file, edit, write_file) use the **parent
- *       directory** so the rule covers the whole directory, not a single file.
+ *       File-targeted tools (read_file, zoom_image, edit, write_file) use the
+ *       **parent directory** so the rule covers the whole directory, not a
+ *       single file.
  *       Directory-targeted tools (grep, glob, ls) use the directory as-is.
  *       The `//` prefix denotes an absolute filesystem path in the rule grammar.
  *   - **domain** tools (WebFetch): `WebFetch(example.com)`
