@@ -130,11 +130,21 @@ describe('resolveVoiceWorkspaceTarget', () => {
     });
   });
 
-  it('fails closed for unknown, ambiguous, and untrusted secondary targets', () => {
-    const untrusted = { ...secondary, trusted: false };
+  it('fails closed for an untrusted secondary target', () => {
+    expect(
+      resolveVoiceWorkspaceTarget({
+        capabilities: capabilities({
+          workspaces: [primary, { ...secondary, trusted: false }],
+        }),
+        intendedCwd: secondary.cwd,
+      }),
+    ).toBeUndefined();
+  });
+
+  it('fails closed for unknown and ambiguous secondary targets', () => {
     const duplicate = { ...secondary, id: 'other' };
     const caps = capabilities({
-      workspaces: [primary, untrusted, duplicate],
+      workspaces: [primary, secondary, duplicate],
     });
 
     expect(
