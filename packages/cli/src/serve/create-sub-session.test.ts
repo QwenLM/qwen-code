@@ -49,6 +49,9 @@ function makeFakeBridge(opts?: {
    * sent-mode worker completes. `resumeSession` makes it live again. */
   reapedParentSessionId?: string;
   reapedParentAttached?: boolean;
+  /** Make `resumeSession` throw for the reaped parent even though it exists,
+   * exercising recovery failure after the directory was materialized. */
+  resumeSessionRejects?: string;
   killSessionResult?: boolean;
   /** Return a different cwd for this session to exercise fail-closed
    * isolated-parent recovery. */
@@ -121,6 +124,9 @@ function makeFakeBridge(opts?: {
       resumes.push(req);
       if (req.sessionId !== opts?.reapedParentSessionId) {
         throw new SessionNotFoundError(req.sessionId);
+      }
+      if (opts?.resumeSessionRejects) {
+        throw new Error(opts.resumeSessionRejects);
       }
       parentRestored = true;
       return {
@@ -804,6 +810,47 @@ describe('sub-session launcher', () => {
     expect(fake.parentObserverClosures).toEqual([]);
     expect(discarded).toEqual(['parent-reaped']);
     expect(fake.detaches).toEqual([]);
+    launcher.stop();
+  });
+
+  it('sent mode: discards the materialized directory when restoring a reaped isolated parent fails', async () => {
+    const fake = makeFakeBridge({
+      events: (pid) => [chunk('durable result'), turnComplete(pid)],
+      reapedParentSessionId: 'parent-reaped',
+      resumeSessionRejects: 'bridge connectivity lost',
+    });
+    const discarded: string[] = [];
+    const launcher = createSubSessionLauncher({
+      getBridge: () => fake.bridge,
+      boundWorkspace: WS,
+      isolatedWorkspace: {
+        materializeDirectory: async (sessionId) =>
+          `${WS}/conversation-${sessionId}`,
+        discardEmptyDirectory: async (sessionId) => {
+          discarded.push(sessionId);
+        },
+      },
+    });
+
+    const launched = await launcher.launch({
+      prompt: 'finish after the isolated parent goes idle',
+      completion: 'sent',
+      callerSessionId: 'parent-reaped',
+    });
+
+    await vi.waitFor(() =>
+      expect(stderrLines).toEqual([
+        expect.stringContaining(
+          `sub-session ${launched.sessionId} completion could not be returned`,
+        ),
+      ]),
+    );
+    expect(fake.resumes).toEqual([
+      { sessionId: 'parent-reaped', workspaceCwd: WS },
+    ]);
+    expect(fake.kills).toEqual([]);
+    expect(fake.detaches).toEqual([]);
+    expect(discarded).toEqual(['parent-reaped']);
     launcher.stop();
   });
 

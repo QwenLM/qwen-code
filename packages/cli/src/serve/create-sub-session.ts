@@ -396,13 +396,13 @@ async function deliverSentCompletion(
   if (initialDelivery === 'accepted') return;
 
   let restoredParent: BridgeSession | undefined;
+  // Materialize before restore so the first synchronous operation after the
+  // bridge registers the parent can reserve its prompt queue for relocation.
+  // That keeps a concurrently arriving prompt behind the cwd change.
+  const isolatedCwd = isolatedWorkspace
+    ? await isolatedWorkspace.materializeDirectory(parentSessionId)
+    : undefined;
   try {
-    // Materialize before restore so the first synchronous operation after the
-    // bridge registers the parent can reserve its prompt queue for relocation.
-    // That keeps a concurrently arriving prompt behind the cwd change.
-    const isolatedCwd = isolatedWorkspace
-      ? await isolatedWorkspace.materializeDirectory(parentSessionId)
-      : undefined;
     restoredParent = await bridge.resumeSession({
       sessionId: parentSessionId,
       workspaceCwd: boundWorkspace,
@@ -488,6 +488,18 @@ async function deliverSentCompletion(
       }
     }
     if (isolatedWorkspace && recoveredParentClosed) {
+      await isolatedWorkspace
+        .discardEmptyDirectory(parentSessionId)
+        .catch(() => {});
+    }
+    if (
+      isolatedWorkspace &&
+      isolatedCwd !== undefined &&
+      restoredParent === undefined
+    ) {
+      // The directory was materialized but the parent was never restored, so
+      // nothing was relocated into it; discard it rather than orphan an empty
+      // directory on disk.
       await isolatedWorkspace
         .discardEmptyDirectory(parentSessionId)
         .catch(() => {});
