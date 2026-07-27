@@ -1535,6 +1535,16 @@ export class GeminiChat {
     | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
     | null = null;
 
+  /**
+   * Text/thought partial of the latest failed attempt, stashed so the
+   * transport retry loop can retry as a continuation instead of throwing
+   * away minutes of already-streamed output. Tool-call partials keep the
+   * markers above; a continuation is never valid across a functionCall.
+   * Reset on every attempt completion, so it always describes the most
+   * recent attempt only.
+   */
+  private pendingPartialTextParts: Part[] | null = null;
+
   private readonly imagePayloadStore = new InMemoryImagePayloadStore();
 
   /**
@@ -2464,10 +2474,102 @@ export class GeminiChat {
               await delay(delayMs, params.config?.abortSignal).promise;
               continue;
             }
+            if (
+              isRetryableStreamTransportError &&
+              streamYieldedChunk &&
+              self.pendingPartialTextParts !== null &&
+              transportStreamRetryCount <
+                TRANSPORT_STREAM_RETRY_CONFIG.maxRetries
+            ) {
+              // Mid-stream transport failure with text/thought already
+              // streamed. Discarding the partial and restarting from zero
+              // loses minutes of thinking-model output, and in headless
+              // mode the partial is already printed and cannot be
+              // unprinted. Retry as a continuation instead: the partial
+              // turn stays in history, a recovery message shows the model
+              // its own suffix, and the pair coalesces on success. Mirrors
+              // the MAX_TOKENS output-recovery flow below.
+              transportStreamRetryCount++;
+              const delayMs =
+                TRANSPORT_STREAM_RETRY_CONFIG.initialDelayMs *
+                transportStreamRetryCount;
+              const partialTurn: Content = {
+                role: 'model',
+                parts: self.pendingPartialTextParts,
+              };
+              self.pendingPartialTextParts = null;
+              const recoveryUserContent = createUserContent([
+                { text: buildOutputRecoveryMessage(partialTurn) },
+              ]);
+              self.history.push(partialTurn);
+              // Record the surviving partial turn up front so JSONL and
+              // in-memory history agree whichever way the attempt ends:
+              // on success the continuation turn records itself normally;
+              // on failure the partial is kept in memory too (the same end
+              // state as an unretryable mid-stream break).
+              self.chatRecordingService?.recordAssistantTurn({
+                model,
+                message: partialTurn.parts,
+                contextWindowSize:
+                  self.config.getContentGeneratorConfig()?.contextWindowSize,
+              });
+              debugLogger.warn(
+                'Transport stream continuation retry scheduled',
+                {
+                  retryPath: 'stream-continuation',
+                  retryDecision: 'retry',
+                  attempt: transportStreamRetryCount,
+                  maxRetries: TRANSPORT_STREAM_RETRY_CONFIG.maxRetries,
+                  retryDelayMs: delayMs,
+                  errorKind: classification.kind,
+                  transportCode: classification.transportCode,
+                },
+              );
+              yield { type: StreamEventType.RETRY, isContinuation: true };
+              await delay(delayMs, params.config?.abortSignal).promise;
+              self.history.push(recoveryUserContent);
+              try {
+                const stream = await self.makeApiCallAndProcessStream(
+                  model,
+                  self.getRequestHistoryForRoute(
+                    currentUserContent,
+                    requestModalities,
+                  ),
+                  params,
+                  prompt_id,
+                  requestOverrides,
+                );
+                for await (const chunk of stream) {
+                  const fr = chunk.candidates?.[0]?.finishReason;
+                  if (fr) lastFinishReason = fr;
+                  yield { type: StreamEventType.CHUNK, value: chunk };
+                }
+                self.coalesceRecoveryPairs(1);
+                lastError = null;
+                break;
+              } catch (continuationError) {
+                // Roll the recovery user message back. The partial turn
+                // stays (see above), and the continuation error replaces
+                // the stale transport error.
+                self.history.pop();
+                debugLogger.warn('Transport stream continuation failed', {
+                  retryPath: 'stream-continuation',
+                  retryDecision: 'failed',
+                  attempts: transportStreamRetryCount,
+                  error:
+                    continuationError instanceof Error
+                      ? continuationError.message
+                      : String(continuationError),
+                });
+                lastError = continuationError;
+              }
+            }
             if (isRetryableStreamTransportError) {
-              // Reached only when the retry above did not fire: either a chunk
-              // was already yielded (replaying would duplicate output) or the
-              // retry budget is exhausted. Either way the error propagates.
+              // Reached only when neither retry fired: the budget is
+              // exhausted, or a chunk was already yielded and the partial
+              // cannot drive a continuation (functionCall partials are kept
+              // out of the stash by construction). Either way the error
+              // propagates.
               debugLogger.warn('Transport stream retry not taken', {
                 retryPath: 'stream',
                 retryDecision: streamYieldedChunk
@@ -4031,6 +4133,9 @@ export class GeminiChat {
     // user prompt and re-issues it; a stale partial-text model turn
     // between them would either bias the retry or surface as a
     // duplicate.
+    // The continuation-retry stash always describes the latest attempt only.
+    this.pendingPartialTextParts = null;
+
     if (streamError !== null) {
       // Reuse the `willPersistToHistory` gate from the recordAssistantTurn
       // block above instead of re-deriving it. When `streamError !== null`,
@@ -4075,6 +4180,15 @@ export class GeminiChat {
                 : String(streamError)
             }`,
         );
+      } else if (thoughtContentPart || consolidatedHistoryParts.length > 0) {
+        // Text/thought partial with no functionCall: not persisted above,
+        // but still worth a continuation retry. Stash it for the transport
+        // retry loop, which can ask the model to continue from this suffix
+        // instead of discarding everything already streamed.
+        this.pendingPartialTextParts = [
+          ...(thoughtContentPart ? [thoughtContentPart] : []),
+          ...consolidatedHistoryParts,
+        ];
       }
       throw streamError;
     }

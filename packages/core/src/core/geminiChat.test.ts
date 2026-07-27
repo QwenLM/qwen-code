@@ -6891,54 +6891,81 @@ describe('GeminiChat', async () => {
       }
     });
 
-    it('does not retry retryable transport stream errors after yielding a chunk', async () => {
-      const transportError = Object.assign(new TypeError('terminated'), {
-        cause: Object.assign(new Error('other side closed'), {
-          code: 'UND_ERR_SOCKET',
-        }),
-      });
+    it('stops continuation-retrying after a single failed continuation', async () => {
+      vi.useFakeTimers();
+      try {
+        const transportError = Object.assign(new TypeError('terminated'), {
+          cause: Object.assign(new Error('other side closed'), {
+            code: 'UND_ERR_SOCKET',
+          }),
+        });
 
-      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
-        (async function* () {
-          yield {
-            candidates: [
-              {
-                content: {
-                  parts: [{ text: 'Partial response before socket close' }],
-                },
-              },
-            ],
-          } as unknown as GenerateContentResponse;
-          throw transportError;
-        })(),
-      );
+        // Fresh generator per call: a reused async generator is already
+        // consumed and ends silently, which is not what a real retry sees.
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockImplementation(() =>
+          Promise.resolve(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Partial response before socket close' }],
+                    },
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+              throw transportError;
+            })(),
+          ),
+        );
 
-      const stream = await chat.sendMessageStream(
-        'test-model',
-        { message: 'test' },
-        'prompt-transport-no-retry-after-chunk',
-      );
-      const events: StreamEvent[] = [];
-      await expect(async () => {
-        for await (const event of stream) {
-          events.push(event);
-        }
-      }).rejects.toThrow('terminated');
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-budget-after-chunk',
+        );
+        // Collect by hand so the events survive the terminal throw (the
+        // helper returns them only on a clean end).
+        const events: StreamEvent[] = [];
+        let caught: unknown;
+        const collecting = (async () => {
+          try {
+            for await (const event of stream) {
+              events.push(event);
+            }
+          } catch (error) {
+            caught = error;
+          }
+        })();
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(10_000);
+        await collecting;
+        expect(caught).toBeInstanceOf(Error);
+        expect((caught as Error).message).toContain('terminated');
 
-      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
-        1,
-      );
-      expect(
-        events.filter((event) => event.type === StreamEventType.RETRY),
-      ).toHaveLength(0);
-      expect(
-        events.some(
-          (event) =>
-            event.type === StreamEventType.CHUNK &&
-            event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
-              'Partial response before socket close',
-        ),
-      ).toBe(true);
+        // The initial attempt plus one continuation retry, then it gives up
+        // rather than chaining recovery messages.
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        const retryEvents = events.filter(
+          (event) => event.type === StreamEventType.RETRY,
+        );
+        expect(retryEvents).toHaveLength(1);
+        expect(retryEvents[0]).toMatchObject({ isContinuation: true });
+        expect(
+          events.some(
+            (event) =>
+              event.type === StreamEventType.CHUNK &&
+              event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Partial response before socket close',
+          ),
+        ).toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('retries a transport stream error after yielding only tool preparation metadata', async () => {
@@ -7189,6 +7216,181 @@ describe('GeminiChat', async () => {
         expect(
           events.filter((event) => event.type === StreamEventType.RETRY),
         ).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('retries a mid-stream transport error as a continuation', async () => {
+      vi.useFakeTimers();
+      try {
+        // The stream dies after real output already flowed: restarting from
+        // zero would re-print everything in headless mode, so the retry
+        // must continue from the partial suffix instead.
+        const transportError = Object.assign(new TypeError('terminated'), {
+          cause: Object.assign(new Error('socket failure'), {
+            code: 'UND_ERR_SOCKET',
+          }),
+        });
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  { content: { parts: [{ text: 'partial answer ' }] } },
+                ],
+              } as unknown as GenerateContentResponse;
+              throw transportError;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: { parts: [{ text: 'completed end' }] },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-mid-stream',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 5_000);
+
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+        const retryEvents = events.filter(
+          (event) => event.type === StreamEventType.RETRY,
+        );
+        expect(retryEvents).toHaveLength(1);
+        expect(retryEvents[0]).toMatchObject({ isContinuation: true });
+
+        // The recovery user message is coalesced away on success: history
+        // ends with one model turn holding partial + continuation, and the
+        // only user turn is the original prompt.
+        const history = chat.getHistory();
+        const modelTurns = history.filter((c) => c.role === 'model');
+        expect(modelTurns).toHaveLength(1);
+        expect(modelTurns[0]!.parts?.map((p) => p.text ?? '').join('')).toBe(
+          'partial answer completed end',
+        );
+        expect(history.filter((c) => c.role === 'user')).toHaveLength(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not continue-retry when the partial turn contains a functionCall', async () => {
+      vi.useFakeTimers();
+      try {
+        // A plain user message between a functionCall and its response is an
+        // invalid API sequence, so a tool-call partial must keep propagating
+        // (same end state as before this change).
+        const transportError = Object.assign(new TypeError('terminated'), {
+          cause: Object.assign(new Error('socket failure'), {
+            code: 'UND_ERR_SOCKET',
+          }),
+        });
+
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockResolvedValueOnce(
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        functionCall: {
+                          name: 'some_tool',
+                          args: { a: 1 },
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+            throw transportError;
+          })(),
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-fc-partial',
+        );
+        await expect(
+          collectStreamWithFakeTimers(stream, 5_000),
+        ).rejects.toThrow();
+        // No continuation attempt was made.
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('keeps the partial turn when the continuation attempt fails', async () => {
+      vi.useFakeTimers();
+      try {
+        const transportError = Object.assign(new TypeError('terminated'), {
+          cause: Object.assign(new Error('socket failure'), {
+            code: 'UND_ERR_SOCKET',
+          }),
+        });
+
+        vi.mocked(mockContentGenerator.generateContentStream)
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  { content: { parts: [{ text: 'partial answer ' }] } },
+                ],
+              } as unknown as GenerateContentResponse;
+              throw transportError;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              throw transportError;
+
+              yield {} as GenerateContentResponse;
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-transport-continuation-fails',
+        );
+        await expect(
+          collectStreamWithFakeTimers(stream, 5_000),
+        ).rejects.toThrow();
+        expect(
+          mockContentGenerator.generateContentStream,
+        ).toHaveBeenCalledTimes(2);
+
+        // The recovery user message is rolled back, the partial model turn
+        // survives (same end state as an unretryable mid-stream break).
+        const history = chat.getHistory();
+        expect(history.filter((c) => c.role === 'user')).toHaveLength(1);
+        const modelTurns = history.filter((c) => c.role === 'model');
+        expect(
+          modelTurns[modelTurns.length - 1]!.parts?.map(
+            (p) => p.text ?? '',
+          ).join(''),
+        ).toBe('partial answer ');
       } finally {
         vi.useRealTimers();
       }
