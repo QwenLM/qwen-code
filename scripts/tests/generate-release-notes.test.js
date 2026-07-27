@@ -618,7 +618,6 @@ describe('createOpenAiCompleter retries', () => {
     expect(calls).toBe(1);
   });
 
-
   it('retries HTTP 429 (rate limiting)', async () => {
     let calls = 0;
     const complete = createOpenAiCompleter({
@@ -628,9 +627,7 @@ describe('createOpenAiCompleter retries', () => {
       baseDelayMs: 1,
       fetchImpl: async () => {
         calls += 1;
-        return calls === 1
-          ? { ok: false, status: 429 }
-          : okResponse;
+        return calls === 1 ? { ok: false, status: 429 } : okResponse;
       },
     });
 
@@ -668,10 +665,13 @@ describe('createOpenAiCompleter retries', () => {
       fetchImpl: async () => {
         calls += 1;
         // Returns 200 OK but empty content — triggers content-validation error
-        return new Response(JSON.stringify({ choices: [{ message: { content: '' } }] }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        });
+        return new Response(
+          JSON.stringify({ choices: [{ message: { content: '' } }] }),
+          {
+            status: 200,
+            headers: { 'Content-Type': 'application/json' },
+          },
+        );
       },
     });
 
@@ -696,6 +696,25 @@ describe('createOpenAiCompleter retries', () => {
     await expect(complete({ kind: 'summaries', entries: [] })).rejects.toThrow(
       /budget exhausted.*HTTP 503/,
     );
+  });
+
+  it('preserves the original error as the deadline error cause', async () => {
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      baseDelayMs: 100,
+      totalTimeoutMs: 50,
+      fetchImpl: async () => {
+        return { ok: false, status: 503 };
+      },
+    });
+
+    const error = await complete({ kind: 'summaries', entries: [] }).catch(
+      (err) => err,
+    );
+    expect(error.message).toMatch(/budget exhausted.*HTTP 503/);
+    expect(error.cause?.message).toBe('Model request failed with HTTP 503.');
   });
 
   it('preserves original error when the deadline expires after backoff', async () => {

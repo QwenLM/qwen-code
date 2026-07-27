@@ -458,12 +458,15 @@ export function createOpenAiCompleter({
     const prompt = promptFor(request);
     let attempt = 0;
     let lastError;
+    const deadlineError = () =>
+      new Error(
+        `Model generation time budget exhausted: ${lastError?.message ?? 'unknown error'}`,
+        { cause: lastError },
+      );
     for (;;) {
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) {
-        throw new Error(
-          `Model generation time budget exhausted: ${lastError?.message ?? 'unknown error'}`,
-        );
+        throw deadlineError();
       }
       try {
         const response = await fetchImpl(endpoint, {
@@ -497,7 +500,7 @@ export function createOpenAiCompleter({
         lastError = error;
         attempt += 1;
         if (Date.now() >= deadline) {
-          throw new Error(`Model generation time budget exhausted: ${error?.message ?? 'unknown error'}`);
+          throw deadlineError();
         }
         if (attempt > maxRetries || !isRetryableModelError(error)) {
           throw error;
@@ -505,7 +508,7 @@ export function createOpenAiCompleter({
         const delayMs =
           baseDelayMs * 2 ** (attempt - 1) * (0.5 + Math.random());
         if (Date.now() + delayMs >= deadline) {
-          throw new Error(`Model generation time budget exhausted: ${error?.message ?? 'unknown error'}`);
+          throw deadlineError();
         }
         console.error(
           `Model request retry ${attempt}/${maxRetries} after ${escapeWorkflowCommand(error.message)}; backing off ${Math.round(delayMs)}ms.`,
