@@ -17,18 +17,17 @@ const skillDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const QWEN_TIMEOUT_MS = Number(process.env.QWEN_TIMEOUT_MS) || 50 * 60 * 1000;
 const specs = {
   'scan': {
-    phaseDoc: 'references/scan.md',
     inputs: [],
     outputs: ['findings.json', 'report-only.md'],
     required: [],
-    invocation: (o) => `--workdir ${o.workdir}`,
+    invocation: (o) => `Scan phase. --workdir ${o.workdir}`,
   },
   'fix': {
-    phaseDoc: 'references/fix.md',
     inputs: ['findings.json'],
     outputs: ['findings.json', 'report-only.md'],
     required: ['branch'],
-    invocation: (o) => `--workdir ${o.workdir} --branch ${o.branch}`,
+    invocation: (o) =>
+      `Fix phase. --workdir ${o.workdir} --branch ${o.branch}`,
   },
 };
 
@@ -133,24 +132,15 @@ function runQwen(options, prompt) {
 }
 
 function promptFor(options, spec) {
-  const stripFrontmatter = (text) =>
-    text
-      .replace(/\r\n/g, '\n')
-      .replace(/^---\n[\s\S]*?\n---(?:\n|$)/, '')
-      .trim();
-  const base = stripFrontmatter(
-    readFileSync(resolve(skillDir, 'SKILL.md'), 'utf8'),
-  );
-  const phase = stripFrontmatter(
-    readFileSync(resolve(skillDir, spec.phaseDoc), 'utf8'),
-  );
+  const skill = readFileSync(resolve(skillDir, 'SKILL.md'), 'utf8')
+    .replace(/\r\n/g, '\n')
+    .replace(/^---\n[\s\S]*?\n---(?:\n|$)/, '')
+    .trim();
   return [
     `Skill directory: ${skillDir}`,
     'Resolve skill-relative paths from that directory.',
     '',
-    base,
-    '',
-    phase,
+    skill,
     '',
     'Invocation:',
     spec.invocation(options),

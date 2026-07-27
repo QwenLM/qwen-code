@@ -15,12 +15,11 @@ The run is split into two phases executed as separate CI jobs: the scan phase
 
 ## Workflow
 
+Your invocation names the phase you are in. Read ONLY that phase's document
+before doing anything else, then follow its steps:
+
 - Scan phase → read `references/scan.md`
 - Fix phase → read `references/fix.md`
-
-In CI the runner appends the right phase document to this prompt, so you do
-not need to read it again. When invoked interactively, read the phase file
-for the phase you were asked to run.
 
 One full run produces ONE branch (named by `--branch`) that batches every
 accepted fix, with one Conventional Commit per finding so reviewers can audit
