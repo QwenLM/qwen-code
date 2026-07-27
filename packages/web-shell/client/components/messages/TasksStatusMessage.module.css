@@ -157,6 +157,163 @@
   gap: 12px;
 }
 
+.monitorDetail {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.monitorOverview {
+  border-bottom: 1px solid var(--border);
+  display: grid;
+  gap: 12px;
+  margin-bottom: 14px;
+  padding-bottom: 14px;
+}
+
+.monitorHeadingRow {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  min-width: 0;
+}
+
+.monitorDescription {
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 500;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitorStatusActions {
+  align-items: center;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 6px;
+}
+
+.monitorStatusTag {
+  border-color: transparent;
+  flex: 0 0 auto;
+}
+
+.monitorStatusTag::before {
+  background: currentColor;
+  border-radius: 50%;
+  content: '';
+  height: 6px;
+  width: 6px;
+}
+
+.monitorStatusTag[data-status='running'] {
+  background: color-mix(in srgb, var(--agent-blue-500) 12%, transparent);
+  border-color: color-mix(in srgb, var(--agent-blue-500) 35%, transparent);
+  color: var(--agent-blue-500);
+}
+
+.monitorStatusTag[data-status='completed'] {
+  background: var(--success-bg);
+  border-color: color-mix(in srgb, var(--success-color) 35%, transparent);
+  color: var(--success-color);
+}
+
+.monitorStatusTag[data-status='failed'],
+.monitorStatusTag[data-status='cancelled'] {
+  background: color-mix(in srgb, var(--error-color) 12%, transparent);
+  border-color: color-mix(in srgb, var(--error-color) 35%, transparent);
+  color: var(--error-color);
+}
+
+.monitorStopButton {
+  appearance: none;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--error-color) 45%, var(--border));
+  border-radius: 6px;
+  color: var(--error-color);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  line-height: 20px;
+  padding: 0 9px;
+}
+
+.monitorStopButton:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--error-color) 10%, transparent);
+}
+
+.monitorStopButton:disabled {
+  cursor: default;
+  opacity: 0.65;
+}
+
+.monitorActionError {
+  color: var(--error-color);
+  font-size: 12px;
+  text-align: right;
+}
+
+.monitorMetrics {
+  display: grid;
+  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
+}
+
+.monitorMetric {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+  padding: 8px 10px;
+}
+
+.monitorMetricValue {
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.monitorMetricLabel,
+.monitorSectionLabel {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.monitorCommandSection,
+.monitorError {
+  display: grid;
+  gap: 6px;
+}
+
+.monitorCommand {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0;
+  max-height: 240px;
+  overflow: auto;
+  padding: 10px;
+  white-space: pre-wrap;
+}
+
+.monitorError {
+  color: var(--error-color);
+  font-size: 12px;
+  margin-top: 12px;
+}
+
 .detailTopMain {
   display: flex;
   flex: 1 1 auto;
