@@ -252,6 +252,53 @@ describe('registerMcpHotReload', () => {
     expect(fc.reinitializeMcpServers).toHaveBeenCalledWith({});
   });
 
+  it('safe mode: a settings.json mcp.allowed edit does NOT leak in and filter the caller-supplied top-tier server mid-session', async () => {
+    // recomputeMcpGating reads settings.merged.mcp.allowed/excluded
+    // unconditionally, with no bare/safe guard of its own — before the fix,
+    // registerMcpHotReload's own bare/safe guard only covered `next` (the
+    // servers map), not the gating lists computed right after it. A live
+    // settings.json edit narrowing mcp.allowed during an already-running
+    // safe-mode session would flow straight into setAllowedMcpServers and
+    // silently filter the caller's top-tier server out of getMcpServers()
+    // mid-session — the same stranded-server class of bug this PR already
+    // fixes at boot, reached through the gating list's SOURCE instead of the
+    // mcpServers map. Initial gating.allowed is non-empty so the edit below
+    // is a real, detectable change regardless of which branch runs (bug or
+    // fix) — otherwise a same-value no-op would short-circuit before either
+    // branch's result is ever applied.
+    const fc = makeFakeConfig(cwd, {
+      settingsMcp: {},
+      gating: { allowed: ['probe'] },
+      safeMode: true,
+    });
+    const topTier = { probe: { command: 'probe' } };
+    registerMcpHotReload(watcher, settings, fc.config, topTier);
+
+    merged.mcp = { allowed: ['some-other-server'] };
+    await listener([]);
+
+    // No --allowed-mcp-server-names flag at startup (bootAllowed undefined)
+    // ⇒ the fixed path applies `undefined` (allow-all, i.e. only the
+    // never-gated top-tier map matters); the buggy path would instead pass
+    // through the settings-sourced ['some-other-server'], excluding `probe`.
+    expect(fc.setAllowedMcpServers).toHaveBeenCalledWith(undefined);
+  });
+
+  it('bare mode: a settings.json mcp.allowed edit does NOT leak in and filter the caller-supplied top-tier server mid-session', async () => {
+    const fc = makeFakeConfig(cwd, {
+      settingsMcp: {},
+      gating: { allowed: ['probe'] },
+      bareMode: true,
+    });
+    const topTier = { probe: { command: 'probe' } };
+    registerMcpHotReload(watcher, settings, fc.config, topTier);
+
+    merged.mcp = { allowed: ['some-other-server'] };
+    await listener([]);
+
+    expect(fc.setAllowedMcpServers).toHaveBeenCalledWith(undefined);
+  });
+
   it('reconciles on an admission-list-only change (mcp.excluded), servers unchanged', async () => {
     const fc = makeFakeConfig(cwd, {
       settingsMcp: { a: { command: 'a' } },
