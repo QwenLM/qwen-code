@@ -2876,6 +2876,39 @@ describe('Server Config (config.ts)', () => {
       expect(stop).toHaveBeenCalledTimes(2);
     });
 
+    it('propagates resource cleanup failures in strict mode and allows retry', async () => {
+      const config = new Config(baseParams);
+      const stop = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('stop failed'))
+        .mockResolvedValue(undefined);
+      const internal = config as unknown as {
+        initializeInternal: () => Promise<void>;
+        toolRegistry: ToolRegistry;
+      };
+      vi.spyOn(internal, 'initializeInternal').mockImplementation(async () => {
+        internal.toolRegistry = { stop } as unknown as ToolRegistry;
+      });
+      await config.initialize();
+
+      await expect(
+        config.shutdown({
+          shutdownTelemetry: false,
+          skipSessionWriter: true,
+          strictResourceCleanup: true,
+        }),
+      ).rejects.toThrow('stop failed');
+      await expect(
+        config.shutdown({
+          shutdownTelemetry: false,
+          skipSessionWriter: true,
+          strictResourceCleanup: true,
+        }),
+      ).resolves.toBeUndefined();
+
+      expect(stop).toHaveBeenCalledTimes(2);
+    });
+
     it('cleans partial resources after initialization fails', async () => {
       const config = new Config(baseParams);
       const initializationError = new Error('late initialization failure');

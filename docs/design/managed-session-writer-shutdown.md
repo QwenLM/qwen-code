@@ -34,6 +34,9 @@ Flush, transcript integrity, or ownership failure retains the primary lock.
 The only release commit is a same-directory rename from the primary lock `P`
 to an owner-unique retired path `R`. The old owner may clean only its exact
 `R`; it never retries the primary rename or touches a successor's `P`.
+Managed shutdown emits an operator-visible warning with candidate lock paths
+when the writer terminal fails. Manual cleanup is safe only after verifying
+that the previous writer is no longer running.
 
 ## Managed ACP shutdown
 
@@ -90,6 +93,15 @@ cannot change its failed terminal to success. The daemon retains its existing
 retry path for an independently managed channel worker that later becomes
 reapable; such a retry joins the same settled ACP process-registry terminal
 rather than starting a new ACP shutdown timeline.
+
+The parent deadline intentionally does not expand to match SessionEnd hook,
+Config initialization, or MCP cleanup budgets because the platform
+termination window may be shorter and outside the daemon's control. Those
+post-writer phases use the time remaining after writer release and may be
+interrupted, producing an unclean daemon exit without restoring the released
+writer lock. Only an unconfirmed channel-worker exit keeps the daemon alive for
+a second graceful-shutdown attempt; other ACP or bridge failures exit nonzero
+on the first signal.
 
 ## Compatibility and rollout
 

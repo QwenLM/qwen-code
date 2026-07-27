@@ -2035,7 +2035,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       order.push('writer');
     });
     vi.mocked(innerConfig.shutdown).mockImplementation(async (options) => {
-      expect(options).toMatchObject({ skipSessionWriter: true });
+      expect(options).toMatchObject({
+        skipSessionWriter: true,
+        strictResourceCleanup: true,
+      });
       order.push('resources');
     });
     const agentPromise = runAcpAgent(
@@ -2159,13 +2162,32 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     });
     await agent.newSession({ cwd: '/tmp', mcpServers: [] });
 
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
     mockConnectionState.resolve();
     try {
       await expect(agentPromise).rejects.toThrow('Managed ACP shutdown failed');
       expect(order).toEqual(['writer', 'resources']);
       expect(process.exitCode).toBe(1);
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'Verify that no previous writer is running before manual cleanup.',
+        ),
+      );
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          path.join(
+            '/runtime-a',
+            'tmp',
+            'session-writer-locks',
+            'managed-writer-failure.lock',
+          ),
+        ),
+      );
     } finally {
       process.exitCode = undefined;
+      stderr.mockRestore();
     }
   });
 

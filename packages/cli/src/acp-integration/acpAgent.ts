@@ -3004,6 +3004,29 @@ export async function runAcpAgent(
       } catch (error) {
         failures.push(error);
         debugLogger.error('[ACP] Managed writer shutdown error:', error);
+        const retainedLockPaths = terminal.configs.flatMap((config) => {
+          if (
+            typeof config.getSessionRuntimeBaseDir !== 'function' ||
+            typeof config.getSessionId !== 'function'
+          ) {
+            return [];
+          }
+          return [
+            path.join(
+              config.getSessionRuntimeBaseDir(),
+              'tmp',
+              'session-writer-locks',
+              `${encodeURIComponent(config.getSessionId())}.lock`,
+            ),
+          ];
+        });
+        writeStderrLineSafe(
+          'qwen --acp: managed session writer shutdown failed; a writer lock may be retained for safety. ' +
+            'Verify that no previous writer is running before manual cleanup.' +
+            (retainedLockPaths.length > 0
+              ? ` Candidate lock paths: ${retainedLockPaths.join(', ')}`
+              : ''),
+        );
       }
       try {
         await fireSessionEndOnce(reason, terminal.configs);
@@ -3461,6 +3484,7 @@ class QwenAgent implements Agent {
         config.shutdown({
           shutdownTelemetry: false,
           skipSessionWriter: true,
+          strictResourceCleanup: true,
         }),
       ),
     );

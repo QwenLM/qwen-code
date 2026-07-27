@@ -729,6 +729,8 @@ export interface RunHandle {
   close(): Promise<void>;
 }
 
+const retryableChannelWorkerShutdownErrors = new WeakSet<Error>();
+
 type CoreRuntime = typeof import('./core-runtime.js');
 type ProviderConfig = NonNullable<ReturnType<CoreRuntime['findProviderById']>>;
 type SettingsRuntime = typeof import('../config/settings.js');
@@ -6297,7 +6299,10 @@ async function runQwenServeImpl(
           process.exit(runtimeStartupError === undefined ? 0 : 1);
         } catch (err) {
           daemonLog.error('shutdown error', err instanceof Error ? err : null);
-          if (channelWorkerManager?.state().enabled) {
+          if (
+            err instanceof Error &&
+            retryableChannelWorkerShutdownErrors.has(err)
+          ) {
             daemonLog.error(
               'refusing to exit while a channel worker or service lease remains; signal again to retry after the child exits (another signal during that retry forces exit)',
             );
@@ -6443,6 +6448,7 @@ async function runQwenServeImpl(
                     closePromise = undefined;
                     shuttingDown = false;
                     channelControlDraining = false;
+                    retryableChannelWorkerShutdownErrors.add(finalErr!);
                     rej(finalErr);
                     return;
                   }
@@ -6685,7 +6691,10 @@ async function runQwenServeImpl(
                     closeErr instanceof Error ? closeErr : null,
                   ),
                 );
-                if (channelWorkerManager?.state().enabled) {
+                if (
+                  closeErr instanceof Error &&
+                  retryableChannelWorkerShutdownErrors.has(closeErr)
+                ) {
                   writeDaemonLifecycleBestEffort(() =>
                     daemonLog.error(
                       'runtime startup failed, but qwen serve remains alive to retain the channel service lease until worker exit is confirmed',
