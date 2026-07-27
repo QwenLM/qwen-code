@@ -722,6 +722,32 @@ describe('runner decision contracts', () => {
     );
   });
 
+  it('rejects invalid prototype-gate inputs before sampling', () => {
+    const validInput = {
+      complete: true,
+      coldWarmPairedDeltasMs: [30, 31, 29],
+      seed: 7264,
+      coldPromptToProviderRequestP50Ms: 200,
+      warmPromptToProviderRequestP50Ms: 100,
+      coldPromptToFirstModelOutputP50Ms: 400,
+    };
+    expect(() =>
+      evaluateSingleBundlePrototypeGate({
+        ...validInput,
+        bootstrapIterations: 0,
+      }),
+    ).toThrow('bootstrapIterations must be a positive integer');
+    expect(() =>
+      evaluateSingleBundlePrototypeGate({ ...validInput, seed: Number.NaN }),
+    ).toThrow('seed must be finite');
+    expect(() =>
+      evaluateSingleBundlePrototypeGate({
+        ...validInput,
+        coldWarmPairedDeltasMs: [Number.NaN],
+      }),
+    ).toThrow('Percentile inputs must all be finite');
+  });
+
   it('maps a mismatched final answer to the stable failure code', () => {
     expect(validateExpectedFinalText('expected', 'expected')).toBeNull();
     expect(validateExpectedFinalText('actual', 'expected')).toEqual({
