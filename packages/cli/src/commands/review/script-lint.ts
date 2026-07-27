@@ -745,17 +745,26 @@ export const scriptLintCommand: CommandModule = {
       }),
   handler: (argv) => {
     const args = argv as unknown as ScriptLintArgs;
-    const report = runScriptLint(args);
-    const json = JSON.stringify(report, null, 2);
-    // Write the file when asked AND always print the JSON — the agent's brief
-    // says "read the JSON it prints", and the roster's generated command passes
-    // `--out`, so an `--out`-only "Wrote ..." line would leave the agent with no
-    // findings to read. Build & Test does exactly this (writes then prints).
-    if (args.out) {
-      mkdirSync(dirname(resolve(args.out)), { recursive: true });
-      writeFileSync(args.out, json);
+    try {
+      const report = runScriptLint(args);
+      const json = JSON.stringify(report, null, 2);
+      // Write the file when asked AND always print the JSON — the agent's brief
+      // says "read the JSON it prints", and the roster's generated command passes
+      // `--out`, so an `--out`-only "Wrote ..." line would leave the agent with no
+      // findings to read. Build & Test does exactly this (writes then prints).
+      if (args.out) {
+        mkdirSync(dirname(resolve(args.out)), { recursive: true });
+        writeFileSync(args.out, json);
+      }
+      writeStdoutLine(json);
+      writeStderrLine(report.note);
+    } catch (err) {
+      // A missing/invalid plan makes `runScriptLint` throw. Emit the one-line
+      // message and a non-zero exit (matching build-test), not yargs' stack trace —
+      // the orchestrator reads a clean error, and the gate still fails closed on the
+      // absent report.
+      writeStderrLine((err as Error).message);
+      process.exitCode = 1;
     }
-    writeStdoutLine(json);
-    writeStderrLine(report.note);
   },
 };
