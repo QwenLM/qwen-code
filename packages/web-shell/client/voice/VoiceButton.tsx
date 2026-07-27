@@ -18,10 +18,12 @@ import styles from './VoiceButton.module.css';
 const VOICE_FEATURE = 'voice_transcribe';
 /** Live waveform bar count in the recording pill. */
 const BAR_COUNT = 16;
+const NOTICE_TIMEOUT_MS = 2_000;
 
 export interface VoiceButtonProps {
   /** Insert the final transcript into the composer (user reviews, then sends). */
   onInsert: (text: string) => void;
+  onActiveChange?: (active: boolean) => void;
   disabled?: boolean;
 }
 
@@ -59,6 +61,7 @@ function formatElapsed(ms: number): string {
 
 export function VoiceButton({
   onInsert,
+  onActiveChange,
   disabled,
 }: VoiceButtonProps): React.JSX.Element | null {
   const workspace = useWorkspace();
@@ -112,6 +115,14 @@ export function VoiceButton({
   const [noticeMessage, setNoticeMessage] = useState<string | undefined>(
     undefined,
   );
+  useEffect(() => {
+    if (!noticeMessage) return undefined;
+    const timer = window.setTimeout(
+      () => setNoticeMessage(undefined),
+      NOTICE_TIMEOUT_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [noticeMessage]);
 
   const { status, interimText, audioLevel, errorMessage, start, stop, abort } =
     useVoiceCapture({
@@ -128,7 +139,22 @@ export function VoiceButton({
       },
     });
 
+  const isActive =
+    status === 'connecting' ||
+    status === 'recording' ||
+    status === 'transcribing';
   const isRecording = status === 'recording';
+
+  useEffect(() => {
+    onActiveChange?.(isActive);
+  }, [isActive, onActiveChange]);
+
+  useEffect(
+    () => () => {
+      onActiveChange?.(false);
+    },
+    [onActiveChange],
+  );
 
   // Rolling waveform history, fed by the live RMS meter while recording.
   const [levels, setLevels] = useState<number[]>(() =>
