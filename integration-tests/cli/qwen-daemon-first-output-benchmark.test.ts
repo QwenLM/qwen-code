@@ -2159,10 +2159,8 @@ function coldWarmProviderDeltas(
 ): number[] {
   const deltas: number[] = [];
   for (const run of runs.filter(isSuccessfulRun)) {
-    const cold = run.sessions.find((session) => session.ordinal === 1);
-    const warm = run.sessions.find((session) => session.ordinal === 2);
-    const coldMs = cold?.timings.promptToProviderRequestArrivalMs ?? null;
-    const warmMs = warm?.timings.promptToProviderRequestArrivalMs ?? null;
+    const coldMs = metricForOrdinal(run, 1, 'promptToProviderRequestArrivalMs');
+    const warmMs = metricForOrdinal(run, 2, 'promptToProviderRequestArrivalMs');
     if (coldMs !== null && warmMs !== null) deltas.push(coldMs - warmMs);
   }
   return deltas;
