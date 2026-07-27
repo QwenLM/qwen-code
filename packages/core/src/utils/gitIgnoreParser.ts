@@ -76,7 +76,15 @@ export class GitIgnoreParser implements GitIgnoreFilter {
           // - If `a/b/.gitignore` defines `c` then it needs to be changed to `/a/b/**/c`
           // - If `a/b/.gitignore` defines `c/d` then it needs to be changed to `/a/b/c/d`
 
-          if (!isAnchoredInFile && !p.includes('/')) {
+          // A trailing `/` is not a separator for this test — it only means
+          // "directories only". Git anchors a pattern when a `/` appears at
+          // the start or in the middle, so `foo/` in `a/b/.gitignore` means
+          // `/a/b/**/foo/` and still matches `a/b/x/foo/`, while `c/d` stays
+          // anchored as `/a/b/c/d`. Counting the trailing slash made every
+          // directory-only rule in a nested ignore file stop applying below
+          // its own directory.
+          const withoutDirSuffix = p.endsWith('/') ? p.slice(0, -1) : p;
+          if (!isAnchoredInFile && !withoutDirSuffix.includes('/')) {
             // If no slash and not anchored in file, it matches files in any
             // subdirectory.
             newPattern = path.join('**', p);

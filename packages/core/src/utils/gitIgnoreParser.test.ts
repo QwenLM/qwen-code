@@ -213,6 +213,55 @@ src/*.tmp
     });
   });
 
+  // A trailing `/` means "directories only"; it is not a separator that
+  // anchors the pattern. Every expectation here was read off `git
+  // check-ignore` in a real repository. This needs its own setup because the
+  // suite above ignores `a/b` outright, which would stop `a/b/.gitignore`
+  // from being consulted at all.
+  describe('directory-only patterns in a nested .gitignore', () => {
+    beforeEach(async () => {
+      await setupGitRepo();
+      await createTestFile('.gitignore', '');
+    });
+
+    it('applies below the nested ignore file, not only beside it', async () => {
+      // git expands `foo/` in `a/b/.gitignore` to `/a/b/**/foo/`.
+      await createTestFile('a/b/.gitignore', 'foo/');
+
+      expect(parser.isIgnored('a/b/foo/f')).toBe(true);
+      expect(parser.isIgnored('a/b/x/foo/f')).toBe(true);
+      expect(parser.isIgnored('a/b/x/y/foo/f')).toBe(true);
+      // Still scoped to the ignore file's own directory.
+      expect(parser.isIgnored('a/foo/f')).toBe(false);
+    });
+
+    it('still matches directories only', async () => {
+      await createTestFile('a/b/.gitignore', 'foo/');
+
+      // `foo` here is a file, not a directory, so git leaves it alone. The
+      // `**/` prefix must not cost the trailing slash its meaning.
+      expect(parser.isIgnored('a/b/x/foo')).toBe(false);
+    });
+
+    it('leaves an anchored directory-only pattern anchored', async () => {
+      // The guard against over-correcting: `/foo/` has a leading slash, so it
+      // matches `a/b/foo/` alone and must not gain the `**/` prefix.
+      await createTestFile('a/b/.gitignore', '/foo/');
+
+      expect(parser.isIgnored('a/b/foo/f')).toBe(true);
+      expect(parser.isIgnored('a/b/x/foo/f')).toBe(false);
+    });
+
+    it('leaves a mid-path directory-only pattern anchored', async () => {
+      // `c/d/` has a real interior separator, so the trailing slash is not
+      // the only slash and the pattern stays anchored.
+      await createTestFile('a/b/.gitignore', 'c/d/');
+
+      expect(parser.isIgnored('a/b/c/d/f')).toBe(true);
+      expect(parser.isIgnored('a/b/x/c/d/f')).toBe(false);
+    });
+  });
+
   describe('precedence rules', () => {
     beforeEach(async () => {
       await setupGitRepo();
