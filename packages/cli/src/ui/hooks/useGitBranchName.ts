@@ -14,7 +14,7 @@ import { resolveBranchName, watchRepoBranch } from '@qwen-code/qwen-code-core';
  * A lightweight poll every 5 s ensures the footer branch name self-heals
  * within one interval even when the watcher misses a branch switch.
  */
-const BRANCH_POLL_INTERVAL_MS = 5_000;
+export const BRANCH_POLL_INTERVAL_MS = 5_000;
 
 /**
  * Tracks the current git branch (or a short commit hash when detached) for

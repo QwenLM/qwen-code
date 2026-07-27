@@ -16,7 +16,10 @@ import {
 import { act } from 'react';
 import { renderHook } from '@testing-library/react';
 import { resolveBranchName, watchRepoBranch } from '@qwen-code/qwen-code-core';
-import { useGitBranchName } from './useGitBranchName.js';
+import {
+  useGitBranchName,
+  BRANCH_POLL_INTERVAL_MS,
+} from './useGitBranchName.js';
 
 // The hook is a thin wrapper over core's gitDirect helpers; the direct-read
 // logic itself is covered by core's gitDirect.test.ts. Here we mock those two
@@ -47,6 +50,7 @@ describe('useGitBranchName', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
   });
 
   it('reads the branch name on mount', async () => {
@@ -180,5 +184,68 @@ describe('useGitBranchName', () => {
     // The initial read still rendered; the rejected setup is swallowed by the
     // hook's .catch() (no unhandled rejection).
     expect(result.current).toBe('main');
+  });
+
+  it('polls on the interval and updates when the branch changed', async () => {
+    vi.useFakeTimers();
+    mockResolve.mockResolvedValueOnce('main').mockResolvedValueOnce('develop');
+
+    const { result } = renderHook(() => useGitBranchName(CWD));
+    await act(async () => {
+      await flushAsyncEffects();
+    });
+    expect(result.current).toBe('main');
+
+    await act(async () => {
+      vi.advanceTimersByTime(BRANCH_POLL_INTERVAL_MS);
+      await flushAsyncEffects();
+    });
+
+    // The initial read plus one poll; the polled value replaced the stale one.
+    expect(mockResolve).toHaveBeenCalledTimes(2);
+    expect(result.current).toBe('develop');
+  });
+
+  it('keeps a stable value when polling finds no change', async () => {
+    vi.useFakeTimers();
+    mockResolve.mockResolvedValue('main');
+
+    const { result } = renderHook(() => useGitBranchName(CWD));
+    await act(async () => {
+      await flushAsyncEffects();
+    });
+    expect(result.current).toBe('main');
+
+    await act(async () => {
+      vi.advanceTimersByTime(BRANCH_POLL_INTERVAL_MS * 3);
+      await flushAsyncEffects();
+    });
+
+    // The poll ran repeatedly, but the unchanged value left the state stable.
+    expect(mockResolve.mock.calls.length).toBeGreaterThan(1);
+    expect(result.current).toBe('main');
+  });
+
+  it('stops polling after unmount', async () => {
+    vi.useFakeTimers();
+    mockResolve.mockResolvedValue('main');
+    const clearIntervalSpy = vi.spyOn(global, 'clearInterval');
+
+    const { unmount } = renderHook(() => useGitBranchName(CWD));
+    await act(async () => {
+      await flushAsyncEffects();
+    });
+    const callsAfterMount = mockResolve.mock.calls.length;
+
+    unmount();
+    expect(clearIntervalSpy).toHaveBeenCalled();
+
+    await act(async () => {
+      vi.advanceTimersByTime(BRANCH_POLL_INTERVAL_MS * 2);
+      await flushAsyncEffects();
+    });
+
+    // No further polls fire once the timer is cleared on unmount.
+    expect(mockResolve.mock.calls.length).toBe(callsAfterMount);
   });
 });
