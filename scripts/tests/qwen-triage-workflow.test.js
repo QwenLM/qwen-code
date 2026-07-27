@@ -2006,6 +2006,18 @@ describe('qwen-triage verify maintainer-review round', () => {
           "s.listen(0, '127.0.0.1', () => fs.writeFileSync(process.argv[2], String(s.address().port)));",
         ].join('\n'),
       );
+      writeFileSync(
+        join(dir, 'deadport.js'),
+        [
+          "const net = require('node:net');",
+          "const fs = require('node:fs');",
+          'const s = net.createServer();',
+          "s.listen(0, '127.0.0.1', () => {",
+          '  const p = s.address().port;',
+          '  s.close(() => fs.writeFileSync(process.argv[2], String(p)));',
+          '});',
+        ].join('\n'),
+      );
       const driver = [
         'set -u',
         'node "$1/upstream.js" "$1/up.port" & UP=$!',
@@ -2021,7 +2033,16 @@ describe('qwen-triage verify maintainer-review round', () => {
         'echo "wrong=$(curl -s -o /dev/null -w %{http_code} -X POST -H "authorization: Bearer nope" -d {} "$U")"',
         'echo "right=$(curl -s -o /dev/null -w %{http_code} -X POST -H "authorization: Bearer tok456" -d {} "$U")"',
         'echo "otherpath=$(curl -s -o /dev/null -w %{http_code} -X POST -H "authorization: Bearer tok456" -d {} "http://127.0.0.1:$P/v1/models")"',
-        'kill $UP $PX 2>/dev/null',
+        'node "$1/deadport.js" "$1/dead.port"',
+        'for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1/dead.port" ] && break; sleep 0.3; done',
+        'DEAD="$(cat "$1/dead.port")"',
+        'REVIEW_OPENAI_BASE_URL="http://127.0.0.1:$DEAD/v1" REVIEW_OPENAI_API_KEY=realkey \\',
+        '  QWEN_PROXY_NONCE=nonce123 PROXY_TOKEN=tok456 node "$1/proxy.js" "$1/px2.port" & PX2=$!',
+        'for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1/px2.port" ] && break; sleep 0.3; done',
+        'P2="$(cat "$1/px2.port")"',
+        'echo "dead=$(curl -s -o /dev/null -w %{http_code} -X POST -H "authorization: Bearer tok456" -d {} "http://127.0.0.1:$P2/v1/chat/completions")"',
+        'echo "dead2=$(curl -s -o /dev/null -w %{http_code} -X POST -H "authorization: Bearer tok456" -d {} "http://127.0.0.1:$P2/v1/chat/completions")"',
+        'kill $UP $PX $PX2 2>/dev/null',
       ].join('\n');
       const out = spawnSync('bash', ['-c', driver, '_', dir], {
         encoding: 'utf8',
@@ -2035,6 +2056,12 @@ describe('qwen-triage verify maintainer-review round', () => {
       // ...and reachable with it, on the one allowed route.
       expect(out).toContain('right=200');
       expect(out).toContain('otherpath=403');
+      // A dead upstream must surface as a 502 the agent can read, not crash
+      // the proxy: the outer catch clears the hoisted timer (a ReferenceError
+      // here would kill the process and turn qwen's next completion into a
+      // false fail verdict), and the process serves the following request.
+      expect(out).toContain('dead=502');
+      expect(out).toContain('dead2=502');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -2239,6 +2266,18 @@ describe('qwen-triage tmux lane parity', () => {
           "s.listen(0, '127.0.0.1', () => fs.writeFileSync(process.argv[2], String(s.address().port)));",
         ].join('\n'),
       );
+      writeFileSync(
+        join(dir, 'deadport.js'),
+        [
+          "const net = require('node:net');",
+          "const fs = require('node:fs');",
+          'const s = net.createServer();',
+          "s.listen(0, '127.0.0.1', () => {",
+          '  const p = s.address().port;',
+          '  s.close(() => fs.writeFileSync(process.argv[2], String(p)));',
+          '});',
+        ].join('\n'),
+      );
       const driver = [
         'set -u',
         'node "$1/upstream.js" "$1/up.port" & UP=$!',
@@ -2253,7 +2292,17 @@ describe('qwen-triage tmux lane parity', () => {
         'echo "unauth=$(curl -sS -o /dev/null -w %{http_code} -X POST "http://127.0.0.1:$P/v1/chat/completions")"',
         'echo "auth=$(curl -sS -o /dev/null -w %{http_code} -X POST -H "Authorization: Bearer t0ken" "http://127.0.0.1:$P/v1/chat/completions")"',
         'echo "wrong=$(curl -sS -o /dev/null -w %{http_code} -X POST -H "Authorization: Bearer nope" "http://127.0.0.1:$P/v1/chat/completions")"',
-        'kill $UP $PX 2>/dev/null',
+        'node "$1/deadport.js" "$1/dead.port"',
+        'for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1/dead.port" ] && break; sleep 0.3; done',
+        'DEAD="$(cat "$1/dead.port")"',
+        'REVIEW_OPENAI_BASE_URL="http://127.0.0.1:$DEAD/v1" \\',
+        '  REVIEW_OPENAI_API_KEY=k QWEN_PROXY_NONCE=n0nce PROXY_TOKEN=t0ken \\',
+        '  node "$1/proxy.js" "$1/px2.port" & PX2=$!',
+        'for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1/px2.port" ] && break; sleep 0.3; done',
+        'P2="$(cat "$1/px2.port")"',
+        'echo "dead=$(curl -sS -o /dev/null -w %{http_code} -X POST -H "Authorization: Bearer t0ken" "http://127.0.0.1:$P2/v1/chat/completions")"',
+        'echo "dead2=$(curl -sS -o /dev/null -w %{http_code} -X POST -H "Authorization: Bearer t0ken" "http://127.0.0.1:$P2/v1/chat/completions")"',
+        'kill $UP $PX $PX2 2>/dev/null',
       ].join('\n');
       const out = spawnSync('bash', ['-c', driver, '_', dir], {
         encoding: 'utf8',
@@ -2268,6 +2317,12 @@ describe('qwen-triage tmux lane parity', () => {
       // The gate exists for the wrong-token case: a prefix match would let
       // any 'Bearer ...' caller spend the real key.
       expect(out).toContain('wrong=401');
+      // A dead upstream is a 502, not a crashed proxy: the outer catch must
+      // clear the hoisted timer without a ReferenceError and survive to serve
+      // the next call, or qwen's next completion hangs and the run maps the
+      // infrastructure fault to a false fail verdict.
+      expect(out).toContain('dead=502');
+      expect(out).toContain('dead2=502');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

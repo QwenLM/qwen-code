@@ -1100,9 +1100,10 @@ jobs:
           # publisher takes the first match, so a planted dir can supply the
           # comment's contents. Sweep the lifecycle-script plant channel; the
           # runtime channel (PR code the agent launches concurrently) is
-          # bounded by the symlink strip after collection. Never descend
-          # through a PR-writable parent: lifecycle scripts can replace
-          # `tmp` with a symlink, and `find` would follow it as root.
+          # bounded by the symlink strip after collection. find's default
+          # -P does not follow a symlinked start path, so there is no live
+          # escape to close; the [ -L tmp ] guard is defence-in-depth against
+          # a future edit adding a trailing slash or -L, which would follow it.
           if [ -L tmp ]; then
             echo '::warning::tmp is a symlink; skipping pre-agent tmux sweep'
           else
@@ -1226,6 +1227,7 @@ jobs:
               return;
             }
 
+            let timer;
             try {
               const incoming = new URL(req.url || '/', 'http://127.0.0.1');
               const target = new URL(base.origin);
@@ -1270,7 +1272,7 @@ jobs:
               }
 
               const controller = new AbortController();
-              const timer = setTimeout(() => controller.abort(), 120_000);
+              timer = setTimeout(() => controller.abort(), 120_000);
               let upstream;
               try {
                 upstream = await fetch(target, { ...init, signal: controller.signal });
@@ -2414,6 +2416,7 @@ jobs:
               return;
             }
 
+            let timer;
             try {
               const incoming = new URL(req.url || '/', 'http://127.0.0.1');
               const target = new URL(base.origin);
@@ -2458,7 +2461,7 @@ jobs:
               }
 
               const controller = new AbortController();
-              const timer = setTimeout(() => controller.abort(), 120_000);
+              timer = setTimeout(() => controller.abort(), 120_000);
               let upstream;
               try {
                 upstream = await fetch(target, { ...init, signal: controller.signal });
