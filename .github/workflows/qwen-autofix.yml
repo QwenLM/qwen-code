@@ -3839,7 +3839,7 @@ jobs:
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
-          OUTCOME: '${{ steps.verify.outputs.outcome }}'
+          OUTCOME: '${{ steps.final_verify.outputs.outcome }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           # The id the announcement wrote. Empty means this round never
           # announced (its step was skipped, or the post itself failed) — then

@@ -4586,6 +4586,9 @@ describe('qwen-autofix workflow', () => {
     expect(reviewAddressReportStep).toContain(
       "COMMITTED: '${{ steps.final_verify.outputs.committed }}'",
     );
+    expect(finalizeStatusCommentStep).toContain(
+      "OUTCOME: '${{ steps.final_verify.outputs.outcome }}'",
+    );
 
     const body = finalizeVerificationStep
       .match(/ {8}run: \|-\n([\s\S]*)$/)?.[1]
@@ -4618,6 +4621,10 @@ describe('qwen-autofix workflow', () => {
       status: 0,
       written: expect.stringContaining('outcome=fixed'),
     });
+    expect(run({ FIRST_OUTCOME: 'noop' })).toMatchObject({
+      status: 0,
+      written: expect.stringContaining('outcome=noop'),
+    });
     expect(
       run({
         FIRST_OUTCOME: 'failed',
@@ -4629,6 +4636,17 @@ describe('qwen-autofix workflow', () => {
     ).toMatchObject({
       status: 0,
       written: expect.stringContaining('outcome=fixed'),
+    });
+    expect(
+      run({
+        FIRST_OUTCOME: 'failed',
+        FIRST_COMMITTED: 'true',
+        REPAIR_ATTEMPTED: 'true',
+        REPAIR_OUTCOME: 'fixed',
+      }),
+    ).toMatchObject({
+      status: 0,
+      written: expect.stringContaining('committed=true'),
     });
     expect(
       run({
