@@ -653,6 +653,47 @@ describe('qwen-triage tmux workflow', () => {
       expect(noHead.comment).toContain('could not be read');
     },
   );
+
+  it('includes high-risk path detection in the triage skill', () => {
+    const prWorkflow = readFileSync(
+      '.qwen/skills/triage/references/pr-workflow.md',
+      'utf8',
+    );
+
+    expect(prWorkflow).toContain('1e. High-risk path');
+    expect(prWorkflow).toContain('openaiContentGenerator');
+    expect(prWorkflow).toContain('streamingToolCallParser');
+    expect(prWorkflow).toContain('acpConnection');
+    expect(prWorkflow).toContain('shellExecutionService');
+    expect(prWorkflow).toContain('mcp-client');
+    expect(prWorkflow).toContain('LspServer');
+    expect(prWorkflow).toContain('66.7% revert precision');
+    expect(prWorkflow).toContain('deepest review tier');
+  });
+
+  it('includes contested-merge detection in the triage skill', () => {
+    const prWorkflow = readFileSync(
+      '.qwen/skills/triage/references/pr-workflow.md',
+      'utf8',
+    );
+
+    expect(prWorkflow).toContain('Contested-merge pattern');
+    expect(prWorkflow).toContain('CHANGES_REQUESTED');
+    expect(prWorkflow).toContain('50.0% revert precision');
+    expect(prWorkflow).toContain('status/on-hold');
+    expect(prWorkflow).toContain('maintainer sign-off');
+  });
+
+  it('includes non-maintainer high-risk tier in the triage skill', () => {
+    const prWorkflow = readFileSync(
+      '.qwen/skills/triage/references/pr-workflow.md',
+      'utf8',
+    );
+
+    expect(prWorkflow).toContain('Non-maintainer + high-risk');
+    expect(prWorkflow).toContain('58.3% revert precision');
+    expect(prWorkflow).toContain('highest-risk tier');
+  });
 });
 
 describe('qwen-triage verify workflow', () => {

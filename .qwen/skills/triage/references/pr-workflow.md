@@ -227,6 +227,36 @@ If you spot a materially simpler path, or changes that go beyond the minimal set
 
 Implementation-level concerns (over-abstraction, code duplication, "10 lines vs 10 files") belong in Stage 2a code review — you need to see the code for those.
 
+**1e. High-risk path and contested-merge detection (data-backed escalation):**
+
+A revert-history analysis of this repo (111 revert commits, 46 unique reverted PRs) found that certain file paths and review patterns are strongly correlated with post-merge reverts. Check for these signals before proceeding to Stage 2 — they do NOT block or close the PR, but they determine the review depth and whether a maintainer sign-off is recommended.
+
+**High-risk paths** — check the PR's changed files against these patterns:
+
+```bash
+gh pr view "$PR_NUMBER" --repo "$REPO" --json files --jq '.files[].path' | grep -E 'openaiContentGenerator|streamingToolCallParser|geminiChat|acpConnection|shell\.ts$|shellExecutionService|mcp-client|mcp-pool|LspServer|acp-integration|ELECTRON_RUN_AS_NODE'
+```
+
+If any file matches (66.7% revert precision, 32.3% recall in the analysis):
+- For non-maintainer PRs: escalate to the deepest review tier — do not skip any review stage, run full `/review` with maximum agent coverage.
+- Flag the high-risk paths in the Stage 1 comment so the reviewer knows where to focus.
+- Recommend E2E verification in tmux (Stage 2b) before approval.
+
+**Contested-merge pattern** — check the PR's review history for a CHANGES_REQUESTED → APPROVE cycle:
+
+```bash
+gh pr view "$PR_NUMBER" --repo "$REPO" --json reviews --jq '[.reviews[] | select(.state != "PENDING" and .state != "COMMENTED") | .state]'
+```
+
+If `CHANGES_REQUESTED` appears after the first review (not at position 0) AND the PR touches core paths (50.0% revert precision, 19.4% recall):
+- Apply `status/on-hold` label via `gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label status/on-hold` (if the label exists).
+- Recommend maintainer sign-off before merge in the Stage 1 comment.
+- Do not auto-approve even if Stage 2 and Stage 3 are clean.
+
+**Non-maintainer + high-risk** (58.3% revert precision, 22.6% recall): the intersection of both signals above is the highest-risk tier. Apply both actions: deepest review depth AND recommend maintainer sign-off.
+
+These signals are NOT terminal gates — they do not stop the review or close the PR. They escalate review depth and flag risk so the reviewer knows where to focus. A PR that touches high-risk paths but passes full review with clean E2E verification can still be approved.
+
 Post a single Stage 1 comment. Be direct — say what you actually think, not what's polite:
 
 ```markdown
