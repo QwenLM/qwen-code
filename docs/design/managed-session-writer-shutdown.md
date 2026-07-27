@@ -30,13 +30,15 @@ accepted work. Managed fast close does not wait for an active model turn and
 does not append an additional finalize record; it drains only recorder work
 accepted before the cutoff.
 
-Flush, transcript integrity, or ownership failure retains the primary lock.
-The only release commit is a same-directory rename from the primary lock `P`
-to an owner-unique retired path `R`. The old owner may clean only its exact
-`R`; it never retries the primary rename or touches a successor's `P`.
-Managed shutdown emits an operator-visible warning with candidate lock paths
-when the writer terminal fails. Manual cleanup is safe only after verifying
-that the previous writer is no longer running.
+A flush failure seals the writer and is still reported after an exact-owner
+release attempt, preserving the pre-existing close contract. An ownership or
+release failure retains the primary lock unless release already committed. The
+only release commit is a same-directory rename from the primary lock `P` to an
+owner-unique retired path `R`. The old owner may clean only its exact `R`; it
+never retries the primary rename or touches a successor's `P`. Managed
+shutdown emits an operator-visible warning with candidate lock paths when the
+writer terminal fails. Manual cleanup is safe only after verifying that the
+previous writer is no longer running.
 
 ## Managed ACP shutdown
 

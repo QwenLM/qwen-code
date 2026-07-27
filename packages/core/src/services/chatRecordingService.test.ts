@@ -1880,15 +1880,15 @@ describe('ChatRecordingService', () => {
   });
 
   describe('close', () => {
-    it('retains the writer lease when accepted work fails to flush', async () => {
+    it('releases the writer lease before reporting a flush failure', async () => {
       const failure = new SessionTranscriptChangedError();
       vi.mocked(mockLease.appendJsonLine).mockRejectedValueOnce(failure);
 
       chatRecordingService.recordUserMessage([{ text: 'not durable' }]);
 
       await expect(chatRecordingService.close()).rejects.toBe(failure);
-      expect(mockLease.release).not.toHaveBeenCalled();
-      expect(chatRecordingService.hasWriteOwnership()).toBe(true);
+      expect(mockLease.release).toHaveBeenCalledOnce();
+      expect(chatRecordingService.hasWriteOwnership()).toBe(false);
     });
 
     it('cuts off new writes synchronously and closes single-flight', async () => {

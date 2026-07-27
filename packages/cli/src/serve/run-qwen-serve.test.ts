@@ -464,6 +464,9 @@ function makeRuntimeBridge(): HttpAcpBridge {
 const mockCreateSpawnChannelFactoryOptions = vi.hoisted(
   () => [] as Array<Record<string, unknown>>,
 );
+const mockChannelWorkerEnabledState = vi.hoisted(() => ({
+  value: undefined as boolean | undefined,
+}));
 
 async function getFreeLoopbackPort(): Promise<number> {
   const server = createServer();
@@ -489,6 +492,28 @@ vi.mock('@qwen-code/acp-bridge/spawnChannel', async (importOriginal) => {
         return actual.createSpawnChannelFactory(options);
       },
     ),
+  };
+});
+
+vi.mock('./channel-worker-manager.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('./channel-worker-manager.js')>();
+  return {
+    ...actual,
+    createChannelWorkerManager: (
+      ...args: Parameters<typeof actual.createChannelWorkerManager>
+    ) => {
+      const manager = actual.createChannelWorkerManager(...args);
+      return {
+        ...manager,
+        state: () => {
+          const state = manager.state();
+          return mockChannelWorkerEnabledState.value === undefined
+            ? state
+            : { ...state, enabled: mockChannelWorkerEnabledState.value };
+        },
+      };
+    },
   };
 });
 
@@ -6298,6 +6323,7 @@ describe('runQwenServe channel worker supervisor', () => {
   let tmpDir: string | undefined;
 
   afterEach(() => {
+    mockChannelWorkerEnabledState.value = undefined;
     vi.restoreAllMocks();
     if (tmpDir) {
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -7926,6 +7952,7 @@ describe('runQwenServe channel worker supervisor', () => {
     vi.spyOn(processRegistry, 'shutdown').mockRejectedValue(
       new Error('ACP process shutdown failed'),
     );
+    mockChannelWorkerEnabledState.value = true;
     const signalListener = process
       .rawListeners('SIGTERM')
       .find(
