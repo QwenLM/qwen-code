@@ -42,6 +42,9 @@ const daemonProxy: ProxyOptions = {
   },
 };
 
+export const QUALIFIED_VOICE_STREAM_PROXY =
+  '^/workspaces/[^/]+/voice/stream/?$';
+
 export default defineConfig(({ command }) => ({
   root: 'client',
   plugins: [react(), tailwindcss()],
@@ -88,6 +91,7 @@ export default defineConfig(({ command }) => ({
       '/daemon/status': daemonProxy,
       '/session': daemonProxy,
       '/permission': daemonProxy,
+      [QUALIFIED_VOICE_STREAM_PROXY]: { ...daemonProxy, ws: true },
       '/workspace': daemonProxy,
       '/extensions': daemonProxy,
       '/file': daemonProxy,
