@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
-import { useMessageQueue } from './useMessageQueue.js';
+import { useMessageQueue, type QueuedSubmission } from './useMessageQueue.js';
 
 describe('useMessageQueue', () => {
   beforeEach(() => {
@@ -89,7 +89,7 @@ describe('useMessageQueue', () => {
     it('returns null when the queue is empty', () => {
       const { result } = renderHook(() => useMessageQueue());
 
-      let popped: string | null = null;
+      let popped: QueuedSubmission | null = null;
       act(() => {
         popped = result.current.popAllMessages();
       });
@@ -107,12 +107,14 @@ describe('useMessageQueue', () => {
         result.current.addMessage('Message 3');
       });
 
-      let popped: string | null = null;
+      let popped: QueuedSubmission | null = null;
       act(() => {
         popped = result.current.popAllMessages();
       });
 
-      expect(popped).toBe('Message 1\n\nMessage 2\n\nMessage 3');
+      expect(popped).toEqual({
+        modelText: 'Message 1\n\nMessage 2\n\nMessage 3',
+      });
       expect(result.current.messageQueue).toEqual([]);
     });
 
@@ -123,12 +125,12 @@ describe('useMessageQueue', () => {
         result.current.addMessage('Only message');
       });
 
-      let popped: string | null = null;
+      let popped: QueuedSubmission | null = null;
       act(() => {
         popped = result.current.popAllMessages();
       });
 
-      expect(popped).toBe('Only message');
+      expect(popped).toEqual({ modelText: 'Only message' });
       expect(result.current.messageQueue).toEqual([]);
     });
 
@@ -144,13 +146,52 @@ describe('useMessageQueue', () => {
         result.current.addMessage('world');
       });
 
-      let popped: string | null = null;
+      let popped: QueuedSubmission | null = null;
       act(() => {
         popped = result.current.popAllMessages();
       });
 
-      expect(popped).toBe('/model\n\nhello\n\nworld');
+      expect(popped).toEqual({
+        modelText: '/model\n\nhello\n\nworld',
+      });
       expect(result.current.messageQueue).toEqual([]);
+    });
+
+    it('aggregates provenance only when every queued message has it', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('model one', false, 'user one');
+        result.current.addMessage('model two', false, 'user two');
+      });
+
+      let popped: QueuedSubmission | null = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      expect(popped).toEqual({
+        modelText: 'model one\n\nmodel two',
+        submittedPrompt: 'user one\n\nuser two',
+      });
+    });
+
+    it('omits aggregate provenance when any queued message lacks it', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('model one', false, 'user one');
+        result.current.addMessage('restored steer');
+      });
+
+      let popped: QueuedSubmission | null = null;
+      act(() => {
+        popped = result.current.popAllMessages();
+      });
+
+      expect(popped).toEqual({
+        modelText: 'model one\n\nrestored steer',
+      });
     });
   });
 
@@ -305,20 +346,39 @@ describe('useMessageQueue', () => {
 
       expect(result.current.messageQueue).toEqual(['steer now', 'newer input']);
     });
+
+    it('drops provenance when interrupted steer messages are restored', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('steer now', false, 'raw steer');
+      });
+      act(() => {
+        const drained = result.current.drainQueue();
+        result.current.restoreMessages(drained);
+      });
+
+      let submission: QueuedSubmission | null = null;
+      act(() => {
+        submission = result.current.popNextTurn();
+      });
+
+      expect(submission).toEqual({ modelText: 'steer now' });
+    });
   });
 
-  describe('popNextSegment', () => {
+  describe('popNextTurn', () => {
     it('returns null when the queue is empty', () => {
       const { result } = renderHook(() => useMessageQueue());
 
-      let segment: string | null = null;
+      let submission: QueuedSubmission | null = null;
       act(() => {
-        segment = result.current.popNextSegment();
+        submission = result.current.popNextTurn();
       });
-      expect(segment).toBeNull();
+      expect(submission).toBeNull();
     });
 
-    it('pops the first item and leaves the rest queued', () => {
+    it('pops the first slash command and leaves the rest queued', () => {
       const { result } = renderHook(() => useMessageQueue());
 
       act(() => {
@@ -326,15 +386,15 @@ describe('useMessageQueue', () => {
         result.current.addMessage('/help');
       });
 
-      let segment: string | null = null;
+      let submission: QueuedSubmission | null = null;
       act(() => {
-        segment = result.current.popNextSegment();
+        submission = result.current.popNextTurn();
       });
-      expect(segment).toBe('/model');
+      expect(submission).toEqual({ modelText: '/model' });
       expect(result.current.messageQueue).toEqual(['/help']);
     });
 
-    it('drains the queue one item at a time across repeated calls', () => {
+    it('drains slash commands one item at a time across repeated calls', () => {
       const { result } = renderHook(() => useMessageQueue());
 
       act(() => {
@@ -343,22 +403,67 @@ describe('useMessageQueue', () => {
         result.current.addMessage('/help');
       });
 
-      const segments: Array<string | null> = [];
+      const submissions: Array<QueuedSubmission | null> = [];
       act(() => {
-        segments.push(result.current.popNextSegment());
+        submissions.push(result.current.popNextTurn());
       });
       act(() => {
-        segments.push(result.current.popNextSegment());
+        submissions.push(result.current.popNextTurn());
       });
       act(() => {
-        segments.push(result.current.popNextSegment());
+        submissions.push(result.current.popNextTurn());
       });
       act(() => {
-        segments.push(result.current.popNextSegment());
+        submissions.push(result.current.popNextTurn());
       });
 
-      expect(segments).toEqual(['/model', '/theme', '/help', null]);
+      expect(submissions).toEqual([
+        { modelText: '/model' },
+        { modelText: '/theme' },
+        { modelText: '/help' },
+        null,
+      ]);
       expect(result.current.messageQueue).toEqual([]);
+    });
+
+    it('batches all plain prompts while leaving interleaved slash commands', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('/model');
+        result.current.addMessage('model one', false, 'user one');
+        result.current.addMessage('/help');
+        result.current.addMessage('model two', true, 'user two');
+      });
+
+      let submission: QueuedSubmission | null = null;
+      act(() => {
+        submission = result.current.popNextTurn();
+      });
+
+      expect(submission).toEqual({
+        modelText: 'model one\n\nmodel two',
+        submittedPrompt: 'user one\n\nuser two',
+      });
+      expect(result.current.messageQueue).toEqual(['/model', '/help']);
+    });
+
+    it('fails closed when a batched prompt lacks provenance', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('model one', false, 'user one');
+        result.current.addMessage('model two');
+      });
+
+      let submission: QueuedSubmission | null = null;
+      act(() => {
+        submission = result.current.popNextTurn();
+      });
+
+      expect(submission).toEqual({
+        modelText: 'model one\n\nmodel two',
+      });
     });
   });
 });

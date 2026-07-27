@@ -510,6 +510,7 @@ function isDaemonPath(path: string): boolean {
     path === '/workspace/extensions/check-updates' ||
     path === '/workspace/mcp' ||
     path === '/workspace/voice' ||
+    /^\/workspaces\/[^/]+\/(voice|providers|settings)\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path) ||
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
     /^\/workspace\/.+\/sessions\/?$/.test(path) ||
@@ -547,6 +548,18 @@ function isDaemonRoute(method: string, path: string): boolean {
   }
   if (method === 'GET' && path === '/workspace/mcp') return true;
   if (method === 'GET' && path === '/workspace/voice') return true;
+  if (
+    (method === 'GET' || method === 'POST') &&
+    /^\/workspaces\/[^/]+\/settings\/?$/.test(path)
+  ) {
+    return true;
+  }
+  if (
+    method === 'GET' &&
+    /^\/workspaces\/[^/]+\/(voice|providers)\/?$/.test(path)
+  ) {
+    return true;
+  }
   if (method === 'GET' && /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path)) {
     return true;
   }
@@ -661,6 +674,27 @@ async function handleDaemonRoute(
   }
   if (method === 'GET' && path === '/workspace/voice') {
     await json(route, workspaceVoice(scenario));
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/voice\/?$/.test(path)) {
+    await json(route, workspaceVoice(scenario));
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/providers\/?$/.test(path)) {
+    await json(route, scenario.providers);
+    return;
+  }
+  if (method === 'GET' && /^\/workspaces\/[^/]+\/settings\/?$/.test(path)) {
+    await json(route, scenario.settings);
+    return;
+  }
+  if (method === 'POST' && /^\/workspaces\/[^/]+\/settings\/?$/.test(path)) {
+    await json(route, {
+      key: getRecordValue(body, 'key') ?? 'unknown',
+      scope: getRecordValue(body, 'scope') ?? 'workspace',
+      value: getRecordValue(body, 'value'),
+      requiresRestart: false,
+    });
     return;
   }
   if (method === 'GET' && /^\/workspace\/mcp\/[^/]+\/tools\/?$/.test(path)) {

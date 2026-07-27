@@ -676,6 +676,7 @@ export interface ServeSessionMonitorTaskStatus {
   exitCode?: number;
   error?: string;
   ownerAgentId?: string;
+  toolUseId?: string;
 }
 
 export type ServeSessionTaskStatus =

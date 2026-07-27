@@ -142,6 +142,41 @@ jobs:
             echo "::warning::AI release notes were not generated; keeping GitHub-generated notes."
           fi
 
+      - name: 'Comment released-in version on merged PRs'
+        if: |-
+          ${{ steps.meta.outputs.is_stable == 'true' }}
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          PREVIOUS_TAG: '${{ steps.previous.outputs.tag }}'
+          RELEASE_TAG: '${{ env.RELEASE_TAG }}'
+        run: |-
+          set -euo pipefail
+          # Squash-merge commit subjects carry the PR as "(#NNN)"; collect those between the two tags.
+          # The trailing "|| true" keeps "no matches" (empty range) from failing under pipefail.
+          pr_numbers="$(git log --pretty=format:'%s' "${PREVIOUS_TAG}..${RELEASE_TAG}" | grep -oE '\(#[0-9]+\)$' | tr -d '()#' | sort -un || true)"
+          if [[ -z "${pr_numbers}" ]]; then
+            echo "No PR references found between ${PREVIOUS_TAG} and ${RELEASE_TAG}."
+            exit 0
+          fi
+          echo "Found PRs between ${PREVIOUS_TAG} and ${RELEASE_TAG}:"
+          echo "${pr_numbers}"
+          marker='<!-- qwen-release-comment:v1 -->'
+          release_url="https://github.com/${GITHUB_REPOSITORY}/releases/tag/${RELEASE_TAG}"
+          while IFS= read -r num; do
+            if [[ -z "${num}" ]]; then
+              continue
+            fi
+            # Re-run safety: skip PRs that already carry this release marker.
+            existing="$(gh pr view "${num}" --json comments --jq '.comments[].body' 2>/dev/null || true)"
+            if grep -qF "${marker}" <<<"${existing}"; then
+              echo "PR #${num} already has a release comment; skipping."
+              continue
+            fi
+            body="${marker}"$'\n'"Released in [${RELEASE_TAG}](${release_url})."
+            gh pr comment "${num}" --body "${body}" && echo "Commented on PR #${num}." || echo "::warning::Failed to comment on PR #${num}."
+          done <<< "${pr_numbers}"
+
       - name: 'Regenerate CHANGELOG.md'
         if: |-
           ${{ steps.meta.outputs.is_stable == 'true' }}

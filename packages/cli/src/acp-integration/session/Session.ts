@@ -6786,6 +6786,12 @@ export class Session implements SessionContext {
         let toolBuildSucceeded = false;
         try {
           const invocation = tool.build(args);
+          if (policyToolName === ToolNames.MONITOR) {
+            const callIdAware = invocation as {
+              setCallId?: (id: string) => void;
+            };
+            callIdAware.setCallId?.(callId);
+          }
           toolBuildSucceeded = true;
 
           // Production AgentTool always initializes `eventEmitter` on its

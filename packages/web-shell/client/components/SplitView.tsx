@@ -10,7 +10,10 @@ import {
   useConnection,
   type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
-import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionArtifact,
+  DaemonWorkspaceCapability,
+} from '@qwen-code/sdk/daemon';
 import type { WebShellSlashCommandHandler } from '../App';
 import { useI18n } from '../i18n';
 import { ChatPane } from './ChatPane';
@@ -73,6 +76,9 @@ export interface SplitViewProps {
   restartSseOnPrompt?: boolean;
   /** Persisted transcript records requested per page by each pane. */
   historyPageSize?: number;
+  voiceUserRevision?: number;
+  voiceWorkspaceRevisions?: Readonly<Record<string, number>>;
+  voiceWorkspaces?: readonly DaemonWorkspaceCapability[];
 }
 
 /**
@@ -96,6 +102,9 @@ export function SplitView({
   workspaceCwd,
   restartSseOnPrompt,
   historyPageSize = WEB_SHELL_HISTORY_PAGE_SIZE,
+  voiceUserRevision = 0,
+  voiceWorkspaceRevisions = {},
+  voiceWorkspaces,
 }: SplitViewProps) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -490,6 +499,10 @@ export function SplitView({
                     <ChatPane
                       title={titleById.get(sessionId)}
                       workspaceCwd={paneWorkspaceCwd}
+                      hidden={isHidden}
+                      voiceUserRevision={voiceUserRevision}
+                      voiceWorkspaceRevisions={voiceWorkspaceRevisions}
+                      voiceWorkspaces={voiceWorkspaces}
                       onClose={() => removePane(sessionId)}
                       onToggleMaximize={
                         canMaximize

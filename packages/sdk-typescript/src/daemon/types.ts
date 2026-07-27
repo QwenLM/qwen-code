@@ -2095,6 +2095,7 @@ export interface DaemonSessionMonitorTaskStatus {
   exitCode?: number;
   error?: string;
   ownerAgentId?: string;
+  toolUseId?: string;
 }
 
 export type DaemonSessionTaskStatus =
