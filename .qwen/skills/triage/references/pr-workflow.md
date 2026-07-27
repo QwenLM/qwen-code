@@ -234,7 +234,7 @@ A revert-history analysis of this repo (111 revert commits, 46 unique reverted P
 **High-risk paths** — check the PR's changed files against these patterns:
 
 ```bash
-gh pr view "$PR_NUMBER" --repo "$REPO" --json files --jq '.files[].path' | grep -E 'openaiContentGenerator|streamingToolCallParser|geminiChat|acpConnection|shell\.ts$|shellExecutionService|mcp-client|mcp-pool|LspServer|acp-integration|relaunch\.ts|sandbox\.ts|electron-run-as-node'
+gh pr view "$PR_NUMBER" --repo "$REPO" --json files --jq '.files[].path' | grep -E 'openaiContentGenerator|streamingToolCallParser|geminiChat|acpConnection|shell\.ts$|shellExecutionService|mcp-client|mcp-pool|LspServer|acp-integration|relaunch\.ts$|sandbox\.ts$|electron-run-as-node'
 ```
 
 If any file matches (66.7% revert precision, 32.3% recall in the analysis):
