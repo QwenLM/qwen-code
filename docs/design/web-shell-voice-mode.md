@@ -13,6 +13,8 @@ Make the Web Shell voice control honor the workspace voice mode already returned
 
 The control captures the active pointer so releasing outside the button still finishes a hold. Keyboard-generated clicks retain the existing toggle behavior in either mode.
 
+If a hold is released while microphone or socket setup is still connecting, the stop request is deferred until the socket opens instead of returning silently to idle.
+
 The mode is loaded with the existing workspace voice status and refreshed through the existing settings-version signal. A status request remains fail-closed: the control stays hidden until the current workspace reports that voice is enabled.
 
 ## Scope

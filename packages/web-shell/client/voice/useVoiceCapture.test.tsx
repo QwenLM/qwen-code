@@ -336,6 +336,70 @@ describe('useVoiceCapture', () => {
     expect(capture?.status).toBe('error');
   });
 
+  it('finalizes after a stop requested while microphone access is pending', async () => {
+    let resolveStream: (stream: {
+      getTracks: () => (typeof track)[];
+    }) => void = () => undefined;
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: {
+        getUserMedia: vi.fn(
+          () =>
+            new Promise<{ getTracks: () => (typeof track)[] }>((resolve) => {
+              resolveStream = resolve;
+            }),
+        ),
+      },
+      configurable: true,
+    });
+    const result = await renderHookHost();
+
+    await act(async () => {
+      result.start();
+      result.stop();
+    });
+    expect(capture?.status).toBe('connecting');
+    expect(MockWebSocket.latest).toBeUndefined();
+    await act(async () => {
+      resolveStream({ getTracks: () => [track] });
+      await Promise.resolve();
+    });
+    const ws = MockWebSocket.latest;
+    if (!ws) throw new Error('WebSocket was not created');
+
+    await act(async () => {
+      ws.onopen?.();
+    });
+
+    expect(ws.sent).toEqual([
+      JSON.stringify({ type: 'start' }),
+      JSON.stringify({ type: 'stop' }),
+    ]);
+    expect(capture?.status).toBe('transcribing');
+  });
+
+  it('clears a pending stop when capture is aborted', async () => {
+    const result = await renderHookHost();
+
+    await act(async () => {
+      result.start();
+    });
+    const ws = MockWebSocket.latest;
+    if (!ws) throw new Error('WebSocket was not created');
+    ws.readyState = 0;
+
+    await act(async () => {
+      result.stop();
+      result.abort();
+    });
+    ws.readyState = MockWebSocket.OPEN;
+    await act(async () => {
+      ws.onopen?.();
+    });
+
+    expect(ws.sent).toEqual([]);
+    expect(capture?.status).toBe('idle');
+  });
+
   it('does not leak a transcription timer when stop is called twice', async () => {
     vi.useFakeTimers();
     const result = await renderHookHost();

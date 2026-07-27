@@ -151,6 +151,7 @@ export function useVoiceCapture(
   const resourcesRef = useRef<CaptureResources>({});
   const mountedRef = useRef(true);
   const captureGenerationRef = useRef(0);
+  const stopWhenConnectedRef = useRef(false);
   // Live status for async WS/worklet callbacks, which would otherwise read a
   // stale closure copy of `status`.
   const statusRef = useRef<VoiceCaptureStatus>('idle');
@@ -196,6 +197,7 @@ export function useVoiceCapture(
 
   const cleanup = useCallback(() => {
     captureGenerationRef.current++;
+    stopWhenConnectedRef.current = false;
     teardownAudio();
     const res = resourcesRef.current;
     clearTranscribeTimeout();
@@ -247,6 +249,26 @@ export function useVoiceCapture(
       onFinalRef.current(text);
     },
     [cleanup, applyStatus],
+  );
+
+  const finalize = useCallback(
+    (ws: WebSocket, generation: number) => {
+      teardownAudio();
+      setAudioLevel(0);
+      applyStatus('transcribing');
+      try {
+        ws.send(JSON.stringify({ type: 'stop' }));
+        clearTranscribeTimeout();
+        resourcesRef.current.transcribeTimeout = setTimeout(() => {
+          if (statusRef.current === 'transcribing') {
+            fail('Transcription timed out.', generation);
+          }
+        }, TRANSCRIPTION_TIMEOUT_MS);
+      } catch {
+        fail('Failed to finalize voice transcription.', generation);
+      }
+    },
+    [applyStatus, clearTranscribeTimeout, fail, teardownAudio],
   );
 
   const start = useCallback(() => {
@@ -376,6 +398,11 @@ export function useVoiceCapture(
           processor.connect(sink);
           sink.connect(context.destination);
           clearTranscribeTimeout();
+          if (stopWhenConnectedRef.current) {
+            stopWhenConnectedRef.current = false;
+            finalize(ws, generation);
+            return;
+          }
           resourcesRef.current.transcribeTimeout = setTimeout(() => {
             if (statusRef.current === 'recording') {
               fail(
@@ -439,33 +466,29 @@ export function useVoiceCapture(
         );
       }
     })();
-  }, [baseUrl, token, fail, finishWith, applyStatus, clearTranscribeTimeout]);
+  }, [
+    baseUrl,
+    token,
+    fail,
+    finishWith,
+    finalize,
+    applyStatus,
+    clearTranscribeTimeout,
+  ]);
 
   const stop = useCallback(() => {
     const ws = resourcesRef.current.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
+      if (statusRef.current === 'connecting') {
+        stopWhenConnectedRef.current = true;
+        return;
+      }
       cleanup();
       applyStatus('idle');
       return;
     }
-    // Stop feeding audio, then ask the daemon to finalize. The 'final' frame
-    // resolves the transcript; teardownAudio releases the mic immediately.
-    teardownAudio();
-    setAudioLevel(0);
-    applyStatus('transcribing');
-    const generation = captureGenerationRef.current;
-    try {
-      ws.send(JSON.stringify({ type: 'stop' }));
-      clearTranscribeTimeout();
-      resourcesRef.current.transcribeTimeout = setTimeout(() => {
-        if (statusRef.current === 'transcribing') {
-          fail('Transcription timed out.', generation);
-        }
-      }, TRANSCRIPTION_TIMEOUT_MS);
-    } catch {
-      fail('Failed to finalize voice transcription.', generation);
-    }
-  }, [cleanup, teardownAudio, fail, applyStatus, clearTranscribeTimeout]);
+    finalize(ws, captureGenerationRef.current);
+  }, [cleanup, finalize, applyStatus]);
 
   const abort = useCallback(() => {
     const ws = resourcesRef.current.ws;
