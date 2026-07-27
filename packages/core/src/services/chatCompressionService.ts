@@ -199,7 +199,6 @@ export type CompactTrigger = 'manual' | 'auto';
 export interface CompressOptions {
   promptId: string;
   force: boolean;
-  model: string;
   config: Config;
   /**
    * Number of consecutive auto-compaction failures for this chat. When it reaches
@@ -318,7 +317,6 @@ export class ChatCompressionService {
     const {
       promptId,
       force,
-      model,
       config,
       consecutiveFailures,
       originalTokenCount,
@@ -520,7 +518,10 @@ export class ChatCompressionService {
     const summaryResult = await runSideQuery(config, {
       purpose: 'chat-compression',
       skipOutputLanguagePreference: true,
-      model,
+      model: config.getCompactionModel?.(),
+      // Compression uses the compaction model (config.getCompactionModel?.()) to reduce cost.
+      // Falls back to fastModel, then the main model if not set.
+      // See https://github.com/QwenLM/qwen-code/issues/5956
       // Stream so a slow compression inference keeps the HTTP connection alive.
       // Non-streaming returns no bytes until the whole summary is generated, so
       // behind a BFF gateway with a short `proxy_read_timeout` a long inference

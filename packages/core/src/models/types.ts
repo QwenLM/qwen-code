@@ -138,6 +138,8 @@ export interface AvailableModel {
   fastOnly?: boolean;
   /** When true, this model only appears in the voice model selector */
   voiceOnly?: boolean;
+  /** When true, this model only appears in the vision model selector */
+  visionOnly?: boolean;
   /** When true, this model only appears in the image generation model selector */
   imageOnly?: boolean;
 

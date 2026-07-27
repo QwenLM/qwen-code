@@ -134,6 +134,7 @@ export interface SlashCommandProcessorActions {
     fastModelMode?: boolean;
     voiceModelMode?: boolean;
     visionModelMode?: boolean;
+    compactionModelMode?: boolean;
     imageModelMode?: boolean;
     persistScope?: 'workspace' | 'user';
   }) => void;
@@ -1117,6 +1118,12 @@ export const useSlashCommandProcessor = (
                     case 'vision-model':
                       actions.openModelDialog({
                         visionModelMode: true,
+                        persistScope: result.persistScope,
+                      });
+                      return { type: 'handled' };
+                    case 'compaction-model':
+                      actions.openModelDialog({
+                        compactionModelMode: true,
                         persistScope: result.persistScope,
                       });
                       return { type: 'handled' };

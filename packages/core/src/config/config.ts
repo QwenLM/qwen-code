@@ -1250,6 +1250,12 @@ export interface ConfigParameters {
    */
   visionModel?: string;
   /**
+   * Dedicated model for chat compression (auto-compaction). Falls back to
+   * fastModel, then the main model. Corresponds to the `compactionModel` setting
+   * (configurable via `/model --compaction`).
+   */
+  compactionModel?: string;
+  /**
    * Per-attempt timeout in milliseconds for the vision bridge transcription
    * call. Unset → built-in 30s. Corresponds to the `visionBridgeTimeoutMs`
    * setting; useful for slow or proxied vision endpoints.
@@ -1936,6 +1942,7 @@ export class Config {
   private readonly webSearchSettings?: WebSearchSettings;
   private webSearchNoticeEmitted = false;
   private visionModel?: string;
+  private compactionModel?: string;
   private imageModel?: string;
   private readonly visionBridgeTimeoutMs: number | undefined;
   private readonly modelFallbacks: string[];
@@ -2354,6 +2361,7 @@ export class Config {
     this.fastModel = params.fastModel || undefined;
     this.webSearchSettings = params.webSearch;
     this.visionModel = params.visionModel || undefined;
+    this.compactionModel = params.compactionModel || undefined;
     this.imageModel = params.imageModel || undefined;
     // Guard: nothing validates settings.json on the load path, so this is the
     // only real gate. `AbortSignal.timeout()` requires an integer in
@@ -3730,7 +3738,10 @@ export class Config {
     if (
       !available.some(
         (model) =>
-          model.id === selector.modelId && !model.voiceOnly && !model.imageOnly,
+          model.id === selector.modelId &&
+          !model.voiceOnly &&
+          !model.imageOnly &&
+          !model.visionOnly,
       )
     ) {
       return undefined;
@@ -3790,6 +3801,70 @@ export class Config {
    */
   setVisionModel(model: string | undefined): void {
     this.visionModel = model || undefined;
+  }
+
+  /**
+   * Resolve the compaction model for chat compression (auto-compaction).
+   * Priority: compactionModel (if set) → fastModel (if set) → main model.
+   */
+  getCompactionModel(): string | undefined {
+    const selector = this.resolveCompactionModelSelector();
+    if (selector) {
+      const available = selector.authType
+        ? this.getAllConfiguredModels([selector.authType])
+        : this.getAllConfiguredModels();
+      if (
+        !available.some(
+          (m) =>
+            m.id === selector.modelId &&
+            !m.voiceOnly &&
+            !m.imageOnly &&
+            !m.visionOnly,
+        )
+      ) {
+        return undefined;
+      }
+      const rawSelector = resolveModelId(this.compactionModel);
+      return rawSelector?.authType
+        ? `${rawSelector.authType}:${selector.modelId}`
+        : selector.modelId;
+    }
+    // Fallback: fastModel → main model
+    return this.getFastModel() ?? this.getModel();
+  }
+
+  private resolveCompactionModelSelector() {
+    if (!this.compactionModel) return undefined;
+    try {
+      const rawSelector = resolveModelId(this.compactionModel);
+      if (!rawSelector) return undefined;
+      if (rawSelector.authType) return rawSelector;
+
+      const currentAuthType = this.getContentGeneratorConfig()?.authType;
+      if (!currentAuthType) {
+        this.debugLogger.debug(
+          'No active auth type; skipping bare compaction model resolution',
+        );
+        return undefined;
+      }
+
+      return resolveModelId(this.compactionModel, {
+        currentAuthType,
+        getAvailableModels: () =>
+          this.getAllConfiguredModels([currentAuthType]),
+      });
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Update the compaction model at runtime (e.g. `/model --compaction <model>`).
+   * Pass undefined or an empty string to clear the override and fall back to
+   * fastModel, then the main model.
+   */
+  setCompactionModel(model: string | undefined): void {
+    this.compactionModel = model || undefined;
   }
 
   /**

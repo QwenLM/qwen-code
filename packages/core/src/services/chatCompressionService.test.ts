@@ -32,7 +32,6 @@ describe('ChatCompressionService', () => {
   let service: ChatCompressionService;
   let mockChat: GeminiChat;
   let mockConfig: Config;
-  const mockModel = 'gemini-pro';
   const mockPromptId = 'test-prompt-id';
   let mockGetHookSystem: ReturnType<typeof vi.fn>;
 
@@ -53,6 +52,7 @@ describe('ChatCompressionService', () => {
       getContentGeneratorConfig: vi.fn().mockReturnValue({}),
       getHookSystem: mockGetHookSystem,
       getModel: () => 'test-model',
+      getCompactionModel: vi.fn(),
       getApprovalMode: () => 'default',
       getDebugLogger: () => ({
         warn: vi.fn(),
@@ -74,7 +74,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: false,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -97,7 +96,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: false,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: MAX_CONSECUTIVE_FAILURES,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -122,7 +120,6 @@ describe('ChatCompressionService', () => {
       // force=true so the only thing that could NOOP us up front is the
       // circuit-breaker. At MAX-1, the breaker must NOT trip.
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: MAX_CONSECUTIVE_FAILURES - 1,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -142,7 +139,6 @@ describe('ChatCompressionService', () => {
     const tripped = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: false,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: MAX_CONSECUTIVE_FAILURES,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -157,7 +153,6 @@ describe('ChatCompressionService', () => {
     await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: MAX_CONSECUTIVE_FAILURES,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -177,7 +172,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: false,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -275,7 +269,6 @@ describe('ChatCompressionService', () => {
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
         force: false,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: 50_000,
@@ -306,7 +299,6 @@ describe('ChatCompressionService', () => {
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
         force: false,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: 50_000,
@@ -328,7 +320,6 @@ describe('ChatCompressionService', () => {
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
         force: false,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: 50_000,
@@ -354,7 +345,6 @@ describe('ChatCompressionService', () => {
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
         force: false,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: 50_000,
@@ -394,7 +384,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 100_000,
@@ -435,7 +424,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true, // → compactTrigger 'manual'
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 100_000,
@@ -485,7 +473,6 @@ describe('ChatCompressionService', () => {
       promptId: mockPromptId,
       force: true,
       trigger: 'auto', // keep the trailing fc (manual would strip it)
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 100_000,
@@ -549,7 +536,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: false,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -591,7 +577,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: false,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -662,7 +647,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: false,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -701,7 +685,6 @@ describe('ChatCompressionService', () => {
       promptId: mockPromptId,
       force: true,
       // forced
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -737,7 +720,6 @@ describe('ChatCompressionService', () => {
     await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -773,7 +755,6 @@ describe('ChatCompressionService', () => {
     await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -822,7 +803,6 @@ describe('ChatCompressionService', () => {
     await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -838,7 +818,10 @@ describe('ChatCompressionService', () => {
     expect(serialized).toContain('[image: image/png]');
   });
 
-  it('forwards model, maxAttempts, and thinkingConfig to runSideQuery', async () => {
+  it('passes getCompactionModel to runSideQuery for compression', async () => {
+    // Compression passes config.getCompactionModel?.() to runSideQuery so it uses
+    // the compaction model (falls back to fastModel, then main model) instead of
+    // the expensive main model, reducing cost. See https://github.com/QwenLM/qwen-code/issues/5956
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'msg1' }] },
       { role: 'model', parts: [{ text: 'msg2' }] },
@@ -848,6 +831,9 @@ describe('ChatCompressionService', () => {
     vi.mocked(mockChat.getHistory).mockReturnValue(history);
     vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(100);
     vi.mocked(tokenLimit).mockReturnValue(1000);
+    vi.mocked(mockConfig.getCompactionModel).mockReturnValue(
+      'compaction-model-v1',
+    );
 
     const mockGenerateText = vi.fn().mockResolvedValue({
       text: 'Summary',
@@ -864,7 +850,6 @@ describe('ChatCompressionService', () => {
     await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -874,9 +859,10 @@ describe('ChatCompressionService', () => {
     // inconsistent) and the output is hard-capped by COMPACT_MAX_OUTPUT_TOKENS
     // so subsequent threshold math has a predictable reserve. maxAttempts=1
     // keeps the call best-effort (next turn re-triggers on failure).
+    // Model is set to getCompactionModel?.() to use the compaction model for cost efficiency.
     expect(mockGenerateText).toHaveBeenCalledWith(
       expect.objectContaining({
-        model: mockModel,
+        model: 'compaction-model-v1',
         maxAttempts: 1,
         config: expect.objectContaining({
           thinkingConfig: { includeThoughts: false },
@@ -910,7 +896,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -964,7 +949,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1009,7 +993,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1062,7 +1045,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: false,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1119,7 +1101,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: false,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1157,7 +1138,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1191,7 +1171,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1227,7 +1206,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: true,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1268,7 +1246,6 @@ describe('ChatCompressionService', () => {
     const result = await service.compress(mockChat, {
       promptId: mockPromptId,
       force: false,
-      model: mockModel,
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1321,7 +1298,6 @@ describe('ChatCompressionService', () => {
         promptId: mockPromptId,
         force: true,
         // force = true -> Manual trigger
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1366,7 +1342,6 @@ describe('ChatCompressionService', () => {
         promptId: mockPromptId,
         force: false,
         // force = false -> Auto trigger
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1385,7 +1360,6 @@ describe('ChatCompressionService', () => {
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
         force: true,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1409,7 +1383,6 @@ describe('ChatCompressionService', () => {
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
         force: false,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1454,7 +1427,6 @@ describe('ChatCompressionService', () => {
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
         force: false,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1502,7 +1474,6 @@ describe('ChatCompressionService', () => {
       await service.compress(mockChat, {
         promptId: mockPromptId,
         force: false,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1544,7 +1515,6 @@ describe('ChatCompressionService', () => {
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
         force: false,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1600,7 +1570,6 @@ describe('ChatCompressionService', () => {
         promptId: mockPromptId,
         force: true,
         // force = true -> Manual trigger
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1645,7 +1614,6 @@ describe('ChatCompressionService', () => {
         promptId: mockPromptId,
         force: false,
         // force = false -> Auto trigger
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1686,7 +1654,6 @@ describe('ChatCompressionService', () => {
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
         force: true,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1733,7 +1700,6 @@ describe('ChatCompressionService', () => {
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
         force: false,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1784,7 +1750,6 @@ describe('ChatCompressionService', () => {
       await service.compress(mockChat, {
         promptId: mockPromptId,
         force: false,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1827,7 +1792,6 @@ describe('ChatCompressionService', () => {
       const result = await service.compress(mockChat, {
         promptId: mockPromptId,
         force: false,
-        model: mockModel,
         config: mockConfig,
         consecutiveFailures: 0,
         originalTokenCount: uiTelemetryService.getLastPromptTokenCount(),
@@ -1890,7 +1854,6 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     await service.compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -1955,7 +1918,6 @@ describe('ChatCompressionService.compress sideQuery config', () => {
     const result = await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -2033,7 +1995,6 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
-      model: 'qwen-test',
       config: makeFakeConfig({ contextWindowSize: 200_000 }),
       consecutiveFailures: 0,
       originalTokenCount: 160_000,
@@ -2053,7 +2014,6 @@ describe('ChatCompressionService.compress cheap-gate uses estimated tokens', () 
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
-      model: 'qwen-test',
       config: makeFakeConfig({ contextWindowSize: 200_000 }),
       consecutiveFailures: 0,
       originalTokenCount: 80_000,
@@ -2289,7 +2249,6 @@ describe('ChatCompressionService.compress — claude-code-style full-history com
     await service.compress(makeFakeChat(history), {
       promptId: 'p',
       force: true,
-      model: 'qwen-vl',
       config: makeFakeConfig(),
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -2337,7 +2296,6 @@ describe('ChatCompressionService.compress — claude-code-style full-history com
       {
         promptId: 'p',
         force: true,
-        model: 'qwen-vl',
         config: makeFakeConfig(),
         consecutiveFailures: 0,
         originalTokenCount: 180_000,
@@ -2407,7 +2365,6 @@ describe('ChatCompressionService.compress — claude-code-style full-history com
       {
         promptId: 'p',
         force: true,
-        model: 'qwen-vl',
         config: makeFakeConfig(),
         consecutiveFailures: 0,
         originalTokenCount: 180_000,
@@ -2453,7 +2410,6 @@ describe('ChatCompressionService.compress — claude-code-style full-history com
     const result = await service.compress(makeFakeChat(history), {
       promptId: 'p',
       force: true,
-      model: 'qwen-vl',
       config: makeFakeConfig(),
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -2513,7 +2469,6 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
-      model: 'qwen-test',
       config: makeFakeConfig({ contextWindowSize: 200_000 }),
       consecutiveFailures: 0,
       originalTokenCount: 160_000,
@@ -2536,7 +2491,6 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
-      model: 'qwen-test',
       config: makeFakeConfig({ contextWindowSize: 200_000 }),
       consecutiveFailures: 0,
       originalTokenCount: 171_000,
@@ -2561,7 +2515,6 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
-      model: 'qwen-test',
       config,
       consecutiveFailures: 0,
       originalTokenCount: 20_000,
@@ -2583,7 +2536,6 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
-      model: 'qwen-test',
       config,
       consecutiveFailures: 0,
       originalTokenCount: 20_000,
@@ -2639,7 +2591,6 @@ describe('ChatCompressionService.compress cheap-gate runs against the full windo
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
-      model: 'qwen-test',
       config: makeFakeConfig({ contextWindowSize: 131_072 }),
       consecutiveFailures: 0,
       originalTokenCount: 90_000,
@@ -2660,7 +2611,6 @@ describe('ChatCompressionService.compress cheap-gate runs against the full windo
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
-      model: 'qwen-test',
       config: makeFakeConfig({ contextWindowSize: 131_072 }),
       consecutiveFailures: 0,
       originalTokenCount: 60_000,
@@ -2678,7 +2628,6 @@ describe('ChatCompressionService.compress cheap-gate runs against the full windo
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
-      model: 'qwen-test',
       config: makeFakeConfig({ contextWindowSize: 200_000 }),
       consecutiveFailures: 0,
       originalTokenCount: 160_000,
@@ -2703,7 +2652,6 @@ describe('ChatCompressionService.compress cheap-gate runs against the full windo
     const result = await new ChatCompressionService().compress(makeFakeChat(), {
       promptId: 'p',
       force: false,
-      model: 'qwen-test',
       config: makeFakeConfig({ contextWindowSize: 131_072 }),
       consecutiveFailures: 0,
       originalTokenCount: 120_000,
@@ -2814,7 +2762,6 @@ describe('ChatCompressionService.compress — single-turn computer-use regressio
     const result = await service.compress(makeFakeChat(history), {
       promptId: 'p',
       force: true,
-      model: 'qwen-vl',
       config: makeFakeConfig(),
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -2920,7 +2867,6 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     await service.compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -2966,7 +2912,6 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     const result = await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 1_000,
@@ -2998,7 +2943,6 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -3035,7 +2979,6 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -3069,7 +3012,6 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -3098,7 +3040,6 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -3133,7 +3074,6 @@ describe('ChatCompressionService.compress — customInstructions plumbing', () =
     await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -3224,7 +3164,6 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -3252,7 +3191,6 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -3342,7 +3280,6 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -3394,7 +3331,6 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 180_000,
@@ -3442,7 +3378,6 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     const result = await new ChatCompressionService().compress(mockChat, {
       promptId: 'p',
       force: true,
-      model: 'qwen-test',
       config: mockConfig,
       consecutiveFailures: 0,
       originalTokenCount: 100_000,

@@ -116,6 +116,7 @@ interface ModelDialogProps {
   isFastModelMode?: boolean;
   isVoiceModelMode?: boolean;
   isVisionModelMode?: boolean;
+  isCompactionModelMode?: boolean;
   isImageModelMode?: boolean;
   /** Override which settings scope to persist the selection to. */
   persistScope?: 'workspace' | 'user';
@@ -286,6 +287,7 @@ export function ModelDialog({
   isFastModelMode,
   isVoiceModelMode,
   isVisionModelMode,
+  isCompactionModelMode,
   isImageModelMode,
   persistScope,
   availableTerminalHeight,
@@ -321,7 +323,8 @@ export function ModelDialog({
           authType === AuthType.QWEN_OAUTH) &&
         isSelectableImageModel &&
         (isFastModelMode || !m.fastOnly) &&
-        (isVoiceModelMode || !m.voiceOnly)
+        (isVoiceModelMode || !m.voiceOnly) &&
+        (isVisionModelMode || !m.visionOnly)
       );
     });
 
@@ -376,7 +379,14 @@ export function ModelDialog({
     }
 
     return result;
-  }, [authType, config, isFastModelMode, isImageModelMode, isVoiceModelMode]);
+  }, [
+    authType,
+    config,
+    isFastModelMode,
+    isImageModelMode,
+    isVoiceModelMode,
+    isVisionModelMode,
+  ]);
 
   const MODEL_OPTIONS = useMemo(
     () =>
@@ -513,7 +523,11 @@ export function ModelDialog({
   // Check if current model is a runtime model
   // Runtime snapshot ID is already in $runtime|${authType}|${modelId} format
   const activeRuntimeSnapshot =
-    isFastModelMode || isVoiceModelMode || isVisionModelMode || isImageModelMode
+    isFastModelMode ||
+    isVoiceModelMode ||
+    isVisionModelMode ||
+    isCompactionModelMode ||
+    isImageModelMode
       ? undefined
       : config?.getActiveRuntimeModelSnapshot?.();
   const currentBaseUrl = config
@@ -580,6 +594,12 @@ export function ModelDialog({
                 model.baseUrl === parsedImageModelValue.baseUrl),
           )
       : undefined;
+  const preferredCompactionModelEntry = isCompactionModelMode
+    ? availableModelEntries.find(({ model }) => {
+        const compactionModel = settings?.merged?.compactionModel?.trim();
+        return compactionModel && model.id === compactionModel;
+      })
+    : undefined;
   const preferredKey = activeRuntimeSnapshot
     ? activeRuntimeSnapshot.id
     : preferredVoiceModelEntry
@@ -594,25 +614,31 @@ export function ModelDialog({
             preferredVisionModelEntry.model.id,
             preferredVisionModelEntry.model.baseUrl,
           )
-        : preferredImageModelEntry
+        : preferredCompactionModelEntry
           ? buildModelSelectionKey(
-              preferredImageModelEntry.authType,
-              preferredImageModelEntry.model.id,
-              preferredImageModelEntry.model.baseUrl,
+              preferredCompactionModelEntry.authType,
+              preferredCompactionModelEntry.model.id,
+              preferredCompactionModelEntry.model.baseUrl,
             )
-          : preferredFastModelEntry
+          : preferredImageModelEntry
             ? buildModelSelectionKey(
-                preferredFastModelEntry.authType,
-                preferredFastModelEntry.model.id,
-                preferredFastModelEntry.model.baseUrl,
+                preferredImageModelEntry.authType,
+                preferredImageModelEntry.model.id,
+                preferredImageModelEntry.model.baseUrl,
               )
-            : authType
+            : preferredFastModelEntry
               ? buildModelSelectionKey(
-                  authType,
-                  preferredModelId,
-                  currentBaseUrl,
+                  preferredFastModelEntry.authType,
+                  preferredFastModelEntry.model.id,
+                  preferredFastModelEntry.model.baseUrl,
                 )
-              : '';
+              : authType
+                ? buildModelSelectionKey(
+                    authType,
+                    preferredModelId,
+                    currentBaseUrl,
+                  )
+                : '';
 
   useKeypress(
     (key) => {
@@ -785,6 +811,34 @@ export function ModelDialog({
         return;
       }
 
+      // Compaction model mode: persist the selected model for chat compression.
+      if (isCompactionModelMode) {
+        if (!selectedEntry || !config) {
+          setErrorMessage(t('Selected compaction model is unavailable.'));
+          return;
+        }
+        const compactionModelId = selectedEntry.model.id;
+        const scope = resolvePersistScope(settings, persistScope);
+        settings.setValue(scope, 'compactionModel', compactionModelId);
+        // Sync runtime Config so the compression service picks it up immediately.
+        config.setCompactionModel(compactionModelId);
+        const scopeSuffix =
+          persistScope === 'workspace'
+            ? t(' (this project)')
+            : persistScope === 'user'
+              ? t(' (global)')
+              : '';
+        uiState?.historyManager.addItem(
+          {
+            type: 'success',
+            text: `${t('Compaction Model')}: ${compactionModelId}${scopeSuffix}`,
+          },
+          Date.now(),
+        );
+        onClose();
+        return;
+      }
+
       if (isImageModelMode) {
         if (!selectedEntry || !config) {
           setErrorMessage(t('Selected image model is unavailable.'));
@@ -939,6 +993,7 @@ export function ModelDialog({
       isFastModelMode,
       isVoiceModelMode,
       isVisionModelMode,
+      isCompactionModelMode,
       isImageModelMode,
       availableModelEntries,
       persistScope,
@@ -960,11 +1015,13 @@ export function ModelDialog({
           ? t('Select Voice Model')
           : isVisionModelMode
             ? t('Select Vision Model')
-            : isImageModelMode
-              ? t('Select Image Model')
-              : isFastModelMode
-                ? t('Select Fast Model')
-                : t('Select Model')) +
+            : isCompactionModelMode
+              ? t('Select Compaction Model')
+              : isImageModelMode
+                ? t('Select Image Model')
+                : isFastModelMode
+                  ? t('Select Fast Model')
+                  : t('Select Model')) +
           (persistScope === 'workspace'
             ? t(' (this project)')
             : persistScope === 'user'
