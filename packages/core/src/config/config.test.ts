@@ -44,6 +44,7 @@ import {
   AuthType,
   createContentGenerator,
   createContentGeneratorConfig,
+  resetPreloadedContentGenerator,
   resolveContentGeneratorConfigWithSources,
 } from '../core/contentGenerator.js';
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
@@ -3581,6 +3582,7 @@ describe('Server Config (config.ts)', () => {
 
       // Spy after initial refresh to ensure model switch does not re-trigger refreshAuth.
       const refreshSpy = vi.spyOn(config, 'refreshAuth');
+      vi.mocked(resetPreloadedContentGenerator).mockClear();
 
       await config.switchModel(AuthType.QWEN_OAUTH, 'coder-model');
 
@@ -3591,6 +3593,10 @@ describe('Server Config (config.ts)', () => {
         vi.mocked(resolveContentGeneratorConfigWithSources),
       ).toHaveBeenCalledTimes(2);
       expect(vi.mocked(createContentGenerator)).toHaveBeenCalledTimes(1);
+      expect(resetPreloadedContentGenerator).toHaveBeenCalledOnce();
+      expect(resetPreloadedContentGenerator).toHaveBeenCalledWith(
+        config.getContentGenerator(),
+      );
     });
 
     it('should preserve thoughts from history on model switch', async () => {
@@ -4534,6 +4540,12 @@ describe('Server Config (config.ts)', () => {
 
   it('relocateWorkingDirectory should preserve leased storage for an ACP cwd change', async () => {
     const config = new Config(baseParams);
+    const generator = {} as ContentGenerator;
+    (
+      config as unknown as {
+        contentGenerator: ContentGenerator;
+      }
+    ).contentGenerator = generator;
     const originalStorage = config.storage;
     const originalPersistenceRoot = originalStorage.getProjectRoot();
     const newDir = path.resolve('/path/to/other');
@@ -4551,6 +4563,7 @@ describe('Server Config (config.ts)', () => {
     ).resolves.toEqual({});
 
     expect(config.getTargetDir()).toBe(newDir);
+    expect(resetPreloadedContentGenerator).toHaveBeenCalledWith(generator);
     expect(config.storage).toBe(originalStorage);
     expect(config.getSessionService().getProjectRoot()).toBe(
       originalPersistenceRoot,
