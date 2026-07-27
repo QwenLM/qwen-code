@@ -23,6 +23,7 @@ import { join } from 'node:path';
 import { createHash } from 'node:crypto';
 import {
   runScriptLint,
+  buildToolInvocation,
   type ToolRun,
   type ToolRunner,
   type LintTool,
@@ -273,5 +274,34 @@ describe('runScriptLint — the report is bound to the diff it ran against', () 
     );
     expect(r.diffHash).toBeUndefined();
     clean();
+  });
+});
+
+describe('buildToolInvocation — config isolation (a PR config cannot suppress its own findings)', () => {
+  // Each defence is load-bearing security: without it a PR can add a linter config
+  // that silences the exact finding the gate blocks on. Asserted on the invocation
+  // itself, so it holds with no binary installed and cannot regress silently.
+  it('shellcheck runs with --norc, ignoring a PR-added .shellcheckrc', () => {
+    const { argv } = buildToolInvocation('shellcheck', '/w/x.sh');
+    expect(argv).toContain('--norc');
+  });
+
+  it('drops SHELLCHECK_OPTS from the env even when the process has a hostile one set', () => {
+    const prev = process.env['SHELLCHECK_OPTS'];
+    process.env['SHELLCHECK_OPTS'] = '--severity=error'; // would hide info-level SC2086
+    try {
+      const { env } = buildToolInvocation('shellcheck', '/w/x.sh');
+      expect(env['SHELLCHECK_OPTS']).toBeUndefined();
+    } finally {
+      if (prev === undefined) delete process.env['SHELLCHECK_OPTS'];
+      else process.env['SHELLCHECK_OPTS'] = prev;
+    }
+  });
+
+  it('points HADOLINT_CONFIG at an EMPTY config, neutralising a PR-added .hadolint.yaml', () => {
+    const { env } = buildToolInvocation('hadolint', '/w/Dockerfile');
+    expect(env['HADOLINT_CONFIG']).toBeTruthy();
+    // the file it points at has no `ignored:` rules — it is empty
+    expect(readFileSync(env['HADOLINT_CONFIG'] as string, 'utf8')).toBe('');
   });
 });

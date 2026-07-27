@@ -1203,11 +1203,13 @@ export function scriptLintGate(planPath: string): {
   // report carries a hash of the diff it ran against; we re-hash the plan's current
   // diff. A mismatch means it is not this review's report: a later PR commit
   // (different diff), OR — the local case HEAD cannot see — an uncommitted edit that
-  // changes the working-tree diff. An absent hash on EITHER side (the diff could
-  // not be read here or there) is unverifiable and also fails closed; only both
-  // sides genuinely matching is fresh.
+  // changes the working-tree diff. An absent hash on EITHER side (the diff could not
+  // be read here or there) is unverifiable and also fails closed — `!planDiffHash`
+  // handles that explicitly, because `undefined !== undefined` is FALSE and would
+  // otherwise accept an arbitrary hashless report. Only both sides present and equal
+  // is fresh.
   const planDiffHash = diffHashOf(plan.diffPathAbsolute);
-  if (report.diffHash !== planDiffHash) {
+  if (!planDiffHash || report.diffHash !== planDiffHash) {
     unreviewed.push(
       'the executable-script lint — the report is stale or its diff could not be verified; re-run `qwen review script-lint`',
     );

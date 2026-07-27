@@ -51,19 +51,26 @@ const MODEL = 'test-model';
 let dir: string;
 /** Passed explicitly, so these tests never race another suite over process.env. */
 let ENV: NodeJS.ProcessEnv;
+// The captured diff, and its content hash. A REAL file (not just a token): coverage
+// only string-matches this path in the agents' prompts, but the script-lint gate
+// re-hashes it for its freshness check — so a plan that arms the gate needs a diff
+// that actually exists, and a report that binds to its hash to read as fresh.
+let DIFF: string;
+let DIFF_HASH: string;
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'compose-cov-'));
   ENV = { QWEN_CODE_PROJECT_DIR: dir, QWEN_CODE_SESSION_ID: 'S1' };
   mkdirSync(join(dir, 'subagents', 'S1'), { recursive: true });
+  DIFF = join(dir, 'the.diff');
+  writeFileSync(DIFF, 'diff --git a/a.ts b/a.ts\n@@ -0,0 +1 @@\n+x\n');
+  DIFF_HASH = createHash('sha256').update(readFileSync(DIFF)).digest('hex');
   ghMock.mockClear();
 });
 
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
 });
-
-const DIFF = '/abs/diff.txt';
 
 /**
  * Write a plan with two chunks, and return its path.
@@ -2437,12 +2444,22 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
   // (compose-review's coverage machinery is exercised elsewhere). A same-repo plan
   // carries a worktreePath; without one (diff-only) the orchestrator could not run
   // the command, so the gate must stay silent.
+  //
+  // Fixtures are FRESH by default: a captured diff exists and both the plan and the
+  // report bind to its hash, so the happy-path tests exercise the gate on a verified
+  // report — not through the fail-open branch. A freshness test overrides one side
+  // (a mismatching hash, or `diffHash: undefined`) to model staleness.
+  let freshDiff: { path: string; hash: string };
+  beforeEach(() => {
+    freshDiff = writeDiff();
+  });
   function writePlan(over: Record<string, unknown>): string {
     const p = join(dir, 'plan.json');
     writeFileSync(
       p,
       JSON.stringify({
         worktreePath: '.qwen/tmp/review-pr-1',
+        diffPathAbsolute: freshDiff.path,
         files: [{ path: 'deploy.sh', kind: 'source', addedLines: 3 }],
         ...over,
       }),
@@ -2461,6 +2478,7 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
         errored: [],
         ok: true,
         note: '',
+        diffHash: freshDiff.hash,
         ...report,
       }),
     );
@@ -2499,8 +2517,7 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
   });
 
   it('fails closed on a STALE report — its diffHash disagrees with the plan diff', () => {
-    const d = writeDiff();
-    const p = writePlan({ diffPathAbsolute: d.path });
+    const p = writePlan({}); // plan binds to the fresh diff
     writeReport({ ...withFinding(finding()), diffHash: 'a-different-hash' });
     const g = scriptLintGate(p);
     // The finding is NOT trusted (it was produced against a different diff); the
@@ -2511,9 +2528,8 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
   });
 
   it('accepts a report whose diffHash matches the plan diff (fresh)', () => {
-    const d = writeDiff();
-    const p = writePlan({ diffPathAbsolute: d.path });
-    writeReport({ ...withFinding(finding()), diffHash: d.hash });
+    const p = writePlan({}); // both bind to the fresh diff by default
+    writeReport(withFinding(finding()));
     const g = scriptLintGate(p);
     expect(g.criticals).toHaveLength(1);
     expect(g.unreviewed).toEqual([]);
@@ -2522,11 +2538,23 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
   it('fails closed when the plan diff is readable but the report has no diffHash', () => {
     // The command could not hash the diff → no `diffHash`. When the plan's diff IS
     // readable, an unverifiable report must not be trusted (the guard is not a no-op).
-    const d = writeDiff();
-    const p = writePlan({ diffPathAbsolute: d.path });
-    writeReport(withFinding(finding())); // no diffHash
+    const p = writePlan({}); // readable diff
+    writeReport({ ...withFinding(finding()), diffHash: undefined }); // no diffHash
     const g = scriptLintGate(p);
     expect(g.criticals).toEqual([]);
+    expect(g.unreviewed[0]).toContain('stale');
+  });
+
+  it('fails closed when NEITHER side has a hash — undefined must not equal undefined', () => {
+    // The unverifiable case its own comment claims to fail closed on: the plan names
+    // no readable diff AND the report carries no hash. `undefined !== undefined` is
+    // false, so a bare `!==` guard would ACCEPT an arbitrary report and promote its
+    // findings to blockers. The `!planDiffHash` arm is what closes it.
+    const p = writePlan({ diffPathAbsolute: '/no/such/diff.txt' });
+    writeReport({ ...withFinding(finding()), diffHash: undefined });
+    const g = scriptLintGate(p);
+    expect(g.criticals).toEqual([]);
+    expect(g.unreviewed).toHaveLength(1);
     expect(g.unreviewed[0]).toContain('stale');
   });
 
@@ -2709,6 +2737,9 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
         errored: [],
         ok: true,
         note: '',
+        // Bind to the plan's diff (coveredPlan sets diffPathAbsolute: DIFF) so the
+        // gate reads a FRESH report, not one that slips through the fail-open branch.
+        diffHash: DIFF_HASH,
         ...report,
       }),
     );

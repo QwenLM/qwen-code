@@ -290,38 +290,46 @@ export type ToolRun =
 export type ToolRunner = (tool: LintTool, absPath: string) => ToolRun;
 
 /**
- * Run a linter over one file. Fails **closed**: only a clean exit (0) or a
- * findings exit (1) yields output to parse; a spawn error (`EACCES`), a signal,
- * a `maxBuffer` overflow, or any other status is an `error` the caller must not
- * read as a clean file. `ENOENT` alone is `missing` (the binary is not installed).
+ * The argv and environment for invoking one linter — the config-isolation layer,
+ * factored out of `runTool` so it can be asserted WITHOUT spawning a binary. Every
+ * defence here is load-bearing: a PR that adds its own linter config must not be
+ * able to suppress the findings we run the linter to catch.
+ *
+ * - shellcheck: `--norc` ignores a PR-controlled `.shellcheckrc` (which could
+ *   `disable=SC2086`), and `SHELLCHECK_OPTS` is dropped from the env for the same
+ *   reason — configuration comes from us, not the diff.
+ * - hadolint: has no working `--no-config` flag (a prior attempt made it exit 2 on
+ *   every Dockerfile), so isolation is via env: `HADOLINT_CONFIG` points at an empty
+ *   file, neutralising a `.hadolint.yaml` the diff added. Env vars are benign if a
+ *   tool ignores them — unlike a bad CLI flag.
  */
-function runTool(tool: LintTool, absPath: string): ToolRun {
-  // The three tools all take a file path and print machine-readable diagnostics.
-  // `shellcheck --norc` ignores a PR-controlled `.shellcheckrc` in the worktree
-  // (which could disable SC2086), and the sanitized env drops `SHELLCHECK_OPTS`
-  // for the same reason: a checker's configuration must come from us, not the diff.
+export function buildToolInvocation(
+  tool: LintTool,
+  absPath: string,
+): { argv: string[]; env: NodeJS.ProcessEnv } {
   const argv: Record<LintTool, string[]> = {
     shellcheck: ['--norc', '--format=json1', '--severity=style', absPath],
     actionlint: ['-format', '{{json .}}', '-no-color', absPath],
-    // NOTE: hadolint has no `--no-config` flag — a prior attempt to add one made
-    // hadolint exit 2 (usage error) on every Dockerfile. Config isolation for
-    // hadolint (a PR-controlled `.hadolint.yaml`) needs a verified mechanism
-    // (`HADOLINT_CONFIG` / `--config <empty>`) and is tracked separately; for now
-    // the invocation is the plain, working one.
     hadolint: ['--format', 'json', absPath],
   };
-  // Config isolation, so a PR-controlled config cannot suppress its own findings:
-  // shellcheck gets `--norc` + `SHELLCHECK_OPTS` dropped (above); hadolint reads a
-  // config from `HADOLINT_CONFIG` when set, so point it at an empty one — that
-  // neutralises a `.hadolint.yaml` the diff added. `HADOLINT_NO_COLOR` keeps output
-  // clean. (Env vars are benign if a tool ignores them — unlike a bad CLI flag.)
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     HADOLINT_NO_COLOR: '1',
     HADOLINT_CONFIG: emptyHadolintConfig(),
   };
   delete env['SHELLCHECK_OPTS'];
-  const r = spawnSync(tool, argv[tool], {
+  return { argv: argv[tool], env };
+}
+
+/**
+ * Run a linter over one file. Fails **closed**: only a clean exit (0) or a
+ * findings exit (1) yields output to parse; a spawn error (`EACCES`), a signal,
+ * a `maxBuffer` overflow, or any other status is an `error` the caller must not
+ * read as a clean file. `ENOENT` alone is `missing` (the binary is not installed).
+ */
+function runTool(tool: LintTool, absPath: string): ToolRun {
+  const { argv, env } = buildToolInvocation(tool, absPath);
+  const r = spawnSync(tool, argv, {
     encoding: 'utf8',
     maxBuffer: 32 * 1024 * 1024,
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -421,10 +429,9 @@ function parseFindings(tool: LintTool, raw: string): LintFinding[] | null {
   return null;
 }
 
-/** The worktree's HEAD commit, or undefined when it is not a git checkout (tests,
- *  a plain directory). Best-effort — a missing SHA just skips the freshness check. */
 /** A hash of the captured diff — the identity of *what was reviewed*. `undefined`
- *  when the diff cannot be read (there is then nothing to bind freshness to).
+ *  when the diff cannot be read; the gate treats an absent hash on either side as
+ *  unverifiable and fails closed (it does NOT skip the freshness check).
  *  Exported so `compose-review`'s gate hashes the plan's diff the SAME way. */
 export function diffHashOf(diffPath: unknown): string | undefined {
   if (typeof diffPath !== 'string' || !diffPath) return undefined;
