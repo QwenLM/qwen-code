@@ -50,6 +50,10 @@ import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { VoiceButton } from '../voice/VoiceButton';
+import type {
+  VoiceStatusRevision,
+  VoiceWorkspaceTarget,
+} from '../voice/voice-workspace-target';
 import { GitBranchChipContent, GitBranchIndicator } from './GitBranchIndicator';
 import { GitModePopover, type SessionGitIntent } from './GitModePopover';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
@@ -180,6 +184,8 @@ interface ChatEditorProps {
   builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
   atProviders?: readonly WebShellAtProvider[];
   composerTagIcons?: WebShellComposerTagIconMap;
+  voiceTarget?: VoiceWorkspaceTarget;
+  voiceStatusRevision?: VoiceStatusRevision;
 }
 
 const CHAT_EDITOR_THEME = {
@@ -1200,6 +1206,8 @@ export const ChatEditor = memo(
       builtinAtProviders,
       atProviders,
       composerTagIcons,
+      voiceTarget,
+      voiceStatusRevision,
     } = props;
 
     const {
@@ -2333,6 +2341,8 @@ export const ChatEditor = memo(
                   <VoiceButton
                     disabled={disabled}
                     onActiveChange={setVoiceActive}
+                    target={voiceTarget}
+                    statusRevision={voiceStatusRevision}
                     onInsert={(text) => {
                       const existing = core.getText();
                       const sep = existing && !/\s$/.test(existing) ? ' ' : '';

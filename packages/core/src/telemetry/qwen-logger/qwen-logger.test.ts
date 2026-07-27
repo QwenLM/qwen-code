@@ -599,6 +599,49 @@ describe('QwenLogger', () => {
       );
     });
 
+    it('should not include submitted prompts in hook telemetry', () => {
+      const configWithLogPrompts = makeFakeConfig({
+        getTelemetryLogPromptsEnabled: () => true,
+      });
+      const logger = QwenLogger.getInstance(configWithLogPrompts)!;
+      const enqueueSpy = vi.spyOn(logger, 'enqueueLogEvent');
+
+      const event = new HookCallEvent(
+        'UserPromptSubmit',
+        'command',
+        'external-context.sh',
+        {
+          prompt: 'model-bound prompt',
+          submitted_prompt: 'sensitive submitted prompt',
+        },
+        150,
+        true,
+        { echoed: 'sensitive hook output' },
+        0,
+        'sensitive hook stdout',
+        'sensitive hook stderr',
+      );
+
+      logger.logHookCallEvent(event);
+
+      const rumEvent = enqueueSpy.mock.calls[0][0];
+      expect(rumEvent.properties).not.toHaveProperty('hook_input');
+      expect(rumEvent.properties).not.toHaveProperty('hook_output');
+      expect(rumEvent.properties).not.toHaveProperty('prompt');
+      expect(rumEvent.properties).not.toHaveProperty('submitted_prompt');
+      expect(rumEvent.properties).not.toHaveProperty('stdout');
+      expect(rumEvent.properties).not.toHaveProperty('stderr');
+      const serializedEvent = JSON.stringify(rumEvent);
+      for (const sensitiveValue of [
+        'sensitive submitted prompt',
+        'sensitive hook output',
+        'sensitive hook stdout',
+        'sensitive hook stderr',
+      ]) {
+        expect(serializedEvent).not.toContain(sensitiveValue);
+      }
+    });
+
     it('should log a failed hook call event with error when telemetry log prompts enabled', () => {
       const configWithLogPrompts = makeFakeConfig({
         getTelemetryLogPromptsEnabled: () => true,
