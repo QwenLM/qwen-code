@@ -1158,7 +1158,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // sits at position 0, so a single `.find()` would let its (more
           // recent) anchor win over earlier session_update recordIds still
           // in the window, causing `beforeRecordId` to re-fetch records
-          // the client already displays.
+          // the client already displays. Last resort: the daemon's
+          // `historyAnchorRecordId` — the latest recordId it read from the
+          // persisted transcript — which covers live sessions whose
+          // in-flight turn capped the journal before any turn boundary
+          // (no recordId anywhere in the retained window or marker).
           const firstPersistedRecordId =
             replayEvents
               .filter((e) => e.type === 'session_update')
@@ -1167,7 +1171,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             replayEvents
               .filter((e) => e.type === 'history_truncated')
               .map(getPersistedReplayRecordId)
-              .find((recordId): recordId is string => recordId !== undefined);
+              .find((recordId): recordId is string => recordId !== undefined) ??
+            activeSession.historyAnchorRecordId;
           const replayHistoryWasTruncated = replayEvents.some(
             hasFullTranscriptBeforeReplay,
           );
