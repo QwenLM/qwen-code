@@ -154,7 +154,9 @@ export function VoiceButton({
           });
         }
       })
-      .catch(() => undefined);
+      .catch((error: unknown) => {
+        console.warn('[web-shell] Voice status probe failed:', error);
+      });
 
     return () => {
       current = false;
@@ -202,20 +204,27 @@ export function VoiceButton({
         const refreshOwnerKey = targetRef.current?.ownerKey;
         const refreshGeneration = ++capabilityRefreshGenerationRef.current;
         setCapabilityRefreshFailed(true);
-        void workspace
-          .refreshCapabilities?.()
-          .then(() => {
-            if (
-              !mountedRef.current ||
-              capabilityRefreshGenerationRef.current !== refreshGeneration ||
-              targetRef.current?.ownerKey !== refreshOwnerKey
-            ) {
-              return;
-            }
-            setCapabilityRefreshFailed(false);
-            setLocalRevision((revision) => revision + 1);
-          })
-          .catch(() => undefined);
+        const settleRefresh = () => {
+          if (
+            !mountedRef.current ||
+            capabilityRefreshGenerationRef.current !== refreshGeneration ||
+            targetRef.current?.ownerKey !== refreshOwnerKey
+          ) {
+            return;
+          }
+          setCapabilityRefreshFailed(false);
+          setLocalRevision((revision) => revision + 1);
+        };
+        try {
+          const refresh = workspace.refreshCapabilities?.();
+          if (refresh) {
+            void refresh.then(settleRefresh, settleRefresh);
+          } else {
+            settleRefresh();
+          }
+        } catch {
+          settleRefresh();
+        }
       },
     });
 

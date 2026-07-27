@@ -86,6 +86,7 @@ const PANE_TOOLBAR_ACTIONS: readonly ComposerToolbarAction[] = [
   'model',
   'voice',
 ];
+const EMPTY_VOICE_WORKSPACE_REVISIONS: Readonly<Record<string, number>> = {};
 
 export interface ChatPaneProps {
   /** Header label; falls back to the session's own display name / id. */
@@ -144,7 +145,7 @@ export function ChatPane({
   restartSseOnPrompt = false,
   hidden = false,
   voiceUserRevision = 0,
-  voiceWorkspaceRevisions = {},
+  voiceWorkspaceRevisions = EMPTY_VOICE_WORKSPACE_REVISIONS,
   voiceWorkspaces,
 }: ChatPaneProps) {
   const { t } = useI18n();
@@ -279,12 +280,15 @@ export function ChatPane({
       workspace.capabilities,
     ],
   );
-  const voiceStatusRevision: VoiceStatusRevision = {
-    user: voiceUserRevision,
-    workspace: voiceTarget
-      ? (voiceWorkspaceRevisions[voiceTarget.workspaceKey] ?? 0)
-      : 0,
-  };
+  const voiceStatusRevision: VoiceStatusRevision = useMemo(
+    () => ({
+      user: voiceUserRevision,
+      workspace: voiceTarget
+        ? (voiceWorkspaceRevisions[voiceTarget.workspaceKey] ?? 0)
+        : 0,
+    }),
+    [voiceTarget, voiceUserRevision, voiceWorkspaceRevisions],
+  );
   const isResponding = streamingState !== 'idle';
   const artifactsByTurn = useMemo(
     () =>
@@ -719,7 +723,8 @@ export function ChatPane({
           onSelectMode={handleSelectMode}
           onSelectModel={handleSelectModel}
           dialogOpen={approvalActive}
-          voiceTarget={hidden || approvalActive ? undefined : voiceTarget}
+          disabled={approvalActive}
+          voiceTarget={hidden ? undefined : voiceTarget}
           voiceStatusRevision={voiceStatusRevision}
           followupState={followupState}
           onAcceptFollowup={onAcceptFollowup}

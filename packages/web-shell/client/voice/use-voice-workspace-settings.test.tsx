@@ -109,6 +109,30 @@ describe('useVoiceWorkspaceSettings', () => {
     expect(workspaceSettingsA).toHaveBeenCalledOnce();
   });
 
+  it('keeps the current descriptor visible during a same-owner refresh', async () => {
+    workspaceSettingsA.mockResolvedValueOnce(settings('voice-a'));
+    currentTarget = targetA;
+    await render();
+    expect(result?.descriptor?.values.effective).toBe('voice-a');
+
+    let resolveRefresh: (value: ReturnType<typeof settings>) => void = () =>
+      undefined;
+    workspaceSettingsA.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveRefresh = resolve;
+      }),
+    );
+    currentRevision = '1';
+    await render();
+    expect(result?.descriptor?.values.effective).toBe('voice-a');
+
+    await act(async () => {
+      resolveRefresh(settings('new-a'));
+      await Promise.resolve();
+    });
+    expect(result?.descriptor?.values.effective).toBe('new-a');
+  });
+
   it('rejects stale A to B to A responses by request generation', async () => {
     let resolveFirstA: (value: ReturnType<typeof settings>) => void = () =>
       undefined;

@@ -15,7 +15,9 @@ import {
 /**
  * Captures 16 kHz mono PCM in the browser and streams it to the immutable
  * workspace owner selected when recording starts. Credentials remain in the
- * browser-to-daemon transport; transcription stays server-side.
+ * browser-to-daemon transport; transcription stays server-side. The bearer
+ * subprotocol is verified by the daemon's ACP upgrade listener in
+ * `serve/acp-http/index.ts`.
  */
 export type VoiceCaptureStatus =
   | 'idle'
@@ -77,7 +79,10 @@ export function toVoiceWebSocketUrl(
 // Browsers cannot set Authorization on a WebSocket. The daemon decodes this
 // bearer subprotocol during the upgrade; keep the prefix in sync with it.
 const WS_BEARER_SUBPROTOCOL_PREFIX = 'qwen-bearer.';
-// The daemon selects this non-secret marker instead of echoing the bearer.
+// Non-secret marker offered alongside the bearer subprotocol. The daemon
+// completes the handshake by selecting THIS (never echoing the secret), which
+// also satisfies WS clients that require the server to pick an offered
+// subprotocol when any were requested. Must not start with the bearer prefix.
 const WS_AUTH_SUBPROTOCOL = 'qwen-ws';
 
 function bearerSubprotocol(token: string): string {
@@ -111,7 +116,7 @@ function describeMicError(err: unknown): string {
   }
 }
 
-/** Float32 [-1, 1] frame to Int16 PCM plus an RMS level for the meter. */
+/** Float32 [-1,1] frame → Int16 PCM + RMS level. */
 function floatToPcm16(input: Float32Array): {
   pcm: ArrayBuffer;
   level: number;
@@ -119,11 +124,11 @@ function floatToPcm16(input: Float32Array): {
   const pcm = new Int16Array(input.length);
   let sumSquares = 0;
   for (let i = 0; i < input.length; i++) {
-    let sample = input[i];
-    if (sample > 1) sample = 1;
-    else if (sample < -1) sample = -1;
-    pcm[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
-    sumSquares += sample * sample;
+    let s = input[i];
+    if (s > 1) s = 1;
+    else if (s < -1) s = -1;
+    pcm[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+    sumSquares += s * s;
   }
   return {
     pcm: pcm.buffer,
@@ -136,8 +141,9 @@ interface CaptureResources {
   stream?: MediaStream;
   context?: AudioContext;
   source?: MediaStreamAudioSourceNode;
-  // The Web Shell CSP omits blob:, so a Blob-URL AudioWorklet cannot load.
-  // ScriptProcessor needs no module URL and therefore works under that CSP.
+  // ScriptProcessorNode (not AudioWorklet): the Web Shell CSP `script-src`
+  // omits `blob:`, which blocks a Blob-URL worklet module. ScriptProcessor
+  // needs no module load, so it sidesteps CSP entirely.
   processor?: ScriptProcessorNode;
   sink?: GainNode;
   transcribeTimeout?: ReturnType<typeof setTimeout>;
@@ -345,10 +351,7 @@ export function useVoiceCapture({
 
     clearTranscribeTimeout();
     resourcesRef.current.transcribeTimeout = setTimeout(() => {
-      if (
-        snapshotIsCurrent(snapshot) &&
-        statusRef.current === 'connecting'
-      ) {
+      if (snapshotIsCurrent(snapshot) && statusRef.current === 'connecting') {
         fail('Voice capture timed out while starting.', snapshot);
       }
     }, START_TIMEOUT_MS);

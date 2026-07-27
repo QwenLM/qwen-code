@@ -179,6 +179,7 @@ describe('VoiceButton', () => {
   });
 
   it('stays hidden while the workspace voice request is pending or fails', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     let rejectVoice: (reason?: unknown) => void = () => undefined;
     mocks.workspaceVoice.mockReturnValue(
       new Promise((_, reject) => {
@@ -194,6 +195,11 @@ describe('VoiceButton', () => {
       await Promise.resolve();
     });
     expect(container.querySelector('button')).toBeNull();
+    expect(warn).toHaveBeenCalledWith(
+      '[web-shell] Voice status probe failed:',
+      expect.any(Error),
+    );
+    warn.mockRestore();
   });
 
   it('does not request workspace voice without the daemon capability', async () => {
@@ -532,13 +538,17 @@ describe('VoiceButton', () => {
     expect(container.querySelector('button')).toBeNull();
   });
 
-  it('keeps the same-owner gate closed when a 1012 refresh fails', async () => {
+  it('revalidates the same owner when a 1012 refresh fails', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
     mocks.workspace.refreshCapabilities.mockRejectedValue(
       new Error('refresh failed'),
     );
-    const { container } = mount(false);
+    const { root, container } = mount(false);
     await flush();
     expect(container.querySelector('button')).not.toBeNull();
+    mocks.workspaceVoice.mockRejectedValueOnce(
+      new Error('voice status still unavailable'),
+    );
 
     act(() => {
       mocks.captureOptions?.onUnexpectedClose?.({
@@ -549,12 +559,28 @@ describe('VoiceButton', () => {
     await flush();
 
     expect(mocks.workspace.refreshCapabilities).toHaveBeenCalledOnce();
-    expect(mocks.workspaceVoice).toHaveBeenCalledOnce();
+    expect(mocks.workspaceVoice).toHaveBeenCalledTimes(2);
     expect(container.querySelector('button')).toBeNull();
+
+    mocks.settingsVersion += 1;
+    act(() => {
+      root.render(
+        <VoiceButton
+          disabled={false}
+          onInsert={() => {}}
+          target={legacyTarget}
+        />,
+      );
+    });
+    await flush();
+
+    expect(mocks.workspaceVoice).toHaveBeenCalledTimes(3);
+    expect(container.querySelector('button')).not.toBeNull();
     expect(mocks.captureOptions?.target).toEqual({
       ownerKey: legacyTarget.ownerKey,
       streamPath: legacyTarget.streamPath,
     });
+    warn.mockRestore();
   });
 
   it('lets a disabled composer stop active dictation', async () => {

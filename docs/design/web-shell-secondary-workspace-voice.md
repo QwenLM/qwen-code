@@ -32,7 +32,7 @@ The composer already has the correct source data. In the main view, `activeWorks
 
 The merged protocol is authoritative: `workspace_qualified_voice` alone advertises all workspace-qualified Voice modalities. The legacy `workspace_voice`, `workspace_voice_transcription`, and `voice_transcribe` tags describe primary-bound routes and are not prerequisites for a secondary runtime.
 
-Issue #6972 originally asked for an intersection between `workspace_qualified_voice` and a legacy Voice capability. That would incorrectly hide a valid secondary configuration when the primary runtime has no Voice model or primary-only capability. The implementation and tests follow the merged protocol, and the issue wording must reflect that separation before implementation review.
+Issue #6972 originally asked for an intersection between `workspace_qualified_voice` and a legacy Voice capability. That would incorrectly hide a valid secondary configuration when the primary runtime has no Voice model or primary-only capability. The issue now reflects that separation, and the implementation and tests follow the merged protocol.
 
 The related model and Settings UI use core routes, not Voice routes, so their capability intersection is operation-specific:
 

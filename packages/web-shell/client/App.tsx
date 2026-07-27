@@ -2622,8 +2622,6 @@ export function App({
   >('workspace');
   const [showFallbacksDialog, setShowFallbacksDialog] = useState(false);
   const showFallbacksDialogRef = useRef(showFallbacksDialog);
-  modelDialogModeRef.current = modelDialogMode;
-  showFallbacksDialogRef.current = showFallbacksDialog;
   const [voiceModels, setVoiceModels] = useState<VoiceModelOption[]>([]);
   const [showApprovalModeDialog, setShowApprovalModeDialog] = useState(false);
   const [showResumeDialog, setShowResumeDialog] = useState(false);
@@ -2647,7 +2645,6 @@ export function App({
     'chat' | 'scheduledTasks' | 'goals' | 'split'
   >('chat');
   const mainViewRef = useRef(mainView);
-  mainViewRef.current = mainView;
   const useFloatingArtifactPanel =
     !canDockArtifactPanel || mainView === 'split';
   // Sessions to seed the split view with (e.g. the selection from the overview).
@@ -2673,7 +2670,6 @@ export function App({
     | null
   >(null);
   const activePanelRef = useRef(activePanel);
-  activePanelRef.current = activePanel;
   const closePanel = useCallback(() => setActivePanel(null), []);
   const handleUseSkill = useCallback(
     (name: string) => {
@@ -3023,7 +3019,6 @@ export function App({
   const [showMemoryDialog, setShowMemoryDialog] = useState(false);
   const [showAuthDialog, setShowAuthDialog] = useState(false);
   const showAuthDialogRef = useRef(showAuthDialog);
-  showAuthDialogRef.current = showAuthDialog;
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
   const [memoryAddSignal, setMemoryAddSignal] = useState(0);
   const [externalInteractionBlockCount, setExternalInteractionBlockCount] =
@@ -3485,12 +3480,15 @@ export function App({
   const [voiceWorkspaceRevisions, setVoiceWorkspaceRevisions] = useState<
     Record<string, number>
   >({});
-  const mainVoiceStatusRevision: VoiceStatusRevision = {
-    user: voiceUserRevision,
-    workspace: mainVoiceTarget
-      ? (voiceWorkspaceRevisions[mainVoiceTarget.workspaceKey] ?? 0)
-      : 0,
-  };
+  const mainVoiceStatusRevision: VoiceStatusRevision = useMemo(
+    () => ({
+      user: voiceUserRevision,
+      workspace: mainVoiceTarget
+        ? (voiceWorkspaceRevisions[mainVoiceTarget.workspaceKey] ?? 0)
+        : 0,
+    }),
+    [mainVoiceTarget, voiceUserRevision, voiceWorkspaceRevisions],
+  );
   const voiceModelSettingsSupported = supportsVoiceModelSettings(
     mainVoiceTarget,
     workspace.capabilities?.features ?? [],
@@ -3870,15 +3868,12 @@ export function App({
     reloadWorkspaceSettings,
   ]);
   const targetedWorkspaceSettings = useMemo(() => {
-    if (mainVoiceTarget?.route === 'legacy-primary') return workspaceSettings;
     const withoutVoice = workspaceSettings.filter(
       (setting) => setting.key !== 'voiceModel',
     );
-    if (
-      !voiceModelSettingsSupported ||
-      !qualifiedVoiceSetting ||
-      mainView === 'split'
-    ) {
+    if (mainView === 'split') return withoutVoice;
+    if (mainVoiceTarget?.route === 'legacy-primary') return workspaceSettings;
+    if (!voiceModelSettingsSupported || !qualifiedVoiceSetting) {
       return withoutVoice;
     }
     const voiceIndex = workspaceSettings.findIndex(
@@ -4013,9 +4008,24 @@ export function App({
     ],
   );
   const mainVoiceTargetRef = useRef(mainVoiceTarget);
-  mainVoiceTargetRef.current = mainVoiceTarget;
   const voiceFeaturesRef = useRef(workspace.capabilities?.features ?? []);
-  voiceFeaturesRef.current = workspace.capabilities?.features ?? [];
+  useLayoutEffect(() => {
+    modelDialogModeRef.current = modelDialogMode;
+    showFallbacksDialogRef.current = showFallbacksDialog;
+    mainViewRef.current = mainView;
+    activePanelRef.current = activePanel;
+    showAuthDialogRef.current = showAuthDialog;
+    mainVoiceTargetRef.current = mainVoiceTarget;
+    voiceFeaturesRef.current = workspace.capabilities?.features ?? [];
+  }, [
+    activePanel,
+    mainView,
+    mainVoiceTarget,
+    modelDialogMode,
+    showAuthDialog,
+    showFallbacksDialog,
+    workspace.capabilities?.features,
+  ]);
   const voicePickerRequestRef = useRef(0);
   const pendingVoicePickerSourceRef = useRef<
     'command' | 'settings' | undefined
@@ -8463,7 +8473,10 @@ export function App({
                           }
                           cancelArmed={cancelArmed}
                           disabled={
-                            isDisabled || isStartingNewSessionSuggestion
+                            isDisabled ||
+                            isStartingNewSessionSuggestion ||
+                            interactionBlocked ||
+                            approvalOverlayActive
                           }
                           commands={commands}
                           skills={loadedSkills}
@@ -8472,7 +8485,7 @@ export function App({
                           atProviders={atProviders}
                           composerTagIcons={composerTagIcons}
                           voiceTarget={
-                            interactionBlocked || approvalOverlayActive
+                            activePanel !== null || mainView !== 'chat'
                               ? undefined
                               : mainVoiceTarget
                           }

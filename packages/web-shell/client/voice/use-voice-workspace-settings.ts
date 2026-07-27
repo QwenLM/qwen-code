@@ -27,52 +27,61 @@ export function useVoiceWorkspaceSettings(
   revisionKey: string,
 ): VoiceWorkspaceSettingsState {
   const requestRef = useRef(0);
-  const targetKey =
+  const ownerKey =
     enabled && target?.route === 'workspace-qualified'
-      ? JSON.stringify([target.ownerKey, revisionKey])
+      ? target.ownerKey
       : undefined;
-  const currentKeyRef = useRef(targetKey);
-  currentKeyRef.current = targetKey;
+  const requestKey = ownerKey
+    ? JSON.stringify([ownerKey, revisionKey])
+    : undefined;
+  const currentRequestKeyRef = useRef(requestKey);
+  currentRequestKeyRef.current = requestKey;
   const [state, setState] = useState<{
-    key: string | undefined;
+    ownerKey: string | undefined;
     status: DaemonWorkspaceSettingsStatus | undefined;
   }>({
-    key: targetKey,
+    ownerKey,
     status: undefined,
   });
 
   const reload = useCallback(async () => {
-    const key = targetKey;
-    if (currentKeyRef.current !== key) return undefined;
+    const key = requestKey;
+    if (currentRequestKeyRef.current !== key) return undefined;
     const request = ++requestRef.current;
-    if (!key || !target || target.route !== 'workspace-qualified') {
+    if (
+      !key ||
+      !ownerKey ||
+      !target ||
+      target.route !== 'workspace-qualified'
+    ) {
       setState({
-        key,
+        ownerKey,
         status: undefined,
       });
       return undefined;
     }
 
-    setState({
-      key,
-      status: undefined,
-    });
+    setState((current) =>
+      current.ownerKey === ownerKey
+        ? current
+        : {
+            ownerKey,
+            status: undefined,
+          },
+    );
     try {
       const status = await loadVoiceSettings(client, target);
-      if (request === requestRef.current && currentKeyRef.current === key) {
-        setState({ key, status });
+      if (
+        request === requestRef.current &&
+        currentRequestKeyRef.current === key
+      ) {
+        setState({ ownerKey, status });
       }
       return status;
     } catch {
-      if (request === requestRef.current && currentKeyRef.current === key) {
-        setState({
-          key,
-          status: undefined,
-        });
-      }
       return undefined;
     }
-  }, [client, target, targetKey]);
+  }, [client, ownerKey, requestKey, target]);
   const invalidate = useCallback(() => {
     requestRef.current++;
   }, []);
@@ -82,7 +91,7 @@ export function useVoiceWorkspaceSettings(
     return invalidate;
   }, [invalidate, reload]);
 
-  const current = state.key === targetKey ? state : undefined;
+  const current = state.ownerKey === ownerKey ? state : undefined;
   return {
     descriptor: current?.status?.settings.find(
       (setting) => setting.key === 'voiceModel',

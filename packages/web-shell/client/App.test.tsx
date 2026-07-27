@@ -55,7 +55,11 @@ type ChatEditorTestProps = {
   skills?: Array<{ name: string; description: string }>;
   commands?: Array<{ name: string }>;
   isPreparing?: boolean;
+  disabled?: boolean;
   dialogOpen?: boolean;
+  onToggleShortcuts?: () => void;
+  voiceTarget?: VoiceWorkspaceTarget;
+  voiceStatusRevision?: VoiceStatusRevision;
   placeholderText?: string;
   workspaces?: Array<{ id: string; cwd: string }>;
   atWorkspaceCwd?: string;
@@ -7710,9 +7714,17 @@ describe('App session callbacks', () => {
     // flips false. Unless dialogOpen also keys off the pending approval,
     // useComposerCore refocuses the composer and ToolApproval — which ignores
     // keys from editable targets — stops responding to its approval shortcuts.
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      features: ['voice_transcribe'],
+    } as typeof mockWorkspace.capabilities;
     const { rerender } = renderApp();
     await flush();
     expect(testState.latestChatEditorProps?.dialogOpen).toBe(false);
+    const voiceTarget = testState.latestChatEditorProps?.voiceTarget;
+    const voiceStatusRevision =
+      testState.latestChatEditorProps?.voiceStatusRevision;
+    expect(voiceTarget).toBeDefined();
 
     await act(async () => {
       testState.blocks = [makePendingPermissionBlock()];
@@ -7721,6 +7733,33 @@ describe('App session callbacks', () => {
     });
 
     expect(testState.latestChatEditorProps?.dialogOpen).toBe(true);
+    expect(testState.latestChatEditorProps?.disabled).toBe(true);
+    expect(testState.latestChatEditorProps?.voiceTarget).toBe(voiceTarget);
+    expect(testState.latestChatEditorProps?.voiceStatusRevision).toBe(
+      voiceStatusRevision,
+    );
+  });
+
+  it('keeps an active Voice owner stable while a normal dialog is open', async () => {
+    mockWorkspace.capabilities = {
+      workspaceCwd: '/tmp/project',
+      features: ['voice_transcribe'],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp();
+    await flush();
+    const voiceTarget = testState.latestChatEditorProps?.voiceTarget;
+    expect(voiceTarget).toBeDefined();
+
+    act(() => {
+      testState.latestChatEditorProps?.onToggleShortcuts?.();
+    });
+    await flush();
+
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
+    expect(testState.latestChatEditorProps?.disabled).toBe(true);
+    expect(testState.latestChatEditorProps?.voiceTarget).toBe(voiceTarget);
   });
 
   it('dismisses an open sub-dialog (model picker) when an approval becomes pending', async () => {

@@ -622,6 +622,8 @@ describe('useVoiceCapture', () => {
     await act(async () => {
       result.start();
     });
+    const context = MockAudioContext.latest;
+    if (!context) throw new Error('audio context was not created');
     await act(async () => {
       root?.unmount();
     });
@@ -633,7 +635,7 @@ describe('useVoiceCapture', () => {
 
     expect(track.stop).toHaveBeenCalledTimes(1);
     expect(MockWebSocket.latest).toBeUndefined();
-    expect(MockAudioContext.latest).toBeUndefined();
+    expect(context.close).toHaveBeenCalledOnce();
     expect(onFinal).not.toHaveBeenCalled();
     expect(onError).not.toHaveBeenCalled();
   });

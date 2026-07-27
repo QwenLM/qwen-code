@@ -373,6 +373,31 @@ describe('ChatPane', () => {
     });
   });
 
+  it('keeps an active split Voice owner stable while approval is pending', () => {
+    connectionState.capabilities = {
+      features: ['voice_transcribe'],
+      workspaceCwd: '/w',
+    };
+    render({ workspaceCwd: '/w' });
+    const voiceTarget = latestChatEditorProps.voiceTarget;
+    const voiceStatusRevision = latestChatEditorProps.voiceStatusRevision;
+    expect(voiceTarget).toBeDefined();
+
+    pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
+    act(() => {
+      root?.render(
+        <I18nProvider language="en">
+          <ChatPane workspaceCwd="/w" />
+        </I18nProvider>,
+      );
+    });
+
+    expect(latestChatEditorProps.dialogOpen).toBe(true);
+    expect(latestChatEditorProps.disabled).toBe(true);
+    expect(latestChatEditorProps.voiceTarget).toBe(voiceTarget);
+    expect(latestChatEditorProps.voiceStatusRevision).toBe(voiceStatusRevision);
+  });
+
   it('uses the merged registered workspace list for split Voice', () => {
     connectionState.workspaceCwd = '/work/locked';
     connectionState.capabilities = {
