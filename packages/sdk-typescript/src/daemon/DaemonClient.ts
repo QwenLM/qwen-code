@@ -1661,6 +1661,19 @@ export class DaemonClient {
     );
   }
 
+  async workspaceDirectoryPicker(): Promise<unknown> {
+    return await this.jsonRequest<unknown>(
+      '/workspace-directory-picker',
+      'POST /workspace-directory-picker',
+      {
+        method: 'POST',
+        body: {},
+        timeoutMs: 300_000,
+        mode: 'rest',
+      },
+    );
+  }
+
   async glob(pattern: string): Promise<unknown> {
     const url = new URL(`${this.baseUrl}/glob`);
     url.searchParams.set('pattern', pattern);

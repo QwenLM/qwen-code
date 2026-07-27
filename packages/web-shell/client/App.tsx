@@ -7197,6 +7197,10 @@ export function App({
               onSuggest={(prefix) =>
                 workspaceActions.suggestWorkspacePaths(prefix)
               }
+              onPick={async () => {
+                const result = await workspaceActions.pickWorkspaceDirectory();
+                return result.selected ? result.path : undefined;
+              }}
               persistenceSupported={
                 persistentWorkspaceRegistrationSupported
               }

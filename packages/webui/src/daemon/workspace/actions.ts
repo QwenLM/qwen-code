@@ -12,6 +12,7 @@ import type {
   DaemonGoal,
   DaemonScheduledTask,
   DaemonWorkspaceActions,
+  DaemonWorkspaceDirectoryPickerResult,
   DaemonWorkspacePathSuggestions,
 } from './types.js';
 
@@ -999,6 +1000,12 @@ export function createDaemonWorkspaceActions({
         'Suggest workspace paths timed out',
       );
       return result as DaemonWorkspacePathSuggestions;
+    },
+
+    async pickWorkspaceDirectory() {
+      const client = requireClient(getClient, 'Open directory picker failed');
+      const result = await client.workspaceDirectoryPicker();
+      return result as DaemonWorkspaceDirectoryPickerResult;
     },
 
     async updateWorkspace(workspaceSelector, update) {

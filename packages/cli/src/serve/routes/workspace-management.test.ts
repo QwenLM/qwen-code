@@ -2404,3 +2404,55 @@ describe('GET /workspace-path-suggestions', () => {
     expect(res.body.code).toBe('invalid_prefix');
   });
 });
+
+describe('POST /workspace-directory-picker', () => {
+  it('remains available in loopback development without a configured token', async () => {
+    const mutate = vi.fn(
+      (options?: { strict?: boolean }) =>
+        (_req: Request, res: Response, next: () => void) => {
+          if (options?.strict) {
+            res.status(401).json({ code: 'token_required' });
+            return;
+          }
+          next();
+        },
+    );
+    const { app } = createApp({
+      mutate,
+      pickWorkspaceDirectory: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const res = await request(app).post('/workspace-directory-picker');
+
+    expect(res.status).toBe(200);
+    expect(res.body.selected).toBe(false);
+  });
+
+  it('returns the absolute path selected by the native picker', async () => {
+    const pickWorkspaceDirectory = vi.fn().mockResolvedValue('/Users/me/code');
+    const { app } = createApp({ pickWorkspaceDirectory });
+
+    const res = await request(app).post('/workspace-directory-picker');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      kind: 'workspace-directory-picker',
+      selected: true,
+      path: '/Users/me/code',
+    });
+  });
+
+  it('returns selected=false when the user cancels', async () => {
+    const { app } = createApp({
+      pickWorkspaceDirectory: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const res = await request(app).post('/workspace-directory-picker');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      kind: 'workspace-directory-picker',
+      selected: false,
+    });
+  });
+});
