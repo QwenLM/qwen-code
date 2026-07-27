@@ -7,6 +7,7 @@ import { I18nProvider } from '../../i18n';
 import { WebShellCustomizationProvider } from '../../customization';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import { SubagentDetailsProvider } from '../../subagentDetailsContext';
+import { MonitorDetailsProvider } from '../../monitorDetailsContext';
 
 vi.mock('../../App', async () => {
   const { createContext } = await import('react');
@@ -657,6 +658,319 @@ describe('tool row rendering', () => {
     act(() => (container.querySelector('button') as HTMLButtonElement).click());
 
     expect(onOpen).toHaveBeenCalledWith(tool);
+  });
+
+  it('opens a single monitor from the tool summary', async () => {
+    const onOpen = vi.fn().mockResolvedValue(true);
+    const tool = makeTool({
+      toolName: 'monitor',
+      status: 'completed',
+      args: { description: 'watch logs' },
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MonitorDetailsProvider onOpen={onOpen}>
+            <ToolGroup tools={[tool]} />
+          </MonitorDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    expect(summary.hasAttribute('aria-expanded')).toBe(false);
+    await act(async () => {
+      summary.click();
+      await Promise.resolve();
+    });
+
+    expect(onOpen).toHaveBeenCalledWith(tool);
+    expect(summary.hasAttribute('aria-expanded')).toBe(false);
+    expect(container.querySelector('[class*="chatChevronDown"]')).toBeNull();
+    expect(
+      container.querySelector('[class*="chatChevronRight"]'),
+    ).not.toBeNull();
+  });
+
+  it('opens a monitor tool line from a mixed tool group', async () => {
+    const onOpen = vi.fn().mockResolvedValue(true);
+    const tool = makeTool({
+      toolName: 'monitor',
+      status: 'completed',
+      args: { description: 'watch logs' },
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MonitorDetailsProvider onOpen={onOpen}>
+            <ToolLine tool={tool} />
+          </MonitorDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const line = container.querySelector(
+      '[class*="lineExpandable"]',
+    ) as HTMLElement;
+    await act(async () => {
+      line.click();
+      await Promise.resolve();
+    });
+
+    expect(onOpen).toHaveBeenCalledWith(tool);
+    expect(line.getAttribute('aria-expanded')).toBeNull();
+    expect(container.querySelector('[class*="lineChevronDown"]')).toBeNull();
+    expect(
+      container.querySelector('[class*="lineChevronRight"]'),
+    ).not.toBeNull();
+  });
+
+  it('falls back to the original summary expansion when monitor details are unavailable', async () => {
+    const onOpen = vi.fn().mockResolvedValue(false);
+    const tool = makeTool({
+      toolName: 'monitor',
+      status: 'completed',
+      args: { description: 'watch logs' },
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MonitorDetailsProvider onOpen={onOpen}>
+            <ToolGroup tools={[tool]} />
+          </MonitorDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    await act(async () => {
+      summary.click();
+      await Promise.resolve();
+    });
+
+    expect(onOpen).toHaveBeenCalledWith(tool);
+    expect(summary.getAttribute('aria-expanded')).toBe('true');
+
+    act(() => summary.click());
+
+    expect(onOpen).toHaveBeenCalledTimes(1);
+    expect(summary.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('resets summary expansion when the monitor identity changes', async () => {
+    const onOpen = vi.fn().mockResolvedValue(false);
+    const tool = makeTool({
+      toolName: 'monitor',
+      status: 'completed',
+      args: { description: 'watch logs' },
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MonitorDetailsProvider onOpen={onOpen}>
+            <ToolGroup tools={[tool]} />
+          </MonitorDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    await act(async () => {
+      summary.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[class*="chatChevronDown"]'),
+    ).not.toBeNull();
+
+    const nextTool = makeTool({
+      callId: 'call-2',
+      toolName: 'monitor',
+      status: 'completed',
+      args: { description: 'watch logs' },
+    });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MonitorDetailsProvider onOpen={onOpen}>
+            <ToolGroup tools={[nextTool]} />
+          </MonitorDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.querySelector('[class*="chatChevronDown"]')).toBeNull();
+    expect(
+      container.querySelector('[class*="chatChevronRight"]'),
+    ).not.toBeNull();
+  });
+
+  it('deduplicates monitor summary clicks while details are loading', async () => {
+    let resolveOpen: ((opened: boolean) => void) | undefined;
+    const onOpen = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveOpen = resolve;
+        }),
+    );
+    const tool = makeTool({
+      toolName: 'monitor',
+      status: 'completed',
+      args: { description: 'watch logs' },
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MonitorDetailsProvider onOpen={onOpen}>
+            <ToolGroup tools={[tool]} />
+          </MonitorDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    act(() => {
+      summary.click();
+      summary.click();
+    });
+    expect(onOpen).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveOpen?.(false);
+      await Promise.resolve();
+    });
+
+    expect(summary.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('falls back to the original tool-line expansion when monitor details are unavailable', async () => {
+    const onOpen = vi.fn().mockResolvedValue(false);
+    const tool = makeTool({
+      toolName: 'monitor',
+      status: 'completed',
+      rawOutput: 'Monitor started',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MonitorDetailsProvider onOpen={onOpen}>
+            <ToolLine tool={tool} forceExpandable />
+          </MonitorDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const line = container.querySelector(
+      '[class*="lineExpandable"]',
+    ) as HTMLElement;
+    await act(async () => {
+      line.click();
+      await Promise.resolve();
+    });
+
+    expect(onOpen).toHaveBeenCalledWith(tool);
+    expect(line.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('deduplicates monitor tool-line clicks while details are loading', async () => {
+    let resolveOpen: ((opened: boolean) => void) | undefined;
+    const onOpen = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveOpen = resolve;
+        }),
+    );
+    const tool = makeTool({
+      toolName: 'monitor',
+      status: 'completed',
+      rawOutput: 'Monitor started',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MonitorDetailsProvider onOpen={onOpen}>
+            <ToolLine tool={tool} forceExpandable />
+          </MonitorDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const line = container.querySelector(
+      '[class*="lineExpandable"]',
+    ) as HTMLElement;
+    act(() => {
+      line.click();
+      line.click();
+    });
+    expect(onOpen).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveOpen?.(false);
+      await Promise.resolve();
+    });
+
+    expect(line.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it('keeps a non-expandable monitor tool line static when details are unavailable', async () => {
+    const onOpen = vi.fn().mockResolvedValue(false);
+    const tool = makeTool({
+      toolName: 'monitor',
+      status: 'completed',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MonitorDetailsProvider onOpen={onOpen}>
+            <ToolLine tool={tool} />
+          </MonitorDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const line = container.querySelector(
+      '[class*="lineExpandable"]',
+    ) as HTMLElement;
+    await act(async () => {
+      line.click();
+      await Promise.resolve();
+    });
+
+    expect(onOpen).toHaveBeenCalledWith(tool);
+    expect(line.getAttribute('role')).toBeNull();
+    expect(line.getAttribute('aria-expanded')).toBeNull();
   });
 
   it('keeps a mixed group static when only its background agent is active', () => {

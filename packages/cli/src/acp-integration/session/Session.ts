@@ -5308,7 +5308,12 @@ export class Session implements SessionContext {
           const notificationParts: Part[] = [{ text: item.modelText }];
           this.config
             .getChatRecordingService()
-            ?.recordNotification(notificationParts, item.displayText);
+            ?.recordNotification(notificationParts, item.displayText, {
+              taskId: item.taskId,
+              status: item.status,
+              kind: item.kind,
+              toolUseId: item.toolUseId,
+            });
 
           const notificationReminders =
             await this.#buildInitialSystemReminders();
@@ -6680,6 +6685,12 @@ export class Session implements SessionContext {
         let toolBuildSucceeded = false;
         try {
           const invocation = tool.build(args);
+          if (policyToolName === ToolNames.MONITOR) {
+            const callIdAware = invocation as {
+              setCallId?: (id: string) => void;
+            };
+            callIdAware.setCallId?.(callId);
+          }
           toolBuildSucceeded = true;
 
           // Production AgentTool always initializes `eventEmitter` on its

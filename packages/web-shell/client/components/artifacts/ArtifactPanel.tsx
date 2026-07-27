@@ -1,4 +1,7 @@
-import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionArtifact,
+  DaemonSessionMonitorTaskStatus,
+} from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../../adapters/types';
 import {
   useWorkspaceActions,
@@ -45,6 +48,7 @@ import {
 import { LineStats, sumLineStats } from './LineStats';
 import styles from './ArtifactPanel.module.css';
 import { SubagentDetail } from './SubagentDetail';
+import { MonitorTaskDetail } from '../messages/TasksStatusMessage';
 
 const MAX_REVIEW_SIDE_BY_SIDE_WIDTH = 700;
 const FREQUENCIES: Frequency[] = [
@@ -96,6 +100,12 @@ export type ArtifactPanelTab =
       rootToolCallId: string;
       rootTool: ACPToolCall;
       workspaceCwd?: string;
+    }
+  | {
+      id: string;
+      kind: 'monitor';
+      title: string;
+      task: DaemonSessionMonitorTaskStatus;
     };
 
 interface ArtifactPanelProps {
@@ -179,6 +189,8 @@ export function ArtifactPanel({
                     <TabArtifactIcon />
                   ) : tab.kind === 'subagent' ? (
                     <TabSubagentIcon />
+                  ) : tab.kind === 'monitor' ? (
+                    <TabMonitorIcon />
                   ) : (
                     <TabScheduledTaskIcon />
                   )}
@@ -247,6 +259,8 @@ export function ArtifactPanel({
             initialRootTool={activeTab.rootTool}
             workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
           />
+        ) : activeTab.kind === 'monitor' ? (
+          <MonitorTaskDetail key={activeTab.id} task={activeTab.task} />
         ) : (
           <ScheduledTaskDetail
             key={activeTab.id}
@@ -256,6 +270,26 @@ export function ArtifactPanel({
         )}
       </div>
     </aside>
+  );
+}
+
+function TabMonitorIcon() {
+  return (
+    <svg
+      className={styles.tabIconSvg}
+      viewBox="0 0 24 24"
+      fill="none"
+      focusable="false"
+      aria-hidden="true"
+    >
+      <path
+        d="M4 12h3l2-5 4 10 2-5h5"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
 
