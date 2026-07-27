@@ -1098,14 +1098,30 @@ jobs:
           # not racing a live process. This also removes the localhost blind
           # scan surface the bearer-gated proxy defends against. The proxy
           # started further below runs as root, so this cannot touch it.
+          #    Zombies do not count. A zombie has already exited and released
+          #    everything except its exit status, so it cannot re-plant an
+          #    artifact or touch the agent's inputs — and it cannot be killed
+          #    either, so counting it means this check can never clear. The
+          #    container runs no init to reap orphans, so they are expected.
+          live_build_processes() {
+            ps -o pid=,stat=,args= -u node 2>/dev/null | awk '$2 !~ /^Z/'
+          }
           pkill -KILL -u node 2>/dev/null || true
           for _ in 1 2 3; do
-            pgrep -u node >/dev/null 2>&1 || break
+            [ -n "$(live_build_processes)" ] || break
             sleep 1
             pkill -KILL -u node 2>/dev/null || true
           done
-          if pgrep -u node >/dev/null 2>&1; then
-            echo "::error::Processes owned by the build user survived; refusing to start the agent."
+          survivors="$(live_build_processes)"
+          if [ -n "$survivors" ]; then
+            # Name them. The first version of this guard failed the job with
+            # nothing but "processes survived", so a real threat and a
+            # harmless leftover were indistinguishable — including to the
+            # person who wrote it.
+            echo "::error::Processes owned by the build user survived SIGKILL; refusing to start the agent."
+            printf '%s\n' "$survivors" | while IFS= read -r proc; do
+              echo "::error::  surviving process: ${proc}"
+            done
             exit 1
           fi
 
@@ -2272,14 +2288,30 @@ jobs:
           #    child can outlive its step, wait for the sweeps below, and then
           #    re-plant artifacts or tamper with the agent's inputs. Without
           #    this, every one-shot cleanup here is racing a live process.
+          #    Zombies do not count. A zombie has already exited and released
+          #    everything except its exit status, so it cannot re-plant an
+          #    artifact or touch the agent's inputs — and it cannot be killed
+          #    either, so counting it means this check can never clear. The
+          #    container runs no init to reap orphans, so they are expected.
+          live_build_processes() {
+            ps -o pid=,stat=,args= -u node 2>/dev/null | awk '$2 !~ /^Z/'
+          }
           pkill -KILL -u node 2>/dev/null || true
           for _ in 1 2 3; do
-            pgrep -u node >/dev/null 2>&1 || break
+            [ -n "$(live_build_processes)" ] || break
             sleep 1
             pkill -KILL -u node 2>/dev/null || true
           done
-          if pgrep -u node >/dev/null 2>&1; then
-            echo "::error::Processes owned by the build user survived; refusing to start the agent."
+          survivors="$(live_build_processes)"
+          if [ -n "$survivors" ]; then
+            # Name them. The first version of this guard failed the job with
+            # nothing but "processes survived", so a real threat and a
+            # harmless leftover were indistinguishable — including to the
+            # person who wrote it.
+            echo "::error::Processes owned by the build user survived SIGKILL; refusing to start the agent."
+            printf '%s\n' "$survivors" | while IFS= read -r proc; do
+              echo "::error::  surviving process: ${proc}"
+            done
             exit 1
           fi
 
