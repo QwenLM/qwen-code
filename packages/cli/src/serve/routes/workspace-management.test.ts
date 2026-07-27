@@ -2468,6 +2468,9 @@ describe('POST /workspace-directory-picker', () => {
 
     expect(res.status).toBe(501);
     expect(res.body.code).toBe('directory_picker_unavailable');
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('native directory picker unavailable'),
+    );
   });
 
   it('returns 500 when the picker fails unexpectedly', async () => {
@@ -2479,5 +2482,8 @@ describe('POST /workspace-directory-picker', () => {
 
     expect(res.status).toBe(500);
     expect(res.body.code).toBe('directory_picker_failed');
+    expect(writeStderrLine).toHaveBeenCalledWith(
+      expect.stringContaining('native directory picker failed: boom'),
+    );
   });
 });

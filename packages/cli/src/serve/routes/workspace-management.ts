@@ -452,13 +452,20 @@ export function registerWorkspaceManagementRoutes(
           ...(path === undefined ? {} : { path }),
         });
       } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
         if (error instanceof NativeDirectoryPickerUnavailableError) {
+          writeStderrLine(
+            `qwen serve: native directory picker unavailable: ${detail}`,
+          );
           res.status(501).json({
             error: 'Native directory picker is unavailable',
             code: 'directory_picker_unavailable',
           });
           return;
         }
+        writeStderrLine(
+          `qwen serve: native directory picker failed: ${detail}`,
+        );
         res.status(500).json({
           error: 'Failed to open native directory picker',
           code: 'directory_picker_failed',
