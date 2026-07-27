@@ -81,6 +81,35 @@ describe('workspace Git branch routes', () => {
   });
 });
 
+describe('legacy route trust guard', () => {
+  it('rejects all six legacy endpoints when the workspace is untrusted', async () => {
+    const app = express();
+    app.use(express.json());
+    registerWorkspaceGitBranchRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+      isWorkspaceTrusted: () => false,
+      mutate: passthroughMutate,
+    });
+
+    const get = await request(app).get('/workspace/git/branches');
+    expect(get.status).toBe(403);
+    expect(get.body.code).toBe('untrusted_workspace');
+
+    for (const [method, path, body] of [
+      ['post', '/workspace/git/checkout', { ref: 'main' }],
+      ['post', '/workspace/git/branch', { name: 'feat' }],
+      ['post', '/workspace/git/push', {}],
+      ['post', '/workspace/git/pull', {}],
+      ['post', '/workspace/git/commit', { message: 'x' }],
+    ] as const) {
+      const res = await request(app)[method](path).send(body);
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('untrusted_workspace');
+    }
+  });
+});
+
 const tmpRoots: string[] = [];
 
 function git(cwd: string, ...args: string[]): string {

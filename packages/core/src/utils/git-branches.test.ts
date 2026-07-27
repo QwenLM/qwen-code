@@ -133,6 +133,21 @@ describe('gitEnv (R12 env isolation)', () => {
   });
 });
 
+describe('fetchGitBranches recent branches', () => {
+  it('lists recently checked-out branches from the reflog', async () => {
+    const dir = makeRepo();
+    git(dir, 'checkout', '-q', '-b', 'feature-a');
+    git(dir, 'checkout', '-q', '-b', 'feature-b');
+    git(dir, 'checkout', '-q', 'master');
+
+    const result = await fetchGitBranches(dir);
+
+    expect(result.recent).toContain('feature-b');
+    expect(result.recent).toContain('feature-a');
+    expect(result.recent).not.toContain('master');
+  });
+});
+
 describe('gitCheckout', () => {
   it('switches to an existing branch', async () => {
     const dir = makeRepo();

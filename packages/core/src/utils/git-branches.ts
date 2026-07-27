@@ -217,9 +217,10 @@ function parseRecentBranches(reflogRaw: string, currentHead: string): string[] {
   for (const line of reflogRaw.trim().split('\n')) {
     // reflog messages for checkouts look like:
     //   "checkout: moving from X to Y"
-    const match = /^checkout: moving from .+ to (.+)$/.exec(line);
-    if (!match) continue;
-    const branch = match[1];
+    if (!line.startsWith('checkout: moving from ')) continue;
+    const idx = line.indexOf(' to ');
+    if (idx === -1) continue;
+    const branch = line.slice(idx + 4);
     if (
       branch &&
       !seen.has(branch) &&

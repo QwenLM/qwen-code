@@ -20,12 +20,16 @@ const {
   workspaceGitDiff,
   workspaceGitLog,
   workspaceGitHubPullRequests,
+  workspaceGitCommit,
+  workspaceGitPush,
   workspaceClient,
   mockState,
 } = vi.hoisted(() => {
   const workspaceGitDiff = vi.fn();
   const workspaceGitLog = vi.fn();
   const workspaceGitHubPullRequests = vi.fn();
+  const workspaceGitCommit = vi.fn();
+  const workspaceGitPush = vi.fn();
   const workspaceClient = {
     workspaceByCwd: () => ({
       workspaceGitDiff,
@@ -33,6 +37,8 @@ const {
       workspaceGitLog,
       workspaceGitCommitDetail: vi.fn(),
       workspaceGitHubPullRequests,
+      workspaceGitCommit,
+      workspaceGitPush,
     }),
   };
   const mockState = { capabilities: undefined as unknown };
@@ -40,6 +46,8 @@ const {
     workspaceGitDiff,
     workspaceGitLog,
     workspaceGitHubPullRequests,
+    workspaceGitCommit,
+    workspaceGitPush,
     workspaceClient,
     mockState,
   };
@@ -351,6 +359,84 @@ describe('GitDialog', () => {
         .getElementById('git-dialog-tab-prs')
         ?.getAttribute('aria-selected'),
     ).toBe('true');
+  });
+
+  it('passes gitCwd to commit and push SDK calls in the commit view', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+      files: [],
+      hiddenCount: 0,
+    });
+    workspaceGitCommit.mockResolvedValue({
+      sha: 'abc1234',
+      subject: 'test commit',
+    });
+    workspaceGitPush.mockResolvedValue({
+      success: true,
+      output: '',
+    });
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDialog
+            workspaceCwd="/repo"
+            gitCwd="/worktrees/wt"
+            initialView="commit"
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const textarea = document.body.querySelector(
+      '[data-web-shell-dialog] textarea',
+    );
+    expect(textarea).toBeTruthy();
+
+    // Set the commit message via React's onChange.
+    await act(async () => {
+      const nativeSetter = Object.getOwnPropertyDescriptor(
+        HTMLTextAreaElement.prototype,
+        'value',
+      )?.set;
+      nativeSetter?.call(textarea, 'fix: test commit');
+      textarea!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await flush();
+
+    // Click "Commit & Push".
+    const buttons = document.body.querySelectorAll(
+      '[data-web-shell-dialog] button',
+    );
+    const commitPushBtn = Array.from(buttons).find((b) =>
+      b.textContent?.includes('Commit and Push'),
+    );
+    expect(commitPushBtn).toBeTruthy();
+
+    await act(async () => {
+      commitPushBtn!.click();
+    });
+    await flush();
+
+    expect(workspaceGitCommit).toHaveBeenCalledWith(
+      'fix: test commit',
+      { all: true },
+      '/worktrees/wt',
+    );
+    expect(workspaceGitPush).toHaveBeenCalledWith(
+      { setUpstream: true },
+      '/worktrees/wt',
+    );
   });
 
   it('clamps to the diff view when the capability is withdrawn mid-session', async () => {

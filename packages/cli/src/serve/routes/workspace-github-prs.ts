@@ -239,6 +239,7 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
     if (!runtime) return;
     if (!requireTrustedWorkspaceRuntime(runtime, res)) return;
 
+    applyReadHeaders(res);
     try {
       runtime.generationGuard?.assertOpen();
       const branch = await getDefaultBranch(

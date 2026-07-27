@@ -167,7 +167,11 @@ export function GitDialog({
               : f.isDeleted
                 ? 'deleted'
                 : 'modified';
-            return `${status}: ${f.path}`;
+            const counts = f.isBinary
+              ? ' (binary)'
+              : ` (+${f.added ?? 0} -${f.removed ?? 0})`;
+            const rename = f.oldPath ? ` (renamed from ${f.oldPath})` : '';
+            return `${status}: ${f.path}${counts}${rename}`;
           });
           let fileSummary = fileLines.join('\n');
           if (fileSummary.length > MAX_SUMMARY_CHARS) {
@@ -255,12 +259,14 @@ export function GitDialog({
       setCommitStatus(null);
       try {
         const ws = client.workspaceByCwd(workspaceCwd);
-        const result = await ws.workspaceGitCommit(commitMsg.trim(), {
-          all: true,
-        });
+        const result = await ws.workspaceGitCommit(
+          commitMsg.trim(),
+          { all: true },
+          gitCwd,
+        );
         if (andPush) {
           try {
-            await ws.workspaceGitPush({ setUpstream: true });
+            await ws.workspaceGitPush({ setUpstream: true }, gitCwd);
             setCommitMsg('');
             setCommitStatus({
               msg: t('gitCommit.commitPushSuccess', { sha: result.sha }),
@@ -292,7 +298,7 @@ export function GitDialog({
         setCommitBusy(null);
       }
     },
-    [client, workspaceCwd, commitMsg, commitBusy, prBusy, t],
+    [client, workspaceCwd, gitCwd, commitMsg, commitBusy, prBusy, t],
   );
 
   // Auto-fill PR form when it opens.
@@ -819,7 +825,7 @@ function BranchSelect({
               <div className={styles.branchSelectGroup}>{remote}</div>
               {names.map((n) => (
                 <button
-                  key={`${remote}/${n}`}
+                  key={n}
                   type="button"
                   className={`${styles.branchSelectItem} ${
                     n === value ? styles.branchSelectItemActive : ''
@@ -829,7 +835,7 @@ function BranchSelect({
                     setOpen(false);
                   }}
                 >
-                  {n}
+                  {n.includes('/') ? n.slice(n.indexOf('/') + 1) : n}
                 </button>
               ))}
             </div>
