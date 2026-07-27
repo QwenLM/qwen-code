@@ -84,19 +84,17 @@ export class GitIgnoreParser implements GitIgnoreFilter {
           // directory-only rule in a nested ignore file stop applying below
           // its own directory.
           const withoutDirSuffix = p.endsWith('/') ? p.slice(0, -1) : p;
-          if (!isAnchoredInFile && !withoutDirSuffix.includes('/')) {
-            // If no slash and not anchored in file, it matches files in any
-            // subdirectory.
-            newPattern = path.join('**', p);
-          }
-
-          // Prepend the .gitignore file's directory.
-          newPattern = path.join(relativeBaseDir, newPattern);
-
-          // Anchor the pattern to a nested gitignore directory.
-          if (!newPattern.startsWith('/')) {
-            newPattern = '/' + newPattern;
-          }
+          // The prefix is assembled by hand rather than with path.join so the
+          // pattern text is never passed through a platform path function.
+          // `relativeBaseDir` comes from path.relative and is the only piece
+          // that can hold a platform separator, so it is the only piece that
+          // is normalised.
+          const baseDir = relativeBaseDir.replace(/\\/g, '/');
+          // If no slash and not anchored in file, it matches files in any
+          // subdirectory.
+          const anyDepth =
+            !isAnchoredInFile && !withoutDirSuffix.includes('/') ? '**/' : '';
+          newPattern = `/${baseDir}/${anyDepth}${p}`;
         }
 
         // Anchor the pattern if originally anchored
@@ -108,9 +106,13 @@ export class GitIgnoreParser implements GitIgnoreFilter {
           newPattern = '!' + newPattern;
         }
 
-        // Even in windows, Ignore expects forward slashes.
-        newPattern = newPattern.replace(/\\/g, '/');
-
+        // No blanket backslash rewrite here. In gitignore syntax `/` is always
+        // the separator and `\` is an escape character, so rewriting every
+        // backslash to `/` corrupted the pattern instead of normalising it:
+        // `foo\ bar.txt` became `foo/ bar.txt`, `\#hash.txt` became
+        // `/#hash.txt` (a comment escape turned into a root anchor) and
+        // `a\[b\].txt` became `a/[b/].txt`. Windows separators can only enter
+        // through `relativeBaseDir`, which is normalised at its source above.
         return newPattern;
       })
       .filter((p) => p !== '');

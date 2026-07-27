@@ -213,6 +213,69 @@ src/*.tmp
     });
   });
 
+  // In gitignore syntax `/` is always the separator and `\` is an escape
+  // character, so a pattern's backslashes are content, not path separators.
+  // Every expectation here was read off `git check-ignore` in a real
+  // repository.
+  describe('backslash escapes in patterns', () => {
+    beforeEach(async () => {
+      await setupGitRepo();
+    });
+
+    it('honours an escaped space', async () => {
+      await createTestFile('.gitignore', 'foo\\ bar.txt\n');
+
+      expect(parser.isIgnored('foo bar.txt')).toBe(true);
+    });
+
+    it('honours an escaped leading hash', async () => {
+      // `\#hash.txt` escapes the comment marker. Rewriting the backslash to
+      // `/` turned it into `/#hash.txt`, which additionally anchored the
+      // pattern to the repository root — so the rule both stopped matching
+      // and changed scope.
+      await createTestFile('.gitignore', '\\#hash.txt\n');
+
+      expect(parser.isIgnored('#hash.txt')).toBe(true);
+      expect(parser.isIgnored('sub/#hash.txt')).toBe(true);
+    });
+
+    it('honours escaped glob metacharacters', async () => {
+      await createTestFile('.gitignore', 'a\\[b\\].txt\nlit\\*.txt\n');
+
+      expect(parser.isIgnored('a[b].txt')).toBe(true);
+      expect(parser.isIgnored('lit*.txt')).toBe(true);
+      // The escape must still suppress the wildcard.
+      expect(parser.isIgnored('litX.txt')).toBe(false);
+    });
+
+    it('honours an escape inside a nested .gitignore', async () => {
+      // The nested path is where the prefix is assembled, so it is the case
+      // that would break if the pattern were passed through a path function.
+      await createTestFile('.gitignore', '');
+      await createTestFile('a/b/.gitignore', 'foo\\ bar.txt\n');
+
+      expect(parser.isIgnored('a/b/foo bar.txt')).toBe(true);
+      expect(parser.isIgnored('a/b/x/foo bar.txt')).toBe(true);
+    });
+
+    it('still expands nested patterns the documented way', async () => {
+      // The guard against over-correcting: the three rules in the comment
+      // above the prefix assembly must survive it unchanged.
+      await createTestFile('.gitignore', '');
+      await createTestFile('a/b/.gitignore', 'c\nd/e\n/f\n');
+
+      // `c` -> /a/b/**/c
+      expect(parser.isIgnored('a/b/c')).toBe(true);
+      expect(parser.isIgnored('a/b/x/c')).toBe(true);
+      // `d/e` -> /a/b/d/e
+      expect(parser.isIgnored('a/b/d/e')).toBe(true);
+      expect(parser.isIgnored('a/b/x/d/e')).toBe(false);
+      // `/f` -> /a/b/f
+      expect(parser.isIgnored('a/b/f')).toBe(true);
+      expect(parser.isIgnored('a/b/x/f')).toBe(false);
+    });
+  });
+
   // A trailing `/` means "directories only"; it is not a separator that
   // anchors the pattern. Every expectation here was read off `git
   // check-ignore` in a real repository. This needs its own setup because the
