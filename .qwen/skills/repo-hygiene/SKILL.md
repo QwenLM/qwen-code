@@ -12,8 +12,15 @@ pre-commit verification.
 
 The run is split into two phases executed as separate CI jobs: the scan phase
 (read-only, produces findings) and the fix phase (reads findings, edits code).
-The phase you are in is stated in your invocation, together with the phase
-instructions appended after this document.
+
+## Workflow
+
+- Scan phase → read `references/scan.md`
+- Fix phase → read `references/fix.md`
+
+In CI the runner appends the right phase document to this prompt, so you do
+not need to read it again. When invoked interactively, read the phase file
+for the phase you were asked to run.
 
 One full run produces ONE branch (named by `--branch`) that batches every
 accepted fix, with one Conventional Commit per finding so reviewers can audit

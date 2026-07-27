@@ -17,14 +17,14 @@ const skillDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const QWEN_TIMEOUT_MS = Number(process.env.QWEN_TIMEOUT_MS) || 50 * 60 * 1000;
 const specs = {
   'scan': {
-    phaseDoc: 'scan.md',
+    phaseDoc: 'references/scan.md',
     inputs: [],
     outputs: ['findings.json', 'report-only.md'],
     required: [],
     invocation: (o) => `--workdir ${o.workdir}`,
   },
   'fix': {
-    phaseDoc: 'fix.md',
+    phaseDoc: 'references/fix.md',
     inputs: ['findings.json'],
     outputs: ['findings.json', 'report-only.md'],
     required: ['branch'],
