@@ -29,7 +29,11 @@ function setPlatform(platform: NodeJS.Platform) {
   vi.spyOn(process, 'platform', 'get').mockReturnValue(platform);
 }
 
-function pickerError(fields: { code?: number; stderr?: string }): Error {
+function pickerError(fields: {
+  code?: number;
+  stderr?: string;
+  killed?: boolean;
+}): Error {
   return Object.assign(new Error('picker failed'), fields);
 }
 
@@ -91,6 +95,19 @@ describe('pickNativeDirectory', () => {
     );
   });
 
+  it('sets UTF-8 output encoding in the PowerShell script', async () => {
+    setPlatform('win32');
+    execFileAsyncMock.mockResolvedValue({ stdout: 'C:\\code' });
+
+    await pickNativeDirectory();
+
+    const args = execFileAsyncMock.mock.calls[0][1] as string[];
+    const script = args[args.length - 1];
+    expect(script).toContain(
+      '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;',
+    );
+  });
+
   it('returns undefined when the Windows dialog is dismissed', async () => {
     setPlatform('win32');
     execFileAsyncMock.mockResolvedValue({ stdout: '   ' });
@@ -140,6 +157,13 @@ describe('pickNativeDirectory', () => {
     await expect(pickNativeDirectory()).rejects.toBeInstanceOf(
       NativeDirectoryPickerUnavailableError,
     );
+  });
+
+  it('treats a timeout kill as a cancel on any platform', async () => {
+    setPlatform('win32');
+    execFileAsyncMock.mockRejectedValue(pickerError({ killed: true }));
+
+    await expect(pickNativeDirectory()).resolves.toBeUndefined();
   });
 
   it('throws unavailable on an unsupported platform', async () => {

@@ -38,6 +38,7 @@ export async function pickNativeDirectory(
 
     if (process.platform === 'win32') {
       const script = [
+        '[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;',
         'Add-Type -AssemblyName System.Windows.Forms;',
         '$dialog = New-Object System.Windows.Forms.FolderBrowserDialog;',
         'if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {',
@@ -65,7 +66,16 @@ export async function pickNativeDirectory(
       return stdout.trim() || undefined;
     }
   } catch (error) {
-    const result = error as { code?: number | string; stderr?: string };
+    const result = error as {
+      code?: number | string;
+      stderr?: string;
+      killed?: boolean;
+    };
+    // A timeout kill (PICKER_TIMEOUT_MS) or an abort-signal kill means the
+    // dialog is gone; treat it as a cancel rather than an OS-level failure.
+    if (result.killed) {
+      return undefined;
+    }
     if (
       (process.platform === 'darwin' &&
         (result.stderr?.includes('(-128)') ||
