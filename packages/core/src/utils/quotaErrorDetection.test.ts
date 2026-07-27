@@ -123,6 +123,14 @@ describe('quotaErrorDetection', () => {
       ).toBe(true);
     });
 
+    it('detects a reset-time message without the word "will"', () => {
+      expect(
+        isQuotaExhaustedError(
+          new Error('Your quota is exhausted. Reset at 2026-08-01 00:00 UTC.'),
+        ),
+      ).toBe(true);
+    });
+
     it('detects an ApiError-shaped quota-exhaustion message', () => {
       const error: ApiError = {
         error: {
@@ -148,9 +156,9 @@ describe('quotaErrorDetection', () => {
     });
 
     it('does not match a 429 that only says quota without a reset time', () => {
-      expect(
-        isQuotaExhaustedError(new Error('Your quota is exhausted.')),
-      ).toBe(false);
+      expect(isQuotaExhaustedError(new Error('Your quota is exhausted.'))).toBe(
+        false,
+      );
     });
 
     it('does not match unrelated errors', () => {

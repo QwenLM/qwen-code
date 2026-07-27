@@ -541,7 +541,10 @@ describe('retryWithBackoff', () => {
         authType: AuthType.USE_OPENAI,
       });
 
-      await expect(promise).rejects.toThrow(/Quota exhausted/);
+      await expect(promise).rejects.toMatchObject({
+        message: expect.stringContaining('Quota exhausted'),
+        status: 429,
+      });
       // Should be called only once (no retries)
       expect(fn).toHaveBeenCalledTimes(1);
     });

@@ -371,7 +371,12 @@ export async function retryWithBackoff<T>(
           retryDiagnostics,
           error,
         );
-        throw new Error(formatQuotaExhaustedMessage(error));
+        const quotaError: HttpError = new Error(
+          formatQuotaExhaustedMessage(error),
+        );
+        const status = getErrorStatus(error);
+        if (status !== undefined) quotaError.status = status;
+        throw quotaError;
       }
 
       // Determine if this error qualifies for persistent retry.
