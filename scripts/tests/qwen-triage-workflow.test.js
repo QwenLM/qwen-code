@@ -680,7 +680,8 @@ describe('qwen-triage tmux workflow', () => {
     expect(prWorkflow).toContain('Contested-merge pattern');
     expect(prWorkflow).toContain('CHANGES_REQUESTED');
     expect(prWorkflow).toContain('50.0% revert precision');
-    expect(prWorkflow).toContain('status/on-hold');
+    expect(prWorkflow).toContain('need-discussion');
+    expect(prWorkflow).not.toContain('status/on-hold');
     expect(prWorkflow).toContain('maintainer sign-off');
   });
 

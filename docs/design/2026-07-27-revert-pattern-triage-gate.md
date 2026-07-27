@@ -136,7 +136,7 @@ not as a separate workflow step.
 ### Rule 2: Contested-merge detection (precision 50.0%, recall 19.4%)
 
 When a PR has a CHANGES_REQUESTED → APPROVE cycle in its review history and
-touches core paths, Stage 1 applies `status/on-hold` and posts a summary
+touches core paths, Stage 1 applies `need-discussion` and posts a summary
 recommending maintainer sign-off before merge.
 
 This targets the flip-flop pattern: PRs that went through multiple review
@@ -146,13 +146,13 @@ contested PRs in the control group).
 Implementation: the Stage 1e skill text instructs the triage model to fetch
 the PR's review state sequence via `gh pr view --json reviews` and check for
 a `CHANGES_REQUESTED` entry after position 0. If found alongside core-path
-changes, the classifier applies `status/on-hold` and recommends maintainer
+changes, the classifier applies `need-discussion` and recommends maintainer
 sign-off. No workflow YAML change is needed.
 
 ### Rule 3: Non-maintainer + high-risk tier (precision 58.3%, recall 22.6%)
 
 A non-maintainer PR touching high-risk paths gets the highest-risk tier:
-full `/review` depth + `status/on-hold` until a maintainer reviews. This
+full `/review` depth + `need-discussion` until a maintainer reviews. This
 is Rule 1 + Rule 2 combined, targeting the intersection that has 58.3%
 precision.
 

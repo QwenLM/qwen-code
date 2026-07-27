@@ -249,7 +249,7 @@ gh pr view "$PR_NUMBER" --repo "$REPO" --json reviews --jq '[.reviews[] | select
 ```
 
 If `CHANGES_REQUESTED` appears after the first review (not at position 0) AND the PR touches core paths (50.0% revert precision, 19.4% recall):
-- Apply `status/on-hold` label via `gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label status/on-hold` (if the label exists).
+- Apply `need-discussion` label via `gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label need-discussion` (if the label exists).
 - Recommend maintainer sign-off before merge in the Stage 1 comment.
 - Do not auto-approve even if Stage 2 and Stage 3 are clean.
 
