@@ -239,8 +239,14 @@ export async function processImports(
   if (importFormat === 'flat') {
     // Use a queue to process files in order of first encounter, and a set to avoid duplicates
     const flatFiles: Array<{ path: string; content: string }> = [];
-    // Track processed files across the entire operation
-    const processedFiles = new Set<string>();
+    // Track the shallowest depth each file has been expanded at, rather than a
+    // plain "seen" set. Once a depth limit exists the two differ: a file first
+    // reached down a long chain is truncated there, and a later, shallower route
+    // to that same file -- comfortably inside the limit -- would be dismissed as
+    // already seen, so its own imports would never be expanded. Recording the
+    // depth lets the shallower route re-expand it while the file itself is still
+    // emitted only once.
+    const expandedAt = new Map<string, number>();
 
     // Helper to recursively process imports
     async function processFlat(
@@ -252,14 +258,19 @@ export async function processImports(
       // Normalize the file path to ensure consistent comparison
       const normalizedPath = path.normalize(filePath);
 
-      // Skip if already processed
-      if (processedFiles.has(normalizedPath)) return;
+      // Already expanded by an equally shallow or shallower route, so this one
+      // cannot reach anything new. This is also what stops cycles: a repeat
+      // visit always arrives at a greater depth.
+      const seenAt = expandedAt.get(normalizedPath);
+      if (seenAt !== undefined && seenAt <= depth) return;
 
-      // Mark as processed before processing to prevent infinite recursion
-      processedFiles.add(normalizedPath);
+      // Add this file to the flat list, once, however many routes reach it.
+      if (seenAt === undefined) {
+        flatFiles.push({ path: normalizedPath, content: fileContent });
+      }
 
-      // Add this file to the flat list
-      flatFiles.push({ path: normalizedPath, content: fileContent });
+      // Record before recursing to prevent infinite recursion.
+      expandedAt.set(normalizedPath, depth);
 
       // Stop descending once the depth limit is reached, matching what the tree
       // path does at the top of processImports: the file sitting at the limit is
@@ -307,8 +318,10 @@ export async function processImports(
         const fullPath = path.resolve(fileBasePath, importPath);
         const normalizedFullPath = path.normalize(fullPath);
 
-        // Skip if already processed
-        if (processedFiles.has(normalizedFullPath)) continue;
+        // Skip if already expanded from here or shallower, so the file is not
+        // re-read when the recursion would immediately return anyway.
+        const childSeenAt = expandedAt.get(normalizedFullPath);
+        if (childSeenAt !== undefined && childSeenAt <= depth + 1) continue;
 
         try {
           await fs.access(fullPath);

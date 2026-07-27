@@ -953,6 +953,46 @@ describe('memoryImportProcessor', () => {
       // truncating chains that were always allowed.
       expect(chainMarkers(result.content, 3)).toEqual([0, 1, 2]);
     });
+
+    it('re-expands a file first reached by a route at the depth limit', async () => {
+      const projectRoot = testPath('test', 'project');
+      const basePath = testPath(projectRoot, 'src');
+
+      mockedFs.access.mockReset();
+      mockedFs.readFile.mockReset();
+      mockedFs.access.mockResolvedValue(undefined);
+      mockedFs.readFile.mockImplementation(async (file: unknown) => {
+        switch (path.basename(String(file))) {
+          case 'deep0.md':
+            return 'DEEP0 @./deep1.md';
+          case 'deep1.md':
+            return 'DEEP1 @./x.md';
+          case 'x.md':
+            return 'XFILE @./y.md';
+          case 'y.md':
+            return 'YFILE';
+          default:
+            return '';
+        }
+      });
+
+      // deep0.md is listed last, so the reverse iteration takes the deep route
+      // to x.md first and lands on it exactly at the limit, truncating it.
+      const result = await processImports(
+        'Root @./x.md @./deep0.md',
+        basePath,
+        { processedFiles: new Set(), maxDepth: 3, currentDepth: 0 },
+        projectRoot,
+        'flat',
+      );
+
+      // x.md is also a direct import of the root at depth 1, so y.md sits well
+      // inside the limit and has to survive the deep route having got there
+      // first. Tracking a bare "seen" set instead of the depth dropped it.
+      expect(result.content).toContain('YFILE');
+      // The shallower re-expansion must not emit x.md a second time.
+      expect(result.content.match(/XFILE/g)).toHaveLength(1);
+    });
   });
 
   describe('validateImportPath', () => {
