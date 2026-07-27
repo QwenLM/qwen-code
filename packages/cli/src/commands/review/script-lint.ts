@@ -282,11 +282,9 @@ function emptyHadolintConfig(): string | undefined {
   if (!hadolintEmptyConfigPath) {
     try {
       const d = mkdtempSync(join(tmpdir(), 'qwen-review-hadolint-'));
-      const p = join(d, 'empty.yaml');
-      writeFileSync(p, '');
-      hadolintEmptyConfigPath = p;
-      // One dir + one empty file per process; `cleanup.ts` only sweeps `.qwen/tmp`,
-      // so remove it ourselves at exit rather than leak it into the OS tmpdir.
+      // Register cleanup RIGHT AFTER mkdtemp, before the write: `cleanup.ts` only
+      // sweeps `.qwen/tmp`, so we remove `d` ourselves at exit — and registering it
+      // first means a `writeFileSync` that throws still leaves `d` swept, not leaked.
       process.on('exit', () => {
         try {
           rmSync(d, { recursive: true, force: true });
@@ -294,6 +292,9 @@ function emptyHadolintConfig(): string | undefined {
           /* best-effort */
         }
       });
+      const p = join(d, 'empty.yaml');
+      writeFileSync(p, '');
+      hadolintEmptyConfigPath = p;
     } catch {
       return undefined; // no controllable config → caller must fail hadolint closed
     }
