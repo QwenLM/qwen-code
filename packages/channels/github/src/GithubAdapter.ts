@@ -374,11 +374,14 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     let text = this.botUsername
       ? stripBotMention(rawBody, this.botUsername)
       : rawBody;
+    let summaryComments = comments;
     if (!text.trim() && comments.length > 0) {
-      const firstBody = comments[0]?.body || '';
+      const firstComment = comments[0]!;
+      const firstBody = firstComment.body || '';
       text = this.botUsername
         ? stripBotMention(firstBody, this.botUsername)
         : firstBody;
+      summaryComments = comments.slice(1);
     }
     if (!text.trim())
       text =
@@ -386,7 +389,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           ? 'Please review this pull request.'
           : 'Please triage this issue.';
     const detail = this.buildMetaDetail(kind, meta);
-    const summary = this.buildCommentsSummary(comments);
+    const summary = this.buildCommentsSummary(summaryComments);
     const metadata = this.appendFraming(
       this.buildMetadata(chatId, threadId, subjectTitle),
       framing,

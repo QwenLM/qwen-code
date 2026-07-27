@@ -791,6 +791,71 @@ describe('GithubChannel', () => {
       );
     });
 
+    it('uses first comment fallback once when PR body is empty', async () => {
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'review_requested',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+            subject: {
+              title: 'feat: add divide',
+              url: 'https://api.github.com/repos/owner/repo/pulls/99',
+              type: 'PullRequest',
+            },
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({ id: 1, node_id: 'C1', body: 'first comment' }),
+          makeComment({ id: 2, node_id: 'C2', body: 'second comment' }),
+        ]);
+      mockOctokit.rest.pulls.get.mockResolvedValue({
+        data: {
+          body: '',
+          state: 'open',
+          draft: false,
+          user: { login: 'alice' },
+          head: { ref: 'feature-divide' },
+          base: { ref: 'main' },
+        },
+      });
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes[0]!.text).toBe('first comment');
+      expect(channel.inboundEnvelopes[0]!.metadata).not.toContain(
+        '@alice: first comment',
+      );
+      expect(channel.inboundEnvelopes[0]!.metadata).toContain(
+        '@alice: second comment',
+      );
+    });
+
+    it('uses fallback triage text when issue body and comments are empty', async () => {
+      await initWithoutLoop();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'assign',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([]);
+      mockOctokit.rest.issues.get.mockResolvedValue({
+        data: {
+          body: '',
+          state: 'open',
+          user: { login: 'bob' },
+        },
+      });
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes[0]!.text).toBe(
+        'Please triage this issue.',
+      );
+    });
+
     it('skips bot-authored meta lane subjects', async () => {
       await initWithoutLoop();
       mockOctokit.paginate.mockResolvedValueOnce([
