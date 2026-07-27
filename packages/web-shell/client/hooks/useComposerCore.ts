@@ -2110,8 +2110,7 @@ export function useComposerCore(
       const hasImage = collectClipboardImages(items, (image) =>
         setPastedImages((prev) => [...prev, image]),
       );
-      // Plain text falls through to the native paste. Large-paste
-      // placeholders are a CodeMirror-only affordance.
+      // Plain text falls through to the native paste.
       if (hasImage) {
         event.preventDefault();
       }
@@ -2217,6 +2216,7 @@ export function useComposerCore(
         );
         return;
       }
+      onDismissFollowupRef.current?.();
       if (isShellMode) {
         shellHistoryActionsRef.current.push(text);
         shellHistoryActionsRef.current.reset();
