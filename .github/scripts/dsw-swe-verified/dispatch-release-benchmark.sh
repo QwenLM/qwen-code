@@ -14,15 +14,27 @@ pool_root="${DSW_POOL_ROOT:-/mnt/workspace/qwen-benchmark-pool}"
 pool_bin="${POOL_BIN:-${pool_root}/venv/bin/qwen-benchmark-pool}"
 python_bin="${POOL_PYTHON:-${pool_root}/venv/bin/python}"
 dataset_root="${SWE_VERIFIED_DATASET_ROOT:-${pool_root}/datasets/swe-bench-verified}"
+agent_cache_root="${QWEN_BENCHMARK_CACHE_ROOT:-/mnt/workspace/qwen-benchmark-cache}"
+agent_cache_prepare="${pool_root}/service/deploy/prepare-agent-cache.py"
 database_url="${BENCHMARK_POOL_DATABASE_URL:-postgresql://qwen_benchmark@127.0.0.1:55432/qwen_benchmark_dsw_release_v1}"
 model_name="${OPENAI_MODEL:-qwen3.7-max}"
+max_attempts="${BENCHMARK_MAX_ATTEMPTS:-4}"
+retry_backoff_seconds="${BENCHMARK_RETRY_BACKOFF_SECONDS:-60}"
 output_root="${GITHUB_WORKSPACE:-$(pwd)}/benchmark-output"
 
 if [[ ! "${INSTANCE_LIMIT}" =~ ^[0-9]+$ ]] || (( INSTANCE_LIMIT < 1 || INSTANCE_LIMIT > 500 )); then
   echo "INSTANCE_LIMIT must be between 1 and 500" >&2
   exit 2
 fi
-for required_path in "${pool_bin}" "${python_bin}" "${dataset_root}"; do
+if [[ ! "${max_attempts}" =~ ^[0-9]+$ ]] || (( max_attempts < 1 || max_attempts > 8 )); then
+  echo "BENCHMARK_MAX_ATTEMPTS must be between 1 and 8" >&2
+  exit 2
+fi
+if [[ ! "${retry_backoff_seconds}" =~ ^[0-9]+$ ]]; then
+  echo "BENCHMARK_RETRY_BACKOFF_SECONDS must be a non-negative integer" >&2
+  exit 2
+fi
+for required_path in "${pool_bin}" "${python_bin}" "${dataset_root}" "${agent_cache_prepare}"; do
   if [[ ! -e "${required_path}" ]]; then
     echo "Required DSW resource is missing: ${required_path}" >&2
     exit 2
@@ -41,6 +53,18 @@ if [[ -n "${BENCHMARK_INSTANCE_ID:-}" ]]; then
 fi
 "${python_bin}" "${script_root}/make-manifest.py" "${manifest_args[@]}"
 
+# Cache the exact published Qwen Code version and its Node/npm runtime before
+# tasks become claimable. This normally takes seconds on a warm DSW cache and
+# does not wait for the benchmark itself.
+qwen_version="${QWEN_REF#v}"
+"${python_bin}" "${agent_cache_prepare}" \
+  --cache-root "${agent_cache_root}" \
+  --node-version "${QWEN_BENCHMARK_NODE_VERSION:-v22.23.1}" \
+  --nvm-version "${QWEN_BENCHMARK_NVM_VERSION:-v0.40.2}" \
+  --qwen-version "${qwen_version}" \
+  --npm-registry "${NPM_CONFIG_REGISTRY:-https://registry.npmjs.org}" \
+  > "${output_root}/agent-cache-manifest-path.txt"
+
 export BENCHMARK_POOL_DATABASE_URL="${database_url}"
 "${pool_bin}" init-db >/dev/null
 submit_json="$(
@@ -54,7 +78,8 @@ submit_json="$(
     --qwen-commit "${QWEN_COMMIT}" \
     --model "${model_name}" \
     --manifest "${manifest_path}" \
-    --max-attempts 2 \
+    --max-attempts "${max_attempts}" \
+    --retry-backoff-seconds "${retry_backoff_seconds}" \
     --infra-failure-threshold 0 \
     --repository "${GITHUB_REPOSITORY}" \
     --release-id "${RELEASE_ID}" \
