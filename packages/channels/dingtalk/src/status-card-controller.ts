@@ -7,6 +7,7 @@ import {
   STATUS_CARD_TEMPLATE_ID,
   type DingtalkInteractiveCardClient,
 } from './interactive-card-client.js';
+import { sanitizeStreamingImageMarkers } from './outbound-image.js';
 
 const FLUSH_INTERVAL_MS = 500;
 const CONTENT_LIMIT = 20_000;
@@ -69,7 +70,7 @@ export class StatusCardController {
     if (record.terminal) return;
     record.content = boundContent(record.content + chunk);
     if (record.streamFailed) return;
-    record.pendingSnapshot = record.content;
+    record.pendingSnapshot = sanitizeStreamingImageMarkers(record.content);
     this.scheduleFlush(record);
   }
 

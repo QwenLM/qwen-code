@@ -1437,6 +1437,76 @@ describe('DingtalkChannel status cards', () => {
     expect(fetchSpy).toHaveBeenCalledOnce();
   });
 
+  it('uploads a final status card image before closing output', async () => {
+    const image = createTempPng();
+    const channel = createChannel({ cwd: image.dir });
+    const closeOutput = vi.fn().mockResolvedValue(true);
+    (
+      channel as unknown as {
+        interactionPresenter: { closeOutput: typeof closeOutput };
+      }
+    ).interactionPresenter = { closeOutput };
+    const segment = {
+      channelName: 'dingtalk',
+      sessionId: 'session-1',
+      runId: 'run-1',
+      segmentId: 'segment-1',
+      owner: { kind: 'channel_user', id: 'owner-1' },
+      target: {
+        channelName: 'dingtalk',
+        chatId: 'cid-1',
+        senderId: 'owner-1',
+        isGroup: true,
+      },
+    } as ChannelOutputSegmentContext;
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                errcode: 0,
+                access_token: 'proactive-token',
+                expires_in: 7200,
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        if (url.startsWith('https://oapi.dingtalk.com/media/upload')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                errcode: 0,
+                media_id: '@lAL-card-media-id',
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        throw new Error(`Unexpected request: ${url}`);
+      });
+
+    try {
+      await getCompleteHook(channel)(
+        'cid-1',
+        `before\n[IMAGE: ${image.path}]\nafter`,
+        'session-1',
+        segment,
+      );
+
+      const finalText = String(closeOutput.mock.calls[0]?.[1]);
+      expect(finalText).toContain('![image](@lAL-card-media-id)');
+      expect(finalText).not.toContain('[IMAGE:');
+      expect(finalText).not.toContain(image.path);
+    } finally {
+      fetchSpy.mockRestore();
+      rmSync(image.dir, { recursive: true, force: true });
+    }
+  });
+
   it('terminalizes the presenter when the agent response is empty', () => {
     const channel = createChannel();
     const terminalizeRun = vi.fn();

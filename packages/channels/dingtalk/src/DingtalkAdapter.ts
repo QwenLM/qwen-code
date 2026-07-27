@@ -1320,17 +1320,18 @@ export class DingtalkChannel extends ChannelBase {
     sessionId: string,
     segment?: ChannelOutputSegmentContext,
   ): Promise<void> {
-    if (
-      segment &&
-      this.interactionPresenter &&
-      (await this.interactionPresenter.closeOutput(
-        segment.segmentId,
-        text,
-        'completed',
-        segment,
-      ))
-    ) {
-      return;
+    if (segment && this.interactionPresenter) {
+      const outgoingText = await this.prepareOutgoingText(text);
+      if (
+        await this.interactionPresenter.closeOutput(
+          segment.segmentId,
+          outgoingText,
+          'completed',
+          segment,
+        )
+      ) {
+        return;
+      }
     }
     await this.sendResponseMessage(chatId, text, sessionId);
   }

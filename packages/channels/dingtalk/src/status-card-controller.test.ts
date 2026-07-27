@@ -97,6 +97,25 @@ describe('StatusCardController', () => {
     expect(content.endsWith('b'.repeat(2_000))).toBe(true);
   });
 
+  it('hides streamed image paths across chunk boundaries', async () => {
+    vi.useFakeTimers();
+    const { client, controller } = createHarness();
+
+    controller.append(segment(), target, 'before [IMA');
+    controller.append(
+      segment(),
+      target,
+      'GE: /Users/ben/private/image.png] after',
+    );
+    await vi.advanceTimersByTimeAsync(500);
+
+    const streamContents = vi
+      .mocked(client.openOrUpdateStream)
+      .mock.calls.map(([request]) => request.content);
+    expect(streamContents.join('\n')).not.toContain('/Users/ben/private');
+    expect(streamContents.at(-1)).toBe('before [Image pending] after');
+  });
+
   it('shows the configured model and refreshes elapsed time only on text flushes', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
