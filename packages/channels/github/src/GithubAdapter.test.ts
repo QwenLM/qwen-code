@@ -842,6 +842,34 @@ describe('GithubChannel', () => {
       );
     });
 
+    it('truncates aggregate comment bodies without splitting surrogate pairs', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ groups: { '*': { requireMention: false } } }),
+        makeBridge(),
+      );
+      await initWithoutLoop();
+      channel.usePreflight = true;
+      const emoji = '\u{1F600}';
+      const body = 'a'.repeat(999) + emoji;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({ id: 1, body, user: { login: 'alice' } }),
+        ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      const text = channel.inboundEnvelopes[0]!.text;
+      expect(text).toContain('a'.repeat(999) + emoji);
+    });
+
     it('keeps unmentioned aggregate comments behind the group gate', async () => {
       await initWithoutLoop();
       channel.usePreflight = true;

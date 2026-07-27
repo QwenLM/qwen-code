@@ -672,7 +672,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const shown = comments.slice(-MAX_AGGREGATE_COMMENTS);
     const lines = shown.map((c) => {
       const who = c.user?.login || 'unknown';
-      const body = (c.body || '').trim().slice(0, MAX_COMMENT_CHARS);
+      const body = Array.from((c.body || '').trim())
+        .slice(0, MAX_COMMENT_CHARS)
+        .join('');
       return `- @${who}: ${body}`;
     });
     const count =
