@@ -45,10 +45,11 @@ function segment(
 
 function questionContext(
   precedingSegmentId?: string,
+  requestId = 'request-1',
 ): ChannelUserInputRequestContext {
   const listeners = new Set<(reason: UserInputSettlementReason) => void>();
   return {
-    requestId: 'request-1',
+    requestId,
     sessionId: 'session-1',
     runId: 'run-1',
     owner: { kind: 'channel_user', id: 'owner-1' },
@@ -322,6 +323,29 @@ describe('DingtalkInteractionPresenter', () => {
     );
   });
 
+  it('expires a pending question when a new message supersedes the run', async () => {
+    const { client, presenter } = createHarness();
+    await presenter.presentInput(questionContext());
+    const questionOutTrackId = vi
+      .mocked(client.createAndDeliver)
+      .mock.calls.find(
+        ([request]) => request.templateId === QUESTION_CARD_TEMPLATE_ID,
+      )![0].outTrackId;
+
+    presenter.terminalizeRun('run-1', 'cancelled', 'steer');
+
+    await vi.waitFor(() =>
+      expect(client.updateInstance).toHaveBeenCalledWith(
+        expect.objectContaining({
+          outTrackId: questionOutTrackId,
+          cardParamMap: expect.objectContaining({
+            card_status: 'expired',
+          }),
+        }),
+      ),
+    );
+  });
+
   it('creates a new status card after the question is submitted', async () => {
     const { client, presenter, projectionOrder, questionCards } =
       createHarness();
@@ -406,5 +430,53 @@ describe('DingtalkInteractionPresenter', () => {
           ),
       ).toHaveLength(2),
     );
+  });
+
+  it('does not block a subsequent question on the previous terminal card update', async () => {
+    const { client, presenter, questionCards } = createHarness();
+    await presenter.presentInput(questionContext());
+    const firstQuestionOutTrackId = vi
+      .mocked(client.createAndDeliver)
+      .mock.calls.find(
+        ([request]) => request.templateId === QUESTION_CARD_TEMPLATE_ID,
+      )![0].outTrackId;
+    const terminalUpdate = deferred<void>();
+    vi.mocked(client.updateInstance).mockImplementation(async (request) => {
+      if (request.cardParamMap.card_status === 'submitted') {
+        await terminalUpdate.promise;
+      }
+    });
+
+    const firstResponse = questionCards.claim({
+      outTrackId: firstQuestionOutTrackId,
+      actionId: 'submit',
+      ownerId: 'owner-1',
+      formData: { '0': 'Beijing' },
+    })?.();
+    await vi.waitFor(() =>
+      expect(client.updateInstance).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardParamMap: expect.objectContaining({
+            card_status: 'submitted',
+          }),
+        }),
+      ),
+    );
+
+    const secondPresentation = presenter.presentInput(
+      questionContext(undefined, 'request-2'),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const questionCreatesBeforeTerminalUpdate = vi
+      .mocked(client.createAndDeliver)
+      .mock.calls.filter(
+        ([request]) => request.templateId === QUESTION_CARD_TEMPLATE_ID,
+      ).length;
+
+    terminalUpdate.resolve();
+    await firstResponse;
+    await secondPresentation;
+
+    expect(questionCreatesBeforeTerminalUpdate).toBe(2);
   });
 });

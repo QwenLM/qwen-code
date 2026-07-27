@@ -139,11 +139,9 @@ export class DingtalkInteractionPresenter {
     ) {
       return Promise.resolve({ kind: 'unsupported' });
     }
-    return this.enqueue(run, () => {
-      const questionCards = this.options.questionCards;
-      if (!questionCards) return { kind: 'unsupported' };
-      return questionCards.present(context, this.cardTarget(context.target));
-    });
+    const questionCards = this.options.questionCards;
+    if (!questionCards) return Promise.resolve({ kind: 'unsupported' });
+    return questionCards.present(context, this.cardTarget(context.target));
   }
 
   terminalizeRun(
@@ -153,7 +151,13 @@ export class DingtalkInteractionPresenter {
   ): void {
     const run = this.runs.get(runId);
     if (!run || run.terminal) return;
-    this.options.questionCards?.cancelRun(runId);
+    this.options.questionCards?.cancelRun(
+      runId,
+      terminal === 'cancelled' &&
+        (detail === 'cancel_command' || detail === 'clear')
+        ? 'cancelled'
+        : 'expired',
+    );
     run.terminal = true;
     const activeSegmentId = run.activeSegmentId;
     run.activeSegmentId = undefined;

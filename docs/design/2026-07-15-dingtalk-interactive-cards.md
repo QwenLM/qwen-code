@@ -200,7 +200,7 @@ Only the DingTalk adapter reads `interactiveCards` and registers the card callba
 - Per-card coalesced writers, transient in-flight claims, and bounded terminal tombstones.
 - DingTalk-local fallback and structured error reporting.
 
-The run/status record keeps `pendingQuestionRequestIds: Set<string>` independently of whether a status card is enabled or created. The question registry does not supersede an older request merely because a newer request exists in the same session. Every terminal question path goes through one `finalizeQuestion` operation: it removes the live question record, clears its timer and settlement subscription, removes the request ID from the run set, re-derives `waiting_input` when a non-terminal status card exists, and replaces the live record with a compact tombstone. Submit, cancel, responder `false`, responder throw, independent settlement, local timeout, and request/run destruction all use this operation. A terminal status card ignores later set mutations.
+The run/status record keeps `pendingQuestionRequestIds: Set<string>` independently of whether a status card is enabled or created. Question presentation is scoped by `sessionId + owner.id`: a newer delivered request expires the older card in the same scope without responding to its original permission, while different users and sessions remain independent. Every terminal question path goes through one `finalizeQuestion` operation: it removes the live question record, clears its timer and settlement subscription, removes the request ID from the run set, re-derives `waiting_input` when a non-terminal status card exists, and replaces the live record with a compact tombstone. Submit, cancel, responder `false`, responder throw, independent settlement, local timeout, supersession, and request/run destruction all use this operation. A terminal status card ignores later set mutations.
 
 ## Streaming status-card lifecycle — DingTalk-only change
 
@@ -255,7 +255,7 @@ Each pending record contains:
 - The typed owner identity.
 - The original one-shot responder.
 - Timeout and settlement subscriptions.
-- The local `reserved`, `pending`, or `responding` state; terminalization
+- The local `reserved`, `pending`, or `claimed` state; terminalization
   replaces the record with a compact tombstone.
 
 The lifecycle follows the latest OpenClaw delivery-race discipline without
@@ -264,7 +264,7 @@ copying its persistence or synthetic-message continuation:
 ```text
 reserved   inserted and subscribed before createAndDeliver
 pending    activated only after successful delivery while still reserved
-responding atomically claimed by one valid callback
+claimed    atomically claimed by one valid callback
 terminal   first settlement wins; live payload is compacted
 ```
 
@@ -279,7 +279,7 @@ The callback order is authoritative:
 2. Parse the submit or cancel payload without changing the record.
 3. Validate the action owner.
 4. For submit, reject every form answer key that is not present in the stored normalized question set.
-5. Atomically claim the current `pending` record as `responding` before the first asynchronous operation.
+5. Atomically claim the current `pending` record as `claimed` before the first asynchronous operation.
 6. Acknowledge the callback immediately. Invalid, duplicate, stale, and foreign-owner callbacks are also acknowledged exactly once after their synchronous checks.
 7. Call the original responder.
 8. If the same record is still current and non-terminal, finalize and project the card from the responder result.
@@ -303,20 +303,20 @@ Single-select values and custom input are strings. Multi-select values are joine
 
 The card never displays submission success before the responder accepts the answer:
 
-| Event                              | Local state             | Card projection                                                         |
-| ---------------------------------- | ----------------------- | ----------------------------------------------------------------------- |
-| Submit responder returns `true`    | `submitted`             | Submitted and disabled                                                  |
-| Cancel responder returns `true`    | `cancelled`             | Cancelled and disabled                                                  |
-| `respond(...) === false`           | `cancelled`             | Non-interactive `card_status=cancelled`, “Permission no longer pending” |
-| `respond(...)` throws              | `cancelled`             | Non-interactive failure projection, disabled, and not retryable         |
-| Independent non-cancel settlement  | `resolved_outside_card` | Non-interactive `card_status=cancelled`, “Resolved outside this card”   |
-| Independent collapsed cancellation | `cancelled`             | Non-interactive `card_status=cancelled`, neutral “Cancelled”            |
-| Timeout                            | `expired`               | Expired and disabled                                                    |
-| Request or run destroyed           | `cancelled`             | Cancelled or Stopped and disabled                                       |
-| Duplicate or late callback         | Existing terminal state | Acknowledge and ignore                                                  |
-| Settlement on a terminal record    | Existing terminal state | Ignore through the terminal tombstone                                   |
+| Event                              | Local state             | Card projection                                                       |
+| ---------------------------------- | ----------------------- | --------------------------------------------------------------------- |
+| Submit responder returns `true`    | `submitted`             | Submitted and disabled                                                |
+| Cancel responder returns `true`    | `cancelled`             | Cancelled and disabled                                                |
+| `respond(...) === false`           | `expired`               | Non-interactive `card_status=expired`, “Question no longer available” |
+| `respond(...)` throws              | `expired`               | Non-interactive failure projection, disabled, and not retryable       |
+| Independent non-cancel settlement  | `resolved_outside_card` | Non-interactive `card_status=expired`, “Resolved outside this card”   |
+| Independent collapsed cancellation | `cancelled`             | Non-interactive `card_status=cancelled`, neutral “Cancelled”          |
+| Timeout                            | `expired`               | Expired and disabled                                                  |
+| Request or run destroyed           | `cancelled`             | Cancelled or Stopped and disabled                                     |
+| Duplicate or late callback         | Existing terminal state | Acknowledge and ignore                                                |
+| Settlement on a terminal record    | Existing terminal state | Ignore through the terminal tombstone                                 |
 
-The `resolved_outside_card` local state is entered only from an independent non-cancel settlement event, not inferred from a `false` responder result. `false` means only that the permission response was not accepted: the request mapping may be absent, its session may be gone, or another surface may already have won. It therefore uses the existing cancelled projection with the neutral “Permission no longer pending” message.
+The `resolved_outside_card` local state is entered only from an independent non-cancel settlement event, not inferred from a `false` responder result. `false` means only that the permission response was not accepted: the request mapping may be absent, its session may be gone, or another surface may already have won. Both cases therefore use the non-interactive `expired` projection without claiming user cancellation.
 
 The existing daemon bridge consumes the request-to-session mapping when `respondToPermission()` throws, and `ChannelBase` removes the pending request on the same path. A later daemon `permissionResolved` is no longer a reliable cleanup signal because the bridge may reject it as an unknown request. DingTalk therefore logs the failure, removes its pending record, retains the terminal tombstone, and immediately makes a best-effort non-success projection. It does not release the claim or promise callback retry.
 
@@ -324,7 +324,7 @@ The existing daemon bridge consumes the request-to-session mapping when `respond
 
 An instance update is a UI projection, not the permission transaction. If the responder succeeds but the subsequent card update fails, the permission remains resolved, the local record remains terminal, duplicate callbacks remain rejected, and the adapter logs the failed UI projection.
 
-Unlike the OpenClaw reference implementation, Qwen Code does not inject a synthetic inbound message. It responds directly to the original permission request. It also does not supersede other pending questions in the same run: the status card derives `waiting_input` from the complete request-ID set.
+Unlike the OpenClaw reference implementation, Qwen Code does not inject a synthetic inbound message. It responds directly to the original permission request. Presentation supersession only expires the older native card; it does not fabricate a response to the original permission.
 
 ## Configuration and built-in templates — DingTalk-only change
 
@@ -422,7 +422,7 @@ The implementation is complete only when the following behavior is covered. Thes
 - A real human DingTalk `started` event binds one eligible run from its inbound message and owner; synthetic, unknown, loop, and webhook message IDs create no eligible run or card.
 - With block streaming off, one status card coalesces chunks with at most one write in flight and one bounded pending snapshot; completed delivery awaits finalization and falls back to Markdown. With block streaming on, no status card is created and existing block delivery remains authoritative.
 - Stop validates owner and card identity, claims once, cancels only the matching `runId`, rejects duplicates, and remains retryable only after a non-terminal `false` result.
-- One permission request creates one question card containing all questions and their ordered answer keys; multiple requests in the same run remain independent.
+- One permission request creates one question card containing all questions and their ordered answer keys; the latest delivered request per session and owner remains interactive, while different users and sessions remain independent.
 - A question is reserved before delivery, activates only if still live after delivery, and never revives after in-flight settlement or run cancellation.
 - Submit selects the original advertised `allow_once` option, encodes single, multi-select, and custom answers as `Record<string, string>`, and directly resolves the original request.
 - A submit containing any answer key outside the stored normalized question set is rejected before the responder is called.

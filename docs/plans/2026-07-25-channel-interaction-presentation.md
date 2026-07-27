@@ -391,8 +391,9 @@ interface RunPresentation {
 
 `appendOutput` captures a bounded snapshot and queues the native update without
 blocking model generation. `closeOutput` appends terminalization to
-`projectionChain`. `presentInput` appends question creation after the existing
-chain and awaits question delivery. The DingTalk adapter closes a
+`projectionChain`. `presentInput` awaits question delivery without joining that
+run-wide chain, so a slow terminal update for the previous question cannot
+block the next question. The DingTalk adapter closes a
 `precedingSegmentId` with `input_requested` before invoking `presentInput`; it
 does not create or update an output card when no `precedingSegmentId` exists.
 
@@ -510,7 +511,10 @@ Add literal tests for:
 - submitted/cancelled/expired/resolved-outside-presenter each update the same
   question `outTrackId`;
 - duplicate callbacks cannot create a new segment or respond twice;
-- two pending requests in one run remain independent;
+- a newer question in the same session-and-owner scope expires the older card
+  without responding to the agent;
+- different users and sessions keep independent pending cards;
+- a slow previous terminal update does not block the next question card;
 - two runs in the same session cannot share segment or request state;
 - late output writes after segment terminalization are ignored;
 - exact-run Stop from an old output card cannot cancel a later run.

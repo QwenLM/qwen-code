@@ -10,7 +10,7 @@ import {
 } from './interactive-card-client.js';
 import type { DingtalkCardCallback } from './interactive-card-types.js';
 
-type QuestionState = 'reserved' | 'pending' | 'responding' | 'terminal';
+type QuestionState = 'reserved' | 'pending' | 'claimed' | 'terminal';
 type QuestionTerminalState =
   | 'submitted'
   | 'cancelled'
@@ -22,9 +22,12 @@ const OTHER_OPTION_VALUE = '__qwen_other__';
 interface QuestionRecord {
   context: ChannelUserInputRequestContext;
   outTrackId: string;
+  scopeKey: string;
+  sequence: number;
   state: QuestionState;
   delivered: boolean;
   terminalState?: QuestionTerminalState;
+  terminalDescription?: string;
   deferredSettlement?: UserInputSettlementReason;
   finishTerminalProjection?: (operation: () => Promise<void>) => Promise<void>;
   timer?: ReturnType<typeof setTimeout>;
@@ -44,11 +47,13 @@ export interface QuestionCardControllerOptions {
 export class QuestionCardController {
   private readonly byRequest = new Map<string, QuestionRecord>();
   private readonly byOutTrack = new Map<string, QuestionRecord>();
+  private readonly activeByScope = new Map<string, QuestionRecord>();
   private readonly pendingByRun = new Map<string, Set<string>>();
   private readonly tombstones = new Map<
     string,
     { reason: QuestionTerminalState; expiresAt: number }
   >();
+  private nextSequence = 0;
 
   constructor(private readonly options: QuestionCardControllerOptions) {}
 
@@ -59,13 +64,15 @@ export class QuestionCardController {
     const record: QuestionRecord = {
       context,
       outTrackId: `qwen-question-${randomUUID()}`,
+      scopeKey: this.scopeKey(context),
+      sequence: this.nextSequence++,
       state: 'reserved',
       delivered: false,
     };
     this.byRequest.set(context.requestId, record);
     this.byOutTrack.set(record.outTrackId, record);
     const unsubscribe = context.onSettled((reason) => {
-      if (record.state === 'responding') {
+      if (record.state === 'claimed') {
         record.deferredSettlement = reason;
         return;
       }
@@ -110,7 +117,25 @@ export class QuestionCardController {
       await this.projectTerminal(record);
       return { kind: 'presented' };
     }
+    const previous = this.activeByScope.get(record.scopeKey);
+    if (previous && previous.sequence > record.sequence) {
+      await this.finalize(
+        record,
+        'expired',
+        'A newer question is available. Answer the latest card.',
+      );
+      return { kind: 'presented' };
+    }
+    if (previous?.state === 'pending') {
+      this.reserveTerminalProjection(previous);
+      void this.finalize(
+        previous,
+        'expired',
+        'A newer question is available. Answer the latest card.',
+      );
+    }
     record.state = 'pending';
+    this.activeByScope.set(record.scopeKey, record);
     const pending = this.pendingByRun.get(context.runId) ?? new Set<string>();
     pending.add(context.requestId);
     this.pendingByRun.set(context.runId, pending);
@@ -133,7 +158,7 @@ export class QuestionCardController {
     }
     if (callback.isCancel || callback.actionId === 'cancel') {
       this.reserveTerminalProjection(record);
-      record.state = 'responding';
+      record.state = 'claimed';
       return () => this.respond(record, 'cancelled');
     }
     if (
@@ -145,17 +170,26 @@ export class QuestionCardController {
     const answers = this.parseAnswers(record, callback.formData);
     if (!answers) return undefined;
     this.reserveTerminalProjection(record);
-    record.state = 'responding';
+    record.state = 'claimed';
     return () => this.respond(record, 'submitted', answers);
   }
 
-  cancelRun(runId: string): void {
+  cancelRun(
+    runId: string,
+    terminalState: 'cancelled' | 'expired' = 'cancelled',
+  ): void {
     const requestIds = [...(this.pendingByRun.get(runId) ?? [])];
     for (const requestId of requestIds) {
       const record = this.byRequest.get(requestId);
       if (record) {
         this.reserveTerminalProjection(record);
-        void this.finalize(record, 'cancelled');
+        void this.finalize(
+          record,
+          terminalState,
+          terminalState === 'expired'
+            ? 'This question is no longer available.'
+            : undefined,
+        );
       }
     }
   }
@@ -177,10 +211,18 @@ export class QuestionCardController {
             }
           : { outcome: { outcome: 'cancelled' } },
       );
-      await this.finalize(record, accepted ? terminalState : 'cancelled');
+      await this.finalize(
+        record,
+        accepted ? terminalState : 'expired',
+        accepted ? undefined : 'This question is no longer available.',
+      );
     } catch (error) {
       this.options.onError?.('question response', error);
-      await this.finalize(record, 'cancelled');
+      await this.finalize(
+        record,
+        'expired',
+        'This question is no longer available.',
+      );
     }
   }
 
@@ -198,16 +240,21 @@ export class QuestionCardController {
   private async finalize(
     record: QuestionRecord,
     state: QuestionTerminalState,
+    description?: string,
   ): Promise<void> {
     if (record.state === 'terminal') return;
     record.state = 'terminal';
     record.terminalState = state;
+    record.terminalDescription = description;
     if (record.timer) clearTimeout(record.timer);
     record.timer = undefined;
     record.unsubscribe?.();
     record.unsubscribe = undefined;
     this.byRequest.delete(record.context.requestId);
     this.byOutTrack.delete(record.outTrackId);
+    if (this.activeByScope.get(record.scopeKey) === record) {
+      this.activeByScope.delete(record.scopeKey);
+    }
     const pending = this.pendingByRun.get(record.context.runId);
     pending?.delete(record.context.requestId);
     if (pending?.size === 0) this.pendingByRun.delete(record.context.runId);
@@ -246,9 +293,9 @@ export class QuestionCardController {
         form_btn_text: 'Expired',
       },
       resolved_outside_presenter: {
-        card_status: 'cancelled',
+        card_status: 'expired',
         question_desc: 'Resolved outside this card.',
-        form_btn_text: 'Resolved',
+        form_btn_text: 'Expired',
       },
       cancelled: {
         card_status: 'cancelled',
@@ -259,7 +306,12 @@ export class QuestionCardController {
     try {
       await this.options.client.updateInstance({
         outTrackId: record.outTrackId,
-        cardParamMap: cardParamMap[record.terminalState],
+        cardParamMap: {
+          ...cardParamMap[record.terminalState],
+          ...(record.terminalDescription
+            ? { question_desc: record.terminalDescription }
+            : {}),
+        },
       });
     } catch (error) {
       this.options.onError?.('question card finalization', error);
@@ -322,6 +374,10 @@ export class QuestionCardController {
 
   private otherAnswerKey(answerKey: string): string {
     return `${answerKey}_other`;
+  }
+
+  private scopeKey(context: ChannelUserInputRequestContext): string {
+    return `${context.sessionId}\0${context.owner.id}`;
   }
 
   private cardData(

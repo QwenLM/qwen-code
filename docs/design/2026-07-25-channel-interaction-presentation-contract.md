@@ -123,21 +123,23 @@ pre-question segment.
 
 A `requestId` identifies one original pending `ask_user_question` permission
 request. One request may contain all normalized questions from that tool call.
-Multiple requests in one run remain independent and may be pending
-simultaneously.
+Presentation ownership is scoped by `sessionId + owner.id`. Different users or
+sessions may have live input presentations simultaneously. After a newer
+request is delivered in the same scope, the older presentation becomes
+non-interactive without sending a synthetic response to the agent.
 
-The input-card state machine is:
+The adapter-internal input state machine is:
 
 ```text
-reserved -> pending -> responding -> submitted
-                                  -> cancelled
-                                  -> expired
-                                  -> resolved_outside_presenter
+reserved -> pending -> claimed -> terminal
 ```
 
-Every terminal transition updates the existing native input presentation in
-place. Normal submission, cancellation, timeout, or external resolution never
-deletes that presentation.
+It is callback arbitration, not a platform card state. DingTalk exposes only
+`pending`, `submitted`, `cancelled`, and `expired`: accepted submission maps to
+`submitted`, accepted user cancellation maps to `cancelled`, and timeout,
+supersession, external resolution, or an unavailable responder maps to
+`expired`. Every terminal transition updates the existing native input
+presentation in place and never deletes it.
 
 The current branch-local settlement label `resolved_outside_card` is renamed
 to `resolved_outside_presenter` before publication. The contract is shared by
@@ -329,9 +331,10 @@ synthetic inbound message.
 ### Concurrent questions
 
 Each original permission request gets its own input presentation. A newer
-request does not supersede or cancel an older request. The run resumes
-according to the existing permission scheduler after the required requests
-settle.
+request delivered for the same `sessionId + owner.id` scope expires the older
+presentation. It does not synthesize a permission response or inbound message.
+Different users and sessions remain independent. The shared permission
+scheduler remains authoritative for agent continuation.
 
 ## DingTalk projection
 
@@ -346,6 +349,8 @@ Changes from the current implementation:
 - create it on the first chunk or final response for a segment;
 - key status records by `segmentId`, while retaining `runId` for Stop;
 - close the active segment before creating a question card;
+- do not queue a new question-card creation behind an older question card's
+  terminal OpenAPI update;
 - never change an old status card to `Waiting for input`;
 - update the question card in place to submitted, cancelled, expired, or
   externally resolved;
@@ -473,6 +478,9 @@ matches the sequences above. It remains unpushed until explicit approval.
 - A direct `ask_user_question` displays one question card and no status card.
 - A question card is updated in place on submit, cancel, expiry, and external
   resolution.
+- A second question for the same session and owner is delivered even if the
+  previous card's terminal update is slow; the previous card becomes expired.
+- Different users and sessions retain independent live question cards.
 - Text before a question remains in a completed historical status card.
 - Text after submission appears in a new status card.
 - No status card displays `Waiting for input`.

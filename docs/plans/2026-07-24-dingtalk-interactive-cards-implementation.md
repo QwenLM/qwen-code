@@ -616,7 +616,7 @@ git commit -m "feat(dingtalk): stream exact-run status cards"
   function:
 
 ```ts
-type QuestionRecordState = 'reserved' | 'pending' | 'responding' | 'terminal';
+type QuestionRecordState = 'reserved' | 'pending' | 'claimed' | 'terminal';
 
 type QuestionTerminalState =
   | 'submitted'
@@ -634,7 +634,7 @@ function finalizeQuestion(
 - [ ] **Step 1: Write failing presentation tests**
 
 Cover one-to-four questions in one card, all field types used by the normalized
-contract, multiple independent requests in one run, disabled cards, creation
+contract, same-scope supersession, cross-user/session isolation, disabled cards, creation
 failure, Markdown cancellation fallback, and question-card eligibility while
 block streaming is on. Use a deferred `createAndDeliver` to prove settlement
 during delivery cannot reactivate the request or invoke its responder.
@@ -666,7 +666,7 @@ wins.
 - [ ] **Step 5: Implement callback validation and one-shot claims**
 
 Validate every callback answer key against the stored normalized question set
-before calling `respond()`. Atomically claim `pending -> responding`, ACK, then
+before calling `respond()`. Atomically claim `pending -> claimed`, ACK, then
 await the responder. Do not mark success before `respond()` returns `true`.
 Unlike the OpenClaw reference, do not synthesize a new inbound message: call
 the original request-bound responder directly.

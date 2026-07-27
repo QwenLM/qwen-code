@@ -144,7 +144,7 @@ describe('QuestionCardController', () => {
     expect(client.updateInstance).toHaveBeenCalledWith(
       expect.objectContaining({
         cardParamMap: expect.objectContaining({
-          card_status: 'cancelled',
+          card_status: 'expired',
           question_desc: 'Resolved outside this card.',
         }),
       }),
@@ -338,7 +338,8 @@ describe('QuestionCardController', () => {
     expect(client.updateInstance).toHaveBeenLastCalledWith(
       expect.objectContaining({
         cardParamMap: expect.objectContaining({
-          card_status: 'cancelled',
+          card_status: 'expired',
+          question_desc: 'This question is no longer available.',
         }),
       }),
     );
@@ -373,10 +374,34 @@ describe('QuestionCardController', () => {
     });
   });
 
-  it('keeps two pending requests in one run independently claimable', async () => {
+  it('expires a card superseded by a new message without responding to the agent', async () => {
+    const { client, controller } = createHarness();
+    const { context, respond } = createContext();
+    await controller.present(context, { chatId: 'cid-1', isGroup: true });
+    const outTrackId = vi.mocked(client.createAndDeliver).mock.calls[0]![0]
+      .outTrackId;
+
+    controller.cancelRun('run-1', 'expired');
+    await vi.waitFor(() =>
+      expect(client.updateInstance).toHaveBeenCalledWith(
+        expect.objectContaining({
+          outTrackId,
+          cardParamMap: expect.objectContaining({
+            card_status: 'expired',
+          }),
+        }),
+      ),
+    );
+
+    expect(respond).not.toHaveBeenCalled();
+  });
+
+  it('keeps pending requests in different sessions independently claimable', async () => {
     const { client, controller } = createHarness();
     const first = createContext('request-1');
     const second = createContext('request-2');
+    second.context.sessionId = 'session-2';
+    second.context.runId = 'run-2';
     await controller.present(first.context, {
       chatId: 'cid-1',
       isGroup: true,
@@ -407,6 +432,124 @@ describe('QuestionCardController', () => {
     expect(secondAction).toBeDefined();
     await secondAction?.();
     expect(second.respond).toHaveBeenCalledOnce();
+  });
+
+  it('expires the previous card when the same user receives a newer question', async () => {
+    const { client, controller } = createHarness();
+    const first = createContext('request-1');
+    const second = createContext('request-2');
+    await controller.present(first.context, {
+      chatId: 'cid-1',
+      isGroup: true,
+    });
+    const firstOutTrackId = vi.mocked(client.createAndDeliver).mock.calls[0]![0]
+      .outTrackId;
+
+    await controller.present(second.context, {
+      chatId: 'cid-1',
+      isGroup: true,
+    });
+
+    expect(client.updateInstance).toHaveBeenCalledWith(
+      expect.objectContaining({
+        outTrackId: firstOutTrackId,
+        cardParamMap: expect.objectContaining({
+          card_status: 'expired',
+          question_desc:
+            'A newer question is available. Answer the latest card.',
+        }),
+      }),
+    );
+    expect(first.respond).not.toHaveBeenCalled();
+    expect(
+      controller.claim({
+        outTrackId: firstOutTrackId,
+        actionId: 'submit',
+        ownerId: 'owner-1',
+        formData: { '0': 'Beijing', '1': ['Logs'] },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('keeps the newer card active when deliveries finish out of order', async () => {
+    const firstDelivery = deferred<void>();
+    const { client, controller } = createHarness();
+    vi.mocked(client.createAndDeliver)
+      .mockReturnValueOnce(firstDelivery.promise)
+      .mockResolvedValueOnce(undefined);
+    const first = createContext('request-1');
+    const second = createContext('request-2');
+
+    const firstPresentation = controller.present(first.context, {
+      chatId: 'cid-1',
+      isGroup: true,
+    });
+    await controller.present(second.context, {
+      chatId: 'cid-1',
+      isGroup: true,
+    });
+    firstDelivery.resolve();
+    await firstPresentation;
+    const [firstOutTrackId, secondOutTrackId] = vi
+      .mocked(client.createAndDeliver)
+      .mock.calls.map(([request]) => request.outTrackId);
+
+    expect(
+      controller.claim({
+        outTrackId: firstOutTrackId,
+        actionId: 'submit',
+        ownerId: 'owner-1',
+        formData: { '0': 'Beijing', '1': ['Logs'] },
+      }),
+    ).toBeUndefined();
+    expect(
+      controller.claim({
+        outTrackId: secondOutTrackId,
+        actionId: 'submit',
+        ownerId: 'owner-1',
+        formData: { '0': 'Shanghai', '1': ['Metrics'] },
+      }),
+    ).toBeDefined();
+  });
+
+  it('keeps pending cards isolated between users', async () => {
+    const { client, controller } = createHarness();
+    const first = createContext('request-1');
+    const second = createContext('request-2');
+    second.context.owner = { kind: 'channel_user', id: 'owner-2' };
+    second.context.target = {
+      ...second.context.target,
+      senderId: 'owner-2',
+    };
+    await controller.present(first.context, {
+      chatId: 'cid-1',
+      isGroup: true,
+    });
+    await controller.present(second.context, {
+      chatId: 'cid-1',
+      isGroup: true,
+    });
+    const [firstOutTrackId, secondOutTrackId] = vi
+      .mocked(client.createAndDeliver)
+      .mock.calls.map(([request]) => request.outTrackId);
+
+    expect(client.updateInstance).not.toHaveBeenCalled();
+    expect(
+      controller.claim({
+        outTrackId: firstOutTrackId,
+        actionId: 'submit',
+        ownerId: 'owner-1',
+        formData: { '0': 'Beijing', '1': ['Logs'] },
+      }),
+    ).toBeDefined();
+    expect(
+      controller.claim({
+        outTrackId: secondOutTrackId,
+        actionId: 'submit',
+        ownerId: 'owner-2',
+        formData: { '0': 'Shanghai', '1': ['Metrics'] },
+      }),
+    ).toBeDefined();
   });
 
   it('does not roll back an accepted answer when terminal projection fails', async () => {
