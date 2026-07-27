@@ -1143,8 +1143,14 @@ const EN: Messages = {
   'queue.submittingDisabled': 'Submitting queued message...',
   'queue.commandBlocked':
     "Slash commands can't be queued while a turn is running.",
-  'queue.shellBlocked':
-    "Shell commands can't be queued while a turn is running.",
+  'queue.shellQueued':
+    'Shell command queued — it will run after the current turn finishes.',
+  'queue.shellDropped': (v) => {
+    const count = v?.count ?? 0;
+    return count === 1
+      ? '1 queued shell command will not run.'
+      : `${count} queued shell commands will not run.`;
+  },
   'queue.queueFailed': 'Failed to queue message',
   'queue.insertFailed': 'Failed to insert queued message',
   'queue.deleteFailed': 'Failed to move message out of queue',
@@ -1185,6 +1191,10 @@ const EN: Messages = {
   'help.shortcut.compact': 'Toggle compact mode',
   'retry.hint': 'Press Ctrl+Y to retry or click to retry',
   'retry.none': 'No failed request to retry.',
+  'system.taskNotification': 'Task notification',
+  'system.taskCompleted': 'Background task completed',
+  'system.taskFailed': 'Background task failed',
+  'system.taskCancelled': 'Background task cancelled',
   'branch.failed': 'Failed to branch session.',
   'branch.success': (v) =>
     `Copied session. New session name: "${v?.name ?? ''}". Switched to the new session.`,
@@ -2125,6 +2135,11 @@ const EN: Messages = {
   'tasks.detail.prompt': 'Prompt',
   'tasks.detail.type': 'Type',
   'tasks.detail.runtime': 'Time',
+  'tasks.detail.eventCount': 'Events',
+  'tasks.detail.pid': 'PID',
+  'tasks.detail.lastEvent': 'Last event',
+  'tasks.detail.droppedCount': 'Dropped',
+  'tasks.detail.exitCode': 'Exit code',
   'tasks.detail.tokenCount': 'Tokens',
   'tasks.detail.toolCallCount': 'Tool calls',
   'tasks.detail.tokens': (v) => `${v?.count ?? 0} tokens`,
@@ -3425,7 +3440,9 @@ const ZH: Messages = {
   'queue.removing': '处理中...',
   'queue.submittingDisabled': '排队消息正在提交中...',
   'queue.commandBlocked': '当前回合运行时，Slash 命令不能进入排队。',
-  'queue.shellBlocked': '当前回合运行时，Shell 命令不能进入排队。',
+  'queue.shellQueued': 'Shell 命令已排队，将在当前回合结束后执行。',
+  'queue.shellDropped': (v) =>
+    `${v?.count ?? 0} 条排队的 Shell 命令将不会执行。`,
   'queue.queueFailed': '排队消息失败',
   'queue.insertFailed': '插入排队消息失败',
   'queue.deleteFailed': '移出队列失败',
@@ -3464,6 +3481,10 @@ const ZH: Messages = {
   'help.shortcut.compact': '切换紧凑模式',
   'retry.hint': '按 Ctrl+Y 重试或点击重试',
   'retry.none': '没有可重试的失败请求。',
+  'system.taskNotification': '后台任务通知',
+  'system.taskCompleted': '后台任务执行完成',
+  'system.taskFailed': '后台任务执行失败',
+  'system.taskCancelled': '后台任务已取消',
   'branch.failed': '分支会话失败。',
   'branch.success': (v) =>
     `已复制会话，新会话名称为： "${v?.name ?? ''}"，当前已切换到新的会话。`,
@@ -4331,6 +4352,11 @@ const ZH: Messages = {
   'tasks.detail.prompt': '提示词',
   'tasks.detail.type': '类型',
   'tasks.detail.runtime': '时间',
+  'tasks.detail.eventCount': '事件数',
+  'tasks.detail.pid': 'PID',
+  'tasks.detail.lastEvent': '最近事件',
+  'tasks.detail.droppedCount': '丢弃行数',
+  'tasks.detail.exitCode': '退出码',
   'tasks.detail.tokenCount': 'Tokens',
   'tasks.detail.toolCallCount': '工具数量',
   'tasks.detail.tokens': (v) => `${v?.count ?? 0} tokens`,

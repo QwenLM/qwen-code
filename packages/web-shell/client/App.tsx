@@ -34,6 +34,7 @@ import { DaemonHttpError, isDaemonTurnError } from '@qwen-code/sdk/daemon';
 import type {
   DaemonInputAnnotation,
   DaemonTranscriptBlock,
+  DaemonSessionMonitorTaskStatus,
   DaemonSessionTaskStatus,
   DaemonSessionArtifact,
   DaemonWorkspaceCapability,
@@ -41,10 +42,15 @@ import type {
 } from '@qwen-code/sdk/daemon';
 
 import { type SessionGitIntent } from './components/GitModePopover';
-import { SESSION_TRANSCRIPT_PAGINATION_FEATURE } from './constants/sessions';
+import {
+  SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
+  SESSION_TRANSCRIPT_PAGINATION_FEATURE,
+} from './constants/sessions';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
+import { MonitorDetailsProvider } from './monitorDetailsContext';
+import { findMonitorTaskForTool } from './utils/monitorTasks';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
 import {
   ChatEditor,
@@ -952,12 +958,24 @@ export function getBackgroundTaskActivityKey(
   for (const message of messages) {
     if (message.role !== 'tool_group') continue;
     for (const tool of message.tools) {
-      if (isBackgroundShellToolCall(tool)) {
+      if (
+        isBackgroundShellToolCall(tool) ||
+        tool.toolName.toLowerCase() === 'monitor'
+      ) {
         parts.push(`${tool.callId}:${tool.status}`);
       }
     }
   }
   return parts.join('|');
+}
+
+export function mergeMonitorTaskSnapshot(
+  current: DaemonSessionMonitorTaskStatus,
+  next: DaemonSessionMonitorTaskStatus,
+): DaemonSessionMonitorTaskStatus {
+  return current.status !== 'running' && next.status === 'running'
+    ? current
+    : next;
 }
 
 function mapToWebShellTaskInfo(
@@ -1356,6 +1374,10 @@ export function App({
   const transcriptReloadSupported =
     connection.capabilities?.features.includes(
       SESSION_TRANSCRIPT_PAGINATION_FEATURE,
+    ) === true;
+  const monitorDetailsSupported =
+    connection.capabilities?.features.includes(
+      SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
     ) === true;
   const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
@@ -1954,6 +1976,35 @@ export function App({
     },
     [getDefaultReviewPanelWidth, t],
   );
+  const openMonitorPanel = useCallback(
+    (task: DaemonSessionMonitorTaskStatus) => {
+      const tab: ArtifactPanelTab = {
+        id: `monitor:${task.id}`,
+        kind: 'monitor',
+        title: task.description,
+        task,
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => {
+              if (item.id !== tab.id || item.kind !== 'monitor') return item;
+              const mergedTask = mergeMonitorTaskSnapshot(item.task, task);
+              return {
+                ...tab,
+                title: mergedTask.description,
+                task: mergedTask,
+              };
+            })
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth],
+  );
   const openSubagentPanelForSession = useCallback(
     (tool: ACPToolCall, sessionId: string, workspaceCwd?: string) => {
       const rawOutput =
@@ -2031,7 +2082,6 @@ export function App({
         );
         return;
       }
-
       if (!request.workspaceActions) {
         setArtifactPanelExtraArtifacts((current) => {
           const index = current.findIndex(
@@ -2359,10 +2409,67 @@ export function App({
     () => getBackgroundTaskActivityKey(messages),
     [messages],
   );
+  const [backgroundTasksRefreshTrigger, setBackgroundTasksRefreshTrigger] =
+    useState(0);
   const backgroundTasks = useBackgroundTasks(
+    connection.sessionId,
     backgroundTaskActivityKey,
     connection.status === 'connected',
+    backgroundTasksRefreshTrigger,
   );
+  const monitorDetailsSessionIdRef = useRef(connection.sessionId);
+  monitorDetailsSessionIdRef.current = connection.sessionId;
+  const openMonitorPanelFromTool = useCallback(
+    async (tool: ACPToolCall): Promise<boolean> => {
+      const sessionId = monitorDetailsSessionIdRef.current;
+      if (!sessionId) return false;
+      try {
+        const snapshot = await sessionActions.getTasks();
+        if (
+          monitorDetailsSessionIdRef.current !== sessionId ||
+          snapshot.sessionId !== sessionId
+        ) {
+          return false;
+        }
+        const task = findMonitorTaskForTool(snapshot.tasks, tool);
+        if (!task) return false;
+        setBackgroundTasksRefreshTrigger((value) => value + 1);
+        openMonitorPanel(task);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [openMonitorPanel, sessionActions],
+  );
+  useEffect(() => {
+    const monitors = new Map(
+      backgroundTasks
+        .filter(
+          (task): task is DaemonSessionMonitorTaskStatus =>
+            task.kind === 'monitor',
+        )
+        .map((task) => [task.id, task]),
+    );
+    if (monitors.size === 0) return;
+    setArtifactPanelTabs((tabs) => {
+      let changed = false;
+      const next = tabs.map((tab) => {
+        if (tab.kind !== 'monitor') return tab;
+        const task = monitors.get(tab.task.id);
+        if (!task || task === tab.task) return tab;
+        const mergedTask = mergeMonitorTaskSnapshot(tab.task, task);
+        if (mergedTask === tab.task) return tab;
+        changed = true;
+        return {
+          ...tab,
+          title: mergedTask.description,
+          task: mergedTask,
+        };
+      });
+      return changed ? next : tabs;
+    });
+  }, [backgroundTasks]);
   const footerTasks = useMemo(
     () => (renderFooter ? backgroundTasks.map(mapToWebShellTaskInfo) : []),
     [backgroundTasks, renderFooter],
@@ -2425,6 +2532,16 @@ export function App({
     useState(false);
   const streamingState = useStreamingState();
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
+  // Cleared in three places: the session-switch effect, the drain loop, and
+  // handleCancel. Bumping drainGenerationRef at each clear site also cancels
+  // any in-flight inline ! command whose ensureSessionForPrompt is resolving.
+  // The session-switch effect exempts the lazy-creation transition (into
+  // preparingSessionIdRef.current) so a submit's own session creation does
+  // not cancel the command.
+  const queuedShellCommandsRef = useRef<string[]>([]);
+  const drainGenerationRef = useRef(0);
+  const shellSubmitInFlightRef = useRef(false);
+  const isDrainingRef = useRef(false);
   const localStreamingStartedAtRef = useRef(Date.now());
   const previousStreamingStateRef =
     useRef<DaemonStreamingState>(streamingState);
@@ -2985,6 +3102,14 @@ export function App({
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [tasksDialogMessage, setTasksDialogMessage] =
     useState<SerializedTasksMessage | null>(null);
+  const handleOpenMonitorDetails = useCallback(
+    (task: DaemonSessionMonitorTaskStatus) => {
+      setTasksDialogMessage(null);
+      setBackgroundTasksRefreshTrigger((value) => value + 1);
+      openMonitorPanel(task);
+    },
+    [openMonitorPanel],
+  );
   const [selectedTheme, setSelectedTheme] = useState<WebShellTheme>(
     providedTheme ?? WebShellThemeId.Dark,
   );
@@ -3011,7 +3136,9 @@ export function App({
     setCurrentMode(modeId);
   }, []);
   const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
-  const createSessionPromiseRef = useRef<Promise<void> | null>(null);
+  const createSessionPromiseRef = useRef<Promise<string | undefined> | null>(
+    null,
+  );
   const preparingSessionIdRef = useRef<string | null>(null);
   /** Git mode intent for the next lazily-created session (branch or worktree). */
   const [gitModeIntent, setGitModeIntent] = useState<SessionGitIntent>({
@@ -3063,10 +3190,11 @@ export function App({
       ) {
         return createSessionPromiseRef.current;
       }
-      return Promise.resolve();
+      return Promise.resolve(undefined);
     }
-    if (currentSessionId) return Promise.resolve();
+    if (currentSessionId) return Promise.resolve(undefined);
     const promise = (async () => {
+      let allocatedSessionId: string | undefined;
       const modelId =
         currentModelRef.current || connectionRef.current.currentModel;
       const modeId =
@@ -3099,6 +3227,7 @@ export function App({
         onSessionCreated: onSessionCreatedRef.current,
         onSessionAllocated: (sessionId) => {
           preparingSessionIdRef.current = sessionId;
+          allocatedSessionId = sessionId;
         },
         getCurrentSessionId: () => connectionRef.current.sessionId,
       }).then((result) => {
@@ -3117,6 +3246,7 @@ export function App({
       // it after creation. The next new chat defaults back to the primary
       // workspace unless the user picks one again.
       setSelectedWorkspaceCwd(undefined);
+      return allocatedSessionId;
     })();
     createSessionPromiseRef.current = promise;
     const clearPreparation = () => {
@@ -3144,6 +3274,16 @@ export function App({
     },
     [],
   );
+  // Daemon-side session registration lags behind the client, so schedule a
+  // backup reload ~2 s after the immediate one to pick up newly created sessions.
+  const scheduleDelayedSessionListReload = useCallback(() => {
+    if (delayedReloadTimerRef.current !== null) {
+      clearTimeout(delayedReloadTimerRef.current);
+    }
+    delayedReloadTimerRef.current = setTimeout(() => {
+      setSessionListReloadToken((n) => n + 1);
+    }, 2000);
+  }, []);
   const dispatchSessionChange = useCallback(
     (event: SessionChangeEvent) => {
       onSessionChange?.(event);
@@ -3240,15 +3380,7 @@ export function App({
           prompt: text,
           queued: false,
         });
-        // Schedule an additional delayed reload to account for daemon-side
-        // session registration lag — the immediate reload above may return
-        // a list that doesn't yet include the newly created session.
-        if (delayedReloadTimerRef.current !== null) {
-          clearTimeout(delayedReloadTimerRef.current);
-        }
-        delayedReloadTimerRef.current = setTimeout(() => {
-          setSessionListReloadToken((n) => n + 1);
-        }, 2000);
+        scheduleDelayedSessionListReload();
       }
       const result = await (
         sessionActions.sendPrompt as (
@@ -3258,7 +3390,12 @@ export function App({
       )(text, promptOptions);
       return result;
     },
-    [clearFollowup, ensureSessionForPrompt, sessionActions],
+    [
+      clearFollowup,
+      ensureSessionForPrompt,
+      scheduleDelayedSessionListReload,
+      sessionActions,
+    ],
   );
   const availableModels = useMemo(
     () =>
@@ -3865,6 +4002,97 @@ export function App({
   useEffect(() => {
     streamingStateRef.current = streamingState;
   }, [streamingState]);
+
+  // Drop queued commands on a session switch so the drain never runs a
+  // command against a different workspace's daemon (mirrors useQueuedPrompts).
+  const prevQueueSessionIdRef = useRef(connection.sessionId);
+  useEffect(() => {
+    if (prevQueueSessionIdRef.current === connection.sessionId) return;
+    prevQueueSessionIdRef.current = connection.sessionId;
+    const dropped = queuedShellCommandsRef.current.length;
+    queuedShellCommandsRef.current = [];
+    // Skip the bump when the transition is into the session that
+    // ensureSessionForPrompt is preparing — that is the submit's own lazy
+    // creation, not a user-initiated switch.
+    if (connection.sessionId !== preparingSessionIdRef.current) {
+      drainGenerationRef.current++;
+      isDrainingRef.current = false;
+    }
+    if (dropped > 0) {
+      pushToast('warning', t('queue.shellDropped', { count: dropped }));
+    }
+  }, [connection.sessionId, pushToast, t]);
+
+  // Declared after the session-switch wipe effect above: React runs effects in
+  // declaration order, so the queue is already cleared before this drain sees it.
+  const prevShellDrainStreamingStateRef = useRef(streamingState);
+  useEffect(() => {
+    const prev = prevShellDrainStreamingStateRef.current;
+    prevShellDrainStreamingStateRef.current = streamingState;
+    // Only start a drain on the transition into idle. sendShellCommand drives
+    // streamingState non-idle while each command runs, so cancelling the drain
+    // on every streamingState change would drop every command after the first.
+    if (prev === 'idle' || streamingState !== 'idle') return;
+    // A running drain re-reads the queue after each batch, so commands queued
+    // mid-drain are picked up by it. Starting a second drain here would bump the
+    // generation and cancel the in-flight batch, silently dropping commands.
+    if (isDrainingRef.current) return;
+    const cmds = queuedShellCommandsRef.current;
+    if (cmds.length === 0) return;
+    queuedShellCommandsRef.current = [];
+    isDrainingRef.current = true;
+    const generation = ++drainGenerationRef.current;
+    const drainSessionId = connectionRef.current.sessionId;
+    void (async () => {
+      try {
+        let batch = cmds;
+        while (batch.length > 0) {
+          for (let i = 0; i < batch.length; i++) {
+            const generationChanged = drainGenerationRef.current !== generation;
+            if (
+              generationChanged ||
+              connectionRef.current.sessionId !== drainSessionId ||
+              connectionRef.current.status !== 'connected'
+            ) {
+              let dropped = batch.length - i;
+              if (!generationChanged) {
+                // The two generation-bump sites (session switch, cancel) wipe
+                // the queue themselves, so anything parked here was queued
+                // after the drop and is fresh user intent. A disconnect has no
+                // such wipe — clear it so a reconnect cannot resurrect a newer
+                // command behind an already-dropped older one.
+                dropped += queuedShellCommandsRef.current.length;
+                queuedShellCommandsRef.current = [];
+              }
+              console.warn(
+                '[web-shell] dropping %d queued shell command(s)',
+                dropped,
+              );
+              pushToast('warning', t('queue.shellDropped', { count: dropped }));
+              return;
+            }
+            try {
+              await sessionActions.sendShellCommand(batch[i]);
+            } catch (error: unknown) {
+              reportError(
+                error,
+                `Failed to execute shell command: !${batch[i]}`,
+              );
+            }
+          }
+          batch = queuedShellCommandsRef.current;
+          queuedShellCommandsRef.current = [];
+        }
+      } finally {
+        // Release the lock only if this IIFE is still the active drainer; a
+        // cancel or session switch may have bumped the generation and handed
+        // the lock to a newer drain that must not be unblocked prematurely.
+        if (drainGenerationRef.current === generation) {
+          isDrainingRef.current = false;
+        }
+      }
+    })();
+  }, [streamingState, sessionActions, reportError, pushToast, t]);
 
   useEffect(() => {
     modelDialogModeRef.current = modelDialogMode;
@@ -5854,17 +6082,56 @@ export function App({
           inputAnnotations: metadata?.inputAnnotations,
         });
       } else if (text.startsWith('!')) {
-        if (promptBlocked) {
-          pushToast('error', t('queue.shellBlocked'));
-          return false;
-        }
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
-        if (!requireActiveSessionForLocalCommand()) return false;
-        sessionActions.sendShellCommand(cmd).catch((error: unknown) => {
-          reportError(error, 'Failed to execute shell command');
-        });
-        return true;
+        if (promptBlocked) {
+          queuedShellCommandsRef.current.push(cmd);
+          pushToast('info', t('queue.shellQueued'));
+          return true;
+        }
+        const needsSession = !connectionRef.current.sessionId;
+        if (needsSession) {
+          if (shellSubmitInFlightRef.current) return false;
+          shellSubmitInFlightRef.current = true;
+          setIsPreparingPrompt(true);
+        }
+        let sessionCreated = false;
+        const generationAtSubmit = drainGenerationRef.current;
+        void ensureSessionForPrompt()
+          .finally(() => {
+            if (needsSession) {
+              setIsPreparingPrompt(false);
+              shellSubmitInFlightRef.current = false;
+            }
+          })
+          .then((createdSessionId) => {
+            if (drainGenerationRef.current !== generationAtSubmit) return;
+            if (needsSession && createdSessionId) {
+              sessionCreated = true;
+              if (commitComposerAccepted) {
+                commitComposerAccepted();
+              } else {
+                editorRef.current?.clear();
+              }
+              dispatchSessionChangeRef.current?.({
+                type: 'submit',
+                sessionId: createdSessionId,
+                prompt: `!${cmd}`,
+                queued: false,
+              });
+              scheduleDelayedSessionListReload();
+            }
+            return sessionActions.sendShellCommand(cmd);
+          })
+          .catch((error: unknown) => {
+            reportError(
+              error,
+              needsSession && !sessionCreated
+                ? 'Failed to create session for shell command'
+                : 'Failed to execute shell command',
+            );
+          });
+        return !needsSession;
       } else {
         if (promptBlocked) {
           return enqueuePrompt(
@@ -5893,6 +6160,8 @@ export function App({
       openScheduledTasks,
       openGoals,
       createNewSession,
+      ensureSessionForPrompt,
+      scheduleDelayedSessionListReload,
       gitDiffWorkspaceCwd,
       sessionWorktree,
       gitHubPrsSupported,
@@ -5954,10 +6223,18 @@ export function App({
   );
 
   const handleCancel = useCallback(() => {
+    const dropped = queuedShellCommandsRef.current.length;
+    queuedShellCommandsRef.current = [];
+    drainGenerationRef.current++;
+    isDrainingRef.current = false;
+    shellSubmitInFlightRef.current = false;
+    if (dropped > 0) {
+      pushToast('warning', t('queue.shellDropped', { count: dropped }));
+    }
     sessionActions.cancel().catch((error: unknown) => {
       reportError(error, 'Failed to cancel request');
     });
-  }, [sessionActions, reportError]);
+  }, [sessionActions, reportError, pushToast, t]);
 
   const handleFocusTaskPill = useCallback((): boolean => {
     if (interactionBlocked) return false;
@@ -6765,6 +7042,7 @@ export function App({
                 embedded
                 manageActiveEvent={false}
                 onClose={() => setTasksDialogMessage(null)}
+                onOpenMonitor={handleOpenMonitorDetails}
               />
             </DialogShell>
           )}
@@ -7690,12 +7968,21 @@ export function App({
                                 }
                               />
                             );
-                            const messageList = (
+                            const messageListWithSubagentDetails = (
                               <SubagentDetailsProvider
                                 onOpen={openSubagentPanel}
                               >
                                 {messageListContent}
                               </SubagentDetailsProvider>
+                            );
+                            const messageList = monitorDetailsSupported ? (
+                              <MonitorDetailsProvider
+                                onOpen={openMonitorPanelFromTool}
+                              >
+                                {messageListWithSubagentDetails}
+                              </MonitorDetailsProvider>
+                            ) : (
+                              messageListWithSubagentDetails
                             );
 
                             const btwPanel =
