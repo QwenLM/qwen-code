@@ -3933,7 +3933,9 @@ export function App({
               connectionRef.current.sessionId !== drainSessionId ||
               connectionRef.current.status !== 'connected'
             ) {
-              const dropped = batch.length - i;
+              const dropped =
+                batch.length - i + queuedShellCommandsRef.current.length;
+              queuedShellCommandsRef.current = [];
               console.warn(
                 '[web-shell] dropping %d queued shell command(s)',
                 dropped,

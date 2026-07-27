@@ -1441,6 +1441,81 @@ describe('App shell command queueing', () => {
     expect(onToast).toHaveBeenCalledWith('warning', expect.any(String));
   });
 
+  it('drops the whole queue when the drain bails, preserving FIFO integrity', async () => {
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    let resolveA!: () => void;
+    const aDone = new Promise<void>((r) => {
+      resolveA = r;
+    });
+    mockSessionActions.sendShellCommand
+      .mockReturnValueOnce(aDone)
+      .mockResolvedValue(undefined);
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onToast });
+    });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!a');
+      testState.latestChatEditorProps?.onSubmit('!b');
+      await Promise.resolve();
+    });
+
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender({ onToast });
+    });
+    await flush();
+    expect(mockSessionActions.sendShellCommand).toHaveBeenCalledTimes(1);
+
+    // User queues `c` while `a` is still running.
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onToast });
+    });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!c');
+      await Promise.resolve();
+    });
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender({ onToast });
+    });
+    await flush();
+
+    mockConnection.status = 'disconnected';
+    await act(async () => {
+      resolveA();
+      await Promise.resolve();
+    });
+    await flush();
+
+    // Both `b` and `c` are dropped, and the user is told about both.
+    expect(onToast).toHaveBeenCalledWith(
+      'warning',
+      '2 queued shell commands will not run.',
+    );
+
+    // Reconnecting must not resurrect `c` behind the already-dropped `b`.
+    mockConnection.status = 'connected';
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onToast });
+    });
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender({ onToast });
+    });
+    await flush();
+    await flush();
+
+    expect(mockSessionActions.sendShellCommand).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith('a');
+  });
+
   it('drains multiple queued commands in FIFO order', async () => {
     const onToast = vi.fn();
     const { rerender } = renderApp({ onToast });
@@ -1969,6 +2044,44 @@ describe('App shell command queueing', () => {
     expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith(
       'git status',
     );
+  });
+
+  it('runs a retry submitted while session creation is still in flight after cancel', async () => {
+    mockConnection.sessionId = undefined;
+    let release!: () => void;
+    const gate = new Promise<void>((r) => {
+      release = r;
+    });
+    mockSessionActions.createSession.mockImplementation(() =>
+      gate.then(() => {
+        mockConnection.sessionId = 'session-1';
+        return { sessionId: 'session-1' };
+      }),
+    );
+    renderApp({});
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!a');
+      await Promise.resolve();
+    });
+    await act(async () => {
+      testState.latestChatEditorProps?.onCancel?.();
+      await Promise.resolve();
+    });
+    // Retry while creation is STILL in flight — the only state in which
+    // shellSubmitInFlightRef stays true unless handleCancel resets it.
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!c');
+      await Promise.resolve();
+    });
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+    await flush();
+
+    expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith('c');
   });
 
   it('skips sendShellCommand when the session changes during session creation', async () => {
