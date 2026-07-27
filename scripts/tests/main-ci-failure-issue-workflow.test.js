@@ -60,9 +60,13 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).toContain(
       '--search "\\"${title_prefix} ${WORKFLOW_NAME}\\" in:title"',
     );
+    expect(workflow).toContain(
+      '--jq "[.[] | select(.title | startswith(\\"${title_prefix} ${WORKFLOW_NAME} on \\"))] | .[0].number // \\"\\""',
+    );
     expect(workflow).toContain('--title "${title_prefix} ${WORKFLOW_NAME}');
     expect(workflow).toContain('gh issue comment "${existing_workflow_issue}"');
     expect(workflow).toContain('## Additional CI Failure');
+    expect(workflow.match(/echo "<!-- \$\{marker\} -->"/g)).toHaveLength(2);
     expect(workflow).toContain('${WORKFLOW_RUN_URL}');
     expect(workflow).toContain('${HEAD_SHA}');
     expect(workflow.match(/exit 0/g)?.length).toBeGreaterThanOrEqual(2);

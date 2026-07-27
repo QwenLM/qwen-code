@@ -72,7 +72,7 @@ jobs:
               --state open \
               --search "\"${title_prefix} ${WORKFLOW_NAME}\" in:title" \
               --json number,title \
-              --jq '.[0].number // ""'
+              --jq "[.[] | select(.title | startswith(\"${title_prefix} ${WORKFLOW_NAME} on \"))] | .[0].number // \"\""
           )"
 
           if [[ -n "${existing_workflow_issue}" ]]; then
