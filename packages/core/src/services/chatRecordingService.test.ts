@@ -460,6 +460,32 @@ describe('ChatRecordingService', () => {
       ]);
     });
 
+    it('overrides tool result provenance to goal_runtime when requested', async () => {
+      const permit: GoalTurnPermit = {
+        goalId: 'goal-1',
+        revision: 4,
+        turnId: 'tool-override-turn',
+      };
+
+      chatRecordingService.recordToolResult(
+        [{ functionResponse: { name: 'run', response: { ok: true } } }],
+        undefined,
+        { goalContext: permit, provenance: 'goal_runtime' },
+      );
+      permit.turnId = 'mutated';
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record).toMatchObject({
+        provenance: 'goal_runtime',
+        goalContext: {
+          goalId: 'goal-1',
+          revision: 4,
+          turnId: 'tool-override-turn',
+        },
+      });
+    });
+
     it('does not treat Goal runtime continuations as rewind boundaries', async () => {
       chatRecordingService.recordAssistantTurn({
         model: 'gemini-pro',
