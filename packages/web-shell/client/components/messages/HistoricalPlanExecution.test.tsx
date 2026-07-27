@@ -91,6 +91,10 @@ function PaginatedHistoryFixture({ onLoad }: { onLoad: () => void }) {
         onLoad();
         setPage(completedPlanMessages(buildAgent));
         setHasOlder(false);
+        // Production loaders (MessageList.loadOlderHistory) resolve true
+        // once the older page is laid out; returning a falsy value here
+        // makes the provider throw "Unable to load earlier session history".
+        return true;
       }}
     >
       <HistoricalPlanExecution todos={todos} sourceTool={todoTool} />
