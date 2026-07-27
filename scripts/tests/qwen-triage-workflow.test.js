@@ -686,7 +686,7 @@ describe('qwen-triage tmux workflow', () => {
     expect(prSkill).toContain(
       'A maintainer removes it once the discussion resolves',
     );
-    expect(prSkill).toContain('different reviewer');
+    expect(prSkill).toContain('does not appear in any earlier entry');
   });
 
   it('includes non-maintainer high-risk tier in the triage skill', () => {

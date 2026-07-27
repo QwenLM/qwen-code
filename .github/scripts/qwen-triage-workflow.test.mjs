@@ -304,7 +304,7 @@ describe('qwen-triage: Stage 1e revert-pattern signals', () => {
     assert.ok(prSkill.includes('qwen-code-ci-bot'));
     assert.ok(prSkill.includes('packages/core/src/**'));
     assert.ok(prSkill.includes('A maintainer removes it once the discussion resolves'));
-    assert.ok(prSkill.includes('different reviewer'));
+    assert.ok(prSkill.includes('does not appear in any earlier entry'));
   });
 
   it('includes non-maintainer high-risk tier', () => {

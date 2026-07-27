@@ -236,7 +236,7 @@ A revert-history analysis of this repo (111 revert commits, 46 unique reverted P
 ```bash
 FILES=$(gh api --paginate "repos/$REPO/pulls/$PR_NUMBER/files" --jq '.[].filename')
 if [ -n "$FILES" ]; then
-  echo "$FILES" | grep -E 'openaiContentGenerator|streamingToolCallParser|geminiChat|acpConnection|(^|/)shell\.ts$|shellExecutionService|mcp-client|mcp-pool|LspServer|acp-integration|(^|/)relaunch\.ts$|(^|/)sandbox\.ts$|electron-run-as-node' || true
+  echo "$FILES" | grep -v '\.\(test\|spec\)\.' | grep -E 'openaiContentGenerator|streamingToolCallParser|geminiChat|acpConnection|(^|/)shell\.ts$|shellExecutionService|mcp-client|mcp-pool|LspServer|acp-integration|(^|/)relaunch\.ts$|(^|/)sandbox\.ts$|electron-run-as-node' || true
 else
   echo "WARNING: could not fetch PR files"
 fi
@@ -254,11 +254,13 @@ If any file matches (the strongest triage-time signal — 10 of 31 reverted PRs 
 gh pr view "$PR_NUMBER" --repo "$REPO" --json reviews --jq '[.reviews[] | select(.state != "PENDING" and .state != "COMMENTED") | select(.author.login != "qwen-code-ci-bot") | {state: .state, author: .author.login}]'
 ```
 
-If the review array has a `CHANGES_REQUESTED` entry after position 0 from a different reviewer than the entries before it (genuine cross-reviewer disagreement, not same-reviewer iteration) AND the PR touches core paths (`packages/core/src/**`, `packages/*/src/auth/**`, `packages/*/src/providers/**`, `packages/*/src/models/**`, `packages/*/src/config/**`, `packages/*/src/tools/**`, `packages/*/src/services/**`):
+If the review array has a `CHANGES_REQUESTED` entry after position 0 from a reviewer who does not appear in any earlier entry (genuine cross-reviewer disagreement, not same-reviewer iteration) AND the PR touches core paths (`packages/core/src/**`, `packages/*/src/auth/**`, `packages/*/src/providers/**`, `packages/*/src/models/**`, `packages/*/src/config/**`, `packages/*/src/tools/**`, `packages/*/src/services/**`):
 
 - Apply `need-discussion` label via `gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label need-discussion` (if the label exists). A maintainer removes it once the discussion resolves.
 - Recommend maintainer sign-off before merge in the Stage 1 comment.
 - Do not auto-approve even if Stage 2 and Stage 3 are clean (this feeds the Stage 3 approval guardrail — see below).
+
+**Re-triage clearing:** the review history is immutable — a `CHANGES_REQUESTED` entry from an earlier round remains even after the disagreement is resolved. On a re-triage (`@qwen-code /triage`), if the `need-discussion` label is absent, treat the contested-merge signal as resolved and do not re-apply it. The label is the clearing mechanism: a maintainer removes it once the discussion resolves, and its absence on re-run means the signal no longer fires.
 
 **Non-maintainer + high-risk**: a non-maintainer PR that matches the high-risk path patterns above is the highest-risk tier. Apply all actions: do not skip any Stage 2 enrichment, require Stage 2b CI evidence, flag the high-risk paths in the Stage 1 comment, recommend E2E verification (scoped to write-access authors per Stage 2c), apply `need-discussion` label (if it exists), recommend maintainer sign-off, and do not auto-approve even if Stage 2 and Stage 3 are clean.
 
@@ -614,7 +616,7 @@ Open it with a one-line confidence score — `**Confidence: N/5** — <one hones
 | 2/5   | Significant concerns; leaning against as-is                     | request changes |
 | 1/5   | Should not merge in its current form                            | request changes |
 
-A fork `refactor` that hits the approval guardrail below, **or a PR that Stage 0 escalated for maintainer awareness**, caps at 3/5 no matter how clean every stage looked — the guardrail drives the action, not the score. At 3/5 the action is always the **defer path** (a comment, never `--request-changes`): name any concerns in the defer comment for the maintainer's attention without approving, and @mention the maintainer for an unresolvable question or when the cap is pure policy. When the cap is pure policy on an otherwise-clean PR, say so in the one-line score so 3/5 doesn't read as real doubt — e.g. `Confidence: 3/5 — clean review, but the fork-refactor guardrail needs a maintainer's sign-off`. Never post a 4–5/5 alongside a `--request-changes`, or a 1–2/5 alongside an `--approve`: the score and the verdict tell the same story.
+A fork `refactor` that hits the approval guardrail below, **a PR that Stage 0 escalated for maintainer awareness, or a PR with an active Stage 1e do-not-auto-approve signal**, caps at 3/5 no matter how clean every stage looked — the guardrail drives the action, not the score. At 3/5 the action is always the **defer path** (a comment, never `--request-changes`): name any concerns in the defer comment for the maintainer's attention without approving, and @mention the maintainer for an unresolvable question or when the cap is pure policy. When the cap is pure policy on an otherwise-clean PR, say so in the one-line score so 3/5 doesn't read as real doubt — e.g. `Confidence: 3/5 — clean review, but the fork-refactor guardrail needs a maintainer's sign-off`. Never post a 4–5/5 alongside a `--request-changes`, or a 1–2/5 alongside an `--approve`: the score and the verdict tell the same story.
 
 Then write what you're actually thinking. "Looks good, ships the feature cleanly, the before/after shows it works" — not a five-bullet summary of the stages. If you have reservations, say them plainly. If you're approving with mild concerns, name them. Sign with `— _Qwen Code · qwen3.7-max_`, add the reviewed-commit footer (empty `HEAD_SHA` → fail closed, as above — don't blank a prior footer), and save this comment's ID.
 
