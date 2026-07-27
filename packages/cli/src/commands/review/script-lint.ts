@@ -30,6 +30,7 @@ import {
   writeFileSync,
   mkdirSync,
   mkdtempSync,
+  rmSync,
   lstatSync,
   openSync,
   readSync,
@@ -260,30 +261,41 @@ function firstLineOf(abs: string): FirstLine {
   }
 }
 
-/** An empty hadolint config, written once. Pointing `HADOLINT_CONFIG` at it makes
- *  hadolint use a config with no `ignored:` rules, so a `.hadolint.yaml` a PR added
- *  to the worktree cannot suppress the findings we run it to catch. Best-effort: if
- *  the write fails, the env var points at a path hadolint will simply not find.
+/**
+ * A private empty hadolint config, created once per process — or `undefined` when
+ * we could not create one. Pointing `HADOLINT_CONFIG` at a config with no `ignored:`
+ * rules is what stops a `.hadolint.yaml` a PR added from suppressing the findings we
+ * run hadolint to catch.
  *
- *  Written inside a fresh `mkdtempSync` directory, NOT at a fixed `tmpdir()` name: a
- *  predictable path on a shared runner is a symlink-race — `writeFileSync` follows a
- *  symlink an attacker pre-planted there and truncates its target. mkdtemp gives a
- *  0700 directory with a random suffix that cannot pre-exist, so the write is safe. */
+ * Two properties, both load-bearing and in OPPOSITE directions:
+ * - The path must be UNPREDICTABLE and freshly ours, because it is a `writeFileSync`
+ *   target — a fixed `tmpdir()` name is a symlink-race (we'd follow a planted symlink
+ *   and truncate its target). `mkdtempSync` gives a 0700 dir with a random suffix.
+ * - The path must also be one WE CONTROL, because `HADOLINT_CONFIG` is a file hadolint
+ *   READS — a predictable fallback we do not own lets an attacker plant an `ignored:`
+ *   config there and reopen the very suppression this closes. So there is NO fixed
+ *   fallback: if `mkdtempSync`/`writeFileSync` fails we return `undefined`, and the
+ *   caller fails the hadolint run CLOSED rather than read a config we cannot vouch for.
+ */
 let hadolintEmptyConfigPath: string | undefined;
-function emptyHadolintConfig(): string {
+function emptyHadolintConfig(): string | undefined {
   if (!hadolintEmptyConfigPath) {
     try {
       const d = mkdtempSync(join(tmpdir(), 'qwen-review-hadolint-'));
-      hadolintEmptyConfigPath = join(d, 'empty.yaml');
-      writeFileSync(hadolintEmptyConfigPath, '');
+      const p = join(d, 'empty.yaml');
+      writeFileSync(p, '');
+      hadolintEmptyConfigPath = p;
+      // One dir + one empty file per process; `cleanup.ts` only sweeps `.qwen/tmp`,
+      // so remove it ourselves at exit rather than leak it into the OS tmpdir.
+      process.on('exit', () => {
+        try {
+          rmSync(d, { recursive: true, force: true });
+        } catch {
+          /* best-effort */
+        }
+      });
     } catch {
-      // best-effort — a config we could not create is still no ignores; point at a
-      // path that will not resolve rather than a predictable, plantable one.
-      hadolintEmptyConfigPath = join(
-        tmpdir(),
-        'qwen-review-hadolint-none',
-        'x',
-      );
+      return undefined; // no controllable config → caller must fail hadolint closed
     }
   }
   return hadolintEmptyConfigPath;
@@ -312,14 +324,18 @@ export type ToolRunner = (tool: LintTool, absPath: string) => ToolRun;
  *   `disable=SC2086`), and `SHELLCHECK_OPTS` is dropped from the env for the same
  *   reason — configuration comes from us, not the diff.
  * - hadolint: has no working `--no-config` flag (a prior attempt made it exit 2 on
- *   every Dockerfile), so isolation is via env: `HADOLINT_CONFIG` points at an empty
- *   file, neutralising a `.hadolint.yaml` the diff added. Env vars are benign if a
- *   tool ignores them — unlike a bad CLI flag.
+ *   every Dockerfile), so isolation is via env: `HADOLINT_CONFIG` points at a private
+ *   empty file, neutralising a `.hadolint.yaml` the diff added. Env vars are benign if
+ *   a tool ignores them — unlike a bad CLI flag. Set only for a hadolint run, and only
+ *   when a private config exists; `runTool` fails hadolint closed when it does not.
+ *
+ * Also carries `timeoutMs`: the wall-clock bound `runTool` puts on the spawn, kept
+ * here so the bound is one asserted value rather than a literal buried in the spawn.
  */
 export function buildToolInvocation(
   tool: LintTool,
   absPath: string,
-): { argv: string[]; env: NodeJS.ProcessEnv } {
+): { argv: string[]; env: NodeJS.ProcessEnv; timeoutMs: number } {
   const argv: Record<LintTool, string[]> = {
     shellcheck: ['--norc', '--format=json1', '--severity=style', absPath],
     actionlint: ['-format', '{{json .}}', '-no-color', absPath],
@@ -328,10 +344,13 @@ export function buildToolInvocation(
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     HADOLINT_NO_COLOR: '1',
-    HADOLINT_CONFIG: emptyHadolintConfig(),
   };
   delete env['SHELLCHECK_OPTS'];
-  return { argv: argv[tool], env };
+  if (tool === 'hadolint') {
+    const cfg = emptyHadolintConfig();
+    if (cfg) env['HADOLINT_CONFIG'] = cfg;
+  }
+  return { argv: argv[tool], env, timeoutMs: 120_000 };
 }
 
 /**
@@ -343,15 +362,25 @@ export function buildToolInvocation(
  * A `timeout` bounds the run, matching the sibling command runners
  * (`build-test.ts`, `test-efficacy.ts`): a crafted script that hangs a linter
  * (pathological `eval`/`source` nesting) must not block the whole review until the
- * outer CI job timeout reclaims the runner. A timeout kills with `SIGTERM`, which
- * the `r.signal` branch below already turns into a fail-closed `error`.
+ * outer CI job timeout reclaims the runner. On a timeout Node sets BOTH `r.error`
+ * (`ETIMEDOUT`) and `r.signal` (`SIGTERM`); `r.error` is checked first, so a timeout
+ * is reported through the error branch below — still fail-closed either way.
  */
 function runTool(tool: LintTool, absPath: string): ToolRun {
-  const { argv, env } = buildToolInvocation(tool, absPath);
+  // hadolint READS `HADOLINT_CONFIG`; if we could not create a private empty config,
+  // running it would honour a PR-added (or planted) `.hadolint.yaml` and let it
+  // suppress findings. Fail the hadolint run CLOSED rather than lint without isolation.
+  if (tool === 'hadolint' && !emptyHadolintConfig()) {
+    return {
+      kind: 'error',
+      reason: 'hadolint config isolation unavailable — failing closed',
+    };
+  }
+  const { argv, env, timeoutMs } = buildToolInvocation(tool, absPath);
   const r = spawnSync(tool, argv, {
     encoding: 'utf8',
     maxBuffer: 32 * 1024 * 1024,
-    timeout: 120_000,
+    timeout: timeoutMs,
     stdio: ['ignore', 'pipe', 'pipe'],
     env,
   });

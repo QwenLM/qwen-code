@@ -16,10 +16,11 @@ import {
   mkdirSync,
   writeFileSync,
   readFileSync,
+  statSync,
   rmSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { createHash } from 'node:crypto';
 import {
   runScriptLint,
@@ -290,5 +291,25 @@ describe('buildToolInvocation — config isolation (a PR config cannot suppress 
     expect(env['HADOLINT_CONFIG']).toBeTruthy();
     // the file it points at has no `ignored:` rules — it is empty
     expect(readFileSync(env['HADOLINT_CONFIG'] as string, 'utf8')).toBe('');
+  });
+
+  it('HADOLINT_CONFIG is a fresh mkdtemp path (0700), not the old predictable name', () => {
+    // The config is a file hadolint READS, so a predictable path is a suppression
+    // vector (plant an `ignored:` config there). It must live in a private 0700
+    // mkdtemp dir, never the fixed `tmpdir()/qwen-review-hadolint-empty.yaml`. Revert
+    // to that fixed name and both assertions fail.
+    const cfg = buildToolInvocation('hadolint', '/w/Dockerfile').env[
+      'HADOLINT_CONFIG'
+    ] as string;
+    expect(cfg).not.toBe(join(tmpdir(), 'qwen-review-hadolint-empty.yaml'));
+    expect(statSync(dirname(cfg)).mode & 0o777).toBe(0o700);
+  });
+
+  it('carries the spawn timeout as an asserted bound (not a buried literal)', () => {
+    // The wall-clock bound `runTool` puts on the spawn. Drop it and a crafted script
+    // that hangs a linter blocks the review until the outer CI job timeout.
+    expect(buildToolInvocation('shellcheck', '/w/x.sh').timeoutMs).toBe(
+      120_000,
+    );
   });
 });
