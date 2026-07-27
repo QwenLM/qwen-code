@@ -630,13 +630,13 @@ describe('runner decision contracts', () => {
         complete: true,
         coldWarmPairedDeltasMs: tightAround(30),
         seed: 7264,
-        coldPromptToProviderRequestP50Ms: 130,
+        coldPromptToProviderRequestP50Ms: 200,
         warmPromptToProviderRequestP50Ms: 100,
         coldPromptToFirstModelOutputP50Ms: 400,
       }),
     ).toMatchObject({
       passed: true,
-      providerDeltaMs: 30,
+      providerDeltaMs: 100,
       pairedMedianDeltaMs: 30,
     });
     expect(
@@ -692,22 +692,34 @@ describe('runner decision contracts', () => {
   });
 
   it('produces a deterministic prototype-gate interval for a fixed seed', () => {
-    const deltas = Array.from({ length: 30 }, (_, index) => 29 + (index % 3));
+    const deltas = Array.from({ length: 30 }, (_, index) => index);
     const input = {
       complete: true,
       coldWarmPairedDeltasMs: deltas,
       seed: 7264,
+      bootstrapIterations: 200,
       coldPromptToProviderRequestP50Ms: 130,
       warmPromptToProviderRequestP50Ms: 100,
       coldPromptToFirstModelOutputP50Ms: 400,
     };
 
-    expect(evaluateSingleBundlePrototypeGate(input)).toEqual(
-      evaluateSingleBundlePrototypeGate(input),
+    const first = evaluateSingleBundlePrototypeGate(input);
+    const second = evaluateSingleBundlePrototypeGate(input);
+    expect(first).toEqual(second);
+    expect(first.bootstrapMedianCi95).toMatchObject({
+      lowMs: 9,
+      highMs: 19.5,
+      iterations: 200,
+      seed: 7264,
+    });
+
+    const differentSeed = evaluateSingleBundlePrototypeGate({
+      ...input,
+      seed: 99,
+    });
+    expect(differentSeed.bootstrapMedianCi95).not.toEqual(
+      first.bootstrapMedianCi95,
     );
-    expect(
-      evaluateSingleBundlePrototypeGate(input).bootstrapMedianCi95,
-    ).toMatchObject({ iterations: DEFAULT_BOOTSTRAP_ITERATIONS, seed: 7264 });
   });
 
   it('maps a mismatched final answer to the stable failure code', () => {

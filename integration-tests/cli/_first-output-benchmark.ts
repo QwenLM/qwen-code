@@ -855,7 +855,7 @@ export function evaluateSingleBundlePrototypeGate(
   if (!Number.isFinite(input.seed)) {
     throw new TypeError('seed must be finite');
   }
-  assertFiniteValues([...input.coldWarmPairedDeltasMs]);
+  assertFiniteValues(input.coldWarmPairedDeltasMs);
   const providerDeltaMs =
     input.coldPromptToProviderRequestP50Ms === null ||
     input.warmPromptToProviderRequestP50Ms === null

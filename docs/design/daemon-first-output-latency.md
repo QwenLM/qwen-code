@@ -33,7 +33,7 @@ The runner is disabled unless `QWEN_FIRST_OUTPUT_BENCHMARK=1`. Its two input mod
 
 The dwell is anchored to SSE readiness rather than session readiness. The SSE connect sits between the two, so anchoring to `sessionReady` would let a slow connect consume the whole window and silently reduce a 100 ms scenario to an immediate-prompt run that still reported its configured dwell. `sseReadyToPromptMs` records the idle window each sample actually received.
 
-Millisecond-scale figures are only meaningful when nothing else competes for the host, so the runner is excluded from the shared integration config and has its own serial config at `integration-tests/vitest.firstoutput.config.ts` (`fileParallelism: false`, one thread, `retry: 0`). The pure helper tests continue to run in the shared suite. Run the benchmark with:
+Millisecond-scale figures are only meaningful when nothing else competes for the host, so the runner is excluded from the shared integration config and has its own serial config at `integration-tests/vitest.firstoutput.config.ts` (`fileParallelism: false`, serial execution, `retry: 0`). The pure helper tests continue to run in the shared suite. Run the benchmark with:
 
 ```text
 QWEN_FIRST_OUTPUT_BENCHMARK=1 QWEN_SANDBOX=false BENCHMARK_CLI_PATH=... \

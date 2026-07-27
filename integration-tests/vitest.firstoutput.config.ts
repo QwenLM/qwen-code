@@ -20,12 +20,6 @@ export default defineConfig({
     include: ['**/qwen-daemon-first-output-benchmark.test.ts'],
     retry: 0,
     fileParallelism: false,
-    poolOptions: {
-      threads: {
-        minThreads: 1,
-        maxThreads: 1,
-      },
-    },
   },
   resolve: {
     alias: {

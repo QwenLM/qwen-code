@@ -978,10 +978,7 @@ async function runSession(
     // The SSE connect sits between the two: anchoring to sessionReady lets a
     // slow connect consume the whole window, silently degrading the scenario
     // into an immediate-prompt run that still reports its configured dwell.
-    const dwellAnchor = Math.max(
-      timestamps.sessionReady,
-      timestamps.sseReady ?? 0,
-    );
+    const dwellAnchor = timestamps.sseReady!;
     const promptNotBefore = dwellAnchor + postSessionDwellMs;
     if (performance.now() < promptNotBefore) {
       await sleep(promptNotBefore - performance.now());
