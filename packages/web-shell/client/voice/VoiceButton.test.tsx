@@ -811,6 +811,15 @@ describe('VoiceButton', () => {
     expect(mocks.capture.stop).toHaveBeenCalledOnce();
   });
 
+  it('ignores pointer hold in tap mode', async () => {
+    mocks.workspaceVoice.mockResolvedValue(
+      voiceStatus(true, '/tmp/workspace', 'tap'),
+    );
+    const button = await render(false);
+    pointer(button, 'pointerdown');
+    expect(mocks.capture.start).not.toHaveBeenCalled();
+  });
+
   it('ignores mouse click in hold mode', async () => {
     const button = await render(false);
 
@@ -825,6 +834,12 @@ describe('VoiceButton', () => {
     click(button, 0);
 
     expect(mocks.capture.start).toHaveBeenCalledOnce();
+  });
+
+  it('ignores a non-primary pointer in hold mode', async () => {
+    const button = await render(false);
+    pointer(button, 'pointerdown', 1, 2);
+    expect(mocks.capture.start).not.toHaveBeenCalled();
   });
 
   it('reports whether voice capture is active', async () => {
