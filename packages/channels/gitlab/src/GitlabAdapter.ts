@@ -144,20 +144,18 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
       .filter((t) => t.updated_at > windowSince)
       .sort((a, b) => a.updated_at.localeCompare(b.updated_at));
 
-    let watermark = this.cursor.lastProcessedAt;
-
     for (const todo of todos) {
       if (
         !todo.target ||
         (todo.target_type !== 'Issue' && todo.target_type !== 'MergeRequest')
       ) {
-        watermark = todo.updated_at;
+        this.cursor.lastProcessedAt = todo.updated_at;
         continue;
       }
 
       const template = templates[todo.action_name];
       if (!template) {
-        watermark = todo.updated_at;
+        this.cursor.lastProcessedAt = todo.updated_at;
         continue;
       }
 
@@ -181,7 +179,8 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
         if (!prev || todo.updated_at > prev) {
           this.cursor.repo[chatId] = { last_read: todo.updated_at };
         }
-        watermark = todo.updated_at;
+        this.cursor.lastProcessedAt = todo.updated_at;
+        this.saveCursor();
       } catch (err) {
         process.stderr.write(
           `[Channel:${this.name}] error processing todo ${todo.id}, stopping: ${err}\n`,
@@ -189,8 +188,6 @@ export class GitlabChannel extends PollingChannelBase<GitlabCursor> {
         break;
       }
     }
-
-    this.cursor.lastProcessedAt = watermark;
   }
 
   private async processTodo(
