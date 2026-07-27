@@ -4061,18 +4061,60 @@ class QwenAgent implements Agent {
     const replayPageSize = bulkReplay
       ? getLoadReplayPageSize(params)
       : undefined;
-    let session: Session;
+    let replayEnvelope: BridgeLoadReplayEnvelope | undefined;
     try {
       await this.ensureAuthenticated(config);
       this.setupFileSystem(config);
-      session = await this.createAndStoreSession(
-        config,
-        settings,
-        sessionData,
-        bulkReplay
-          ? { replayHistory: false, startPostReplayServices: false }
-          : {},
-      );
+      await this.createAndStoreSession(config, settings, sessionData, {
+        ...(bulkReplay ? { replayHistory: false } : {}),
+        beforeStartPostReplayServices: async (createdSession) => {
+          if (bulkReplay) {
+            const records = sessionData?.conversation.messages;
+            let replayUpdates: SessionUpdate[] = [];
+            if (records) {
+              createdSession.primeTurnFromHistory(records);
+              const replayPage = selectRecentHistoryRecords(
+                records,
+                replayPageSize,
+              );
+              const replayUsage = createReplayCumulativeUsage();
+              const replay = await collectHistoryReplayUpdates({
+                sessionId: params.sessionId,
+                config,
+                records: replayPage.records,
+                gaps: sessionData?.historyGaps,
+                cumulativeUsage: replayUsage,
+                supersedeUnrestorableGoal: true,
+                logger: debugLogger,
+              });
+              replayUpdates = replay.updates;
+              copyCumulativeUsage(createdSession.cumulativeUsage, replayUsage);
+              if (replay.replayError !== undefined) {
+                replayEnvelope = {
+                  v: LOAD_REPLAY_VERSION,
+                  updates: replayUpdates,
+                  partial: true,
+                  replayError: replay.replayError,
+                  ...(replayPage.hasMore ? { hasMore: true } : {}),
+                };
+              }
+              replayEnvelope ??= {
+                v: LOAD_REPLAY_VERSION,
+                updates: replayUpdates,
+                ...(replayPage.hasMore ? { hasMore: true } : {}),
+              };
+            }
+            replayEnvelope ??= {
+              v: LOAD_REPLAY_VERSION,
+              updates: replayUpdates,
+            };
+          }
+
+          await this.#restoreWorktreeOnResume(config, createdSession);
+          await this.#restoreBackgroundAgentsOnResume(config, createdSession);
+          this.#restoreGoalOnResume(config, createdSession);
+        },
+      });
     } catch (error) {
       return this.cleanupAfterRequestFailure(error, async () => {
         if (this.sessions.get(config.getSessionId())?.getConfig() !== config) {
@@ -4080,73 +4122,6 @@ class QwenAgent implements Agent {
         }
       });
     }
-    let replayEnvelope: BridgeLoadReplayEnvelope | undefined;
-    if (bulkReplay) {
-      try {
-        const records = sessionData?.conversation.messages;
-        let replayUpdates: SessionUpdate[] = [];
-        if (records) {
-          session.primeTurnFromHistory(records);
-          const replayPage = selectRecentHistoryRecords(
-            records,
-            replayPageSize,
-          );
-          const replayUsage = createReplayCumulativeUsage();
-          const replay = await collectHistoryReplayUpdates({
-            sessionId: params.sessionId,
-            config,
-            records: replayPage.records,
-            gaps: sessionData?.historyGaps,
-            cumulativeUsage: replayUsage,
-            // A resume: the goal restore runs right after this.
-            supersedeUnrestorableGoal: true,
-            logger: debugLogger,
-          });
-          replayUpdates = replay.updates;
-          copyCumulativeUsage(session.cumulativeUsage, replayUsage);
-          if (replay.replayError !== undefined) {
-            replayEnvelope = {
-              v: LOAD_REPLAY_VERSION,
-              updates: replayUpdates,
-              partial: true,
-              replayError: replay.replayError,
-              ...(replayPage.hasMore ? { hasMore: true } : {}),
-            };
-          }
-          replayEnvelope ??= {
-            v: LOAD_REPLAY_VERSION,
-            updates: replayUpdates,
-            ...(replayPage.hasMore ? { hasMore: true } : {}),
-          };
-        }
-        replayEnvelope ??= {
-          v: LOAD_REPLAY_VERSION,
-          updates: replayUpdates,
-        };
-        session.installRewriter();
-        session.startCronScheduler();
-      } catch (err) {
-        return this.cleanupAfterRequestFailure(err, async () => {
-          try {
-            await this.discardStoredSessionIfCurrent(params.sessionId, session);
-          } catch (cleanupError) {
-            await this.removeStoredSessionEntry(
-              params.sessionId,
-              session,
-              [cleanupError],
-              {
-                shutdownConfig: false,
-              },
-            );
-            await this.cleanupUnstoredConfig(config);
-          }
-        });
-      }
-    }
-
-    await this.#restoreWorktreeOnResume(config, session);
-    await this.#restoreBackgroundAgentsOnResume(config, session);
-    this.#restoreGoalOnResume(config, session);
 
     const modesData = this.buildModesData(config);
     const availableModels = this.buildAvailableModels(config);
@@ -4214,15 +4189,21 @@ class QwenAgent implements Agent {
       params.sessionId,
       true,
     );
-    let session: Session;
     try {
       await this.ensureAuthenticated(config);
       this.setupFileSystem(config);
-      session = await this.createAndStoreSession(
+      await this.createAndStoreSession(
         config,
         settings,
         config.getResumedSessionData(),
-        { replayHistory: false },
+        {
+          replayHistory: false,
+          beforeStartPostReplayServices: async (createdSession) => {
+            await this.#restoreWorktreeOnResume(config, createdSession);
+            await this.#restoreBackgroundAgentsOnResume(config, createdSession);
+            this.#restoreGoalOnResume(config, createdSession);
+          },
+        },
       );
     } catch (error) {
       return this.cleanupAfterRequestFailure(error, async () => {
@@ -4231,10 +4212,6 @@ class QwenAgent implements Agent {
         }
       });
     }
-
-    await this.#restoreWorktreeOnResume(config, session);
-    await this.#restoreBackgroundAgentsOnResume(config, session);
-    this.#restoreGoalOnResume(config, session);
 
     const modesData = this.buildModesData(config);
     const availableModels = this.buildAvailableModels(config);
@@ -6800,10 +6777,17 @@ class QwenAgent implements Agent {
       }
       case TODO_STOP_GUARD_QUEUE_RELEASE_METHOD: {
         const sessionId = params['sessionId'];
+        const promptId = params['promptId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
           throw RequestError.invalidParams(
             undefined,
             'Invalid or missing sessionId',
+          );
+        }
+        if (typeof promptId !== 'string' || promptId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing promptId',
           );
         }
         const session = this.sessions.get(sessionId);
@@ -6814,7 +6798,7 @@ class QwenAgent implements Agent {
           );
         }
         return {
-          released: session.releaseTodoStopGuardQueuedPromptWait(),
+          released: session.releaseTodoStopGuardQueuedPromptWait(promptId),
         };
       }
       case 'qwen/providers/list': {
@@ -8470,14 +8454,13 @@ class QwenAgent implements Agent {
           }
         }
 
-        // Noop check
         const previousCwd = config.getTargetDir();
-        if (canonicalPath === previousCwd) {
-          return { previousCwd, newCwd: canonicalPath, warnings: [] };
-        }
-
-        // Trust check
-        if (isFolderTrustEnabled(this.settings.merged)) {
+        let trustValidated = false;
+        const validateTrust = () => {
+          if (!isFolderTrustEnabled(this.settings.merged)) {
+            trustValidated = true;
+            return;
+          }
           const trustedFolders = loadTrustedFolders();
           if (trustedFolders.isPathTrusted(canonicalPath) !== true) {
             throw new RequestError(
@@ -8486,43 +8469,78 @@ class QwenAgent implements Agent {
               { errorKind: 'directory_not_trusted', path: canonicalPath },
             );
           }
+          trustValidated = true;
+        };
+        if (canonicalPath !== previousCwd) {
+          validateTrust();
         }
 
-        // Relocate working directory (skip process.chdir and artifact
-        // migration for ACP — storage stays at the bound workspace so
-        // branch/load/lifecycle paths remain consistent).
-        const warnings: string[] = [];
-        const relocation = await config.relocateWorkingDirectory(
-          canonicalPath,
-          canonicalPath,
-          { skipProcessChdir: true, skipArtifactMigration: true },
+        const releaseGate = await beginSessionCloseAfterCurrentGate(
+          session,
+          SESSION_DRAIN_TIMEOUT_MS,
         );
-        if (relocation.memoryRefreshError) {
-          warnings.push(
-            `Memory refresh failed: ${
-              relocation.memoryRefreshError instanceof Error
-                ? relocation.memoryRefreshError.message
-                : String(relocation.memoryRefreshError)
-            }`,
-          );
-        }
-
-        // Update model context
         try {
-          await config
-            .getGeminiClient()
-            ?.addWorkingDirectoryChangedContext(previousCwd, canonicalPath);
-        } catch (error) {
-          warnings.push(
-            `Model context refresh failed: ${
-              error instanceof Error ? error.message : String(error)
-            }`,
+          const settledPreviousCwd = config.getTargetDir();
+          if (canonicalPath === settledPreviousCwd) {
+            return {
+              previousCwd: settledPreviousCwd,
+              newCwd: canonicalPath,
+              warnings: [],
+            };
+          }
+          if (!trustValidated) {
+            validateTrust();
+          }
+
+          session.hardSuspendTodoStopGuard();
+          await waitForSessionDrain(
+            session.waitForActiveTurnsToSettle(),
+            SESSION_DRAIN_TIMEOUT_MS,
+            'close',
           );
+
+          // Relocate working directory (skip process.chdir and artifact
+          // migration for ACP — storage stays at the bound workspace so
+          // branch/load/lifecycle paths remain consistent).
+          const warnings: string[] = [];
+          const relocation = await config.relocateWorkingDirectory(
+            canonicalPath,
+            canonicalPath,
+            { skipProcessChdir: true, skipArtifactMigration: true },
+          );
+          if (relocation.memoryRefreshError) {
+            warnings.push(
+              `Memory refresh failed: ${
+                relocation.memoryRefreshError instanceof Error
+                  ? relocation.memoryRefreshError.message
+                  : String(relocation.memoryRefreshError)
+              }`,
+            );
+          }
+
+          try {
+            await config
+              .getGeminiClient()
+              ?.addWorkingDirectoryChangedContext(
+                settledPreviousCwd,
+                canonicalPath,
+              );
+          } catch (error) {
+            warnings.push(
+              `Model context refresh failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`,
+            );
+          }
+
+          return {
+            previousCwd: settledPreviousCwd,
+            newCwd: canonicalPath,
+            warnings,
+          };
+        } finally {
+          releaseGate();
         }
-
-        session.clearTodoStopGuardTrust();
-
-        return { previousCwd, newCwd: canonicalPath, warnings };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionApprovalMode: {
         const sessionId = params['sessionId'];
@@ -10598,7 +10616,7 @@ class QwenAgent implements Agent {
     sessionData?: ResumedSessionData,
     options: {
       replayHistory?: boolean;
-      startPostReplayServices?: boolean;
+      beforeStartPostReplayServices?: (session: Session) => Promise<void>;
     } = {},
   ): Promise<Session> {
     const sessionId = config.getSessionId();
@@ -10638,13 +10656,14 @@ class QwenAgent implements Agent {
         );
       }
 
-      if (options.startPostReplayServices !== false) {
-        // Install rewriter AFTER history replay to avoid rewriting historical messages
-        session.installRewriter();
+      await options.beforeStartPostReplayServices?.(session);
 
-        // After replay so a durable cron fire can't interleave with it.
-        session.startCronScheduler();
-      }
+      // Install rewriter AFTER history replay to avoid rewriting historical messages
+      session.installRewriter();
+
+      // After replay and resume-state restoration so a durable cron fire can't
+      // interleave with either.
+      session.startCronScheduler();
 
       setTimeout(() => {
         void session.sendAvailableCommandsUpdate();

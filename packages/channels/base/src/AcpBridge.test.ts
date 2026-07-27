@@ -94,8 +94,10 @@ type TestableAcpBridge = AcpBridge & {
   connection: {
     extMethod: ReturnType<typeof vi.fn>;
     newSession?: ReturnType<typeof vi.fn>;
+    loadSession?: ReturnType<typeof vi.fn>;
     prompt?: ReturnType<typeof vi.fn>;
   };
+  knownSessionIds: Set<string>;
   channelLoopMcpServer: unknown;
   channelLoopToolHandlers: ChannelLoopToolHandler[];
   channelLoopMcpRegistered: boolean;
@@ -258,7 +260,38 @@ describe('AcpBridge', () => {
       bridge.handleExtMethod('craft/drainMidTurnQueue', {
         sessionId: 's-1',
       }),
-    ).resolves.toStrictEqual({ messages: [] });
+    ).resolves.toStrictEqual({ messages: [], hasQueuedPrompt: false });
+  });
+
+  it('claims Guard continuations only for a session owned by this bridge', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      newSession: vi.fn().mockResolvedValue({ sessionId: 's-1' }),
+    };
+
+    await expect(bridge.newSession('/tmp')).resolves.toBe('s-1');
+    await expect(
+      bridge.handleExtMethod('craft/claimTodoStopGuardContinuation', {
+        sessionId: 's-1',
+        promptId: 'bridge-owner',
+      }),
+    ).resolves.toStrictEqual({
+      claimed: true,
+      hasQueuedPrompt: false,
+    });
+    await expect(
+      bridge.handleExtMethod('craft/claimTodoStopGuardContinuation', {
+        sessionId: 'other-session',
+      }),
+    ).resolves.toStrictEqual({
+      claimed: false,
+      hasQueuedPrompt: false,
+    });
   });
 
   it('returns only the final turn text after tool calls', async () => {

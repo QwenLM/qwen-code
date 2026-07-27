@@ -59,6 +59,7 @@ import type {
   MidTurnQueueEntry,
   PendingPromptEntry,
 } from './bridgeTypes.js';
+import { TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD } from './bridgeTypes.js';
 import type { ClientMcpMessageSender } from './bridgeOptions.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
@@ -2505,8 +2506,10 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
           pendingPromptList?: PendingPromptEntry[];
           events: { publish: ReturnType<typeof vi.fn> };
           activePromptId?: string;
+          promptActive?: boolean;
         }
       | undefined,
+    ownsSession?: (sessionId: string) => boolean,
   ): BridgeClient {
     const resolvedEntry = entry
       ? { ...entry, pendingPromptList: entry.pendingPromptList ?? [] }
@@ -2518,6 +2521,11 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
       { request: thrower } as never,
       0,
       Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      ownsSession as never,
     );
   }
 
@@ -2715,6 +2723,140 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
         sessionId: 'sess:queued',
       }),
     ).resolves.toEqual({ messages: [], hasQueuedPrompt: false });
+  });
+
+  it('claims only for the live running owner and reports queued competition', async () => {
+    const running = {
+      promptId: 'running',
+      queuedAt: Date.now(),
+      text: 'current',
+      state: 'running' as const,
+      abortController: new AbortController(),
+    };
+    const queued = {
+      promptId: 'queued',
+      queuedAt: Date.now(),
+      text: 'next',
+      state: 'queued' as const,
+      abortController: new AbortController(),
+    };
+    const entry = {
+      sessionId: 'sess:claim',
+      activePromptId: 'running',
+      promptActive: true,
+      midTurnMessageQueue: [],
+      pendingPromptList: [running, queued],
+      events: { publish: vi.fn() },
+      todoStopGuardAwaitingQueuedPromptOwnerPromptId: undefined as
+        | string
+        | undefined,
+    };
+    const client = new BridgeClient(
+      ((sessionId: string) =>
+        sessionId === 'sess:claim' ? entry : undefined) as never,
+      thrower as never,
+      { request: thrower } as never,
+      0,
+      Infinity,
+    );
+
+    await expect(
+      client.extMethod(TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD, {
+        sessionId: 'sess:claim',
+        promptId: 'wrong-owner',
+      }),
+    ).resolves.toEqual({ claimed: false, hasQueuedPrompt: false });
+    await expect(
+      client.extMethod(TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD, {
+        sessionId: 'sess:claim',
+        promptId: 'running',
+      }),
+    ).resolves.toEqual({ claimed: false, hasQueuedPrompt: true });
+
+    queued.abortController.abort();
+    const competing = {
+      promptId: 'competing',
+      queuedAt: Date.now(),
+      text: 'competing',
+      state: 'running' as const,
+      abortController: new AbortController(),
+    };
+    entry.pendingPromptList.push(competing);
+    await expect(
+      client.extMethod(TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD, {
+        sessionId: 'sess:claim',
+        promptId: 'running',
+      }),
+    ).resolves.toEqual({ claimed: false, hasQueuedPrompt: false });
+    expect(entry.todoStopGuardAwaitingQueuedPromptOwnerPromptId).toBe(
+      'running',
+    );
+
+    competing.abortController.abort();
+    await expect(
+      client.extMethod(TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD, {
+        sessionId: 'sess:claim',
+        promptId: 'running',
+      }),
+    ).resolves.toEqual({ claimed: true, hasQueuedPrompt: false });
+  });
+
+  it('allows ownerless automatic claims only while no bridge prompt is live', async () => {
+    const running = {
+      promptId: 'running',
+      queuedAt: Date.now(),
+      text: 'current',
+      state: 'running' as const,
+      abortController: new AbortController(),
+    };
+    const activeClient = makeClientWithEntry('sess:active', {
+      sessionId: 'sess:active',
+      activePromptId: 'running',
+      promptActive: true,
+      midTurnMessageQueue: [],
+      pendingPromptList: [running],
+      events: { publish: vi.fn() },
+    });
+    const idleClient = makeClientWithEntry('sess:idle', {
+      sessionId: 'sess:idle',
+      promptActive: false,
+      midTurnMessageQueue: [],
+      pendingPromptList: [],
+      events: { publish: vi.fn() },
+    });
+
+    await expect(
+      activeClient.extMethod(TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD, {
+        sessionId: 'sess:active',
+      }),
+    ).resolves.toEqual({ claimed: false, hasQueuedPrompt: false });
+    await expect(
+      idleClient.extMethod(TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD, {
+        sessionId: 'sess:idle',
+      }),
+    ).resolves.toEqual({ claimed: true, hasQueuedPrompt: false });
+    await expect(
+      idleClient.extMethod(TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD, {
+        sessionId: 'missing',
+      }),
+    ).resolves.toEqual({ claimed: false, hasQueuedPrompt: false });
+  });
+
+  it('rejects claims for sessions not owned by this ACP channel', async () => {
+    const entry = {
+      sessionId: 'sess:not-owned',
+      promptActive: false,
+      midTurnMessageQueue: [],
+      pendingPromptList: [],
+      events: { publish: vi.fn() },
+    };
+    const client = makeClientWithEntry('sess:not-owned', entry, () => false);
+
+    await expect(
+      client.extMethod(TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD, {
+        sessionId: 'sess:not-owned',
+      }),
+    ).resolves.toEqual({ claimed: false, hasQueuedPrompt: false });
   });
 
   it('rejects an unknown ext-method with JSON-RPC methodNotFound (-32601)', async () => {

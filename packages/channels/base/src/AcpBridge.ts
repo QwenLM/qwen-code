@@ -32,6 +32,8 @@ import { sanitizeLogText } from './sanitize.js';
 export type { AvailableCommand, ToolCallEvent } from './ChannelAgentBridge.js';
 
 const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+const TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD =
+  'craft/claimTodoStopGuardContinuation';
 
 export interface AcpBridgeOptions {
   cliEntryPath: string;
@@ -77,6 +79,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private _availableCommands: AvailableCommand[] = [];
   private channelLoopMcpServer: ChannelLoopMcpServer | undefined;
   private readonly channelLoopToolHandlers: ChannelLoopToolHandler[] = [];
+  private readonly knownSessionIds = new Set<string>();
   private channelLoopMcpRegistered = false;
   private channelLoopMcpRegistration: Promise<void> | null = null;
   private readonly pendingPermissions = new Map<
@@ -131,6 +134,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       // Do not emit sessionDied here: a full ACP process exit is handled by
       // channel start crash recovery, which reloads the persisted sessions.
       this.resolvePendingPermissions();
+      this.knownSessionIds.clear();
       this.connection = null;
       this.child = null;
       this.emit('disconnected', code, signal);
@@ -197,6 +201,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     const conn = this.ensureConnection();
     await this.registerChannelLoopMcpServer();
     const response = await conn.newSession({ cwd, mcpServers: [] });
+    this.knownSessionIds.add(response.sessionId);
     return response.sessionId;
   }
 
@@ -208,6 +213,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       cwd,
       mcpServers: [],
     });
+    this.knownSessionIds.add(sessionId);
     return sessionId;
   }
 
@@ -519,7 +525,15 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       return this.handleClientMcpMessage(params);
     }
     if (method === MID_TURN_QUEUE_DRAIN_METHOD) {
-      return { messages: [] };
+      return { messages: [], hasQueuedPrompt: false };
+    }
+    if (method === TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD) {
+      const sessionId =
+        typeof params['sessionId'] === 'string' ? params['sessionId'] : '';
+      return {
+        claimed: this.knownSessionIds.has(sessionId),
+        hasQueuedPrompt: false,
+      };
     }
     throw new Error(`Method not found: ${method}`);
   }
