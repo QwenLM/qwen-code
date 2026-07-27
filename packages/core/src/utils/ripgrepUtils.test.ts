@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { EventEmitter } from 'node:events';
 import {
   _resetRipgrepUtilsCachesForTest,
   canUseRipgrep,
@@ -15,6 +16,63 @@ import {
 import { fileExists } from './fileUtils.js';
 import { execCommand, isCommandAvailable } from './shell-utils.js';
 import path from 'node:path';
+
+const childProcessMock = vi.hoisted(() => ({
+  execFile: vi.fn(),
+}));
+
+vi.mock('node:child_process', () => ({
+  execFile: childProcessMock.execFile,
+}));
+
+type RipgrepTestError = Error & {
+  code?: string | number | undefined | null;
+  signal?: string | null;
+};
+
+function createExecError(
+  message: string,
+  props: Partial<Pick<RipgrepTestError, 'code' | 'signal'>> = {},
+): RipgrepTestError {
+  return Object.assign(new Error(message), props);
+}
+
+function mockRipgrepAttempt(options: {
+  error?: RipgrepTestError;
+  stdout?: string;
+  stderr?: string;
+  spawnError?: RipgrepTestError;
+  order?: 'callback-only' | 'error-only' | 'callback-then-error';
+}): void {
+  childProcessMock.execFile.mockImplementationOnce(
+    (
+      _command: string,
+      _args: string[],
+      _options: unknown,
+      callback: (
+        error: RipgrepTestError | null,
+        stdout?: string,
+        stderr?: string,
+      ) => void,
+    ) => {
+      const child = new EventEmitter();
+      const order = options.order ?? 'callback-only';
+      queueMicrotask(() => {
+        if (order !== 'error-only') {
+          callback(
+            options.error ?? null,
+            options.stdout ?? '',
+            options.stderr ?? '',
+          );
+        }
+        if (options.spawnError) {
+          child.emit('error', options.spawnError);
+        }
+      });
+      return child;
+    },
+  );
+}
 
 vi.mock('./fileUtils.js', () => ({
   fileExists: vi.fn(),
@@ -29,8 +87,15 @@ describe('ripgrepUtils', () => {
   beforeEach(() => {
     _resetRipgrepUtilsCachesForTest();
     vi.mocked(fileExists).mockReset();
+    vi.mocked(execCommand).mockReset();
     vi.mocked(isCommandAvailable).mockReset();
     vi.mocked(execCommand).mockReset();
+    childProcessMock.execFile.mockReset();
+    vi.mocked(execCommand).mockResolvedValue({
+      stdout: 'ripgrep 14.1.0\n',
+      stderr: '',
+      code: 0,
+    });
   });
 
   describe('getBuiltinRipgrep', () => {
