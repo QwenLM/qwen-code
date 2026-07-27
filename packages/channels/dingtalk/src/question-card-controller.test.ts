@@ -219,6 +219,14 @@ describe('QuestionCardController', () => {
         formData: { '0': 'Shanghai', '1': ['Logs'] },
       }),
     ).toBeUndefined();
+    expect(
+      controller.claim({
+        outTrackId,
+        actionId: 'cancel',
+        ownerId: 'owner-1',
+        formData: {},
+      }),
+    ).toBeUndefined();
 
     await action?.();
     expect(respond).toHaveBeenCalledOnce();
@@ -423,6 +431,50 @@ describe('QuestionCardController', () => {
 
     expect(first.respond).toHaveBeenCalledOnce();
     expect(second.respond).not.toHaveBeenCalled();
+    const secondAction = controller.claim({
+      outTrackId: secondOutTrackId,
+      actionId: 'submit',
+      ownerId: 'owner-1',
+      formData: { '0': 'Shanghai', '1': ['Metrics'] },
+    });
+    expect(secondAction).toBeDefined();
+    await secondAction?.();
+    expect(second.respond).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a newer run claimable after old settlement and callback events', async () => {
+    const { client, controller } = createHarness();
+    const first = createContext('request-1');
+    const second = createContext('request-2');
+    second.context.runId = 'run-2';
+    await controller.present(first.context, {
+      chatId: 'cid-1',
+      isGroup: true,
+    });
+    await controller.present(second.context, {
+      chatId: 'cid-1',
+      isGroup: true,
+    });
+    const [firstOutTrackId, secondOutTrackId] = vi
+      .mocked(client.createAndDeliver)
+      .mock.calls.map(([request]) => request.outTrackId);
+    vi.mocked(client.updateInstance).mockClear();
+
+    controller.cancelRun('run-1', 'expired');
+    first.settle('resolved_outside_presenter');
+
+    expect(
+      controller.claim({
+        outTrackId: firstOutTrackId,
+        actionId: 'submit',
+        ownerId: 'owner-1',
+        formData: { '0': 'Beijing', '1': ['Logs'] },
+      }),
+    ).toBeUndefined();
+    expect(client.updateInstance).not.toHaveBeenCalledWith(
+      expect.objectContaining({ outTrackId: secondOutTrackId }),
+    );
+
     const secondAction = controller.claim({
       outTrackId: secondOutTrackId,
       actionId: 'submit',

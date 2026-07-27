@@ -346,6 +346,38 @@ describe('DingtalkInteractionPresenter', () => {
     );
   });
 
+  it('does not let an old run terminal event expire a newer question', async () => {
+    const { client, presenter, questionCards } = createHarness();
+    await presenter.presentInput(questionContext());
+    presenter.registerRun('run-2', 'owner-1', target);
+    const second = questionContext(undefined, 'request-2');
+    second.runId = 'run-2';
+    await presenter.presentInput(second);
+    const questionOutTrackIds = vi
+      .mocked(client.createAndDeliver)
+      .mock.calls.filter(
+        ([request]) => request.templateId === QUESTION_CARD_TEMPLATE_ID,
+      )
+      .map(([request]) => request.outTrackId);
+    const secondOutTrackId = questionOutTrackIds[1]!;
+    vi.mocked(client.updateInstance).mockClear();
+
+    presenter.terminalizeRun('run-1', 'cancelled', 'steer');
+
+    expect(client.updateInstance).not.toHaveBeenCalledWith(
+      expect.objectContaining({ outTrackId: secondOutTrackId }),
+    );
+    const secondAction = questionCards.claim({
+      outTrackId: secondOutTrackId,
+      actionId: 'submit',
+      ownerId: 'owner-1',
+      formData: { '0': 'Shanghai' },
+    });
+    expect(secondAction).toBeDefined();
+    await secondAction?.();
+    expect(second.respond).toHaveBeenCalledOnce();
+  });
+
   it('creates a new status card after the question is submitted', async () => {
     const { client, presenter, projectionOrder, questionCards } =
       createHarness();

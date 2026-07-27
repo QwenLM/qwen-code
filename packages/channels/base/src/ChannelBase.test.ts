@@ -1271,6 +1271,76 @@ describe('ChannelBase', () => {
       await active.finish();
     });
 
+    it.each([
+      {
+        sessionScope: 'user',
+        inbound: {
+          senderId: 'alice',
+          chatId: 'group-user',
+          isGroup: true,
+          isMentioned: true,
+        },
+        expectedTarget: {
+          senderId: 'alice',
+          chatId: 'group-user',
+          isGroup: true,
+        },
+      },
+      {
+        sessionScope: 'thread',
+        inbound: {
+          senderId: 'bob',
+          chatId: 'group-thread',
+          threadId: 'topic-1',
+          isGroup: true,
+          isMentioned: true,
+        },
+        expectedTarget: {
+          senderId: 'bob',
+          chatId: 'group-thread',
+          threadId: 'topic-1',
+          isGroup: true,
+        },
+      },
+      {
+        sessionScope: 'single',
+        inbound: {
+          senderId: 'carol',
+          chatId: 'carol-dm',
+          isGroup: false,
+        },
+        expectedTarget: {
+          senderId: 'carol',
+          chatId: 'carol-dm',
+          isGroup: false,
+        },
+      },
+    ] as const)(
+      'captures the active owner and target for $sessionScope scope',
+      async ({ sessionScope, inbound, expectedTarget }) => {
+        const ch = createChannel({ sessionScope, groupPolicy: 'open' });
+        ch.userInputPresentationResult = { kind: 'presented' };
+        const active = await startActiveSession(ch, inbound);
+
+        emitUserQuestion(active.sessionId, `req-${sessionScope}`);
+
+        await vi.waitFor(() =>
+          expect(ch.userInputPresentations).toHaveLength(1),
+        );
+        expect(ch.userInputPresentations[0]).toMatchObject({
+          requestId: `req-${sessionScope}`,
+          sessionId: active.sessionId,
+          owner: { kind: 'channel_user', id: inbound.senderId },
+          target: {
+            channelName: 'test-chan',
+            ...expectedTarget,
+          },
+        });
+
+        await active.finish();
+      },
+    );
+
     it('presents direct user input without allocating an output segment', async () => {
       const ch = createChannel();
       ch.userInputPresentationResult = { kind: 'presented' };

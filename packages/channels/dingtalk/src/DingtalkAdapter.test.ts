@@ -309,6 +309,61 @@ it('ACKs a parsed card callback before starting asynchronous handling', async ()
   });
 });
 
+it('ACKs duplicate card callbacks while executing one claimed action', async () => {
+  const action = vi.fn().mockResolvedValue(undefined);
+  const claim = vi.fn().mockReturnValueOnce(action).mockReturnValue(undefined);
+  class DuplicateCallbackTestChannel extends DingtalkChannel {
+    protected override routeCardCallback(): (() => Promise<void>) | undefined {
+      return claim();
+    }
+  }
+  new DuplicateCallbackTestChannel(
+    'test-dingtalk',
+    {
+      type: 'dingtalk',
+      token: '',
+      clientId: 'client-id',
+      clientSecret: 'client-secret',
+      senderPolicy: 'open',
+      allowedUsers: [],
+      sessionScope: 'user',
+      cwd: '/tmp',
+      groupPolicy: 'open',
+      dmPolicy: 'open',
+      groups: {},
+    } as never,
+    {} as never,
+  );
+  const client = mockClientAt(dingtalkSdkMock.instances.length - 1);
+  const callbackData = JSON.stringify({
+    userId: 'owner-1',
+    value: JSON.stringify({
+      outTrackId: 'question-1',
+      actionValue: 'submit',
+    }),
+  });
+
+  client.callbacks.get('card')?.({
+    headers: { messageId: 'card-message-1' },
+    data: callbackData,
+  } as DWClientDownStream);
+  client.callbacks.get('card')?.({
+    headers: { messageId: 'card-message-2' },
+    data: callbackData,
+  } as DWClientDownStream);
+
+  expect(client.send).toHaveBeenNthCalledWith(1, 'card-message-1', {
+    status: 'success',
+    message: 'ok',
+  });
+  expect(client.send).toHaveBeenNthCalledWith(2, 'card-message-2', {
+    status: 'success',
+    message: 'ok',
+  });
+  expect(claim).toHaveBeenCalledTimes(2);
+  await vi.waitFor(() => expect(action).toHaveBeenCalledOnce());
+});
+
 it('routes the built-in btn_stop action to the status card controller', () => {
   const stopAction = vi.fn().mockResolvedValue(undefined);
   const claimStop = vi.fn().mockReturnValue(stopAction);
@@ -1448,10 +1503,13 @@ describe('DingtalkChannel status cards', () => {
 
   it('does not let a stale terminal event detach a newer session run', () => {
     const channel = createChannel();
+    const terminalizeRun = vi.fn();
     const maps = channel as unknown as {
       cardRunBySession: Map<string, string>;
       cardRuns: Map<string, unknown>;
+      interactionPresenter: { terminalizeRun: typeof terminalizeRun };
     };
+    maps.interactionPresenter = { terminalizeRun };
     maps.cardRunBySession.set('session-1', 'run-new');
     maps.cardRuns.set('run-old', {});
     maps.cardRuns.set('run-new', {});
@@ -1465,6 +1523,7 @@ describe('DingtalkChannel status cards', () => {
       owner: { kind: 'channel_user', id: 'owner-1' },
     });
 
+    expect(terminalizeRun).toHaveBeenCalledWith('run-old', 'completed');
     expect(maps.cardRunBySession.get('session-1')).toBe('run-new');
     expect(maps.cardRuns.has('run-old')).toBe(false);
     expect(maps.cardRuns.has('run-new')).toBe(true);
@@ -1722,6 +1781,36 @@ describe('DingtalkChannel parsed-message logging', () => {
         isGroup: true,
       }),
     );
+  });
+
+  it('uses conversation fallback for thread scope when DingTalk has no thread id', () => {
+    const channel = createChannel({ sessionScope: 'thread' });
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'thread-fallback-m1',
+        conversationType: '2',
+        conversationId: 'cid-thread-fallback',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: true,
+        text: { content: '@qwen-code hello' },
+      }),
+      headers: { messageId: 'thread-fallback-m1' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    const inbound = vi.mocked(channel.handleInbound).mock.calls[0]![0];
+    expect(inbound).toMatchObject({
+      chatId: 'cid-thread-fallback',
+      isGroup: true,
+    });
+    expect(inbound).not.toHaveProperty('threadId');
   });
 
   it('logs debug payloads when enabled for the channel', () => {
