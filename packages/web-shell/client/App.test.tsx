@@ -645,6 +645,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
       sessionListReloadToken?: number;
       collapsed?: boolean;
       onOpenPlugins?: () => void;
+      onOpenChannels?: () => void;
       onOpenDaemonStatus?: () => void;
       onOpenSessions?: () => void;
       onOpenSplitView?: () => void;
@@ -696,6 +697,15 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
             onClick: props.onOpenPlugins,
           },
           'plugins',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-channels',
+            type: 'button',
+            onClick: props.onOpenChannels,
+          },
+          'channels',
         ),
         React.createElement(
           'button',
@@ -762,6 +772,13 @@ mockComponent('./components/tools/ToolsManagerPage', 'ToolsManagerPage');
 mockComponent('./components/skills/SkillsManagerPage', 'SkillsManagerPage');
 mockComponent('./components/dialogs/DaemonStatusDialog', 'DaemonStatusDialog');
 mockComponent('./components/SessionOverviewPanel', 'SessionOverviewPanel');
+vi.doMock('./components/channels/ChannelsManagerPage', async () => {
+  const React = await import('react');
+  return {
+    ChannelsManagerPage: () =>
+      React.createElement('div', { 'data-testid': 'channels-manager-page' }),
+  };
+});
 vi.doMock('./components/SplitView', async () => {
   const React = await import('react');
   return {
@@ -6205,6 +6222,24 @@ describe('App session callbacks', () => {
         ?.querySelectorAll<HTMLButtonElement>('button[role="tab"]')[2]
         ?.getAttribute('aria-selected'),
     ).toBe('true');
+  });
+
+  it('opens Channel management from the sidebar', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-channels"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    const panel = container.querySelector('[data-testid="inline-panel"]');
+    expect(panel?.getAttribute('aria-label')).toBe('Channels');
+    expect(
+      panel?.querySelector('[data-testid="channels-manager-page"]'),
+    ).not.toBeNull();
   });
 
   it('shadow-isolates the unified plugin manager body when plugins is enabled', async () => {
