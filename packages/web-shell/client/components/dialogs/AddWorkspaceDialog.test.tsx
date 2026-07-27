@@ -341,6 +341,27 @@ describe('AddWorkspaceDialog', () => {
       expect(input().value).toBe('');
     });
 
+    it('shows an error when the system picker fails', async () => {
+      const onPick = vi.fn().mockRejectedValue(new Error('boom'));
+      mount(
+        <AddWorkspaceDialog
+          onClose={vi.fn()}
+          onAdd={vi.fn()}
+          onPick={onPick}
+        />,
+      );
+
+      await act(async () => {
+        browseButton().click();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(alert()?.textContent).toContain(
+        'Unable to open the system folder picker',
+      );
+    });
+
     it('never queries for a non-absolute value', async () => {
       const onSuggest = vi.fn().mockResolvedValue(SUGGESTIONS);
       mount(

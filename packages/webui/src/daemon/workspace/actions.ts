@@ -1004,7 +1004,11 @@ export function createDaemonWorkspaceActions({
 
     async pickWorkspaceDirectory() {
       const client = requireClient(getClient, 'Open directory picker failed');
-      const result = await client.workspaceDirectoryPicker();
+      const result = await withActionTimeout(
+        client.workspaceDirectoryPicker(),
+        'Open directory picker timed out',
+        300_000,
+      );
       return result as DaemonWorkspaceDirectoryPickerResult;
     },
 

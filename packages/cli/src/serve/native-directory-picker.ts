@@ -9,6 +9,11 @@ import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
 
+// Matches the SDK client's 5-minute ceiling so a dismissed dialog cannot leave
+// an orphaned native picker (and its visible GUI) running after the request
+// that spawned it is gone.
+const PICKER_TIMEOUT_MS = 300_000;
+
 export class NativeDirectoryPickerUnavailableError extends Error {}
 
 export async function pickNativeDirectory(): Promise<string | undefined> {
@@ -21,12 +26,11 @@ export async function pickNativeDirectory(): Promise<string | undefined> {
         'withPrompt: "Select a workspace folder",',
         '}).toString();',
       ].join(' ');
-      const { stdout } = await execFileAsync('osascript', [
-        '-l',
-        'JavaScript',
-        '-e',
-        script,
-      ]);
+      const { stdout } = await execFileAsync(
+        'osascript',
+        ['-l', 'JavaScript', '-e', script],
+        { timeout: PICKER_TIMEOUT_MS },
+      );
       return stdout.trim() || undefined;
     }
 
@@ -38,21 +42,24 @@ export async function pickNativeDirectory(): Promise<string | undefined> {
         '[Console]::Out.Write($dialog.SelectedPath)',
         '}',
       ].join(' ');
-      const { stdout } = await execFileAsync('powershell.exe', [
-        '-NoProfile',
-        '-STA',
-        '-Command',
-        script,
-      ]);
+      const { stdout } = await execFileAsync(
+        'powershell.exe',
+        ['-NoProfile', '-STA', '-Command', script],
+        { timeout: PICKER_TIMEOUT_MS },
+      );
       return stdout.trim() || undefined;
     }
 
     if (process.platform === 'linux') {
-      const { stdout } = await execFileAsync('zenity', [
-        '--file-selection',
-        '--directory',
-        '--title=Select a workspace folder',
-      ]);
+      const { stdout } = await execFileAsync(
+        'zenity',
+        [
+          '--file-selection',
+          '--directory',
+          '--title=Select a workspace folder',
+        ],
+        { timeout: PICKER_TIMEOUT_MS },
+      );
       return stdout.trim() || undefined;
     }
   } catch (error) {
@@ -61,7 +68,11 @@ export async function pickNativeDirectory(): Promise<string | undefined> {
       (process.platform === 'darwin' &&
         (result.stderr?.includes('(-128)') ||
           result.stderr?.includes('User canceled'))) ||
-      (process.platform === 'linux' && result.code === 1)
+      // Zenity exits 1 both for a deliberate cancel and for "cannot open
+      // display" on headless Linux; only the former is a silent cancel.
+      (process.platform === 'linux' &&
+        result.code === 1 &&
+        !result.stderr?.includes('cannot open display'))
     ) {
       return undefined;
     }

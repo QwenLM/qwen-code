@@ -13,6 +13,7 @@ import {
   type WorkspaceManagementRouteDeps,
   type WorkspaceRuntimeRemovalController,
 } from './workspace-management.js';
+import { NativeDirectoryPickerUnavailableError } from '../native-directory-picker.js';
 import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
@@ -2454,5 +2455,29 @@ describe('POST /workspace-directory-picker', () => {
       kind: 'workspace-directory-picker',
       selected: false,
     });
+  });
+
+  it('returns 501 when the native picker is unavailable', async () => {
+    const { app } = createApp({
+      pickWorkspaceDirectory: vi
+        .fn()
+        .mockRejectedValue(new NativeDirectoryPickerUnavailableError()),
+    });
+
+    const res = await request(app).post('/workspace-directory-picker');
+
+    expect(res.status).toBe(501);
+    expect(res.body.code).toBe('directory_picker_unavailable');
+  });
+
+  it('returns 500 when the picker fails unexpectedly', async () => {
+    const { app } = createApp({
+      pickWorkspaceDirectory: vi.fn().mockRejectedValue(new Error('boom')),
+    });
+
+    const res = await request(app).post('/workspace-directory-picker');
+
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('directory_picker_failed');
   });
 });
