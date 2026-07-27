@@ -1152,9 +1152,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // only fires once with the fully-populated state.
           const { compactedReplay, liveJournal } = activeSession.replaySnapshot;
           const replayEvents = [...compactedReplay, ...liveJournal];
-          const firstPersistedRecordId = replayEvents
-            .map(getPersistedReplayRecordId)
-            .find((recordId): recordId is string => recordId !== undefined);
+          // Prefer a recordId carried by an actual `session_update` in the
+          // retained window; fall back to the `history_truncated` marker's
+          // stamped anchor only when no session_update has one. The marker
+          // sits at position 0, so a single `.find()` would let its (more
+          // recent) anchor win over earlier session_update recordIds still
+          // in the window, causing `beforeRecordId` to re-fetch records
+          // the client already displays.
+          const firstPersistedRecordId =
+            replayEvents
+              .filter((e) => e.type === 'session_update')
+              .map(getPersistedReplayRecordId)
+              .find((recordId): recordId is string => recordId !== undefined) ??
+            replayEvents
+              .filter((e) => e.type === 'history_truncated')
+              .map(getPersistedReplayRecordId)
+              .find((recordId): recordId is string => recordId !== undefined);
           const replayHistoryWasTruncated = replayEvents.some(
             hasFullTranscriptBeforeReplay,
           );

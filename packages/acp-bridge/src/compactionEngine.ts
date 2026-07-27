@@ -165,6 +165,13 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
   // pagination. Undefined until at least one recordId has been observed;
   // omitted from the marker in that case.
   private activeRecordId: string | undefined;
+  // Pagination anchor for the replay-path `history_truncated` marker,
+  // captured at the first replay-window eviction. Unlike `activeRecordId`
+  // (which `ingest()` advances on every turn boundary), this value is
+  // frozen at the eviction boundary so the marker's `recordId` stays at
+  // the earliest retained position — a later `ingest()` must not push it
+  // past records the client already displays.
+  private replayAnchorRecordId: string | undefined;
 
   private slots: CompactedSlot[] = [];
   private toolSlotIndex: Map<string, number> = new Map();
@@ -286,6 +293,15 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     // now-stale position. `activeRecordId` will be rebuilt from any
     // `session_update` recordIds encountered on subsequent `ingest()` calls.
     this.activeRecordId = undefined;
+    // Pre-scan seeded compactedTurns for the last recordId (mirrors
+    // seedReplayEvents) so eviction by addReplaySegment doesn't lose it.
+    for (let i = snapshot.compactedTurns.length - 1; i >= 0; i--) {
+      const id = replayRecordId(snapshot.compactedTurns[i]!);
+      if (id !== undefined) {
+        this.activeRecordId = id;
+        break;
+      }
+    }
     for (const event of snapshot.compactedTurns) {
       if (TRANSIENT_TYPES.has(event.type)) continue;
       this.addReplaySegment([event], 0);
@@ -299,6 +315,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
   seedReplayEvents(events: BridgeEvent[]): void {
     if (this.closed) return;
     this.resetReplayWindow();
+    this.activeRecordId = undefined;
     // Pre-scan for the last recordId BEFORE segments are added (and
     // possibly evicted) so a subsequent `snapshot()` can still stamp it
     // on a `history_truncated` marker as a pagination anchor. Without
@@ -606,6 +623,10 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     }
 
     if (droppedSegmentCount > 0) {
+      // Freeze the pagination anchor at the first eviction so later
+      // ingests don't advance it past the retained window's earliest
+      // recordId (see replayAnchorRecordId declaration).
+      this.replayAnchorRecordId ??= this.activeRecordId;
       this.compactReplaySegmentQueueIfNeeded();
       this.notifyReplayWindowEviction({
         droppedBytes,
@@ -657,11 +678,14 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
           : {}),
         // Pagination anchor for clients whose retained window lost every
         // turn-boundary event (e.g. live-journal truncation during one
-        // long in-flight turn). Undefined when no recordId has ever been
-        // observed — the field is intentionally omitted in that case so
-        // old clients continue to validate the marker shape.
-        ...(this.activeRecordId !== undefined
-          ? { recordId: this.activeRecordId }
+        // long in-flight turn). Uses the eviction-time anchor, not
+        // `activeRecordId`, so a post-seed `ingest()` can't push it past
+        // records the client already displays. Undefined when no recordId
+        // was observed before the first eviction — the field is
+        // intentionally omitted in that case so old clients continue to
+        // validate the marker shape.
+        ...(this.replayAnchorRecordId !== undefined
+          ? { recordId: this.replayAnchorRecordId }
           : {}),
         fullTranscriptAvailable: true,
       },
@@ -674,6 +698,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     this.replayBytes = 0;
     this.truncatedEvents = 0;
     this.truncatedTurns = 0;
+    this.replayAnchorRecordId = undefined;
   }
 
   private clearTextSlotIndex(): void {
