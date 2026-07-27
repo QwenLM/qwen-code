@@ -381,3 +381,54 @@ describe('toolResultDisplayCompaction', () => {
     expect(compactedTeam.teamName).toContain('truncated from');
   });
 });
+
+describe('compactString limit', () => {
+  // The compaction marker embeds the original length, so it is 60-80
+  // characters on its own. It used to be appended whatever the limit was,
+  // which meant a small caller-supplied limit got back more than it asked
+  // for -- and sometimes more than the string it was given.
+  it.each([
+    ['recording' as const, 70, 60],
+    ['history' as const, 64, 63],
+    ['history' as const, 100, 50],
+    ['recording' as const, 200, 10],
+    ['history' as const, 40, 0],
+  ])(
+    'keeps %s output within bounds for input %d at limit %d',
+    (purpose, inputLength, limit) => {
+      const value = 'x'.repeat(inputLength);
+      const compact =
+        purpose === 'recording'
+          ? compactStringForRecording(value, limit)
+          : compactStringForHistory(value, limit);
+
+      expect(compact.length).toBeLessThanOrEqual(limit);
+      // Compacting must never hand back more characters than it was given.
+      expect(compact.length).toBeLessThanOrEqual(value.length);
+    },
+  );
+
+  // Guards against over-correcting: when the limit does leave room for the
+  // marker, the marker must still be there. These pass before and after.
+  it.each([
+    ['recording' as const, 5000, 500],
+    ['history' as const, 5000, 200],
+    ['history' as const, 5000, 120],
+  ])(
+    'still explains the truncation for %s at input %d, limit %d',
+    (purpose, inputLength, limit) => {
+      const value = 'x'.repeat(inputLength);
+      const compact =
+        purpose === 'recording'
+          ? compactStringForRecording(value, limit)
+          : compactStringForRecording(value, limit);
+
+      expect(compact.length).toBeLessThanOrEqual(limit);
+      expect(compact).toContain('truncated');
+    },
+  );
+
+  it('returns a short string untouched regardless of the marker length', () => {
+    expect(compactStringForHistory('short', 1000)).toBe('short');
+  });
+});
