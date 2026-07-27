@@ -5308,7 +5308,12 @@ export class Session implements SessionContext {
           const notificationParts: Part[] = [{ text: item.modelText }];
           this.config
             .getChatRecordingService()
-            ?.recordNotification(notificationParts, item.displayText);
+            ?.recordNotification(notificationParts, item.displayText, {
+              taskId: item.taskId,
+              status: item.status,
+              kind: item.kind,
+              toolUseId: item.toolUseId,
+            });
 
           const notificationReminders =
             await this.#buildInitialSystemReminders();

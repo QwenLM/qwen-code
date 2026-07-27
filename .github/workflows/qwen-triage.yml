@@ -983,7 +983,12 @@ jobs:
           set -euo pipefail
           apt-get install -y --no-install-recommends tmux util-linux
 
-          npm install -g --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest'
+          # Run the global install from RUNNER_TEMP: the persistent workspace
+          # still holds the PREVIOUS run's checked-out tree here, and npm
+          # reads a cwd .npmrc — whose settings (script-shell, hooks) a
+          # --registry flag does not override — into a root-privileged
+          # install. Same fix as the verify lane.
+          (cd "${RUNNER_TEMP:?}" && npm install -g --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest')
           qwen --version
           tmux -V
 
@@ -992,7 +997,14 @@ jobs:
         run: |-
           set -uo pipefail
           [ -e .git ] || exit 0
-          rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
+          # Never descend through a PR-writable parent (same guard as the
+          # end-of-job cleanup and the verify lane's pre-checkout step).
+          [ -L .qwen ] && rm -f .qwen
+          if [ -L .qwen/tmp ]; then
+            rm -f .qwen/tmp
+          elif [ -d .qwen/tmp ]; then
+            rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
+          fi
           git worktree prune -v || true
 
       - name: 'Checkout PR merge ref'
@@ -1072,6 +1084,42 @@ jobs:
             exit 1
           fi
 
+          # `npm ci`/`npm run build` ran the PR's lifecycle scripts as `node`
+          # in the previous step. A detached postinstall child can outlive that
+          # step and the one-shot sweep below — re-planting a `*-tmux-*`
+          # artifact dir after the sweep runs, or tampering with the agent's
+          # inputs while it executes. Kill anything still running as the build
+          # user BEFORE any cleanup, same as the verify lane, so the sweep is
+          # not racing a live process. This also removes the localhost blind
+          # scan surface the bearer-gated proxy defends against. The proxy
+          # started further below runs as root, so this cannot touch it.
+          pkill -KILL -u node 2>/dev/null || true
+          for _ in 1 2 3; do
+            pgrep -u node >/dev/null 2>&1 || break
+            sleep 1
+            pkill -KILL -u node 2>/dev/null || true
+          done
+          if pgrep -u node >/dev/null 2>&1; then
+            echo "::error::Processes owned by the build user survived; refusing to start the agent."
+            exit 1
+          fi
+
+          # `npm ci`/`npm run build` just ran the PR's lifecycle scripts, which
+          # can plant a `tmp/<name>-tmux-<ts>/` directory holding a report.md
+          # and a transcript. The collector below globs `*-tmux-*` and the
+          # publisher takes the first match, so a planted dir can supply the
+          # comment's contents. Sweep the lifecycle-script plant channel; the
+          # runtime channel (PR code the agent launches concurrently) is
+          # bounded by the symlink strip after collection. find's default
+          # -P does not follow a symlinked start path, so there is no live
+          # escape to close; the [ -L tmp ] guard is defence-in-depth against
+          # a future edit adding a trailing slash or -L, which would follow it.
+          if [ -L tmp ]; then
+            echo '::warning::tmp is a symlink; skipping pre-agent tmux sweep'
+          else
+            find tmp -maxdepth 2 -type d -name '*-tmux-*' -exec rm -rf {} + 2>/dev/null || true
+          fi
+
           # Bypass the runner proxy before launching qwen: the proxy cuts the
           # SSE stream to the model host, and qwen reads HTTP(S)_PROXY directly
           # without honoring NO_PROXY. Clear proxy env for qwen itself while
@@ -1143,17 +1191,37 @@ jobs:
           unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
 
           start_openai_proxy() {
-            local proxy_port proxy_script
-            proxy_port=8787
-            proxy_script="${RUNNER_TEMP:-/tmp}/qwen-openai-proxy.js"
+            local proxy_port proxy_script proxy_nonce port_file
+            # PR lifecycle code ran before this step and could have left a
+            # server on a fixed port: the real proxy would die with
+            # EADDRINUSE while the health probe succeeded against the
+            # squatter, and qwen would take its completions. Proven
+            # exploitable on the verify lane; same defences here — ephemeral
+            # port reported through a root-owned file, a per-run nonce the
+            # health endpoint must echo, a bearer token only the agent
+            # knows, and a liveness check on our PID.
+            proxy_script="${RUNNER_TEMP:-/tmp}/qwen-openai-proxy-tmux.js"
+            port_file="${RUNNER_TEMP:-/tmp}/qwen-openai-proxy-tmux.port"
+            proxy_nonce="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+            # NOT in the `local` list above on purpose: the agent env below
+            # reads it as OPENAI_API_KEY and the proxy receives it as
+            # PROXY_TOKEN. Uppercase + export mirror the verify lane, so a
+            # tidy that adds it to `local` cannot silently blank the agent's
+            # key and 401 every completion.
+            PROXY_TOKEN="$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+            export PROXY_TOKEN
+            rm -f "$port_file"
             cat > "$proxy_script" <<'NODE'
           const http = require('node:http');
+          const { writeFileSync } = require('node:fs');
           const { Readable } = require('node:stream');
 
-          const port = Number(process.argv[2]);
+          const portFile = process.argv[2];
           const baseUrl = process.env.REVIEW_OPENAI_BASE_URL;
           const apiKey = process.env.REVIEW_OPENAI_API_KEY;
-          if (!baseUrl || !apiKey || !Number.isInteger(port)) {
+          const nonce = process.env.QWEN_PROXY_NONCE;
+          const token = process.env.PROXY_TOKEN;
+          if (!baseUrl || !apiKey || !portFile || !nonce || !token) {
             console.error('missing proxy configuration');
             process.exit(1);
           }
@@ -1163,11 +1231,13 @@ jobs:
 
           const server = http.createServer(async (req, res) => {
             if (req.url === '/__health') {
-              res.writeHead(204);
-              res.end();
+              // Identity, not just liveness: a squatter cannot know the nonce.
+              res.writeHead(200, { 'content-type': 'text/plain' });
+              res.end(nonce);
               return;
             }
 
+            let timer;
             try {
               const incoming = new URL(req.url || '/', 'http://127.0.0.1');
               const target = new URL(base.origin);
@@ -1189,6 +1259,14 @@ jobs:
                 return;
               }
 
+              // Only the agent knows this run's token; anything else on the
+              // runner that finds the port cannot get the key used.
+              if (req.headers.authorization !== `Bearer ${token}`) {
+                res.writeHead(401, { 'content-type': 'text/plain' });
+                res.end('proxy: unauthorized\n');
+                return;
+              }
+
               const headers = new Headers(req.headers);
               headers.delete('host');
               headers.delete('content-length');
@@ -1204,7 +1282,7 @@ jobs:
               }
 
               const controller = new AbortController();
-              const timer = setTimeout(() => controller.abort(), 120_000);
+              timer = setTimeout(() => controller.abort(), 120_000);
               let upstream;
               try {
                 upstream = await fetch(target, { ...init, signal: controller.signal });
@@ -1215,9 +1293,12 @@ jobs:
                   return;
                 }
                 throw error;
-              } finally {
-                clearTimeout(timer);
               }
+              // NOTE: the timer is deliberately NOT cleared here. fetch()
+              // resolves on HEADERS, and the armed timer doubles as the
+              // first idle window for the body; the per-chunk handler below
+              // refreshes it. Clearing it here would leave no guard on an
+              // upstream that sends headers and then stalls.
               const responseHeaders = {};
               upstream.headers.forEach((value, key) => {
                 const lower = key.toLowerCase();
@@ -1227,37 +1308,82 @@ jobs:
               });
               res.writeHead(upstream.status, responseHeaders);
               if (upstream.body) {
-                Readable.fromWeb(upstream.body).pipe(res);
+                const body = Readable.fromWeb(upstream.body);
+                const done = () => clearTimeout(timer);
+                body.on('end', done);
+                // When the idle watchdog fires mid-body it aborts the
+                // upstream, which surfaces here as an error: tear down the
+                // downstream response too, or the client sits on a silent
+                // socket until its own idle timer.
+                body.on('error', () => {
+                  done();
+                  res.destroy();
+                });
+                // A downstream disconnect must abort the upstream request
+                // too, or the stalled fetch keeps the socket alive.
+                res.on('close', () => {
+                  done();
+                  controller.abort();
+                });
+                body.pipe(res);
+                // Idle, not total: qwen tolerates minutes of silence inside
+                // one stream (DEFAULT_STREAM_IDLE_TIMEOUT_MS), so a total
+                // cap would cut healthy long completions. Refresh per chunk;
+                // attached after pipe() because a 'data' listener flips the
+                // stream to flowing mode.
+                body.on('data', () => {
+                  clearTimeout(timer);
+                  timer = setTimeout(() => controller.abort(), 120_000);
+                });
               } else {
+                clearTimeout(timer);
                 res.end();
               }
             } catch (error) {
+              clearTimeout(timer);
+              // The message can carry resolved hosts, IPs and TLS detail.
+              // The agent needs to know the call failed, not the topology.
+              console.error('proxy upstream failure:', error);
               res.writeHead(502, { 'content-type': 'text/plain' });
-              res.end(`proxy error: ${error instanceof Error ? error.message : String(error)}\n`);
+              res.end('proxy error: upstream request failed\n');
             }
           });
 
-          server.listen(port, '127.0.0.1');
+          // Port 0: let the OS choose, then publish it where only root can write.
+          server.listen(0, '127.0.0.1', () => {
+            writeFileSync(portFile, String(server.address().port));
+          });
           NODE
 
             REVIEW_OPENAI_API_KEY="$REVIEW_OPENAI_API_KEY" \
               REVIEW_OPENAI_BASE_URL="$REVIEW_OPENAI_BASE_URL" \
-              node "$proxy_script" "$proxy_port" &
+              QWEN_PROXY_NONCE="$proxy_nonce" \
+              node "$proxy_script" "$port_file" &
             OPENAI_PROXY_PID=$!
             trap 'kill "$OPENAI_PROXY_PID" 2>/dev/null || true' EXIT
 
-            for _ in 1 2 3 4 5; do
-              if curl -fsS "http://127.0.0.1:${proxy_port}/__health" >/dev/null; then
-                break
-              fi
+            proxy_port=''
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
               if ! kill -0 "$OPENAI_PROXY_PID" 2>/dev/null; then
                 echo "::error::OpenAI proxy exited before becoming ready"
                 exit 1
               fi
+              if [ -z "$proxy_port" ] && [ -s "$port_file" ]; then
+                proxy_port="$(tr -cd '0-9' < "$port_file")"
+              fi
+              if [ -n "$proxy_port" ] &&
+                 [ "$(curl -fsS "http://127.0.0.1:${proxy_port}/__health" 2>/dev/null)" = "$proxy_nonce" ]; then
+                break
+              fi
+              proxy_port=''
               sleep 1
             done
-            if ! curl -fsS "http://127.0.0.1:${proxy_port}/__health" >/dev/null; then
-              echo "::error::OpenAI proxy did not become ready"
+            # All three must hold: the PID we started is alive, the port it
+            # reported, and the nonce echoed back.
+            if [ -z "$proxy_port" ] ||
+               ! kill -0 "$OPENAI_PROXY_PID" 2>/dev/null ||
+               [ "$(curl -fsS "http://127.0.0.1:${proxy_port}/__health" 2>/dev/null)" != "$proxy_nonce" ]; then
+              echo "::error::OpenAI proxy did not become ready (or another process answered on its port)"
               exit 1
             fi
 
@@ -1293,7 +1419,7 @@ jobs:
             "GITHUB_REPOSITORY=$GITHUB_REPOSITORY"
             "GITHUB_TOKEN="
             "GH_TOKEN="
-            "OPENAI_API_KEY=qwen-loopback-proxy"
+            "OPENAI_API_KEY=$PROXY_TOKEN"
             "OPENAI_BASE_URL=$LOCAL_OPENAI_BASE_URL"
             "NO_PROXY=${NO_PROXY:-}"
             "no_proxy=${no_proxy:-}"
@@ -1319,6 +1445,10 @@ jobs:
           # Collect the skill's narrative artifacts (report.md, readable logs)
           # from the workspace tmp/ into the upload dir.
           find tmp -maxdepth 2 -type d -name '*-tmux-*' -exec cp -r {} "$RUNNER_TEMP/tmux-results/" \; 2>/dev/null || true
+          # cp -r copies symlinks as symlinks (no deref), but
+          # actions/upload-artifact FOLLOWS them — a node-planted link would
+          # exfiltrate whatever it points at into the artifact. Drop links.
+          find "$RUNNER_TEMP/tmux-results" -type l -delete 2>/dev/null || true
 
           if [ "$EXIT_CODE" -eq 124 ]; then
             VERDICT='timeout'
@@ -1357,8 +1487,21 @@ jobs:
         run: |-
           set -uo pipefail
           [ -e .git ] || exit 0
-          rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
-          find tmp -maxdepth 2 -type d -name '*-tmux-*' -exec rm -rf {} + 2>/dev/null || true
+          # Never descend through a PR-writable parent: PR code ran in this
+          # workspace, so `.qwen` or `.qwen/tmp` can be a symlink pointing
+          # outside it (verified on the verify lane: the glob then deletes
+          # the link target's contents as root).
+          [ -L .qwen ] && rm -f .qwen
+          if [ -L .qwen/tmp ]; then
+            rm -f .qwen/tmp
+          elif [ -d .qwen/tmp ]; then
+            rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
+          fi
+          if [ -L tmp ]; then
+            echo '::warning::tmp is a symlink; skipping end-of-job tmux sweep'
+          else
+            find tmp -maxdepth 2 -type d -name '*-tmux-*' -exec rm -rf {} + 2>/dev/null || true
+          fi
           git worktree prune -v || true
 
   # Post the tmux verdict back to the PR. Runs on a clean GitHub-hosted runner
@@ -1378,6 +1521,20 @@ jobs:
        (needs.tmux-testing.result == 'success' &&
         needs.tmux-testing.outputs.verdict != '' &&
         needs.tmux-testing.outputs.verdict != 'n/a'))
+    # Per-RUN group, deliberately not per-PR: a GitHub concurrency group
+    # holds at most one running plus one pending job, and a newer pending job
+    # REPLACES the older one even with cancel-in-progress: false — so a
+    # per-PR group would let a second run cancel a completed run's pending
+    # publisher and drop its report. Overlap between publishers is instead
+    # made safe by the bot-owned prefix-match dedup below. Same shape as
+    # publish-verify.
+    concurrency:
+      group: "${{ format('{0}-publish-tmux-{1}', github.workflow, github.run_id) }}"
+      cancel-in-progress: false
+    # Downloads one artifact and posts one comment; without this it would
+    # inherit the 360-minute default and a hung gh call could hold a hosted
+    # runner for six hours. Same bound as publish-verify.
+    timeout-minutes: 10
     runs-on: 'ubuntu-latest'
     permissions:
       pull-requests: 'write'
@@ -1425,16 +1582,32 @@ jobs:
             local summary="$1" file="$2" max="$3" content truncated='' summary_html
             [ -n "$file" ] && [ -f "$file" ] || return 0
             summary_html="$(printf '%s' "$summary" | html_escape)"
-            if [ "$(wc -c < "$file")" -gt "$max" ]; then
-              truncated=$'\n\n...truncated -- full log in the run artifacts.'
-            fi
-            if ! content="$(
+            # Escape FIRST, then cap. Escaping inflates every & < > by 4-5
+            # bytes, so a raw-side cap can push the assembled body past
+            # GitHub's 65,536-char comment limit, 422 the post, and leave no
+            # comment at all. Same fix the verify lane carries; truncation is
+            # done on a character boundary via node, because BSD `iconv -c`
+            # passes an incomplete trailing UTF-8 sequence through unchanged.
+            local esc_file="${TMPDIR:-/tmp}/tmux-emit-$$"
+            if ! (
               set -o pipefail
-              head -c "$max" "$file" | tr -d '\000' | html_escape
-            )"; then
+              head -c 400000 "$file" | tr -d '\000' | html_escape > "$esc_file"
+            ); then
               echo "::warning::emit_block failed while rendering $summary; see run artifacts." >&2
+              rm -f "$esc_file"
               content='<em>Log could not be rendered; see run artifacts.</em>'
-            elif [ -n "$truncated" ]; then
+            else
+              if [ "$(wc -c < "$esc_file")" -gt "$max" ] ||
+                 [ "$(wc -c < "$file")" -gt 400000 ]; then
+                truncated=$'\n\n...truncated -- full log in the run artifacts.'
+              fi
+              content="$(node -e '
+                const fs = require("node:fs");
+                const [file, max] = process.argv.slice(1);
+                const buf = fs.readFileSync(file).subarray(0, Number(max));
+                process.stdout.write(new TextDecoder("utf-8").decode(buf).replace(/�+$/, ""));
+              ' "$esc_file" "$max")" || content="$(head -c "$max" "$esc_file")"
+              rm -f "$esc_file"
               content="${content}${truncated}"
             fi
             printf '<details>\n<summary>%s</summary>\n\n<pre><code>\n' "$summary_html"
@@ -1486,8 +1659,8 @@ jobs:
               printf '%s\n' '— _Qwen Code · tmux real-user testing_'
             } > "$BODY_FILE"
           else
-            REPORT="$(find tmux-results -name 'report.md' 2>/dev/null | head -1 || true)"
-            TRANSCRIPT="$(find tmux-results -name 'tmux-readable-full.log' 2>/dev/null | head -1 || true)"
+            REPORT="$(find tmux-results -mindepth 2 -type f -path '*-tmux-*/report.md' 2>/dev/null | sort | head -1 || true)"
+            TRANSCRIPT="$(find tmux-results -mindepth 2 -type f -path '*-tmux-*/tmux-readable-full.log' 2>/dev/null | sort | head -1 || true)"
             if [ -z "$REPORT" ] && [ -z "$TRANSCRIPT" ]; then
               MISSING_ARTIFACTS_NOTE='No report.md or tmux-readable-full.log was found in tmux-results, so detailed report sections are omitted.'
               echo "::warning::${MISSING_ARTIFACTS_NOTE}"
@@ -1532,13 +1705,24 @@ jobs:
           fi
 
           # Dedup: update an existing tmux comment if one is already present.
-          if ! EXISTING="$(
+          # Only BOT-OWNED comments STARTING with the marker are candidates,
+          # so a marker a human reviewer quotes cannot divert the bot into
+          # PATCHing (and overwriting) their comment with the write PAT.
+          # Fail CLOSED on identity failure: an empty login would widen the
+          # filter to every user's comments. Same discipline as publish-verify.
+          EXISTING=''
+          if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
+            echo "::warning::Could not resolve the bot identity; posting a fresh tmux comment instead of reusing one."
+            BOT_LOGIN=''
+          fi
+          if [ -n "$BOT_LOGIN" ] && ! EXISTING="$(
             # -F would otherwise make gh api default to POST.
             gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
               --method GET \
               --paginate \
               -F per_page=100 \
-              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-triage:tmux -->"))] | last | .id // empty'
+              | jq -sr --arg bot "$BOT_LOGIN" \
+                '[.[][] | select((.body | startswith("<!-- qwen-triage:tmux -->")) and .user.login == $bot)] | last | .id // empty'
           )"; then
             echo "::warning::Failed to look up existing tmux comments; will create a new one."
             EXISTING=""
@@ -2259,6 +2443,7 @@ jobs:
               return;
             }
 
+            let timer;
             try {
               const incoming = new URL(req.url || '/', 'http://127.0.0.1');
               const target = new URL(base.origin);
@@ -2303,7 +2488,7 @@ jobs:
               }
 
               const controller = new AbortController();
-              const timer = setTimeout(() => controller.abort(), 120_000);
+              timer = setTimeout(() => controller.abort(), 120_000);
               let upstream;
               try {
                 upstream = await fetch(target, { ...init, signal: controller.signal });
@@ -2316,9 +2501,10 @@ jobs:
                 throw error;
               }
               // NOTE: the timer is deliberately NOT cleared here. fetch()
-              // resolves on HEADERS, so clearing now would let an upstream
-              // that stalls mid-body hang until the outer 25-minute
-              // watchdog. It is cleared when the body ends or errors below.
+              // resolves on HEADERS, and the armed timer doubles as the
+              // first idle window for the body; the per-chunk handler below
+              // refreshes it. Clearing it here would leave no guard on an
+              // upstream that sends headers and then stalls.
               const responseHeaders = {};
               upstream.headers.forEach((value, key) => {
                 const lower = key.toLowerCase();
@@ -2331,7 +2517,14 @@ jobs:
                 const body = Readable.fromWeb(upstream.body);
                 const done = () => clearTimeout(timer);
                 body.on('end', done);
-                body.on('error', done);
+                // When the idle watchdog fires mid-body it aborts the
+                // upstream, which surfaces here as an error: tear down the
+                // downstream response too, or the client sits on a silent
+                // socket until its own idle timer.
+                body.on('error', () => {
+                  done();
+                  res.destroy();
+                });
                 // A downstream disconnect must abort the upstream request
                 // too, or the stalled fetch keeps the socket alive.
                 res.on('close', () => {
@@ -2339,11 +2532,21 @@ jobs:
                   controller.abort();
                 });
                 body.pipe(res);
+                // Idle, not total: qwen tolerates minutes of silence inside
+                // one stream (DEFAULT_STREAM_IDLE_TIMEOUT_MS), so a total
+                // cap would cut healthy long completions. Refresh per chunk;
+                // attached after pipe() because a 'data' listener flips the
+                // stream to flowing mode.
+                body.on('data', () => {
+                  clearTimeout(timer);
+                  timer = setTimeout(() => controller.abort(), 120_000);
+                });
               } else {
                 clearTimeout(timer);
                 res.end();
               }
             } catch (error) {
+              clearTimeout(timer);
               // The message can carry resolved hosts, IPs and TLS detail.
               // The agent needs to know the call failed, not the topology.
               console.error('proxy upstream failure:', error);
