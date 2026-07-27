@@ -56,6 +56,9 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).toContain(
       'apply_autofix_route "${existing_workflow_issue}"',
     );
+    expect(workflow.indexOf('existing_sha_issue')).toBeLessThan(
+      workflow.indexOf('existing_workflow_issue'),
+    );
     expect(workflow).toContain('title_prefix="Main CI failed:"');
     expect(workflow).toContain(
       '--search "\\"${title_prefix} ${WORKFLOW_NAME}\\" in:title"',
