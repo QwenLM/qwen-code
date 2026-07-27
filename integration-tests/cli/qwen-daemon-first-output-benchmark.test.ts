@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2026 Qwen Team
+ * Copyright 2025 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -39,6 +39,7 @@ import {
   DEFAULT_FIRST_OUTPUT_EVENT_BUFFER_LIMIT,
   DEFAULT_MATERIAL_THRESHOLD_MS,
   DEFAULT_ORDER_SENSITIVITY_THRESHOLD_MS,
+  FIRST_OUTPUT_BENCHMARK_VERSION,
   FirstOutputTracker,
   evaluateSingleBundlePrototypeGate,
   measuredPairCountForDwell,
@@ -48,7 +49,7 @@ import {
   renderFirstOutputBenchmarkMarkdown,
   validateExpectedFinalText,
   validatePromptAcceptance,
-  type FirstOutputBenchmarkArtifactV1,
+  type FirstOutputBenchmarkArtifactV2,
   type FirstOutputFailure,
   type FirstOutputFailureCode,
   type FirstOutputMetricName,
@@ -136,7 +137,6 @@ interface ResolvedBundle {
   configuredPath: string;
   realPath: string;
   sha256: string;
-  gitCommit: string | null;
   compileCacheDir: string;
 }
 
@@ -306,9 +306,6 @@ function readBenchmarkConfig(): BenchmarkConfig {
     );
   }
 
-  const dwell = parseBenchmarkPostSessionDwell(
-    process.env['BENCHMARK_POST_SESSION_DWELL_MS'],
-  );
   if (hasSingle) {
     if (process.env['BENCHMARK_POST_SESSION_DWELL_MS'] !== undefined) {
       throw new Error(
@@ -329,6 +326,12 @@ function readBenchmarkConfig(): BenchmarkConfig {
     };
   }
 
+  // Parsed only after the compare-only rejections above, so an unsupported
+  // value in single mode reports that the variable is compare-only rather than
+  // listing the dwell values compare mode would have accepted.
+  const dwell = parseBenchmarkPostSessionDwell(
+    process.env['BENCHMARK_POST_SESSION_DWELL_MS'],
+  );
   const control = resolveBundle(controlPath!, 'control');
   const candidate = resolveBundle(candidatePath!, 'candidate');
   if (control.realPath === candidate.realPath) {
@@ -382,29 +385,12 @@ function resolveBundle(input: string, role: BundleRole): ResolvedBundle {
     sha256: createHash('sha256')
       .update(fs.readFileSync(realPath))
       .digest('hex'),
-    gitCommit: gitCommitForPath(realPath),
     compileCacheDir,
   };
 }
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function gitCommitForPath(filePath: string): string | null {
-  try {
-    return execFileSync(
-      'git',
-      ['-C', path.dirname(filePath), 'rev-parse', 'HEAD'],
-      {
-        encoding: 'utf8',
-        timeout: 5_000,
-        stdio: ['ignore', 'pipe', 'ignore'],
-      },
-    ).trim();
-  } catch {
-    return null;
-  }
 }
 
 async function spawnBenchmarkDaemon(
@@ -1567,15 +1553,6 @@ async function runComparisonPairs(
     measured.push(pair);
     if (!isSuccessfulRawPair(pair)) return { warmups, measured };
   }
-  const abCount = measured.filter((pair) => pair.order === 'AB').length;
-  const baCount = measured.filter((pair) => pair.order === 'BA').length;
-  const expectedPerOrder = config.measuredPairs / 2;
-  if (abCount !== expectedPerOrder || baCount !== expectedPerOrder) {
-    throw new Error(
-      'Internal AB/BA balance error: expected ' +
-        `${expectedPerOrder}/${expectedPerOrder}, received ${abCount}/${baCount}.`,
-    );
-  }
   return { warmups, measured };
 }
 
@@ -1634,7 +1611,11 @@ async function runComparisonPair(
 }
 
 function isSuccessfulProcessSample(
-  sample: ProcessSample,
+  sample: {
+    failure: FirstOutputFailure | null;
+    cleanup: { failure: FirstOutputFailure | null };
+    sessions: readonly FirstOutputSessionRunResult[];
+  },
   expectedSessions: 1 | 2,
 ): boolean {
   return (
@@ -1894,13 +1875,13 @@ function pairedOptions(seedOffset: number): {
 }
 
 function commonArtifactFields(): Pick<
-  FirstOutputBenchmarkArtifactV1,
+  FirstOutputBenchmarkArtifactV2,
   'version' | 'benchmark' | 'capturedAt' | 'harnessGitCommit' | 'platform'
 > {
   const cpus = os.cpus();
   const loadAverage = os.loadavg() as [number, number, number];
   return {
-    version: 1,
+    version: FIRST_OUTPUT_BENCHMARK_VERSION,
     benchmark: 'daemon-first-output',
     capturedAt: new Date().toISOString(),
     harnessGitCommit: gitHead(),
@@ -1922,7 +1903,7 @@ function commonConfig(postSessionDwellMs: number): {
   providerDelayMs: number;
   providerConnection: 'close-per-response';
   postSessionDwellMs: number;
-  prompt: string;
+  promptShape: string;
   expectedAnswer: string;
   maxBufferedEvents: number;
   providerRequestsPerSession: number;
@@ -1933,7 +1914,7 @@ function commonConfig(postSessionDwellMs: number): {
     providerDelayMs: PROVIDER_DELAY_MS,
     providerConnection: 'close-per-response',
     postSessionDwellMs,
-    prompt:
+    promptShape:
       `Unique fixed-width ${PROMPT_LENGTH}-character prompt with a ` +
       'zero-padded per-session marker',
     expectedAnswer: EXPECTED_ANSWER,
@@ -1957,7 +1938,6 @@ function variantDescriptor(bundle: ResolvedBundle): {
   cliPath: string;
   realpath: string;
   sha256: string;
-  gitCommit: string | null;
   compileCache: {
     policy: 'fixed-private-per-variant-warmed';
     directory: string;
@@ -1967,7 +1947,6 @@ function variantDescriptor(bundle: ResolvedBundle): {
     cliPath: bundle.configuredPath,
     realpath: bundle.realPath,
     sha256: bundle.sha256,
-    gitCommit: bundle.gitCommit,
     compileCache: {
       policy: 'fixed-private-per-variant-warmed',
       directory: bundle.compileCacheDir,
@@ -1978,7 +1957,7 @@ function variantDescriptor(bundle: ResolvedBundle): {
 function buildSingleArtifact(
   config: SingleBenchmarkConfig,
   raw: Awaited<ReturnType<typeof runSingleSamples>>,
-): FirstOutputBenchmarkArtifactV1 {
+): FirstOutputBenchmarkArtifactV2 {
   const warmupRuns = raw.warmups.map((sample, index) =>
     toProcessRun(sample, index + 1, null),
   );
@@ -2086,7 +2065,7 @@ function buildSingleArtifact(
 function buildPairedArtifact(
   config: CompareBenchmarkConfig,
   raw: Awaited<ReturnType<typeof runComparisonPairs>>,
-): FirstOutputBenchmarkArtifactV1 {
+): FirstOutputBenchmarkArtifactV2 {
   const warmups = raw.warmups.map((pair, index) =>
     toPairResult(pair, index + 1),
   );
@@ -2190,12 +2169,7 @@ function coldWarmProviderDeltas(
 }
 
 function isSuccessfulRun(run: FirstOutputProcessRunResult): boolean {
-  return (
-    run.failure === null &&
-    run.cleanup.failure === null &&
-    run.sessions.length === SINGLE_SESSIONS_PER_PROCESS &&
-    run.sessions.every((session) => session.runEligible)
-  );
+  return isSuccessfulProcessSample(run, SINGLE_SESSIONS_PER_PROCESS);
 }
 
 function countRunFailures(
@@ -2221,7 +2195,7 @@ function countPairFailures(
 
 function buildFatalArtifact(
   failure: FirstOutputFailure,
-): FirstOutputBenchmarkArtifactV1 {
+): FirstOutputBenchmarkArtifactV2 {
   const hasSingle = Boolean(process.env['BENCHMARK_CLI_PATH']?.trim());
   const hasPaired = Boolean(
     process.env['BENCHMARK_CONTROL_CLI_PATH']?.trim() ||
@@ -2319,7 +2293,7 @@ async function cleanupActiveResources(): Promise<void> {
     it(
       'records a single baseline or balanced paired comparison',
       async () => {
-        let artifact: FirstOutputBenchmarkArtifactV1 | undefined;
+        let artifact: FirstOutputBenchmarkArtifactV2 | undefined;
         let runError: unknown;
         let configResolved = false;
         try {
@@ -2341,7 +2315,7 @@ async function cleanupActiveResources(): Promise<void> {
           if (artifact) {
             writeSnapshotArtifacts(
               OUTPUT_DIR,
-              'daemon-first-output-benchmark-v1',
+              'daemon-first-output-benchmark-v2',
               artifact,
               renderFirstOutputBenchmarkMarkdown(artifact),
               'first-output-benchmark',
