@@ -16,7 +16,8 @@
   ],
   "scripts": {
     "build": "tsc --build",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:ci": "vitest run"
   },
   "dependencies": {
     "@qwen-code/channel-base": "file:../base",
