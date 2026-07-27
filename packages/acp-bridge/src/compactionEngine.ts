@@ -100,6 +100,14 @@ function replayRecordId(event: BridgeEvent): string | undefined {
   return typeof recordId === 'string' ? recordId : undefined;
 }
 
+function lastRecordIdIn(events: BridgeEvent[]): string | undefined {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const id = replayRecordId(events[i]!);
+    if (id !== undefined) return id;
+  }
+  return undefined;
+}
+
 export interface ReplayWindowEviction {
   droppedBytes: number;
   droppedEvents: number;
@@ -295,13 +303,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     this.activeRecordId = undefined;
     // Pre-scan seeded compactedTurns for the last recordId (mirrors
     // seedReplayEvents) so eviction by addReplaySegment doesn't lose it.
-    for (let i = snapshot.compactedTurns.length - 1; i >= 0; i--) {
-      const id = replayRecordId(snapshot.compactedTurns[i]!);
-      if (id !== undefined) {
-        this.activeRecordId = id;
-        break;
-      }
-    }
+    this.activeRecordId = lastRecordIdIn(snapshot.compactedTurns);
     for (const event of snapshot.compactedTurns) {
       if (TRANSIENT_TYPES.has(event.type)) continue;
       this.addReplaySegment([event], 0);
@@ -322,13 +324,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     // this, a seed whose head is evicted by the replay-byte cap would
     // lose its only recordId-bearing events and the marker would ship
     // with no anchor, breaking transcript pagination on reconnect.
-    for (let i = events.length - 1; i >= 0; i--) {
-      const id = replayRecordId(events[i]!);
-      if (id !== undefined) {
-        this.activeRecordId = id;
-        break;
-      }
-    }
+    this.activeRecordId = lastRecordIdIn(events);
     let recordEvents: BridgeEvent[] = [];
     let recordId: string | undefined;
     const flushRecord = () => {
