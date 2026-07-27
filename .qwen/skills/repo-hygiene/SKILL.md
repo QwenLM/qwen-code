@@ -50,8 +50,6 @@ nothing worth fixing is a valid, silent outcome.
   fixes without intermediate verification. If any command fails, fix the cause
   and rerun it; if you cannot make the checks pass confidently, write
   `<workdir>/failure.md` and do not commit.
-- Never re-issue a tool call with identical arguments. If you need the same
-  information again, use what you already have from the previous call.
 - Regenerate committed generated artifacts when you change their source. If
   you edit `packages/cli/src/config/settingsSchema.ts` (or `settings.ts`), run
   `npm run generate:settings-schema` and commit the regenerated
