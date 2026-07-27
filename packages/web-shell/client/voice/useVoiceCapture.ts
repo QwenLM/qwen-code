@@ -47,6 +47,7 @@ export interface UseVoiceCaptureReturn {
 
 const SAMPLE_RATE = 16_000;
 const FRAME_SIZE = 4096;
+const START_TIMEOUT_MS = 60_000;
 const TRANSCRIPTION_TIMEOUT_MS = 60_000;
 
 function toWebSocketUrl(baseUrl: string): string {
@@ -257,49 +258,65 @@ export function useVoiceCapture(
     const isStale = () =>
       !mountedRef.current || captureGenerationRef.current !== generation;
 
+    if (!navigator.mediaDevices?.getUserMedia) {
+      fail(
+        window.isSecureContext
+          ? 'Microphone capture is not supported in this browser.'
+          : 'Microphone needs a secure context — open the Web Shell via localhost/127.0.0.1 or https.',
+        generation,
+      );
+      return;
+    }
+
+    let context: AudioContext;
+    let contextReady: Promise<void>;
+    try {
+      context = new AudioContext({ sampleRate: SAMPLE_RATE });
+      resourcesRef.current.context = context;
+      if (context.sampleRate !== SAMPLE_RATE) {
+        throw new Error(
+          `Browser audio rate ${context.sampleRate} Hz is not the required ${SAMPLE_RATE} Hz.`,
+        );
+      }
+      contextReady =
+        context.state === 'suspended' ? context.resume() : Promise.resolve();
+    } catch (error) {
+      fail(error instanceof Error ? error.message : String(error), generation);
+      return;
+    }
+
+    clearTranscribeTimeout();
+    resourcesRef.current.transcribeTimeout = setTimeout(() => {
+      if (statusRef.current === 'connecting') {
+        fail('Voice capture timed out while starting.', generation);
+      }
+    }, START_TIMEOUT_MS);
+
     void (async () => {
       try {
-        if (!navigator.mediaDevices?.getUserMedia) {
-          throw new Error(
-            window.isSecureContext
-              ? 'Microphone capture is not supported in this browser.'
-              : 'Microphone needs a secure context — open the Web Shell via localhost/127.0.0.1 or https.',
-          );
-        }
-        let stream: MediaStream;
-        try {
-          stream = await navigator.mediaDevices.getUserMedia({
+        const streamPromise = navigator.mediaDevices
+          .getUserMedia({
             audio: {
               channelCount: 1,
               echoCancellation: true,
               noiseSuppression: true,
             },
-          });
-        } catch (err) {
-          throw new Error(describeMicError(err));
-        }
-        if (isStale()) {
-          stream.getTracks().forEach((track) => track.stop());
-          return;
-        }
-        resourcesRef.current.stream = stream;
-
-        const context = new AudioContext({ sampleRate: SAMPLE_RATE });
-        if (context.sampleRate !== SAMPLE_RATE) {
-          stream.getTracks().forEach((track) => track.stop());
-          void context.close().catch(() => {});
-          throw new Error(
-            `Browser audio rate ${context.sampleRate} Hz is not the required ${SAMPLE_RATE} Hz.`,
+          })
+          .then(
+            (stream) => {
+              if (isStale()) {
+                stream.getTracks().forEach((track) => track.stop());
+              } else {
+                resourcesRef.current.stream = stream;
+              }
+              return stream;
+            },
+            (error: unknown) => {
+              throw new Error(describeMicError(error));
+            },
           );
-        }
-        resourcesRef.current.context = context;
-        // Resume in case the browser created it suspended (pre-gesture).
-        if (context.state === 'suspended') await context.resume();
-        if (isStale()) {
-          stream.getTracks().forEach((track) => track.stop());
-          void context.close().catch(() => {});
-          return;
-        }
+        const [stream] = await Promise.all([streamPromise, contextReady]);
+        if (isStale()) return;
 
         const source = context.createMediaStreamSource(stream);
         const processor = context.createScriptProcessor(FRAME_SIZE, 1, 1);

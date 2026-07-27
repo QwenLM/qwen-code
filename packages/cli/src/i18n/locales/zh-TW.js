@@ -176,6 +176,8 @@ export default {
   'toolDisplayName.Shell': '運行命令',
   'toolDisplayName.Shell Command': 'Shell 命令',
   'toolDisplayName.TodoList': '任務清單',
+  'toolDisplayName.Goal': '目標',
+  'toolDisplayName.UpdateGoal': '更新目標',
   'toolDisplayName.SaveMemory': '儲存記憶',
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '製品',
