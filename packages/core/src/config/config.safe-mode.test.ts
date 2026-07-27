@@ -339,6 +339,63 @@ describe('Config safe mode', () => {
     });
   });
 
+  describe('safe mode MCP discovery — a stranded-server regression (found live-testing PR #7827)', () => {
+    // `getMcpServers()` reporting a top-tier server as configured is not
+    // enough on its own — something has to actually CONNECT to it and
+    // register its tools. That's a separate gate in `initialize()`
+    // (`startMcpDiscoveryInBackground` behind `!this.isSafeMode()`), written
+    // when `getMcpServers()` always returned `{}` under safe mode and so
+    // discovery had nothing to do anyway. Left unpatched, a caller-supplied
+    // top-tier server survives `getMcpServers()` but never actually gets
+    // discovered/connected — confirmed live against a real ACP session
+    // before this fix (the agent reported the tool as configured-but-absent).
+    function getMcpManagerMock(config: Config) {
+      return (
+        config.getToolRegistry() as unknown as {
+          __mcpManagerMock: { discoverAllMcpToolsIncremental: Mock };
+        }
+      ).__mcpManagerMock;
+    }
+
+    it('still kicks off background MCP discovery in safe mode when a top-tier server is present', async () => {
+      const config = new Config({
+        ...baseParams,
+        safeMode: true,
+        mcpServers: { local: { command: 'local', args: [] } },
+        topTierMcpServers: { probe: { command: 'probe', args: [] } },
+      });
+      await config.initialize();
+      expect(
+        getMcpManagerMock(config).discoverAllMcpToolsIncremental,
+      ).toHaveBeenCalledWith(config);
+    });
+
+    it('does not kick off background MCP discovery in safe mode when nothing was supplied (no wasted work)', async () => {
+      const config = new Config({
+        ...baseParams,
+        safeMode: true,
+        mcpServers: { local: { command: 'local', args: [] } },
+      });
+      await config.initialize();
+      expect(
+        getMcpManagerMock(config).discoverAllMcpToolsIncremental,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('does not kick off background MCP discovery in safe mode when the only top-tier server is filtered out by allowedMcpServers', async () => {
+      const config = new Config({
+        ...baseParams,
+        safeMode: true,
+        allowedMcpServers: ['nope'],
+        topTierMcpServers: { probe: { command: 'probe', args: [] } },
+      });
+      await config.initialize();
+      expect(
+        getMcpManagerMock(config).discoverAllMcpToolsIncremental,
+      ).not.toHaveBeenCalled();
+    });
+  });
+
   describe('safe mode skips context file loading', () => {
     it('sets empty user memory after refreshHierarchicalMemory', async () => {
       const config = new Config({ ...baseParams, safeMode: true });

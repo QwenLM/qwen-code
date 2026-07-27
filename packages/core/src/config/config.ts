@@ -2802,10 +2802,22 @@ export class Config {
     // Also gated on `!options?.skipMcpDiscovery` — the ACP
     // bootstrap path passes `skipMcpDiscovery: true` so the bootstrap
     // config doesn't run discovery under its pool-less manager.
+    //
+    // Safe mode still skips discovery when there's nothing to discover (the
+    // common case: no top-tier servers supplied) — this block predates the
+    // safe-mode `getMcpServers()` fix (PR #7827) and was written when
+    // `getMcpServers()` always returned `{}` under safe mode, making this a
+    // harmless no-op regardless. Now that caller-supplied top-tier servers
+    // survive safe mode, unconditionally skipping discovery here would
+    // silently strand them: `getMcpServers()` reports them as configured,
+    // but nothing ever connects to them or registers their tools. Checking
+    // `getMcpServers()` (not `topTierMcpServers` directly) also respects the
+    // `allowedMcpServers` filter already applied there.
     if (
       skipInlineMcpDiscovery &&
       !this.getBareMode() &&
-      !this.isSafeMode() &&
+      (!this.isSafeMode() ||
+        Object.keys(this.getMcpServers() ?? {}).length > 0) &&
       !options?.skipMcpDiscovery
     ) {
       this.startMcpDiscoveryInBackground();
