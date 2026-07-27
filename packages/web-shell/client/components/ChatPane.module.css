@@ -92,6 +92,48 @@
   color: var(--foreground);
 }
 
+.headerActions {
+  position: relative;
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.headerActionsMeasure {
+  position: absolute;
+  visibility: hidden;
+  pointer-events: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.headerActionsInline {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.headerTrailing {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+.headerOverflowPanel {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  padding: 2px;
+}
+
+.headerActionButton,
 .closeButton,
 .maximizeButton {
   flex: 0 0 auto;
@@ -107,6 +149,7 @@
   cursor: pointer;
 }
 
+.headerActionButton:hover,
 .closeButton:hover,
 .maximizeButton:hover {
   color: var(--foreground);

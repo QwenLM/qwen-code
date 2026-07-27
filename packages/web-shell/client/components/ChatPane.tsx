@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
 import { Maximize2Icon, Minimize2Icon } from 'lucide-react';
 import {
   useActions,
@@ -67,6 +67,7 @@ import {
   getFileChangesByTurn,
   getScheduledTasksByTurn,
 } from './artifacts/turnOutputSelectors';
+import { PaneHeaderActions } from './PaneHeaderActions';
 import styles from './ChatPane.module.css';
 import accentStyles from './WorkspaceAccent.module.css';
 
@@ -80,6 +81,15 @@ const PANE_TOOLBAR_ACTIONS: readonly ComposerToolbarAction[] = [
   'voice',
 ];
 
+export interface PaneHeaderActionsInfo {
+  sessionId: string;
+  workspaceCwd?: string;
+}
+
+export type PaneHeaderActionsRenderer = (
+  info: PaneHeaderActionsInfo,
+) => ReactNode;
+
 export interface ChatPaneProps {
   /** Header label; falls back to the session's own display name / id. */
   title?: string;
@@ -89,6 +99,14 @@ export interface ChatPaneProps {
    * multi-workspace daemon; falls back to the connection's own workspace.
    */
   workspaceCwd?: string;
+  /**
+   * Extra actions rendered in the pane header, before the built-in
+   * maximize/close buttons. Receives this pane's session id (and workspace
+   * when known) so the host can scope each control to the right session. When
+   * the actions no longer fit beside the title they collapse into a `…`
+   * overflow menu.
+   */
+  renderHeaderActions?: PaneHeaderActionsRenderer;
   onClose?: () => void;
   /**
    * Toggle this pane between maximized (solo, filling the whole split) and the
@@ -122,6 +140,7 @@ export interface ChatPaneProps {
 export function ChatPane({
   title,
   workspaceCwd,
+  renderHeaderActions,
   onClose,
   onToggleMaximize,
   isMaximized = false,
@@ -482,6 +501,13 @@ export function ChatPane({
         : PANE_TOOLBAR_ACTIONS,
     [showWorkspaceChip],
   );
+  const headerActions =
+    connection.sessionId && renderHeaderActions
+      ? renderHeaderActions({
+          sessionId: connection.sessionId,
+          workspaceCwd: paneWorkspaceCwd || undefined,
+        })
+      : null;
 
   // Also surface the workspace in the pane HEADER (always visible at the top),
   // not just the composer chip at the bottom — on a narrow split the composer
@@ -530,46 +556,66 @@ export function ChatPane({
         <span className={styles.title} title={headerLabel}>
           {headerLabel}
         </span>
-        {onToggleMaximize && (
-          <button
-            type="button"
-            className={styles.maximizeButton}
-            onClick={onToggleMaximize}
-            aria-pressed={isMaximized}
-            aria-label={t(
-              isMaximized ? 'splitView.restorePane' : 'splitView.maximizePane',
-            )}
-            title={t(
-              isMaximized ? 'splitView.restorePane' : 'splitView.maximizePane',
-            )}
-          >
-            {/* Same icon vocabulary as the dialog fullscreen toggle. */}
-            {isMaximized ? (
-              <Minimize2Icon size={16} aria-hidden />
-            ) : (
-              <Maximize2Icon size={16} aria-hidden />
-            )}
-          </button>
-        )}
-        {onClose && (
-          <button
-            type="button"
-            className={styles.closeButton}
-            onClick={onClose}
-            aria-label={t('splitView.closePane')}
-            title={t('splitView.closePane')}
-          >
-            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
-              <path
-                d="M6 6l12 12M18 6L6 18"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-              />
-            </svg>
-          </button>
-        )}
+        <PaneHeaderActions
+          trailing={
+            onToggleMaximize || onClose ? (
+              <>
+                {onToggleMaximize && (
+                  <button
+                    type="button"
+                    className={styles.maximizeButton}
+                    onClick={onToggleMaximize}
+                    aria-pressed={isMaximized}
+                    aria-label={t(
+                      isMaximized
+                        ? 'splitView.restorePane'
+                        : 'splitView.maximizePane',
+                    )}
+                    title={t(
+                      isMaximized
+                        ? 'splitView.restorePane'
+                        : 'splitView.maximizePane',
+                    )}
+                  >
+                    {/* Same icon vocabulary as the dialog fullscreen toggle. */}
+                    {isMaximized ? (
+                      <Minimize2Icon size={16} aria-hidden />
+                    ) : (
+                      <Maximize2Icon size={16} aria-hidden />
+                    )}
+                  </button>
+                )}
+                {onClose && (
+                  <button
+                    type="button"
+                    className={styles.closeButton}
+                    onClick={onClose}
+                    aria-label={t('splitView.closePane')}
+                    title={t('splitView.closePane')}
+                    data-testid="pane-close"
+                  >
+                    <svg
+                      viewBox="0 0 24 24"
+                      width="16"
+                      height="16"
+                      aria-hidden="true"
+                    >
+                      <path
+                        d="M6 6l12 12M18 6L6 18"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                      />
+                    </svg>
+                  </button>
+                )}
+              </>
+            ) : null
+          }
+        >
+          {headerActions}
+        </PaneHeaderActions>
       </header>
 
       {connection.error && (
