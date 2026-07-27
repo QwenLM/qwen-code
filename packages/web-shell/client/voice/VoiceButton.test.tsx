@@ -739,6 +739,14 @@ describe('VoiceButton', () => {
     expect(mocks.capture.stop).toHaveBeenCalledOnce();
   });
 
+  it('ignores mouse click in hold mode', async () => {
+    const button = await render(false);
+
+    click(button); // detail defaults to 1 (real pointer click)
+
+    expect(mocks.capture.start).not.toHaveBeenCalled();
+  });
+
   it('allows keyboard activation in hold mode', async () => {
     const button = await render(false);
 
