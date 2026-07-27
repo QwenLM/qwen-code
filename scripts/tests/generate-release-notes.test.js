@@ -618,6 +618,86 @@ describe('createOpenAiCompleter retries', () => {
     expect(calls).toBe(1);
   });
 
+
+  it('retries HTTP 429 (rate limiting)', async () => {
+    let calls = 0;
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      baseDelayMs: 1,
+      fetchImpl: async () => {
+        calls += 1;
+        return calls === 1
+          ? { ok: false, status: 429 }
+          : okResponse;
+      },
+    });
+
+    await complete({ kind: 'summaries', entries: [] });
+    expect(calls).toBe(2);
+  });
+
+  it('retries network errors without HTTP status', async () => {
+    let calls = 0;
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      baseDelayMs: 1,
+      fetchImpl: async () => {
+        calls += 1;
+        if (calls === 1) {
+          throw new Error('fetch failed: ECONNRESET');
+        }
+        return okResponse;
+      },
+    });
+
+    await complete({ kind: 'summaries', entries: [] });
+    expect(calls).toBe(2);
+  });
+
+  it('does not retry content-validation errors', async () => {
+    let calls = 0;
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      baseDelayMs: 1,
+      fetchImpl: async () => {
+        calls += 1;
+        // Returns 200 OK but empty content — triggers content-validation error
+        return new Response(JSON.stringify({ choices: [{ message: { content: '' } }] }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        });
+      },
+    });
+
+    await expect(complete({ kind: 'summaries', entries: [] })).rejects.toThrow(
+      'Model response did not contain message content.',
+    );
+    expect(calls).toBe(1);
+  });
+
+  it('preserves original error in deadline-expired message', async () => {
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      baseDelayMs: 100,
+      totalTimeoutMs: 50,
+      fetchImpl: async () => {
+        return { ok: false, status: 503 };
+      },
+    });
+
+    await expect(complete({ kind: 'summaries', entries: [] })).rejects.toThrow(
+      /budget exhausted.*HTTP 503/,
+    );
+  });
+
   it('logs a retry line when backing off', async () => {
     let calls = 0;
     const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
