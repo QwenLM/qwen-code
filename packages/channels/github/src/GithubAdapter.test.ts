@@ -776,6 +776,58 @@ describe('GithubChannel', () => {
       );
     });
 
+    it('dispatches assign from PR metadata', async () => {
+      await initWithoutLoop();
+      channel.usePreflight = true;
+      mockOctokit.paginate.mockResolvedValueOnce([
+        makeNotification({
+          reason: 'assign',
+          subject: {
+            title: 'feat: add divide',
+            url: 'https://api.github.com/repos/owner/repo/pulls/99',
+            type: 'PullRequest',
+          },
+        }),
+      ]);
+      mockOctokit.rest.issues.listEvents.mockResolvedValue({
+        data: [
+          makeIssueEvent({
+            id: 8,
+            node_id: 'E_assign',
+            event: 'assigned',
+            assigner: { login: 'bob' },
+            assignee: { login: 'test-bot' },
+          }),
+        ],
+        headers: {},
+      });
+      mockOctokit.rest.pulls.get.mockResolvedValue({
+        data: {
+          body: 'implement division',
+          state: 'open',
+          draft: false,
+          user: { login: 'alice' },
+          head: { ref: 'feature-divide' },
+          base: { ref: 'main' },
+        },
+      });
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]).toMatchObject({
+        threadId: 'pr:99',
+        senderId: 'bob',
+        isMentioned: true,
+      });
+      expect(channel.inboundEnvelopes[0]!.text).toContain('implement division');
+      expect(channel.inboundEnvelopes[0]!.metadata).toContain(
+        'Trigger: assign. You were assigned to this pull request.',
+      );
+      expect(mockOctokit.rest.pulls.get).toHaveBeenCalled();
+      expect(mockOctokit.rest.issues.get).not.toHaveBeenCalled();
+    });
+
     it('searches the preceding page when the last events page is partial', async () => {
       await initWithoutLoop();
       mockOctokit.rest.issues.listEvents
@@ -832,6 +884,68 @@ describe('GithubChannel', () => {
       expect(mockOctokit.rest.issues.listEvents).toHaveBeenCalledTimes(2);
       expect(mockOctokit.rest.issues.listEvents).toHaveBeenLastCalledWith(
         expect.objectContaining({ page: 2 }),
+      );
+    });
+
+    it('fetches the preceding page separately when lastPage > 2', async () => {
+      await initWithoutLoop();
+      mockOctokit.rest.issues.listEvents
+        .mockResolvedValueOnce({
+          data: [makeIssueEvent({ id: 1, event: 'commented' })],
+          headers: {
+            link: '<https://api.github.com/repos/owner/repo/issues/99/events?page=4>; rel="last"',
+          },
+        })
+        .mockResolvedValueOnce({
+          data: [
+            makeIssueEvent({
+              id: 100,
+              node_id: 'E_review',
+              created_at: '2026-07-02T09:00:00.000Z',
+            }),
+          ],
+          headers: {},
+        })
+        .mockResolvedValueOnce({
+          data: [
+            makeIssueEvent({
+              id: 50,
+              event: 'commented',
+              created_at: '2026-07-02T08:00:00.000Z',
+            }),
+          ],
+          headers: {},
+        });
+
+      const trigger = await (
+        channel as unknown as {
+          findMetaTrigger: (
+            ctx: Record<string, unknown>,
+            reason: 'review_requested' | 'assign',
+          ) => Promise<{ actor: string; key: string } | null>;
+        }
+      ).findMetaTrigger(
+        {
+          chatId: 'owner/repo',
+          threadId: 'pr:99',
+          issueNumber: 99,
+          lastReadAt: null,
+          windowSince: '2026-07-01T00:00:00.000Z',
+          maxUpdatedAt: '2026-07-02T10:00:00.000Z',
+          subjectTitle: 'feat: add divide',
+        },
+        'review_requested',
+      );
+
+      expect(trigger).toEqual({ actor: 'maintainer', key: 'E_review' });
+      expect(mockOctokit.rest.issues.listEvents).toHaveBeenCalledTimes(3);
+      expect(mockOctokit.rest.issues.listEvents).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ page: 4 }),
+      );
+      expect(mockOctokit.rest.issues.listEvents).toHaveBeenNthCalledWith(
+        3,
+        expect.objectContaining({ page: 3 }),
       );
     });
 
@@ -910,10 +1024,11 @@ describe('GithubChannel', () => {
 
     it.each([
       {
-        name: 'an already-read direct request',
+        name: 'an already-dispatched direct request',
         reason: 'review_requested' as const,
         lastReadAt: '2026-07-02T09:30:00.000Z',
         events: [makeIssueEvent()],
+        dispatchedEvents: ['E_9'],
       },
       {
         name: 'a removed direct request',
@@ -927,6 +1042,7 @@ describe('GithubChannel', () => {
             created_at: '2026-07-02T09:30:00.000Z',
           }),
         ],
+        dispatchedEvents: [],
       },
       {
         name: 'a team request',
@@ -938,6 +1054,7 @@ describe('GithubChannel', () => {
             requested_team: { name: 'other-team' },
           }),
         ],
+        dispatchedEvents: [],
       },
       {
         name: 'an assignment followed by unassign',
@@ -955,11 +1072,13 @@ describe('GithubChannel', () => {
             assignee: { login: 'test-bot' },
           }),
         ],
+        dispatchedEvents: [],
       },
     ])(
       'ignores sticky $reason after $name',
-      async ({ reason, lastReadAt, events }) => {
+      async ({ reason, lastReadAt, events, dispatchedEvents }) => {
         await initWithoutLoop();
+        channel.cursor.dispatchedEvents = dispatchedEvents;
         mockOctokit.rest.issues.listEvents.mockResolvedValue({
           data: events,
           headers: {},
@@ -1043,7 +1162,7 @@ describe('GithubChannel', () => {
       await initWithoutLoop();
       channel.usePreflight = true;
       const emoji = '\u{1F600}';
-      const body = 'a'.repeat(999) + emoji;
+      const body = 'a'.repeat(1000) + emoji;
       mockOctokit.paginate
         .mockResolvedValueOnce([
           makeNotification({
@@ -1059,7 +1178,8 @@ describe('GithubChannel', () => {
 
       expect(channel.inboundEnvelopes).toHaveLength(1);
       const text = channel.inboundEnvelopes[0]!.text;
-      expect(text).toContain('a'.repeat(999) + emoji);
+      expect(text).toContain('a'.repeat(1000));
+      expect(text).not.toContain(emoji);
     });
 
     it('caps aggregate summaries at the latest 20 comments', async () => {
@@ -1348,6 +1468,33 @@ describe('GithubChannel', () => {
         'owner/repo|issue:0',
       );
       expect(channel.cursor.dispatchedBodies).toContain('owner/repo|issue:999');
+    });
+
+    it('trims all three dedup lists after a successful poll', async () => {
+      await initWithoutLoop();
+      // Drain the poll loop's pending pollOnce() so it cannot race with
+      // the cursor setup below.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      channel.cursor.dispatchedBodies = Array.from(
+        { length: 501 },
+        (_, i) => `b${i}`,
+      );
+      channel.cursor.dispatchedComments = Array.from(
+        { length: 501 },
+        (_, i) => `c${i}`,
+      );
+      channel.cursor.dispatchedEvents = Array.from(
+        { length: 501 },
+        (_, i) => `e${i}`,
+      );
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await pollOnce();
+      expect(channel.cursor.dispatchedBodies).toHaveLength(500);
+      expect(channel.cursor.dispatchedBodies).not.toContain('b0');
+      expect(channel.cursor.dispatchedComments).toHaveLength(500);
+      expect(channel.cursor.dispatchedComments).not.toContain('c0');
+      expect(channel.cursor.dispatchedEvents).toHaveLength(500);
+      expect(channel.cursor.dispatchedEvents).not.toContain('e0');
     });
 
     it('skips bot-authored issue body', async () => {

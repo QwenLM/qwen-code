@@ -24,8 +24,8 @@ returned again after unrelated activity.
 For `review_requested` and `assign`, the adapter reads the newest page of issue
 events (and the preceding page when the last page is partial, so the window
 covers the newest ~100 events rather than only the last page, which can hold a
-single event) and accepts only the latest matching direct-user event that has
-not been dispatched or read. A later removal or unassignment cancels the trigger. The
+single event) and accepts only the latest matching direct-user event within the
+poll window that has not already been dispatched. A later removal or unassignment cancels the trigger. The
 event actor becomes the envelope sender, so `senderPolicy` checks the person who
 requested the review or assignment instead of the PR or issue author. Team
 review requests fail closed because a notification does not prove that the bot
