@@ -38,8 +38,6 @@ type ExtendedDaemonTextTranscriptBlock = DaemonTextTranscriptBlock & {
   meta?: {
     source?: unknown;
     inputAnnotations?: unknown;
-    qwenDiscreteMessage?: boolean;
-    backgroundTask?: unknown;
   };
 };
 
@@ -172,24 +170,18 @@ function getMidTurnInjectedText(data: unknown): string | null {
   return text || null;
 }
 
-function isBackgroundNotificationAssistantBlock(
+function isBackgroundNotificationBlock(
   block: DaemonTextTranscriptBlock,
 ): boolean {
   const extended = block as ExtendedDaemonTextTranscriptBlock;
-  const meta = extended.meta;
-  return (
-    meta?.['source'] === 'background_notification' &&
-    meta['qwenDiscreteMessage'] === true &&
-    meta['backgroundTask'] !== undefined
-  );
+  return extended.meta?.['source'] === 'background_notification';
 }
 
-function normalizeAssistantTextBlock(
+function getBackgroundNotificationData(
   block: DaemonTextTranscriptBlock,
-): DaemonTextTranscriptBlock | null {
-  if (isBackgroundNotificationAssistantBlock(block)) return null;
-  if (!block.text && !block.usage) return null;
-  return block;
+): Record<string, unknown> | undefined {
+  const extended = block as ExtendedDaemonTextTranscriptBlock;
+  return getRecord(extended.meta?.['backgroundTask']) ?? undefined;
 }
 
 function isTextBlockEmpty(block: DaemonTextTranscriptBlock): boolean {
@@ -276,10 +268,25 @@ export function transcriptBlocksToDaemonMessages(
 
     switch (block.kind) {
       case 'user': {
+        const textBlock = block as DaemonTextTranscriptBlock;
+        if (isBackgroundNotificationBlock(textBlock)) {
+          currentAssistantIdx = null;
+          currentThinkingIdx = null;
+          needsNewContentMessage = true;
+          messages.push({
+            id: block.id,
+            role: 'system',
+            content: textBlock.text,
+            variant: 'info',
+            source: 'background_notification',
+            data: getBackgroundNotificationData(textBlock),
+            timestamp: blockTime,
+          });
+          break;
+        }
         currentAssistantIdx = null;
         currentThinkingIdx = null;
         needsNewContentMessage = false;
-        const textBlock = block as DaemonTextTranscriptBlock;
         const meta = getRecord(
           (textBlock as ExtendedDaemonTextTranscriptBlock).meta,
         );
@@ -307,10 +314,23 @@ export function transcriptBlocksToDaemonMessages(
       }
 
       case 'assistant': {
-        const textBlock = normalizeAssistantTextBlock(
-          block as DaemonTextTranscriptBlock,
-        );
-        if (!textBlock) break;
+        const textBlock = block as DaemonTextTranscriptBlock;
+        if (isBackgroundNotificationBlock(textBlock)) {
+          currentAssistantIdx = null;
+          currentThinkingIdx = null;
+          needsNewContentMessage = true;
+          messages.push({
+            id: block.id,
+            role: 'system',
+            content: textBlock.text,
+            variant: 'info',
+            source: 'background_notification',
+            data: getBackgroundNotificationData(textBlock),
+            timestamp: blockTime,
+          });
+          break;
+        }
+        if (!textBlock.text && !textBlock.usage) break;
 
         const parentSubAgent = textBlock.parentToolCallId
           ? toolsByCallId.get(textBlock.parentToolCallId)
