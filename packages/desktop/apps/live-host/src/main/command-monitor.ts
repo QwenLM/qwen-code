@@ -84,8 +84,12 @@ export class CommandMonitor {
     });
     this.child = child;
 
-    child.stdout.on('data', (chunk: Buffer) => this.consumeStdout(chunk));
+    child.stdout.on('data', (chunk: Buffer) => {
+      if (child !== this.child) return;
+      this.consumeStdout(chunk);
+    });
     child.stderr.on('data', (chunk: Buffer) => {
+      if (child !== this.child) return;
       if (chunk.byteLength > MAX_HELPER_BUFFER_BYTES) {
         this.failHelper('helper_stderr_overflow');
       }

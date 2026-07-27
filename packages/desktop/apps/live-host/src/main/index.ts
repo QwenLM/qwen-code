@@ -48,6 +48,7 @@ if (process.platform !== 'darwin') {
 
 if (!app.requestSingleInstanceLock()) {
   app.quit();
+  process.exit(0);
 }
 
 app.commandLine.appendSwitch('autoplay-policy', 'no-user-gesture-required');

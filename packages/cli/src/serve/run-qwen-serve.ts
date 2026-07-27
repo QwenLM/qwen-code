@@ -5795,6 +5795,8 @@ async function runQwenServeImpl(
         candidateApp: Application,
       ): Promise<void> => {
         if (!resolveAcpHttpEnabled()) return Promise.resolve();
+        if (candidateApp.locals?.['liveVoiceEnabledAtBoot'] !== true)
+          return Promise.resolve();
         if (liveDiscoveryPublish) return liveDiscoveryPublish;
         const coordinator = candidateApp.locals?.['liveCoordinator'] as
           | { daemonInstanceNonce?: unknown }

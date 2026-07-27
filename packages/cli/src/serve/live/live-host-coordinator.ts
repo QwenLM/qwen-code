@@ -479,6 +479,7 @@ export class LiveHostCoordinator {
 
   setCallState(epoch: number, state: LiveCall['state']): boolean {
     if (!this.call || this.call.epoch !== epoch) return false;
+    if (this.call.state === state) return true;
     this.call.state = state;
     this.broadcastState();
     return true;
@@ -493,7 +494,9 @@ export class LiveHostCoordinator {
 
   setTranscript(epoch: number, transcript: string): boolean {
     if (!this.call || this.call.epoch !== epoch) return false;
-    this.call.transcript = transcript.slice(0, MAX_TRANSCRIPT_LENGTH);
+    const truncated = transcript.slice(0, MAX_TRANSCRIPT_LENGTH);
+    if (this.call.transcript === truncated) return true;
+    this.call.transcript = truncated;
     this.broadcastState();
     return true;
   }
