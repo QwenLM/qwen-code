@@ -263,12 +263,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           'pull',
           'Trigger: review_requested. You were asked to review this pull request.',
         );
-      case 'assign':
+      case 'assign': {
+        const isPr = ctx.threadId.startsWith('pr:');
         return this.processMetaLane(
           ctx,
-          ctx.threadId.startsWith('pr:') ? 'pull' : 'issue',
-          'Trigger: assign. You were assigned to this issue.',
+          isPr ? 'pull' : 'issue',
+          isPr
+            ? 'Trigger: assign. You were assigned to this pull request.'
+            : 'Trigger: assign. You were assigned to this issue.',
         );
+      }
       case 'aggregate':
         return this.processAggregateLane(ctx);
       default:
