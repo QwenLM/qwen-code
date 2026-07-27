@@ -500,7 +500,7 @@ export function BranchPickerPopover({
                               key={b.name}
                               name={localName}
                               isHead={false}
-                              onClick={() => void handleCheckout(localName)}
+                              onClick={() => void handleCheckout(b.name)}
                             />
                           );
                         })}

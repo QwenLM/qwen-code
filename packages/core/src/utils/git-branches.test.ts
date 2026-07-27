@@ -17,6 +17,7 @@ import {
   gitPush,
   isValidCheckoutRef,
 } from './git-branches.js';
+import { getDefaultBranch } from './github-prs.js';
 
 const tmpRoots: string[] = [];
 
@@ -308,5 +309,118 @@ describe('gitPull', () => {
     const branch = currentBranch(dir);
     const fetched = git(dir, 'rev-parse', `origin/${branch}`).trim();
     expect(fetched).not.toBe(headBefore);
+  });
+});
+
+describe('gitCommit index rollback (R10 #1)', () => {
+  it('restores the original index when the commit fails after add -A', async () => {
+    const dir = makeRepo();
+    const hookDir = path.join(dir, '.git', 'hooks');
+    fs.mkdirSync(hookDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(hookDir, 'pre-commit'),
+      '#!/bin/sh\necho "lint failed" >&2\nexit 1\n',
+      { mode: 0o755 },
+    );
+    // Stage a deliberate subset and leave another file untracked.
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'staged edit\n');
+    git(dir, 'add', 'a.txt');
+    fs.writeFileSync(path.join(dir, 'scratch.txt'), 'never staged\n');
+
+    expect(git(dir, 'diff', '--cached', '--name-only').trim()).toBe('a.txt');
+
+    await expect(gitCommit(dir, 'feat: x', { all: true })).rejects.toThrow();
+
+    // The failed commit must not leave the whole tree staged: the index
+    // returns to exactly what the user had staged beforehand.
+    expect(git(dir, 'diff', '--cached', '--name-only').trim()).toBe('a.txt');
+  });
+});
+
+describe('gitCheckout remote-tracking refs (R10 #4)', () => {
+  function advanceRemote(remote: string, fileName: string): string {
+    const clone = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitclone-'));
+    tmpRoots.push(clone);
+    git(clone, 'clone', '-q', remote, '.');
+    git(clone, 'config', 'user.email', 'other@example.com');
+    git(clone, 'config', 'user.name', 'Other');
+    git(clone, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(clone, fileName), 'remote\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', `advance ${fileName}`);
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+    return git(clone, 'rev-parse', 'HEAD').trim();
+  }
+
+  it('tracks the exact remote ref when no local branch exists (multi-remote)', async () => {
+    const dir = makeRepo();
+    const branch = currentBranch(dir);
+    const remoteA = makeBareRemote();
+    const remoteB = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remoteA);
+    git(dir, 'remote', 'add', 'upstream', remoteB);
+    git(dir, 'push', '-q', 'origin', 'HEAD');
+    git(dir, 'push', '-q', 'upstream', 'HEAD');
+    // Advance upstream only, then fetch so upstream/<branch> differs.
+    const upstreamHead = advanceRemote(remoteB, 'upstream-only.txt');
+    git(dir, 'fetch', '-q', 'upstream');
+    // Remove the local branch so checkout must create one.
+    git(dir, 'checkout', '-q', '--detach');
+    git(dir, 'branch', '-D', branch);
+
+    const result = await gitCheckout(dir, `upstream/${branch}`);
+
+    expect(result).toEqual({ branch, detached: false });
+    expect(currentBranch(dir)).toBe(branch);
+    expect(headSha(dir)).toBe(upstreamHead);
+    const tracking = git(
+      dir,
+      'rev-parse',
+      '--abbrev-ref',
+      `${branch}@{u}`,
+    ).trim();
+    expect(tracking).toBe(`upstream/${branch}`);
+  });
+
+  it('checks out the existing local branch rather than the remote commit', async () => {
+    const dir = makeRepo();
+    const branch = currentBranch(dir);
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', 'origin', 'HEAD');
+    // Advance the remote so origin/<branch> differs from the local branch.
+    advanceRemote(remote, 'remote-only.txt');
+    git(dir, 'fetch', '-q', 'origin');
+    const localHead = headSha(dir);
+    const remoteHead = git(dir, 'rev-parse', `origin/${branch}`).trim();
+    expect(remoteHead).not.toBe(localHead);
+
+    const result = await gitCheckout(dir, `origin/${branch}`);
+
+    // A local branch of that name exists: check it out (staying on the local
+    // commit) rather than detaching HEAD on the remote-tracking ref.
+    expect(result).toEqual({ branch, detached: false });
+    expect(headSha(dir)).toBe(localHead);
+  });
+});
+
+describe('getDefaultBranch (R10 #3)', () => {
+  it('returns the fully-qualified remote ref so log ranges stay correct', async () => {
+    const dir = makeRepo();
+    const branch = currentBranch(dir);
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', 'origin', 'HEAD');
+    git(dir, 'fetch', '-q', 'origin');
+    git(dir, 'remote', 'set-head', 'origin', branch);
+
+    const result = await getDefaultBranch(dir);
+
+    expect(result).toBe(`origin/${branch}`);
+  });
+
+  it('returns null when origin/HEAD is not set', async () => {
+    const dir = makeRepo();
+    expect(await getDefaultBranch(dir)).toBeNull();
   });
 });

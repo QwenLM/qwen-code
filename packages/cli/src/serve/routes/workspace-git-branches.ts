@@ -59,45 +59,45 @@ function sendGitError(
     detail = err instanceof Error ? err.message : String(err);
   }
 
-  const sanitize = (raw: string): string =>
-    raw.split(cwd).join('<workspace>').slice(0, GIT_ERROR_MESSAGE_MAX);
+  // Redact the workspace path and cap the length once, on every response —
+  // including the unclassified 500 fall-through. Raw git output embeds
+  // absolute paths (e.g. a wedged `.git/index.lock`) that must never reach
+  // the client, and a long message must not walk past the cap.
+  const message = detail
+    .split(cwd)
+    .join('<workspace>')
+    .slice(0, GIT_ERROR_MESSAGE_MAX);
 
   if (
     /not a git repository/i.test(detail) ||
     /invalid reference/i.test(detail)
   ) {
-    res
-      .status(404)
-      .json({ error: 'not_a_git_repository', message: sanitize(detail) });
+    res.status(404).json({ error: 'not_a_git_repository', message });
     return;
   }
   if (/dirty|uncommitted|would be overwritten/i.test(detail)) {
-    res
-      .status(409)
-      .json({ error: 'dirty_working_tree', message: sanitize(detail) });
+    res.status(409).json({ error: 'dirty_working_tree', message });
     return;
   }
   if (/already exists/i.test(detail)) {
-    res
-      .status(409)
-      .json({ error: 'branch_already_exists', message: sanitize(detail) });
+    res.status(409).json({ error: 'branch_already_exists', message });
     return;
   }
   if (/nothing to commit/i.test(detail)) {
-    res
-      .status(400)
-      .json({ error: 'nothing_to_commit', message: sanitize(detail) });
+    res.status(400).json({ error: 'nothing_to_commit', message });
     return;
   }
   if (/detached HEAD/i.test(detail)) {
-    res.status(409).json({ error: 'detached_head', message: sanitize(detail) });
+    res.status(409).json({ error: 'detached_head', message });
     return;
   }
-  if (/no upstream/i.test(detail)) {
-    res.status(400).json({ error: 'no_upstream', message: sanitize(detail) });
+  if (/no upstream|no tracking information/i.test(detail)) {
+    res.status(400).json({ error: 'no_upstream', message });
     return;
   }
-  sendBridgeError(res, err, { route });
+  // Unclassified failure: keep the operator log line but forward a redacted
+  // message so the raw git output never reaches the client.
+  sendBridgeError(res, new Error(message), { route });
 }
 
 async function handleBranches(

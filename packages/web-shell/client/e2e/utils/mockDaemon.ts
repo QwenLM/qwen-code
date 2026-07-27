@@ -877,6 +877,7 @@ async function handleDaemonRoute(
       scenario.gitLog ?? {
         v: 1,
         workspaceCwd: scenario.workspaceCwd,
+        available: true,
         entries: [
           {
             sha: 'abc1234',

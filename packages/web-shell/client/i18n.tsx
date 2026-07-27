@@ -55,6 +55,8 @@ const EN: Messages = {
   'gitCommit.messagePlaceholder': 'Commit message (⌘/Ctrl+Enter to commit)',
   'gitCommit.generating': 'Generating commit message…',
   'gitCommit.genFailed': 'Auto-generation failed — write your message',
+  'gitCommit.prLogUnavailable':
+    'Could not load commits for the selected base branch.',
   'gitCommit.commit': 'Commit',
   'gitCommit.commitAndPush': 'Commit and Push',
   'gitCommit.createPr': 'Create Pull Request',
@@ -2378,6 +2380,7 @@ const ZH: Messages = {
   'gitCommit.messagePlaceholder': '提交信息（⌘/Ctrl+Enter 提交）',
   'gitCommit.generating': '正在生成提交信息…',
   'gitCommit.genFailed': '自动生成失败 — 请手动输入提交信息',
+  'gitCommit.prLogUnavailable': '无法加载所选目标分支的提交记录。',
   'gitCommit.commit': '提交',
   'gitCommit.commitAndPush': '提交并推送',
   'gitCommit.createPr': '创建合并请求',

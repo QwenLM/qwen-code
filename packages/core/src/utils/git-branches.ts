@@ -254,6 +254,42 @@ export async function gitCheckout(
   if (!isValidCheckoutRef(ref)) {
     throw new Error(`invalid checkout ref: ${ref}`);
   }
+  // A remote-tracking ref (remote/branch) needs more than a bare
+  // `git checkout <branch>`: with two remotes carrying the same branch name
+  // the bare name is ambiguous ("matched multiple remote tracking branches"),
+  // and checking out the remote ref directly detaches HEAD. When no local
+  // branch of that name exists yet, create one tracking the exact remote ref
+  // so a fork layout (origin + upstream) lands on the clicked commit.
+  const isRemoteTracking = await runGit(cwd, [
+    'show-ref',
+    '--verify',
+    '--quiet',
+    `refs/remotes/${ref}`,
+  ])
+    .then(() => true)
+    .catch(() => false);
+  if (isRemoteTracking) {
+    const localName = ref.slice(ref.indexOf('/') + 1);
+    const hasLocal = await runGit(cwd, [
+      'show-ref',
+      '--verify',
+      '--quiet',
+      `refs/heads/${localName}`,
+    ])
+      .then(() => true)
+      .catch(() => false);
+    if (hasLocal) {
+      await runGit(cwd, ['checkout', localName, '--']);
+    } else {
+      // `--track` forces commit-ish interpretation of the verified
+      // remote-tracking ref, so no pathspec terminator is needed.
+      await runGit(cwd, ['checkout', '--track', ref]);
+    }
+    const head = (
+      await runGit(cwd, ['symbolic-ref', '--short', 'HEAD'])
+    ).trim();
+    return { branch: head, detached: false };
+  }
   // `--` terminates options/pathspecs so a validated ref can never be
   // reinterpreted as a path (e.g. `.` wiping the working tree).
   await runGit(cwd, ['checkout', ref, '--']);
@@ -382,11 +418,23 @@ export async function gitCommit(
   message: string,
   opts?: { all?: boolean },
 ): Promise<GitCommitResult> {
-  if (opts?.all) {
-    await runGit(cwd, ['add', '-A']);
+  // Snapshot the index before `git add -A` so a failed commit (e.g. a
+  // rejecting pre-commit hook) can restore the user's original staging
+  // instead of leaving the whole working tree staged.
+  const savedIndex = opts?.all
+    ? (await runGit(cwd, ['write-tree']).catch(() => '')).trim() || null
+    : null;
+  try {
+    if (opts?.all) {
+      await runGit(cwd, ['add', '-A']);
+    }
+    await runGit(cwd, ['commit', '-m', message]);
+  } catch (err) {
+    if (savedIndex) {
+      await runGit(cwd, ['read-tree', savedIndex]).catch(() => {});
+    }
+    throw err;
   }
-  const args = ['commit', '-m', message];
-  await runGit(cwd, args);
   const sha = (await runGit(cwd, ['rev-parse', '--short', 'HEAD'])).trim();
   const subject = (await runGit(cwd, ['log', '-1', '--format=%s'])).trim();
   return { sha, subject };

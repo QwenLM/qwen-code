@@ -320,7 +320,8 @@ export async function createGitHubPullRequest(
 }
 
 /**
- * Get the default branch name for the repo (e.g. "main").
+ * Get the default branch as a fully-qualified remote ref (e.g.
+ * "origin/main").
  */
 export async function getDefaultBranch(cwd: string): Promise<string | null> {
   const gitRoot = findGitRoot(cwd);
@@ -339,9 +340,11 @@ export async function getDefaultBranch(cwd: string): Promise<string | null> {
     );
     const raw = stdout.trim();
     if (!raw) return null;
-    // Strip the remote prefix (e.g. "origin/main" → "main").
-    const slash = raw.indexOf('/');
-    return slash >= 0 ? raw.slice(slash + 1) : raw;
+    // Keep the fully-qualified remote ref (e.g. "origin/main"). Callers that
+    // build a log range (`<base>..HEAD`) need the remote-tracking ref so a
+    // stale local default branch doesn't pull other people's commits into the
+    // range; the PR-create path strips the prefix itself for `gh --base`.
+    return raw;
   } catch {
     return null;
   }

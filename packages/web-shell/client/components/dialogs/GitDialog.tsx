@@ -355,6 +355,16 @@ export function GitDialog({
           ws.workspaceGitDiff(gitCwd),
         ]).then(([log, diff]) => {
           if (abort.signal.aborted) return;
+          if (!log.available) {
+            // The base ref didn't resolve locally (e.g. a stale or missing
+            // default branch) — surface it instead of generating from an
+            // empty range and emitting a misleading "(no commits)".
+            setPrStatus({
+              msg: t('gitCommit.prLogUnavailable'),
+              type: 'error',
+            });
+            return;
+          }
           // Build context from branch commits + uncommitted changes.
           const commitSummary =
             log.entries.length > 0
@@ -438,7 +448,7 @@ export function GitDialog({
       });
 
     return () => abort.abort();
-  }, [prFormOpen, isCommit, client, workspaceCwd, gitCwd]);
+  }, [prFormOpen, isCommit, client, workspaceCwd, gitCwd, t]);
 
   const doCreatePr = useCallback(async () => {
     if (!prTitle.trim()) return;

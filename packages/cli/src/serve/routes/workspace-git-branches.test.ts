@@ -4,9 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { execFileSync } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import express from 'express';
 import request from 'supertest';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { sendBridgeError } from '../server/error-response.js';
 import { registerWorkspaceGitBranchRoutes } from './workspace-git-branches.js';
 
@@ -65,5 +69,80 @@ describe('workspace Git branch routes', () => {
 
     expect(response.status).toBe(400);
     expect(response.body.error).toBe('invalid_rebase');
+  });
+});
+
+const tmpRoots: string[] = [];
+
+function git(cwd: string, ...args: string[]): string {
+  return execFileSync('git', args, { cwd, encoding: 'utf8' });
+}
+
+function makeRepo(): string {
+  const dir = fs.realpathSync(
+    fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-route-')),
+  );
+  tmpRoots.push(dir);
+  git(dir, 'init', '-q');
+  git(dir, 'config', 'user.email', 'test@example.com');
+  git(dir, 'config', 'user.name', 'Test');
+  git(dir, 'config', 'commit.gpgsign', 'false');
+  fs.writeFileSync(path.join(dir, 'a.txt'), 'one\n');
+  git(dir, 'add', '.');
+  git(dir, 'commit', '-q', '-m', 'init');
+  return dir;
+}
+
+function appWithWorkspace(cwd: string) {
+  const app = express();
+  app.use(express.json());
+  registerWorkspaceGitBranchRoutes(app, {
+    boundWorkspace: cwd,
+    sendBridgeError,
+    mutate: passthroughMutate,
+  });
+  return app;
+}
+
+afterEach(() => {
+  for (const dir of tmpRoots.splice(0)) {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+describe('workspace Git branch routes against a real repo (R10 #2)', () => {
+  it('redacts the workspace path on an unclassified git failure', async () => {
+    const dir = makeRepo();
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
+    // Wedge the index lock so `git add -A` fails with an unclassified error
+    // whose message embeds the absolute workspace path.
+    fs.writeFileSync(path.join(dir, '.git', 'index.lock'), '');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/commit')
+      .send({ message: 'feat: x', all: true });
+
+    expect(response.status).toBe(500);
+    const body = JSON.stringify(response.body);
+    expect(body).not.toContain(dir);
+    expect(body).toContain('<workspace>');
+  });
+
+  it('classifies a pull with no tracking information as no_upstream', async () => {
+    const dir = makeRepo();
+    const remote = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranch-remote-')),
+    );
+    tmpRoots.push(remote);
+    git(remote, 'init', '-q', '--bare');
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', 'origin', 'HEAD');
+
+    const response = await request(appWithWorkspace(dir))
+      .post('/workspace/git/pull')
+      .send({});
+
+    expect(response.status).toBe(400);
+    expect(response.body.error).toBe('no_upstream');
   });
 });
