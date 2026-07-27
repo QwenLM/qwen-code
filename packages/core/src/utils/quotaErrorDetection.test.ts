@@ -123,6 +123,22 @@ describe('quotaErrorDetection', () => {
       ).toBe(true);
     });
 
+    it('detects an ApiError-shaped quota-exhaustion message', () => {
+      const error: ApiError = {
+        error: {
+          code: 429,
+          message:
+            'Your quota has been exhausted. It will reset at 2026-07-28.',
+          status: 'RESOURCE_EXHAUSTED',
+          details: [],
+        },
+      };
+      expect(isQuotaExhaustedError(error)).toBe(true);
+      expect(formatQuotaExhaustedMessage(error)).toContain(
+        'Your quota has been exhausted. It will reset at 2026-07-28.',
+      );
+    });
+
     it('does not match transient throttling without a reset time', () => {
       expect(
         isQuotaExhaustedError(
