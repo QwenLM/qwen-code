@@ -1285,9 +1285,10 @@ jobs:
                 throw error;
               }
               // NOTE: the timer is deliberately NOT cleared here. fetch()
-              // resolves on HEADERS, so clearing now would let an upstream
-              // that stalls mid-body hang until the outer 20-minute
-              // watchdog. It is cleared when the body ends or errors below.
+              // resolves on HEADERS, and the armed timer doubles as the
+              // first idle window for the body; the per-chunk handler below
+              // refreshes it. Clearing it here would leave no guard on an
+              // upstream that sends headers and then stalls.
               const responseHeaders = {};
               upstream.headers.forEach((value, key) => {
                 const lower = key.toLowerCase();
@@ -1300,7 +1301,14 @@ jobs:
                 const body = Readable.fromWeb(upstream.body);
                 const done = () => clearTimeout(timer);
                 body.on('end', done);
-                body.on('error', done);
+                // When the idle watchdog fires mid-body it aborts the
+                // upstream, which surfaces here as an error: tear down the
+                // downstream response too, or the client sits on a silent
+                // socket until its own idle timer.
+                body.on('error', () => {
+                  done();
+                  res.destroy();
+                });
                 // A downstream disconnect must abort the upstream request
                 // too, or the stalled fetch keeps the socket alive.
                 res.on('close', () => {
@@ -1308,6 +1316,15 @@ jobs:
                   controller.abort();
                 });
                 body.pipe(res);
+                // Idle, not total: qwen tolerates minutes of silence inside
+                // one stream (DEFAULT_STREAM_IDLE_TIMEOUT_MS), so a total
+                // cap would cut healthy long completions. Refresh per chunk;
+                // attached after pipe() because a 'data' listener flips the
+                // stream to flowing mode.
+                body.on('data', () => {
+                  clearTimeout(timer);
+                  timer = setTimeout(() => controller.abort(), 120_000);
+                });
               } else {
                 clearTimeout(timer);
                 res.end();
@@ -2474,9 +2491,10 @@ jobs:
                 throw error;
               }
               // NOTE: the timer is deliberately NOT cleared here. fetch()
-              // resolves on HEADERS, so clearing now would let an upstream
-              // that stalls mid-body hang until the outer 25-minute
-              // watchdog. It is cleared when the body ends or errors below.
+              // resolves on HEADERS, and the armed timer doubles as the
+              // first idle window for the body; the per-chunk handler below
+              // refreshes it. Clearing it here would leave no guard on an
+              // upstream that sends headers and then stalls.
               const responseHeaders = {};
               upstream.headers.forEach((value, key) => {
                 const lower = key.toLowerCase();
@@ -2489,7 +2507,14 @@ jobs:
                 const body = Readable.fromWeb(upstream.body);
                 const done = () => clearTimeout(timer);
                 body.on('end', done);
-                body.on('error', done);
+                // When the idle watchdog fires mid-body it aborts the
+                // upstream, which surfaces here as an error: tear down the
+                // downstream response too, or the client sits on a silent
+                // socket until its own idle timer.
+                body.on('error', () => {
+                  done();
+                  res.destroy();
+                });
                 // A downstream disconnect must abort the upstream request
                 // too, or the stalled fetch keeps the socket alive.
                 res.on('close', () => {
@@ -2497,6 +2522,15 @@ jobs:
                   controller.abort();
                 });
                 body.pipe(res);
+                // Idle, not total: qwen tolerates minutes of silence inside
+                // one stream (DEFAULT_STREAM_IDLE_TIMEOUT_MS), so a total
+                // cap would cut healthy long completions. Refresh per chunk;
+                // attached after pipe() because a 'data' listener flips the
+                // stream to flowing mode.
+                body.on('data', () => {
+                  clearTimeout(timer);
+                  timer = setTimeout(() => controller.abort(), 120_000);
+                });
               } else {
                 clearTimeout(timer);
                 res.end();

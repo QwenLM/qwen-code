@@ -62,6 +62,75 @@ function job(name) {
     : workflow.slice(start, start + 1 + nextJob);
 }
 
+// Spawns the real proxy against a streaming upstream (20 chunks, 200 ms
+// apart = 4 s total) and a stalling upstream (headers + one chunk, then
+// silence), with the proxy's 120 s watchdog shortened to 1.5 s. The healthy
+// stream spans longer than the idle window while each gap stays under it, so
+// it arrives in full only if the watchdog is idle (refreshed per chunk) and
+// not a total cap; and a mid-body stall must CLOSE the downstream response,
+// not strand the client on a silent socket until its own timeout.
+function runProxyWatchdogTest(proxy) {
+  const dir = mkdtempSync(join(tmpdir(), 'proxy-watchdog-'));
+  try {
+    writeFileSync(
+      join(dir, 'proxy.js'),
+      proxy.replace(/^ {10}/gm, '').replaceAll('120_000', '1500'),
+    );
+    writeFileSync(
+      join(dir, 'stream.js'),
+      [
+        "const http = require('node:http');",
+        "const fs = require('node:fs');",
+        'const NL = String.fromCharCode(10);',
+        'const ticks = Number(process.argv[3]);',
+        'const tickMs = Number(process.argv[4]);',
+        'const s = http.createServer((q, r) => {',
+        "  r.writeHead(200, { 'content-type': 'text/event-stream' });",
+        '  let i = 0;',
+        '  const iv = setInterval(() => {',
+        "    r.write('data: ' + i++ + NL + NL);",
+        '    if (i >= ticks) { clearInterval(iv); r.end(); }',
+        '  }, tickMs);',
+        '});',
+        "s.listen(0, '127.0.0.1', () => fs.writeFileSync(process.argv[2], String(s.address().port)));",
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(dir, 'stall.js'),
+      [
+        "const http = require('node:http');",
+        "const fs = require('node:fs');",
+        'const NL = String.fromCharCode(10);',
+        'const s = http.createServer((q, r) => {',
+        "  r.writeHead(200, { 'content-type': 'text/event-stream' });",
+        "  r.write('data: 0' + NL + NL);",
+        '});',
+        "s.listen(0, '127.0.0.1', () => fs.writeFileSync(process.argv[2], String(s.address().port)));",
+      ].join('\n'),
+    );
+    const driver = [
+      'set -u',
+      'node "$1/stream.js" "$1/stream.port" 20 200 & STREAM=$!',
+      'node "$1/stall.js" "$1/stall.port" & STALL=$!',
+      'for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1/stream.port" ] && [ -s "$1/stall.port" ] && break; sleep 0.3; done',
+      'REVIEW_OPENAI_BASE_URL="http://127.0.0.1:$(cat "$1/stream.port")/v1" REVIEW_OPENAI_API_KEY=k QWEN_PROXY_NONCE=n0nce PROXY_TOKEN=t0ken node "$1/proxy.js" "$1/px.port" & PX=$!',
+      'REVIEW_OPENAI_BASE_URL="http://127.0.0.1:$(cat "$1/stall.port")/v1" REVIEW_OPENAI_API_KEY=k QWEN_PROXY_NONCE=n0nce PROXY_TOKEN=t0ken node "$1/proxy.js" "$1/px2.port" & PX2=$!',
+      'for _ in 1 2 3 4 5 6 7 8 9 10; do [ -s "$1/px.port" ] && [ -s "$1/px2.port" ] && break; sleep 0.3; done',
+      'P="$(cat "$1/px.port")"; P2="$(cat "$1/px2.port")"',
+      'echo "chunks=$(curl -sS --max-time 15 -X POST -H "Authorization: Bearer t0ken" "http://127.0.0.1:$P/v1/chat/completions" | grep -c "^data:")"',
+      'curl -sS -o /dev/null --max-time 10 -X POST -H "Authorization: Bearer t0ken" "http://127.0.0.1:$P2/v1/chat/completions"',
+      'echo "stall_exit=$?"',
+      'kill $STREAM $STALL $PX $PX2 2>/dev/null',
+    ].join('\n');
+    return spawnSync('bash', ['-c', driver, '_', dir], {
+      encoding: 'utf8',
+      timeout: 60000,
+    }).stdout;
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
 describe('qwen-triage tmux workflow', () => {
   it('does not require fork PR authors to have write permission for automatic triage', () => {
     const precheckJob = job('precheck-pr');
@@ -2067,6 +2136,25 @@ describe('qwen-triage verify maintainer-review round', () => {
     }
   });
 
+  // The watchdog must be an IDLE timer, not a total one: fetch() resolves on
+  // headers and a completion can stream for minutes (qwen tolerates 240 s of
+  // silence, DEFAULT_STREAM_IDLE_TIMEOUT_MS). A total cap truncated healthy
+  // long completions, and firing it mid-body never terminated the downstream
+  // response, so the client sat on a silent socket.
+  it('treats the verify proxy watchdog as idle and ends a stalled response', () => {
+    const runStep = stepIn('verify', 'Run verification agent');
+    const proxy = runStep.match(/<<'NODE'\n([\s\S]*?)\n\s*NODE\n/)?.[1];
+    expect(proxy).toBeTruthy();
+    const out = runProxyWatchdogTest(proxy);
+    // 20 chunks at 200 ms span 4 s, longer than the 1.5 s idle window, yet
+    // all arrive: the watchdog refreshes per chunk, so a healthy stream is
+    // not cut.
+    expect(out).toContain('chunks=20');
+    // A mid-body stall closes the response (curl 18), not a hang until the
+    // client's own timeout (curl 28).
+    expect(out).toContain('stall_exit=18');
+  });
+
   // GitHub cancels the OLDER pending run in a concurrency group, so the
   // requester's own /verify proceeds — the earlier "queued behind other
   // runs" notice had that backwards and warned the wrong person. The real
@@ -2326,6 +2414,18 @@ describe('qwen-triage tmux lane parity', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // Same regression as the verify lane, asserted here because this PR carries
+  // the proxy across to tmux: the watchdog is idle (refreshed per chunk) and a
+  // mid-body stall terminates the response instead of stranding the client.
+  it('treats the tmux proxy watchdog as idle and ends a stalled response', () => {
+    const runStep = stepIn('tmux-testing', 'Run tmux real-user testing');
+    const proxy = runStep.match(/<<'NODE'\n([\s\S]*?)\n\s*NODE\n/)?.[1];
+    expect(proxy).toBeTruthy();
+    const out = runProxyWatchdogTest(proxy);
+    expect(out).toContain('chunks=20');
+    expect(out).toContain('stall_exit=18');
   });
 
   // PR lifecycle scripts run before the agent and can plant a
