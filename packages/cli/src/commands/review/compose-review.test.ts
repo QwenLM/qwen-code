@@ -2651,6 +2651,17 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     expect(g.unreviewed[0]).toContain('produced no report');
   });
 
+  it('surfaces its OWN reason when the plan itself cannot be read', () => {
+    // The coverage machinery also caps an unreadable plan, so the verdict is capped
+    // either way — but the gate must still contribute its specific reason rather than
+    // go silent (delete the plan-parse `unreviewed.push` and this disclosure vanishes
+    // while the cap stays, which is exactly the sentence a reader loses).
+    const g = scriptLintGate(join(dir, 'does-not-exist.json'));
+    expect(g.criticals).toEqual([]);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('could not read the plan');
+  });
+
   it('reads a fresh report for a shebang script the path-predicate misses', () => {
     // hasExecutableScript('.husky/pre-commit') is false (path-only), but the
     // command shebang-detected it and reported a finding. The gate reads the
