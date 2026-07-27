@@ -1626,11 +1626,9 @@ export function openQwenRealtimeSession(
             deletePendingCallsForResponse(responseId);
             consumeResponseInput(responseId);
             if (activeResponseId === responseId) activeResponseId = undefined;
-            if (activeResponseId === undefined) {
-              activeResponseAuthority = undefined;
-              activeApprovedCallId = undefined;
-              activeApprovedToolName = undefined;
-            }
+            activeResponseAuthority = undefined;
+            activeApprovedCallId = undefined;
+            activeApprovedToolName = undefined;
             if (activeAudioResponseId === responseId) {
               activeAudioResponseId = undefined;
             }

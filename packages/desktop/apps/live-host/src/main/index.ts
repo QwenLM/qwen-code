@@ -699,6 +699,7 @@ void app.whenReady().then(() => {
       selfChecks.audioInput = false;
       failClosedForReadinessLoss();
     } else {
+      selfChecks.audioInput = true;
       overlay?.webContents.send('live:audio:initialize', true);
     }
     publishState();

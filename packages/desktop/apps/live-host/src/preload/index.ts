@@ -65,14 +65,28 @@ ipcRenderer.on('live:audio:play', (_event, frame: Uint8Array) => {
 });
 ipcRenderer.on('live:audio:clear', () => audio.clearOutput());
 
+let lastPointerInteractive = false;
+let pointerRafPending = false;
+let pointerX = 0;
+let pointerY = 0;
 window.addEventListener('mousemove', (event) => {
-  const element = document.elementFromPoint(event.clientX, event.clientY);
-  ipcRenderer.send(
-    'live:pointer-interactivity',
-    Boolean(element?.closest('[data-live-interactive]')),
-  );
+  pointerX = event.clientX;
+  pointerY = event.clientY;
+  if (pointerRafPending) return;
+  pointerRafPending = true;
+  requestAnimationFrame(() => {
+    pointerRafPending = false;
+    const element = document.elementFromPoint(pointerX, pointerY);
+    const interactive = Boolean(
+      element?.closest('[data-live-interactive]'),
+    );
+    if (interactive === lastPointerInteractive) return;
+    lastPointerInteractive = interactive;
+    ipcRenderer.send('live:pointer-interactivity', interactive);
+  });
 });
 window.addEventListener('mouseleave', () => {
+  lastPointerInteractive = false;
   ipcRenderer.send('live:pointer-interactivity', false);
 });
 window.addEventListener('beforeunload', () => void audio.dispose());

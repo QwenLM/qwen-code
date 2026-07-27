@@ -526,6 +526,14 @@ export class LiveHostCoordinator {
     this.call = undefined;
     this.lastCallError = message;
     this.clearOutput(call.epoch);
+    ++this.nextEpoch;
+    try {
+      void Promise.resolve(
+        this.handlers.onStop?.({ epoch: call.epoch, callId: call.callId }),
+      ).catch(() => {});
+    } catch {
+      // The call is already stopped. Handler failures cannot restore it.
+    }
     this.broadcastState();
     return true;
   }

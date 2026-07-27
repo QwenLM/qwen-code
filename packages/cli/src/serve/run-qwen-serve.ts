@@ -5861,7 +5861,17 @@ async function runQwenServeImpl(
         await liveDiscoveryPublish;
         const owners = liveDiscoveryOwners.splice(0);
         if (owners.length === 0) return;
-        const { removeLiveDiscoveryFile } = await loadLiveDiscoveryRuntime();
+        let removeLiveDiscoveryFile: LiveDiscoveryRuntime['removeLiveDiscoveryFile'];
+        try {
+          ({ removeLiveDiscoveryFile } = await loadLiveDiscoveryRuntime());
+        } catch (err) {
+          daemonLog.warn(
+            `failed to load Live discovery runtime for cleanup: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+          return;
+        }
         for (const owner of owners) {
           try {
             await removeLiveDiscoveryFile(owner.runtimeBaseDir, owner);

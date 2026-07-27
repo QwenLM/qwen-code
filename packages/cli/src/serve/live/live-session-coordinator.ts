@@ -665,9 +665,6 @@ export class LiveSessionCoordinator {
         this.options.host.setCallState(context.epoch, 'listening');
         this.armConnectionRotation(context, generation);
         this.flushCoordinatorUpdates(context);
-        void realtime.closed.then((info) => {
-          this.handleRealtimeClose(context, generation, info);
-        });
         return;
       } catch (error) {
         if (!this.isActive(context) || context.stopping) throw error;
@@ -976,7 +973,10 @@ export class LiveSessionCoordinator {
     context.coordinatorPromise ??= this.createOrResumeCoordinator(
       context,
       firstRequest,
-    );
+    ).catch((error) => {
+      context.coordinatorPromise = undefined;
+      throw error;
+    });
     return context.coordinatorPromise;
   }
 

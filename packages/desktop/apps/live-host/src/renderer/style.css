@@ -84,8 +84,15 @@ body {
 }
 
 .orb.error,
-.orb.unavailable {
+.orb.unavailable,
+.orb.disconnected,
+.orb.incompatible {
   background: #ff716b;
+}
+
+.orb.connecting {
+  background: #72b7ff;
+  animation: pulse 1.2s ease-in-out infinite;
 }
 
 @keyframes pulse {
