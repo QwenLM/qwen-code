@@ -854,6 +854,7 @@ export interface PostToolBatchOutput extends HookOutput {
  */
 export interface UserPromptSubmitInput extends HookInput {
   prompt: string;
+  submitted_prompt?: string;
 }
 
 /**
