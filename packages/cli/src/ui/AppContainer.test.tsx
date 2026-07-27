@@ -1060,6 +1060,7 @@ describe('AppContainer State Management', () => {
 
       capturedUIActions.handleFinalSubmit('/btw next turn', {
         deferUntilIdle: true,
+        submittedPrompt: '/btw next turn',
       });
 
       expect(mockQueueMessage).toHaveBeenCalledWith(
@@ -1104,7 +1105,9 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      capturedUIActions.handleFinalSubmit('/btw quick side question');
+      capturedUIActions.handleFinalSubmit('/btw quick side question', {
+        submittedPrompt: '/btw quick side question',
+      });
 
       expect(mockSubmitQuery).toHaveBeenCalledWith(
         '/btw quick side question',
@@ -1149,7 +1152,9 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      capturedUIActions.handleFinalSubmit('/model');
+      capturedUIActions.handleFinalSubmit('/model', {
+        submittedPrompt: '/model',
+      });
 
       expect(mockSubmitQuery).toHaveBeenCalledWith(
         '/model',
@@ -1195,8 +1200,12 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      capturedUIActions.handleFinalSubmit('continue the review');
-      capturedUIActions.handleFinalSubmit('one more check');
+      capturedUIActions.handleFinalSubmit('continue the review', {
+        submittedPrompt: 'continue the review',
+      });
+      capturedUIActions.handleFinalSubmit('one more check', {
+        submittedPrompt: 'one more check',
+      });
 
       expect(mockQueueMessage).toHaveBeenNthCalledWith(
         1,
@@ -1248,8 +1257,9 @@ describe('AppContainer State Management', () => {
       );
 
       expect(capturedUIActions.popAllQueuedMessages()).toBe(modelText);
-      capturedUIActions.prepareInputSubmission?.(modelText);
-      capturedUIActions.handleFinalSubmit(modelText);
+      capturedUIActions.handleFinalSubmit(modelText, {
+        submittedPrompt: modelText,
+      });
       act(() => {
         onBufferChange?.('');
       });
@@ -1300,7 +1310,9 @@ describe('AppContainer State Management', () => {
         onBufferChange?.(`${modelText} with edits`);
         onBufferChange?.(modelText);
       });
-      capturedUIActions.handleFinalSubmit(modelText);
+      capturedUIActions.handleFinalSubmit(modelText, {
+        submittedPrompt: modelText,
+      });
 
       expect(mockQueueMessage).toHaveBeenCalledWith(
         modelText,
@@ -1310,8 +1322,9 @@ describe('AppContainer State Management', () => {
 
       mockQueueMessage.mockClear();
       expect(capturedUIActions.popAllQueuedMessages()).toBe(modelText);
-      capturedUIActions.prepareInputSubmission?.(`${modelText} with edits`);
-      capturedUIActions.handleFinalSubmit(`${modelText} with edits`);
+      capturedUIActions.handleFinalSubmit(`${modelText} with edits`, {
+        submittedPrompt: `${modelText} with edits`,
+      });
 
       expect(mockQueueMessage).toHaveBeenCalledWith(
         `${modelText} with edits`,
@@ -1321,8 +1334,9 @@ describe('AppContainer State Management', () => {
 
       mockQueueMessage.mockClear();
       expect(capturedUIActions.popAllQueuedMessages()).toBe(modelText);
-      capturedUIActions.prepareInputSubmission?.(`${modelText} `);
-      capturedUIActions.handleFinalSubmit(`${modelText} `);
+      capturedUIActions.handleFinalSubmit(`${modelText} `, {
+        submittedPrompt: `${modelText} `,
+      });
 
       expect(mockQueueMessage).toHaveBeenCalledWith(
         `${modelText} `,
@@ -1337,7 +1351,9 @@ describe('AppContainer State Management', () => {
         onBufferChange?.('');
         onBufferChange?.('fresh prompt');
       });
-      capturedUIActions.handleFinalSubmit('fresh prompt');
+      capturedUIActions.handleFinalSubmit('fresh prompt', {
+        submittedPrompt: 'fresh prompt',
+      });
 
       expect(mockQueueMessage).toHaveBeenCalledWith(
         'fresh prompt',
@@ -1347,8 +1363,10 @@ describe('AppContainer State Management', () => {
 
       mockQueueMessage.mockClear();
       expect(capturedUIActions.popAllQueuedMessages()).toBe(modelText);
-      capturedUIActions.clearRestoredSubmission?.();
-      capturedUIActions.handleFinalSubmit(modelText);
+      capturedUIActions.clearRestoredSubmission();
+      capturedUIActions.handleFinalSubmit(modelText, {
+        submittedPrompt: modelText,
+      });
 
       expect(mockQueueMessage).toHaveBeenCalledWith(
         modelText,
@@ -1378,7 +1396,9 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      capturedUIActions.handleFinalSubmit('   ');
+      capturedUIActions.handleFinalSubmit('   ', {
+        submittedPrompt: '   ',
+      });
 
       expect(mockQueueMessage).toHaveBeenCalledWith('   ', false, undefined);
     });
@@ -1404,7 +1424,9 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      capturedUIActions.handleFinalSubmit(' \n你好 🌏\nsecond line \n ');
+      capturedUIActions.handleFinalSubmit(' \n你好 🌏\nsecond line \n ', {
+        submittedPrompt: ' \n你好 🌏\nsecond line \n ',
+      });
 
       expect(mockQueueMessage).toHaveBeenCalledWith(
         ' \n你好 🌏\nsecond line \n ',
@@ -1446,7 +1468,7 @@ describe('AppContainer State Management', () => {
       );
     });
 
-    it('omits provenance when a programmatic caller explicitly has none', () => {
+    it('omits provenance when a programmatic caller does not opt in', () => {
       const mockQueueMessage = vi.fn();
       mockedUseMessageQueue.mockReturnValue({
         messageQueue: [],
@@ -1467,12 +1489,50 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      capturedUIActions.handleFinalSubmit('configured initial prompt', {
-        submittedPrompt: undefined,
-      });
+      capturedUIActions.handleFinalSubmit('configured initial prompt');
 
       expect(mockQueueMessage).toHaveBeenCalledWith(
         'configured initial prompt',
+        false,
+        undefined,
+      );
+    });
+
+    it('keeps restored direct Vim submissions fail closed', () => {
+      const modelText =
+        '<system-reminder>\nmanaged context\n</system-reminder>\n\nvim prompt';
+      const mockQueueMessage = vi.fn();
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [modelText],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(modelText),
+        popAllMessages: vi.fn().mockReturnValue({
+          modelText,
+          submittedPrompt: 'vim prompt',
+        }),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(capturedUIActions.popAllQueuedMessages()).toBe(modelText);
+      const vimSubmit = mockedUseVim.mock.calls.at(-1)?.[1];
+      if (typeof vimSubmit !== 'function') {
+        throw new Error('useVim did not receive its submit callback');
+      }
+      vimSubmit(modelText);
+
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        modelText,
         false,
         undefined,
       );
@@ -2030,7 +2090,9 @@ describe('AppContainer State Management', () => {
       await Promise.resolve();
 
       triggerCancel(cancelInfoFor(modelText, 1, 'review this'));
-      capturedUIActions.handleFinalSubmit(modelText);
+      capturedUIActions.handleFinalSubmit(modelText, {
+        submittedPrompt: modelText,
+      });
 
       expect(mockSetText).toHaveBeenCalledWith(modelText);
       expect(mockQueueMessage).toHaveBeenCalledWith(

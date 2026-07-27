@@ -75,6 +75,7 @@ vi.mock('../contexts/UIActionsContext.js', () => ({
     handleRetryLastPrompt: vi.fn(),
     temporaryCloseFeedbackDialog: vi.fn(),
     popAllQueuedMessages: vi.fn(() => null),
+    clearRestoredSubmission: vi.fn(),
   })),
 }));
 vi.mock('../contexts/AgentViewContext.js', () => ({
@@ -220,6 +221,7 @@ describe('InputPrompt', () => {
       handleRetryLastPrompt: vi.fn(),
       temporaryCloseFeedbackDialog: vi.fn(),
       popAllQueuedMessages: vi.fn(() => null),
+      clearRestoredSubmission: vi.fn(),
     } as unknown as ReturnType<typeof useUIActions>);
     mockedUseAgentViewState.mockReturnValue({
       activeView: 'main',
@@ -408,19 +410,15 @@ describe('InputPrompt', () => {
       expect(mockedClearPromptStash).toHaveBeenCalledWith(
         path.join('test', 'project', 'src'),
       );
-      expect(props.onSubmit).toHaveBeenCalledWith('send this');
+      expect(props.onSubmit).toHaveBeenCalledWith('send this', {
+        deferUntilIdle: false,
+        submittedPrompt: 'send this',
+      });
     });
     unmount();
   });
 
-  it('prepares submission provenance before clearing the input buffer', async () => {
-    const prepareInputSubmission = vi.fn();
-    mockedUseUIActions.mockReturnValue({
-      handleRetryLastPrompt: vi.fn(),
-      temporaryCloseFeedbackDialog: vi.fn(),
-      popAllQueuedMessages: vi.fn(() => null),
-      prepareInputSubmission,
-    } as unknown as ReturnType<typeof useUIActions>);
+  it('captures explicit provenance before clearing the input buffer', async () => {
     props.buffer.setText('restored prompt');
     vi.mocked(props.buffer.setText).mockClear();
 
@@ -431,13 +429,12 @@ describe('InputPrompt', () => {
     });
 
     await waitFor(() => {
-      expect(prepareInputSubmission).toHaveBeenCalledWith('restored prompt');
       expect(props.buffer.setText).toHaveBeenCalledWith('');
-      expect(props.onSubmit).toHaveBeenCalledWith('restored prompt');
+      expect(props.onSubmit).toHaveBeenCalledWith('restored prompt', {
+        deferUntilIdle: false,
+        submittedPrompt: 'restored prompt',
+      });
     });
-    expect(prepareInputSubmission.mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(props.buffer.setText).mock.invocationCallOrder[0],
-    );
     expect(
       vi.mocked(props.buffer.setText).mock.invocationCallOrder[0],
     ).toBeLessThan(vi.mocked(props.onSubmit).mock.invocationCallOrder[0]);
@@ -484,6 +481,7 @@ describe('InputPrompt', () => {
     await waitFor(() => {
       expect(props.onSubmit).toHaveBeenCalledWith('send this later', {
         deferUntilIdle: true,
+        submittedPrompt: 'send this later',
       });
     });
     expect(props.buffer.setText).toHaveBeenCalledWith('');
@@ -971,7 +969,10 @@ describe('InputPrompt', () => {
 
           // Submitting a non-empty buffer clears the stale suggestion too, so a
           // synchronous slash command (/clear, /help) can't leave a ghost.
-          expect(props.onSubmit).toHaveBeenCalledWith('ship it');
+          expect(props.onSubmit).toHaveBeenCalledWith('ship it', {
+            deferUntilIdle: false,
+            submittedPrompt: 'ship it',
+          });
           expect(onPromptSuggestionDismiss).toHaveBeenCalled();
         } finally {
           vi.useRealTimers();
@@ -1283,7 +1284,10 @@ describe('InputPrompt', () => {
     await wait();
 
     expect(mockShellHistory.addCommandToHistory).toHaveBeenCalledWith('ls -l');
-    expect(props.onSubmit).toHaveBeenCalledWith('ls -l');
+    expect(props.onSubmit).toHaveBeenCalledWith('ls -l', {
+      deferUntilIdle: false,
+      submittedPrompt: 'ls -l',
+    });
     unmount();
   });
 
@@ -1309,7 +1313,10 @@ describe('InputPrompt', () => {
 
     expect(mockInputHistory.navigateUp).toHaveBeenCalled();
     expect(mockInputHistory.navigateDown).toHaveBeenCalled();
-    expect(props.onSubmit).toHaveBeenCalledWith('some text');
+    expect(props.onSubmit).toHaveBeenCalledWith('some text', {
+      deferUntilIdle: false,
+      submittedPrompt: 'some text',
+    });
     unmount();
   });
 
@@ -1488,7 +1495,10 @@ describe('InputPrompt', () => {
       await waitFor(() => {
         expect(props.onSubmit).toHaveBeenCalledWith(
           '@.qwen/tmp/clipboard.png\n\ndescribe this image',
-          { submittedPrompt: 'describe this image' },
+          {
+            deferUntilIdle: false,
+            submittedPrompt: 'describe this image',
+          },
         );
       });
       unmount();
@@ -1794,7 +1804,10 @@ describe('InputPrompt', () => {
     stdin.write('\r');
     await wait();
 
-    expect(props.onSubmit).toHaveBeenCalledWith('/clear');
+    expect(props.onSubmit).toHaveBeenCalledWith('/clear', {
+      deferUntilIdle: false,
+      submittedPrompt: '/clear',
+    });
     unmount();
   });
 
@@ -1819,7 +1832,10 @@ describe('InputPrompt', () => {
     stdin.write('\r');
     await wait();
 
-    expect(props.onSubmit).toHaveBeenCalledWith('/export');
+    expect(props.onSubmit).toHaveBeenCalledWith('/export', {
+      deferUntilIdle: false,
+      submittedPrompt: '/export',
+    });
     expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
     unmount();
   });
@@ -1852,7 +1868,10 @@ describe('InputPrompt', () => {
     stdin.write('\r');
     await wait();
 
-    expect(props.onSubmit).toHaveBeenCalledWith('/export md');
+    expect(props.onSubmit).toHaveBeenCalledWith('/export md', {
+      deferUntilIdle: false,
+      submittedPrompt: '/export md',
+    });
     unmount();
   });
 
@@ -2547,7 +2566,10 @@ describe('InputPrompt', () => {
     stdinFinal.write('\r');
     await wait();
 
-    expect(props.onSubmit).toHaveBeenCalledWith('/memory');
+    expect(props.onSubmit).toHaveBeenCalledWith('/memory', {
+      deferUntilIdle: false,
+      submittedPrompt: '/memory',
+    });
     expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
     unmountFinal();
   });
@@ -2572,7 +2594,10 @@ describe('InputPrompt', () => {
     stdin.write('\r');
     await wait();
 
-    expect(props.onSubmit).toHaveBeenCalledWith('/memory');
+    expect(props.onSubmit).toHaveBeenCalledWith('/memory', {
+      deferUntilIdle: false,
+      submittedPrompt: '/memory',
+    });
     expect(mockCommandCompletion.handleAutocomplete).not.toHaveBeenCalled();
     unmount();
   });
@@ -2777,7 +2802,10 @@ describe('InputPrompt', () => {
     stdin.write('\r');
     await wait();
 
-    expect(props.onSubmit).toHaveBeenCalledWith('a prompt from history');
+    expect(props.onSubmit).toHaveBeenCalledWith('a prompt from history', {
+      deferUntilIdle: false,
+      submittedPrompt: 'a prompt from history',
+    });
     expect(mockInputHistory.resetHistoryNav).toHaveBeenCalled();
     unmount();
   });
@@ -2796,7 +2824,10 @@ describe('InputPrompt', () => {
     stdin.write('\r');
     await wait();
 
-    expect(props.onSubmit).toHaveBeenCalledWith('/clear');
+    expect(props.onSubmit).toHaveBeenCalledWith('/clear', {
+      deferUntilIdle: false,
+      submittedPrompt: '/clear',
+    });
     unmount();
   });
 
@@ -3733,7 +3764,10 @@ describe('InputPrompt', () => {
         await flush();
 
         // Verify that onSubmit was called after the timeout
-        expect(props.onSubmit).toHaveBeenCalledWith('test command');
+        expect(props.onSubmit).toHaveBeenCalledWith('test command', {
+          deferUntilIdle: false,
+          submittedPrompt: 'test command',
+        });
       } finally {
         vi.useRealTimers();
         unmount();
@@ -3754,7 +3788,10 @@ describe('InputPrompt', () => {
       await wait();
 
       // Verify that onSubmit was called normally
-      expect(props.onSubmit).toHaveBeenCalledWith('normal command');
+      expect(props.onSubmit).toHaveBeenCalledWith('normal command', {
+        deferUntilIdle: false,
+        submittedPrompt: 'normal command',
+      });
 
       unmount();
     });
@@ -4022,7 +4059,10 @@ describe('InputPrompt', () => {
         expect(stdout.lastFrame()).not.toContain('(r:)');
       });
 
-      expect(props.onSubmit).toHaveBeenCalledWith('echo hello');
+      expect(props.onSubmit).toHaveBeenCalledWith('echo hello', {
+        deferUntilIdle: false,
+        submittedPrompt: 'echo hello',
+      });
       unmount();
     });
 
@@ -4498,7 +4538,10 @@ describe('InputPrompt', () => {
         await flush();
 
         // Verify onSubmit was called with expanded content
-        expect(props.onSubmit).toHaveBeenCalledWith(largeContent);
+        expect(props.onSubmit).toHaveBeenCalledWith(largeContent, {
+          deferUntilIdle: false,
+          submittedPrompt: '[Pasted Content 1001 chars]',
+        });
       } finally {
         vi.useRealTimers();
         unmount();
@@ -4540,6 +4583,11 @@ describe('InputPrompt', () => {
 
         expect(props.onSubmit).toHaveBeenCalledWith(
           `${secondPaste}\n${firstPaste}`,
+          {
+            deferUntilIdle: false,
+            submittedPrompt:
+              '[Pasted Content 1001 chars] #2\n[Pasted Content 1001 chars]',
+          },
         );
       } finally {
         vi.useRealTimers();
@@ -4577,7 +4625,10 @@ describe('InputPrompt', () => {
         expect(mockShellHistory.addCommandToHistory).toHaveBeenCalledWith(
           largeContent,
         );
-        expect(props.onSubmit).toHaveBeenCalledWith(largeContent);
+        expect(props.onSubmit).toHaveBeenCalledWith(largeContent, {
+          deferUntilIdle: false,
+          submittedPrompt: '[Pasted Content 1001 chars]',
+        });
       } finally {
         vi.useRealTimers();
         unmount();

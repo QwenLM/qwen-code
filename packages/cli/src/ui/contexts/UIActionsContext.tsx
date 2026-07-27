@@ -85,8 +85,7 @@ export interface UIActions {
   handleRetryLastPrompt: () => void;
   handleClearScreen: () => void;
   popAllQueuedMessages: () => string | null;
-  clearRestoredSubmission?: () => void;
-  prepareInputSubmission?: (value: string) => void;
+  clearRestoredSubmission: () => void;
   // Welcome back dialog
   handleWelcomeBackSelection: (choice: 'continue' | 'restart') => void;
   handleWelcomeBackClose: () => void;

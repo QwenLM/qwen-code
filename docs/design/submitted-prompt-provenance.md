@@ -5,8 +5,8 @@
 `UserPromptSubmit.prompt` is the prompt for the current model invocation. It can
 contain Qwen-generated reminders, expanded files and resources, slash-command
 output, extension output, or context added by an earlier hook. It therefore
-cannot reliably answer a different question: what text did a person submit at
-the interactive input boundary?
+cannot reliably answer a different question: what text projection crossed a
+supported interactive input boundary?
 
 This change adds an optional `submitted_prompt` field:
 
@@ -50,7 +50,7 @@ Non-goals:
 
 ```mermaid
 flowchart LR
-  U["Interactive TUI submission"] --> C["Capture trimmed submitted text"]
+  U["Interactive TUI submission"] --> C["Capture trimmed text projection"]
   C --> E["Qwen expansion and reminders"]
   C -. "defer or restore" .-> Q["Queue or restore with provenance sidecar"]
   Q --> E["Qwen expansion and reminders"]
@@ -69,19 +69,32 @@ an internal sidecar and is consumed only when the queued text becomes a fresh
 turn. Any ambiguous transformation, partial batch, or edited restoration fails
 closed by omitting `submitted_prompt`.
 
+Large-paste placeholders remain compact in `submitted_prompt`; their full
+content is expanded only into the model-bound `prompt`. This preserves the TUI
+projection and avoids duplicating multi-megabyte pasted content in every hook
+payload.
+
+Cancellation restoration retains ownership of the main turn when a concurrent
+`/btw` side question runs. Because that side question can write a newer user
+entry to disk history, cancellation removes the latest logged entry only when
+the main turn still exclusively owns it. This coupling keeps the restored
+provenance sidecar and persistent history aligned instead of restoring one turn
+while deleting another.
+
 ## Eligibility
 
-| Path                                                                     | `prompt`                   | `submitted_prompt`                               | Rule                                                     |
-| ------------------------------------------------------------------------ | -------------------------- | ------------------------------------------------ | -------------------------------------------------------- |
-| Fresh interactive TUI submission sent as `UserQuery`                     | Existing model-bound value | Present                                          | Capture the trimmed input before reminders and expansion |
-| Deferred TUI submission that later becomes a fresh turn                  | Existing model-bound value | Present only with complete provenance            | Preserve the sidecar while queued                        |
-| Exact cancellation or queue restoration followed by resubmission         | Existing model-bound value | Present only when the restored text is unchanged | Reuse the sidecar only for an exact restoration          |
-| Edited or partially known restored input                                 | Existing model-bound value | Absent                                           | Do not guess provenance                                  |
-| Same-turn steering input                                                 | Existing behavior          | Absent                                           | Steering is not a fresh supported submission             |
-| Tool result or hook continuation                                         | Existing behavior          | Absent                                           | Preserve legacy continuation behavior                    |
-| Retry, cron, notification, or teammate traffic                           | Existing behavior          | Absent                                           | Preserve existing trigger behavior                       |
-| Configured `--prompt-interactive` initial prompt                         | Existing model-bound value | Absent                                           | It did not cross the interactive input boundary          |
-| ACP, headless, `serve`, SDK, remote input, or accepted speculative input | Existing behavior          | Absent                                           | No producer is added in this change                      |
+| Path                                                                     | `prompt`                   | `submitted_prompt`                               | Rule                                            |
+| ------------------------------------------------------------------------ | -------------------------- | ------------------------------------------------ | ----------------------------------------------- |
+| Fresh interactive TUI submission sent as `UserQuery`                     | Existing model-bound value | Present                                          | Capture the trimmed projection before expansion |
+| Deferred TUI submission that later becomes a fresh turn                  | Existing model-bound value | Present only with complete provenance            | Preserve the sidecar while queued               |
+| Exact cancellation or queue restoration followed by resubmission         | Existing model-bound value | Present only when the restored text is unchanged | Reuse the sidecar only for an exact restoration |
+| Edited or partially known restored input                                 | Existing model-bound value | Absent                                           | Do not guess provenance                         |
+| Same-turn steering input                                                 | Existing behavior          | Absent                                           | Steering is not a fresh supported submission    |
+| Tool result or hook continuation                                         | Existing behavior          | Absent                                           | Preserve legacy continuation behavior           |
+| Retry, cron, notification, or teammate traffic                           | Existing behavior          | Absent                                           | Preserve existing trigger behavior              |
+| Configured `--prompt-interactive` initial prompt                         | Existing model-bound value | Absent                                           | It did not cross the interactive input boundary |
+| Vim NORMAL-mode direct submission                                        | Existing model-bound value | Absent                                           | It bypasses the canonical InputPrompt producer  |
+| ACP, headless, `serve`, SDK, remote input, or accepted speculative input | Existing behavior          | Absent                                           | No producer is added in this change             |
 
 The table defines provenance only. Existing event triggering remains unchanged,
 including paths that do not fire `UserPromptSubmit`.
@@ -161,7 +174,8 @@ callers the missing boundary signal while preserving existing integrations.
 ## Verification
 
 Unit tests cover the Core serialization gate, hook chaining, TUI capture,
-deferred queues, exact and edited restoration, provenance clearing, and
-incomplete batches. Interactive E2E coverage captures a real command-hook
-payload and confirms that expansion can change `prompt` without changing
-`submitted_prompt` and that a tool-result continuation omits the field.
+large-paste projection, deferred queues, exact and edited restoration,
+provenance clearing, and incomplete batches. Interactive E2E coverage captures
+a real command-hook payload and confirms that expansion can change `prompt`
+without changing `submitted_prompt` and that a tool-result continuation omits
+the field.

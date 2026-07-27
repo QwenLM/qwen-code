@@ -237,24 +237,24 @@ When `ok` is `false`, Qwen Code will continue working and use the `reason` as co
 
 Hooks fire at specific points during a Qwen Code session. Different events support different matchers to filter trigger conditions.
 
-| Event                | Triggered When                              | Matcher Target                                                 |
-| :------------------- | :------------------------------------------ | :------------------------------------------------------------- |
-| `PreToolUse`         | Before tool execution                       | Tool id (`write_file`, `read_file`, `run_shell_command`, etc.) |
-| `PostToolUse`        | After successful tool execution             | Tool id                                                        |
-| `PostToolUseFailure` | After tool execution fails                  | Tool id                                                        |
-| `UserPromptSubmit`   | Before an eligible prompt reaches the model | None (when emitted)                                            |
-| `SessionStart`       | When session starts or resumes              | Source (`startup`, `resume`, `clear`, `compact`)               |
-| `SessionEnd`         | When session ends                           | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)          |
-| `MessageDisplay`     | Repeatedly, as the reply streams            | None (always fires)                                            |
-| `Stop`               | When Claude prepares to conclude response   | None (always fires)                                            |
-| `SubagentStart`      | When subagent starts                        | Agent type (`Bash`, `Explorer`, `Plan`, etc.)                  |
-| `SubagentStop`       | When subagent stops                         | Agent type                                                     |
-| `PreCompact`         | Before conversation compaction              | Trigger (`manual`, `auto`)                                     |
-| `Notification`       | When notifications are sent                 | Type (`permission_prompt`, `idle_prompt`, `auth_success`)      |
-| `PermissionRequest`  | When permission dialog is shown             | Tool id                                                        |
-| `PermissionDenied`   | When tool permission is denied              | Tool id                                                        |
-| `TodoCreated`        | When a new todo item is created             | None (always fires)                                            |
-| `TodoCompleted`      | When a todo item is marked as completed     | None (always fires)                                            |
+| Event                | Triggered When                            | Matcher Target                                                 |
+| :------------------- | :---------------------------------------- | :------------------------------------------------------------- |
+| `PreToolUse`         | Before tool execution                     | Tool id (`write_file`, `read_file`, `run_shell_command`, etc.) |
+| `PostToolUse`        | After successful tool execution           | Tool id                                                        |
+| `PostToolUseFailure` | After tool execution fails                | Tool id                                                        |
+| `UserPromptSubmit`   | Before supported model invocations        | None                                                           |
+| `SessionStart`       | When session starts or resumes            | Source (`startup`, `resume`, `clear`, `compact`)               |
+| `SessionEnd`         | When session ends                         | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)          |
+| `MessageDisplay`     | Repeatedly, as the reply streams          | None (always fires)                                            |
+| `Stop`               | When Claude prepares to conclude response | None (always fires)                                            |
+| `SubagentStart`      | When subagent starts                      | Agent type (`Bash`, `Explorer`, `Plan`, etc.)                  |
+| `SubagentStop`       | When subagent stops                       | Agent type                                                     |
+| `PreCompact`         | Before conversation compaction            | Trigger (`manual`, `auto`)                                     |
+| `Notification`       | When notifications are sent               | Type (`permission_prompt`, `idle_prompt`, `auth_success`)      |
+| `PermissionRequest`  | When permission dialog is shown           | Tool id                                                        |
+| `PermissionDenied`   | When tool permission is denied            | Tool id                                                        |
+| `TodoCreated`        | When a new todo item is created           | None (always fires)                                            |
+| `TodoCompleted`      | When a todo item is marked as completed   | None (always fires)                                            |
 
 ### Matcher Patterns
 
@@ -506,7 +506,7 @@ The `permissionDecision` value controls whether the tool runs:
 
 #### UserPromptSubmit
 
-**Purpose**: Executed before an eligible prompt reaches the model to validate, block, or enrich the current model invocation. The existing event can also occur on continuation paths, so `prompt` must not be assumed to be raw user input.
+**Purpose**: Executed before supported model invocations to validate, block, or enrich the current model-bound prompt. The event currently covers `UserQuery`, `ToolResult`, and `Hook` sends, while `Retry`, `Steer`, `Cron`, `Notification`, and `Teammate` sends are skipped. It can therefore occur on continuation paths, and `prompt` must not be assumed to be raw user input.
 
 **Event-specific fields**:
 
@@ -520,6 +520,10 @@ The `permissionDecision` value controls whether the tool runs:
 `submitted_prompt` is optional. It is present only when Qwen can carry provenance from a supported interactive TUI submission to a fresh `UserQuery`. It is omitted for unsupported producers and machine-driven paths such as same-turn steering, tool-result continuations, retries, cron, notifications, and teammate traffic. ACP, headless, `serve`, SDK, and remote-input paths do not produce it in this version.
 
 Deferred input can retain the field when its provenance remains complete. A combined batch retains provenance only when every constituent item has it; edited, partially known, or otherwise ambiguous input omits the field. Consumers that require user-submitted text should treat absence as unavailable rather than falling back to `prompt`.
+
+Large-paste placeholders remain compact in `submitted_prompt`; the expanded pasted content appears only in `prompt`. Consumers should treat the field as a TUI text projection rather than a byte-for-byte record of clipboard input.
+
+Vim NORMAL-mode currently submits through a direct path that bypasses the canonical InputPrompt preparation, so that path omits `submitted_prompt`. Vim INSERT-mode Enter falls through to InputPrompt and remains eligible.
 
 This field is provenance, not authentication, tenant identity, authorization, or DLP. It is caller-supplied data. Every executor configured for this event receives it; in particular, HTTP hooks send it to their endpoint and prompt hooks send it to their model provider.
 
@@ -1313,9 +1317,11 @@ A PostToolUse HTTP hook that sends all tool execution records to a remote audit 
 }
 ```
 
-### Example 3: User Prompt Validation Hook
+### Example 3: Interactive TUI Submitted Prompt Validation Hook
 
 A UserPromptSubmit hook that validates supported interactive TUI submissions for sensitive information and provides context for long prompts. It skips invocations where source provenance is unavailable. The keyword check is illustrative and is not a complete DLP policy:
+
+To inspect the current model-bound content instead, read `prompt`. That field can include generated or expanded content, is not the original user input, and does not imply that `UserPromptSubmit` covers every model send. Do not silently fall back from `submitted_prompt` to `prompt` when source provenance is required.
 
 **prompt_validator.py**
 

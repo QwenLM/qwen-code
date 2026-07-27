@@ -1067,17 +1067,6 @@ export const AppContainer = (props: AppContainerProps) => {
     restoredSubmissionRef.current = null;
     restoredSubmissionEditedRef.current = false;
   }, []);
-  const prepareInputSubmission = useCallback((value: string) => {
-    const restoredSubmission = restoredSubmissionRef.current;
-    if (
-      restoredSubmission !== null &&
-      (restoredSubmissionEditedRef.current ||
-        restoredSubmission.modelText !== value)
-    ) {
-      restoredSubmissionRef.current = null;
-      restoredSubmissionEditedRef.current = true;
-    }
-  }, []);
   const handleBufferChange = useCallback((text: string) => {
     if (text.length === 0) {
       restoredSubmissionRef.current = null;
@@ -2226,16 +2215,14 @@ export const AppContainer = (props: AppContainerProps) => {
       restoredSubmissionRef.current = null;
       const restoredSubmissionWasEdited = restoredSubmissionEditedRef.current;
       restoredSubmissionEditedRef.current = false;
-      const submittedPromptCandidate =
-        options !== undefined && 'submittedPrompt' in options
-          ? options.submittedPrompt
-          : submittedValue;
+      const submittedPromptCandidate = options?.submittedPrompt;
+      const provenanceEnabled = submittedPromptCandidate !== undefined;
       const trimmedSubmittedPrompt = submittedPromptCandidate?.trim();
       const submittedPrompt = restoredSubmissionWasEdited
         ? undefined
         : restoredSubmission === null
           ? trimmedSubmittedPrompt || undefined
-          : restoredSubmission.modelText === submittedValue
+          : provenanceEnabled && restoredSubmission.modelText === submittedValue
             ? restoredSubmission.submittedPrompt
             : undefined;
 
@@ -2801,7 +2788,7 @@ export const AppContainer = (props: AppContainerProps) => {
       welcomeBackChoice !== 'restart' &&
       geminiClient?.isInitialized?.()
     ) {
-      handleFinalSubmit(initialPrompt, { submittedPrompt: undefined });
+      handleFinalSubmit(initialPrompt);
       initialPromptSubmitted.current = true;
     }
   }, [
@@ -4482,7 +4469,6 @@ export const AppContainer = (props: AppContainerProps) => {
       handleClearScreen,
       popAllQueuedMessages,
       clearRestoredSubmission,
-      prepareInputSubmission,
       // Welcome back dialog
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
@@ -4574,7 +4560,6 @@ export const AppContainer = (props: AppContainerProps) => {
       handleClearScreen,
       popAllQueuedMessages,
       clearRestoredSubmission,
-      prepareInputSubmission,
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
       handleWorktreeExit,

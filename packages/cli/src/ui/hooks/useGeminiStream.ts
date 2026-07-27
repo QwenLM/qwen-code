@@ -2666,6 +2666,10 @@ export const useGeminiStream = (
       const isTurnContinuation =
         submitType === SendMessageType.ToolResult ||
         submitType === SendMessageType.Steer;
+      const submittedPrompt =
+        submitType === SendMessageType.UserQuery
+          ? metadata?.submittedPrompt
+          : undefined;
 
       // Prevent concurrent executions of submitQuery, but allow continuations
       // which are part of the same logical flow (tool responses)
@@ -2803,9 +2807,7 @@ export const useGeminiStream = (
                 abortSignal,
                 prompt_id!,
                 submitType,
-                submitType === SendMessageType.UserQuery
-                  ? metadata?.submittedPrompt
-                  : undefined,
+                submittedPrompt,
                 allowConcurrentBtwDuringResponse,
               );
 
@@ -2902,10 +2904,7 @@ export const useGeminiStream = (
             notificationDisplayText: metadata?.notificationDisplayText,
             modelOverride: modelOverrideRef.current,
             steerInput: metadata?.steerInput,
-            ...(submitType === SendMessageType.UserQuery &&
-            metadata?.submittedPrompt !== undefined
-              ? { submittedPrompt: metadata.submittedPrompt }
-              : {}),
+            ...(submittedPrompt !== undefined ? { submittedPrompt } : {}),
             ...(!allowConcurrentBtwDuringResponse && midTurnDrainRef
               ? { getSteerInput: drainSteerAtBoundary }
               : {}),
