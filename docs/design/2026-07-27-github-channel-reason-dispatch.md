@@ -1,163 +1,77 @@
-# GitHub Channel: Dispatch By Notification Reason
+# GitHub Notification Reason Dispatch
 
 ## Goal
 
-Route GitHub notifications by `notification.reason` so each trigger type
-dispatches a purpose-built prompt to the agent, instead of the current
-one-size-fits-all "fetch every new comment and dispatch" behavior.
+Use GitHub notifications as wake-up signals while preserving the channel's
+existing sender and mention gates.
 
-Issue #7807 tracks this feature.
+Issue #7807 adds five behaviors:
 
-## Background
+| Notification        | Behavior                                                                          |
+| ------------------- | --------------------------------------------------------------------------------- |
+| `mention`           | Dispatch only new comments that actually mention the bot.                         |
+| `review_requested`  | Dispatch PR metadata only when a matching issue event requested this bot.         |
+| `assign`            | Dispatch issue or PR metadata only when a matching issue event assigned this bot. |
+| `author`, `comment` | Aggregate new comments from allowed senders.                                      |
+| Other reasons       | Keep the existing per-comment behavior with trigger metadata.                     |
 
-`packages/channels/github/src/GithubAdapter.ts` `pollOnce` currently treats all
-notifications identically: for each notification it enumerates the thread's new
-comments (since the cursor window) and dispatches every one of them via
-`handleInbound`, regardless of `notification.reason`. The `isMentioned` flag is
-computed but only used as a marker — it does not gate dispatch.
+## Event identity and authorization
 
-This has two problems:
+GitHub notification IDs identify threads, and `reason` is sticky rather than a
+unique event. A notification with `reason: review_requested` may therefore be
+returned again after unrelated activity.
 
-1. **Noise**: a `mention` notification whose thread also received non-mention
-   comments dispatches all of them — the agent fires on comments that did not
-   @ the bot.
-2. **Coverage gap**: `review_requested` and `assign` — the two highest-value
-   trigger types for a coding agent — are not covered at all. The bot won't
-   automatically pick up a review request or an assignment.
+For `review_requested` and `assign`, the adapter reads the newest page of issue
+events and accepts only the latest matching direct-user event that has not been
+dispatched or read. A later removal or unassignment cancels the trigger. The
+event actor becomes the envelope sender, so `senderPolicy` checks the person who
+requested the review or assignment instead of the PR or issue author. Team
+review requests fail closed because a notification does not prove that the bot
+belongs to the requested team.
 
-The mechanical layer (octokit pagination, rate-limit retry, cursor persistence,
-`postErrorComment`) is already complete (PR #7632, #7727). This is a pure
-semantic-layer enhancement that builds on it without architectural change.
+PR and issue bodies are labeled as untrusted data before they enter the prompt.
+Aggregated comments are filtered by sender policy before joining and remain
+behind the normal mention gate; an ordinary comment is not presented as a
+mention.
 
-## Scope
+## Cursor and retries
 
-In scope:
+The cursor keeps three bounded lists:
 
-- Route at the notification level by `notification.reason` into five lanes:
-  `mention`, `review_requested`, `assign`, `aggregate` (author/comment), and
-  `generic` (everything else).
-- `mention` lane: only dispatch comments that actually @ the bot; strip the
-  @mention from the prompt text (already done); skip non-mention comments.
-- `review_requested` lane (PR only): fetch PR meta via `octokit.rest.pulls.get`
-  (title / author / state / draft / head→base) and dispatch one envelope with a
-  review-specific prompt, even when there are no new comments (the review
-  request itself is the trigger).
-- `assign` lane: fetch issue meta via `octokit.rest.issues.get` and dispatch one
-  envelope with a triage-specific prompt, even when there are no new comments.
-- `aggregate` lane (`author` / `comment`): combine the window's new comments
-  into one envelope with a "review and respond if needed" prompt, instead of one
-  turn per comment.
-- `generic` lane: keep current behavior (dispatch all new comments) with a
-  generic framing note in metadata.
-- Cursor dedup: add `dispatchedComments` (by comment `node_id`) and
-  `dispatchedNotifications` (by notification `id`), bounded like the existing
-  `dispatchedBodies`. These survive a `markNotificationsAsRead` failure that
-  leaves the cursor un-advanced and causes the next poll to re-fetch the same
-  notifications.
+- `dispatchedBodies` for first-contact issue or PR bodies
+- `dispatchedComments` for comment node IDs
+- `dispatchedEvents` for issue event node IDs
 
-Out of scope:
+New keys are saved immediately, so a process crash or a later mark-read failure
+does not repeat work already accepted by the channel. The lists are trimmed to
+the latest 500 keys after a successful poll; they remain untrimmed while a poll
+is retrying so a large in-flight batch is not duplicated.
 
-- Configurable / extensible reason→prompt mapping (suggested by triage, not
-  requested by the issue — added only if a follow-up asks).
-- `state_change` (reopen/close) handling.
-- Changes to `ChannelBase.handleInbound` or the dispatch-mode machinery — all
-  routing is local to the GitHub adapter; the envelope contract is unchanged.
+Processing continues after an individual failure so later threads are not
+blocked. The adapter marks notifications read through the batch timestamp and
+advances `lastProcessedAt` only when the whole batch succeeds; this timestamped
+mark avoids swallowing activity that arrives during the poll.
 
-## Design
+## Bounds
 
-### Cursor
+Comment aggregation includes at most the latest 20 comments and 1,000
+characters from each body. PR and issue bodies are capped at 6,000 characters.
+These limits bound prompt growth without adding configuration.
 
-```ts
-interface GithubCursor {
-  lastProcessedAt: string;
-  dispatchedBodies?: string[]; // existing — by chatId|threadId
-  dispatchedComments?: string[]; // NEW — by comment node_id
-  dispatchedNotifications?: string[]; // NEW — by notification id
-}
+## Verification
+
+The package test covers one contract per route plus the failure boundaries:
+
+- real mention gating for `mention` and aggregate routes
+- issue-event actor attribution for review and assignment
+- sticky reasons without a new matching issue event do not dispatch
+- per-sender aggregate filtering
+- persisted comment dedup
+- processing failures remain unread without blocking later threads
+
+Run:
+
+```bash
+cd packages/channels/github
+npx vitest run src/GithubAdapter.test.ts
 ```
-
-All three lists share the same `MAX_DISPATCHED = 500` bound and eviction
-(`slice(-MAX)`). `validateCursor` normalizes falsy-non-array values to `[]`,
-mirroring the existing `dispatchedBodies` handling.
-
-### Routing
-
-A `routeByReason(reason)` helper maps the reason string to a lane:
-
-| reason              | lane                         |
-| ------------------- | ---------------------------- |
-| `mention`           | `mention`                    |
-| `review_requested`  | `review_requested` (PR only) |
-| `assign`            | `assign`                     |
-| `author`, `comment` | `aggregate`                  |
-| everything else     | `generic`                    |
-
-### pollOnce structure
-
-The notification loop records `dispatchedNotifications` for a notification
-**after** its lane finishes (success or per-thread error caught), so a
-`markNotificationsAsRead` failure that aborts the poll before the cursor
-advances does not re-dispatch already-handled notifications on the next poll.
-Notifications that errored mid-lane are not recorded, so they retry on the next
-poll (same as today).
-
-The shared comment-fetching (`listComments` since `windowSince`, filter bot's
-own + out-of-window) stays. What changes per lane is the dispatch decision and
-the metadata framing:
-
-- **`mention`**: iterate new comments; dispatch only those with
-  `isMentioned === true`. First-contact body dispatch (existing
-  `tryFirstContactBody`) stays for the no-mention-comment + unread case.
-- **`review_requested`**: fetch PR meta; dispatch one envelope whose `text` is
-  the PR body (or the first new comment when the body is empty) and whose
-  `metadata` carries the review framing + PR meta + a summary of new comments.
-  Skips PRs authored by the bot. New comments are listed only to surface them
-  in metadata — they are not dispatched individually.
-- **`assign`**: same shape as `review_requested` but with issue meta and a
-  triage framing; reuses `octokit.rest.issues.get`.
-- **`aggregate`**: list new comments; if none, skip; otherwise build one
-  envelope whose `text` joins each comment body prefixed with its sender and
-  whose `metadata` carries the "check and respond" framing + issue meta.
-- **`generic`**: current per-comment dispatch; metadata gains a generic
-  framing line. First-contact body dispatch stays.
-
-`dispatchedComments` is recorded after each `handleInbound` (success or
-error-comment-posted) keyed on `comment.node_id ?? String(comment.id)`.
-
-### Metadata framing
-
-Reason-specific framing is appended to the existing `Type | Title | URL`
-metadata so the agent sees the trigger context. Example for
-`review_requested`:
-
-```
-Type: Pull Request | Title: feat: add X | URL: https://github.com/owner/repo/pull/99
-Trigger: review_requested. You were asked to review this PR. Author: alice | State: open | Draft: false | branch: feature-x → main
-```
-
-## Testing
-
-Package-local tests in `packages/channels/github/src/GithubAdapter.test.ts`,
-extending the existing `TestableGithubChannel` capture harness:
-
-- each lane dispatches the expected envelope count / text / metadata
-- `mention` lane skips non-mention comments (the noise-reduction assertion)
-- `review_requested` lane calls `pulls.get` and dispatches with review framing
-  even when there are no comments
-- `assign` lane calls `issues.get` and dispatches with triage framing
-- `aggregate` lane joins multiple comments into one envelope and skips when no
-  new comments
-- `generic` lane keeps current dispatch behavior
-- cursor dedup: a re-fetched notification (same id) is skipped; a re-fetched
-  comment (same node_id) is skipped
-- existing tests updated where the new `mention` gating changes their outcome
-
-## Risks
-
-- The `mention` gating changes an existing tested behavior (non-mention
-  comments under a `mention` notification no longer dispatch). Tests that
-  asserted the old behavior are updated to assert the new, intended behavior.
-- `review_requested` / `assign` add two extra API calls per matching
-  notification (`pulls.get` / `issues.get`). Both ride the existing
-  `githubApi` retry wrapper and only fire for their respective reasons, so the
-  added call volume is bounded.

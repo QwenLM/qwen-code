@@ -20,6 +20,7 @@ vi.mock('@octokit/rest', () => {
       },
       issues: {
         listComments: vi.fn(),
+        listEvents: vi.fn(),
         createComment: vi.fn(),
         get: vi.fn(),
       },
@@ -60,6 +61,7 @@ const mockOctokit = (
     };
     issues: {
       listComments: ReturnType<typeof vi.fn>;
+      listEvents: ReturnType<typeof vi.fn>;
       createComment: ReturnType<typeof vi.fn>;
       get: ReturnType<typeof vi.fn>;
     };
@@ -129,13 +131,28 @@ function makeComment(overrides: Record<string, unknown> = {}) {
   };
 }
 
+function makeIssueEvent(overrides: Record<string, unknown> = {}) {
+  const id = (overrides.id as number | undefined) ?? 9;
+  return {
+    id,
+    node_id: `E_${id}`,
+    event: 'review_requested',
+    created_at: '2026-07-02T09:00:00.000Z',
+    review_requester: { login: 'maintainer' },
+    requested_reviewer: { login: 'test-bot' },
+    ...overrides,
+  };
+}
+
 /** Subclass that captures envelopes instead of running the full ChannelBase pipeline. */
 class TestableGithubChannel extends GithubChannel {
   inboundEnvelopes: Envelope[] = [];
   handleInboundError: Error | null = null;
+  usePreflight = false;
 
   override async handleInbound(envelope: Envelope): Promise<void> {
     if (this.handleInboundError) throw this.handleInboundError;
+    if (this.usePreflight && !(await this.preflightInbound(envelope))) return;
     this.inboundEnvelopes.push(envelope);
   }
 
@@ -156,9 +173,6 @@ describe('GithubChannel', () => {
     savedQwenHome = process.env.QWEN_HOME;
     process.env.QWEN_HOME = mkdtempSync(join(tmpdir(), 'qwen-gh-test-'));
     vi.clearAllMocks();
-    // clearAllMocks clears call history but NOT the mockResolvedValueOnce
-    // queue, so leftover queue entries from a prior test leak forward. Reset
-    // paginate explicitly to start each test with a clean queue.
     mockOctokit.paginate.mockReset();
     channel = new TestableGithubChannel(
       'test-github',
@@ -169,6 +183,10 @@ describe('GithubChannel', () => {
       data: { id: 99999, login: 'test-bot' },
     });
     mockOctokit.rest.activity.markNotificationsAsRead.mockResolvedValue({});
+    mockOctokit.rest.issues.listEvents.mockReset().mockResolvedValue({
+      data: [],
+      headers: {},
+    });
     mockOctokit.rest.issues.createComment.mockResolvedValue({});
   });
 
@@ -284,7 +302,7 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes).toHaveLength(0);
     });
 
-    it('dispatches non-mention comments under a generic reason with isMentioned false', async () => {
+    it('dispatches non-mention comments for generic reasons', async () => {
       await initWithoutLoop();
       mockOctokit.paginate
         .mockResolvedValueOnce([
@@ -304,19 +322,20 @@ describe('GithubChannel', () => {
       );
     });
 
-    it('skips non-mention comments under a mention reason (noise reduction)', async () => {
+    it('skips non-mention comments for mention notifications', async () => {
       await initWithoutLoop();
       mockOctokit.paginate
         .mockResolvedValueOnce([
           makeNotification({
-            reason: 'mention',
             last_read_at: '2026-07-01T12:00:00.000Z',
           }),
         ])
         .mockResolvedValueOnce([
           makeComment({ body: 'just a regular comment' }),
         ]);
+
       await pollOnce();
+
       expect(channel.inboundEnvelopes).toHaveLength(0);
     });
 
@@ -361,7 +380,10 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes).toHaveLength(0);
       expect(
         mockOctokit.rest.activity.markNotificationsAsRead,
-      ).toHaveBeenCalledWith(expect.objectContaining({ read: true }));
+      ).toHaveBeenCalledWith({
+        last_read_at: '2026-07-02T10:00:00.000Z',
+        read: true,
+      });
     });
 
     it('processes valid notification after a null-URL notification', async () => {
@@ -386,11 +408,12 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes[0]!.chatId).toBe('owner/repo');
     });
 
-    it('marks notifications as read before processing (best-effort)', async () => {
+    it('marks notifications as read after processing', async () => {
       const notification = makeNotification({
         updated_at: '2026-07-02T10:00:00.000Z',
       });
       await initWithoutLoop();
+      mockOctokit.rest.activity.markNotificationsAsRead.mockClear();
       mockOctokit.paginate
         .mockResolvedValueOnce([notification])
         .mockResolvedValueOnce([makeComment()]);
@@ -406,10 +429,10 @@ describe('GithubChannel', () => {
         mockOctokit.rest.activity.markNotificationsAsRead.mock
           .invocationCallOrder[0]!;
       const commentOrder = mockOctokit.paginate.mock.invocationCallOrder[2]!;
-      expect(markOrder).toBeLessThan(commentOrder);
+      expect(markOrder).toBeGreaterThan(commentOrder);
     });
 
-    it('marks all fetched notifications read even on failure', async () => {
+    it('does not mark or advance the batch after a failure', async () => {
       const good = makeNotification({
         id: '1',
         updated_at: '2026-07-02T08:00:00.000Z',
@@ -420,36 +443,52 @@ describe('GithubChannel', () => {
       });
 
       await initWithoutLoop();
+      mockOctokit.rest.activity.markNotificationsAsRead.mockClear();
       mockOctokit.paginate
         .mockResolvedValueOnce([good, bad])
         .mockResolvedValueOnce([makeComment()])
         .mockRejectedValue(new Error('rate limit'));
 
-      await pollOnce();
+      await expect(pollOnce()).rejects.toThrow('rate limit');
 
       expect(
         mockOctokit.rest.activity.markNotificationsAsRead,
-      ).toHaveBeenCalledWith({
-        last_read_at: '2026-07-02T10:00:00.000Z',
-        read: true,
-      });
+      ).not.toHaveBeenCalled();
+      expect(channel.cursor.lastProcessedAt).toBe('2026-07-01T00:00:00.000Z');
+      expect(channel.inboundEnvelopes).toHaveLength(1);
     });
 
-    it('aborts the poll cycle without advancing cursor when markNotificationsAsRead fails', async () => {
+    it('persists handled comments before a mark-read retry', async () => {
       await initWithoutLoop();
-      mockOctokit.paginate.mockResolvedValueOnce([
-        makeNotification({ updated_at: '2026-07-02T10:00:00.000Z' }),
-      ]);
+      mockOctokit.rest.activity.markNotificationsAsRead.mockClear();
+      const notification = makeNotification({
+        last_read_at: null,
+        updated_at: '2026-07-02T10:00:00.000Z',
+      });
+      const comment = makeComment();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([notification])
+        .mockResolvedValueOnce([comment]);
       mockOctokit.rest.activity.markNotificationsAsRead.mockRejectedValue(
         new Error('server error'),
       );
 
       await expect(pollOnce()).rejects.toThrow('server error');
       expect(channel.cursor.lastProcessedAt).toBe('2026-07-01T00:00:00.000Z');
-      expect(channel.inboundEnvelopes).toHaveLength(0);
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.cursor.dispatchedComments).toContain('C_kw1001');
+
+      mockOctokit.rest.activity.markNotificationsAsRead.mockResolvedValue({});
+      mockOctokit.paginate
+        .mockResolvedValueOnce([notification])
+        .mockResolvedValueOnce([comment]);
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(mockOctokit.rest.issues.get).not.toHaveBeenCalled();
     });
 
-    it('continues processing remaining notifications after a per-thread error', async () => {
+    it('continues after a failed notification so other threads are not blocked', async () => {
       const good1 = makeNotification({
         id: '1',
         updated_at: '2026-07-02T08:00:00.000Z',
@@ -479,6 +518,7 @@ describe('GithubChannel', () => {
       });
 
       await initWithoutLoop();
+      mockOctokit.rest.activity.markNotificationsAsRead.mockClear();
       mockOctokit.paginate
         .mockResolvedValueOnce([good1, bad, good2])
         .mockResolvedValueOnce([makeComment({ id: 2001 })]) // good1
@@ -487,13 +527,15 @@ describe('GithubChannel', () => {
         .mockRejectedValueOnce(new Error('API error')) // bad, attempt 3 -> throws
         .mockResolvedValueOnce([makeComment({ id: 2002 })]); // good2
 
-      await pollOnce();
+      await expect(pollOnce()).rejects.toThrow('API error');
 
-      expect(channel.inboundEnvelopes).toHaveLength(2);
       expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
         '2001',
         '2002',
       ]);
+      expect(
+        mockOctokit.rest.activity.markNotificationsAsRead,
+      ).not.toHaveBeenCalled();
     });
 
     it('excludes comments created after the batch maxUpdatedAt', async () => {
@@ -573,25 +615,39 @@ describe('GithubChannel', () => {
   });
 
   describe('reason routing', () => {
-    it('review_requested fetches PR meta and dispatches a review prompt even with no comments', async () => {
+    it('dispatches a late review_requested event from PR metadata', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({
+          senderPolicy: 'allowlist',
+          allowedUsers: ['maintainer'],
+        }),
+        makeBridge(),
+      );
       await initWithoutLoop();
-      const prNotif = makeNotification({
-        id: '200',
-        reason: 'review_requested',
-        last_read_at: '2026-07-01T12:00:00.000Z',
-        updated_at: '2026-07-02T10:00:00.000Z',
-        subject: {
-          title: 'feat: add divide',
-          url: 'https://api.github.com/repos/owner/repo/pulls/99',
-          type: 'PullRequest',
-        },
+      channel.usePreflight = true;
+      mockOctokit.paginate.mockResolvedValueOnce([
+        makeNotification({
+          reason: 'review_requested',
+          subject: {
+            title: 'feat: add divide',
+            url: 'https://api.github.com/repos/owner/repo/pulls/99',
+            type: 'PullRequest',
+          },
+        }),
+      ]);
+      mockOctokit.rest.issues.listEvents.mockResolvedValue({
+        data: [
+          makeIssueEvent({
+            id: 7,
+            node_id: 'E_review',
+            created_at: '2026-06-30T09:00:00.000Z',
+          }),
+        ],
+        headers: {},
       });
-      mockOctokit.paginate
-        .mockResolvedValueOnce([prNotif])
-        .mockResolvedValueOnce([]); // no comments
       mockOctokit.rest.pulls.get.mockResolvedValue({
         data: {
-          title: 'feat: add divide',
           body: 'implement division',
           state: 'open',
           draft: false,
@@ -603,61 +659,40 @@ describe('GithubChannel', () => {
 
       await pollOnce();
 
-      expect(mockOctokit.rest.pulls.get).toHaveBeenCalledWith(
-        expect.objectContaining({
-          owner: 'owner',
-          repo: 'repo',
-          pull_number: 99,
-        }),
-      );
       expect(channel.inboundEnvelopes).toHaveLength(1);
-      const env = channel.inboundEnvelopes[0]!;
-      expect(env.threadId).toBe('pr:99');
-      expect(env.text).toBe('implement division');
-      expect(env.senderId).toBe('alice');
-      // review_requested is a directed trigger — isMentioned must be true so
-      // the default requireMention group gate lets it through instead of
-      // dropping it as 'mention_required'.
-      expect(env.isMentioned).toBe(true);
-      expect(env.metadata).toContain('review_requested');
-      expect(env.metadata).toContain(
+      expect(channel.inboundEnvelopes[0]).toMatchObject({
+        threadId: 'pr:99',
+        senderId: 'maintainer',
+        isMentioned: true,
+      });
+      expect(channel.inboundEnvelopes[0]!.text).toContain('untrusted data');
+      expect(channel.inboundEnvelopes[0]!.text).toContain('implement division');
+      expect(channel.inboundEnvelopes[0]!.metadata).toContain(
         'Author: alice | State: open | Draft: false',
       );
-      expect(env.metadata).toContain('feature-divide → main');
-    });
-
-    it('review_requested falls back to generic for non-PR subjects', async () => {
-      await initWithoutLoop();
-      // A review_requested on an Issue subject is unexpected; route to generic
-      // so it still dispatches comments instead of being dropped.
-      mockOctokit.paginate
-        .mockResolvedValueOnce([
-          makeNotification({
-            reason: 'review_requested',
-            last_read_at: '2026-07-01T12:00:00.000Z',
-          }),
-        ])
-        .mockResolvedValueOnce([makeComment({ body: '@test-bot review' })]);
-
-      await pollOnce();
-
-      expect(mockOctokit.rest.pulls.get).not.toHaveBeenCalled();
-      expect(channel.inboundEnvelopes).toHaveLength(1);
       expect(channel.inboundEnvelopes[0]!.metadata).toContain(
-        'Trigger: review_requested.',
+        'feature-divide → main',
       );
     });
 
-    it('assign fetches issue meta and dispatches a triage prompt even with no comments', async () => {
+    it('dispatches assign from issue metadata', async () => {
       await initWithoutLoop();
-      mockOctokit.paginate
-        .mockResolvedValueOnce([
-          makeNotification({
-            reason: 'assign',
-            last_read_at: '2026-07-01T12:00:00.000Z',
+      channel.usePreflight = true;
+      mockOctokit.paginate.mockResolvedValueOnce([
+        makeNotification({ reason: 'assign' }),
+      ]);
+      mockOctokit.rest.issues.listEvents.mockResolvedValue({
+        data: [
+          makeIssueEvent({
+            id: 8,
+            node_id: 'E_assign',
+            event: 'assigned',
+            assigner: { login: 'bob' },
+            assignee: { login: 'test-bot' },
           }),
-        ])
-        .mockResolvedValueOnce([]); // no comments
+        ],
+        headers: {},
+      });
       mockOctokit.rest.issues.get.mockResolvedValue({
         data: {
           body: 'the build is broken',
@@ -668,298 +703,108 @@ describe('GithubChannel', () => {
 
       await pollOnce();
 
-      expect(mockOctokit.rest.issues.get).toHaveBeenCalledWith(
-        expect.objectContaining({
-          owner: 'owner',
-          repo: 'repo',
-          issue_number: 42,
-        }),
-      );
       expect(channel.inboundEnvelopes).toHaveLength(1);
-      const env = channel.inboundEnvelopes[0]!;
-      expect(env.text).toBe('the build is broken');
-      expect(env.senderId).toBe('bob');
-      // assign is a directed trigger — isMentioned must be true so the default
-      // requireMention group gate lets it through.
-      expect(env.isMentioned).toBe(true);
-      expect(env.metadata).toContain('Trigger: assign.');
-      expect(env.metadata).toContain('Author: bob | State: open');
-    });
-
-    it('assign fetches PR meta for PR subjects', async () => {
-      await initWithoutLoop();
-      mockOctokit.paginate
-        .mockResolvedValueOnce([
-          makeNotification({
-            reason: 'assign',
-            last_read_at: '2026-07-01T12:00:00.000Z',
-            subject: {
-              title: 'feat: add divide',
-              url: 'https://api.github.com/repos/owner/repo/pulls/99',
-              type: 'PullRequest',
-            },
-          }),
-        ])
-        .mockResolvedValueOnce([]);
-      mockOctokit.rest.pulls.get.mockResolvedValue({
-        data: {
-          body: 'please triage this PR',
-          state: 'open',
-          draft: false,
-          user: { login: 'alice' },
-          head: { ref: 'feature-divide' },
-          base: { ref: 'main' },
-        },
+      expect(channel.inboundEnvelopes[0]).toMatchObject({
+        senderId: 'bob',
+        isMentioned: true,
       });
-
-      await pollOnce();
-
-      expect(mockOctokit.rest.pulls.get).toHaveBeenCalledWith(
-        expect.objectContaining({ pull_number: 99 }),
-      );
-      expect(mockOctokit.rest.issues.get).not.toHaveBeenCalled();
-      expect(channel.inboundEnvelopes[0]!.threadId).toBe('pr:99');
-      expect(channel.inboundEnvelopes[0]!.metadata).toContain(
-        'feature-divide → main',
-      );
-    });
-
-    it('records meta lane body and comments after dispatch', async () => {
-      await initWithoutLoop();
-      mockOctokit.paginate
-        .mockResolvedValueOnce([
-          makeNotification({
-            reason: 'review_requested',
-            last_read_at: '2026-07-01T12:00:00.000Z',
-            subject: {
-              title: 'feat: add divide',
-              url: 'https://api.github.com/repos/owner/repo/pulls/99',
-              type: 'PullRequest',
-            },
-          }),
-        ])
-        .mockResolvedValueOnce([
-          makeComment({ id: 1, node_id: 'C1', body: 'please review' }),
-        ]);
-      mockOctokit.rest.pulls.get.mockResolvedValue({
-        data: {
-          body: 'implement division',
-          state: 'open',
-          draft: false,
-          user: { login: 'alice' },
-          head: { ref: 'feature-divide' },
-          base: { ref: 'main' },
-        },
-      });
-
-      await pollOnce();
-
-      expect(channel.cursor.dispatchedBodies).toContain('owner/repo|pr:99');
-      expect(channel.cursor.dispatchedComments).toContain('C1');
-    });
-
-    it('uses fallback review text when PR body and comments are empty', async () => {
-      await initWithoutLoop();
-      mockOctokit.paginate
-        .mockResolvedValueOnce([
-          makeNotification({
-            reason: 'review_requested',
-            last_read_at: '2026-07-01T12:00:00.000Z',
-            subject: {
-              title: 'feat: add divide',
-              url: 'https://api.github.com/repos/owner/repo/pulls/99',
-              type: 'PullRequest',
-            },
-          }),
-        ])
-        .mockResolvedValueOnce([]);
-      mockOctokit.rest.pulls.get.mockResolvedValue({
-        data: {
-          body: '',
-          state: 'open',
-          draft: false,
-          user: { login: 'alice' },
-          head: { ref: 'feature-divide' },
-          base: { ref: 'main' },
-        },
-      });
-
-      await pollOnce();
-
-      expect(channel.inboundEnvelopes[0]!.text).toBe(
-        'Please review this pull request.',
-      );
-    });
-
-    it('uses first comment fallback once when PR body is empty', async () => {
-      await initWithoutLoop();
-      mockOctokit.paginate
-        .mockResolvedValueOnce([
-          makeNotification({
-            reason: 'review_requested',
-            last_read_at: '2026-07-01T12:00:00.000Z',
-            subject: {
-              title: 'feat: add divide',
-              url: 'https://api.github.com/repos/owner/repo/pulls/99',
-              type: 'PullRequest',
-            },
-          }),
-        ])
-        .mockResolvedValueOnce([
-          makeComment({ id: 1, node_id: 'C1', body: 'first comment' }),
-          makeComment({ id: 2, node_id: 'C2', body: 'second comment' }),
-        ]);
-      mockOctokit.rest.pulls.get.mockResolvedValue({
-        data: {
-          body: '',
-          state: 'open',
-          draft: false,
-          user: { login: 'alice' },
-          head: { ref: 'feature-divide' },
-          base: { ref: 'main' },
-        },
-      });
-
-      await pollOnce();
-
-      expect(channel.inboundEnvelopes[0]!.text).toBe('first comment');
-      expect(channel.inboundEnvelopes[0]!.metadata).not.toContain(
-        '@alice: first comment',
+      expect(channel.inboundEnvelopes[0]!.text).toContain(
+        'the build is broken',
       );
       expect(channel.inboundEnvelopes[0]!.metadata).toContain(
-        '@alice: second comment',
+        'Trigger: assign.',
       );
     });
 
-    it('uses fallback triage text when issue body and comments are empty', async () => {
-      await initWithoutLoop();
-      mockOctokit.paginate
-        .mockResolvedValueOnce([
-          makeNotification({
-            reason: 'assign',
-            last_read_at: '2026-07-01T12:00:00.000Z',
+    it.each([
+      {
+        name: 'an already-read direct request',
+        reason: 'review_requested' as const,
+        lastReadAt: '2026-07-02T09:30:00.000Z',
+        events: [makeIssueEvent()],
+      },
+      {
+        name: 'a removed direct request',
+        reason: 'review_requested' as const,
+        lastReadAt: null,
+        events: [
+          makeIssueEvent(),
+          makeIssueEvent({
+            id: 10,
+            event: 'review_request_removed',
+            created_at: '2026-07-02T09:30:00.000Z',
           }),
-        ])
-        .mockResolvedValueOnce([]);
-      mockOctokit.rest.issues.get.mockResolvedValue({
-        data: {
-          body: '',
-          state: 'open',
-          user: { login: 'bob' },
-        },
-      });
+        ],
+      },
+      {
+        name: 'a team request',
+        reason: 'review_requested' as const,
+        lastReadAt: null,
+        events: [
+          makeIssueEvent({
+            requested_reviewer: undefined,
+            requested_team: { name: 'other-team' },
+          }),
+        ],
+      },
+      {
+        name: 'an assignment followed by unassign',
+        reason: 'assign' as const,
+        lastReadAt: null,
+        events: [
+          makeIssueEvent({
+            event: 'assigned',
+            assignee: { login: 'test-bot' },
+          }),
+          makeIssueEvent({
+            id: 10,
+            event: 'unassigned',
+            created_at: '2026-07-02T09:30:00.000Z',
+            assignee: { login: 'test-bot' },
+          }),
+        ],
+      },
+    ])(
+      'ignores sticky $reason after $name',
+      async ({ reason, lastReadAt, events }) => {
+        await initWithoutLoop();
+        mockOctokit.rest.issues.listEvents.mockResolvedValue({
+          data: events,
+          headers: {},
+        });
 
-      await pollOnce();
-
-      expect(channel.inboundEnvelopes[0]!.text).toBe(
-        'Please triage this issue.',
-      );
-    });
-
-    it('skips bot-authored meta lane subjects', async () => {
-      await initWithoutLoop();
-      mockOctokit.paginate.mockResolvedValueOnce([
-        makeNotification({
-          reason: 'review_requested',
-          last_read_at: '2026-07-01T12:00:00.000Z',
-          subject: {
-            title: 'feat: add divide',
-            url: 'https://api.github.com/repos/owner/repo/pulls/99',
-            type: 'PullRequest',
+        const trigger = await (
+          channel as unknown as {
+            findMetaTrigger: (
+              ctx: Record<string, unknown>,
+              reason: 'review_requested' | 'assign',
+            ) => Promise<unknown>;
+          }
+        ).findMetaTrigger(
+          {
+            chatId: 'owner/repo',
+            threadId: 'pr:99',
+            issueNumber: 99,
+            lastReadAt,
+            windowSince: '2026-07-01T00:00:00.000Z',
+            maxUpdatedAt: '2026-07-02T10:00:00.000Z',
+            subjectTitle: 'feat: add divide',
           },
-        }),
-      ]);
-      mockOctokit.rest.pulls.get.mockResolvedValue({
-        data: {
-          body: 'self-authored',
-          state: 'open',
-          draft: false,
-          user: { login: 'test-bot' },
-        },
-      });
+          reason,
+        );
 
-      await pollOnce();
+        expect(trigger).toBeNull();
+      },
+    );
 
-      expect(channel.inboundEnvelopes).toHaveLength(0);
-    });
-
-    it('aggregate (author) combines multiple comments into one envelope', async () => {
-      await initWithoutLoop();
-      mockOctokit.paginate
-        .mockResolvedValueOnce([
-          makeNotification({
-            reason: 'author',
-            last_read_at: '2026-07-01T12:00:00.000Z',
-          }),
-        ])
-        .mockResolvedValueOnce([
-          makeComment({
-            id: 1,
-            node_id: 'C1',
-            body: 'looks good',
-            user: { login: 'alice' },
-          }),
-          makeComment({
-            id: 2,
-            node_id: 'C2',
-            body: 'ship it',
-            user: { login: 'bob' },
-          }),
-        ]);
-
-      await pollOnce();
-
-      expect(channel.inboundEnvelopes).toHaveLength(1);
-      const env = channel.inboundEnvelopes[0]!;
-      expect(env.metadata).toContain('Trigger: new comments');
-      expect(env.metadata).toContain('New comments (2)');
-      expect(env.metadata).toContain('@alice: looks good');
-      expect(env.metadata).toContain('@bob: ship it');
-      expect(env.isMentioned).toBe(true);
-    });
-
-    it('aggregate filters comments by sender allowlist before dispatch', async () => {
+    it('aggregates only comments from allowed senders', async () => {
       channel = new TestableGithubChannel(
         'test-github',
         makeConfig({ senderPolicy: 'allowlist', allowedUsers: ['bob'] }),
         makeBridge(),
       );
-      mockOctokit.paginate.mockResolvedValueOnce([]);
-      await channel.connect();
-      channel.disconnect();
-      channel.cursor = { lastProcessedAt: '2026-07-01T00:00:00.000Z' };
-      mockOctokit.paginate
-        .mockResolvedValueOnce([
-          makeNotification({
-            reason: 'author',
-            last_read_at: '2026-07-01T12:00:00.000Z',
-          }),
-        ])
-        .mockResolvedValueOnce([
-          makeComment({
-            id: 1,
-            node_id: 'C1',
-            body: 'not allowed',
-            user: { login: 'alice' },
-          }),
-          makeComment({
-            id: 2,
-            node_id: 'C2',
-            body: 'allowed',
-            user: { login: 'bob' },
-          }),
-        ]);
-
-      await pollOnce();
-
-      expect(channel.inboundEnvelopes).toHaveLength(1);
-      expect(channel.inboundEnvelopes[0]!.senderId).toBe('bob');
-      expect(channel.inboundEnvelopes[0]!.metadata).not.toContain('@alice');
-      expect(channel.inboundEnvelopes[0]!.metadata).toContain('@bob: allowed');
-    });
-
-    it('aggregate skips when there are no new comments', async () => {
       await initWithoutLoop();
+      channel.usePreflight = true;
       mockOctokit.paginate
         .mockResolvedValueOnce([
           makeNotification({
@@ -967,72 +812,63 @@ describe('GithubChannel', () => {
             last_read_at: '2026-07-01T12:00:00.000Z',
           }),
         ])
-        .mockResolvedValueOnce([]);
-
-      await pollOnce();
-      expect(channel.inboundEnvelopes).toHaveLength(0);
-    });
-
-    it('does not suppress later events with the same notification thread id', async () => {
-      await initWithoutLoop();
-      mockOctokit.paginate
-        .mockResolvedValueOnce([
-          makeNotification({
-            id: '100',
-            updated_at: '2026-07-02T10:00:00.000Z',
-          }),
-        ])
         .mockResolvedValueOnce([
           makeComment({
             id: 1,
-            node_id: 'C1',
-            created_at: '2026-07-02T09:00:00.000Z',
+            body: 'not allowed',
+            user: { login: 'alice' },
           }),
-        ])
-        .mockResolvedValueOnce([
-          makeNotification({
-            id: '100',
-            updated_at: '2026-07-02T11:00:00.000Z',
-          }),
-        ])
-        .mockResolvedValueOnce([
           makeComment({
             id: 2,
-            node_id: 'C2',
-            created_at: '2026-07-02T10:30:00.000Z',
+            body: '@test-bot allowed',
+            user: { login: 'bob' },
           }),
         ]);
 
       await pollOnce();
-      await pollOnce();
 
-      expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
-        '1',
-        '2',
-      ]);
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.inboundEnvelopes[0]).toMatchObject({
+        senderId: 'bob',
+        isMentioned: true,
+      });
+      expect(channel.inboundEnvelopes[0]!.text).not.toContain('@alice');
+      expect(channel.inboundEnvelopes[0]!.text).toContain(
+        '@bob: @test-bot allowed',
+      );
     });
 
-    it('skips a comment whose node_id was already dispatched', async () => {
+    it('keeps unmentioned aggregate comments behind the group gate', async () => {
       await initWithoutLoop();
-      const comment = makeComment({
-        id: 2001,
-        node_id: 'C_dedup',
-        body: '@test-bot help',
-      });
-      channel.cursor.dispatchedComments = ['C_dedup'];
+      channel.usePreflight = true;
       mockOctokit.paginate
         .mockResolvedValueOnce([
           makeNotification({
-            reason: 'mention',
+            reason: 'comment',
             last_read_at: '2026-07-01T12:00:00.000Z',
           }),
         ])
-        .mockResolvedValueOnce([comment]);
+        .mockResolvedValueOnce([makeComment({ body: 'ordinary comment' })]);
 
       await pollOnce();
-      expect(
-        channel.inboundEnvelopes.filter((e) => e.messageId === '2001'),
-      ).toHaveLength(0);
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+    });
+
+    it('skips comments already persisted in the cursor', async () => {
+      await initWithoutLoop();
+      channel.cursor.dispatchedComments = ['C_kw1001'];
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([makeComment()]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(0);
     });
   });
 
@@ -1169,7 +1005,7 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes).toHaveLength(1);
     });
 
-    it('evicts oldest dispatchedBodies entries beyond the limit', async () => {
+    it('keeps in-flight dedup keys until the poll succeeds', async () => {
       await initWithoutLoop();
       // Pre-fill cursor with 500 entries (the max)
       channel.cursor.dispatchedBodies = Array.from(
@@ -1194,12 +1030,32 @@ describe('GithubChannel', () => {
             },
           }),
         ])
+        .mockResolvedValueOnce([])
+        .mockResolvedValueOnce([
+          makeNotification({
+            last_read_at: null,
+            subject: {
+              title: 'New Issue',
+              url: 'https://api.github.com/repos/owner/repo/issues/999',
+              type: 'Issue',
+            },
+          }),
+        ])
         .mockResolvedValueOnce([]);
+      mockOctokit.rest.activity.markNotificationsAsRead.mockRejectedValue(
+        new Error('server error'),
+      );
+
+      await expect(pollOnce()).rejects.toThrow('server error');
+
+      expect(channel.cursor.dispatchedBodies).toHaveLength(501);
+      expect(channel.cursor.dispatchedBodies).toContain('owner/repo|issue:0');
+
+      mockOctokit.rest.activity.markNotificationsAsRead.mockResolvedValue({});
 
       await pollOnce();
 
       expect(channel.cursor.dispatchedBodies).toHaveLength(500);
-      // Oldest entry evicted, newest retained
       expect(channel.cursor.dispatchedBodies).not.toContain(
         'owner/repo|issue:0',
       );
@@ -1263,57 +1119,15 @@ describe('GithubChannel', () => {
   });
 
   describe('error handling', () => {
-    it('posts error comment when handleInbound fails', async () => {
+    it('does not post an error comment while the notification will retry', async () => {
       channel.handleInboundError = new Error('agent down');
       await initWithoutLoop();
       mockOctokit.paginate
         .mockResolvedValueOnce([makeNotification()])
         .mockResolvedValueOnce([makeComment()]);
-      await pollOnce();
+      await expect(pollOnce()).rejects.toThrow('agent down');
 
-      expect(mockOctokit.rest.issues.createComment).toHaveBeenCalledWith(
-        expect.objectContaining({
-          body: expect.stringContaining('Failed to process'),
-        }),
-      );
-    });
-
-    it('still marks thread as read after handleInbound failure', async () => {
-      channel.handleInboundError = new Error('agent down');
-      await initWithoutLoop();
-      mockOctokit.paginate
-        .mockResolvedValueOnce([makeNotification()])
-        .mockResolvedValueOnce([makeComment()]);
-
-      await pollOnce();
-
-      expect(
-        mockOctokit.rest.activity.markNotificationsAsRead,
-      ).toHaveBeenCalledWith(expect.objectContaining({ read: true }));
-    });
-
-    it('posts only one error comment when mention dispatch fails on a new thread', async () => {
-      channel.handleInboundError = new Error('agent down');
-      await initWithoutLoop();
-      mockOctokit.paginate
-        .mockResolvedValueOnce([makeNotification({ last_read_at: null })])
-        .mockResolvedValueOnce([makeComment()]);
-      mockOctokit.rest.issues.get.mockResolvedValue({
-        data: {
-          body: '@test-bot help',
-          created_at: '2026-07-02T08:00:00.000Z',
-          user: { id: 10002, login: 'bob' },
-        },
-      });
-
-      await pollOnce();
-
-      const errorComments =
-        mockOctokit.rest.issues.createComment.mock.calls.filter(
-          (call: Array<{ body?: string }>) =>
-            call[0]?.body?.includes('Failed to process'),
-        );
-      expect(errorComments).toHaveLength(1);
+      expect(mockOctokit.rest.issues.createComment).not.toHaveBeenCalled();
     });
   });
 
@@ -1418,30 +1232,24 @@ describe('GithubChannel', () => {
             lastProcessedAt: string;
             dispatchedBodies?: string[];
             dispatchedComments?: string[];
+            dispatchedEvents?: string[];
           } | null;
         }
       ).validateCursor(parsed);
     }
 
-    it('normalizes falsy non-array dispatchedBodies to empty array', () => {
+    it.each([
+      'dispatchedBodies',
+      'dispatchedComments',
+      'dispatchedEvents',
+    ] as const)('normalizes invalid %s values', (field) => {
       for (const bad of [false, 0, '', null]) {
         const result = validate({
           lastProcessedAt: '2026-07-01T00:00:00.000Z',
-          dispatchedBodies: bad,
+          [field]: bad,
         });
         expect(result).not.toBeNull();
-        expect(result!.dispatchedBodies).toEqual([]);
-      }
-    });
-
-    it('normalizes falsy non-array dispatchedComments', () => {
-      for (const bad of [false, 0, '', null]) {
-        const result = validate({
-          lastProcessedAt: '2026-07-01T00:00:00.000Z',
-          dispatchedComments: bad,
-        });
-        expect(result).not.toBeNull();
-        expect(result!.dispatchedComments).toEqual([]);
+        expect(result![field]).toEqual([]);
       }
     });
 
@@ -1452,27 +1260,6 @@ describe('GithubChannel', () => {
       });
       expect(result).not.toBeNull();
       expect(result!.dispatchedBodies).toEqual(['owner/repo|issue:1']);
-    });
-
-    it('accepts valid dispatchedComments array', () => {
-      const result = validate({
-        lastProcessedAt: '2026-07-01T00:00:00.000Z',
-        dispatchedComments: ['C_kw1001'],
-      });
-      expect(result).not.toBeNull();
-      expect(result!.dispatchedComments).toEqual(['C_kw1001']);
-    });
-
-    it('drops legacy dispatchedNotifications entries', () => {
-      const result = validate({
-        lastProcessedAt: '2026-07-01T00:00:00.000Z',
-        dispatchedNotifications: ['100'],
-      });
-      expect(result).not.toBeNull();
-      expect(
-        (result as { dispatchedNotifications?: string[] })
-          .dispatchedNotifications,
-      ).toBeUndefined();
     });
 
     it('accepts missing dispatchedBodies', () => {
