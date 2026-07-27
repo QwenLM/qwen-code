@@ -1803,6 +1803,151 @@ describe('modelCommand', () => {
     });
   });
 
+  describe('--compaction handler', () => {
+    it('should set compaction model', async () => {
+      const setValue = vi.fn();
+      const setCompactionModel = vi.fn();
+      mockContext = createMockCommandContext({
+        invocation: {
+          raw: '/model --compaction compaction-model',
+          name: 'model',
+          args: '--compaction compaction-model',
+        },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'gpt-4',
+              authType: AuthType.USE_OPENAI,
+            }),
+            getAllConfiguredModels: vi.fn().mockReturnValue([
+              {
+                id: 'compaction-model',
+                label: 'Compaction Model',
+                authType: AuthType.USE_OPENAI,
+              },
+              {
+                id: 'gpt-4',
+                label: 'GPT-4',
+                authType: AuthType.USE_OPENAI,
+              },
+            ]),
+            setCompactionModel,
+          },
+          settings: createMockSettings(setValue),
+        },
+      });
+
+      const result = await modelCommand.action!(
+        mockContext,
+        '--compaction compaction-model',
+      );
+
+      expect(setValue).toHaveBeenCalledWith(
+        expect.any(String),
+        'compactionModel',
+        'compaction-model',
+      );
+      expect(setCompactionModel).toHaveBeenCalledWith('compaction-model');
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content: 'Compaction Model: compaction-model',
+      });
+    });
+
+    it('should reject unavailable compaction models', async () => {
+      const setCompactionModel = vi.fn();
+      mockContext = createMockCommandContext({
+        invocation: {
+          raw: '/model --compaction missing-model',
+          name: 'model',
+          args: '--compaction missing-model',
+        },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'gpt-4',
+              authType: AuthType.USE_OPENAI,
+            }),
+            getAllConfiguredModels: vi
+              .fn()
+              .mockReturnValue([{ id: 'gpt-4', label: 'GPT-4' }]),
+            setCompactionModel,
+          },
+          settings: createMockSettings(),
+        },
+      });
+
+      const result = await modelCommand.action!(
+        mockContext,
+        '--compaction missing-model',
+      );
+
+      expect(setCompactionModel).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('missing-model'),
+      });
+    });
+
+    it('should show compaction model info in non-interactive mode', async () => {
+      mockContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        invocation: { args: '--compaction' },
+        services: {
+          config: createMockConfig({
+            model: 'gpt-4',
+            authType: AuthType.USE_OPENAI,
+          }),
+          settings: {
+            merged: {
+              compactionModel: 'compaction-model',
+            } as Record<string, unknown>,
+          },
+        },
+      });
+
+      const result = await modelCommand.action!(mockContext, '--compaction');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'Current compaction model: compaction-model\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction " to clear the override.',
+      });
+    });
+
+    it('should show fallback info when compaction model is not set', async () => {
+      mockContext = createMockCommandContext({
+        executionMode: 'non_interactive',
+        invocation: { args: '--compaction' },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'gpt-4',
+              authType: AuthType.USE_OPENAI,
+            }),
+            getFastModel: vi.fn().mockReturnValue('fast-model'),
+            getModel: vi.fn().mockReturnValue('gpt-4'),
+          } as unknown as Partial<Config>,
+          settings: {
+            merged: {} as Record<string, unknown>,
+          },
+        },
+      });
+
+      const result = await modelCommand.action!(mockContext, '--compaction');
+
+      expect(result).toEqual({
+        type: 'message',
+        messageType: 'info',
+        content:
+          'Current compaction model: not set (falls back to fast model, then main model)\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction " to clear the override.',
+      });
+    });
+  });
+
   describe('non-interactive mode', () => {
     it('should use interactive-only wording for unavailable direct switches', async () => {
       const setValue = vi.fn();

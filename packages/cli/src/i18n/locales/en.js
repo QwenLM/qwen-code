@@ -1493,8 +1493,8 @@ export default {
     'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
     'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
-  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
-    'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --compaction for chat compression model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --compaction for chat compression model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
   "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
     "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.",
   "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
@@ -1510,6 +1510,8 @@ export default {
     'Set the image-capable model used to transcribe images for a text-only main model',
   'Set the model used to generate images':
     'Set the model used to generate images',
+  'Set the model used for chat compression (auto-compaction)':
+    'Set the model used for chat compression (auto-compaction)',
   'Persist the model selection to the project settings (workspace scope)':
     'Persist the model selection to the project settings (workspace scope)',
   'Persist the model selection to the user settings (global scope)':
@@ -1520,6 +1522,13 @@ export default {
   'Select Voice Model': 'Select Voice Model',
   'Vision Model': 'Vision Model',
   'Image Model': 'Image Model',
+  'Compaction Model': 'Compaction Model',
+  'Current compaction model: {{compactionModel}}\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction " to clear the override.':
+    'Current compaction model: {{compactionModel}}\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction " to clear the override.',
+  'not set (falls back to fast model, then main model)':
+    'not set (falls back to fast model, then main model)',
+  'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --compaction without a model to choose from configured models.':
+    'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --compaction without a model to choose from configured models.',
   'Voice Model': 'Voice Model',
   'Selected voice model is unavailable.':
     'Selected voice model is unavailable.',

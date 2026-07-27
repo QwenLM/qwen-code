@@ -817,7 +817,7 @@ export function ModelDialog({
           setErrorMessage(t('Selected compaction model is unavailable.'));
           return;
         }
-        const compactionModelId = selectedEntry.model.id;
+        const compactionModelId = encodeAuxModelSelector(selected);
         const scope = resolvePersistScope(settings, persistScope);
         settings.setValue(scope, 'compactionModel', compactionModelId);
         // Sync runtime Config so the compression service picks it up immediately.

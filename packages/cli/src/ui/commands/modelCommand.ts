@@ -348,7 +348,9 @@ function getAvailableModelIds(
     if (mode === 'image')
       return m.imageOnly === true && !m.fastOnly && !m.voiceOnly;
     if (mode === 'vision') return !m.fastOnly && !m.voiceOnly && !m.imageOnly;
-    // All other modes (main, fast, voice, compaction) exclude vision-only models.
+    if (mode === 'fast') return !m.voiceOnly && !m.imageOnly && !m.visionOnly;
+    if (mode === 'voice') return !m.fastOnly && !m.imageOnly && !m.visionOnly;
+    // 'main' and 'compaction' exclude all selector-only models.
     return !m.fastOnly && !m.voiceOnly && !m.imageOnly && !m.visionOnly;
   });
   return availableModels.map((model) => model.id);
@@ -827,7 +829,7 @@ export const modelCommand: SlashCommand = {
         selector.authType
           ? config.getAvailableModelsForAuthType(selector.authType)
           : config.getAllConfiguredModels()
-      ).filter((m) => !m.voiceOnly);
+      ).filter((m) => !m.voiceOnly && !m.imageOnly && !m.visionOnly);
       if (!availableModels.some((model) => model.id === selector.modelId)) {
         return {
           type: 'message',
