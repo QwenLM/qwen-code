@@ -6,7 +6,11 @@
 
 import type { GenerateContentResponse } from '@google/genai';
 import { AuthType } from '../core/contentGenerator.js';
-import { isQwenQuotaExceededError } from './quotaErrorDetection.js';
+import {
+  isQwenQuotaExceededError,
+  isQuotaExhaustedError,
+  formatQuotaExhaustedMessage,
+} from './quotaErrorDetection.js';
 import { createDebugLogger } from './debugLogger.js';
 import { getErrorStatus } from './errors.js';
 import { isRateLimitError } from './rateLimit.js';
@@ -353,6 +357,21 @@ export async function retryWithBackoff<T>(
             `  - ModelStudio:   https://help.aliyun.com/zh/model-studio/coding-plan\n\n` +
             `After setting up your API key, run /auth to configure your provider.`,
         );
+      }
+
+      // Permanent quota exhaustion (e.g. Bailian token-plan "1-week quota has
+      // been exhausted, will reset at …"). Unlike transient 429 throttling,
+      // retrying cannot succeed until the reset time — fast-fail and surface a
+      // friendly message so the session does not hang through the full retry
+      // budget with no output. Applies to any auth type since a reset time is
+      // the universal signal of a permanently exhausted quota.
+      if (isQuotaExhaustedError(error)) {
+        debugLogger.error(
+          'Quota exhausted, fast-failing',
+          retryDiagnostics,
+          error,
+        );
+        throw new Error(formatQuotaExhaustedMessage(error));
       }
 
       // Determine if this error qualifies for persistent retry.

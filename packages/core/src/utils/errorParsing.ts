@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { isApiError, isStructuredError } from './quotaErrorDetection.js';
+import {
+  isApiError,
+  isStructuredError,
+  QUOTA_EXHAUSTED_PREFIX,
+} from './quotaErrorDetection.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { getErrorMessage } from './errors.js';
 
@@ -49,6 +53,13 @@ const API_ERROR_PREFIX = '[API Error: ';
  */
 function isAlreadyFormatted(value: string): boolean {
   const trimmed = value.trimEnd();
+
+  // Friendly quota-exhaustion messages built by formatQuotaExhaustedMessage
+  // are already in final form — surface them verbatim, do not wrap.
+  if (trimmed.startsWith(QUOTA_EXHAUSTED_PREFIX)) {
+    return true;
+  }
+
   if (!trimmed.startsWith(API_ERROR_PREFIX)) {
     return false;
   }

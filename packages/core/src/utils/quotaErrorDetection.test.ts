@@ -11,6 +11,8 @@ import {
   isGenericQuotaExceededError,
   isApiError,
   isStructuredError,
+  isQuotaExhaustedError,
+  formatQuotaExhaustedMessage,
   type ApiError,
 } from './quotaErrorDetection.js';
 
@@ -99,6 +101,68 @@ describe('quotaErrorDetection', () => {
     it('should not detect non-quota errors', () => {
       const error = new Error('Network error');
       expect(isGenericQuotaExceededError(error)).toBe(false);
+    });
+  });
+
+  describe('isQuotaExhaustedError', () => {
+    it('detects the Bailian token-plan quota-exhaustion error', () => {
+      const error = Object.assign(
+        new Error(
+          '429 Your token-plan 1-week quota has been exhausted. The quota will reset at 07-27 09:25:00 UTC.',
+        ),
+        { status: 429 },
+      );
+      expect(isQuotaExhaustedError(error)).toBe(true);
+    });
+
+    it('detects a plain-string quota-exhaustion message', () => {
+      expect(
+        isQuotaExhaustedError(
+          'Your token-plan quota has been exceeded. It will reset at 2026-07-27.',
+        ),
+      ).toBe(true);
+    });
+
+    it('does not match transient throttling without a reset time', () => {
+      expect(
+        isQuotaExhaustedError(
+          new Error('Rate limit exceeded. Please retry later.'),
+        ),
+      ).toBe(false);
+    });
+
+    it('does not match a 429 that only says quota without a reset time', () => {
+      expect(
+        isQuotaExhaustedError(new Error('Your quota is exhausted.')),
+      ).toBe(false);
+    });
+
+    it('does not match unrelated errors', () => {
+      expect(isQuotaExhaustedError(new Error('Network timeout'))).toBe(false);
+      expect(isQuotaExhaustedError(null)).toBe(false);
+      expect(isQuotaExhaustedError(undefined)).toBe(false);
+    });
+  });
+
+  describe('formatQuotaExhaustedMessage', () => {
+    it('strips the leading HTTP-status prefix and keeps the reset time', () => {
+      const error = Object.assign(
+        new Error(
+          '429 Your token-plan 1-week quota has been exhausted. The quota will reset at 07-27 09:25:00 UTC.',
+        ),
+        { status: 429 },
+      );
+      const message = formatQuotaExhaustedMessage(error);
+      expect(message.startsWith('Quota exhausted: ')).toBe(true);
+      expect(message).not.toContain('429 Your');
+      expect(message).toContain('will reset at 07-27 09:25:00 UTC');
+      expect(message).toContain('switch to another API key');
+    });
+
+    it('falls back when no message can be extracted', () => {
+      const message = formatQuotaExhaustedMessage(42);
+      expect(message.startsWith('Quota exhausted: ')).toBe(true);
+      expect(message).toContain('quota has been exhausted');
     });
   });
 

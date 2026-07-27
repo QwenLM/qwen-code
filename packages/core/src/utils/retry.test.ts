@@ -523,6 +523,53 @@ describe('retryWithBackoff', () => {
       expect(fn).toHaveBeenCalledTimes(1);
     });
 
+    it('should throw immediately for a permanent quota-exhaustion error (any auth)', async () => {
+      // Bailian token-plan "1-week quota has been exhausted" surfaces as a 429
+      // from the OpenAI SDK but is permanent — it must fast-fail, not retry.
+      const quotaError = Object.assign(
+        new Error(
+          '429 Your token-plan 1-week quota has been exhausted. The quota will reset at 07-27 09:25:00 UTC.',
+        ),
+        { status: 429 },
+      );
+      const fn = vi.fn().mockRejectedValue(quotaError);
+
+      const promise = retryWithBackoff(fn, {
+        maxAttempts: 5,
+        initialDelayMs: 1000,
+        maxDelayMs: 5000,
+        authType: AuthType.USE_OPENAI,
+      });
+
+      await expect(promise).rejects.toThrow(/Quota exhausted/);
+      // Should be called only once (no retries)
+      expect(fn).toHaveBeenCalledTimes(1);
+    });
+
+    it('should retry a transient 429 that does not carry a reset time', async () => {
+      // A plain TPM/RPM 429 (no "will reset at") stays retryable — the
+      // quota-exhaustion fast-fail must not swallow transient throttling.
+      const transient429 = Object.assign(
+        new Error('Rate limit exceeded. Please retry later.'),
+        { status: 429 },
+      );
+      const fn = vi
+        .fn()
+        .mockRejectedValueOnce(transient429)
+        .mockResolvedValue('success');
+
+      const promise = retryWithBackoff(fn, {
+        maxAttempts: 5,
+        initialDelayMs: 100,
+        maxDelayMs: 1000,
+        authType: AuthType.USE_OPENAI,
+      });
+      await vi.runAllTimersAsync();
+
+      await expect(promise).resolves.toBe('success');
+      expect(fn).toHaveBeenCalledTimes(2);
+    });
+
     it('should retry for Qwen OAuth with throttling message', async () => {
       const throttlingError: HttpError = new Error(
         'requests throttling triggered',
