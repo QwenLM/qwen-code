@@ -4,7 +4,7 @@
 
 Approved for implementation on 2026-07-28. This document narrows the existing
 interactive-card design to the work required to rebase PR #6930 onto
-`origin/main` at `17408f102`.
+`origin/main` at `ef69eff20`.
 
 ## Goal
 
@@ -39,7 +39,7 @@ The implementation will not:
 ## Current Merge Assessment
 
 The PR head is `444cd6549`, its merge base with latest main is `cb9810214`,
-and latest main is `17408f102`. A three-way merge reports content conflicts
+and latest main is `ef69eff20`. A three-way merge reports content conflicts
 only in:
 
 - `packages/channels/dingtalk/src/DingtalkAdapter.ts`;
