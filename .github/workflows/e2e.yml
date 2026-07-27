@@ -112,7 +112,10 @@ jobs:
         if: |-
           ${{ matrix.sandbox == 'sandbox:docker' }}
         env:
-          QWEN_SANDBOX: docker
+          # build_sandbox.js resolves the container command through
+          # sandbox_command.js, which exits non-zero on Linux when this is unset
+          # — the test script used to supply it.
+          QWEN_SANDBOX: 'docker'
         run: |-
           npm run build:sandbox -- -s
 
