@@ -737,7 +737,10 @@ async function main() {
   for (const warning of result.warnings) {
     // Workflow-command form renders as a run annotation in GitHub Actions;
     // plain stderr text was invisible there even though the run stayed green.
-    console.error(`::warning::${warning}`);
+    // Escape %/CR/LF: warning text can carry model output (parse errors,
+    // PR-derived fields), and a forged "::error::" would emit a second runner
+    // command. See https://docs.github.com/actions/workflow-commands-for-github-actions
+    console.error(`::warning::${escapeWorkflowCommand(warning)}`);
   }
   tryAppendDegradedStepSummary(result);
 
@@ -752,6 +755,13 @@ async function main() {
   }
 }
 
+export function escapeWorkflowCommand(text) {
+  return String(text)
+    .replace(/%/g, '%25')
+    .replace(/\r/g, '%0D')
+    .replace(/\n/g, '%0A');
+}
+
 export function tryAppendDegradedStepSummary(result, summaryPath) {
   // The step summary is auxiliary; a filesystem failure there (EACCES,
   // ENOSPC) must not cost the primary release-notes artifact.
@@ -759,9 +769,11 @@ export function tryAppendDegradedStepSummary(result, summaryPath) {
     appendDegradedStepSummary(result, summaryPath);
   } catch (error) {
     console.error(
-      `::warning::failed to write the degraded step summary: ${
-        error instanceof Error ? error.message : String(error)
-      }`,
+      `::warning::${escapeWorkflowCommand(
+        `failed to write the degraded step summary: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      )}`,
     );
   }
 }
@@ -779,7 +791,9 @@ export function appendDegradedStepSummary(
       ? 'Some model batches fell back to pull-request titles; see the warnings on this run.'
       : 'No AI summaries or highlights were produced; the notes use pull-request titles only.',
     '',
-    ...result.warnings.map((warning) => `- ${warning}`),
+    ...result.warnings.map(
+      (warning) => `- ${warning.replace(/[\r\n]+/g, ' ')}`,
+    ),
     '',
   ];
   // The step-summary path's parent may not exist yet on a fresh runner.

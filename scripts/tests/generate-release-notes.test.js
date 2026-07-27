@@ -22,6 +22,7 @@ import {
   classifyChange,
   createOpenAiCompleter,
   enrichEntries,
+  escapeWorkflowCommand,
   generateAiContent,
   generateReleaseNotes,
   parseGeneratedEntries,
@@ -721,6 +722,56 @@ describe('appendDegradedStepSummary', () => {
     expect(errSpy).toHaveBeenCalledWith(
       expect.stringContaining('failed to write the degraded step summary'),
     );
+    errSpy.mockRestore();
+  });
+});
+
+describe('escapeWorkflowCommand', () => {
+  it('percent-encodes newlines so model text cannot forge a runner command', () => {
+    const malicious = 'batch failed\n::error::forged annotation';
+    const escaped = escapeWorkflowCommand(malicious);
+    expect(escaped).not.toContain('\n');
+    expect(escaped).not.toContain('\r');
+    expect(escaped).toBe('batch failed%0A::error::forged annotation');
+  });
+
+  it('encodes percent signs so encoded sequences are not double-decoded', () => {
+    expect(escapeWorkflowCommand('100% done')).toBe('100%25 done');
+  });
+
+  it('encodes carriage returns', () => {
+    expect(escapeWorkflowCommand('a\rb')).toBe('a%0Db');
+  });
+});
+
+describe('appendDegradedStepSummary markdown hardening', () => {
+  it('collapses newlines in step-summary list items', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'qwen-rn-summary-'));
+    const summaryPath = join(dir, 'summary.md');
+    vi.mocked(appendFileSync).mockClear();
+    appendDegradedStepSummary(
+      { usedAi: false, warnings: ['line1\nline2 ::error::x'] },
+      summaryPath,
+    );
+    expect(vi.mocked(appendFileSync)).toHaveBeenCalledTimes(1);
+    const [, written] = vi.mocked(appendFileSync).mock.calls[0];
+    expect(written).toContain('- line1 line2 ::error::x');
+    expect(String(written)).not.toMatch(/\nline2/);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('escapes the failed-summary warning through tryAppend', () => {
+    vi.mocked(appendFileSync).mockImplementationOnce(() => {
+      throw new Error('ENOSPC');
+    });
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    tryAppendDegradedStepSummary(
+      { usedAi: false, warnings: ['degraded'] },
+      join(tmpdir(), 'summary.md'),
+    );
+    const emitted = errSpy.mock.calls[0][0];
+    expect(emitted).toMatch(/^::warning::/);
+    expect(emitted).not.toContain('\n');
     errSpy.mockRestore();
   });
 });
