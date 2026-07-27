@@ -538,6 +538,66 @@ describe('GithubChannel', () => {
       ).not.toHaveBeenCalled();
     });
 
+    it('advances past a permanently failing notification instead of wedging', async () => {
+      const bad = makeNotification({
+        id: '7',
+        updated_at: '2026-07-02T09:00:00.000Z',
+        last_read_at: '2026-07-01T12:00:00.000Z',
+        subject: {
+          title: 'Deleted issue',
+          url: 'https://api.github.com/repos/owner/repo/issues/7',
+          type: 'Issue',
+        },
+      });
+      const good = makeNotification({
+        id: '42',
+        updated_at: '2026-07-02T10:00:00.000Z',
+        last_read_at: '2026-07-01T12:00:00.000Z',
+        subject: {
+          title: 'Healthy issue',
+          url: 'https://api.github.com/repos/owner/repo/issues/42',
+          type: 'Issue',
+        },
+      });
+      const notFound = Object.assign(new Error('Not Found'), { status: 404 });
+
+      await initWithoutLoop();
+      mockOctokit.rest.activity.markNotificationsAsRead.mockClear();
+
+      // Poll 1: the dead thread 404s (terminal), the healthy one dispatches.
+      mockOctokit.paginate
+        .mockResolvedValueOnce([bad, good])
+        .mockRejectedValueOnce(notFound) // bad: listComments -> terminal 404
+        .mockResolvedValueOnce([makeComment({ id: 2001 })]); // good
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes.map((e) => e.messageId)).toEqual([
+        '2001',
+      ]);
+      // Not wedged: mark-read ran and the cursor advanced past the dead
+      // notification, so it falls outside the next poll's window.
+      expect(
+        mockOctokit.rest.activity.markNotificationsAsRead,
+      ).toHaveBeenCalledWith({
+        last_read_at: '2026-07-02T10:00:00.000Z',
+        read: true,
+      });
+      expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
+
+      // Poll 2: only the healthy thread is still in the window; its comment is
+      // already deduped, so nothing re-dispatches and the 404 is not retried.
+      mockOctokit.rest.activity.markNotificationsAsRead.mockClear();
+      mockOctokit.paginate
+        .mockResolvedValueOnce([good])
+        .mockResolvedValueOnce([makeComment({ id: 2001 })]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      expect(channel.cursor.lastProcessedAt).toBe('2026-07-02T10:00:00.000Z');
+    });
+
     it('excludes comments created after the batch maxUpdatedAt', async () => {
       await initWithoutLoop();
       mockOctokit.paginate
@@ -716,6 +776,138 @@ describe('GithubChannel', () => {
       );
     });
 
+    it('searches the preceding page when the last events page is partial', async () => {
+      await initWithoutLoop();
+      mockOctokit.rest.issues.listEvents
+        .mockResolvedValueOnce({
+          data: [
+            makeIssueEvent({
+              id: 100,
+              node_id: 'E_review',
+              event: 'review_requested',
+              requested_reviewer: { login: 'test-bot' },
+              review_requester: { login: 'maintainer' },
+              created_at: '2026-07-02T09:00:00.000Z',
+            }),
+          ],
+          headers: {
+            link: '<https://api.github.com/repos/owner/repo/issues/99/events?page=2>; rel="last"',
+          },
+        })
+        .mockResolvedValueOnce({
+          data: [
+            makeIssueEvent({
+              id: 101,
+              node_id: 'E_later',
+              event: 'commented',
+              created_at: '2026-07-02T09:30:00.000Z',
+            }),
+          ],
+          headers: {},
+        });
+
+      const trigger = await (
+        channel as unknown as {
+          findMetaTrigger: (
+            ctx: Record<string, unknown>,
+            reason: 'review_requested' | 'assign',
+          ) => Promise<{ actor: string; key: string } | null>;
+        }
+      ).findMetaTrigger(
+        {
+          chatId: 'owner/repo',
+          threadId: 'pr:99',
+          issueNumber: 99,
+          lastReadAt: null,
+          windowSince: '2026-07-01T00:00:00.000Z',
+          maxUpdatedAt: '2026-07-02T10:00:00.000Z',
+          subjectTitle: 'feat: add divide',
+        },
+        'review_requested',
+      );
+
+      // The trigger lives on page 1; the last (partial) page alone would miss
+      // it. Merging the preceding page keeps it inside the search window.
+      expect(trigger).toEqual({ actor: 'maintainer', key: 'E_review' });
+      expect(mockOctokit.rest.issues.listEvents).toHaveBeenCalledTimes(2);
+      expect(mockOctokit.rest.issues.listEvents).toHaveBeenLastCalledWith(
+        expect.objectContaining({ page: 2 }),
+      );
+    });
+
+    it('caps meta-lane bodies at 6000 code points', async () => {
+      await initWithoutLoop();
+      channel.usePreflight = true;
+      mockOctokit.paginate.mockResolvedValueOnce([
+        makeNotification({ reason: 'assign' }),
+      ]);
+      mockOctokit.rest.issues.listEvents.mockResolvedValue({
+        data: [
+          makeIssueEvent({
+            id: 8,
+            node_id: 'E_assign',
+            event: 'assigned',
+            assigner: { login: 'bob' },
+            assignee: { login: 'test-bot' },
+          }),
+        ],
+        headers: {},
+      });
+      mockOctokit.rest.issues.get.mockResolvedValue({
+        data: {
+          body: 'y'.repeat(7000),
+          state: 'open',
+          user: { login: 'bob' },
+        },
+      });
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      const text = channel.inboundEnvelopes[0]!.text;
+      expect(text).toContain('y'.repeat(6000));
+      expect(text).not.toContain('y'.repeat(6001));
+    });
+
+    it('refuses a direct request whose issue event has no actor', async () => {
+      await initWithoutLoop();
+      mockOctokit.rest.issues.listEvents.mockResolvedValue({
+        data: [
+          makeIssueEvent({
+            id: 11,
+            node_id: 'E_noactor',
+            event: 'review_requested',
+            requested_reviewer: { login: 'test-bot' },
+            review_requester: undefined,
+            actor: undefined,
+          }),
+        ],
+        headers: {},
+      });
+
+      const trigger = await (
+        channel as unknown as {
+          findMetaTrigger: (
+            ctx: Record<string, unknown>,
+            reason: 'review_requested' | 'assign',
+          ) => Promise<{ actor: string; key: string } | null>;
+        }
+      ).findMetaTrigger(
+        {
+          chatId: 'owner/repo',
+          threadId: 'pr:99',
+          issueNumber: 99,
+          lastReadAt: null,
+          windowSince: '2026-07-01T00:00:00.000Z',
+          maxUpdatedAt: '2026-07-02T10:00:00.000Z',
+          subjectTitle: 'feat: add divide',
+        },
+        'review_requested',
+      );
+
+      expect(trigger).toBeNull();
+    });
+
     it.each([
       {
         name: 'an already-read direct request',
@@ -868,6 +1060,70 @@ describe('GithubChannel', () => {
       expect(channel.inboundEnvelopes).toHaveLength(1);
       const text = channel.inboundEnvelopes[0]!.text;
       expect(text).toContain('a'.repeat(999) + emoji);
+    });
+
+    it('caps aggregate summaries at the latest 20 comments', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ groups: { '*': { requireMention: false } } }),
+        makeBridge(),
+      );
+      await initWithoutLoop();
+      channel.usePreflight = true;
+      const comments = Array.from({ length: 25 }, (_, i) =>
+        makeComment({
+          id: i + 1,
+          body: `comment number ${i + 1}`,
+          user: { login: 'alice' },
+        }),
+      );
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce(comments);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      const text = channel.inboundEnvelopes[0]!.text;
+      expect(text).toContain('latest 20 of 25');
+      expect(text).toContain('comment number 6');
+      expect(text).toContain('comment number 25');
+    });
+
+    it('truncates each aggregate comment body to 1000 code points', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ groups: { '*': { requireMention: false } } }),
+        makeBridge(),
+      );
+      await initWithoutLoop();
+      channel.usePreflight = true;
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'comment',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({
+            id: 1,
+            body: 'x'.repeat(1500),
+            user: { login: 'alice' },
+          }),
+        ]);
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes).toHaveLength(1);
+      const text = channel.inboundEnvelopes[0]!.text;
+      expect(text).toContain('x'.repeat(1000));
+      expect(text).not.toContain('x'.repeat(1001));
     });
 
     it('keeps unmentioned aggregate comments behind the group gate', async () => {
@@ -1379,6 +1635,13 @@ describe('GithubChannel', () => {
       await expect(githubApi(fn)).resolves.toBe('ok');
       expect(sleep).toHaveBeenNthCalledWith(1, 1000); // 1000 * 2^0
       expect(sleep).toHaveBeenNthCalledWith(2, 2000); // 1000 * 2^1
+    });
+
+    it('throws immediately without retrying on a terminal 404', async () => {
+      stubSleep();
+      const fn = vi.fn().mockRejectedValue(httpError(404));
+      await expect(githubApi(fn)).rejects.toThrow('HTTP 404');
+      expect(fn).toHaveBeenCalledTimes(1);
     });
 
     it('rethrows once retries are exhausted', async () => {

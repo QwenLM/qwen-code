@@ -22,8 +22,10 @@ unique event. A notification with `reason: review_requested` may therefore be
 returned again after unrelated activity.
 
 For `review_requested` and `assign`, the adapter reads the newest page of issue
-events and accepts only the latest matching direct-user event that has not been
-dispatched or read. A later removal or unassignment cancels the trigger. The
+events (and the preceding page when the last page is partial, so the window
+covers the newest ~100 events rather than only the last page, which can hold a
+single event) and accepts only the latest matching direct-user event that has
+not been dispatched or read. A later removal or unassignment cancels the trigger. The
 event actor becomes the envelope sender, so `senderPolicy` checks the person who
 requested the review or assignment instead of the PR or issue author. Team
 review requests fail closed because a notification does not prove that the bot
@@ -51,6 +53,12 @@ Processing continues after an individual failure so later threads are not
 blocked. The adapter marks notifications read through the batch timestamp and
 advances `lastProcessedAt` only when the whole batch succeeds; this timestamped
 mark avoids swallowing activity that arrives during the poll.
+
+A notification that fails with a permanent GitHub error (a deleted or
+transferred subject returning 404/410) is logged and skipped instead of being
+treated as a batch failure, so one dead thread cannot wedge the cursor and be
+re-fetched every poll. Transient failures still hold the batch open for
+at-least-once retry.
 
 ## Bounds
 
