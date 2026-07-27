@@ -74,6 +74,8 @@ const EN: Messages = {
   'branchSelect.search': 'Search branches…',
   'branchSelect.loading': 'Loading…',
   'branchSelect.noMatches': 'No matches',
+  'branchSelect.error': 'Failed to load branches',
+  'branchSelect.retry': 'Retry',
   'branchSelect.local': 'local',
   'gitDiff.title': 'Changes',
   'gitDiff.summary': (v) =>
@@ -2448,6 +2450,8 @@ const ZH: Messages = {
   'branchSelect.search': '搜索分支…',
   'branchSelect.loading': '加载中…',
   'branchSelect.noMatches': '无匹配',
+  'branchSelect.error': '分支加载失败',
+  'branchSelect.retry': '重试',
   'branchSelect.local': '本地',
   'gitDiff.title': '变更',
   'gitDiff.summary': (v) =>

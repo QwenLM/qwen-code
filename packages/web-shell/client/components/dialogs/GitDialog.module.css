@@ -371,3 +371,17 @@
   font-size: 11px;
   color: var(--muted-foreground, #888);
 }
+
+.branchSelectRetry {
+  margin-left: 6px;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--primary, #60a5fa);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.branchSelectRetry:hover {
+  text-decoration: underline;
+}

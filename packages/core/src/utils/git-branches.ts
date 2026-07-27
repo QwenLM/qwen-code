@@ -560,7 +560,12 @@ export async function gitCommit(
     await runGit(cwd, ['commit', '-m', message], env);
   } catch (err) {
     if (savedIndex) {
-      await runGit(cwd, ['read-tree', savedIndex], env).catch(() => {});
+      await runGit(cwd, ['read-tree', savedIndex], env).catch((rollbackErr) => {
+        // A failed rollback leaves the whole `add -A` result staged; surface
+        // it so the stale index can be diagnosed instead of failing silently.
+        // eslint-disable-next-line no-console
+        console.error('git index rollback failed:', rollbackErr);
+      });
     }
     throw err;
   }

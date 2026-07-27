@@ -1081,20 +1081,24 @@ describe('DaemonClient', () => {
       const ws = client.workspaceByCwd('/work/secondary');
       const cwd = '/work/secondary/packages/app';
 
+      await ws.workspaceGitBranches(cwd);
       await ws.workspaceGitCheckout('feat/thing', cwd);
       await ws.workspaceGitCreateBranch('feat/new', 'main', cwd);
       await ws.workspaceGitPush({ setUpstream: true }, cwd);
       await ws.workspaceGitPull({ rebase: true }, cwd);
       await ws.workspaceGitCommit('fix: thing', { all: true }, cwd);
+      await ws.workspaceGitHubCreatePullRequest({ title: 'Add thing' }, cwd);
 
       const base = 'http://daemon/workspaces/%2Fwork%2Fsecondary';
       const enc = encodeURIComponent(cwd);
       expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', `${base}/git/branches?cwd=${enc}`],
         ['POST', `${base}/git/checkout?cwd=${enc}`],
         ['POST', `${base}/git/branch?cwd=${enc}`],
         ['POST', `${base}/git/push?cwd=${enc}`],
         ['POST', `${base}/git/pull?cwd=${enc}`],
         ['POST', `${base}/git/commit?cwd=${enc}`],
+        ['POST', `${base}/github/prs/create?cwd=${enc}`],
       ]);
     });
 

@@ -4892,10 +4892,12 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  workspaceGitBranches(): Promise<DaemonGitBranchesResult> {
+  workspaceGitBranches(cwd?: string): Promise<DaemonGitBranchesResult> {
+    const suffix =
+      cwd != null ? `/git/branches?cwd=${urlEncode(cwd)}` : '/git/branches';
     return this.client.workspaceJsonRequest<DaemonGitBranchesResult>(
       this.workspaceSelector,
-      '/git/branches',
+      suffix,
       'GET /workspaces/:workspace/git/branches',
       { mode: 'rest' },
     );

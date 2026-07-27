@@ -85,6 +85,7 @@ export function GitDialog({
     local: string[];
     remotes: [string, string[]][];
   } | null>(null);
+  const [prBranchesError, setPrBranchesError] = useState(false);
   const [prStatus, setPrStatus] = useState<{
     msg: string;
     type: 'error' | 'success';
@@ -227,7 +228,16 @@ export function GitDialog({
 
   const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (isCommit) {
-      if (['ArrowRight', 'ArrowLeft', 'Home', 'End'].includes(event.key)) {
+      // Commit is the rightmost tab. Arrow keys and Home move into the regular
+      // tabs so keyboard users aren't trapped on the commit tab; End stays put
+      // because commit is already the last tab.
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault();
+        selectAndFocus(tabViews[tabViews.length - 1]);
+      } else if (event.key === 'ArrowRight' || event.key === 'Home') {
+        event.preventDefault();
+        selectAndFocus(tabViews[0]);
+      } else if (event.key === 'End') {
         event.preventDefault();
       }
       return;
@@ -301,12 +311,9 @@ export function GitDialog({
     [client, workspaceCwd, gitCwd, commitMsg, commitBusy, prBusy, t],
   );
 
-  // Auto-fill PR form when it opens.
-  useEffect(() => {
-    if (!prFormOpen || !isCommit) return;
+  const loadPrBranches = useCallback(() => {
     const ws = client.workspaceByCwd(workspaceCwd);
-
-    // Fetch branch list for the target-branch dropdown (independent).
+    setPrBranchesError(false);
     ws.workspaceGitBranches()
       .then((branches) => {
         const local = branches.local.map((b) => b.name);
@@ -323,7 +330,19 @@ export function GitDialog({
         }
         setPrBranches({ local, remotes: Array.from(remoteMap.entries()) });
       })
-      .catch(() => setPrBranches(null));
+      .catch(() => {
+        setPrBranches(null);
+        setPrBranchesError(true);
+      });
+  }, [client, workspaceCwd]);
+
+  // Auto-fill PR form when it opens.
+  useEffect(() => {
+    if (!prFormOpen || !isCommit) return;
+    const ws = client.workspaceByCwd(workspaceCwd);
+
+    // Fetch branch list for the target-branch dropdown (independent).
+    loadPrBranches();
 
     setPrStatus(null);
     setPrGenerating(true);
@@ -455,7 +474,7 @@ export function GitDialog({
       });
 
     return () => abort.abort();
-  }, [prFormOpen, isCommit, client, workspaceCwd, gitCwd, t]);
+  }, [prFormOpen, isCommit, client, workspaceCwd, gitCwd, t, loadPrBranches]);
 
   const doCreatePr = useCallback(async () => {
     if (!prTitle.trim() || prGenerating) return;
@@ -702,6 +721,8 @@ export function GitDialog({
                     value={prBase}
                     onChange={setPrBase}
                     branches={prBranches}
+                    error={prBranchesError}
+                    onRetry={loadPrBranches}
                   />
                   <button
                     type="button"
@@ -756,10 +777,14 @@ function BranchSelect({
   value,
   onChange,
   branches,
+  error = false,
+  onRetry,
 }: {
   value: string;
   onChange: (v: string) => void;
   branches: BranchList;
+  error?: boolean;
+  onRetry?: () => void;
 }) {
   const { t } = useI18n();
   const [open, setOpen] = useState(false);
@@ -866,11 +891,25 @@ function BranchSelect({
               ))}
             </div>
           )}
-          {!branches && (
-            <div className={styles.branchSelectEmpty}>
-              {t('branchSelect.loading')}
-            </div>
-          )}
+          {!branches &&
+            (error ? (
+              <div className={styles.branchSelectEmpty}>
+                {t('branchSelect.error')}
+                {onRetry && (
+                  <button
+                    type="button"
+                    className={styles.branchSelectRetry}
+                    onClick={onRetry}
+                  >
+                    {t('branchSelect.retry')}
+                  </button>
+                )}
+              </div>
+            ) : (
+              <div className={styles.branchSelectEmpty}>
+                {t('branchSelect.loading')}
+              </div>
+            ))}
           {branches &&
             filteredRemotes.length === 0 &&
             filteredLocal.length === 0 && (

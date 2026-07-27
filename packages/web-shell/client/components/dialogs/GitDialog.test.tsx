@@ -22,6 +22,9 @@ const {
   workspaceGitHubPullRequests,
   workspaceGitCommit,
   workspaceGitPush,
+  workspaceGitBranches,
+  workspaceGitHubDefaultBranch,
+  workspaceGit,
   workspaceClient,
   mockState,
 } = vi.hoisted(() => {
@@ -30,6 +33,9 @@ const {
   const workspaceGitHubPullRequests = vi.fn();
   const workspaceGitCommit = vi.fn();
   const workspaceGitPush = vi.fn();
+  const workspaceGitBranches = vi.fn();
+  const workspaceGitHubDefaultBranch = vi.fn();
+  const workspaceGit = vi.fn();
   const workspaceClient = {
     workspaceByCwd: () => ({
       workspaceGitDiff,
@@ -39,6 +45,9 @@ const {
       workspaceGitHubPullRequests,
       workspaceGitCommit,
       workspaceGitPush,
+      workspaceGitBranches,
+      workspaceGitHubDefaultBranch,
+      workspaceGit,
     }),
   };
   const mockState = { capabilities: undefined as unknown };
@@ -48,6 +57,9 @@ const {
     workspaceGitHubPullRequests,
     workspaceGitCommit,
     workspaceGitPush,
+    workspaceGitBranches,
+    workspaceGitHubDefaultBranch,
+    workspaceGit,
     workspaceClient,
     mockState,
   };
@@ -483,5 +495,127 @@ describe('GitDialog', () => {
         .getElementById('git-dialog-panel')
         ?.getAttribute('aria-labelledby'),
     ).toBe('git-dialog-tab-diff');
+  });
+
+  it('lets arrow keys leave the commit tab back to the regular tabs', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+      files: [],
+      hiddenCount: 0,
+    });
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDialog
+            workspaceCwd="/repo"
+            initialView="commit"
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    const commitTab = document.getElementById('git-dialog-tab-commit');
+    expect(commitTab).toBeTruthy();
+
+    // Commit is the rightmost tab; ArrowLeft moves to the last regular tab
+    // (log, since the PR tab is absent without the capability) instead of
+    // being swallowed.
+    await act(async () => {
+      commitTab?.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }),
+      );
+    });
+    await flush();
+
+    expect(document.getElementById('git-dialog-tab-commit')).toBeNull();
+    expect(
+      document
+        .getElementById('git-dialog-tab-log')
+        ?.getAttribute('aria-selected'),
+    ).toBe('true');
+  });
+
+  it('offers a retry when the PR base-branch list fails to load', async () => {
+    workspaceGitDiff.mockResolvedValue({
+      v: 1,
+      workspaceCwd: '/repo',
+      available: true,
+      filesCount: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+      files: [],
+      hiddenCount: 0,
+    });
+    workspaceGitHubDefaultBranch.mockResolvedValue({ branch: 'origin/main' });
+    workspaceGit.mockResolvedValue({ branch: 'feat/x', detached: false });
+    workspaceGitBranches.mockRejectedValueOnce(new Error('boom'));
+    mockState.capabilities = { features: ['workspace_github_prs'] };
+
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <GitDialog
+            workspaceCwd="/repo"
+            initialView="commit"
+            onClose={vi.fn()}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flush();
+
+    // Open the PR form so the base-branch dropdown fetches (and fails).
+    const createPrBtn = Array.from(
+      document.body.querySelectorAll('[data-web-shell-dialog] button'),
+    ).find((b) => b.textContent?.includes('Create Pull Request'));
+    expect(createPrBtn).toBeTruthy();
+    await act(async () => {
+      createPrBtn!.click();
+    });
+    await flush();
+
+    // Open the base-branch dropdown: it must show an error + retry, not a
+    // permanent "Loading…".
+    const branchTrigger = document.body.querySelector(
+      'button[aria-label="Base branch"]',
+    );
+    expect(branchTrigger).toBeTruthy();
+    await act(async () => {
+      (branchTrigger as HTMLButtonElement).click();
+    });
+    await flush();
+
+    expect(document.body.textContent).toContain('Failed to load branches');
+    const retryBtn = Array.from(document.body.querySelectorAll('button')).find(
+      (b) => b.textContent?.includes('Retry'),
+    );
+    expect(retryBtn).toBeTruthy();
+
+    // Retry succeeds and renders the fetched branches.
+    workspaceGitBranches.mockResolvedValue({
+      local: [{ name: 'main' }],
+      remote: [{ name: 'origin/main' }],
+    });
+    await act(async () => {
+      retryBtn!.click();
+    });
+    await flush();
+
+    expect(document.body.textContent).not.toContain('Failed to load branches');
+    expect(workspaceGitBranches).toHaveBeenCalledTimes(2);
   });
 });

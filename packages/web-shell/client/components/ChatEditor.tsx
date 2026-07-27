@@ -54,7 +54,11 @@ import type {
   VoiceStatusRevision,
   VoiceWorkspaceTarget,
 } from '../voice/voice-workspace-target';
-import { GitBranchChipContent, GitBranchIndicator } from './GitBranchIndicator';
+import {
+  GitBranchChipContent,
+  GitBranchIndicator,
+  gitBranchAriaLabel,
+} from './GitBranchIndicator';
 import { GitModePopover, type SessionGitIntent } from './GitModePopover';
 import { BranchPickerPopover } from './BranchPickerPopover';
 import { WorkspaceIndicator } from './WorkspaceIndicator';
@@ -132,6 +136,8 @@ interface ChatEditorProps {
   gitBranch?: string;
   /** Whether the session is in a worktree (styles the git chip purple). */
   gitWorktree?: boolean;
+  /** Git working directory for worktree sessions; targets git operations. */
+  gitCwd?: string;
   /** Git mode intent for the empty-state composer chip (branch/worktree selection). */
   gitModeIntent?: SessionGitIntent;
   /** Callback when the user changes the git mode intent via the composer chip popover. */
@@ -1171,6 +1177,7 @@ export const ChatEditor = memo(
       currentModel = '',
       gitBranch,
       gitWorktree,
+      gitCwd,
       gitModeIntent,
       onGitModeIntentChange,
       gitStatus,
@@ -2149,12 +2156,18 @@ export const ChatEditor = memo(
                         open={branchPickerOpen}
                         onOpenChange={setBranchPickerOpen}
                         workspaceCwd={selectedWorkspace?.cwd ?? ''}
+                        gitCwd={gitCwd}
                         onOpenDiff={onOpenGitDiff}
                         onOpenCommit={onOpenCommit}
                       >
                         <button
                           type="button"
                           className={styles.gitBranchChipButton}
+                          aria-label={gitBranchAriaLabel(
+                            gitBranch,
+                            gitStatus,
+                            t,
+                          )}
                         >
                           <GitBranchIndicator
                             branch={gitBranch}

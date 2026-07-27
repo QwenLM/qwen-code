@@ -86,7 +86,7 @@ export function BranchPickerPopover({
     setLoading(true);
     setError(null);
     try {
-      const result = await ws.workspaceGitBranches();
+      const result = await ws.workspaceGitBranches(gitCwd);
       if (requestId !== requestIdRef.current) return;
       setData(result);
     } catch (err) {
@@ -97,7 +97,7 @@ export function BranchPickerPopover({
         setLoading(false);
       }
     }
-  }, [ws]);
+  }, [ws, gitCwd]);
 
   useEffect(() => {
     if (open) {
