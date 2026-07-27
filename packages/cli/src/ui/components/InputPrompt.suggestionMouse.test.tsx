@@ -56,7 +56,7 @@ vi.mock('../contexts/UIActionsContext.js', () => ({
     handleRetryLastPrompt: vi.fn(),
     temporaryCloseFeedbackDialog: vi.fn(),
     popAllQueuedMessages: vi.fn(() => null),
-    clearRestoredSubmission: vi.fn(),
+    invalidateSubmittedPromptProvenance: vi.fn(),
   })),
 }));
 vi.mock('../contexts/AgentViewContext.js', () => ({

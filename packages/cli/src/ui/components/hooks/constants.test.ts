@@ -212,6 +212,14 @@ describe('hooks constants', () => {
       expect(desc).toContain('load_reason');
     });
 
+    it('should distinguish model-bound and submitted prompts', () => {
+      const desc = getHookDescription(HookEventName.UserPromptSubmit);
+      expect(desc).toContain('"prompt"');
+      expect(desc).toContain('model-bound');
+      expect(desc).toContain('"submitted_prompt"');
+      expect(desc).toContain('interactive TUI');
+    });
+
     it('should return description for PostCompact', () => {
       const desc = getHookDescription(HookEventName.PostCompact);
       expect(desc).toContain('trigger');

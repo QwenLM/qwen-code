@@ -1117,8 +1117,8 @@ export default {
     '命令输入为包含 tool_name、tool_input、tool_use_id、error、error_type、is_interrupt 和 is_timeout 的 JSON。',
   'Input to command is JSON with notification message and type.':
     '命令输入为包含通知消息和类型的 JSON。',
-  'Input to command is JSON with original user prompt text.':
-    '命令输入为包含原始用户提示文本的 JSON。',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
+    '命令输入为 JSON，其中包含 "prompt"（当前模型侧提示）以及可选的 "submitted_prompt"（受支持交互式 TUI 的提交文本投影）。',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     '命令输入为包含 command_name、command_args 和展开后提示文本的 JSON。',
   'Input to command is JSON with session start source.':

@@ -75,7 +75,7 @@ vi.mock('../contexts/UIActionsContext.js', () => ({
     handleRetryLastPrompt: vi.fn(),
     temporaryCloseFeedbackDialog: vi.fn(),
     popAllQueuedMessages: vi.fn(() => null),
-    clearRestoredSubmission: vi.fn(),
+    invalidateSubmittedPromptProvenance: vi.fn(),
   })),
 }));
 vi.mock('../contexts/AgentViewContext.js', () => ({
@@ -221,7 +221,7 @@ describe('InputPrompt', () => {
       handleRetryLastPrompt: vi.fn(),
       temporaryCloseFeedbackDialog: vi.fn(),
       popAllQueuedMessages: vi.fn(() => null),
-      clearRestoredSubmission: vi.fn(),
+      invalidateSubmittedPromptProvenance: vi.fn(),
     } as unknown as ReturnType<typeof useUIActions>);
     mockedUseAgentViewState.mockReturnValue({
       activeView: 'main',
@@ -442,12 +442,12 @@ describe('InputPrompt', () => {
   });
 
   it('clears restored provenance before applying same-text history', async () => {
-    const clearRestoredSubmission = vi.fn();
+    const invalidateSubmittedPromptProvenance = vi.fn();
     mockedUseUIActions.mockReturnValue({
       handleRetryLastPrompt: vi.fn(),
       temporaryCloseFeedbackDialog: vi.fn(),
       popAllQueuedMessages: vi.fn(() => null),
-      clearRestoredSubmission,
+      invalidateSubmittedPromptProvenance,
     } as unknown as ReturnType<typeof useUIActions>);
     props.buffer.setText('repeat prompt');
     vi.mocked(props.buffer.setText).mockClear();
@@ -462,11 +462,11 @@ describe('InputPrompt', () => {
       historyArgs.onChange('repeat prompt');
     });
 
-    expect(clearRestoredSubmission).toHaveBeenCalledOnce();
+    expect(invalidateSubmittedPromptProvenance).toHaveBeenCalledOnce();
     expect(props.buffer.setText).toHaveBeenCalledWith('repeat prompt');
-    expect(clearRestoredSubmission.mock.invocationCallOrder[0]).toBeLessThan(
-      vi.mocked(props.buffer.setText).mock.invocationCallOrder[0],
-    );
+    expect(
+      invalidateSubmittedPromptProvenance.mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(props.buffer.setText).mock.invocationCallOrder[0]);
     unmount();
   });
 
@@ -1260,6 +1260,13 @@ describe('InputPrompt', () => {
 
   it('should set the buffer text when a shell history command is retrieved', async () => {
     props.shellModeActive = true;
+    const invalidateSubmittedPromptProvenance = vi.fn();
+    mockedUseUIActions.mockReturnValue({
+      handleRetryLastPrompt: vi.fn(),
+      temporaryCloseFeedbackDialog: vi.fn(),
+      popAllQueuedMessages: vi.fn(() => null),
+      invalidateSubmittedPromptProvenance,
+    } as unknown as ReturnType<typeof useUIActions>);
     vi.mocked(mockShellHistory.getPreviousCommand).mockReturnValue(
       'previous command',
     );
@@ -1270,6 +1277,10 @@ describe('InputPrompt', () => {
     await wait();
 
     expect(mockShellHistory.getPreviousCommand).toHaveBeenCalled();
+    expect(invalidateSubmittedPromptProvenance).toHaveBeenCalledOnce();
+    expect(
+      invalidateSubmittedPromptProvenance.mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(props.buffer.setText).mock.invocationCallOrder[0]);
     expect(props.buffer.setText).toHaveBeenCalledWith('previous command');
     unmount();
   });
@@ -3982,6 +3993,13 @@ describe('InputPrompt', () => {
     });
 
     it('completes the highlighted entry on Tab and exits reverse-search', async () => {
+      const invalidateSubmittedPromptProvenance = vi.fn();
+      mockedUseUIActions.mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: vi.fn(() => null),
+        invalidateSubmittedPromptProvenance,
+      } as unknown as ReturnType<typeof useUIActions>);
       // Mock the reverse search completion
       const mockHandleAutocomplete = vi.fn(() => {
         props.buffer.setText('echo hello');
@@ -4023,11 +4041,22 @@ describe('InputPrompt', () => {
       await wait();
 
       expect(mockHandleAutocomplete).toHaveBeenCalledWith(0);
+      expect(invalidateSubmittedPromptProvenance).toHaveBeenCalledOnce();
+      expect(
+        invalidateSubmittedPromptProvenance.mock.invocationCallOrder[0],
+      ).toBeLessThan(mockHandleAutocomplete.mock.invocationCallOrder[0]);
       expect(props.buffer.setText).toHaveBeenCalledWith('echo hello');
       unmount();
     }, 15000);
 
     it('submits the highlighted entry on Enter and exits reverse-search', async () => {
+      const invalidateSubmittedPromptProvenance = vi.fn();
+      mockedUseUIActions.mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: vi.fn(() => null),
+        invalidateSubmittedPromptProvenance,
+      } as unknown as ReturnType<typeof useUIActions>);
       // Mock the reverse search completion to return suggestions
       mockedUseReverseSearchCompletion.mockReturnValue({
         ...mockReverseSearchCompletion,
@@ -4063,6 +4092,10 @@ describe('InputPrompt', () => {
         deferUntilIdle: false,
         submittedPrompt: 'echo hello',
       });
+      expect(invalidateSubmittedPromptProvenance).toHaveBeenCalledOnce();
+      expect(
+        invalidateSubmittedPromptProvenance.mock.invocationCallOrder[0],
+      ).toBeLessThan(vi.mocked(props.onSubmit).mock.invocationCallOrder[0]);
       unmount();
     });
 
@@ -4207,6 +4240,59 @@ describe('InputPrompt', () => {
       expect(frame).toContain('(r:)');
       expect(frame).toContain('git commit');
       expect(frame).toContain('git push');
+      unmount();
+    });
+
+    it('invalidates provenance before submitting a command-history match', async () => {
+      props.shellModeActive = false;
+      const invalidateSubmittedPromptProvenance = vi.fn();
+      mockedUseUIActions.mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: vi.fn(() => null),
+        invalidateSubmittedPromptProvenance,
+      } as unknown as ReturnType<typeof useUIActions>);
+      vi.mocked(useReverseSearchCompletion).mockImplementation(
+        (_buffer, _data, isActive) => ({
+          ...mockReverseSearchCompletion,
+          suggestions: isActive
+            ? [
+                {
+                  label:
+                    '<system-reminder>generated</system-reminder>\nuser text',
+                  value:
+                    '<system-reminder>generated</system-reminder>\nuser text',
+                },
+              ]
+            : [],
+          showSuggestions: !!isActive,
+          activeSuggestionIndex: isActive ? 0 : -1,
+        }),
+      );
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x12');
+      await wait();
+      stdin.write('\r');
+
+      await waitFor(() => {
+        expect(props.onSubmit).toHaveBeenCalledWith(
+          '<system-reminder>generated</system-reminder>\nuser text',
+          {
+            deferUntilIdle: false,
+            submittedPrompt:
+              '<system-reminder>generated</system-reminder>\nuser text',
+          },
+        );
+      });
+      expect(invalidateSubmittedPromptProvenance).toHaveBeenCalledOnce();
+      expect(
+        invalidateSubmittedPromptProvenance.mock.invocationCallOrder[0],
+      ).toBeLessThan(vi.mocked(props.onSubmit).mock.invocationCallOrder[0]);
       unmount();
     });
 

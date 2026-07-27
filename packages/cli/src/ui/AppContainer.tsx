@@ -1062,15 +1062,24 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const preferredEditor = usePreferredEditor();
   const restoredSubmissionRef = useRef<QueuedSubmission | null>(null);
-  const restoredSubmissionEditedRef = useRef(false);
-  const clearRestoredSubmission = useCallback(() => {
+  const submittedPromptProvenanceUnavailableRef = useRef(false);
+  const setBufferTextRef = useRef<
+    ReturnType<typeof useTextBuffer>['setText'] | null
+  >(null);
+  const invalidateSubmittedPromptProvenance = useCallback(() => {
     restoredSubmissionRef.current = null;
-    restoredSubmissionEditedRef.current = false;
+    submittedPromptProvenanceUnavailableRef.current = true;
   }, []);
   const handleBufferChange = useCallback((text: string) => {
     if (text.length === 0) {
+      if (
+        restoredSubmissionRef.current !== null ||
+        submittedPromptProvenanceUnavailableRef.current
+      ) {
+        setBufferTextRef.current?.('', { clearUndoHistory: true });
+      }
       restoredSubmissionRef.current = null;
-      restoredSubmissionEditedRef.current = false;
+      submittedPromptProvenanceUnavailableRef.current = false;
       return;
     }
     if (
@@ -1078,7 +1087,7 @@ export const AppContainer = (props: AppContainerProps) => {
       restoredSubmissionRef.current.modelText !== text
     ) {
       restoredSubmissionRef.current = null;
-      restoredSubmissionEditedRef.current = true;
+      submittedPromptProvenanceUnavailableRef.current = true;
     }
   }, []);
 
@@ -1092,6 +1101,8 @@ export const AppContainer = (props: AppContainerProps) => {
     preferredEditor,
     onChange: handleBufferChange,
   });
+  const setBufferText = buffer.setText;
+  setBufferTextRef.current = setBufferText;
   const restoredPromptStashTargetsRef = useRef(new Set<string>());
   const promptStashTargetDir = config.getTargetDir();
   useEffect(() => {
@@ -1099,9 +1110,11 @@ export const AppContainer = (props: AppContainerProps) => {
       return;
     }
     restoredPromptStashTargetsRef.current.add(promptStashTargetDir);
-    restorePromptStash(promptStashTargetDir, buffer.text, (text) =>
-      buffer.setText(text),
-    );
+    restorePromptStash(promptStashTargetDir, buffer.text, (text) => {
+      restoredSubmissionRef.current = null;
+      submittedPromptProvenanceUnavailableRef.current = true;
+      buffer.setText(text);
+    });
   }, [buffer, promptStashTargetDir]);
 
   useEffect(() => {
@@ -1429,6 +1442,14 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const { vimEnabled, vimMode } = useVimModeState();
   const { toggleVimEnabled } = useVimModeActions();
+
+  useLayoutEffect(() => {
+    if (vimEnabled && buffer.text.length > 0) {
+      // Vim registers outlive buffer clears, so provenance cannot be recovered
+      // by pasting register contents and then disabling Vim.
+      invalidateSubmittedPromptProvenance();
+    }
+  }, [buffer.text, invalidateSubmittedPromptProvenance, vimEnabled]);
 
   const {
     isSubagentCreateDialogOpen,
@@ -2064,7 +2085,7 @@ export const AppContainer = (props: AppContainerProps) => {
     const submission = popAllMessages();
     if (submission === null) return null;
     restoredSubmissionRef.current = submission;
-    restoredSubmissionEditedRef.current = false;
+    submittedPromptProvenanceUnavailableRef.current = false;
     return submission.modelText;
   }, [popAllMessages]);
 
@@ -2211,20 +2232,32 @@ export const AppContainer = (props: AppContainerProps) => {
         submittedPrompt?: string;
       },
     ) => {
-      const restoredSubmission = restoredSubmissionRef.current;
-      restoredSubmissionRef.current = null;
-      const restoredSubmissionWasEdited = restoredSubmissionEditedRef.current;
-      restoredSubmissionEditedRef.current = false;
+      const consumesComposerState = options !== undefined;
+      const restoredSubmission = consumesComposerState
+        ? restoredSubmissionRef.current
+        : null;
+      const submittedPromptProvenanceUnavailable =
+        consumesComposerState &&
+        submittedPromptProvenanceUnavailableRef.current;
+      if (consumesComposerState) {
+        restoredSubmissionRef.current = null;
+        submittedPromptProvenanceUnavailableRef.current = false;
+      }
       const submittedPromptCandidate = options?.submittedPrompt;
-      const provenanceEnabled = submittedPromptCandidate !== undefined;
+      const provenanceEnabled =
+        !vimEnabled && submittedPromptCandidate !== undefined;
       const trimmedSubmittedPrompt = submittedPromptCandidate?.trim();
-      const submittedPrompt = restoredSubmissionWasEdited
-        ? undefined
-        : restoredSubmission === null
-          ? trimmedSubmittedPrompt || undefined
-          : provenanceEnabled && restoredSubmission.modelText === submittedValue
-            ? restoredSubmission.submittedPrompt
-            : undefined;
+      const submittedPrompt =
+        submittedPromptProvenanceUnavailable || !provenanceEnabled
+          ? undefined
+          : restoredSubmission === null
+            ? trimmedSubmittedPrompt || undefined
+            : restoredSubmission.modelText === submittedValue
+              ? restoredSubmission.submittedPrompt
+              : undefined;
+      if (restoredSubmission !== null || submittedPromptProvenanceUnavailable) {
+        setBufferText('', { clearUndoHistory: true });
+      }
 
       // Route to active in-process agent if viewing a sub-agent tab.
       if (agentViewState.activeView !== 'main') {
@@ -2446,6 +2479,8 @@ export const AppContainer = (props: AppContainerProps) => {
       geminiClient,
       historyManager,
       settings.merged.ui?.disableWorkflowKeywordTrigger,
+      setBufferText,
+      vimEnabled,
     ],
   );
 
@@ -2546,7 +2581,7 @@ export const AppContainer = (props: AppContainerProps) => {
       const popped = popAllMessages();
       if (popped) {
         restoredSubmissionRef.current = popped;
-        restoredSubmissionEditedRef.current = false;
+        submittedPromptProvenanceUnavailableRef.current = false;
         const currentText = buffer.text;
         buffer.setText(
           currentText
@@ -2606,7 +2641,7 @@ export const AppContainer = (props: AppContainerProps) => {
             ? {}
             : { submittedPrompt: cancelledTurnUserItem.submittedPrompt }),
         };
-        restoredSubmissionEditedRef.current = false;
+        submittedPromptProvenanceUnavailableRef.current = false;
         buffer.setText(cancelledTurnUserItem.text);
       };
 
@@ -3394,6 +3429,8 @@ export const AppContainer = (props: AppContainerProps) => {
           refreshStatic();
 
           if (userItem.type === 'user' && userItem.text) {
+            restoredSubmissionRef.current = null;
+            submittedPromptProvenanceUnavailableRef.current = true;
             buffer.setText(userItem.text);
           }
 
@@ -4468,7 +4505,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleRetryLastPrompt: retryLastPrompt,
       handleClearScreen,
       popAllQueuedMessages,
-      clearRestoredSubmission,
+      invalidateSubmittedPromptProvenance,
       // Welcome back dialog
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
@@ -4559,7 +4596,7 @@ export const AppContainer = (props: AppContainerProps) => {
       retryLastPrompt,
       handleClearScreen,
       popAllQueuedMessages,
-      clearRestoredSubmission,
+      invalidateSubmittedPromptProvenance,
       handleWelcomeBackSelection,
       handleWelcomeBackClose,
       handleWorktreeExit,

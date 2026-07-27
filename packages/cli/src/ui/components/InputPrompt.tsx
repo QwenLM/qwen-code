@@ -668,7 +668,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
 
   const customSetTextAndResetCompletionSignal = useCallback(
     (newText: string) => {
-      uiActions.clearRestoredSubmission();
+      uiActions.invalidateSubmittedPromptProvenance();
       buffer.setText(newText);
       setHistoryRestoredText(newText);
     },
@@ -1288,6 +1288,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             }
           }
           if (keyMatchers[Command.ACCEPT_SUGGESTION_REVERSE_SEARCH](key)) {
+            uiActions.invalidateSubmittedPromptProvenance();
             sc.handleAutocomplete(activeSuggestionIndex);
             resetState();
             setActive(false);
@@ -1300,6 +1301,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             showSuggestions && activeSuggestionIndex > -1
               ? suggestions[activeSuggestionIndex].value
               : buffer.text;
+          if (showSuggestions && activeSuggestionIndex > -1) {
+            uiActions.invalidateSubmittedPromptProvenance();
+          }
           handleSubmitAndClear(textToSubmit);
           resetState();
           setActive(false);
@@ -1650,12 +1654,18 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // Shell History Navigation
         if (keyMatchers[Command.NAVIGATION_UP](key)) {
           const prevCommand = shellHistory.getPreviousCommand();
-          if (prevCommand !== null) buffer.setText(prevCommand);
+          if (prevCommand !== null) {
+            uiActions.invalidateSubmittedPromptProvenance();
+            buffer.setText(prevCommand);
+          }
           return true;
         }
         if (keyMatchers[Command.NAVIGATION_DOWN](key)) {
           const nextCommand = shellHistory.getNextCommand();
-          if (nextCommand !== null) buffer.setText(nextCommand);
+          if (nextCommand !== null) {
+            uiActions.invalidateSubmittedPromptProvenance();
+            buffer.setText(nextCommand);
+          }
           return true;
         }
       }
@@ -2033,6 +2043,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         const sc = isCommandSearch
           ? commandSearchCompletion
           : reverseSearchCompletion;
+        uiActions.invalidateSubmittedPromptProvenance();
         sc.handleAutocomplete(index);
         sc.resetCompletionState();
         (isCommandSearch ? setCommandSearchActive : setReverseSearchActive)(
@@ -2080,6 +2091,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       setExpandedSuggestionIndex,
       setCommandSearchActive,
       setReverseSearchActive,
+      uiActions,
     ],
   );
 

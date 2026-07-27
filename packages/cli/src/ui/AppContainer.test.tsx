@@ -32,7 +32,7 @@ import {
   type Mock,
 } from 'vitest';
 import { render, cleanup } from 'ink-testing-library';
-import { useContext, act } from 'react';
+import { useContext, useState, act } from 'react';
 import {
   AppContainer,
   dedupeNewestFirst,
@@ -152,6 +152,7 @@ vi.mock('./contexts/AgentViewContext.js', () => ({
 }));
 vi.mock('./components/shared/text-buffer.js');
 vi.mock('./hooks/useLogger.js');
+vi.mock('../services/prompt-stash.js');
 
 // Mock external utilities
 vi.mock('../utils/events.js');
@@ -185,6 +186,7 @@ import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { ShellExecutionService } from '@qwen-code/qwen-code-core';
+import { restorePromptStash } from '../services/prompt-stash.js';
 
 describe('AppContainer State Management', () => {
   let mockConfig: Config;
@@ -216,6 +218,7 @@ describe('AppContainer State Management', () => {
   const mockedUseLoadingIndicator = useLoadingIndicator as Mock;
   const mockedUseTerminalSize = useTerminalSize as Mock;
   const mockedUseKeypress = useKeypress as Mock;
+  const mockedRestorePromptStash = vi.mocked(restorePromptStash);
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -362,6 +365,7 @@ describe('AppContainer State Management', () => {
       getPreviousUserMessages: vi.fn().mockResolvedValue([]),
       removeLastUserMessage: vi.fn().mockResolvedValue(false),
     });
+    mockedRestorePromptStash.mockReturnValue(false);
     mockedUseLoadingIndicator.mockReturnValue({
       elapsedTime: '0.0s',
       currentLoadingPhrase: '',
@@ -500,6 +504,16 @@ describe('AppContainer State Management', () => {
       text: '',
       setText,
     });
+    const addMessage = vi.fn();
+    mockedUseMessageQueue.mockReturnValue({
+      messageQueue: [],
+      addMessage,
+      clearQueue: vi.fn(),
+      getQueuedMessagesText: vi.fn().mockReturnValue(''),
+      popAllMessages: vi.fn().mockReturnValue(null),
+      drainQueue: vi.fn().mockReturnValue([]),
+      popNextTurn: vi.fn().mockReturnValue(null),
+    });
 
     const apiHistory = options.apiHistory ?? [
       apiUser('first prompt'),
@@ -561,6 +575,7 @@ describe('AppContainer State Management', () => {
       addItem,
       loadHistory,
       setText,
+      addMessage,
       rewind,
       getHistoryShallow,
       truncateHistory,
@@ -1363,7 +1378,7 @@ describe('AppContainer State Management', () => {
 
       mockQueueMessage.mockClear();
       expect(capturedUIActions.popAllQueuedMessages()).toBe(modelText);
-      capturedUIActions.clearRestoredSubmission();
+      capturedUIActions.invalidateSubmittedPromptProvenance();
       capturedUIActions.handleFinalSubmit(modelText, {
         submittedPrompt: modelText,
       });
@@ -1371,7 +1386,120 @@ describe('AppContainer State Management', () => {
       expect(mockQueueMessage).toHaveBeenCalledWith(
         modelText,
         false,
-        modelText,
+        undefined,
+      );
+    });
+
+    it('treats a restored prompt stash as provenance unavailable', () => {
+      const stashedText =
+        '<system-reminder>\ngenerated context\n</system-reminder>\n\nuser text';
+      const mockQueueMessage = vi.fn();
+      const setText = vi.fn();
+      mockedUseTextBuffer.mockImplementation(() => ({
+        text: '',
+        setText,
+      }));
+      mockedRestorePromptStash.mockImplementation(
+        (_targetDir, _currentText, onRestore) => {
+          onRestore(stashedText);
+          return true;
+        },
+      );
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(setText).toHaveBeenCalledWith(stashedText);
+      capturedUIActions.handleFinalSubmit(stashedText, {
+        submittedPrompt: stashedText,
+      });
+
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        stashedText,
+        false,
+        undefined,
+      );
+      expect(setText).toHaveBeenLastCalledWith('', {
+        clearUndoHistory: true,
+      });
+      expect(setText).toHaveBeenCalledWith(stashedText);
+      expect(setText).toHaveBeenCalledTimes(2);
+    });
+
+    it('clears restored prompt undo history after a manual clear', () => {
+      const stashedText =
+        '<system-reminder>\ngenerated context\n</system-reminder>\n\nuser text';
+      const addMessage = vi.fn();
+      let currentText = '';
+      let onBufferChange: ((text: string) => void) | undefined;
+      const setText = vi.fn((text: string) => {
+        currentText = text;
+      });
+      mockedUseTextBuffer.mockImplementation((options) => {
+        onBufferChange = options.onChange;
+        return {
+          get text() {
+            return currentText;
+          },
+          setText,
+        };
+      });
+      mockedRestorePromptStash.mockImplementation(
+        (_targetDir, _currentText, onRestore) => {
+          onRestore(stashedText);
+          return true;
+        },
+      );
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      act(() => {
+        currentText = '';
+        onBufferChange?.('');
+      });
+
+      expect(setText).toHaveBeenLastCalledWith('', {
+        clearUndoHistory: true,
+      });
+
+      capturedUIActions.handleFinalSubmit('fresh prompt', {
+        submittedPrompt: 'fresh prompt',
+      });
+      expect(addMessage).toHaveBeenCalledWith(
+        'fresh prompt',
+        false,
+        'fresh prompt',
       );
     });
 
@@ -1468,8 +1596,21 @@ describe('AppContainer State Management', () => {
       );
     });
 
-    it('omits provenance when a programmatic caller does not opt in', () => {
+    it('does not consume composer provenance for a programmatic submission', () => {
+      const stashedText =
+        '<system-reminder>\ngenerated context\n</system-reminder>\n\nuser text';
       const mockQueueMessage = vi.fn();
+      const setText = vi.fn();
+      mockedUseTextBuffer.mockImplementation(() => ({
+        text: '',
+        setText,
+      }));
+      mockedRestorePromptStash.mockImplementation(
+        (_targetDir, _currentText, onRestore) => {
+          onRestore(stashedText);
+          return true;
+        },
+      );
       mockedUseMessageQueue.mockReturnValue({
         messageQueue: [],
         addMessage: mockQueueMessage,
@@ -1489,6 +1630,7 @@ describe('AppContainer State Management', () => {
         />,
       );
 
+      expect(setText).toHaveBeenCalledWith(stashedText);
       capturedUIActions.handleFinalSubmit('configured initial prompt');
 
       expect(mockQueueMessage).toHaveBeenCalledWith(
@@ -1496,21 +1638,33 @@ describe('AppContainer State Management', () => {
         false,
         undefined,
       );
+      expect(setText).toHaveBeenCalledTimes(1);
+
+      capturedUIActions.handleFinalSubmit(stashedText, {
+        submittedPrompt: stashedText,
+      });
+      expect(mockQueueMessage).toHaveBeenLastCalledWith(
+        stashedText,
+        false,
+        undefined,
+      );
+      expect(setText).toHaveBeenCalledWith('', {
+        clearUndoHistory: true,
+      });
     });
 
-    it('keeps restored direct Vim submissions fail closed', () => {
-      const modelText =
-        '<system-reminder>\nmanaged context\n</system-reminder>\n\nvim prompt';
+    it('omits provenance while Vim mode is enabled', () => {
       const mockQueueMessage = vi.fn();
+      mockedUseVimModeState.mockReturnValue({
+        vimEnabled: true,
+        vimMode: 'INSERT',
+      });
       mockedUseMessageQueue.mockReturnValue({
-        messageQueue: [modelText],
+        messageQueue: [],
         addMessage: mockQueueMessage,
         clearQueue: vi.fn(),
-        getQueuedMessagesText: vi.fn().mockReturnValue(modelText),
-        popAllMessages: vi.fn().mockReturnValue({
-          modelText,
-          submittedPrompt: 'vim prompt',
-        }),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
         drainQueue: vi.fn().mockReturnValue([]),
         popNextTurn: vi.fn().mockReturnValue(null),
       });
@@ -1524,15 +1678,62 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      expect(capturedUIActions.popAllQueuedMessages()).toBe(modelText);
-      const vimSubmit = mockedUseVim.mock.calls.at(-1)?.[1];
-      if (typeof vimSubmit !== 'function') {
-        throw new Error('useVim did not receive its submit callback');
-      }
-      vimSubmit(modelText);
+      capturedUIActions.handleFinalSubmit('vim prompt', {
+        submittedPrompt: 'vim prompt',
+      });
 
       expect(mockQueueMessage).toHaveBeenCalledWith(
-        modelText,
+        'vim prompt',
+        false,
+        undefined,
+      );
+    });
+
+    it('keeps Vim-modified composer text ineligible after Vim is disabled', () => {
+      const mockQueueMessage = vi.fn();
+      let setVimEnabled: ((enabled: boolean) => void) | undefined;
+      mockedUseTextBuffer.mockImplementation(() => ({
+        text: 'register contents',
+        setText: vi.fn(),
+      }));
+      const useMockVimModeState = () => {
+        const [vimEnabled, setEnabled] = useState(true);
+        setVimEnabled = setEnabled;
+        return {
+          vimEnabled,
+          vimMode: 'NORMAL',
+        };
+      };
+      mockedUseVimModeState.mockImplementation(useMockVimModeState);
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      act(() => {
+        setVimEnabled?.(false);
+      });
+
+      capturedUIActions.handleFinalSubmit('register contents', {
+        submittedPrompt: 'register contents',
+      });
+
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        'register contents',
         false,
         undefined,
       );
@@ -4800,6 +5001,18 @@ describe('AppContainer State Management', () => {
         { truncatedCount: 2 },
         harness.snapshots.slice(0, 2),
       );
+
+      capturedUIActions.handleFinalSubmit('second prompt', {
+        submittedPrompt: 'second prompt',
+      });
+      expect(harness.addMessage).toHaveBeenCalledWith(
+        'second prompt',
+        false,
+        undefined,
+      );
+      expect(harness.setText).toHaveBeenLastCalledWith('', {
+        clearUndoHistory: true,
+      });
     });
 
     it('shows an error and returns for conversation-only rewind with no client', async () => {

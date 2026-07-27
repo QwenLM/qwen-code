@@ -162,7 +162,8 @@ export class HookEventHandler {
     const input: UserPromptSubmitInput = {
       ...this.createBaseInput(HookEventName.UserPromptSubmit),
       prompt,
-      ...(submittedPrompt !== undefined
+      ...(typeof submittedPrompt === 'string' &&
+      submittedPrompt.trim().length > 0
         ? { submitted_prompt: submittedPrompt }
         : {}),
     };

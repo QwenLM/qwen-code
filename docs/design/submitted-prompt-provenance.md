@@ -83,18 +83,32 @@ while deleting another.
 
 ## Eligibility
 
-| Path                                                                     | `prompt`                   | `submitted_prompt`                               | Rule                                            |
-| ------------------------------------------------------------------------ | -------------------------- | ------------------------------------------------ | ----------------------------------------------- |
-| Fresh interactive TUI submission sent as `UserQuery`                     | Existing model-bound value | Present                                          | Capture the trimmed projection before expansion |
-| Deferred TUI submission that later becomes a fresh turn                  | Existing model-bound value | Present only with complete provenance            | Preserve the sidecar while queued               |
-| Exact cancellation or queue restoration followed by resubmission         | Existing model-bound value | Present only when the restored text is unchanged | Reuse the sidecar only for an exact restoration |
-| Edited or partially known restored input                                 | Existing model-bound value | Absent                                           | Do not guess provenance                         |
-| Same-turn steering input                                                 | Existing behavior          | Absent                                           | Steering is not a fresh supported submission    |
-| Tool result or hook continuation                                         | Existing behavior          | Absent                                           | Preserve legacy continuation behavior           |
-| Retry, cron, notification, or teammate traffic                           | Existing behavior          | Absent                                           | Preserve existing trigger behavior              |
-| Configured `--prompt-interactive` initial prompt                         | Existing model-bound value | Absent                                           | It did not cross the interactive input boundary |
-| Vim NORMAL-mode direct submission                                        | Existing model-bound value | Absent                                           | It bypasses the canonical InputPrompt producer  |
-| ACP, headless, `serve`, SDK, remote input, or accepted speculative input | Existing behavior          | Absent                                           | No producer is added in this change             |
+| Path                                                                               | `prompt`                   | `submitted_prompt`                               | Rule                                            |
+| ---------------------------------------------------------------------------------- | -------------------------- | ------------------------------------------------ | ----------------------------------------------- |
+| Fresh interactive TUI submission sent as `UserQuery`                               | Existing model-bound value | Present                                          | Capture the trimmed projection before expansion |
+| Deferred TUI submission that later becomes a fresh turn                            | Existing model-bound value | Present only with complete provenance            | Preserve the sidecar while queued               |
+| Exact cancellation or queue restoration followed by resubmission                   | Existing model-bound value | Present only when the restored text is unchanged | Reuse the sidecar only for an exact restoration |
+| Edited or partially known restored input                                           | Existing model-bound value | Absent                                           | Do not guess provenance                         |
+| Prompt, command, or shell-history navigation or selected search match              | Existing model-bound value | Absent                                           | History can contain generated expansions        |
+| Prompt restored from the cross-restart stash                                       | Existing model-bound value | Absent                                           | The stash stores text without provenance        |
+| Prompt restored by conversation rewind                                             | Existing model-bound value | Absent                                           | Rewind history stores model-bound text only     |
+| Same-turn steering input                                                           | Existing behavior          | Absent                                           | Steering is not a fresh supported submission    |
+| Tool result or hook continuation                                                   | Existing behavior          | Absent                                           | Preserve legacy continuation behavior           |
+| Retry, cron, notification, or teammate traffic                                     | Existing behavior          | Absent                                           | Preserve existing trigger behavior              |
+| Configured `--prompt-interactive` initial prompt                                   | Existing model-bound value | Absent                                           | It did not cross the interactive input boundary |
+| Non-empty input present while Vim mode is enabled, including after Vim is disabled | Existing model-bound value | Absent                                           | Vim registers do not carry provenance           |
+| ACP, headless, `serve`, SDK, remote input, or accepted speculative input           | Existing behavior          | Absent                                           | No producer is added in this change             |
+
+When restored or provenance-unavailable model-bound input is cleared or
+submitted, the TUI discards its text-buffer undo and redo history before a
+later input can become eligible. This prevents undo from restoring model-bound
+text after its provenance marker or sidecar has been consumed.
+
+Any non-empty input present while Vim is enabled remains ineligible after Vim
+is disabled until the composer is cleared. This conservative rule also covers
+drafts entered before enabling Vim. Vim registers can retain model-bound text
+across buffer clears, so changing modes cannot restore provenance for existing
+content.
 
 The table defines provenance only. Existing event triggering remains unchanged,
 including paths that do not fire `UserPromptSubmit`.
@@ -153,18 +167,19 @@ access controls must match the submitted data. A hook can also copy its input
 into its own output, error, logs, or downstream systems; those destinations are
 outside this field's guarantees.
 
+When both fields are present, prompt-hook payloads contain overlapping text and
+can consume additional model input tokens. This contract does not provide
+per-hook field suppression.
+
 Hook-call telemetry currently exports hook metadata rather than the full input,
 but that implementation detail is not a privacy boundary and consumers should
 not rely on it.
 
 ## Why this differs from Claude Code
 
-In the reviewed Claude Code source, `UserPromptSubmit` runs inside
-`src/utils/processUserInput/processUserInput.ts`, after user-input processing
-decides a request should be queried and before control enters the model query
-loop. Tool-result recursion remains inside `src/query.ts` and does not cross
-that user-input boundary. Consequently, Claude Code's existing `prompt`
-naturally represents the input at its user-submission boundary.
+Claude Code runs `UserPromptSubmit` at its user-submission boundary, before
+control enters the model query loop. Tool-result recursion does not cross that
+boundary, so its existing `prompt` naturally represents submitted input.
 
 Qwen Code runs the hook closer to its shared model-send pipeline and preserves
 legacy behavior across more send paths. Moving the event would be a broader,

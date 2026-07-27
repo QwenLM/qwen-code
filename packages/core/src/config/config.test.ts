@@ -8107,9 +8107,19 @@ describe('Model Switching and Config Updates', () => {
         expected: 'submitted prompt',
       },
       {
-        name: 'preserves an empty submitted prompt',
+        name: 'preserves surrounding whitespace on a non-empty prompt',
+        submittedPrompt: '  submitted prompt  ',
+        expected: '  submitted prompt  ',
+      },
+      {
+        name: 'drops an empty submitted prompt',
         submittedPrompt: '',
-        expected: '',
+        expected: undefined,
+      },
+      {
+        name: 'drops a whitespace-only submitted prompt',
+        submittedPrompt: ' \t\n ',
+        expected: undefined,
       },
       {
         name: 'drops a numeric submitted prompt',
