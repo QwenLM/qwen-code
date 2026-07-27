@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
+  DaemonSessionMonitorTaskStatus,
   DaemonSessionTasksStatus,
   DaemonSessionTaskStatus,
 } from '@qwen-code/sdk/daemon';
@@ -19,6 +20,7 @@ import {
   localizeToolDisplayName,
   sanitizeControlChars,
 } from './toolFormatting';
+import { Badge } from '../ui/badge';
 import styles from './TasksStatusMessage.module.css';
 
 const ACTIVE_EVENT = 'web-shell:tasks-panel-active';
@@ -239,11 +241,13 @@ export function TasksStatusMessage({
   embedded = false,
   manageActiveEvent = true,
   onClose,
+  onOpenMonitor,
 }: {
   message: SerializedTasksMessage;
   embedded?: boolean;
   manageActiveEvent?: boolean;
   onClose?: () => void;
+  onOpenMonitor?: (task: DaemonSessionMonitorTaskStatus) => void;
 }) {
   const { t } = useI18n();
   const actions = useActions();
@@ -445,7 +449,11 @@ export function TasksStatusMessage({
         event.preventDefault();
         event.stopPropagation();
         if (step === 'list' && selectedTask) {
-          setStep('detail');
+          if (embedded && selectedTask.kind === 'monitor' && onOpenMonitor) {
+            onOpenMonitor(selectedTask);
+          } else {
+            setStep('detail');
+          }
         } else if (step === 'detail') {
           setIsOpen(false);
         }
@@ -468,7 +476,16 @@ export function TasksStatusMessage({
         return;
       }
     },
-    [isOpen, step, tasks.length, selectedTask, handleCancel, pendingCancelId],
+    [
+      embedded,
+      isOpen,
+      step,
+      tasks.length,
+      selectedTask,
+      handleCancel,
+      onOpenMonitor,
+      pendingCancelId,
+    ],
   );
 
   if (!isOpen) return null;
@@ -621,7 +638,11 @@ export function TasksStatusMessage({
                   }
                   onClick={() => {
                     setSelectedIndex(index);
-                    setStep(embedded && expanded ? 'list' : 'detail');
+                    if (embedded && task.kind === 'monitor' && onOpenMonitor) {
+                      onOpenMonitor(task);
+                    } else {
+                      setStep(embedded && expanded ? 'list' : 'detail');
+                    }
                   }}
                   onMouseEnter={() => {
                     if (!embedded) setSelectedIndex(index);
@@ -726,6 +747,159 @@ function detailTitle(
     case 'monitor':
       return `${t('tasks.kind.monitor')} › ${task.description}`;
   }
+}
+
+export function MonitorTaskDetail({
+  task,
+}: {
+  task: DaemonSessionMonitorTaskStatus;
+}) {
+  const { t } = useI18n();
+  const actions = useActions();
+  const [currentTask, setCurrentTask] = useState(task);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setCurrentTask((current) =>
+      current.id === task.id &&
+      current.status !== 'running' &&
+      task.status === 'running'
+        ? current
+        : task,
+    );
+  }, [task]);
+
+  useEffect(() => {
+    setActionError(null);
+  }, [task.id, task.status]);
+
+  const handleCancel = useCallback(async () => {
+    if (busy || currentTask.status !== 'running') return;
+    setActionError(null);
+    setBusy(true);
+    try {
+      const result = await actions.cancelTask(currentTask.id, 'monitor');
+      if (!result.cancelled) {
+        setActionError(t('tasks.alreadyStopped'));
+        return;
+      }
+      setCurrentTask({
+        ...currentTask,
+        status: 'cancelled',
+        endTime: Date.now(),
+      });
+      setActionError(null);
+      try {
+        const snapshot = await actions.getTasks();
+        const updatedTask = snapshot.tasks.find(
+          (candidate): candidate is DaemonSessionMonitorTaskStatus =>
+            candidate.kind === 'monitor' && candidate.id === currentTask.id,
+        );
+        if (updatedTask && updatedTask.status !== 'running') {
+          setCurrentTask(updatedTask);
+        }
+      } catch (error: unknown) {
+        console.warn('[web-shell] failed to refresh stopped monitor:', error);
+      }
+    } catch (error: unknown) {
+      console.warn('[web-shell] failed to cancel monitor:', error);
+      setActionError(t('tasks.cancelFailed'));
+    } finally {
+      setBusy(false);
+    }
+  }, [actions, busy, currentTask, t]);
+
+  return (
+    <div className={styles.monitorDetail}>
+      <div className={styles.monitorOverview}>
+        <div className={styles.monitorHeadingRow}>
+          <div className={styles.monitorDescription}>
+            {currentTask.description}
+          </div>
+          <div className={styles.monitorStatusActions}>
+            <Badge
+              variant="outline"
+              className={styles.monitorStatusTag}
+              data-status={currentTask.status}
+            >
+              {statusLabel(currentTask.status, t)}
+            </Badge>
+            {currentTask.status === 'running' && (
+              <button
+                type="button"
+                className={styles.monitorStopButton}
+                disabled={busy}
+                onClick={() => void handleCancel()}
+              >
+                {busy ? t('common.loading') : t('tasks.action.stop')}
+              </button>
+            )}
+          </div>
+        </div>
+        {actionError && (
+          <div className={styles.monitorActionError}>{actionError}</div>
+        )}
+        <div className={styles.monitorMetrics}>
+          <MonitorMetric
+            label={t('tasks.detail.runtime')}
+            value={formatRuntime(currentTask.runtimeMs)}
+          />
+          <MonitorMetric
+            label={t('tasks.detail.eventCount')}
+            value={String(currentTask.eventCount)}
+          />
+          {currentTask.pid !== undefined && (
+            <MonitorMetric
+              label={t('tasks.detail.pid')}
+              value={String(currentTask.pid)}
+            />
+          )}
+          {currentTask.eventCount > 0 && (
+            <MonitorMetric
+              label={t('tasks.detail.lastEvent')}
+              value={new Date(currentTask.lastEventTime).toLocaleTimeString()}
+            />
+          )}
+          {currentTask.droppedLines > 0 && (
+            <MonitorMetric
+              label={t('tasks.detail.droppedCount')}
+              value={String(currentTask.droppedLines)}
+            />
+          )}
+          {currentTask.exitCode !== undefined && (
+            <MonitorMetric
+              label={t('tasks.detail.exitCode')}
+              value={String(currentTask.exitCode)}
+            />
+          )}
+        </div>
+      </div>
+      <div className={styles.monitorCommandSection}>
+        <div className={styles.monitorSectionLabel}>
+          {t('tasks.detail.command')}
+        </div>
+        <pre className={styles.monitorCommand}>{currentTask.command}</pre>
+      </div>
+      {currentTask.error && (
+        <div className={styles.monitorError}>
+          <div className={styles.monitorSectionLabel}>
+            {t('tasks.detail.error')}
+          </div>
+          <div>{currentTask.error}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MonitorMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className={styles.monitorMetric}>
+      <div className={styles.monitorMetricValue}>{value}</div>
+      <div className={styles.monitorMetricLabel}>{label}</div>
+    </div>
+  );
 }
 
 function TaskDetail({
