@@ -101,16 +101,6 @@
   min-width: 0;
 }
 
-.headerActionsMeasure {
-  position: absolute;
-  visibility: hidden;
-  pointer-events: none;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  white-space: nowrap;
-}
-
 .headerActionsInline {
   display: inline-flex;
   align-items: center;

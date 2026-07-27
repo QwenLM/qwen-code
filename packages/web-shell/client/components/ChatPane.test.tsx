@@ -744,12 +744,7 @@ describe('ChatPane', () => {
       sessionId: 'sess-1',
       workspaceCwd: '/work/api',
     });
-    // Measure row always mounts a copy for width checks; assert against that.
-    expect(
-      container!.querySelector(
-        '[data-testid="pane-header-actions-measure"] [data-testid="host-pane-action"]',
-      )?.textContent,
-    ).toBe('sess-1:/work/api');
+    expect(testid('host-pane-action')?.textContent).toBe('sess-1:/work/api');
     expect(testid('pane-header-actions')).not.toBeNull();
   });
 

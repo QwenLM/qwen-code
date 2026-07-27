@@ -4,11 +4,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import {
+  Children,
+  isValidElement,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { MoreHorizontalIcon } from 'lucide-react';
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuItem,
   DropdownMenuTrigger,
 } from './ui/dropdown-menu';
 import { useI18n } from '../i18n';
@@ -28,6 +36,9 @@ export interface PaneHeaderActionsProps {
  * Renders pane-header host actions inline when they fit, otherwise collapses
  * them into a `…` menu. Measures against the header width so split-pane
  * resizing / add-remove does not crush the title.
+ *
+ * Host actions are mounted in exactly one place (inline or overflow) so
+ * stateful action components are not duplicated for width measurement.
  */
 export function PaneHeaderActions({
   children,
@@ -35,22 +46,37 @@ export function PaneHeaderActions({
 }: PaneHeaderActionsProps) {
   const { t } = useI18n();
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const measureRef = useRef<HTMLDivElement | null>(null);
+  const inlineRef = useRef<HTMLDivElement | null>(null);
   const trailingRef = useRef<HTMLDivElement | null>(null);
+  const preferredWidthRef = useRef(0);
   const [collapsed, setCollapsed] = useState(false);
   const hasHostActions = children != null && children !== false;
 
   useLayoutEffect(() => {
     if (!hasHostActions) {
+      preferredWidthRef.current = 0;
       setCollapsed(false);
       return;
     }
 
     const header = rootRef.current?.parentElement;
-    const measure = measureRef.current;
-    if (!header || !measure) return;
+    if (!header) return;
 
     const update = () => {
+      // Refresh natural width only while inline; when collapsed keep the last
+      // measured value so we can decide when to expand again without a second
+      // React mount of the host actions.
+      if (inlineRef.current) {
+        preferredWidthRef.current = inlineRef.current.scrollWidth;
+      }
+      const needed = preferredWidthRef.current;
+      // Skip until the inline row has a real width — jsdom and the first
+      // paint often report 0, which would otherwise force a false collapse
+      // and unmount host actions into a closed menu.
+      if (needed === 0) {
+        setCollapsed(false);
+        return;
+      }
       const trailingWidth = trailingRef.current?.offsetWidth ?? 0;
       const headerGap = 8; // matches `.header { gap }`
       const actionsGap = trailingWidth > 0 ? 4 : 0; // matches `.headerActions`
@@ -58,17 +84,11 @@ export function PaneHeaderActions({
       const padding =
         (parseFloat(style.paddingLeft) || 0) +
         (parseFloat(style.paddingRight) || 0);
-      // Multi-workspace panes show a workspace tag before the title; reserve
-      // its width (and its flex gap) so host actions collapse before the title
-      // is crushed below TITLE_MIN_WIDTH_PX.
       const workspaceTag = header.querySelector<HTMLElement>(
         '[data-web-shell-pane-workspace]',
       );
       const workspaceTagWidth = workspaceTag?.offsetWidth ?? 0;
       const workspaceTagGap = workspaceTagWidth > 0 ? headerGap : 0;
-      // Compare natural host-action width against space left after the title
-      // minimum and trailing built-ins. The overflow trigger is not part of
-      // this budget so collapsing cannot oscillate at the threshold.
       const available =
         header.clientWidth -
         padding -
@@ -78,19 +98,18 @@ export function PaneHeaderActions({
         trailingWidth -
         headerGap -
         actionsGap;
-      setCollapsed(measure.scrollWidth > available);
+      setCollapsed(needed > available);
     };
 
     update();
     const observer = new ResizeObserver(update);
     observer.observe(header);
-    observer.observe(measure);
+    if (inlineRef.current) observer.observe(inlineRef.current);
     if (trailingRef.current) observer.observe(trailingRef.current);
-    // `children` is intentionally omitted: a new ReactNode each ChatPane
-    // render would tear down and recreate the observer on every stream token.
-    // Content-size changes are already covered by observing `measure`.
     return () => observer.disconnect();
-  }, [hasHostActions]);
+    // Re-run when collapse flips so we can attach/detach the inline observer
+    // after the single host-action mount moves between trees.
+  }, [hasHostActions, collapsed]);
 
   return (
     <div
@@ -98,17 +117,6 @@ export function PaneHeaderActions({
       className={styles.headerActions}
       data-testid="pane-header-actions"
     >
-      {hasHostActions && (
-        <div
-          ref={measureRef}
-          className={styles.headerActionsMeasure}
-          aria-hidden
-          data-testid="pane-header-actions-measure"
-        >
-          {children}
-        </div>
-      )}
-
       {hasHostActions &&
         (collapsed ? (
           <DropdownMenu>
@@ -128,11 +136,20 @@ export function PaneHeaderActions({
               className="w-auto min-w-40"
               data-testid="pane-header-overflow-menu"
             >
-              <div className={styles.headerOverflowPanel}>{children}</div>
+              <div className={styles.headerOverflowPanel}>
+                {Children.toArray(children).map((child, index) =>
+                  isValidElement(child) ? (
+                    <DropdownMenuItem key={child.key ?? index} asChild>
+                      {child}
+                    </DropdownMenuItem>
+                  ) : null,
+                )}
+              </div>
             </DropdownMenuContent>
           </DropdownMenu>
         ) : (
           <div
+            ref={inlineRef}
             className={styles.headerActionsInline}
             data-testid="pane-header-actions-inline"
           >
