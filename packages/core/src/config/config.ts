@@ -97,6 +97,7 @@ import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import { maybeRunAutoSkillCurator } from '../skills/skill-curator.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import {
   type AutoModeDenialState,
@@ -2700,6 +2701,22 @@ export class Config {
     this.subagentManager = new SubagentManager(this);
     recordStartupEvent('config_initialize_skills_start');
     if (!options?.skipSkillManager) {
+      if (this.getAutoSkillEnabled()) {
+        try {
+          const curatorResult = await maybeRunAutoSkillCurator(
+            this.getProjectRoot(),
+          );
+          if (curatorResult.status === 'ran') {
+            this.debugLogger.debug(
+              `Auto-skill curator checked ${curatorResult.result.checked} skill(s) and archived ${curatorResult.result.archived.length}.`,
+            );
+          }
+        } catch (error) {
+          this.debugLogger.warn(
+            `Auto-skill curator skipped: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
       this.skillManager = new SkillManager(this);
       if (this.getBareMode() || this.isSafeMode()) {
         await this.skillManager.refreshCache();

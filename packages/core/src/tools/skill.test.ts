@@ -19,6 +19,7 @@ import {
   clearCollectedSkillEntriesCache,
   renderAvailableSkillsBlock,
 } from './skill-utils.js';
+import { recordAutoSkillUsage } from '../skills/skill-curator.js';
 
 // Type for accessing protected methods in tests
 type SkillToolWithProtectedMethods = SkillTool & {
@@ -37,6 +38,9 @@ type SkillToolWithProtectedMethods = SkillTool & {
 
 // Mock dependencies
 vi.mock('../skills/skill-manager.js');
+vi.mock('../skills/skill-curator.js', () => ({
+  recordAutoSkillUsage: vi.fn().mockResolvedValue(false),
+}));
 vi.mock('../telemetry/index.js', () => ({
   logSkillLaunch: vi.fn(),
   recordSkillInvocation: vi.fn(),
@@ -89,6 +93,7 @@ describe('SkillTool', () => {
     // Create mock config
     config = {
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+      getAutoSkillEnabled: vi.fn().mockReturnValue(true),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getSkillManager: vi.fn(),
       getGeminiClient: vi.fn().mockReturnValue(undefined),
@@ -620,6 +625,10 @@ describe('SkillTool', () => {
         skillName: 'code-review',
         success: true,
       });
+      expect(recordAutoSkillUsage).toHaveBeenCalledWith(
+        '/test/project',
+        mockRuntimeConfig,
+      );
     });
 
     it('should include allowedTools in result when present', async () => {
@@ -718,6 +727,7 @@ describe('SkillTool', () => {
         skillName: 'code-review',
         success: false,
       });
+      expect(recordAutoSkillUsage).not.toHaveBeenCalled();
     });
 
     it("L3 default is 'ask' so AUTO mode routes through the classifier", async () => {

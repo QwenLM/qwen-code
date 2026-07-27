@@ -54,7 +54,10 @@ import { BundledSkillLoader } from '../../services/BundledSkillLoader.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
 import { SavedWorkflowLoader } from '../../services/saved-workflow-loader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
-import { SkillCommandLoader } from '../../services/SkillCommandLoader.js';
+import {
+  recordAutoSkillCommandUsage,
+  SkillCommandLoader,
+} from '../../services/SkillCommandLoader.js';
 import {
   parseSlashCommand,
   parseStackedSlashCommands,
@@ -930,10 +933,14 @@ export const useSlashCommandProcessor = (
             }
 
             if (config) {
+              const succeeded = skillResult?.type === 'submit_prompt';
               recordSkillInvocation(config, {
                 skillName: getSkillCommandName(skill),
-                success: skillResult?.type === 'submit_prompt',
+                success: succeeded,
               });
+              if (succeeded) {
+                await recordAutoSkillCommandUsage(config, skill);
+              }
             }
           }
 
@@ -1256,6 +1263,7 @@ export const useSlashCommandProcessor = (
                     updateItem(invocationItemId, { sentToModel: true });
                   }
                   recordSkillCommandInvocation(true);
+                  await recordAutoSkillCommandUsage(config, commandToExecute);
                   return {
                     type: 'submit_prompt',
                     content,

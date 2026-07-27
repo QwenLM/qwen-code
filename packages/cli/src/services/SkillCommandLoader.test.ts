@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { SkillCommandLoader } from './SkillCommandLoader.js';
+import {
+  recordAutoSkillCommandUsage,
+  SkillCommandLoader,
+} from './SkillCommandLoader.js';
 import { skillArgsPath } from './skill-args-file.js';
 import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -16,6 +19,12 @@ import {
   type Config,
   type SkillConfig,
 } from '@qwen-code/qwen-code-core';
+
+const recordAutoSkillUsageMock = vi.hoisted(() => vi.fn());
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
+  recordAutoSkillUsage: recordAutoSkillUsageMock,
+}));
 
 function makeSkill(overrides: Partial<SkillConfig> = {}): SkillConfig {
   return {
@@ -46,6 +55,8 @@ describe('SkillCommandLoader', () => {
     mockConfig = {
       getSkillManager: vi.fn().mockReturnValue(mockSkillManager),
       getBareMode: vi.fn().mockReturnValue(false),
+      getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+      getAutoSkillEnabled: vi.fn().mockReturnValue(true),
       getPermissionManager: vi
         .fn()
         .mockReturnValue({ addSessionAllowRule: mockAddSessionAllowRule }),
@@ -181,6 +192,31 @@ describe('SkillCommandLoader', () => {
     expect(commands[0].sourceDetail).toBe('project');
     expect(commands[0].source).toBe('skill-dir-command');
     expect(commands[0].modelInvocable).toBe(true);
+    expect(commands[0].skillDetail?.filePath).toBe(skill.filePath);
+
+    await recordAutoSkillCommandUsage(mockConfig, commands[0]);
+    expect(recordAutoSkillUsageMock).toHaveBeenCalledWith('/test/project', {
+      name: 'my-skill',
+      level: 'project',
+      filePath: skill.filePath,
+    });
+  });
+
+  it('does not record curator usage when Auto Skill is disabled', async () => {
+    vi.mocked(mockConfig.getAutoSkillEnabled).mockReturnValue(false);
+
+    await recordAutoSkillCommandUsage(mockConfig, {
+      name: 'my-skill',
+      description: 'My skill',
+      kind: CommandKind.SKILL,
+      skillDetail: {
+        name: 'my-skill',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/auto-skill-test/SKILL.md',
+      },
+    });
+
+    expect(recordAutoSkillUsageMock).not.toHaveBeenCalled();
   });
 
   it('should submit skill body as prompt', async () => {

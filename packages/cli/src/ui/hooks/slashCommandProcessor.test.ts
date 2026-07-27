@@ -35,17 +35,22 @@ import {
   recordSkillInvocation,
 } from '@qwen-code/qwen-code-core';
 
-const { logSlashCommand, recordSkillInvocationMock, debugLoggerMock } =
-  vi.hoisted(() => ({
-    logSlashCommand: vi.fn(),
-    recordSkillInvocationMock: vi.fn(),
-    debugLoggerMock: {
-      debug: vi.fn(),
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn(),
-    },
-  }));
+const {
+  logSlashCommand,
+  recordSkillInvocationMock,
+  recordAutoSkillUsageMock,
+  debugLoggerMock,
+} = vi.hoisted(() => ({
+  logSlashCommand: vi.fn(),
+  recordSkillInvocationMock: vi.fn(),
+  recordAutoSkillUsageMock: vi.fn(),
+  debugLoggerMock: {
+    debug: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+  },
+}));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
@@ -54,6 +59,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     ...original,
     logSlashCommand,
     recordSkillInvocation: recordSkillInvocationMock,
+    recordAutoSkillUsage: recordAutoSkillUsageMock,
     createDebugLogger: () => debugLoggerMock,
     getIdeInstaller: vi.fn().mockReturnValue(null),
   };
@@ -2259,9 +2265,18 @@ describe('useSlashCommandProcessor', () => {
     });
 
     it('records successful skill slash commands when they submit a prompt', async () => {
+      vi.spyOn(mockConfig, 'getProjectRoot').mockReturnValueOnce(
+        '/test/project',
+      );
+      vi.spyOn(mockConfig, 'getAutoSkillEnabled').mockReturnValueOnce(true);
       const skillCmd = createTestCommand(
         {
           name: 'review-skill',
+          skillDetail: {
+            name: 'review-skill',
+            level: 'project',
+            filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
+          },
           action: vi.fn().mockResolvedValue({
             type: 'submit_prompt',
             content: [{ text: 'skill body' }],
@@ -2281,6 +2296,11 @@ describe('useSlashCommandProcessor', () => {
       expect(recordSkillInvocation).toHaveBeenCalledWith(mockConfig, {
         skillName: 'review-skill',
         success: true,
+      });
+      expect(recordAutoSkillUsageMock).toHaveBeenCalledWith('/test/project', {
+        name: 'review-skill',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
       });
     });
 

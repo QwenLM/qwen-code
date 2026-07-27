@@ -19,6 +19,12 @@ import { CommandKind, type ExecutionMode } from './ui/commands/types.js';
 import { filterCommandsForMode } from './services/commandUtils.js';
 import { goalCommand } from './ui/commands/goalCommand.js';
 
+const recordAutoSkillUsageMock = vi.hoisted(() => vi.fn());
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@qwen-code/qwen-code-core')>()),
+  recordAutoSkillUsage: recordAutoSkillUsageMock,
+}));
+
 // Mock the CommandService
 const mockGetCommands = vi.hoisted(() => vi.fn());
 const mockGetCommandsForMode = vi.hoisted(() => vi.fn());
@@ -64,6 +70,7 @@ describe('handleSlashCommand', () => {
       getFolderTrustFeature: vi.fn().mockReturnValue(false),
       getFolderTrust: vi.fn().mockReturnValue(false),
       getProjectRoot: vi.fn().mockReturnValue('/test/project'),
+      getAutoSkillEnabled: vi.fn().mockReturnValue(true),
       isTrustedFolder: vi.fn().mockReturnValue(true),
       getDisableAllHooks: vi.fn().mockReturnValue(false),
       hasHooksForEvent: vi.fn().mockReturnValue(true),
@@ -433,7 +440,11 @@ describe('handleSlashCommand', () => {
       name: 'review',
       description: 'Review code',
       kind: CommandKind.SKILL,
-      skillDetail: { name: 'review-skill' },
+      skillDetail: {
+        name: 'review-skill',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
+      },
       action: vi.fn().mockResolvedValue({
         type: 'submit_prompt',
         content: [{ text: 'Review prompt' }],
@@ -458,6 +469,11 @@ describe('handleSlashCommand', () => {
       byName: {
         'review-skill': { count: 1, success: 1, fail: 0 },
       },
+    });
+    expect(recordAutoSkillUsageMock).toHaveBeenCalledWith('/test/project', {
+      name: 'review-skill',
+      level: 'project',
+      filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
     });
   });
 
@@ -532,6 +548,11 @@ describe('handleSlashCommand', () => {
       name: 'review',
       description: 'Review code',
       kind: CommandKind.SKILL,
+      skillDetail: {
+        name: 'review',
+        level: 'project',
+        filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
+      },
       action: vi.fn().mockResolvedValue({
         type: 'submit_prompt',
         content: 'Review prompt',
@@ -557,6 +578,7 @@ describe('handleSlashCommand', () => {
         review: { count: 1, success: 0, fail: 1 },
       },
     });
+    expect(recordAutoSkillUsageMock).not.toHaveBeenCalled();
   });
 
   it('records SKILL submit_prompt commands as failures when hooks throw', async () => {
@@ -1059,6 +1081,43 @@ describe('handleSlashCommand', () => {
 
       expect(skillA.action).toHaveBeenCalledTimes(1);
       expect(skillB.action).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not record blocked stacked auto-skills as used', async () => {
+      mockFireUserPromptExpansionEvent.mockResolvedValue({
+        getBlockingError: () => ({
+          blocked: true,
+          reason: 'Blocked by policy',
+        }),
+        shouldStopExecution: () => false,
+      });
+      const skillA = {
+        ...createSkillCommand('feat-dev', 'a'),
+        skillDetail: {
+          name: 'feat-dev',
+          level: 'project',
+          filePath: '/test/project/.qwen/skills/auto-skill-feat-dev/SKILL.md',
+        },
+      };
+      const skillB = {
+        ...createSkillCommand('review', 'b'),
+        skillDetail: {
+          name: 'review',
+          level: 'project',
+          filePath: '/test/project/.qwen/skills/auto-skill-review/SKILL.md',
+        },
+      };
+      mockGetCommands.mockReturnValue([skillA, skillB]);
+
+      const result = await handleSlashCommand(
+        '/feat-dev /review do stuff',
+        abortController,
+        mockConfig,
+        mockSettings,
+      );
+
+      expect(result.type).toBe('message');
+      expect(recordAutoSkillUsageMock).not.toHaveBeenCalled();
     });
 
     it('handles stacked skills with no remaining text', async () => {

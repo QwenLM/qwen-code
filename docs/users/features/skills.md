@@ -68,6 +68,16 @@ Use project Skills for:
 
 Project Skills can be checked into git and automatically become available to teammates.
 
+### Maintain auto-generated project Skills
+
+When **Auto Skill** is enabled, Qwen Code tracks successful uses of generated project Skills and periodically moves inactive ones out of the active library. Only directories named `.qwen/skills/auto-skill-*` whose `SKILL.md` frontmatter contains `source: auto-skill` are managed; personal, extension, bundled, and hand-authored Skills are never selected.
+
+- After 30 days without a successful use or `SKILL.md` edit, an auto-skill is marked stale.
+- After 90 days, its complete directory is moved to `.qwen/archived-skills/`. Nothing is permanently deleted.
+- Automatic maintenance runs at most once every 7 days. A newly observed library gets a full grace period before maintenance begins.
+
+Use `/curator` to see active, stale, and archived auto-skills. Run `/curator run --dry-run` to preview a maintenance pass, `/curator run` to apply it immediately, or `/curator restore <directory>` to move an archived auto-skill back into the active library.
+
 ## Write `SKILL.md`
 
 Create a `SKILL.md` file with YAML frontmatter and Markdown content:

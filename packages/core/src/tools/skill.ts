@@ -22,6 +22,7 @@ import {
 import path from 'path';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { registerSkillHooks } from '../hooks/registerSkillHooks.js';
+import { recordAutoSkillUsage } from '../skills/skill-curator.js';
 
 const debugLogger = createDebugLogger('SKILL');
 
@@ -548,6 +549,15 @@ class SkillToolInvocation extends BaseToolInvocation<SkillParams, ToolResult> {
 
       const baseDir = path.dirname(skill.filePath);
       const llmContent = buildSkillLlmContent(baseDir, skill.body);
+      if (this.config.getAutoSkillEnabled()) {
+        try {
+          await recordAutoSkillUsage(this.config.getProjectRoot(), skill);
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to record auto-skill usage: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
       recordSkillInvocation(this.config, {
         skillName: this.params.skill,
         success: true,
