@@ -608,6 +608,31 @@ describe('createOpenAiCompleter retries', () => {
     expect(calls).toBe(1);
   });
 
+  it('logs a retry line when backing off', async () => {
+    let calls = 0;
+    const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      baseDelayMs: 1,
+      fetchImpl: async () => {
+        calls += 1;
+        return calls === 1 ? { ok: false, status: 500 } : okResponse;
+      },
+    });
+
+    await complete({ kind: 'summaries', entries: [] });
+    const retryLine = errSpy.mock.calls
+      .map((args) => args[0])
+      .find((line) => String(line).startsWith('Model request retry '));
+    expect(retryLine).toBeDefined();
+    expect(retryLine).toMatch(
+      /retry 1\/2 after .*HTTP 500.*; backing off \d+ms/,
+    );
+    errSpy.mockRestore();
+  });
+
   it('stops retrying before the shared time budget expires', async () => {
     let calls = 0;
     const timeout = vi.spyOn(globalThis, 'setTimeout');
