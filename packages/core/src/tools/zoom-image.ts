@@ -10,6 +10,10 @@ import type { Part } from '@google/genai';
 import type { Metadata } from 'sharp';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
+import { logFileOperation } from '../telemetry/loggers.js';
+import { FileOperation } from '../telemetry/metrics.js';
+import { FileOperationEvent } from '../telemetry/types.js';
+import { getSpecificMimeType } from '../utils/fileUtils.js';
 import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
 import { getFileReadDefaultPermission } from './file-read-permission.js';
 import { ToolErrorType } from './tool-error.js';
@@ -268,6 +272,17 @@ class ZoomImageInvocation extends BaseToolInvocation<
         },
       },
     ];
+
+    logFileOperation(
+      this.config,
+      new FileOperationEvent(
+        ZoomImageTool.Name,
+        FileOperation.READ,
+        undefined,
+        getSpecificMimeType(this.params.file_path),
+        path.extname(this.params.file_path),
+      ),
+    );
 
     return {
       llmContent,

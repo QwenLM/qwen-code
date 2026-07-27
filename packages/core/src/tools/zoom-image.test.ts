@@ -9,13 +9,18 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
+import { logFileOperation } from '../telemetry/loggers.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { ToolErrorType } from './tool-error.js';
 import { ZoomImageTool } from './zoom-image.js';
+
+vi.mock('../telemetry/loggers.js', () => ({
+  logFileOperation: vi.fn(),
+}));
 
 describe('ZoomImageTool', () => {
   let root: string;
@@ -601,5 +606,66 @@ describe('ZoomImageTool', () => {
     // unconstrained visual budget would have produced.
     expect(metadata.width).toBeLessThanOrEqual(80);
     expect(metadata.height).toBeLessThanOrEqual(80);
+  });
+
+  it('rejects a sharp-decodable but unsupported format at the format guard', async () => {
+    const imagePath = path.join(root, 'static.gif');
+    await sharp({
+      create: {
+        width: 20,
+        height: 20,
+        channels: 3,
+        background: '#ff0000',
+      },
+    })
+      .gif()
+      .toFile(imagePath);
+
+    const result = await tool
+      .build({
+        file_path: imagePath,
+        x1: 0,
+        y1: 0,
+        x2: 1000,
+        y2: 1000,
+      })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toMatchObject({
+      type: ToolErrorType.READ_CONTENT_FAILURE,
+    });
+    expect(result.llmContent).toMatch(/PNG, JPEG, or WebP/i);
+  });
+
+  it('emits a file_operation telemetry event on a successful zoom', async () => {
+    const imagePath = path.join(root, 'telemetry.png');
+    await sharp({
+      create: {
+        width: 40,
+        height: 40,
+        channels: 3,
+        background: '#00ff00',
+      },
+    })
+      .png()
+      .toFile(imagePath);
+    vi.mocked(logFileOperation).mockClear();
+
+    const result = await tool
+      .build({
+        file_path: imagePath,
+        x1: 0,
+        y1: 0,
+        x2: 1000,
+        y2: 1000,
+      })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeUndefined();
+    expect(logFileOperation).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(logFileOperation).mock.calls[0]![1]).toMatchObject({
+      tool_name: 'zoom_image',
+      operation: 'read',
+    });
   });
 });
