@@ -34,11 +34,24 @@ const hasShellcheck = (() => {
 })();
 
 let dir: string;
+// Extra temp dirs a test makes for itself (a symlink worktree, say). Tracked and
+// torn down in `afterEach` so a failing `expect` — which throws before an inline
+// `rmSync` — cannot leak one; the hook runs regardless.
+let extraDirs: string[];
+/** mkdtemp a dir that `afterEach` will always clean, even if the test throws. */
+function tmpDir(prefix: string): string {
+  const d = mkdtempSync(join(tmpdir(), prefix));
+  extraDirs.push(d);
+  return d;
+}
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'script-lint-'));
+  extraDirs = [];
 });
 afterEach(() => {
-  rmSync(dir, { recursive: true, force: true });
+  for (const d of [dir, ...extraDirs]) {
+    rmSync(d, { recursive: true, force: true });
+  }
 });
 
 /** Write the worktree file and a plan pointing at it with the given hunk ranges. */
@@ -157,7 +170,7 @@ describe('runScriptLint — graceful degradation and scoping', () => {
   it('records a symlinked script as skipped, never dropped (empty ≠ clean)', () => {
     // A `hook.sh` that is a symlink is lint-owed by name but not a regular file;
     // it must not vanish from the report, or an empty report reads as a clean pass.
-    const dirLocal = mkdtempSync(join(tmpdir(), 'script-lint-sym-'));
+    const dirLocal = tmpDir('script-lint-sym-'); // cleaned in afterEach, leak-proof
     writeFileSync(join(dirLocal, 'real.txt'), 'data\n');
     symlinkSync(join(dirLocal, 'real.txt'), join(dirLocal, 'hook.sh'));
     const planPath = join(dirLocal, 'plan.json');
@@ -170,7 +183,6 @@ describe('runScriptLint — graceful degradation and scoping', () => {
     expect(r.skipped).toHaveLength(1);
     expect(r.skipped[0].tool).toBe('shellcheck');
     expect(r.skipped[0].reason).toContain('not a regular file');
-    rmSync(dirLocal, { recursive: true, force: true });
   });
 
   it('checks nothing when no executable file changed', () => {

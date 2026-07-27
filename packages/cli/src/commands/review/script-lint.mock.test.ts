@@ -10,7 +10,7 @@
 // errors is not a clean file), and the context-line classification are pinned
 // with no binary present.
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   mkdtempSync,
   mkdirSync,
@@ -29,13 +29,16 @@ import {
   type LintTool,
 } from './script-lint.js';
 
+// A per-test temp dir, set up and torn down by hooks — NOT inline `fresh()`/`clean()`
+// calls. A failing `expect` throws before any inline cleanup would run and leaks the
+// dir; `afterEach` runs regardless, so the teardown is leak-proof.
 let dir: string;
-function fresh() {
+beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'script-lint-mock-'));
-}
-function clean() {
+});
+afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
-}
+});
 
 /** A runner that returns the same canned result for whichever tool is asked. */
 function fixedRunner(res: ToolRun): ToolRunner {
@@ -75,7 +78,6 @@ function setup(
 
 describe('runScriptLint — tool JSON normalisation (injected runner)', () => {
   it('defers a workflow to its own `deferred` state without ever running actionlint', () => {
-    fresh();
     // The runner would report findings, but a workflow is deferred BEFORE it runs
     // (actionlint's source-mapping is not yet parsed), so it lands in skipped, not
     // checked — and the runner is never even called for it.
@@ -94,11 +96,9 @@ describe('runScriptLint — tool JSON normalisation (injected runner)', () => {
     expect(r.deferred[0].reason).toContain('not yet supported');
     expect(r.skipped).toEqual([]);
     expect(runner).not.toHaveBeenCalled();
-    clean();
   });
 
   it('normalises hadolint output (code + level preserved)', () => {
-    fresh();
     const runner = fixedRunner({
       kind: 'ok',
       stdout: JSON.stringify([
@@ -121,11 +121,9 @@ describe('runScriptLint — tool JSON normalisation (injected runner)', () => {
       inDiff: true,
     });
     expect(r.ok).toBe(false);
-    clean();
   });
 
   it('normalises shellcheck json1 (SC-prefixed code, info blocks)', () => {
-    fresh();
     const { plan, worktree } = setup('x.sh', '#!/bin/bash\nrm $X\n', {
       hunks: [{ newStart: 2, newEnd: 2 }],
     });
@@ -139,7 +137,6 @@ describe('runScriptLint — tool JSON normalisation (injected runner)', () => {
       inDiff: true,
     });
     expect(r.ok).toBe(false);
-    clean();
   });
 });
 
@@ -157,7 +154,6 @@ describe('runScriptLint — fail closed (a crashed checker is not clean)', () =>
   ] as Array<[string, ToolRun]>)(
     'reports %s as errored, not ok',
     (_label, res) => {
-      fresh();
       const { plan, worktree } = setup('x.sh', '#!/bin/bash\nrm $X\n', {
         hunks: [{ newStart: 2, newEnd: 2 }],
       });
@@ -167,14 +163,12 @@ describe('runScriptLint — fail closed (a crashed checker is not clean)', () =>
       expect(r.errored[0].tool).toBe('shellcheck');
       expect(r.ok).toBe(false);
       expect(r.note).toContain('failed to lint');
-      clean();
     },
   );
 
   it('treats non-empty UNPARSEABLE output as errored, not a clean file', () => {
     // A runner that "succeeded" but printed junk before/instead of JSON — a
     // version skew, a deprecation notice. Fail closed, do not record `checked`.
-    fresh();
     const { plan, worktree } = setup('x.sh', '#!/bin/bash\nrm $X\n', {
       hunks: [{ newStart: 2, newEnd: 2 }],
     });
@@ -186,13 +180,11 @@ describe('runScriptLint — fail closed (a crashed checker is not clean)', () =>
     expect(r.errored).toHaveLength(1);
     expect(r.errored[0].reason).toContain('unparseable');
     expect(r.ok).toBe(false);
-    clean();
   });
 });
 
 describe('runScriptLint — inDiff uses added lines, not hunk context', () => {
   it('does NOT block on a finding that lands on a context line', () => {
-    fresh();
     // The diff ADDS line 4 (`echo new`); line 3 (`rm $X`) is unchanged context
     // inside the same hunk. A pre-existing SC2086 on line 3 must not be this PR's.
     const diff = [
@@ -228,13 +220,11 @@ describe('runScriptLint — inDiff uses added lines, not hunk context', () => {
     expect(sc!.line).toBe(3);
     expect(sc!.inDiff).toBe(false); // line 3 is context, not an added line
     expect(r.ok).toBe(true);
-    clean();
   });
 });
 
 describe('runScriptLint — the report is bound to the diff it ran against', () => {
   it('stamps the report with a sha256 of the plan diff (the freshness key)', () => {
-    fresh();
     // This is the headline of the staleness guard: the report carries a hash of the
     // diff it reviewed, so `compose-review` can re-hash the plan's current diff and
     // reject a stale report. Content, not HEAD — correct for a PR and for local
@@ -258,11 +248,9 @@ describe('runScriptLint — the report is bound to the diff it ran against', () 
       .update(readFileSync(diffPath))
       .digest('hex');
     expect(r.diffHash).toBe(expected);
-    clean();
   });
 
   it('leaves diffHash undefined when the plan carries no readable diff', () => {
-    fresh();
     // No `diffPathAbsolute` on the plan → nothing to hash. `compose-review` treats an
     // absent hash as unverifiable and fails closed, so undefined is the honest value.
     const { plan, worktree } = setup('x.sh', '#!/bin/bash\nrm $X\n', {
@@ -273,7 +261,6 @@ describe('runScriptLint — the report is bound to the diff it ran against', () 
       shellcheckRunner([{ line: 1, code: 2086, level: 'info' }]),
     );
     expect(r.diffHash).toBeUndefined();
-    clean();
   });
 });
 

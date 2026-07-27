@@ -29,6 +29,7 @@ import {
   readFileSync,
   writeFileSync,
   mkdirSync,
+  mkdtempSync,
   lstatSync,
   openSync,
   readSync,
@@ -262,15 +263,27 @@ function firstLineOf(abs: string): FirstLine {
 /** An empty hadolint config, written once. Pointing `HADOLINT_CONFIG` at it makes
  *  hadolint use a config with no `ignored:` rules, so a `.hadolint.yaml` a PR added
  *  to the worktree cannot suppress the findings we run it to catch. Best-effort: if
- *  the write fails, the env var points at a path hadolint will simply not find. */
+ *  the write fails, the env var points at a path hadolint will simply not find.
+ *
+ *  Written inside a fresh `mkdtempSync` directory, NOT at a fixed `tmpdir()` name: a
+ *  predictable path on a shared runner is a symlink-race — `writeFileSync` follows a
+ *  symlink an attacker pre-planted there and truncates its target. mkdtemp gives a
+ *  0700 directory with a random suffix that cannot pre-exist, so the write is safe. */
 let hadolintEmptyConfigPath: string | undefined;
 function emptyHadolintConfig(): string {
   if (!hadolintEmptyConfigPath) {
-    hadolintEmptyConfigPath = join(tmpdir(), 'qwen-review-hadolint-empty.yaml');
     try {
+      const d = mkdtempSync(join(tmpdir(), 'qwen-review-hadolint-'));
+      hadolintEmptyConfigPath = join(d, 'empty.yaml');
       writeFileSync(hadolintEmptyConfigPath, '');
     } catch {
-      /* best-effort — a missing config is still no ignores */
+      // best-effort — a config we could not create is still no ignores; point at a
+      // path that will not resolve rather than a predictable, plantable one.
+      hadolintEmptyConfigPath = join(
+        tmpdir(),
+        'qwen-review-hadolint-none',
+        'x',
+      );
     }
   }
   return hadolintEmptyConfigPath;
@@ -326,12 +339,19 @@ export function buildToolInvocation(
  * findings exit (1) yields output to parse; a spawn error (`EACCES`), a signal,
  * a `maxBuffer` overflow, or any other status is an `error` the caller must not
  * read as a clean file. `ENOENT` alone is `missing` (the binary is not installed).
+ *
+ * A `timeout` bounds the run, matching the sibling command runners
+ * (`build-test.ts`, `test-efficacy.ts`): a crafted script that hangs a linter
+ * (pathological `eval`/`source` nesting) must not block the whole review until the
+ * outer CI job timeout reclaims the runner. A timeout kills with `SIGTERM`, which
+ * the `r.signal` branch below already turns into a fail-closed `error`.
  */
 function runTool(tool: LintTool, absPath: string): ToolRun {
   const { argv, env } = buildToolInvocation(tool, absPath);
   const r = spawnSync(tool, argv, {
     encoding: 'utf8',
     maxBuffer: 32 * 1024 * 1024,
+    timeout: 120_000,
     stdio: ['ignore', 'pipe', 'pipe'],
     env,
   });
