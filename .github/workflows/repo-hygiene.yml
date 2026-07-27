@@ -370,18 +370,64 @@ jobs:
 
           MAX_FILES_PER_FIX='3'
           MAX_LINES_PER_FIX='100'
+          DROPPED_COMMITS=()
           while IFS= read -r sha; do
             FILES="$(git diff-tree --no-commit-id --name-only -r "${sha}" | wc -l | tr -d ' ')"
             if [[ "${FILES}" -gt "${MAX_FILES_PER_FIX}" ]]; then
-              echo "❌ Commit ${sha:0:7} touches ${FILES} files; cap is ${MAX_FILES_PER_FIX}."
-              exit 1
+              echo "⚠️  Commit ${sha:0:7} touches ${FILES} files; cap is ${MAX_FILES_PER_FIX}. Dropping."
+              DROPPED_COMMITS+=("${sha}")
+              continue
             fi
             LINES="$(git diff-tree --no-commit-id --numstat -r "${sha}" | awk '{a+=$1; d+=$2} END {print a+d+0}')"
             if [[ "${LINES}" -gt "${MAX_LINES_PER_FIX}" ]]; then
-              echo "❌ Commit ${sha:0:7} has ${LINES} diff lines; cap is ${MAX_LINES_PER_FIX}."
-              exit 1
+              echo "⚠️  Commit ${sha:0:7} has ${LINES} diff lines; cap is ${MAX_LINES_PER_FIX}. Dropping."
+              DROPPED_COMMITS+=("${sha}")
             fi
           done < <(git rev-list origin/main.."${BRANCH}")
+
+          if [[ "${#DROPPED_COMMITS[@]}" -gt 0 ]]; then
+            # Capture commit messages before rebase removes them
+            DROPPED_MSGS="$(for sha in "${DROPPED_COMMITS[@]}"; do git log -1 --format='%s' "${sha}"; done)"
+
+            # Build rebase todo: drop bad commits
+            GIT_SEQUENCE_EDITOR="sed -i 's/^pick \(${DROPPED_COMMITS[0]:0:7}\)/drop \1/'" \
+              git rebase -i "origin/main"
+            for sha in "${DROPPED_COMMITS[@]:1}"; do
+              GIT_SEQUENCE_EDITOR="sed -i 's/^pick \(${sha:0:7}\)/drop \1/'" \
+                git rebase -i "origin/main"
+            done
+
+            # Update findings.json: move dropped fixes to reportOnly
+            export DROPPED_MSGS
+            node -e '
+              const fs = require("fs");
+              const f = JSON.parse(fs.readFileSync(process.env.WORKDIR + "/findings.json", "utf8"));
+              const dropped = (process.env.DROPPED_MSGS || "").split("\n").filter(Boolean);
+              const moved = [];
+              f.fixes = f.fixes.filter(fix => {
+                const match = dropped.some(msg => {
+                  const summary = msg.replace(/^\w+\([^)]+\):\s*/, "");
+                  return fix.rootCause.toLowerCase().includes(summary.toLowerCase().slice(0, 30)) ||
+                         fix.minimalFix.toLowerCase().includes(summary.toLowerCase().slice(0, 30));
+                });
+                if (match) { fix.status = "dropped-gate"; moved.push(fix); return false; }
+                return true;
+              });
+              for (const m of moved) {
+                f.reportOnly.push({ id: m.id, rootCause: m.rootCause, evidence: m.evidence, whyReal: m.whyReal, minimalFix: m.minimalFix + " (dropped by gate: exceeded per-commit threshold)" });
+              }
+              fs.writeFileSync(process.env.WORKDIR + "/findings.json", JSON.stringify(f, null, 2));
+              console.log(`Moved ${moved.length} finding(s) to reportOnly.`);
+            '
+
+            # If no commits left, bail
+            COMMITS="$(git rev-list --count origin/main..HEAD)"
+            if [[ "${COMMITS}" -eq 0 ]]; then
+              echo 'All commits dropped — nothing left to push.'
+              echo 'result=no-fixes' >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+          fi
 
           COMMITS="$(git rev-list --count origin/main.."${BRANCH}")"
           echo "commits=${COMMITS}" >> "${GITHUB_OUTPUT}"
