@@ -32,10 +32,19 @@ export function useGitBranchName(cwd: string): string | undefined {
     let cancelled = false;
     let dispose: (() => void) | undefined;
     let pollTimer: ReturnType<typeof setInterval> | undefined;
+    // Orders concurrent refreshes (watcher callback + polling interval): a
+    // read that started earlier can resolve later and would otherwise
+    // overwrite a newer result with a stale branch name.
+    let refreshGeneration = 0;
 
     const refresh = async () => {
+      const generation = ++refreshGeneration;
       const name = await resolveBranchName(cwd);
-      if (!cancelled && name !== branchNameRef.current) {
+      if (
+        !cancelled &&
+        generation === refreshGeneration &&
+        name !== branchNameRef.current
+      ) {
         setBranchName(name);
       }
     };

@@ -107,6 +107,55 @@ describe('useGitBranchName', () => {
     expect(result.current).toBe('develop');
   });
 
+  it('ignores a stale refresh that resolves after a newer one', async () => {
+    mockResolve.mockResolvedValueOnce('main');
+    let fire: (() => void) | undefined;
+    mockWatch.mockImplementation(async (_cwd: string, onChange: () => void) => {
+      fire = onChange;
+      return () => {};
+    });
+
+    // Two concurrent reads whose resolution order we control: the first one
+    // started (stale) resolves last, the second (fresh) resolves first.
+    let resolveStale!: (value: string) => void;
+    let resolveFresh!: (value: string) => void;
+    const stale = new Promise<string>((resolve) => {
+      resolveStale = resolve;
+    });
+    const fresh = new Promise<string>((resolve) => {
+      resolveFresh = resolve;
+    });
+    mockResolve.mockReturnValueOnce(stale).mockReturnValueOnce(fresh);
+
+    const { result } = renderHook(() => useGitBranchName(CWD));
+    await act(async () => {
+      await flushAsyncEffects();
+    });
+    expect(result.current).toBe('main');
+
+    // Start both refreshes; each begins its read before either resolves.
+    await act(async () => {
+      fire?.();
+      fire?.();
+      await flushAsyncEffects();
+    });
+
+    // The newer read resolves first with the switched branch.
+    await act(async () => {
+      resolveFresh('develop');
+      await flushAsyncEffects();
+    });
+    expect(result.current).toBe('develop');
+
+    // The older read resolves later with the pre-switch value; the generation
+    // guard discards it instead of flashing the stale branch name.
+    await act(async () => {
+      resolveStale('main');
+      await flushAsyncEffects();
+    });
+    expect(result.current).toBe('develop');
+  });
+
   it('disposes the watcher on unmount', async () => {
     mockResolve.mockResolvedValue('main');
     const dispose = vi.fn();
