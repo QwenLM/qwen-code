@@ -4677,6 +4677,14 @@ describe('qwen-autofix workflow', () => {
       status: 1,
       written: expect.stringContaining('outcome=failed'),
     });
+    expect(run({ FIRST_OUTCOME: '' })).toMatchObject({ status: 1 });
+    expect(
+      run({
+        FIRST_OUTCOME: 'failed',
+        REPAIR_ATTEMPTED: 'true',
+        REPAIR_OUTCOME: '',
+      }),
+    ).toMatchObject({ status: 1 });
   });
 
   it('posts a human-handoff marker when review addressing reaches a terminal handoff', () => {
