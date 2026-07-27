@@ -3918,6 +3918,11 @@ class QwenAgent implements Agent {
 
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
     const { cwd, mcpServers } = params;
+    // Extract caller-supplied session id from ACP _meta extension (#7831).
+    const requestedSessionId =
+      typeof params._meta?.['qwen-code.sessionId'] === 'string'
+        ? (params._meta['qwen-code.sessionId'] as string)
+        : undefined;
     const parentContext = extractDaemonTraceContext(params);
     return await withDaemonSpan(
       'qwen-code.daemon.session_start',
@@ -3935,7 +3940,7 @@ class QwenAgent implements Agent {
         );
         this.settings = settings;
         const config = await profiler.time('config_setup', () =>
-          this.newSessionConfig(cwd, mcpServers, settings),
+          this.newSessionConfig(cwd, mcpServers, settings, requestedSessionId),
         );
         let session: Session;
         try {

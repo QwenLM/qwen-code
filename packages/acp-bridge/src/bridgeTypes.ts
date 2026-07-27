@@ -98,6 +98,13 @@ export interface BridgeSpawnRequest {
   worktree?: { slug: string; path: string; branch: string };
   /** Branch metadata, set by the daemon route before spawn. */
   branch?: { name: string; baseBranch: string };
+  /**
+   * Optional caller-supplied session id. When provided, the agent uses this
+   * id instead of generating a random UUID. Validated by the core Config
+   * constructor (format + duplicate detection). Passed through ACP `_meta`
+   * since the protocol's NewSessionRequest has no native sessionId field.
+   */
+  sessionId?: string;
 }
 
 export interface BridgeSession {

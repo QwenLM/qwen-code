@@ -1259,6 +1259,27 @@ export function registerSessionRoutes(
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
 
+    // Optional caller-supplied session id. Validated at the route boundary
+    // so a 400 surfaces before touching the bridge. The core Config
+    // constructor uses it verbatim (falling back to randomUUID when absent).
+    const rawSessionId = body['sessionId'];
+    let requestedSessionId: string | undefined;
+    if (rawSessionId !== undefined && rawSessionId !== null) {
+      if (
+        typeof rawSessionId !== 'string' ||
+        rawSessionId.length === 0 ||
+        rawSessionId.length > 128
+      ) {
+        res.status(400).json({
+          error:
+            '`sessionId` must be a non-empty string (max 128 chars) when provided',
+          code: 'invalid_session_id',
+        });
+        return;
+      }
+      requestedSessionId = rawSessionId;
+    }
+
     // ── Branch creation ────────────────────────────────────────────
     // When `branch` is present, create and checkout a new git branch
     // before spawning. The session runs in the same working directory
@@ -1551,6 +1572,9 @@ export function registerSessionRoutes(
         ...(source.sourceId !== undefined ? { sourceId: source.sourceId } : {}),
         ...(worktreeMeta ? { worktree: worktreeMeta } : {}),
         ...(branchMeta ? { branch: branchMeta } : {}),
+        ...(requestedSessionId !== undefined
+          ? { sessionId: requestedSessionId }
+          : {}),
       });
       try {
         runtime.generationGuard?.assertOpen();

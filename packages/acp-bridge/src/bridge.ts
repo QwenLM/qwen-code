@@ -2542,6 +2542,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     sourceId?: string,
     worktree?: { slug: string; path: string; branch: string },
     branch?: { name: string; baseBranch: string },
+    requestedSessionId?: string,
   ): Promise<BridgeSession> {
     // Get-or-create the daemon's single channel, then call
     // `connection.newSession()` on it. Sessions share the child's
@@ -2600,6 +2601,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 telemetry.injectPromptContext({
                   cwd: boundWorkspace,
                   mcpServers: [],
+                  ...(requestedSessionId
+                    ? { _meta: { 'qwen-code.sessionId': requestedSessionId } }
+                    : {}),
                 }),
               ),
               initTimeoutMs,
@@ -5151,6 +5155,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         source.sourceId,
         req.worktree,
         req.branch,
+        req.sessionId,
       );
       // Track in-flight spawns regardless of scope. Under `single`
       // this also serves the coalescing path above (a parallel
