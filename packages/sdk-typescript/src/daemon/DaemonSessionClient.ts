@@ -307,6 +307,10 @@ export class DaemonSessionClient {
     return this.session.worktree;
   }
 
+  get branch(): DaemonSession['branch'] {
+    return this.session.branch;
+  }
+
   get lastEventId(): number | undefined {
     return this.lastSeenEventId;
   }

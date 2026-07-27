@@ -9,6 +9,7 @@ import { Box, Text } from 'ink';
 import Link from 'ink-link';
 import stringWidth from 'string-width';
 import { theme } from '../../semantic-colors.js';
+import { ICON } from '../../constants.js';
 import { RenderInline } from '../../utils/InlineMarkdownRenderer.js';
 
 interface StatusMessageProps {
@@ -69,7 +70,7 @@ export const InfoMessage: React.FC<StatusTextProps> = ({
 }) => (
   <StatusMessage
     text={text}
-    prefix="●"
+    prefix={ICON.CIRCLE_FILLED}
     prefixColor={theme.text.primary}
     textColor={theme.text.primary}
     footer={
@@ -96,7 +97,7 @@ export const SuccessMessage: React.FC<StatusTextProps> = ({ text }) => (
 export const WarningMessage: React.FC<StatusTextProps> = ({ text }) => (
   <StatusMessage
     text={text}
-    prefix="△"
+    prefix={ICON.TRIANGLE}
     prefixColor={theme.status.warning}
     textColor={theme.status.warning}
   />
@@ -132,7 +133,7 @@ export const RetryCountdownMessage: React.FC<StatusTextProps> = ({ text }) => (
 export const VisionNoticeMessage: React.FC<StatusTextProps> = ({ text }) => (
   <StatusMessage
     text={text}
-    prefix="◎"
+    prefix={ICON.BULLSEYE}
     prefixColor={theme.text.secondary}
     textColor={theme.text.secondary}
   />
@@ -145,7 +146,7 @@ export const VisionNoticeMessage: React.FC<StatusTextProps> = ({ text }) => (
 export const AwayRecapMessage: React.FC<StatusTextProps> = ({ text }) => (
   <Box flexDirection="row">
     <Box width={2} flexShrink={0}>
-      <Text color={theme.text.secondary}>※</Text>
+      <Text color={theme.text.secondary}>{ICON.REFERENCE}</Text>
     </Box>
     <Text wrap="wrap">
       <Text color={theme.text.secondary} bold>

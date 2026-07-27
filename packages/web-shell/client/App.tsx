@@ -39,7 +39,8 @@ import type {
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
-import { GitForkIcon, XIcon } from 'lucide-react';
+
+import { type SessionGitIntent } from './components/GitModePopover';
 import { SESSION_TRANSCRIPT_PAGINATION_FEATURE } from './constants/sessions';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
@@ -576,8 +577,6 @@ export interface WebShellProps {
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   /** Custom renderer for the welcome header. Receives version, cwd, model, and mode. */
   renderWelcomeHeader?: WelcomeHeaderRenderer;
-  /** Show the worktree-isolation action in the empty welcome state. Defaults to false. */
-  showWorktreeToggle?: boolean;
   /** Custom renderer shown below the chat composer in the empty welcome state. */
   renderWelcomeFooter?: WelcomeFooterRenderer;
   /**
@@ -656,6 +655,7 @@ export interface WebShellProps {
 }
 
 interface AppProps extends WebShellProps {
+  initialSelectedWorkspaceCwd?: string;
   lockedWorkspaceCwd?: string;
   lockedWorkspaceCapability?: DaemonWorkspaceCapability;
   restartSseOnPrompt?: boolean;
@@ -668,9 +668,11 @@ type SessionActionsWithCreate = {
     approvalMode?: string;
     sourceType?: string;
     worktree?: { slug?: string };
+    branch?: { name: string };
   }) => Promise<{
     sessionId: string;
     worktree?: { slug: string; path: string; branch: string };
+    branch?: { name: string; baseBranch: string };
   }>;
   attachSession: () => Promise<void>;
   clearSession: () => Promise<void>;
@@ -1071,7 +1073,6 @@ export function App({
   composerTagIcons,
   renderToolHeaderExtra,
   renderWelcomeHeader,
-  showWorktreeToggle = false,
   renderWelcomeFooter,
   mobileWelcomeFooterMiddle = false,
   parseUserMessageContent,
@@ -1112,6 +1113,7 @@ export function App({
   onSubmitBefore,
   restartSseOnPrompt,
   historyPageSize,
+  initialSelectedWorkspaceCwd,
   lockedWorkspaceCwd,
   lockedWorkspaceCapability,
 }: AppProps = {}) {
@@ -1372,6 +1374,8 @@ export function App({
   const workspaceDisplayNameSupported =
     workspace.capabilities?.features?.includes('workspace_display_name') ===
     true;
+  const gitHubPrsSupported =
+    workspace.capabilities?.features?.includes('workspace_github_prs') === true;
   const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(false);
   const [workspaceMutationBusy, setWorkspaceMutationBusy] = useState(false);
   const workspaceMutationTokenRef = useRef<symbol | null>(null);
@@ -1392,7 +1396,7 @@ export function App({
   // so the ensureSessionForPrompt callback must read the latest value.
   const [selectedWorkspaceCwd, setSelectedWorkspaceCwd] = useState<
     string | undefined
-  >(undefined);
+  >(initialSelectedWorkspaceCwd);
   const selectedWorkspaceCwdRef = useRef(selectedWorkspaceCwd);
   selectedWorkspaceCwdRef.current = selectedWorkspaceCwd;
   const [selectedWorkspaceGitStatus, setSelectedWorkspaceGitStatus] = useState<
@@ -1417,6 +1421,10 @@ export function App({
   const [sessionWorktree, setSessionWorktree] = useState<
     { slug: string; path: string; branch: string } | undefined
   >(undefined);
+  /** Branch metadata for the current session (set after creation with branch mode). */
+  const [sessionBranch, setSessionBranch] = useState<
+    { name: string; baseBranch: string } | undefined
+  >(undefined);
   // Tracks the session id from the latest effect run. In-flight fetches
   // compare their captured sid against this ref on resolve: a match means
   // the response is still relevant and may set OR clear the worktree state;
@@ -1433,6 +1441,7 @@ export function App({
     worktreeSessionIdRef.current = sid;
     if (!sid) {
       setSessionWorktree(undefined);
+      setSessionBranch(undefined);
       return;
     }
     workspace.client
@@ -1440,11 +1449,13 @@ export function App({
       .then((summary) => {
         if (worktreeSessionIdRef.current === sid) {
           setSessionWorktree(summary.worktree);
+          setSessionBranch(summary.branch);
         }
       })
       .catch(() => {
         if (worktreeSessionIdRef.current === sid) {
           setSessionWorktree(undefined);
+          setSessionBranch(undefined);
         }
       });
   }, [connection.sessionId, workspace.client]);
@@ -1483,20 +1494,41 @@ export function App({
     }
     let cancelled = false;
     const fetchStatus = () => {
-      void workspace.client
-        .workspaceByCwd(activeWorkspaceCwd)
-        .workspaceGit(sessionWorktree?.path)
-        .then((git) => {
-          if (!cancelled) setSelectedWorkspaceGitStatus(git);
+      const git = workspace.client.workspaceByCwd(activeWorkspaceCwd);
+      // Fast path: last-known cache (branch-only on a cold start) paints the
+      // chip immediately.
+      void git
+        .workspaceGit({ cwd: sessionWorktree?.path })
+        .then((status) => {
+          if (!cancelled) setSelectedWorkspaceGitStatus(status);
         })
         .catch(() => {
           if (!cancelled) setSelectedWorkspaceGitStatus(undefined);
         });
+      // Fresh path: resolves when the daemon's recomputation lands, so the
+      // enriched counters fill in without depending on SSE — the
+      // `git_status_changed` push only flows on a per-session event stream,
+      // which doesn't exist before the first prompt (deferred connect).
+      // Daemon-side in-flight dedup shares one `git status` computation
+      // across both requests. Worktree `?cwd=` reads always compute
+      // directly, so a second request would be a duplicate there.
+      if (!sessionWorktree) {
+        void git
+          .workspaceGit({ wait: true })
+          .then((status) => {
+            if (!cancelled) setSelectedWorkspaceGitStatus(status);
+          })
+          .catch((err) => {
+            console.warn('[web-shell] git status fresh path failed:', err);
+          });
+      }
     };
     fetchStatus();
-    // The enriched working-tree summary isn't pushed over SSE, so refresh it on
-    // focus and on a slow poll for the active workspace only. A live branch
-    // change re-runs this effect via the connection.gitBranch dependency.
+    // Refresh triggers stay on focus and on a slow poll for the active
+    // workspace only. A live branch change re-runs this effect via the
+    // connection.gitBranch dependency. With an active session the daemon's
+    // `git_status_changed` push (mirrored by the effect below) additionally
+    // covers realtime updates between polls.
     const onFocus = () => fetchStatus();
     window.addEventListener('focus', onFocus);
     const poll = window.setInterval(() => {
@@ -1513,6 +1545,17 @@ export function App({
     workspace.client,
     sessionWorktree,
   ]);
+  // Mirror the daemon's `git_status_changed` push (surfaced as
+  // connection.gitStatus by the session provider) into the chip state so the
+  // enriched counters fill in right after the branch-only first paint.
+  // Worktree sessions bypass the daemon cache/SSE path — their status comes
+  // from the ?cwd= fetch above.
+  useEffect(() => {
+    const status = connection.gitStatus;
+    if (!status || sessionWorktree) return;
+    if (status.workspaceCwd !== activeWorkspaceCwd) return;
+    setSelectedWorkspaceGitStatus(status);
+  }, [connection.gitStatus, activeWorkspaceCwd, sessionWorktree]);
   const onToastRef = useRef(onToast);
   onToastRef.current = onToast;
   const toastIdRef = useRef(0);
@@ -2382,6 +2425,16 @@ export function App({
     useState(false);
   const streamingState = useStreamingState();
   const streamingStateRef = useRef<DaemonStreamingState>(streamingState);
+  // Cleared in three places: the session-switch effect, the drain loop, and
+  // handleCancel. Bumping drainGenerationRef at each clear site also cancels
+  // any in-flight inline ! command whose ensureSessionForPrompt is resolving.
+  // The session-switch effect exempts the lazy-creation transition (into
+  // preparingSessionIdRef.current) so a submit's own session creation does
+  // not cancel the command.
+  const queuedShellCommandsRef = useRef<string[]>([]);
+  const drainGenerationRef = useRef(0);
+  const shellSubmitInFlightRef = useRef(false);
+  const isDrainingRef = useRef(false);
   const localStreamingStartedAtRef = useRef(Date.now());
   const previousStreamingStateRef =
     useRef<DaemonStreamingState>(streamingState);
@@ -2467,7 +2520,7 @@ export function App({
   // it — the composer git chip / `/diff` (current workspace) or a sidebar
   // folder's git chip (that workspace) — so each can target its own repo.
   const [gitDialog, setGitDialog] = useState<
-    { workspaceCwd: string; view: GitDialogView } | undefined
+    { workspaceCwd: string; gitCwd?: string; view: GitDialogView } | undefined
   >(undefined);
   // Main content view. The scheduled-tasks page replaces the chat pane inline
   // (not a modal overlay), mirroring the reference design; creating or opening
@@ -2968,12 +3021,18 @@ export function App({
     setCurrentMode(modeId);
   }, []);
   const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
-  const createSessionPromiseRef = useRef<Promise<void> | null>(null);
+  const createSessionPromiseRef = useRef<Promise<string | undefined> | null>(
+    null,
+  );
   const preparingSessionIdRef = useRef<string | null>(null);
-  /** Worktree request for the next lazily-created session. */
-  const pendingWorktreeRef = useRef<{ slug?: string } | undefined>(undefined);
-  /** Render-visible mirror of pendingWorktreeRef for the empty-state badge. */
-  const [worktreePending, setWorktreePending] = useState(false);
+  /** Git mode intent for the next lazily-created session (branch or worktree). */
+  const [gitModeIntent, setGitModeIntent] = useState<SessionGitIntent>({
+    mode: 'current',
+  });
+  const gitModeIntentRef = useRef(gitModeIntent);
+  useEffect(() => {
+    gitModeIntentRef.current = gitModeIntent;
+  }, [gitModeIntent]);
   const newSessionSuggestionSubmitTokenRef = useRef(0);
   const pendingNewSessionSuggestionSubmitRef = useRef<{
     token: number;
@@ -3016,10 +3075,11 @@ export function App({
       ) {
         return createSessionPromiseRef.current;
       }
-      return Promise.resolve();
+      return Promise.resolve(undefined);
     }
-    if (currentSessionId) return Promise.resolve();
+    if (currentSessionId) return Promise.resolve(undefined);
     const promise = (async () => {
+      let allocatedSessionId: string | undefined;
       const modelId =
         currentModelRef.current || connectionRef.current.currentModel;
       const modeId =
@@ -3041,26 +3101,37 @@ export function App({
         modeId,
         workspaceCwd:
           lockedWorkspaceCwd ?? acceptedWorkspaceCwd ?? primaryWorkspaceCwd,
-        worktree: pendingWorktreeRef.current,
+        worktree:
+          gitModeIntentRef.current.mode === 'worktree'
+            ? { slug: gitModeIntentRef.current.slug }
+            : undefined,
+        branch:
+          gitModeIntentRef.current.mode === 'branch'
+            ? { name: gitModeIntentRef.current.name }
+            : undefined,
         onSessionCreated: onSessionCreatedRef.current,
         onSessionAllocated: (sessionId) => {
           preparingSessionIdRef.current = sessionId;
+          allocatedSessionId = sessionId;
         },
         getCurrentSessionId: () => connectionRef.current.sessionId,
       }).then((result) => {
         if (result.worktree) {
           setSessionWorktree(result.worktree);
         }
+        if (result.branch) {
+          setSessionBranch(result.branch);
+        }
         // Clear the pending intent only on success. On failure the
-        // welcome badge stays visible so the user knows the isolation
-        // intent was not fulfilled and can retry.
-        pendingWorktreeRef.current = undefined;
-        setWorktreePending(false);
+        // composer chip stays in the selected mode so the user knows
+        // the intent was not fulfilled and can retry.
+        setGitModeIntent({ mode: 'current' });
       });
       // One-shot: the picker targets only the *next* new session, so clear
       // it after creation. The next new chat defaults back to the primary
       // workspace unless the user picks one again.
       setSelectedWorkspaceCwd(undefined);
+      return allocatedSessionId;
     })();
     createSessionPromiseRef.current = promise;
     const clearPreparation = () => {
@@ -3088,6 +3159,16 @@ export function App({
     },
     [],
   );
+  // Daemon-side session registration lags behind the client, so schedule a
+  // backup reload ~2 s after the immediate one to pick up newly created sessions.
+  const scheduleDelayedSessionListReload = useCallback(() => {
+    if (delayedReloadTimerRef.current !== null) {
+      clearTimeout(delayedReloadTimerRef.current);
+    }
+    delayedReloadTimerRef.current = setTimeout(() => {
+      setSessionListReloadToken((n) => n + 1);
+    }, 2000);
+  }, []);
   const dispatchSessionChange = useCallback(
     (event: SessionChangeEvent) => {
       onSessionChange?.(event);
@@ -3184,15 +3265,7 @@ export function App({
           prompt: text,
           queued: false,
         });
-        // Schedule an additional delayed reload to account for daemon-side
-        // session registration lag — the immediate reload above may return
-        // a list that doesn't yet include the newly created session.
-        if (delayedReloadTimerRef.current !== null) {
-          clearTimeout(delayedReloadTimerRef.current);
-        }
-        delayedReloadTimerRef.current = setTimeout(() => {
-          setSessionListReloadToken((n) => n + 1);
-        }, 2000);
+        scheduleDelayedSessionListReload();
       }
       const result = await (
         sessionActions.sendPrompt as (
@@ -3202,7 +3275,12 @@ export function App({
       )(text, promptOptions);
       return result;
     },
-    [clearFollowup, ensureSessionForPrompt, sessionActions],
+    [
+      clearFollowup,
+      ensureSessionForPrompt,
+      scheduleDelayedSessionListReload,
+      sessionActions,
+    ],
   );
   const availableModels = useMemo(
     () =>
@@ -3216,6 +3294,16 @@ export function App({
   // git-status effect targets (computed once above), so the chip and the
   // dialog always target the same repo.
   const gitDiffWorkspaceCwd = activeWorkspaceCwd;
+  const gitModeEligible = Boolean(
+    !connection.sessionId &&
+      workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)?.trusted &&
+      selectedWorkspaceGitStatus?.branch,
+  );
+  useEffect(() => {
+    if (!gitModeEligible) {
+      setGitModeIntent({ mode: 'current' });
+    }
+  }, [gitModeEligible]);
   const dialogOpen =
     showResumeDialog ||
     showDeleteDialog ||
@@ -3800,6 +3888,97 @@ export function App({
     streamingStateRef.current = streamingState;
   }, [streamingState]);
 
+  // Drop queued commands on a session switch so the drain never runs a
+  // command against a different workspace's daemon (mirrors useQueuedPrompts).
+  const prevQueueSessionIdRef = useRef(connection.sessionId);
+  useEffect(() => {
+    if (prevQueueSessionIdRef.current === connection.sessionId) return;
+    prevQueueSessionIdRef.current = connection.sessionId;
+    const dropped = queuedShellCommandsRef.current.length;
+    queuedShellCommandsRef.current = [];
+    // Skip the bump when the transition is into the session that
+    // ensureSessionForPrompt is preparing — that is the submit's own lazy
+    // creation, not a user-initiated switch.
+    if (connection.sessionId !== preparingSessionIdRef.current) {
+      drainGenerationRef.current++;
+      isDrainingRef.current = false;
+    }
+    if (dropped > 0) {
+      pushToast('warning', t('queue.shellDropped', { count: dropped }));
+    }
+  }, [connection.sessionId, pushToast, t]);
+
+  // Declared after the session-switch wipe effect above: React runs effects in
+  // declaration order, so the queue is already cleared before this drain sees it.
+  const prevShellDrainStreamingStateRef = useRef(streamingState);
+  useEffect(() => {
+    const prev = prevShellDrainStreamingStateRef.current;
+    prevShellDrainStreamingStateRef.current = streamingState;
+    // Only start a drain on the transition into idle. sendShellCommand drives
+    // streamingState non-idle while each command runs, so cancelling the drain
+    // on every streamingState change would drop every command after the first.
+    if (prev === 'idle' || streamingState !== 'idle') return;
+    // A running drain re-reads the queue after each batch, so commands queued
+    // mid-drain are picked up by it. Starting a second drain here would bump the
+    // generation and cancel the in-flight batch, silently dropping commands.
+    if (isDrainingRef.current) return;
+    const cmds = queuedShellCommandsRef.current;
+    if (cmds.length === 0) return;
+    queuedShellCommandsRef.current = [];
+    isDrainingRef.current = true;
+    const generation = ++drainGenerationRef.current;
+    const drainSessionId = connectionRef.current.sessionId;
+    void (async () => {
+      try {
+        let batch = cmds;
+        while (batch.length > 0) {
+          for (let i = 0; i < batch.length; i++) {
+            const generationChanged = drainGenerationRef.current !== generation;
+            if (
+              generationChanged ||
+              connectionRef.current.sessionId !== drainSessionId ||
+              connectionRef.current.status !== 'connected'
+            ) {
+              let dropped = batch.length - i;
+              if (!generationChanged) {
+                // The two generation-bump sites (session switch, cancel) wipe
+                // the queue themselves, so anything parked here was queued
+                // after the drop and is fresh user intent. A disconnect has no
+                // such wipe — clear it so a reconnect cannot resurrect a newer
+                // command behind an already-dropped older one.
+                dropped += queuedShellCommandsRef.current.length;
+                queuedShellCommandsRef.current = [];
+              }
+              console.warn(
+                '[web-shell] dropping %d queued shell command(s)',
+                dropped,
+              );
+              pushToast('warning', t('queue.shellDropped', { count: dropped }));
+              return;
+            }
+            try {
+              await sessionActions.sendShellCommand(batch[i]);
+            } catch (error: unknown) {
+              reportError(
+                error,
+                `Failed to execute shell command: !${batch[i]}`,
+              );
+            }
+          }
+          batch = queuedShellCommandsRef.current;
+          queuedShellCommandsRef.current = [];
+        }
+      } finally {
+        // Release the lock only if this IIFE is still the active drainer; a
+        // cancel or session switch may have bumped the generation and handed
+        // the lock to a newer drain that must not be unblocked prematurely.
+        if (drainGenerationRef.current === generation) {
+          isDrainingRef.current = false;
+        }
+      }
+    })();
+  }, [streamingState, sessionActions, reportError, pushToast, t]);
+
   useEffect(() => {
     modelDialogModeRef.current = modelDialogMode;
     showFallbacksDialogRef.current = showFallbacksDialog;
@@ -4146,10 +4325,9 @@ export function App({
       const targetWorkspaceCwd = lockedWorkspaceCwd ?? workspaceCwd;
       selectedWorkspaceCwdRef.current = targetWorkspaceCwd;
       setSelectedWorkspaceCwd(targetWorkspaceCwd);
-      // Starting a fresh chat drops any pending worktree intent set from the
-      // empty-state toggle, so it never leaks into the next created session.
-      pendingWorktreeRef.current = undefined;
-      setWorktreePending(false);
+      // Starting a fresh chat drops any pending git mode intent so it never
+      // leaks into the next created session.
+      setGitModeIntent({ mode: 'current' });
       // Close the drawer before awaiting so a failed createSession() doesn't leave
       // it stuck open with the page scroll still locked, matching loadSidebarSession.
       closeMobileDrawer();
@@ -4168,8 +4346,9 @@ export function App({
           reloadLoadedSkills(targetWorkspaceCwd),
         ]);
         // Clear after successful clearSession — if it rejects, the old
-        // session's worktree state is preserved.
+        // session's worktree/branch state is preserved.
         setSessionWorktree(undefined);
+        setSessionBranch(undefined);
         return true;
       } catch (error) {
         if (composerFocusRequestRef.current === focusRequest) {
@@ -4561,9 +4740,9 @@ export function App({
     async (sessionId: string, workspaceCwd?: string) => {
       composerFocusRequestRef.current += 1;
       setSidebarSwitchingSessionId(sessionId);
-      pendingWorktreeRef.current = undefined;
-      setWorktreePending(false);
+      setGitModeIntent({ mode: 'current' });
       setSessionWorktree(undefined);
+      setSessionBranch(undefined);
       // Close the drawer before awaiting the load; the transcript clears
       // immediately and shows its loading skeleton for the selected session.
       closeMobileDrawer();
@@ -4998,7 +5177,11 @@ export function App({
               pushToast('info', t('localCommand.diffNoWorkspace'));
               return true;
             }
-            setGitDialog({ workspaceCwd: gitDiffWorkspaceCwd, view: 'diff' });
+            setGitDialog({
+              workspaceCwd: gitDiffWorkspaceCwd,
+              gitCwd: sessionWorktree?.path,
+              view: 'diff',
+            });
             return true;
           }
           if (cmd === 'log') {
@@ -5006,7 +5189,23 @@ export function App({
               pushToast('info', t('localCommand.logNoWorkspace'));
               return true;
             }
-            setGitDialog({ workspaceCwd: gitDiffWorkspaceCwd, view: 'log' });
+            setGitDialog({
+              workspaceCwd: gitDiffWorkspaceCwd,
+              gitCwd: sessionWorktree?.path,
+              view: 'log',
+            });
+            return true;
+          }
+          if (cmd === 'prs') {
+            if (!gitDiffWorkspaceCwd) {
+              pushToast('info', t('localCommand.prsNoWorkspace'));
+              return true;
+            }
+            if (!gitHubPrsSupported) {
+              pushToast('info', t('localCommand.prsUnsupported'));
+              return true;
+            }
+            setGitDialog({ workspaceCwd: gitDiffWorkspaceCwd, view: 'prs' });
             return true;
           }
           if (cmd === 'tasks') {
@@ -5768,17 +5967,56 @@ export function App({
           inputAnnotations: metadata?.inputAnnotations,
         });
       } else if (text.startsWith('!')) {
-        if (promptBlocked) {
-          pushToast('error', t('queue.shellBlocked'));
-          return false;
-        }
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
-        if (!requireActiveSessionForLocalCommand()) return false;
-        sessionActions.sendShellCommand(cmd).catch((error: unknown) => {
-          reportError(error, 'Failed to execute shell command');
-        });
-        return true;
+        if (promptBlocked) {
+          queuedShellCommandsRef.current.push(cmd);
+          pushToast('info', t('queue.shellQueued'));
+          return true;
+        }
+        const needsSession = !connectionRef.current.sessionId;
+        if (needsSession) {
+          if (shellSubmitInFlightRef.current) return false;
+          shellSubmitInFlightRef.current = true;
+          setIsPreparingPrompt(true);
+        }
+        let sessionCreated = false;
+        const generationAtSubmit = drainGenerationRef.current;
+        void ensureSessionForPrompt()
+          .finally(() => {
+            if (needsSession) {
+              setIsPreparingPrompt(false);
+              shellSubmitInFlightRef.current = false;
+            }
+          })
+          .then((createdSessionId) => {
+            if (drainGenerationRef.current !== generationAtSubmit) return;
+            if (needsSession && createdSessionId) {
+              sessionCreated = true;
+              if (commitComposerAccepted) {
+                commitComposerAccepted();
+              } else {
+                editorRef.current?.clear();
+              }
+              dispatchSessionChangeRef.current?.({
+                type: 'submit',
+                sessionId: createdSessionId,
+                prompt: `!${cmd}`,
+                queued: false,
+              });
+              scheduleDelayedSessionListReload();
+            }
+            return sessionActions.sendShellCommand(cmd);
+          })
+          .catch((error: unknown) => {
+            reportError(
+              error,
+              needsSession && !sessionCreated
+                ? 'Failed to create session for shell command'
+                : 'Failed to execute shell command',
+            );
+          });
+        return !needsSession;
       } else {
         if (promptBlocked) {
           return enqueuePrompt(
@@ -5807,7 +6045,11 @@ export function App({
       openScheduledTasks,
       openGoals,
       createNewSession,
+      ensureSessionForPrompt,
+      scheduleDelayedSessionListReload,
       gitDiffWorkspaceCwd,
+      sessionWorktree,
+      gitHubPrsSupported,
       handleBusyGoalClear,
       handleGoalSlashCommand,
       handleThemeChange,
@@ -5866,10 +6108,18 @@ export function App({
   );
 
   const handleCancel = useCallback(() => {
+    const dropped = queuedShellCommandsRef.current.length;
+    queuedShellCommandsRef.current = [];
+    drainGenerationRef.current++;
+    isDrainingRef.current = false;
+    shellSubmitInFlightRef.current = false;
+    if (dropped > 0) {
+      pushToast('warning', t('queue.shellDropped', { count: dropped }));
+    }
     sessionActions.cancel().catch((error: unknown) => {
       reportError(error, 'Failed to cancel request');
     });
-  }, [sessionActions, reportError]);
+  }, [sessionActions, reportError, pushToast, t]);
 
   const handleFocusTaskPill = useCallback((): boolean => {
     if (interactionBlocked) return false;
@@ -6381,42 +6631,6 @@ export function App({
     ],
   );
 
-  // The empty-state toggle is offered only when the workspace the next
-  // session would land in is trusted and is a git repository — the daemon
-  // rejects worktree creation otherwise. Mirrors the sidebar entry's gating.
-  const worktreeToggleEligible = Boolean(
-    showWorktreeToggle &&
-      workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)?.trusted &&
-      selectedWorkspaceGitStatus?.branch,
-  );
-  const worktreeToggleRef = useRef<HTMLButtonElement>(null);
-  const worktreeCancelRef = useRef<HTMLButtonElement>(null);
-  const worktreeFocusTarget = useRef<'cancel' | 'toggle' | null>(null);
-  const handleEnableWorktree = useCallback(() => {
-    pendingWorktreeRef.current = {};
-    setWorktreePending(true);
-    worktreeFocusTarget.current = 'cancel';
-  }, []);
-  const handleCancelWorktree = useCallback(() => {
-    pendingWorktreeRef.current = undefined;
-    setWorktreePending(false);
-    worktreeFocusTarget.current = 'toggle';
-  }, []);
-  useEffect(() => {
-    if (showWorktreeToggle) return;
-    pendingWorktreeRef.current = undefined;
-    setWorktreePending(false);
-  }, [showWorktreeToggle]);
-  useEffect(() => {
-    if (!worktreeFocusTarget.current) return;
-    const target = worktreeFocusTarget.current;
-    worktreeFocusTarget.current = null;
-    if (target === 'cancel') {
-      worktreeCancelRef.current?.focus();
-    } else {
-      worktreeToggleRef.current?.focus();
-    }
-  }, [worktreePending]);
   const welcomeHeader = useMemo(
     () => (
       <>
@@ -6425,65 +6639,9 @@ export function App({
         ) : (
           <WelcomeHeader {...welcomeHeaderProps} />
         )}
-        {showWorktreeToggle && worktreePending ? (
-          <div className={styles.worktreeWelcomeBadge}>
-            <span className={styles.worktreeBadgeIcon}>
-              <GitForkIcon size={18} strokeWidth={1.8} />
-            </span>
-            <span className={styles.worktreeBadgeText}>
-              <span className={styles.worktreeWelcomeTitle}>
-                {t('worktree.welcomeTitle')}
-              </span>
-              <span className={styles.worktreeWelcomeDesc}>
-                {t('worktree.welcomeDesc')}
-              </span>
-            </span>
-            <button
-              ref={worktreeCancelRef}
-              type="button"
-              className={styles.worktreeWelcomeCancel}
-              aria-label={t('worktree.cancel')}
-              data-testid="worktree-welcome-cancel"
-              onClick={handleCancelWorktree}
-            >
-              <XIcon size={14} strokeWidth={2} />
-            </button>
-          </div>
-        ) : (
-          worktreeToggleEligible && (
-            <button
-              ref={worktreeToggleRef}
-              type="button"
-              className={styles.worktreeWelcomeToggle}
-              data-testid="worktree-welcome-toggle"
-              onClick={handleEnableWorktree}
-            >
-              <span className={styles.worktreeToggleIcon}>
-                <GitForkIcon size={16} strokeWidth={1.8} />
-              </span>
-              <span className={styles.worktreeToggleText}>
-                <span className={styles.worktreeToggleLabel}>
-                  {t('worktree.welcomeTitle')}
-                </span>
-                <span className={styles.worktreeToggleHint}>
-                  {t('worktree.toggleHint')}
-                </span>
-              </span>
-            </button>
-          )
-        )}
       </>
     ),
-    [
-      renderWelcomeHeader,
-      showWorktreeToggle,
-      welcomeHeaderProps,
-      worktreePending,
-      worktreeToggleEligible,
-      handleEnableWorktree,
-      handleCancelWorktree,
-      t,
-    ],
+    [renderWelcomeHeader, welcomeHeaderProps],
   );
   const welcomeFooter = useMemo(
     () => renderWelcomeFooter?.(welcomeHeaderProps),
@@ -6751,8 +6909,9 @@ export function App({
           )}
           {gitDialog && (
             <GitDialog
-              key={`${gitDialog.workspaceCwd}:${gitDialog.view}`}
+              key={`${gitDialog.workspaceCwd}:${gitDialog.gitCwd ?? ''}:${gitDialog.view}`}
               workspaceCwd={gitDialog.workspaceCwd}
+              gitCwd={gitDialog.gitCwd}
               initialView={gitDialog.view}
               onClose={() => setGitDialog(undefined)}
             />
@@ -7633,6 +7792,8 @@ export function App({
                                 historyCapacityReached={
                                   transcriptHistory.capacityReached
                                 }
+                                historyPaginationError={
+                                  transcriptHistory.paginationError}
                                 onLoadOlderHistory={transcriptHistory.loadMore}
                                 transcriptBlockCount={blocks.length}
                                 transcriptActivity={store}
@@ -7921,18 +8082,24 @@ export function App({
                             sessionWorktree
                               ? (selectedWorkspaceGitStatus?.branch ??
                                 sessionWorktree.branch)
-                              : (connection.sessionId
-                                ? connection.gitBranch
-                                : (selectedWorkspaceGitStatus?.branch ??
-                                  undefined))
+                              : sessionBranch
+                                ? (selectedWorkspaceGitStatus?.branch ??
+                                  sessionBranch.name)
+                                : (connection.sessionId
+                                  ? connection.gitBranch
+                                  : (selectedWorkspaceGitStatus?.branch ??
+                                    undefined))
                           }
                           gitWorktree={Boolean(sessionWorktree)}
+                          gitModeIntent={gitModeEligible ? gitModeIntent : undefined}
+                          onGitModeIntentChange={gitModeEligible ? setGitModeIntent : undefined}
                           gitStatus={selectedWorkspaceGitStatus}
                           onOpenGitDiff={
-                            gitDiffWorkspaceCwd && !sessionWorktree
+                            gitDiffWorkspaceCwd
                               ? () =>
                                   setGitDialog({
                                     workspaceCwd: gitDiffWorkspaceCwd,
+                                    gitCwd: sessionWorktree?.path,
                                     view: 'diff',
                                   })
                               : undefined

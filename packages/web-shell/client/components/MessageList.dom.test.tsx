@@ -203,6 +203,7 @@ function mount(
     hasOlderHistory?: boolean;
     loadingOlderHistory?: boolean;
     historyCapacityReached?: boolean;
+    historyPaginationError?: boolean;
     onLoadOlderHistory?: () => Promise<void>;
     transcriptBlockCount?: number;
     transcriptActivity?: {
@@ -243,6 +244,7 @@ function mount(
             hasOlderHistory={opts.hasOlderHistory}
             loadingOlderHistory={opts.loadingOlderHistory}
             historyCapacityReached={opts.historyCapacityReached}
+            historyPaginationError={opts.historyPaginationError}
             onLoadOlderHistory={opts.onLoadOlderHistory}
             transcriptBlockCount={opts.transcriptBlockCount}
             transcriptActivity={opts.transcriptActivity}
@@ -1576,6 +1578,50 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(c.querySelector('[role="status"]')?.textContent).toBe(
       'History display limit reached. Earlier messages remain saved.',
     );
+  });
+
+  it('shows a persistent error when history pagination fails', () => {
+    const c = mount([userMsg('u1')], undefined, {
+      historyPaginationError: true,
+    });
+    expect(c.querySelector('[role="status"]')?.textContent).toBe(
+      'Earlier history could not be loaded.',
+    );
+  });
+
+  it('does not auto-load older history when a pagination error is present', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 300,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    // historyPaginationError is true, hasOlderHistory is true
+    const c = mount([userMsg('u1')], undefined, {
+      hasOlderHistory: true,
+      historyPaginationError: true,
+      onLoadOlderHistory,
+    });
+
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+
+    // It should NOT call loadMore because paginationError blocks it
+    expect(onLoadOlderHistory).not.toHaveBeenCalled();
   });
 
   it('does not smooth-scroll when existing session history loads after an empty render', () => {

@@ -35,6 +35,10 @@ const daemonProxy: ProxyOptions = {
       proxyReq.removeHeader('origin');
       proxyReq.removeHeader('referer');
     });
+    proxy.on('proxyReqWs', (proxyReq) => {
+      proxyReq.removeHeader('origin');
+      proxyReq.removeHeader('referer');
+    });
   },
 };
 

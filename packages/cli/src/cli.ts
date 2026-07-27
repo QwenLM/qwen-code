@@ -421,7 +421,7 @@ export function isExpectedPtyRaceError(error: unknown): boolean {
 
 export async function handleCriticalError(error: unknown): Promise<void> {
   const [{ FatalError }, { AlreadyReportedError }] = await Promise.all([
-    import('@qwen-code/qwen-code-core'),
+    import('./utils/deferred-core-runtime.js'),
     import('./utils/errors.js'),
   ]);
 

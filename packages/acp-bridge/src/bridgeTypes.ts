@@ -96,6 +96,8 @@ export interface BridgeSpawnRequest {
   approvalMode?: ApprovalMode;
   /** Worktree isolation metadata, set by the daemon route before spawn. */
   worktree?: { slug: string; path: string; branch: string };
+  /** Branch metadata, set by the daemon route before spawn. */
+  branch?: { name: string; baseBranch: string };
 }
 
 export interface BridgeSession {
@@ -130,6 +132,8 @@ export interface BridgeSession {
   sourcePersisted?: boolean;
   /** Present when the session was created with worktree isolation. */
   worktree?: { slug: string; path: string; branch: string };
+  /** Present when the session was created with a new branch. */
+  branch?: { name: string; baseBranch: string };
 }
 
 export interface BridgeRestoreSessionRequest {
@@ -435,6 +439,8 @@ export interface BridgeSessionSummary {
   color?: SessionGroupPresetColor | null;
   /** Present when the session was created with worktree isolation. */
   worktree?: { slug: string; path: string; branch: string };
+  /** Present when the session was created with a new branch. */
+  branch?: { name: string; baseBranch: string };
 }
 
 /**
@@ -493,6 +499,16 @@ export interface BridgeClientRequestContext {
    * SSE event to the pending HTTP 202 request.
    */
   promptId?: string;
+  /** Trusted Channel delivery correlation injected by the daemon prompt
+   * route. Never populated from caller-controlled ACP metadata. */
+  channelDelivery?: {
+    deliveryId: string;
+    target: {
+      channelName: string;
+      type: 'user' | 'chat';
+      id: string;
+    };
+  };
   /**
    * Internal: set ONLY by `continueSession` to re-arm the continuation meta
    * key that `sendPrompt` strips from untrusted callers. HTTP routes never
@@ -509,6 +525,8 @@ export interface BridgeClientRequestContext {
    */
   deadlineMs?: number;
 }
+
+export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
 
 /**
  * Returned from `recordHeartbeat`. `lastSeenAt` is the server-side
@@ -557,6 +575,9 @@ export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
  */
 export const TODO_STOP_GUARD_QUEUE_RELEASE_METHOD =
   'craft/todoStopGuardQueueReleased';
+
+/** Parent-to-agent request that acknowledges prompt cancellation handling. */
+export const PROMPT_CANCEL_METHOD = 'craft/cancelPendingPrompt';
 
 /**
  * Reverse tool channel marker (issue #5626, Phase 2). The parent serve process
@@ -614,6 +635,14 @@ export interface PendingPromptEntry {
    * later publish attempts for the same prompt are suppressed.
    */
   terminalPublished?: boolean;
+  /** Cancellation handshake; duplicate callers await rather than resend it. */
+  cancelForwardInitial?: Promise<void>;
+  /** Full cancellation handshake, used to fence the next FIFO dispatch. */
+  cancelForwardDrain?: Promise<void>;
+  /** Releases the cancellation fence when the prompt deadline expires. */
+  cancelForwardDeadline?: Promise<void>;
+  /** True after the prompt request has been handed to the ACP connection. */
+  dispatched?: boolean;
   /**
    * Set when `removePendingPrompt` cancels a RUNNING prompt. The entry
    * stays on `pendingPromptList` (hidden from `getPendingPrompts`) until
@@ -641,6 +670,8 @@ export interface BridgeDaemonStatusLimits {
   maxPendingPromptsPerSession: number | null;
   eventRingSize: number;
   compactedReplayMaxBytes: number;
+  maxJournalEvents: number;
+  maxJournalBytes: number;
   channelIdleTimeoutMs: number;
   sessionIdleTimeoutMs: number;
 }
@@ -1540,7 +1571,7 @@ export interface AcpSessionBridge {
 }
 
 export interface BridgeShutdownOptions {
-  reason?: 'daemon_shutdown' | 'workspace_removed';
+  reason?: 'daemon_shutdown' | 'workspace_removed' | 'trust_reconfigured';
 }
 
 export interface ShellCommandResult {

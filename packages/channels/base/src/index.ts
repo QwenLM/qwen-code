@@ -27,6 +27,12 @@ export type {
 export { BlockStreamer } from './BlockStreamer.js';
 export type { BlockStreamerOptions } from './BlockStreamer.js';
 export { ChannelBase } from './ChannelBase.js';
+export {
+  CHANNEL_PROACTIVE_DELIVERY_ERROR_CODE,
+  ChannelProactiveDeliveryError,
+  isChannelProactiveDeliveryError,
+} from './ChannelProactiveDeliveryError.js';
+export type { ChannelProactiveDeliveryDisposition } from './ChannelProactiveDeliveryError.js';
 export type {
   ChannelBaseOptions,
   ChannelMemoryRecallCacheStatus,
@@ -73,6 +79,7 @@ export {
   sanitizeLogText,
 } from './sanitize.js';
 export { isTerminalTaskLifecycleType } from './types.js';
+export { PollingChannelBase } from './PollingChannelBase.js';
 export type {
   Attachment,
   BlockStreamingChunkConfig,
@@ -87,6 +94,7 @@ export type {
   ChannelMemoryScopeConfig,
   ChannelMemoryScopeMode,
   ChannelPlugin,
+  ChannelProactiveTarget,
   ChannelRuntimeIdentity,
   ChannelRuntimeMemoryScope,
   ChannelTaskCancellationReason,

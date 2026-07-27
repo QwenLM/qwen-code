@@ -19,27 +19,11 @@ import type {
   DaemonGitCommitDetail,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
+import { timeAgo } from '../../utils/timeAgo';
 import { DialogShell } from './DialogShell';
 import styles from './GitLogDialog.module.css';
 
 const PAGE_SIZE = 50;
-
-function timeAgo(timestamp: number, now: number, language: string): string {
-  const seconds = Math.max(0, Math.floor(now - timestamp));
-  const formatter = new Intl.RelativeTimeFormat(language, { numeric: 'auto' });
-  if (seconds < 60) return formatter.format(0, 'second');
-  const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return formatter.format(-minutes, 'minute');
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return formatter.format(-hours, 'hour');
-  const days = Math.floor(hours / 24);
-  if (days < 7) return formatter.format(-days, 'day');
-  const weeks = Math.floor(days / 7);
-  if (weeks < 5) return formatter.format(-weeks, 'week');
-  const months = Math.floor(days / 30);
-  if (months < 12) return formatter.format(-months, 'month');
-  return formatter.format(-Math.max(1, Math.floor(days / 365)), 'year');
-}
 
 function parseRefs(refs: string): { label: string; isHead: boolean }[] {
   if (!refs) return [];
@@ -58,10 +42,12 @@ function parseRefs(refs: string): { label: string; isHead: boolean }[] {
 function CommitRow({
   entry,
   workspaceCwd,
+  gitCwd,
   now,
 }: {
   entry: DaemonGitLogEntry;
   workspaceCwd: string;
+  gitCwd?: string;
   now: number;
 }) {
   const { client } = useWorkspace();
@@ -98,7 +84,7 @@ function CommitRow({
       setError(false);
       client
         .workspaceByCwd(workspaceCwd)
-        .workspaceGitCommitDetail(entry.sha)
+        .workspaceGitCommitDetail(entry.sha, gitCwd)
         .then((result) => {
           if (cancelledRef.current) return;
           setDetail(result);
@@ -223,9 +209,11 @@ function CommitRow({
 
 export function GitLogContent({
   workspaceCwd,
+  gitCwd,
   onSubtitleChange,
 }: {
   workspaceCwd: string;
+  gitCwd?: string;
   onSubtitleChange?: (subtitle: string | undefined) => void;
 }) {
   const { client } = useWorkspace();
@@ -251,7 +239,7 @@ export function GitLogContent({
     nextSkipRef.current = 0;
     client
       .workspaceByCwd(workspaceCwd)
-      .workspaceGitLog(PAGE_SIZE, 0)
+      .workspaceGitLog(PAGE_SIZE, 0, gitCwd)
       .then((result) => {
         if (!cancelled) {
           nextSkipRef.current = result.entries.length;
@@ -267,14 +255,14 @@ export function GitLogContent({
     return () => {
       cancelled = true;
     };
-  }, [client, workspaceCwd]);
+  }, [client, workspaceCwd, gitCwd]);
 
   const loadMore = useCallback(() => {
     if (!log || loadingMore) return;
     setLoadingMore(true);
     client
       .workspaceByCwd(workspaceCwd)
-      .workspaceGitLog(PAGE_SIZE, nextSkipRef.current)
+      .workspaceGitLog(PAGE_SIZE, nextSkipRef.current, gitCwd)
       .then((result) => {
         nextSkipRef.current += result.entries.length;
         setLog((prev) => {
@@ -296,7 +284,7 @@ export function GitLogContent({
       .finally(() => {
         setLoadingMore(false);
       });
-  }, [client, workspaceCwd, log, loadingMore]);
+  }, [client, workspaceCwd, gitCwd, log, loadingMore]);
 
   const subtitle = log?.available
     ? t('gitLog.subtitle', { count: log.entries.length })
@@ -324,6 +312,7 @@ export function GitLogContent({
               key={entry.sha}
               entry={entry}
               workspaceCwd={workspaceCwd}
+              gitCwd={gitCwd}
               now={now}
             />
           ))}

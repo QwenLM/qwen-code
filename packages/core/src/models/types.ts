@@ -32,6 +32,8 @@ export type ModelGenerationConfig = Pick<
   | 'samplingParams'
   | 'timeout'
   | 'maxRetries'
+  | 'retryInitialDelayMs'
+  | 'retryMaxDelayMs'
   | 'retryErrorCodes'
   | 'enableCacheControl'
   | 'forceGlobalCacheScope'
@@ -68,6 +70,8 @@ export interface ModelConfig {
   fastOnly?: boolean;
   /** When true, this model only appears in the voice model selector, not the main model list */
   voiceOnly?: boolean;
+  /** When true, this model only appears in the image generation model selector */
+  imageOnly?: boolean;
 }
 
 /**
@@ -134,6 +138,8 @@ export interface AvailableModel {
   fastOnly?: boolean;
   /** When true, this model only appears in the voice model selector */
   voiceOnly?: boolean;
+  /** When true, this model only appears in the image generation model selector */
+  imageOnly?: boolean;
 
   /** Whether this is a runtime model (not from modelProviders) */
   isRuntimeModel?: boolean;
