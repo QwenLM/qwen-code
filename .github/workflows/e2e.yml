@@ -111,6 +111,8 @@ jobs:
       - name: 'Build the sandbox image'
         if: |-
           ${{ matrix.sandbox == 'sandbox:docker' }}
+        env:
+          QWEN_SANDBOX: docker
         run: |-
           npm run build:sandbox -- -s
 
