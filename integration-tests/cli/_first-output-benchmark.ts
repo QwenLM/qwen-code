@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export const FIRST_OUTPUT_BENCHMARK_VERSION = 1 as const;
+export const FIRST_OUTPUT_BENCHMARK_VERSION = 2 as const;
 export const DEFAULT_BOOTSTRAP_ITERATIONS = 10_000;
 export const DEFAULT_MATERIAL_THRESHOLD_MS = 10;
 export const DEFAULT_ORDER_SENSITIVITY_THRESHOLD_MS = 10;
@@ -970,7 +970,6 @@ export interface FirstOutputVariantDescriptor {
   cliPath: string;
   realpath: string;
   sha256: string;
-  gitCommit: string | null;
   compileCache: {
     policy: 'fixed-private-per-variant-warmed';
     directory: string;
@@ -997,7 +996,7 @@ export interface FirstOutputPairedMetricSummary {
   bySession: Record<string, PairedCandidateControlStats>;
 }
 
-interface FirstOutputBenchmarkArtifactBaseV1 {
+interface FirstOutputBenchmarkArtifactBaseV2 {
   version: typeof FIRST_OUTPUT_BENCHMARK_VERSION;
   benchmark: 'daemon-first-output';
   capturedAt: string;
@@ -1019,15 +1018,15 @@ interface FirstOutputBenchmarkCommonConfig {
   providerDelayMs: number;
   providerConnection: 'close-per-response';
   postSessionDwellMs: number;
-  prompt: string;
+  promptShape: string;
   expectedAnswer: string;
   maxBufferedEvents: number;
   providerRequestsPerSession: number;
   timeoutsMs: Record<string, number>;
 }
 
-export interface FirstOutputSingleBenchmarkArtifactV1
-  extends FirstOutputBenchmarkArtifactBaseV1 {
+export interface FirstOutputSingleBenchmarkArtifactV2
+  extends FirstOutputBenchmarkArtifactBaseV2 {
   mode: 'single';
   config: FirstOutputBenchmarkCommonConfig & {
     warmupRuns: number;
@@ -1062,8 +1061,8 @@ export interface FirstOutputSingleBenchmarkArtifactV1
   };
 }
 
-export interface FirstOutputPairedBenchmarkArtifactV1
-  extends FirstOutputBenchmarkArtifactBaseV1 {
+export interface FirstOutputPairedBenchmarkArtifactV2
+  extends FirstOutputBenchmarkArtifactBaseV2 {
   mode: 'paired';
   config: FirstOutputBenchmarkCommonConfig & {
     warmupPairs: number;
@@ -1097,8 +1096,8 @@ export interface FirstOutputPairedBenchmarkArtifactV1
   };
 }
 
-export interface FirstOutputFailedBenchmarkArtifactV1
-  extends FirstOutputBenchmarkArtifactBaseV1 {
+export interface FirstOutputFailedBenchmarkArtifactV2
+  extends FirstOutputBenchmarkArtifactBaseV2 {
   mode: 'failed';
   config: {
     requestedMode: 'single' | 'paired' | 'unknown';
@@ -1113,10 +1112,10 @@ export interface FirstOutputFailedBenchmarkArtifactV1
   };
 }
 
-export type FirstOutputBenchmarkArtifactV1 =
-  | FirstOutputSingleBenchmarkArtifactV1
-  | FirstOutputPairedBenchmarkArtifactV1
-  | FirstOutputFailedBenchmarkArtifactV1;
+export type FirstOutputBenchmarkArtifactV2 =
+  | FirstOutputSingleBenchmarkArtifactV2
+  | FirstOutputPairedBenchmarkArtifactV2
+  | FirstOutputFailedBenchmarkArtifactV2;
 
 function formatMilliseconds(value: number | null): string {
   return value === null ? 'n/a' : value.toFixed(1);
@@ -1139,7 +1138,7 @@ function formatDistribution(distribution: PercentileSummary | null): string {
 }
 
 export function renderFirstOutputBenchmarkMarkdown(
-  artifact: FirstOutputBenchmarkArtifactV1,
+  artifact: FirstOutputBenchmarkArtifactV2,
 ): string {
   const decisionLabel =
     artifact.mode === 'paired' ? 'Primary metric decision' : 'Decision';

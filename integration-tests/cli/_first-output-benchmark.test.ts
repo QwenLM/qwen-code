@@ -20,7 +20,7 @@ import {
   validateExpectedFinalText,
   validatePromptAcceptance,
   type BenchmarkDaemonEvent,
-  type FirstOutputBenchmarkArtifactV1,
+  type FirstOutputBenchmarkArtifactV2,
   type PairedMetricSample,
 } from './_first-output-benchmark.js';
 
@@ -758,7 +758,7 @@ describe('artifact rendering', () => {
         providerDelayMs: 50,
         providerConnection: 'close-per-response',
         postSessionDwellMs: 0,
-        prompt: 'reply',
+        promptShape: 'reply',
         expectedAnswer: 'ok',
         maxBufferedEvents: 256,
         providerRequestsPerSession: 1,
@@ -768,7 +768,6 @@ describe('artifact rendering', () => {
             cliPath: '/control',
             realpath: '/control',
             sha256: 'control-hash',
-            gitCommit: null,
             compileCache: {
               policy: 'fixed-private-per-variant-warmed',
               directory: '/cache/control',
@@ -778,7 +777,6 @@ describe('artifact rendering', () => {
             cliPath: '/candidate',
             realpath: '/candidate',
             sha256: 'candidate-hash',
-            gitCommit: null,
             compileCache: {
               policy: 'fixed-private-per-variant-warmed',
               directory: '/cache/candidate',
@@ -808,7 +806,7 @@ describe('artifact rendering', () => {
           reasons: ['Candidate is faster'],
         },
       },
-    } satisfies FirstOutputBenchmarkArtifactV1;
+    } satisfies FirstOutputBenchmarkArtifactV2;
     const before = JSON.stringify(artifact);
 
     const markdown = renderFirstOutputBenchmarkMarkdown(artifact);
@@ -851,7 +849,7 @@ describe('artifact rendering', () => {
           reasons: ['bundle path is missing'],
         },
       },
-    } satisfies FirstOutputBenchmarkArtifactV1;
+    } satisfies FirstOutputBenchmarkArtifactV2;
 
     expect(renderFirstOutputBenchmarkMarkdown(artifact)).toContain(
       'Failure: invalid_configuration',
