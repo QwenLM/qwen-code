@@ -1453,6 +1453,40 @@ describe('loadCliConfig', () => {
     expect(servers['settings-only']).toBeUndefined();
   });
 
+  it('does NOT let a settings-sourced mcp.allowed list silently filter a session-supplied server under safe mode', async () => {
+    // Found by an automated review pass on PR #7827: the allowedMcpServers
+    // assembly guard was `!bareMode` only (missing `&& !safeMode`), so
+    // settings.mcp.allowed/excluded — LOCAL/ambient state, same category as
+    // settings.mcpServers itself — was still read under safe mode. Combined
+    // with getMcpServers()'s own allowedMcpServers filter (added earlier in
+    // this same PR for the --allowed-mcp-server-names case), a narrow
+    // settings.json mcp.allowed list would silently drop a caller-supplied
+    // top-tier server, defeating the very guarantee this PR exists to
+    // provide — via an indirect vector (a filter's SOURCE), not the
+    // mcpServers map directly.
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      mcp: { allowed: ['some-other-server'] },
+    };
+    const sessionMcpServers = {
+      'session-server': new ServerConfig.MCPServerConfig('session-cmd'),
+    };
+
+    const config = await loadCliConfig(
+      settings,
+      argv,
+      process.cwd(),
+      undefined,
+      undefined,
+      undefined,
+      sessionMcpServers,
+    );
+
+    const servers = config.getMcpServers() ?? {};
+    expect(servers['session-server']?.command).toBe('session-cmd');
+  });
+
   it('drops ALL MCP servers under safe mode when none were supplied by the caller', async () => {
     process.argv = ['node', 'script.js', '--safe-mode'];
     const argv = await parseArguments();
