@@ -5644,6 +5644,40 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('createToolRegistry', () => {
+    it('registers zoom_image for an image-capable primary model', async () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'getEffectiveInputModalities').mockReturnValue({
+        image: true,
+      });
+
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).toContain(ToolNames.ZOOM_IMAGE);
+    });
+
+    it('does not register zoom_image for a text-only primary model', async () => {
+      const config = new Config(baseParams);
+      vi.spyOn(config, 'getEffectiveInputModalities').mockReturnValue({});
+
+      await config.initialize();
+
+      const registerToolMock = (
+        (await vi.importMock('../tools/tool-registry')) as {
+          ToolRegistry: { prototype: { registerFactory: Mock } };
+        }
+      ).ToolRegistry.prototype.registerFactory;
+      expect(
+        (registerToolMock as Mock).mock.calls.map((call) => call[0]),
+      ).not.toContain(ToolNames.ZOOM_IMAGE);
+    });
+
     it('should ignore coreTools overrides in bare mode', async () => {
       const config = new Config({
         ...baseParams,
