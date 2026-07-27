@@ -142,6 +142,12 @@ function occurrenceLine({ sha, runUrl, runId, at }) {
 
 const TRIMMED_NOTE = '_Older recurrences trimmed._';
 const RECURRENCE_HEADING = '## Recurrences';
+const ALSO_FAILING_HEADING = '## Also failing';
+// The "## Also failing" list is machine-owned and rebuilt from the current
+// failure set on every merge, so the previous one is stripped first. The block
+// is the heading plus its contiguous bullet list — nothing else is ever written
+// under it.
+const ALSO_FAILING_BLOCK = /\n*##\s+Also failing\s*\n+(?:- [^\n]*\n?)+/;
 
 function splitOccurrenceBlock(body) {
   const index = body.indexOf(OCCURRENCE_MARKER);
@@ -248,21 +254,32 @@ export function renderIssueBody({
   const withoutHeading = head.replace(/\n*##\s+Recurrences\s*$/, '');
   const prose = tail ? `${withoutHeading}\n\n${tail}` : withoutHeading;
 
+  // The "## Also failing" list is rebuilt from the current failure set below,
+  // so strip the previous one first: a test that has since been fixed must
+  // disappear instead of being listed forever.
+  const strippedProse = prose.replace(ALSO_FAILING_BLOCK, '').trimEnd();
+
   // Record markers for tests that joined the failure set after the issue was
   // opened, so the next run still matches this issue on either test.
   const missingMarkers = analysis.markers.filter(
-    (marker) => !prose.includes(marker),
+    (marker) => !strippedProse.includes(marker),
   );
-  const missingTests = testLines.filter((line) => !prose.includes(line));
+  const missingTests = testLines.filter(
+    (line) => !strippedProse.includes(line),
+  );
   const withMarkers = missingMarkers.length
-    ? `${missingMarkers.map((marker) => `<!-- ${marker} -->`).join('\n')}\n${prose}`
-    : prose;
+    ? `${missingMarkers.map((marker) => `<!-- ${marker} -->`).join('\n')}\n${strippedProse}`
+    : strippedProse;
   const withTests = missingTests.length
-    ? `${withMarkers}\n\n## Also failing\n\n${missingTests.join('\n')}`
+    ? `${withMarkers}\n\n${ALSO_FAILING_HEADING}\n\n${missingTests.join('\n')}`
     : withMarkers;
 
-  // A re-run of the same run must not add a second line for it.
-  const kept = lines.filter((line) => !line.includes(`/${occurrence.runId}`));
+  // A re-run of the same run must not add a second line for it. Match the
+  // `[run <id>]` link text, not the run URL: `/301` is a substring of `/3010`,
+  // so a URL match would silently delete an unrelated run's line.
+  const kept = lines.filter(
+    (line) => !line.includes(`[run ${occurrence.runId}]`),
+  );
   const combined = [occurrenceLine(occurrence), ...kept];
   const nextLines = combined.slice(0, maxOccurrences);
   const footer = combined.length > nextLines.length ? ['', TRIMMED_NOTE] : [];

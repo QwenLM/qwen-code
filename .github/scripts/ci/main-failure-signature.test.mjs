@@ -201,6 +201,31 @@ test('merging a re-run of the same run does not duplicate its line', () => {
   ]);
 });
 
+test('re-running one run keeps another run whose id it is a prefix of', () => {
+  const analysis = analyzeLogs('E2E Tests', [VITEST_LOG]);
+  const existing = renderIssueBody({
+    analysis,
+    occurrence: {
+      ...OCCURRENCE,
+      runId: '3010',
+      runUrl: 'https://github.com/QwenLM/qwen-code/actions/runs/3010',
+    },
+  });
+
+  // Run 301 is a re-run; `/301` is a substring of `/runs/3010`, so matching on
+  // the URL would delete run 3010's line. Matching on `[run 301]` must not.
+  const merged = renderIssueBody({
+    analysis,
+    existingBody: existing,
+    occurrence: { ...OCCURRENCE },
+  });
+
+  assert.deepEqual(occurrenceLines(merged), [
+    '- `af7a9ec12722` · 2026-07-27T02:42:08Z · [run 301](https://github.com/QwenLM/qwen-code/actions/runs/301)',
+    '- `af7a9ec12722` · 2026-07-27T02:42:08Z · [run 3010](https://github.com/QwenLM/qwen-code/actions/runs/3010)',
+  ]);
+});
+
 test('falls back to a per-commit issue when no test can be identified', () => {
   const analysis = analyzeLogs('E2E Tests', ['npm error code ERESOLVE']);
   const title = renderIssueTitle({ analysis, occurrence: OCCURRENCE });
@@ -293,6 +318,62 @@ test('merging records a test that joined the failure set later', () => {
     1,
     'the original failing test is listed exactly once',
   );
+});
+
+test('"Also failing" is rebuilt from the live failure set, not appended', () => {
+  const first = analyzeLogs('E2E Tests', [VITEST_LOG]);
+  const joined = analyzeLogs('E2E Tests', [
+    VITEST_LOG,
+    ' FAIL  channel-plugin.test.ts > remembers pineapple',
+  ]);
+  let body = renderIssueBody({ analysis: first, occurrence: OCCURRENCE });
+  body = renderIssueBody({
+    analysis: joined,
+    existingBody: body,
+    occurrence: { ...OCCURRENCE, runId: '303', runUrl: '.../runs/303' },
+  });
+  body = renderIssueBody({
+    analysis: joined,
+    existingBody: body,
+    occurrence: { ...OCCURRENCE, runId: '304', runUrl: '.../runs/304' },
+  });
+
+  // One heading and one listing of the extra test, however many merges ran.
+  assert.equal(body.split('## Also failing').length - 1, 1);
+  assert.equal(
+    body.split('- `channel-plugin.test.ts > remembers pineapple`').length - 1,
+    1,
+  );
+});
+
+test('a test that joined then got fixed drops out of "Also failing"', () => {
+  const first = analyzeLogs('E2E Tests', [VITEST_LOG]);
+  const joined = analyzeLogs('E2E Tests', [
+    VITEST_LOG,
+    ' FAIL  channel-plugin.test.ts > remembers pineapple',
+  ]);
+  const withExtra = renderIssueBody({
+    analysis: joined,
+    existingBody: renderIssueBody({ analysis: first, occurrence: OCCURRENCE }),
+    occurrence: { ...OCCURRENCE, runId: '303', runUrl: '.../runs/303' },
+  });
+  assert.ok(
+    withExtra.includes('- `channel-plugin.test.ts > remembers pineapple`'),
+  );
+
+  // The extra test is fixed; only the original failure recurs.
+  const merged = renderIssueBody({
+    analysis: first,
+    existingBody: withExtra,
+    occurrence: { ...OCCURRENCE, runId: '304', runUrl: '.../runs/304' },
+  });
+
+  assert.ok(
+    !merged.includes('- `channel-plugin.test.ts > remembers pineapple`'),
+  );
+  assert.ok(!merged.includes('## Also failing'));
+  // The original failing test is still listed exactly once.
+  assert.equal(merged.split(`- \`${VITEST_TEST_ID}\``).length - 1, 1);
 });
 
 test('the recurrence list is bounded and the trim note never re-enters it', () => {

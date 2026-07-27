@@ -55,6 +55,10 @@ describe('main CI failure issue workflow', () => {
     // open one issue per merge. The markers themselves live in the helper.
     expect(workflow).toContain('main-failure-signature.mjs');
     expect(workflow).toContain('searchMarkers');
+    // The failing tests are read from the triggering run's failed-job logs, so
+    // the dedupe key is recovered even when the run reported no test result.
+    expect(workflow).toContain('actions/runs/${WORKFLOW_RUN_ID}/jobs');
+    expect(workflow).toContain('actions/jobs/${job_id}/logs');
     expect(workflow).toContain('gh issue list');
     expect(workflow).toContain('gh issue create');
     expect(workflow).toContain('apply_autofix_route "${EXISTING_ISSUE}"');
@@ -81,6 +85,18 @@ describe('main CI failure issue workflow', () => {
       expect(rendered, name).not.toContain('main-failure-signature.mjs');
       expect(job.permissions, name).toEqual({ issues: 'write' });
     }
+  });
+
+  it('pins the analyze checkout and drops persist-credentials', () => {
+    // The read-only analyze job does check out the repo (it runs the helper),
+    // so pin it to a SHA rather than a mutable tag and never leave the workflow
+    // token on the runner.
+    const checkout = jobs.analyze.steps.find((step) =>
+      String(step.uses ?? '').startsWith('actions/checkout'),
+    );
+    expect(checkout).toBeDefined();
+    expect(checkout.uses).toMatch(/^actions\/checkout@[0-9a-f]{40}$/);
+    expect(checkout.with['persist-credentials']).toBe(false);
   });
 
   it('keeps the log analysis away from the bot PAT and from write scopes', () => {
