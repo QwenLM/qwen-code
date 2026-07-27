@@ -2280,6 +2280,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             .catch(() => undefined);
         },
         opts.onChannelDelivery,
+        () =>
+          channelInfo?.sessionIds === sessionIds &&
+          channelInfo.sessionSpawnsInFlight > 0,
       );
       const connection = new ClientSideConnection(() => client, channel.stream);
 

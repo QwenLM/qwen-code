@@ -1955,6 +1955,65 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('allows client MCP discovery during session pre-registration only', async () => {
+    const contexts: unknown[] = [];
+    const send = vi.fn().mockImplementation(async (_payload, context) => {
+      contexts.push(context);
+      return { jsonrpc: '2.0', id: 1, result: {} };
+    });
+    const handles: ChannelHandle[] = [];
+    const handle = makeChannel({
+      newSessionImpl: async (params) => {
+        const sessionId = `sess:${params.cwd}`;
+        await expect(
+          handles[0]!.agentConnection.extMethod(
+            SERVE_CONTROL_EXT_METHODS.clientMcpMessage,
+            {
+              server: 'channel-loop',
+              sessionId,
+              payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+            },
+          ),
+        ).resolves.toEqual({
+          payload: { jsonrpc: '2.0', id: 1, result: {} },
+        });
+        return { sessionId };
+      },
+    });
+    handles.push(handle);
+    const bridge = makeBridge({
+      channelFactory: vi.fn().mockResolvedValue(handle.channel),
+      clientMcpSender: () => send,
+    });
+
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    expect(contexts).toEqual([undefined]);
+
+    await handle.agentConnection.extMethod(
+      SERVE_CONTROL_EXT_METHODS.clientMcpMessage,
+      {
+        server: 'channel-loop',
+        sessionId: session.sessionId,
+        payload: { jsonrpc: '2.0', id: 2, method: 'tools/list' },
+      },
+    );
+    expect(contexts).toEqual([undefined, { sessionId: session.sessionId }]);
+
+    await expect(
+      handle.agentConnection.extMethod(
+        SERVE_CONTROL_EXT_METHODS.clientMcpMessage,
+        {
+          server: 'channel-loop',
+          sessionId: 'foreign-session',
+          payload: { jsonrpc: '2.0', id: 3, method: 'tools/list' },
+        },
+      ),
+    ).rejects.toMatchObject({ code: -32602 });
+    expect(send).toHaveBeenCalledTimes(2);
+
+    await bridge.shutdown();
+  });
+
   it('refreshes extensions across live sessions and broadcasts merged results', async () => {
     const handles: ChannelHandle[] = [];
     const bridge = makeBridge({

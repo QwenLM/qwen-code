@@ -2888,6 +2888,60 @@ describe('BridgeClient — reverse tool channel (qwen/control/client_mcp/message
     ).rejects.toMatchObject({ code: -32602 });
   });
 
+  it('forwards a pre-registration session frame without trusted context', async () => {
+    const contexts: unknown[] = [];
+    const send = vi.fn().mockImplementation(async (_payload, context) => {
+      contexts.push(context);
+      return {
+        jsonrpc: '2.0',
+        id: 1,
+        result: {},
+      };
+    });
+    const sender: ClientMcpMessageSender = () => send;
+    const client = new BridgeClient(
+      (() => undefined) as never,
+      (() => undefined) as never,
+      { request: thrower } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      sender,
+      () => false,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => true,
+    );
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+
+    try {
+      await expect(
+        client.extMethod('qwen/control/client_mcp/message', {
+          server: 'channel-loop',
+          sessionId: 'unowned-session',
+          payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+        }),
+      ).resolves.toEqual({
+        payload: { jsonrpc: '2.0', id: 1, result: {} },
+      });
+      expect(contexts).toEqual([undefined]);
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'type=client_mcp_message action=forwarded_without_session',
+        ),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it('rejects a session id owned by another ACP channel', async () => {
     const send = vi.fn().mockResolvedValue({
       jsonrpc: '2.0',
