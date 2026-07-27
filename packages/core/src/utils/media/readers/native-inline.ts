@@ -22,6 +22,7 @@ import { effortBudget } from '../media-effort.js';
 import {
   transformImage,
   extractClip,
+  extractAudioTrack,
   type ImageTransformParams,
 } from '../ffmpeg-tools.js';
 import type {
@@ -74,6 +75,16 @@ function fits(buffer: Buffer): boolean {
   return buffer.length <= getMaxInlineMediaBytes();
 }
 
+/**
+ * Whether an audio mime type is directly ingestible on the inline audio channel
+ * without transcoding. Providers' inline audio (OpenAI/DashScope `input_audio`)
+ * accept only wav/mp3; everything else must be transcoded to mp3.
+ */
+function isInlineReadyAudio(mimeType: string): boolean {
+  const m = mimeType.toLowerCase();
+  return m.includes('wav') || m.includes('mp3') || m.includes('mpeg');
+}
+
 class NativeInlineReader implements MediaReader {
   readonly id = 'native-inline';
   readonly kind = 'native' as const;
@@ -81,6 +92,12 @@ class NativeInlineReader implements MediaReader {
 
   isAvailable(probe: MediaProbe, ctx: MediaReadContext): boolean {
     const modalities = ctx.config.getEffectiveInputModalities();
+    // Video is serviceable whenever the model can ingest video natively OR at
+    // least images: an image-capable model sees a video via keyframes (原生代看,
+    // the trunk owns this downgrade — strategies must not reinvent it).
+    if (probe.modality === 'video') {
+      return modalities.video === true || modalities.image === true;
+    }
     return modalities[MODALITY_TO_INPUT_KEY[probe.modality]] === true;
   }
 
@@ -203,6 +220,17 @@ class NativeInlineReader implements MediaReader {
     const budget = effortBudget(params.effort);
     const cost = costFor(probe, ctx.config);
 
+    // Capability downgrade owned by the trunk: a model that cannot ingest video
+    // natively but can see images gets the video as keyframes (原生代看). This is
+    // why S2/dispatch does not need its own keyframe path — it reads segments
+    // through this reader and gets native clips or keyframes per capability.
+    if (
+      probe.modality === 'video' &&
+      ctx.config.getEffectiveInputModalities().video !== true
+    ) {
+      return this.keyframeResult(probe, params.range, budget, ctx, params.fps);
+    }
+
     // Explicit time window → cut a clip.
     if (params.range) {
       const [s, e] = params.range;
@@ -253,6 +281,33 @@ class NativeInlineReader implements MediaReader {
     // Whole file: inline when it fits.
     const transport = decideTransport(probe, ctx.config);
     if (transport.mode === 'inline') {
+      // Audio must be inlined in a broadly-ingestible container. Providers'
+      // inline-audio channel only accepts wav/mp3 (OpenAI/DashScope input_audio),
+      // so transcode other codecs (m4a/aac/ogg/flac/opus/…) to mp3 — otherwise
+      // the request converter silently drops the audio (零静默降质).
+      if (probe.modality === 'audio' && !isInlineReadyAudio(probe.mimeType)) {
+        try {
+          const mp3 = await extractAudioTrack(probe, { signal: ctx.signal });
+          if (fits(mp3.buffer)) {
+            return {
+              content: inlinePart(
+                mp3.buffer,
+                mp3.mimeType,
+                `${path.basename(probe.path)}.mp3`,
+              ),
+              scope: 'full audio (native inline, transcoded to mp3)',
+              precision: `re-encoded from ${probe.mimeType} to audio/mpeg so the provider can ingest it (container change; audio content preserved)`,
+              cost,
+              readMore:
+                'Full track delivered; re-encoded to mp3 for provider compatibility.',
+            };
+          }
+          // Transcoded track still too big to inline → oversized handling below.
+        } catch {
+          // ffmpeg unavailable/failed: fall through to inlining the original,
+          // which some providers (e.g. Gemini) can still ingest.
+        }
+      }
       const bytes = await fs.readFile(probe.path);
       return {
         content: inlinePart(bytes, probe.mimeType, path.basename(probe.path)),
@@ -264,9 +319,13 @@ class NativeInlineReader implements MediaReader {
       };
     }
 
-    // Too large: upload when the provider can fetch a URL; else keyframe fallback.
+    // Too large: upload only when the provider can actually consume THIS
+    // modality by reference. Uploading audio for a provider whose request path
+    // only takes image/video URLs would strand the bytes behind a URL that gets
+    // dropped downstream — so gate on the per-modality capability, not just
+    // supportsFileUri, and otherwise fall back / fail closed with a remedy.
     const profile = getMediaProfile(ctx.config);
-    if (profile.supportsFileUri) {
+    if (profile.fileUriModalities.includes(probe.modality)) {
       const uploader = determineUploader(ctx.config);
       try {
         const uploaded = await uploader.upload(probe);
@@ -292,7 +351,9 @@ class NativeInlineReader implements MediaReader {
       params,
       budget,
       ctx,
-      'Configure a media upload backend, or request a specific time range so a clip fits inline.',
+      probe.modality === 'audio'
+        ? 'This provider cannot ingest audio by URL. Read a specific time range with media_watch(range=…) so a clip fits inline, or media_extract(mode="transcript") for the whole track.'
+        : 'Configure a media upload backend, or request a specific time range so a clip fits inline.',
     );
   }
 

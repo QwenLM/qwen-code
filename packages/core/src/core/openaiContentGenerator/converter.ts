@@ -916,7 +916,7 @@ function createMediaContentPart(
           type: 'input_audio' as const,
           input_audio: {
             data: `data:${mimeType};base64,${part.inlineData.data}`,
-            format,
+            format: format as 'wav' | 'mp3',
           },
         };
       }
@@ -961,6 +961,25 @@ function createMediaContentPart(
       return {
         type: 'image_url' as const,
         image_url: { url: fileUri },
+      };
+    }
+
+    if (mediaType === 'audio') {
+      if (!modalities.audio) {
+        return unsupportedModalityPlaceholder(
+          'audio',
+          filename,
+          requestContext,
+        );
+      }
+      // DashScope/Qwen accept a public URL in input_audio.data (verified live),
+      // so an uploaded audio file is delivered by reference, not dropped.
+      return {
+        type: 'input_audio' as const,
+        input_audio: {
+          data: fileUri,
+          format: (getAudioFormat(mimeType) ?? 'mp3') as 'wav' | 'mp3',
+        },
       };
     }
 
@@ -1037,9 +1056,19 @@ function getMediaType(mimeType: string): 'image' | 'audio' | 'video' | 'file' {
   return 'file';
 }
 
-function getAudioFormat(mimeType: string): 'wav' | 'mp3' | null {
-  if (mimeType.includes('wav')) return 'wav';
-  if (mimeType.includes('mp3') || mimeType.includes('mpeg')) return 'mp3';
+// input_audio wants a short format token (wav/mp3/m4a/…) distinct from the full
+// mimeType. Mirrors Qwen/DashScope's audio format table (verified live: m4a and
+// the data: URI form are accepted by qwen-omni on compatible-mode). Returns null
+// for codecs outside the table so the caller can transcode instead of guessing.
+function getAudioFormat(mimeType: string): string | null {
+  const m = mimeType.toLowerCase();
+  if (m.includes('wav')) return 'wav';
+  if (m.includes('mp3') || m.includes('mpeg')) return 'mp3';
+  if (m.includes('aac')) return 'aac';
+  if (m.includes('m4a') || m.includes('mp4')) return 'm4a';
+  if (m.includes('opus')) return 'opus';
+  if (m.includes('ogg')) return 'ogg';
+  if (m.includes('flac')) return 'flac';
   return null;
 }
 

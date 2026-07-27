@@ -33,6 +33,83 @@ export function modalityOf(mimeType: string): Modality | undefined {
   return undefined;
 }
 
+/**
+ * Sniff a media MIME type from a file's leading bytes (magic numbers), so
+ * identification does NOT depend on the filename extension (方案 1.1.1 · 进入与
+ * 识别: "MIME 类型以 magic bytes 判定，不依赖扩展名"). Returns undefined when the
+ * signature is not a recognized image/audio/video container — callers then fall
+ * back to the extension-based type. Never throws.
+ */
+export function sniffMimeFromBytes(head: Buffer): string | undefined {
+  const b = head;
+  const startsWith = (sig: number[], offset = 0): boolean =>
+    b.length >= offset + sig.length &&
+    sig.every((byte, i) => b[offset + i] === byte);
+  const ascii = (offset: number, len: number): string =>
+    b.length >= offset + len ? b.toString('latin1', offset, offset + len) : '';
+
+  // --- Images ---
+  if (startsWith([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))
+    return 'image/png';
+  if (startsWith([0xff, 0xd8, 0xff])) return 'image/jpeg';
+  if (ascii(0, 4) === 'GIF8') return 'image/gif';
+  if (startsWith([0x42, 0x4d])) return 'image/bmp';
+  if (
+    startsWith([0x49, 0x49, 0x2a, 0x00]) ||
+    startsWith([0x4d, 0x4d, 0x00, 0x2a])
+  )
+    return 'image/tiff';
+
+  // --- RIFF container: WEBP (image), WAV (audio), AVI (video) ---
+  if (ascii(0, 4) === 'RIFF') {
+    const form = ascii(8, 4);
+    if (form === 'WEBP') return 'image/webp';
+    if (form === 'WAVE') return 'audio/wav';
+    if (form.startsWith('AVI')) return 'video/x-msvideo';
+  }
+
+  // --- Audio ---
+  if (ascii(0, 3) === 'ID3') return 'audio/mpeg';
+  // MP3 frame sync (0xFFEx/0xFFFx) without an ID3 tag.
+  if (b.length >= 2 && b[0] === 0xff && (b[1] & 0xe0) === 0xe0)
+    return 'audio/mpeg';
+  if (ascii(0, 4) === 'OggS') return 'audio/ogg';
+  if (ascii(0, 4) === 'fLaC') return 'audio/flac';
+
+  // --- ISO-BMFF (MP4/MOV/M4A): 'ftyp' box at offset 4, brand at offset 8 ---
+  if (ascii(4, 4) === 'ftyp') {
+    const brand = ascii(8, 4);
+    if (brand.startsWith('M4A') || brand.startsWith('M4B')) return 'audio/mp4';
+    if (brand.startsWith('qt')) return 'video/quicktime';
+    return 'video/mp4';
+  }
+
+  // --- Matroska / WebM (EBML header) ---
+  if (startsWith([0x1a, 0x45, 0xdf, 0xa3])) return 'video/webm';
+
+  return undefined;
+}
+
+/**
+ * Read a file's first bytes and sniff its media MIME by content. Best-effort:
+ * returns undefined if the file can't be read or the signature is unknown.
+ */
+export async function sniffMediaMime(
+  filePath: string,
+): Promise<string | undefined> {
+  let handle: fs.FileHandle | undefined;
+  try {
+    handle = await fs.open(filePath, 'r');
+    const buf = Buffer.alloc(16);
+    const { bytesRead } = await handle.read(buf, 0, 16, 0);
+    return sniffMimeFromBytes(buf.subarray(0, bytesRead));
+  } catch {
+    return undefined;
+  } finally {
+    await handle?.close().catch(() => {});
+  }
+}
+
 /** Stream a file through sha256 without loading it fully into memory. */
 export async function hashFile(filePath: string): Promise<string> {
   const hash = createHash('sha256');
@@ -142,7 +219,12 @@ export async function probeMedia(filePath: string): Promise<MediaProbe> {
   if (!stat.isFile()) {
     throw new Error(`Not a file: ${resolved}`);
   }
-  const mimeType = getSpecificMimeType(resolved) ?? 'application/octet-stream';
+  // Identify by content first (magic bytes), not the extension: a recognized
+  // signature is authoritative, so a mislabeled or extension-less media file is
+  // still handled, and text files masquerading with a media extension are not.
+  const sniffed = await sniffMediaMime(resolved);
+  const extMime = getSpecificMimeType(resolved) ?? 'application/octet-stream';
+  const mimeType = sniffed ?? extMime;
   const modality = modalityOf(mimeType);
   if (!modality) {
     throw new Error(

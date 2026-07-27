@@ -5,11 +5,13 @@
  */
 
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Config } from '../../config/config.js';
 import type { PermissionDecision } from '../../permissions/types.js';
 import { Storage } from '../../config/storage.js';
 import { isSubpaths } from '../paths.js';
 import { isAnyAutoMemPath } from '../../memory/paths.js';
+import { isRemoteMediaUrl, isFileUrl } from './media-source.js';
 
 /**
  * P5 · Media security boundary (A-class, always-on).
@@ -41,7 +43,21 @@ export function getMediaReadPermission(
   filePath: string,
   config: Config,
 ): PermissionDecision {
-  const resolved = path.resolve(filePath);
+  // A remote URL is untrusted network content and an outbound fetch — require
+  // confirmation rather than silently pulling arbitrary URLs.
+  if (isRemoteMediaUrl(filePath)) {
+    return 'ask';
+  }
+  // A file:// URL is just a local path; check it as one.
+  let localPath = filePath;
+  if (isFileUrl(filePath)) {
+    try {
+      localPath = fileURLToPath(filePath.trim());
+    } catch {
+      return 'ask';
+    }
+  }
+  const resolved = path.resolve(localPath);
   const workspaceContext = config.getWorkspaceContext();
   const allowedRoots = [
     config.storage.getProjectTempDir(),

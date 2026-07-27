@@ -4,31 +4,30 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content, Part } from '@google/genai';
+import type { Part } from '@google/genai';
 import type { Config } from '../../config/config.js';
 import { getResponseText } from '../partUtils.js';
 import { getMediaMemory } from '../../memory/media/media-memory-store.js';
 import { computeAutoLinks } from '../../memory/media/media-links.js';
-import { extractKeyframes } from './keyframe-extractor.js';
 import { effortBudget } from './media-effort.js';
-import { probeMedia } from './probe.js';
 import { MediaReadError } from './reader-registry.js';
+import { resolveAndProbe } from './media-source.js';
+import { readMediaParts } from './media-orchestrator.js';
 import type { MediaEffort, MediaProbe } from './types.js';
 
 /**
- * media_dispatch — parallel time-segment understanding.
+ * media_dispatch — parallel time-segment understanding (strategy S2).
  *
- * A long video is split into time segments; each segment is understood
- * independently and in parallel by a lightweight one-shot understanding call
- * (keyframes for that range → the model describes them). Notes are aggregated
- * and recorded in cross-session media memory.
+ * Pure orchestration ABOVE the Seam A read trunk: a long video is split into
+ * time segments, each segment's media is acquired through the shared trunk
+ * (`readMediaParts` → probe→registry.pick→reader.read, so a capable model gets
+ * the segment 原生全保真 and others get keyframes — the trunk decides, dispatch
+ * does not reinvent it), each is understood by a one-shot model call, and the
+ * notes are reduced and recorded in cross-session media memory.
  *
- * This runs regardless of whether the *main* model is multimodal: the per-
- * segment understanding uses the main model itself when it can ingest images,
- * otherwise a configured vision model. So a multimodal main model still benefits
- * from parallel divide-and-conquer over a long video (U4 was "reuse existing
- * parallel primitives"; this is the explicit media-native version the caller
- * asked for).
+ * Runs regardless of whether the *main* model is multimodal: the per-segment
+ * understanding uses the main model when it can ingest images, otherwise a
+ * configured vision model (the trunk is read under that model's capabilities).
  */
 
 export interface DispatchOptions {
@@ -57,6 +56,7 @@ export interface SegmentUnderstanding {
   index: number;
   range: [number, number];
   note: string;
+  /** Media parts shown for this segment (keyframes → N frames; native clip → 1). */
   frameCount: number;
 }
 
@@ -88,6 +88,31 @@ function pickUnderstandingModel(config: Config): string | undefined {
     return config.getModel();
   }
   return config.getDefaultVisionBridgeModel()?.id;
+}
+
+/**
+ * A capability view of the config for reading segments under the *understanding*
+ * model. When the main model can ingest images we read under the real config (so
+ * an omni main model yields native clips, an image-only one yields keyframes —
+ * the trunk decides). When we bridge to a vision model, we present an
+ * image-capable view so the trunk serves keyframes for that vision model.
+ */
+function understandingConfigView(
+  config: Config,
+  model: string,
+  mainImageCapable: boolean,
+): Config {
+  if (mainImageCapable) return config;
+  return new Proxy(config, {
+    get(target, prop, receiver) {
+      if (prop === 'getEffectiveInputModalities') {
+        return () => ({ image: true });
+      }
+      if (prop === 'getModel') return () => model;
+      const value = Reflect.get(target, prop, receiver);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  }) as Config;
 }
 
 function segmentRanges(
@@ -130,12 +155,12 @@ function segmentPrompt(
   durationSec: number,
   focus: string,
 ): string {
-  const base = `These keyframes are sampled from the video segment t=${range[0]}s–${range[1]}s (of a ${Math.round(durationSec)}s video).`;
+  const base = `This is the video segment t=${range[0]}s–${range[1]}s (of a ${Math.round(durationSec)}s video).`;
   const instruction =
     focus.length > 0
       ? focus
       : 'Describe concisely and factually what happens in this segment: key objects, actions, on-screen text, scene changes.';
-  return `${base} ${instruction} Only describe what the frames actually show; do not speculate.`;
+  return `${base} ${instruction} Only describe what is actually shown; do not speculate.`;
 }
 
 async function understandSegment(
@@ -143,28 +168,32 @@ async function understandSegment(
   range: [number, number],
   index: number,
   model: string,
-  framesPerSegment: number,
-  frameLongEdge: number,
+  readConfig: Config,
   focus: string,
+  effort: MediaEffort | undefined,
   config: Config,
   signal: AbortSignal,
 ): Promise<SegmentUnderstanding> {
   try {
-    const frames = await extractKeyframes(probe, {
-      range,
-      maxFrames: framesPerSegment,
-      longEdge: frameLongEdge,
+    // Segment media comes from the trunk: native clip when the model can watch
+    // video, keyframes otherwise — decided in one place, not here.
+    const mediaParts = await readMediaParts(
+      probe,
+      { range, ...(effort ? { effort } : {}) },
+      readConfig,
       signal,
-    });
+    );
+    const frameCount = mediaParts.filter(
+      (p) => p.inlineData || p.fileData,
+    ).length;
     const parts: Part[] = [
-      ...frames.parts,
+      ...mediaParts,
       { text: segmentPrompt(range, probe.durationSec ?? 0, focus) },
     ];
-    const contents: Content[] = [{ role: 'user', parts }];
     const response = await config
       .getGeminiClient()
       .generateContent(
-        contents,
+        [{ role: 'user', parts }],
         {},
         signal,
         model,
@@ -172,7 +201,7 @@ async function understandSegment(
       );
     const note =
       getResponseText(response)?.trim() || '(no description returned)';
-    return { index, range, note, frameCount: frames.frameCount };
+    return { index, range, note, frameCount };
   } catch (err) {
     return {
       index,
@@ -189,7 +218,8 @@ export async function dispatchMediaSegments(
   config: Config,
   opts: DispatchOptions,
 ): Promise<DispatchResult> {
-  const probe = await probeMedia(filePath);
+  // Resolve (URL/file:// → local) and probe through the shared trunk entry.
+  const { probe } = await resolveAndProbe(filePath, opts.signal);
   if (probe.modality !== 'video') {
     throw new MediaReadError(
       'unsupported-format',
@@ -247,9 +277,9 @@ export async function dispatchMediaSegments(
       MAX_SEGMENTS,
     ),
   );
-  const framesPerSegment =
-    opts.framesPerSegment ?? Math.max(2, Math.round(budget.maxFrames / 2));
   const ranges = segmentRanges(durationSec, count);
+  const mainImageCapable = config.getEffectiveInputModalities().image === true;
+  const readConfig = understandingConfigView(config, model, mainImageCapable);
 
   const segments = await mapWithConcurrency(
     ranges,
@@ -260,9 +290,9 @@ export async function dispatchMediaSegments(
         range,
         index,
         model,
-        framesPerSegment,
-        budget.frameLongEdge,
+        readConfig,
         focus,
+        opts.effort,
         config,
         opts.signal,
       ),
@@ -284,7 +314,7 @@ export async function dispatchMediaSegments(
       segments
         .map(
           (s) =>
-            `### Segment ${s.index + 1} · t=${s.range[0]}s–${s.range[1]}s (${s.frameCount} frames)\n${s.note}`,
+            `### Segment ${s.index + 1} · t=${s.range[0]}s–${s.range[1]}s (${s.frameCount} part(s))\n${s.note}`,
         )
         .join('\n\n');
     await memory.put({

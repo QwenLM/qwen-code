@@ -981,12 +981,16 @@ async function largeMediaMemoryResult(
   modality: keyof InputModalities,
   displayName: string,
 ): Promise<ProcessedFileReadResult> {
-  const tool =
+  // Name the read tools WITHOUT hardwiring a strategy: the model picks S1–S6
+  // (native watch vs segmented dispatch) — the scaffold must not pre-route
+  // (需求文档 §5.2). For video, watching natively (media_watch, includes audio
+  // and can reference a URL directly) is the default; dispatch is the option for
+  // very long videos that need parallel map-reduce over time segments.
+  const primaryTool = modality === 'image' ? 'image_view' : 'media_watch';
+  const toolAdvice =
     modality === 'video'
-      ? 'media_dispatch'
-      : modality === 'image'
-        ? 'image_view'
-        : 'media_watch';
+      ? 'media_watch (watch it natively — includes audio; a URL is fetched directly, no download), or media_dispatch for a very long video (splits it into parallel time segments)'
+      : primaryTool;
   let record;
   try {
     const { getMediaMemory } = await import(
@@ -1001,15 +1005,14 @@ async function largeMediaMemoryResult(
       llmContent:
         `[${modality} "${displayName}" is too large to read inline, but media memory already has a cross-session understanding of this exact file:]\n\n` +
         `${record.body}\n\n` +
-        `[If this does not answer the question, call ${tool} with a targeted prompt (pass force:true to re-analyze from scratch).]`,
+        `[If this does not answer the question, call ${toolAdvice} with a targeted prompt (pass force:true to re-analyze from scratch).]`,
       returnDisplay: `Recalled media memory: ${displayName}`,
     };
   }
   return {
     llmContent:
       `[${modality} "${displayName}" is too large to read inline, and media memory has NO prior understanding of it. ` +
-      `To analyze it, call ${tool}${modality === 'video' ? ' (it splits the video into time segments and understands them in parallel)' : ''} ` +
-      `with a prompt describing what you need to know.]`,
+      `To analyze it, call ${toolAdvice} with a prompt describing what you need to know.]`,
     returnDisplay: `Large ${modality}, not in memory: ${displayName}`,
   };
 }

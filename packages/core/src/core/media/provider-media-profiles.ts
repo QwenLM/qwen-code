@@ -34,6 +34,15 @@ export interface MediaProfile {
    * Files API). Drives whether the upload transport is worth attempting.
    */
   supportsFileUri: boolean;
+  /**
+   * Which modalities can actually be delivered *by reference* (`fileData.fileUri`)
+   * on this provider's request path. This is narrower than `supportsFileUri`:
+   * e.g. the DashScope/OpenAI-compatible request only accepts image & video URLs
+   * (`image_url`/`video_url`) — audio must be inlined (`input_audio` base64), so
+   * uploading audio and referencing it by URL would be silently dropped. The
+   * reader consults this to avoid that (fails closed with a remedy instead).
+   */
+  fileUriModalities: Modality[];
 }
 
 const DEFAULT_PROFILE: MediaProfile = {
@@ -43,12 +52,14 @@ const DEFAULT_PROFILE: MediaProfile = {
   tokensPerAudioSecond: 25,
   tokensPerVideoSecond: 300,
   supportsFileUri: true,
+  fileUriModalities: ['image', 'video'],
 };
 
 /**
  * DashScope / Qwen-VL family. Qwen-VL downscales images to a token budget
  * (≈ up to 1280 long edge for the compatible endpoint) and accepts public
- * https/oss URLs for images, audio and video.
+ * https/oss URLs for images and video, and for audio via input_audio.data
+ * (verified live against qwen-omni on compatible-mode).
  */
 const QWEN_PROFILE: MediaProfile = {
   id: 'qwen-vl',
@@ -57,6 +68,7 @@ const QWEN_PROFILE: MediaProfile = {
   tokensPerAudioSecond: 20,
   tokensPerVideoSecond: 256,
   supportsFileUri: true,
+  fileUriModalities: ['image', 'audio', 'video'],
 };
 
 /** Google Gemini / Vertex — native long-context video, high per-image tiling. */
@@ -67,6 +79,7 @@ const GEMINI_PROFILE: MediaProfile = {
   tokensPerAudioSecond: 32,
   tokensPerVideoSecond: 300,
   supportsFileUri: true,
+  fileUriModalities: ['image', 'audio', 'video'],
 };
 
 /** Anthropic Claude — images tiled to ~1568 long edge; no native audio/video. */
@@ -77,6 +90,7 @@ const ANTHROPIC_PROFILE: MediaProfile = {
   tokensPerAudioSecond: 0,
   tokensPerVideoSecond: 0,
   supportsFileUri: false,
+  fileUriModalities: [],
 };
 
 /** Generic OpenAI-compatible (GPT-4o class): image tiles, no native a/v. */
@@ -87,6 +101,7 @@ const OPENAI_PROFILE: MediaProfile = {
   tokensPerAudioSecond: 0,
   tokensPerVideoSecond: 0,
   supportsFileUri: true,
+  fileUriModalities: ['image', 'video'],
 };
 
 function looksLikeDashScope(baseUrl: string | undefined): boolean {

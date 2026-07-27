@@ -20,9 +20,10 @@ import {
   type ClipResult,
 } from './ffmpeg-tools.js';
 import { effortBudget } from './media-effort.js';
-import { probeMedia, hashBuffer } from './probe.js';
+import { hashBuffer } from './probe.js';
 import { buildMediaDelivery, buildMediaError } from './media-result.js';
 import { MediaReadError } from './reader-registry.js';
+import { resolveAndProbe } from './media-source.js';
 import type { MediaEffort, Modality, MediaProbe } from './types.js';
 
 /**
@@ -114,8 +115,16 @@ export async function deriveMediaArtifact(
 ): Promise<ToolResult> {
   let source: MediaProbe;
   try {
-    source = await probeMedia(input.filePath);
+    const resolved = await resolveAndProbe(input.filePath, input.signal);
+    source = resolved.probe;
   } catch (err) {
+    if (err instanceof MediaReadError) {
+      return buildMediaError({
+        kind: err.kind,
+        message: err.message,
+        remedy: err.remedy,
+      });
+    }
     const message = err instanceof Error ? err.message : String(err);
     return buildMediaError({
       kind: message.includes('Unsupported media type')

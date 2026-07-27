@@ -17,6 +17,7 @@ import {
 } from '../../utils/media/media-result.js';
 import { dispatchMediaSegments } from '../../utils/media/media-dispatch.js';
 import { MediaReadError } from '../../utils/media/reader-registry.js';
+import { isMediaUrl } from '../../utils/media/media-source.js';
 
 export interface MediaDispatchParams {
   file_path: string;
@@ -127,7 +128,7 @@ export class MediaDispatchTool extends BaseDeclarativeTool<
         properties: {
           file_path: {
             type: 'string',
-            description: 'Absolute path to the video file.',
+            description: 'Absolute path or http(s) URL of the video file.',
           },
           segments: {
             type: 'integer',
@@ -156,8 +157,8 @@ export class MediaDispatchTool extends BaseDeclarativeTool<
     if (!params.file_path?.trim()) {
       return "The 'file_path' parameter must be non-empty.";
     }
-    if (!path.isAbsolute(params.file_path)) {
-      return `File path must be absolute, but was relative: ${params.file_path}.`;
+    if (!path.isAbsolute(params.file_path) && !isMediaUrl(params.file_path)) {
+      return `File path must be an absolute path or an http(s) URL, but was: ${params.file_path}.`;
     }
     if (
       params.segments !== undefined &&

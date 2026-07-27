@@ -13,6 +13,7 @@ import type { PermissionDecision } from '../../permissions/types.js';
 import { readMedia } from '../../utils/media/media-orchestrator.js';
 import { deriveMediaArtifact } from '../../utils/media/media-derive.js';
 import { getMediaReadPermission } from '../../utils/media/media-security.js';
+import { isMediaUrl } from '../../utils/media/media-source.js';
 import type { MediaReadParams } from '../../utils/media/reader-registry.js';
 import type { MediaEffort } from '../../utils/media/types.js';
 
@@ -93,7 +94,7 @@ export class MediaExtractTool extends BaseDeclarativeTool<
         properties: {
           file_path: {
             type: 'string',
-            description: 'Absolute path to the media file.',
+            description: 'Absolute path or http(s) URL of the media file.',
           },
           mode: {
             type: 'string',
@@ -126,8 +127,8 @@ export class MediaExtractTool extends BaseDeclarativeTool<
     if (!params.file_path?.trim()) {
       return "The 'file_path' parameter must be non-empty.";
     }
-    if (!path.isAbsolute(params.file_path)) {
-      return `File path must be absolute, but was relative: ${params.file_path}.`;
+    if (!path.isAbsolute(params.file_path) && !isMediaUrl(params.file_path)) {
+      return `File path must be an absolute path or an http(s) URL, but was: ${params.file_path}.`;
     }
     return null;
   }

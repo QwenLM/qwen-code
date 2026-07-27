@@ -63,6 +63,10 @@ function fakeConfig(
     getModel: () => 'main-model',
     getDefaultVisionBridgeModel: () =>
       opts.visionModelId ? { id: opts.visionModelId } : undefined,
+    // dispatch now reads segments through the trunk, which resolves the media
+    // config and provider profile — a trunk-complete fake needs these.
+    getMediaConfig: () => undefined,
+    getContentGeneratorConfig: () => ({}),
     getGeminiClient: () => ({
       generateContent: async (
         contents: Array<{

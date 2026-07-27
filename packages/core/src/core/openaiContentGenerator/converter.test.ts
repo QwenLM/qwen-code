@@ -2408,7 +2408,7 @@ describe('OpenAIContentConverter', () => {
       expect(contentArray[1].text).toContain('archive.zip');
     });
 
-    it('should render unsupported fileData types (including audio) as a text block', () => {
+    it('should render audio fileData as input_audio by URL (DashScope-compatible)', () => {
       const request: GenerateContentParameters = {
         model: 'models/test',
         contents: [
@@ -2459,14 +2459,17 @@ describe('OpenAIContentConverter', () => {
       const contentArray = toolMessage?.content as Array<{
         type: string;
         text?: string;
+        input_audio?: { data: string; format: string };
       }>;
       expect(contentArray).toHaveLength(2);
       expect(contentArray[0].type).toBe('text');
       expect(contentArray[0].text).toBe('File content');
-      expect(contentArray[1].type).toBe('text');
-      expect(contentArray[1].text).toContain('Unsupported file media type');
-      expect(contentArray[1].text).toContain('audio/mpeg');
-      expect(contentArray[1].text).toContain('audio.mp3');
+      // Audio delivered by reference (URL in input_audio.data), not dropped.
+      expect(contentArray[1].type).toBe('input_audio');
+      expect(contentArray[1].input_audio?.data).toBe(
+        'https://example.com/audio.mp3',
+      );
+      expect(contentArray[1].input_audio?.format).toBe('mp3');
     });
 
     it('should create tool message with text-only content when no media parts', () => {
