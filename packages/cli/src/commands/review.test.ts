@@ -48,6 +48,7 @@ describe('reviewCommand', () => {
       'load-rules',
       'agent-prompt',
       'build-test',
+      'script-lint',
       'resolve-anchors',
       'check-coverage',
       'presubmit',
