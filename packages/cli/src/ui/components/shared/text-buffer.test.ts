@@ -73,6 +73,26 @@ describe('textBufferReducer', () => {
       expect(state.lines).toEqual(['no undo']);
       expect(state.undoStack.length).toBe(0);
     });
+
+    it('should clear undo and redo history when requested', () => {
+      const stateWithHistory: TextBufferState = {
+        ...initialState,
+        lines: ['history-derived'],
+        undoStack: [{ lines: ['draft'], cursorRow: 0, cursorCol: 5 }],
+        redoStack: [{ lines: ['other'], cursorRow: 0, cursorCol: 5 }],
+      };
+      const state = textBufferReducer(stateWithHistory, {
+        type: 'set_text',
+        payload: '',
+        clearUndoHistory: true,
+      });
+
+      expect(state.lines).toEqual(['']);
+      expect(state.undoStack).toEqual([]);
+      expect(state.redoStack).toEqual([]);
+      expect(textBufferReducer(state, { type: 'undo' }).lines).toEqual(['']);
+      expect(textBufferReducer(state, { type: 'redo' }).lines).toEqual(['']);
+    });
   });
 
   describe('insert action', () => {

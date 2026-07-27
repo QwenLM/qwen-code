@@ -34,6 +34,7 @@ import { DaemonHttpError, isDaemonTurnError } from '@qwen-code/sdk/daemon';
 import type {
   DaemonInputAnnotation,
   DaemonTranscriptBlock,
+  DaemonSessionMonitorTaskStatus,
   DaemonSessionTaskStatus,
   DaemonSessionArtifact,
   DaemonWorkspaceCapability,
@@ -41,11 +42,24 @@ import type {
 } from '@qwen-code/sdk/daemon';
 
 import { type SessionGitIntent } from './components/GitModePopover';
-import { SESSION_TRANSCRIPT_PAGINATION_FEATURE } from './constants/sessions';
+import {
+  SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
+  SESSION_TRANSCRIPT_PAGINATION_FEATURE,
+} from './constants/sessions';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
+import { MonitorDetailsProvider } from './monitorDetailsContext';
+import { findMonitorTaskForTool } from './utils/monitorTasks';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
+import {
+  loadVoiceProviders,
+  resolveVoiceWorkspaceTarget,
+  setVoiceModelSetting,
+  supportsVoiceModelSettings,
+  type VoiceStatusRevision,
+} from './voice/voice-workspace-target';
+import { useVoiceWorkspaceSettings } from './voice/use-voice-workspace-settings';
 import {
   ChatEditor,
   type ComposerToolbarAction,
@@ -119,6 +133,7 @@ import {
 } from './utils/goalCondition';
 import { ExtensionsManagerPage } from './components/extensions/ExtensionsManagerPage';
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
+import { ChannelsManagerPage } from './components/channels/ChannelsManagerPage';
 import { ShadowDomBoundary } from './components/ShadowDomBoundary';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { isAskUserPermission } from './utils/askUserPermission';
@@ -952,12 +967,24 @@ export function getBackgroundTaskActivityKey(
   for (const message of messages) {
     if (message.role !== 'tool_group') continue;
     for (const tool of message.tools) {
-      if (isBackgroundShellToolCall(tool)) {
+      if (
+        isBackgroundShellToolCall(tool) ||
+        tool.toolName.toLowerCase() === 'monitor'
+      ) {
         parts.push(`${tool.callId}:${tool.status}`);
       }
     }
   }
   return parts.join('|');
+}
+
+export function mergeMonitorTaskSnapshot(
+  current: DaemonSessionMonitorTaskStatus,
+  next: DaemonSessionMonitorTaskStatus,
+): DaemonSessionMonitorTaskStatus {
+  return current.status !== 'running' && next.status === 'running'
+    ? current
+    : next;
 }
 
 function mapToWebShellTaskInfo(
@@ -1356,6 +1383,10 @@ export function App({
   const transcriptReloadSupported =
     connection.capabilities?.features.includes(
       SESSION_TRANSCRIPT_PAGINATION_FEATURE,
+    ) === true;
+  const monitorDetailsSupported =
+    connection.capabilities?.features.includes(
+      SESSION_MONITOR_TOOL_CORRELATION_FEATURE,
     ) === true;
   const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
@@ -1954,6 +1985,35 @@ export function App({
     },
     [getDefaultReviewPanelWidth, t],
   );
+  const openMonitorPanel = useCallback(
+    (task: DaemonSessionMonitorTaskStatus) => {
+      const tab: ArtifactPanelTab = {
+        id: `monitor:${task.id}`,
+        kind: 'monitor',
+        title: task.description,
+        task,
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => {
+              if (item.id !== tab.id || item.kind !== 'monitor') return item;
+              const mergedTask = mergeMonitorTaskSnapshot(item.task, task);
+              return {
+                ...tab,
+                title: mergedTask.description,
+                task: mergedTask,
+              };
+            })
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth],
+  );
   const openSubagentPanelForSession = useCallback(
     (tool: ACPToolCall, sessionId: string, workspaceCwd?: string) => {
       const rawOutput =
@@ -2031,7 +2091,6 @@ export function App({
         );
         return;
       }
-
       if (!request.workspaceActions) {
         setArtifactPanelExtraArtifacts((current) => {
           const index = current.findIndex(
@@ -2359,10 +2418,67 @@ export function App({
     () => getBackgroundTaskActivityKey(messages),
     [messages],
   );
+  const [backgroundTasksRefreshTrigger, setBackgroundTasksRefreshTrigger] =
+    useState(0);
   const backgroundTasks = useBackgroundTasks(
+    connection.sessionId,
     backgroundTaskActivityKey,
     connection.status === 'connected',
+    backgroundTasksRefreshTrigger,
   );
+  const monitorDetailsSessionIdRef = useRef(connection.sessionId);
+  monitorDetailsSessionIdRef.current = connection.sessionId;
+  const openMonitorPanelFromTool = useCallback(
+    async (tool: ACPToolCall): Promise<boolean> => {
+      const sessionId = monitorDetailsSessionIdRef.current;
+      if (!sessionId) return false;
+      try {
+        const snapshot = await sessionActions.getTasks();
+        if (
+          monitorDetailsSessionIdRef.current !== sessionId ||
+          snapshot.sessionId !== sessionId
+        ) {
+          return false;
+        }
+        const task = findMonitorTaskForTool(snapshot.tasks, tool);
+        if (!task) return false;
+        setBackgroundTasksRefreshTrigger((value) => value + 1);
+        openMonitorPanel(task);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [openMonitorPanel, sessionActions],
+  );
+  useEffect(() => {
+    const monitors = new Map(
+      backgroundTasks
+        .filter(
+          (task): task is DaemonSessionMonitorTaskStatus =>
+            task.kind === 'monitor',
+        )
+        .map((task) => [task.id, task]),
+    );
+    if (monitors.size === 0) return;
+    setArtifactPanelTabs((tabs) => {
+      let changed = false;
+      const next = tabs.map((tab) => {
+        if (tab.kind !== 'monitor') return tab;
+        const task = monitors.get(tab.task.id);
+        if (!task || task === tab.task) return tab;
+        const mergedTask = mergeMonitorTaskSnapshot(tab.task, task);
+        if (mergedTask === tab.task) return tab;
+        changed = true;
+        return {
+          ...tab,
+          title: mergedTask.description,
+          task: mergedTask,
+        };
+      });
+      return changed ? next : tabs;
+    });
+  }, [backgroundTasks]);
   const footerTasks = useMemo(
     () => (renderFooter ? backgroundTasks.map(mapToWebShellTaskInfo) : []),
     [backgroundTasks, renderFooter],
@@ -2529,6 +2645,7 @@ export function App({
   const [mainView, setMainView] = useState<
     'chat' | 'scheduledTasks' | 'goals' | 'split'
   >('chat');
+  const mainViewRef = useRef(mainView);
   const useFloatingArtifactPanel =
     !canDockArtifactPanel || mainView === 'split';
   // Sessions to seed the split view with (e.g. the selection from the overview).
@@ -2551,8 +2668,10 @@ export function App({
     | 'skills'
     | 'plugins'
     | 'agents'
+    | 'channels'
     | null
   >(null);
+  const activePanelRef = useRef(activePanel);
   const closePanel = useCallback(() => setActivePanel(null), []);
   const handleUseSkill = useCallback(
     (name: string) => {
@@ -2580,7 +2699,8 @@ export function App({
         | 'mcp'
         | 'skills'
         | 'plugins'
-        | 'agents',
+        | 'agents'
+        | 'channels',
     ) => {
       setMainView('chat');
       setActivePanel(panel);
@@ -2817,7 +2937,7 @@ export function App({
     prevActivePanelRef.current = activePanel;
     prevApprovalOverlayRef.current = approvalOverlayActive;
     if (activePanel) {
-      if (activePanel === 'extensions') {
+      if (activePanel === 'extensions' || activePanel === 'channels') {
         panelHeadingRef.current?.focus();
         return;
       }
@@ -2995,6 +3115,14 @@ export function App({
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [tasksDialogMessage, setTasksDialogMessage] =
     useState<SerializedTasksMessage | null>(null);
+  const handleOpenMonitorDetails = useCallback(
+    (task: DaemonSessionMonitorTaskStatus) => {
+      setTasksDialogMessage(null);
+      setBackgroundTasksRefreshTrigger((value) => value + 1);
+      openMonitorPanel(task);
+    },
+    [openMonitorPanel],
+  );
   const [selectedTheme, setSelectedTheme] = useState<WebShellTheme>(
     providedTheme ?? WebShellThemeId.Dark,
   );
@@ -3332,6 +3460,60 @@ export function App({
   // while a full-pane view (the Scheduled Tasks page) covers the chat, so
   // keystrokes/Escape can't reach the hidden composer underneath.
   const interactionBlocked = dialogOpen || mainView !== 'chat';
+  const mainVoiceTarget = useMemo(
+    () =>
+      resolveVoiceWorkspaceTarget({
+        capabilities: workspace.capabilities,
+        intendedCwd: activeWorkspaceCwd,
+        sessionId: connection.sessionId,
+        workspaces:
+          workspace.capabilities?.workspaces || lockedWorkspaceCapability
+            ? workspaces
+            : undefined,
+      }),
+    [
+      activeWorkspaceCwd,
+      connection.sessionId,
+      lockedWorkspaceCapability,
+      workspace.capabilities,
+      workspaces,
+    ],
+  );
+  const [voiceUserRevision, setVoiceUserRevision] = useState(0);
+  const [voiceWorkspaceRevisions, setVoiceWorkspaceRevisions] = useState<
+    Record<string, number>
+  >({});
+  const mainVoiceStatusRevision: VoiceStatusRevision = useMemo(
+    () => ({
+      user: voiceUserRevision,
+      workspace: mainVoiceTarget
+        ? (voiceWorkspaceRevisions[mainVoiceTarget.workspaceKey] ?? 0)
+        : 0,
+    }),
+    [mainVoiceTarget, voiceUserRevision, voiceWorkspaceRevisions],
+  );
+  const voiceModelSettingsSupported = supportsVoiceModelSettings(
+    mainVoiceTarget,
+    workspace.capabilities?.features ?? [],
+  );
+  const matchingVoiceSettingsVersion =
+    mainVoiceTarget?.sessionId === connection.sessionId &&
+    (!mainVoiceTarget?.cwd || mainVoiceTarget.cwd === connection.workspaceCwd)
+      ? workspaceEventSignals?.settingsVersion
+      : undefined;
+  const {
+    descriptor: qualifiedVoiceSetting,
+    reload: reloadQualifiedVoiceSettings,
+  } = useVoiceWorkspaceSettings(
+    workspace.client,
+    mainVoiceTarget,
+    voiceModelSettingsSupported && mainView !== 'split',
+    JSON.stringify([
+      voiceUserRevision,
+      mainVoiceStatusRevision.workspace,
+      matchingVoiceSettingsVersion ?? null,
+    ]),
+  );
 
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
@@ -3677,6 +3859,47 @@ export function App({
     setValue: setWorkspaceSetting,
     reload: reloadWorkspaceSettings,
   } = workspaceSettingsState;
+  const reloadTargetedWorkspaceSettings = useCallback(async () => {
+    const status = await reloadWorkspaceSettings();
+    if (mainVoiceTarget?.route === 'workspace-qualified') {
+      await reloadQualifiedVoiceSettings();
+    }
+    return status;
+  }, [
+    mainVoiceTarget?.route,
+    reloadQualifiedVoiceSettings,
+    reloadWorkspaceSettings,
+  ]);
+  const targetedWorkspaceSettings = useMemo(() => {
+    const withoutVoice = workspaceSettings.filter(
+      (setting) => setting.key !== 'voiceModel',
+    );
+    if (mainView === 'split') return withoutVoice;
+    if (mainVoiceTarget?.route === 'legacy-primary') return workspaceSettings;
+    if (!voiceModelSettingsSupported || !qualifiedVoiceSetting) {
+      return withoutVoice;
+    }
+    const voiceIndex = workspaceSettings.findIndex(
+      (setting) => setting.key === 'voiceModel',
+    );
+    if (voiceIndex < 0) {
+      return [...withoutVoice, qualifiedVoiceSetting];
+    }
+    return workspaceSettings.map((setting) =>
+      setting.key === 'voiceModel' ? qualifiedVoiceSetting : setting,
+    );
+  }, [
+    mainView,
+    mainVoiceTarget?.route,
+    qualifiedVoiceSetting,
+    voiceModelSettingsSupported,
+    workspaceSettings,
+  ]);
+  const targetedWorkspaceSettingsState = {
+    ...workspaceSettingsState,
+    settings: targetedWorkspaceSettings,
+    reload: reloadTargetedWorkspaceSettings,
+  };
   const themeSetting = workspaceSettings.find(
     (setting) => setting.key === THEME_SETTING_KEY,
   );
@@ -3688,7 +3911,7 @@ export function App({
   );
   const currentVoiceModel = (() => {
     const value = readScopedModelSetting(
-      workspaceSettings,
+      targetedWorkspaceSettings,
       modelSettingScope,
       'voiceModel',
     );
@@ -3724,6 +3947,207 @@ export function App({
           .filter(Boolean)
       : [];
   }, [workspaceSettings, modelSettingScope]);
+  const bumpVoiceRevision = useCallback(
+    (target: typeof mainVoiceTarget, scope: 'workspace' | 'user') => {
+      if (!target) return;
+      if (scope === 'user') {
+        setVoiceUserRevision((revision) => revision + 1);
+        return;
+      }
+      setVoiceWorkspaceRevisions((revisions) => ({
+        ...revisions,
+        [target.workspaceKey]: (revisions[target.workspaceKey] ?? 0) + 1,
+      }));
+    },
+    [],
+  );
+  const writeVoiceModelForTarget = useCallback(
+    async (
+      value: string,
+      scope: 'workspace' | 'user',
+      target = mainVoiceTarget,
+    ) => {
+      if (
+        !target ||
+        !supportsVoiceModelSettings(
+          target,
+          workspace.capabilities?.features ?? [],
+        )
+      ) {
+        throw new Error(
+          'Voice model settings are unavailable for this workspace.',
+        );
+      }
+      try {
+        if (target.route === 'legacy-primary' || scope === 'user') {
+          await setWorkspaceSetting(scope, 'voiceModel', value);
+        } else {
+          await setVoiceModelSetting(workspace.client, target, scope, value);
+        }
+      } catch (error) {
+        bumpVoiceRevision(target, scope);
+        if (target.route === 'legacy-primary') {
+          await reloadWorkspaceSettings().catch(() => undefined);
+        } else {
+          await reloadQualifiedVoiceSettings().catch(() => undefined);
+        }
+        throw error;
+      }
+      bumpVoiceRevision(target, scope);
+      if (target.route === 'legacy-primary') {
+        await reloadWorkspaceSettings().catch(() => undefined);
+      } else {
+        await reloadQualifiedVoiceSettings().catch(() => undefined);
+      }
+    },
+    [
+      bumpVoiceRevision,
+      mainVoiceTarget,
+      reloadQualifiedVoiceSettings,
+      reloadWorkspaceSettings,
+      setWorkspaceSetting,
+      workspace.capabilities?.features,
+      workspace.client,
+    ],
+  );
+  const mainVoiceTargetRef = useRef(mainVoiceTarget);
+  const voiceFeaturesRef = useRef(workspace.capabilities?.features ?? []);
+  useLayoutEffect(() => {
+    modelDialogModeRef.current = modelDialogMode;
+    showFallbacksDialogRef.current = showFallbacksDialog;
+    mainViewRef.current = mainView;
+    activePanelRef.current = activePanel;
+    showAuthDialogRef.current = showAuthDialog;
+    mainVoiceTargetRef.current = mainVoiceTarget;
+    voiceFeaturesRef.current = workspace.capabilities?.features ?? [];
+  }, [
+    activePanel,
+    mainView,
+    mainVoiceTarget,
+    modelDialogMode,
+    showAuthDialog,
+    showFallbacksDialog,
+    workspace.capabilities?.features,
+  ]);
+  const voicePickerRequestRef = useRef(0);
+  const pendingVoicePickerSourceRef = useRef<
+    'command' | 'settings' | undefined
+  >(undefined);
+  const pendingVoicePickerOwnerRef = useRef<string | undefined>(undefined);
+  const voicePickerTargetRef = useRef(mainVoiceTarget);
+  useEffect(
+    () => () => {
+      voicePickerRequestRef.current++;
+      pendingVoicePickerSourceRef.current = undefined;
+    },
+    [],
+  );
+  const openVoiceModelPicker = useCallback(
+    async (scope: 'workspace' | 'user', source: 'command' | 'settings') => {
+      const target = mainVoiceTargetRef.current;
+      if (
+        !target ||
+        !supportsVoiceModelSettings(
+          target,
+          workspace.capabilities?.features ?? [],
+        )
+      ) {
+        reportError(
+          new Error('Voice model settings are unavailable for this workspace.'),
+          t('model.setVoice'),
+        );
+        return;
+      }
+      const request = ++voicePickerRequestRef.current;
+      pendingVoicePickerSourceRef.current = source;
+      pendingVoicePickerOwnerRef.current = target.ownerKey;
+      const intentIsCurrent = () =>
+        request === voicePickerRequestRef.current &&
+        mainVoiceTargetRef.current?.ownerKey === target.ownerKey &&
+        supportsVoiceModelSettings(
+          mainVoiceTargetRef.current,
+          voiceFeaturesRef.current,
+        ) &&
+        (source === 'settings'
+          ? activePanelRef.current === 'settings'
+          : activePanelRef.current === null) &&
+        mainViewRef.current === 'chat' &&
+        modelDialogModeRef.current === null &&
+        !showFallbacksDialogRef.current &&
+        !showAuthDialogRef.current;
+      try {
+        const status = await loadVoiceProviders(workspace.client, target);
+        if (!intentIsCurrent()) {
+          if (request === voicePickerRequestRef.current) {
+            pendingVoicePickerSourceRef.current = undefined;
+          }
+          return;
+        }
+        pendingVoicePickerSourceRef.current = undefined;
+        voicePickerTargetRef.current = target;
+        setVoiceModels(extractVoiceModels(status));
+        setModelSettingScope(scope);
+        setModelDialogMode('voice');
+      } catch (error) {
+        if (!intentIsCurrent()) {
+          if (request === voicePickerRequestRef.current) {
+            pendingVoicePickerSourceRef.current = undefined;
+          }
+          return;
+        }
+        pendingVoicePickerSourceRef.current = undefined;
+        reportError(error, t('model.setVoice'));
+      }
+    },
+    [reportError, t, workspace.capabilities?.features, workspace.client],
+  );
+  useEffect(() => {
+    if (
+      pendingVoicePickerSourceRef.current &&
+      (pendingVoicePickerOwnerRef.current !== mainVoiceTarget?.ownerKey ||
+        !voiceModelSettingsSupported)
+    ) {
+      voicePickerRequestRef.current++;
+      pendingVoicePickerSourceRef.current = undefined;
+    }
+  }, [mainVoiceTarget?.ownerKey, voiceModelSettingsSupported]);
+  useEffect(() => {
+    const source = pendingVoicePickerSourceRef.current;
+    const sourceSurfaceIsCurrent =
+      source === 'settings' ? activePanel === 'settings' : activePanel === null;
+    if (source && !sourceSurfaceIsCurrent) {
+      voicePickerRequestRef.current++;
+      pendingVoicePickerSourceRef.current = undefined;
+    }
+  }, [activePanel]);
+  useEffect(() => {
+    if (
+      pendingVoicePickerSourceRef.current &&
+      (mainView !== 'chat' ||
+        modelDialogMode !== null ||
+        showFallbacksDialog ||
+        showAuthDialog)
+    ) {
+      voicePickerRequestRef.current++;
+      pendingVoicePickerSourceRef.current = undefined;
+    }
+  }, [mainView, modelDialogMode, showAuthDialog, showFallbacksDialog]);
+  useEffect(() => {
+    const pickerTarget = voicePickerTargetRef.current;
+    if (
+      modelDialogMode === 'voice' &&
+      (pickerTarget?.ownerKey !== mainVoiceTarget?.ownerKey ||
+        !voiceModelSettingsSupported ||
+        mainView !== 'chat')
+    ) {
+      setModelDialogMode(null);
+    }
+  }, [
+    mainView,
+    mainVoiceTarget?.ownerKey,
+    modelDialogMode,
+    voiceModelSettingsSupported,
+  ]);
   // Fallback candidates are the selectable (non-runtime) models, keyed by their
   // base id — the same value shape the modelFallbacks setting stores.
   const fallbackModelOptions = useMemo(() => {
@@ -3978,12 +4402,6 @@ export function App({
       }
     })();
   }, [streamingState, sessionActions, reportError, pushToast, t]);
-
-  useEffect(() => {
-    modelDialogModeRef.current = modelDialogMode;
-    showFallbacksDialogRef.current = showFallbacksDialog;
-    showAuthDialogRef.current = showAuthDialog;
-  }, [modelDialogMode, showFallbacksDialog, showAuthDialog]);
 
   useEffect(() => {
     let retryableTurnErrorId: string | null = null;
@@ -5398,25 +5816,13 @@ export function App({
             }
             if (modelArg === '--voice') {
               if (echoOrDeferLocalCommand(text, images)) return true;
-              workspaceActions
-                .loadProviders()
-                .then((status) => {
-                  setVoiceModels(extractVoiceModels(status));
-                  setModelDialogMode('voice');
-                })
-                .catch((error: unknown) =>
-                  reportError(error, t('model.setVoice')),
-                );
+              void openVoiceModelPicker('workspace', 'command');
               return true;
             }
             if (modelArg.startsWith('--voice ')) {
               const voiceModelId = modelArg.replace(/^--voice\s+/, '');
-              setWorkspaceSetting(
-                'workspace',
-                'voiceModel',
-                voiceModelId,
-              ).catch((error: unknown) =>
-                reportError(error, t('model.setVoice')),
+              void writeVoiceModelForTarget(voiceModelId, 'workspace').catch(
+                (error: unknown) => reportError(error, t('model.setVoice')),
               );
               return true;
             }
@@ -6069,6 +6475,8 @@ export function App({
       setPendingModel,
       setPendingMode,
       setWorkspaceSetting,
+      openVoiceModelPicker,
+      writeVoiceModelForTarget,
       showContextUsage,
       t,
       workspaceActions,
@@ -6529,11 +6937,23 @@ export function App({
       // Model IDs from the voice picker arrive as bare model IDs (baseModelId),
       // not ACP format. extractVoiceModels() sets id to the baseModelId.
       const bareModelId = extractBareModelId(modelId);
-      setWorkspaceSetting(modelSettingScope, 'voiceModel', bareModelId).catch(
-        (error: unknown) => reportError(error, t('model.setVoice')),
-      );
+      const target = voicePickerTargetRef.current;
+      if (!target || target.ownerKey !== mainVoiceTargetRef.current?.ownerKey) {
+        reportError(
+          new Error(
+            'The Voice workspace changed before the selection applied.',
+          ),
+          t('model.setVoice'),
+        );
+        return;
+      }
+      void writeVoiceModelForTarget(
+        bareModelId,
+        modelSettingScope,
+        target,
+      ).catch((error: unknown) => reportError(error, t('model.setVoice')));
     },
-    [modelSettingScope, reportError, setWorkspaceSetting, t],
+    [modelSettingScope, reportError, t, writeVoiceModelForTarget],
   );
 
   const handleVisionModelSelect = useCallback(
@@ -6927,6 +7347,7 @@ export function App({
                 embedded
                 manageActiveEvent={false}
                 onClose={() => setTasksDialogMessage(null)}
+                onOpenMonitor={handleOpenMonitorDetails}
               />
             </DialogShell>
           )}
@@ -7158,6 +7579,10 @@ export function App({
                     closeMobileDrawer();
                     openPanel('plugins');
                   }}
+                  onOpenChannels={() => {
+                    closeMobileDrawer();
+                    openPanel('channels');
+                  }}
                   onOpenDaemonStatus={() => {
                     closeMobileDrawer();
                     openPanel('status');
@@ -7291,6 +7716,8 @@ export function App({
                               ? t('agents.title')
                           : activePanel === 'plugins'
                               ? t('plugins.title')
+                            : activePanel === 'channels'
+                              ? t('channels.title')
                               : t('sessionsOverview.title')
                   }
                 >
@@ -7298,7 +7725,8 @@ export function App({
                     activePanel !== 'mcp' &&
                     activePanel !== 'skills' &&
                     activePanel !== 'agents' &&
-                    activePanel !== 'plugins' && (
+                    activePanel !== 'plugins' &&
+                    activePanel !== 'channels' && (
                     <div className={styles.panelHeader}>
                     <button
                       ref={panelBackRef}
@@ -7350,14 +7778,15 @@ export function App({
                       initialFocusRef={
                         activePanel === 'plugins'
                           ? pluginTabRef
-                          : activePanel === 'extensions'
+                          : activePanel === 'extensions' ||
+                              activePanel === 'channels'
                             ? panelHeadingRef
                             : undefined
                       }
                     >
                       {activePanel === 'settings' ? (
                       <SettingsMessage
-                        settingsState={workspaceSettingsState}
+                        settingsState={targetedWorkspaceSettingsState}
                         embedded
                         onLanguageChange={handleSettingsLanguageChange}
                         onThemeChange={handleThemeChange}
@@ -7386,33 +7815,7 @@ export function App({
                             setModelSettingScope(scope);
                             setModelDialogMode('vision');
                           } else if (key === 'voiceModel') {
-                            // The voice picker opens asynchronously (after
-                            // loadProviders), so DON'T record the scope up front:
-                            // if the user opens and closes another picker while
-                            // loading, the reset effect would clobber it and the
-                            // voice model would persist to the wrong scope. Set
-                            // the scope together with the open, from this click's
-                            // captured `scope`, and only when no other surface
-                            // opened meanwhile.
-                            workspaceActions
-                              .loadProviders()
-                              .then((status) => {
-                                setVoiceModels(extractVoiceModels(status));
-                                // "No other surface opened meanwhile" — mirror the
-                                // reset effect's condition so the voice picker
-                                // never opens on top of a fallbacks/auth dialog.
-                                if (
-                                  modelDialogModeRef.current === null &&
-                                  !showFallbacksDialogRef.current &&
-                                  !showAuthDialogRef.current
-                                ) {
-                                  setModelSettingScope(scope);
-                                  setModelDialogMode('voice');
-                                }
-                              })
-                              .catch((error: unknown) =>
-                                reportError(error, t('model.setVoice')),
-                              );
+                            void openVoiceModelPicker(scope, 'settings');
                           } else if (key === 'modelFallbacks') {
                             setModelSettingScope(scope);
                             setShowFallbacksDialog(true);
@@ -7464,6 +7867,11 @@ export function App({
                         onClose={closePanel}
                         onUseSkill={handleUseSkill}
                         initialFocusRef={pluginTabRef}
+                      />
+                    ) : activePanel === 'channels' ? (
+                      <ChannelsManagerPage
+                        onClose={closePanel}
+                        initialFocusRef={panelHeadingRef}
                       />
                     ) : (
                       <SessionOverviewPanel
@@ -7707,6 +8115,14 @@ export function App({
                         messageTurnOutputs={messageTurnOutputs}
                         restartSseOnPrompt={restartSseOnPrompt}
                         historyPageSize={historyPageSize}
+                        voiceUserRevision={voiceUserRevision}
+                        voiceWorkspaceRevisions={voiceWorkspaceRevisions}
+                        voiceWorkspaces={
+                          workspace.capabilities?.workspaces ||
+                          lockedWorkspaceCapability
+                            ? workspaces
+                            : undefined
+                        }
                       />
                     </CompactModeContext.Provider>
                   </WebShellCustomizationProvider>
@@ -7852,12 +8268,21 @@ export function App({
                                 }
                               />
                             );
-                            const messageList = (
+                            const messageListWithSubagentDetails = (
                               <SubagentDetailsProvider
                                 onOpen={openSubagentPanel}
                               >
                                 {messageListContent}
                               </SubagentDetailsProvider>
+                            );
+                            const messageList = monitorDetailsSupported ? (
+                              <MonitorDetailsProvider
+                                onOpen={openMonitorPanelFromTool}
+                              >
+                                {messageListWithSubagentDetails}
+                              </MonitorDetailsProvider>
+                            ) : (
+                              messageListWithSubagentDetails
                             );
 
                             const btwPanel =
@@ -8064,7 +8489,10 @@ export function App({
                           }
                           cancelArmed={cancelArmed}
                           disabled={
-                            isDisabled || isStartingNewSessionSuggestion
+                            isDisabled ||
+                            isStartingNewSessionSuggestion ||
+                            interactionBlocked ||
+                            approvalOverlayActive
                           }
                           commands={commands}
                           skills={loadedSkills}
@@ -8072,6 +8500,12 @@ export function App({
                           builtinAtProviders={builtinAtProviders}
                           atProviders={atProviders}
                           composerTagIcons={composerTagIcons}
+                          voiceTarget={
+                            activePanel !== null || mainView !== 'chat'
+                              ? undefined
+                              : mainVoiceTarget
+                          }
+                          voiceStatusRevision={mainVoiceStatusRevision}
                           queuedMessages={queuedTexts}
                           onFocusFooter={handleFocusTaskPill}
                           onPopQueuedMessages={editLastQueuedPrompt}

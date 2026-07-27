@@ -799,8 +799,8 @@ export default {
     'Die Eingabe an den Befehl ist JSON mit tool_name, tool_input, tool_use_id, error, error_type, is_interrupt und is_timeout.',
   'Input to command is JSON with notification message and type.':
     'Die Eingabe an den Befehl ist JSON mit Benachrichtigungsnachricht und -typ.',
-  'Input to command is JSON with original user prompt text.':
-    'Die Eingabe an den Befehl ist JSON mit dem ursprünglichen Benutzer-Prompt-Text.',
+  'Input to command is JSON with "prompt" (the current model-bound prompt) and optional "submitted_prompt" (the supported interactive TUI text projection).':
+    'Die Eingabe für den Befehl ist JSON mit "prompt" (dem aktuellen modellgebundenen Prompt) und optional "submitted_prompt" (der Textprojektion der unterstützten interaktiven TUI).',
   'Input to command is JSON with command_name, command_args, and expanded prompt text.':
     'Die Eingabe an den Befehl ist JSON mit command_name, command_args und erweitertem Prompt-Text.',
   'Input to command is JSON with session start source.':

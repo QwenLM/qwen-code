@@ -175,6 +175,8 @@ export enum SendMessageType {
 
 export interface SendMessageOptions {
   type: SendMessageType;
+  /** User-submitted text captured before prompt expansion. */
+  submittedPrompt?: string;
   /** Returns user input waiting to steer the active turn at a model boundary. */
   getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
   /** Steer lease already appended to this request, settled after history push. */
@@ -2017,6 +2019,12 @@ export class GeminiClient {
       this.config.hasHooksForEvent('UserPromptSubmit')
     ) {
       const promptText = partToString(request);
+      const submittedPrompt =
+        messageType === SendMessageType.UserQuery &&
+        typeof options?.submittedPrompt === 'string' &&
+        options.submittedPrompt.trim().length > 0
+          ? options.submittedPrompt
+          : undefined;
       const response = await messageBus.request<
         HookExecutionRequest,
         HookExecutionResponse
@@ -2026,6 +2034,9 @@ export class GeminiClient {
           eventName: 'UserPromptSubmit',
           input: {
             prompt: promptText,
+            ...(submittedPrompt !== undefined
+              ? { submitted_prompt: submittedPrompt }
+              : {}),
           },
         },
         MessageBusType.HOOK_EXECUTION_RESPONSE,
@@ -2753,6 +2764,7 @@ export class GeminiClient {
               {
                 ...options,
                 type: SendMessageType.Steer,
+                submittedPrompt: undefined,
                 steerInput,
               },
               steerTurnBudget,
@@ -3078,6 +3090,7 @@ export class GeminiClient {
                 type: pendingSteer
                   ? SendMessageType.Steer
                   : SendMessageType.Hook,
+                submittedPrompt: undefined,
                 steerInput: pendingSteer,
               },
               continueTurnBudget,
