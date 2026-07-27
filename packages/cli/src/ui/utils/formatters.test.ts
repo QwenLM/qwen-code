@@ -106,6 +106,32 @@ describe('formatters', () => {
     it('should format bytes into GB', () => {
       expect(formatMemoryUsage(12345678901)).toBe('11.50 GB');
     });
+
+    // Rounding to one decimal can carry a value up to the next unit's
+    // boundary. Choosing the unit from the raw byte count kept the smaller
+    // label, so a value one byte under a megabyte printed as "1024.0 KB".
+    it.each([
+      [1024 * 1024 - 1, '1.0 MB'],
+      [1024 * 1024 * 1024 - 1, '1.00 GB'],
+    ])('rolls %d over to the next unit', (bytes, expected) => {
+      expect(formatMemoryUsage(bytes)).toBe(expected);
+    });
+
+    // Guards against over-correcting into rolling over too eagerly. Each of
+    // these stays in its own unit, and all pass before and after.
+    it.each([
+      [0, '0.0 KB'],
+      [512, '0.5 KB'],
+      [1024, '1.0 KB'],
+      [1024 * 1024, '1.0 MB'],
+      [1024 * 1024 * 1024, '1.00 GB'],
+      [1024 * 1023, '1023.0 KB'],
+      [1024 * 1024 * 1023, '1023.0 MB'],
+      // Just below the point where rounding would reach the boundary.
+      [1024 * 1024 - 100, '1023.9 KB'],
+    ])('keeps %d in its own unit', (bytes, expected) => {
+      expect(formatMemoryUsage(bytes)).toBe(expected);
+    });
   });
 
   describe('formatDuration', () => {
