@@ -6,12 +6,15 @@
 
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 describe('main CI failure issue workflow', () => {
   const workflow = readFileSync(
     '.github/workflows/main-ci-failure-issue.yml',
     'utf8',
   );
+  const yml = parse(workflow);
+  const jobs = yml.jobs;
 
   it('opens an autofix-ready issue only for failed main CI runs', () => {
     expect(workflow).toContain('workflow_run:');
@@ -47,16 +50,48 @@ describe('main CI failure issue workflow', () => {
     expect(workflow).toContain('apply_autofix_route "${issue_url}"');
   });
 
-  it('deduplicates failures for the same commit and includes run context', () => {
-    expect(workflow).toContain('qwen-main-ci-failure:${HEAD_SHA}');
+  it('deduplicates by failing test and includes run context', () => {
+    // The dedupe key is the failing test, not the commit: a standing red used to
+    // open one issue per merge. The markers themselves live in the helper.
+    expect(workflow).toContain('main-failure-signature.mjs');
+    expect(workflow).toContain('searchMarkers');
     expect(workflow).toContain('gh issue list');
     expect(workflow).toContain('gh issue create');
-    expect(workflow).toContain('apply_autofix_route "${existing_issue}"');
+    expect(workflow).toContain('apply_autofix_route "${EXISTING_ISSUE}"');
     expect(workflow).toContain('${WORKFLOW_RUN_URL}');
     expect(workflow).toContain('${HEAD_SHA}');
   });
 
-  it('does not check out repository code', () => {
-    expect(workflow).not.toContain('actions/checkout');
+  it('re-reads an existing issue so recorded recurrences survive the update', () => {
+    expect(workflow).toContain('gh issue view "${existing_issue}"');
+    expect(workflow).toContain('--existing "${existing_body}"');
+  });
+
+  const privilegedJobs = Object.entries(jobs).filter(([, job]) =>
+    JSON.stringify(job).includes('CI_DEV_BOT_PAT'),
+  );
+
+  it('keeps the bot PAT in a job that runs no repository code', () => {
+    // The job that can write as the bot must not check out or execute anything
+    // from the repository; it only consumes strings produced elsewhere.
+    expect(privilegedJobs).toHaveLength(1);
+    for (const [name, job] of privilegedJobs) {
+      const rendered = JSON.stringify(job);
+      expect(rendered, name).not.toContain('actions/checkout');
+      expect(rendered, name).not.toContain('main-failure-signature.mjs');
+      expect(job.permissions, name).toEqual({ issues: 'write' });
+    }
+  });
+
+  it('keeps the log analysis away from the bot PAT and from write scopes', () => {
+    const analyze = jobs.analyze;
+    expect(JSON.stringify(analyze)).not.toContain('CI_DEV_BOT_PAT');
+    // Reading job logs needs `actions: read`; nothing here needs write.
+    expect(analyze.permissions).toEqual({
+      actions: 'read',
+      contents: 'read',
+      issues: 'read',
+    });
+    expect(privilegedJobs[0][1].needs).toBe('analyze');
   });
 });

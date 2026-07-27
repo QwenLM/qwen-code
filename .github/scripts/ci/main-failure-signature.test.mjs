@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  LEGACY_MARKER_PREFIX,
   MAX_OCCURRENCES,
   OCCURRENCE_MARKER,
   TEST_MARKER_PREFIX,
@@ -9,6 +10,7 @@ import {
   extractFailingTests,
   failureSignature,
   renderIssueBody,
+  renderIssueTitle,
   shortenForTitle,
   testKey,
 } from './main-failure-signature.mjs';
@@ -197,6 +199,39 @@ test('merging a re-run of the same run does not duplicate its line', () => {
   assert.deepEqual(occurrenceLines(merged), [
     '- `af7a9ec12722` · 2026-07-27T04:00:00Z · [run 301](https://github.com/QwenLM/qwen-code/actions/runs/301)',
   ]);
+});
+
+test('falls back to a per-commit issue when no test can be identified', () => {
+  const analysis = analyzeLogs('E2E Tests', ['npm error code ERESOLVE']);
+  const title = renderIssueTitle({ analysis, occurrence: OCCURRENCE });
+  const body = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+
+  assert.equal(title, 'Main CI failed: E2E Tests on af7a9ec12722');
+  assert.ok(body.includes(`<!-- ${LEGACY_MARKER_PREFIX}${OCCURRENCE.sha} -->`));
+  assert.ok(body.includes('tracked per commit'));
+  assert.ok(body.includes(`- Run: ${OCCURRENCE.runUrl}`));
+  // No recurrence machinery on this path: each commit gets its own issue.
+  assert.ok(!body.includes(OCCURRENCE_MARKER));
+});
+
+test('the per-commit path leaves an already-filed body untouched', () => {
+  const analysis = analyzeLogs('E2E Tests', ['npm error code ERESOLVE']);
+  const existingBody = 'whatever the previous run wrote\n';
+  assert.equal(
+    renderIssueBody({ analysis, occurrence: OCCURRENCE, existingBody }),
+    existingBody,
+  );
+});
+
+test('a title for identified tests names the test, not the commit', () => {
+  const analysis = analyzeLogs('E2E Tests', [VITEST_LOG]);
+  assert.equal(
+    renderIssueTitle({ analysis, occurrence: OCCURRENCE }),
+    analysis.title,
+  );
+  assert.ok(
+    !renderIssueTitle({ analysis, occurrence: OCCURRENCE }).includes('af7a9ec'),
+  );
 });
 
 test('merging keeps notes written below the machine block', () => {

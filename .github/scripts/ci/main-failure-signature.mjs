@@ -17,6 +17,8 @@ import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 
 export const TEST_MARKER_PREFIX = 'qwen-main-ci-failure-test:';
+/** Pre-dedupe marker, still used for runs whose failing tests are unknown. */
+export const LEGACY_MARKER_PREFIX = 'qwen-main-ci-failure:';
 export const SIGNATURE_MARKER_PREFIX = 'qwen-main-ci-failure-sig:';
 export const OCCURRENCE_MARKER = '<!-- qwen-main-ci-failure-occurrences -->';
 export const MAX_OCCURRENCES = 10;
@@ -165,6 +167,35 @@ function splitOccurrenceBlock(body) {
 }
 
 /**
+ * A run that failed before any test result was reported — an install or build
+ * break — has nothing to dedupe on, so it keeps the original per-commit marker
+ * and title.
+ */
+function renderPerCommitBody({ analysis, occurrence }) {
+  return [
+    `<!-- ${LEGACY_MARKER_PREFIX}${occurrence.sha} -->`,
+    '',
+    'A main-branch CI run failed on `main` before any test result was',
+    'reported, so this issue is tracked per commit.',
+    '',
+    `- Workflow: ${analysis.workflow}`,
+    `- Run: ${occurrence.runUrl}`,
+    `- Run ID: ${occurrence.runId}`,
+    `- Commit: ${occurrence.sha}`,
+    '',
+    'This issue is labeled for autofix so the existing agent can create a repair PR.',
+    '',
+  ].join('\n');
+}
+
+export function renderIssueTitle({ analysis, occurrence }) {
+  if (!analysis.tests.length) {
+    return `Main CI failed: ${analysis.workflow} on ${String(occurrence.sha).slice(0, 12)}`;
+  }
+  return analysis.title;
+}
+
+/**
  * Build the issue body: the create path when `existingBody` is empty, otherwise
  * a merge that keeps the existing prose (an agent's or a human's notes live
  * there) and only refreshes the machine-owned trailer.
@@ -176,6 +207,14 @@ export function renderIssueBody({
   existingBody = '',
 }) {
   const testLines = analysis.tests.map((test) => `- \`${test.id}\``);
+
+  if (!analysis.tests.length) {
+    // Nothing to merge into: the per-commit path opens one issue per commit and
+    // an existing body means the same commit was already filed.
+    return existingBody.trim()
+      ? existingBody
+      : renderPerCommitBody({ analysis, occurrence });
+  }
 
   if (!existingBody.trim()) {
     const head = [
@@ -267,22 +306,27 @@ function runCli(argv) {
     return;
   }
 
-  if (command === 'body') {
+  // The title and body are emitted together so the privileged job that writes
+  // the issue needs nothing but these two strings — it never reads the repo.
+  if (command === 'plan') {
     const analysis = JSON.parse(readFileSync(options.analysis, 'utf8'));
     const existingBody = options.existing
       ? readFileSync(options.existing, 'utf8')
       : '';
+    const occurrence = {
+      sha: options.sha,
+      runUrl: options['run-url'],
+      runId: options['run-id'],
+      at: options.at,
+    };
     process.stdout.write(
-      renderIssueBody({
-        analysis,
-        existingBody,
-        occurrence: {
-          sha: options.sha,
-          runUrl: options['run-url'],
-          runId: options['run-id'],
-          at: options.at,
-        },
-      }),
+      `${JSON.stringify({
+        title: renderIssueTitle({ analysis, occurrence }),
+        body: renderIssueBody({ analysis, existingBody, occurrence }),
+        searchMarkers: analysis.tests.length
+          ? analysis.searchMarkers
+          : [`${LEGACY_MARKER_PREFIX}${occurrence.sha}`],
+      })}\n`,
     );
     return;
   }
