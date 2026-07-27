@@ -72,22 +72,12 @@ function reconcileMouseMode(
   entry.active = desired;
 }
 
-const disableAllMouseModes = () => {
-  for (const [stdout, entry] of mouseModeRefs) {
-    if (entry.active) disableMouseEvents(stdout, entry.active);
-  }
-  mouseModeRefs.clear();
-};
-
 function acquireMouseMode(
   stdout: NodeJS.WriteStream,
   tracking: MouseTracking,
 ): void {
   let entry = mouseModeRefs.get(stdout);
   if (!entry) {
-    if (mouseModeRefs.size === 0) {
-      process.on('exit', disableAllMouseModes);
-    }
     entry = { button: 0, any: 0, active: null };
     mouseModeRefs.set(stdout, entry);
   }
@@ -107,9 +97,6 @@ function releaseMouseMode(
 
   if (entry.button === 0 && entry.any === 0) {
     mouseModeRefs.delete(stdout);
-    if (mouseModeRefs.size === 0) {
-      process.removeListener('exit', disableAllMouseModes);
-    }
   }
 }
 

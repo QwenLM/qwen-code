@@ -49,10 +49,7 @@ export const AlternateScreen: FC<AlternateScreenProps> = ({
       }
     };
     safeWrite(ENTER_ALT_SCREEN + CLEAR_SCREEN + HIDE_CURSOR);
-    const onExit = () => safeWrite(SHOW_CURSOR + EXIT_ALT_SCREEN);
-    process.on('exit', onExit);
     return () => {
-      process.removeListener('exit', onExit);
       safeWrite(SHOW_CURSOR + EXIT_ALT_SCREEN);
     };
   }, [writeRaw, disabled]);
