@@ -110,6 +110,29 @@ function toOpenAPI30(schema: Record<string, unknown>): Record<string, unknown> {
 
     // 6. Recursively process other properties
     for (const [key, value] of Object.entries(source)) {
+      // `properties` / `$defs` / `definitions` are name->schema MAPS: their
+      // keys are property/definition names, not JSON Schema keywords. Walking
+      // one as if it were a schema node makes every step above misfire on a
+      // property whose name collides with a keyword — a property called
+      // `const` is replaced by a bogus `enum`, one called `default` is
+      // dropped by the skip list below, and one called `type` is copied
+      // verbatim instead of being converted. Only the VALUES are schemas.
+      if (
+        (key === 'properties' || key === '$defs' || key === 'definitions') &&
+        typeof value === 'object' &&
+        value !== null &&
+        !Array.isArray(value)
+      ) {
+        const map: Record<string, unknown> = {};
+        for (const [mapKey, mapValue] of Object.entries(
+          value as Record<string, unknown>,
+        )) {
+          map[mapKey] = convert(mapValue);
+        }
+        target[key] = map;
+        continue;
+      }
+
       // Skip fields we've already handled or want to remove
       if (
         key === 'type' ||
