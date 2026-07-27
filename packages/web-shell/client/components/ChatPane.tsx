@@ -736,7 +736,7 @@ export function ChatPane({
         />
         {CustomComposerFooter && (
           <CustomComposerFooter
-            disabled={false}
+            disabled={approvalActive}
             isRunning={isResponding}
             currentMode={connection.currentMode ?? 'default'}
             currentModel={connection.currentModel ?? ''}

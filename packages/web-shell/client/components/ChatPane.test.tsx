@@ -224,6 +224,7 @@ const { ChatPane } = await import('./ChatPane');
 
 let root: Root | null = null;
 let container: HTMLDivElement | null = null;
+const EMPTY_CUSTOMIZATION: WebShellCustomization = {};
 
 beforeEach(() => {
   connectionState = {
@@ -275,7 +276,7 @@ afterEach(() => {
 
 function render(
   props: Record<string, unknown> = {},
-  customization: WebShellCustomization = {},
+  customization: WebShellCustomization = EMPTY_CUSTOMIZATION,
 ): void {
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -293,7 +294,7 @@ function render(
 
 function rerender(
   props: Record<string, unknown> = {},
-  customization: WebShellCustomization = {},
+  customization: WebShellCustomization = EMPTY_CUSTOMIZATION,
 ): void {
   act(() =>
     root!.render(
@@ -365,8 +366,8 @@ describe('ChatPane', () => {
     };
     rerender({}, customization);
 
-    expect(latestChatEditorProps.disabled).toBeUndefined();
-    expect(footerProps.at(-1)?.disabled).toBe(false);
+    expect(latestChatEditorProps.disabled).toBe(true);
+    expect(footerProps.at(-1)?.disabled).toBe(true);
   });
 
   it('adds no composer footer DOM when omitted or returning null', () => {
@@ -374,7 +375,7 @@ describe('ChatPane', () => {
     const composer = container!.querySelector('[data-web-shell-composer]');
     const children = Array.from(composer?.parentElement?.children ?? []);
     expect(composer?.nextElementSibling).toBeNull();
-    expect(latestChatEditorProps.disabled).toBeUndefined();
+    expect(latestChatEditorProps.disabled).toBe(false);
 
     rerender({}, { renderComposerFooter: () => null });
 
@@ -483,13 +484,7 @@ describe('ChatPane', () => {
     expect(voiceTarget).toBeDefined();
 
     pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
-    act(() => {
-      root?.render(
-        <I18nProvider language="en">
-          <ChatPane workspaceCwd="/w" />
-        </I18nProvider>,
-      );
-    });
+    rerender({ workspaceCwd: '/w' });
 
     expect(latestChatEditorProps.dialogOpen).toBe(true);
     expect(latestChatEditorProps.disabled).toBe(true);
