@@ -740,7 +740,7 @@ describe('createOpenAiCompleter retries', () => {
     });
 
     await expect(complete({ kind: 'summaries', entries: [] })).rejects.toThrow(
-      'Model generation time budget exhausted.',
+      /budget exhausted.*HTTP 500/,
     );
     expect(calls).toBe(1);
     expect(timeout).not.toHaveBeenCalled();
@@ -781,7 +781,7 @@ describe('createOpenAiCompleter retries', () => {
     await complete({ kind: 'summaries', entries: [] });
     now = 51;
     await expect(complete({ kind: 'highlights', entries: [] })).rejects.toThrow(
-      'Model generation time budget exhausted.',
+      'Model generation time budget exhausted: unknown error',
     );
     expect(calls).toBe(1);
     clock.mockRestore();

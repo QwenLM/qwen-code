@@ -419,6 +419,8 @@ function promptFor(request) {
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const CONTENT_VALIDATION_ERROR_MESSAGE =
+  'Model response did not contain message content.';
 
 function isRetryableModelError(error) {
   // AbortSignal.timeout raises TimeoutError; older paths may surface AbortError.
@@ -429,7 +431,7 @@ function isRetryableModelError(error) {
   // Content-validation errors from our own code are deterministic — retrying
   // the same prompt will reproduce the same failure. Only network-level errors
   // (no HTTP status) are transient.
-  if (error?.message === 'Model response did not contain message content.') {
+  if (error?.message === CONTENT_VALIDATION_ERROR_MESSAGE) {
     return false;
   }
   if (!match) {
@@ -455,10 +457,13 @@ export function createOpenAiCompleter({
   return async (request) => {
     const prompt = promptFor(request);
     let attempt = 0;
+    let lastError;
     for (;;) {
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) {
-        throw new Error(`Model generation time budget exhausted: ${error?.message ?? 'unknown error'}`);
+        throw new Error(
+          `Model generation time budget exhausted: ${lastError?.message ?? 'unknown error'}`,
+        );
       }
       try {
         const response = await fetchImpl(endpoint, {
@@ -485,10 +490,11 @@ export function createOpenAiCompleter({
         const data = await response.json();
         const content = data?.choices?.[0]?.message?.content;
         if (typeof content !== 'string' || !content.trim()) {
-          throw new Error('Model response did not contain message content.');
+          throw new Error(CONTENT_VALIDATION_ERROR_MESSAGE);
         }
         return content;
       } catch (error) {
+        lastError = error;
         attempt += 1;
         if (Date.now() >= deadline) {
           throw new Error(`Model generation time budget exhausted: ${error?.message ?? 'unknown error'}`);
