@@ -368,10 +368,14 @@ cancel.
 The first metadata projection is deliberately limited to the configured model
 and elapsed wall-clock time. DingTalk reads the optional model from the
 existing Channel configuration and renders a running line such as
-`Running · qwen3.7-max · 12s`. It refreshes the elapsed value no more than once
-every five seconds and writes the exact elapsed value with the terminal state,
-for example `Stopped · qwen3.7-max · 18s`. If the Channel configuration does
-not select a model, the line omits the model rather than inferring one.
+`Running · qwen3.7-max · 12s`. It refreshes the elapsed value when the existing
+coalesced model-text stream flushes and the displayed second has changed, so
+the status adds at most one update per second without an independent timer.
+Silent thinking or tool execution therefore does not advance the visible
+counter until the next text flush. The terminal update always writes the exact
+elapsed value, for example `Stopped · qwen3.7-max · 18s`. If the Channel
+configuration does not select a model, the line omits the model rather than
+inferring one.
 
 This increment does not expose token usage. Accurate per-turn token counts are
 not present in the current Channel bridge or lifecycle contract, and an
