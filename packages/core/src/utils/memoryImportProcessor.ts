@@ -261,6 +261,24 @@ export async function processImports(
       // Add this file to the flat list
       flatFiles.push({ path: normalizedPath, content: fileContent });
 
+      // Stop descending once the depth limit is reached, matching what the tree
+      // path does at the top of processImports: the file sitting at the limit is
+      // still included, its own imports are simply not expanded.
+      //
+      // `depth` was threaded through every recursive call below and incremented
+      // each time, but never compared against anything, so flat mode expanded an
+      // import chain of any length while tree mode stopped at maxDepth. Given
+      // maxDepth 3 and a chain of twelve files, tree emitted four and flat
+      // emitted all twelve -- the limit that exists to bound how much a QWEN.md
+      // can pull into context did nothing in the one format that concatenates
+      // every imported file whole.
+      if (depth >= importState.maxDepth) {
+        logger.warn(
+          `Maximum import depth (${importState.maxDepth}) reached. Stopping import processing.`,
+        );
+        return;
+      }
+
       // Find imports in this file
       const codeRegions = findCodeRegions(fileContent);
       const imports = findImports(fileContent);

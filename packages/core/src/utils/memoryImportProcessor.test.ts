@@ -871,6 +871,88 @@ describe('memoryImportProcessor', () => {
       expect(result.content).toContain('A @./b.md');
       expect(result.content).toContain('B content');
     });
+
+    // chain0 -> chain1 -> ... -> chain7, each importing the next.
+    const mockChain = (length: number) => {
+      mockedFs.access.mockReset();
+      mockedFs.readFile.mockReset();
+      mockedFs.access.mockResolvedValue(undefined);
+      mockedFs.readFile.mockImplementation(async (file: unknown) => {
+        const index = Number(
+          path.basename(String(file), '.md').replace('chain', ''),
+        );
+        return index < length - 1
+          ? `CHAIN${index} @./chain${index + 1}.md`
+          : `CHAIN${index}`;
+      });
+    };
+
+    const chainMarkers = (content: string, length: number) =>
+      [...Array(length).keys()].filter((i) => content.includes(`CHAIN${i}`));
+
+    it('stops expanding a flat import chain at maxDepth', async () => {
+      const projectRoot = testPath('test', 'project');
+      const basePath = testPath(projectRoot, 'src');
+      mockChain(8);
+
+      const result = await processImports(
+        'Root @./chain0.md',
+        basePath,
+        { processedFiles: new Set(), maxDepth: 3, currentDepth: 0 },
+        projectRoot,
+        'flat',
+      );
+
+      // The root is depth 0, so chain0..chain2 sit at depths 1..3 and chain2 is
+      // the last file allowed to expand its own imports.
+      expect(chainMarkers(result.content, 8)).toEqual([0, 1, 2]);
+    });
+
+    it('applies the same depth limit in flat and tree formats', async () => {
+      const projectRoot = testPath('test', 'project');
+      const basePath = testPath(projectRoot, 'src');
+
+      mockChain(8);
+      const flat = await processImports(
+        'Root @./chain0.md',
+        basePath,
+        { processedFiles: new Set(), maxDepth: 3, currentDepth: 0 },
+        projectRoot,
+        'flat',
+      );
+
+      mockChain(8);
+      const tree = await processImports(
+        'Root @./chain0.md',
+        basePath,
+        { processedFiles: new Set(), maxDepth: 3, currentDepth: 0 },
+        projectRoot,
+        'tree',
+      );
+
+      expect(chainMarkers(flat.content, 8)).toEqual(
+        chainMarkers(tree.content, 8),
+      );
+    });
+
+    it('fully expands a flat import chain that stays within maxDepth', async () => {
+      const projectRoot = testPath('test', 'project');
+      const basePath = testPath(projectRoot, 'src');
+      mockChain(3);
+
+      const result = await processImports(
+        'Root @./chain0.md',
+        basePath,
+        { processedFiles: new Set(), maxDepth: 5, currentDepth: 0 },
+        projectRoot,
+        'flat',
+      );
+
+      // Passes both before and after the depth guard, on purpose: it pins the
+      // other half of the contract so the limit can never be enforced by
+      // truncating chains that were always allowed.
+      expect(chainMarkers(result.content, 3)).toEqual([0, 1, 2]);
+    });
   });
 
   describe('validateImportPath', () => {
