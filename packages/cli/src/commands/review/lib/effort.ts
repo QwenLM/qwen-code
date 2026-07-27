@@ -20,9 +20,8 @@
 
 import { readFileSync } from 'node:fs';
 import { PARSE_ARGS_REPORT } from './paths.js';
+import { EFFORT_LEVELS } from '../parse-args.js';
 import type { ReviewEffort } from '../parse-args.js';
-
-const LEVELS: ReadonlySet<string> = new Set(['low', 'medium', 'high']);
 
 /**
  * The effort to record in a capture command's plan. An explicit `--effort` wins;
@@ -34,16 +33,29 @@ const LEVELS: ReadonlySet<string> = new Set(['low', 'medium', 'high']);
 export function resolveEffort(
   explicit: string | undefined,
 ): ReviewEffort | undefined {
-  if (explicit && LEVELS.has(explicit)) return explicit as ReviewEffort;
+  if (explicit && EFFORT_LEVELS.has(explicit)) return explicit as ReviewEffort;
   try {
     const parsed = JSON.parse(readFileSync(PARSE_ARGS_REPORT, 'utf8')) as {
       effort?: unknown;
     };
-    if (typeof parsed.effort === 'string' && LEVELS.has(parsed.effort)) {
+    if (typeof parsed.effort === 'string' && EFFORT_LEVELS.has(parsed.effort)) {
       return parsed.effort as ReviewEffort;
     }
   } catch {
     /* no report, or unreadable/unparseable — undefined (roster fail-safe to full) */
   }
   return undefined;
+}
+
+/**
+ * The resolved effort shaped for spreading into a capture command's plan:
+ * `{ effort }` when a level resolves, `{}` otherwise (roster fail-safes to full).
+ * The three capture commands spread this verbatim, so the conditional spread lives
+ * here once rather than being re-spelled at each call site.
+ */
+export function planEffortField(explicit: string | undefined): {
+  effort?: ReviewEffort;
+} {
+  const effort = resolveEffort(explicit);
+  return effort ? { effort } : {};
 }

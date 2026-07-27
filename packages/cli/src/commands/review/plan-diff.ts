@@ -19,7 +19,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR } from './lib/paths.js';
-import { resolveEffort } from './lib/effort.js';
+import { planEffortField } from './lib/effort.js';
 import type { ReviewEffort } from './parse-args.js';
 import {
   buildDiffPlan,
@@ -91,13 +91,7 @@ function runPlanDiff(args: PlanDiffArgs): void {
     ...(args.pr !== undefined && args.repo !== undefined
       ? { prNumber: String(args.pr), ownerRepo: args.repo }
       : {}),
-    // `--effort` wins; else recover the level parse-args resolved, so the effort
-    // reaches `plan.effort` without the orchestrator re-threading the flag (see
-    // resolveEffort). Absent → roster fail-safes to full, unchanged.
-    ...(() => {
-      const effort = resolveEffort(args.effort);
-      return effort ? { effort } : {};
-    })(),
+    ...planEffortField(args.effort),
     // No `git show` is possible here — there is no ref to resolve a path
     // against — so per-file line counts and heaviness are unavailable. Chunk
     // coverage, which is what Step 3B needs, is not.

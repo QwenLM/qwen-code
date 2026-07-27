@@ -41,7 +41,7 @@ import {
   tmpFile,
   worktreePath,
 } from './lib/paths.js';
-import { resolveEffort } from './lib/effort.js';
+import { planEffortField } from './lib/effort.js';
 import {
   buildDiffPlan,
   DEFAULT_MAX_CHUNK_LINES,
@@ -378,13 +378,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     diffPath,
     diffPathAbsolute,
     prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
-    // `--effort` wins; else recover the level parse-args resolved, so the effort
-    // reaches `plan.effort` without the orchestrator re-threading the flag (see
-    // resolveEffort). Absent → roster fail-safes to full, unchanged.
-    ...(() => {
-      const effort = resolveEffort(args.effort);
-      return effort ? { effort } : {};
-    })(),
+    ...planEffortField(args.effort),
     ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path)),
   };
 

@@ -12,6 +12,7 @@ import { planDiffCommand } from './plan-diff.js';
 import { chunksCoverDiff } from './lib/diff-plan.js';
 
 let dir: string;
+let cwd: string;
 const run = (diffPath: string, out: string, maxChunkLines = 400) =>
   (planDiffCommand.handler as (a: unknown) => void)({
     diff_path: diffPath,
@@ -21,8 +22,11 @@ const run = (diffPath: string, out: string, maxChunkLines = 400) =>
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'plan-diff-'));
+  cwd = process.cwd();
+  process.chdir(dir);
 });
 afterEach(() => {
+  process.chdir(cwd);
   if (dir) rmSync(dir, { recursive: true, force: true });
 });
 

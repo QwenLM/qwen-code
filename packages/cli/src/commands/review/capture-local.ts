@@ -21,7 +21,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
 import { REVIEW_TMP_DIR, tmpFile } from './lib/paths.js';
-import { resolveEffort } from './lib/effort.js';
+import { planEffortField } from './lib/effort.js';
 import type { ReviewEffort } from './parse-args.js';
 import { captureLocalDiff, type SkippedFile } from './lib/local-diff.js';
 import { buildDiffPlan, READ_FILE_CHAR_CAP } from './lib/diff-plan.js';
@@ -97,14 +97,7 @@ function runCaptureLocal(args: CaptureLocalArgs): void {
     ...buildPlanReport(plan, null),
     untrackedFiles: capture.untracked,
     skippedFiles: capture.skipped,
-    // `--effort` wins; otherwise recover the level parse-args resolved, so a
-    // `/review --effort medium` reaches `plan.effort` even when the orchestrator
-    // did not re-thread the flag (see resolveEffort). Absent → roster fail-safes
-    // to full, unchanged.
-    ...(() => {
-      const effort = resolveEffort(args.effort);
-      return effort ? { effort } : {};
-    })(),
+    ...planEffortField(args.effort),
   };
 
   writeFileSync(out, stringifyPlanReport(result), 'utf8');
