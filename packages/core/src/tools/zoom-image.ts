@@ -7,7 +7,7 @@
 import path from 'node:path';
 import fs from 'node:fs/promises';
 import type { Part } from '@google/genai';
-import sharp from 'sharp';
+import type { Metadata } from 'sharp';
 import type { Config } from '../config/config.js';
 import type { PermissionDecision } from '../permissions/types.js';
 import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
@@ -115,6 +115,22 @@ class ZoomImageInvocation extends BaseToolInvocation<
 
   override async execute(signal: AbortSignal): Promise<ToolResult> {
     signal.throwIfAborted();
+    let sharp: typeof import('sharp');
+    try {
+      // sharp is a CJS `export =` module: at runtime the dynamic-import
+      // namespace carries the callable on `.default`, which the NodeNext types
+      // collapse away, so unwrap it explicitly (cf. utils/iconvHelper.ts).
+      sharp = (
+        (await import('sharp')) as unknown as {
+          default: typeof import('sharp');
+        }
+      ).default;
+    } catch {
+      return failureResult(
+        'zoom_image is unavailable because the "sharp" image module could not be loaded.',
+        ToolErrorType.READ_CONTENT_FAILURE,
+      );
+    }
     let stats: Awaited<ReturnType<typeof fs.stat>>;
     try {
       stats = await fs.stat(this.params.file_path);
@@ -145,7 +161,7 @@ class ZoomImageInvocation extends BaseToolInvocation<
         ToolErrorType.FILE_TOO_LARGE,
       );
     }
-    let metadata: sharp.Metadata;
+    let metadata: Metadata;
     try {
       metadata = await sharp(this.params.file_path, {
         failOn: 'error',
@@ -261,7 +277,7 @@ export class ZoomImageTool extends BaseDeclarativeTool<
     super(
       ZoomImageTool.Name,
       ToolDisplayNames.ZOOM_IMAGE,
-      'Crops a region from a full-resolution static image and returns a magnified view. Coordinates are integers normalized from 0 to 1000 against the displayed image, with (0,0) at top-left and (1000,1000) at bottom-right. Use this when text, numbers, lines, or other details are too small to inspect confidently. You may call it repeatedly.',
+      'Crops a region from a full-resolution static image and returns a magnified view. Coordinates are integers normalized from 0 to 1000 against the displayed image, with (0,0) at top-left and (1000,1000) at bottom-right. Use this when text, numbers, lines, or other details are too small to inspect confidently. You may call it repeatedly; coordinates always refer to the original full-resolution image, never to a previously returned view.',
       Kind.Read,
       {
         type: 'object',

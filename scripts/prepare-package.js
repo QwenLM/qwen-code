@@ -318,6 +318,18 @@ function writeDistPackageJson(rootDir, distDir) {
       '@teddyzhu/clipboard-linux-arm64-gnu': '0.0.5',
       '@teddyzhu/clipboard-win32-x64-msvc': '0.0.5',
       '@teddyzhu/clipboard-win32-arm64-msvc': '0.0.5',
+      // sharp is a native module: externalized in esbuild and declared here so
+      // npm installs the matching @img platform binary in the published package.
+      sharp: '0.34.5',
+      '@img/sharp-darwin-arm64': '0.34.5',
+      '@img/sharp-darwin-x64': '0.34.5',
+      '@img/sharp-linux-arm64': '0.34.5',
+      '@img/sharp-linux-x64': '0.34.5',
+      '@img/sharp-win32-x64': '0.34.5',
+      '@img/sharp-libvips-darwin-arm64': '1.2.4',
+      '@img/sharp-libvips-darwin-x64': '1.2.4',
+      '@img/sharp-libvips-linux-arm64': '1.2.4',
+      '@img/sharp-libvips-linux-x64': '1.2.4',
     },
     engines: rootPackageJson.engines,
   };

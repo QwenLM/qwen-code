@@ -222,9 +222,21 @@ describe('ZoomImageTool', () => {
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
         const offset = (y * width + x) * 3;
-        pixels[offset] = x < width / 2 ? 255 : 0;
-        pixels[offset + 1] = x < width / 2 ? 0 : 255;
-        pixels[offset + 2] = 0;
+        // Four distinct quadrants. Orientation 6 rotates the stored image 90deg
+        // clockwise for display, moving the stored bottom-left quadrant (blue)
+        // into the displayed top-left; a crop that ignores auto-orientation
+        // reads the stored top-left (red) instead, so this pins the behavior.
+        const color =
+          y < height / 2
+            ? x < width / 2
+              ? [255, 0, 0]
+              : [0, 255, 0]
+            : x < width / 2
+              ? [0, 0, 255]
+              : [255, 255, 0];
+        pixels[offset] = color[0]!;
+        pixels[offset + 1] = color[1]!;
+        pixels[offset + 2] = color[2]!;
       }
     }
     const imagePath = path.join(root, 'oriented.jpg');
@@ -235,16 +247,18 @@ describe('ZoomImageTool', () => {
       .withMetadata({ orientation: 6 })
       .toFile(imagePath);
 
+    // Displayed (auto-oriented) size is 40x60; select its top-left quadrant.
     const result = await tool
       .build({
         file_path: imagePath,
         x1: 0,
         y1: 0,
-        x2: 1000,
-        y2: 450,
+        x2: 500,
+        y2: 500,
       })
       .execute(new AbortController().signal);
 
+    expect(result.error).toBeUndefined();
     const parts = result.llmContent as Array<{
       inlineData?: { data: string };
     }>;
@@ -256,8 +270,9 @@ describe('ZoomImageTool', () => {
     const center =
       (Math.floor(info.height / 2) * info.width + Math.floor(info.width / 2)) *
       info.channels;
-    expect(data[center]).toBeGreaterThan(235);
+    expect(data[center]).toBeLessThan(20);
     expect(data[center + 1]).toBeLessThan(20);
+    expect(data[center + 2]).toBeGreaterThan(235);
     expect(result.llmContent).toEqual(
       expect.arrayContaining([
         {
@@ -405,11 +420,45 @@ describe('ZoomImageTool', () => {
       tool.build({
         file_path: path.join(root, 'image.png'),
         x1: 0,
+        y1: 500,
+        x2: 1000,
+        y2: 500,
+      }),
+    ).toThrow(/y1 must be less than y2/i);
+    expect(() =>
+      tool.build({
+        file_path: path.join(root, 'image.png'),
+        x1: 0,
         y1: -1,
         x2: 1000,
         y2: 1000,
       }),
     ).toThrow(/>= 0/);
+  });
+
+  it('rejects a path matched by a .qwenignore pattern', async () => {
+    await fs.writeFile(path.join(root, '.qwenignore'), 'secret-*.png\n');
+    const ignoredPath = path.join(root, 'secret-image.png');
+    await sharp({
+      create: {
+        width: 20,
+        height: 20,
+        channels: 3,
+        background: '#000000',
+      },
+    })
+      .png()
+      .toFile(ignoredPath);
+
+    expect(() =>
+      tool.build({
+        file_path: ignoredPath,
+        x1: 0,
+        y1: 0,
+        x2: 1000,
+        y2: 1000,
+      }),
+    ).toThrow(/ignored by .qwenignore pattern/i);
   });
 
   it('uses the read_file path permission boundary', async () => {
