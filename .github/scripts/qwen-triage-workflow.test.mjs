@@ -21,6 +21,17 @@ const workflowPath = join(
   'qwen-triage.yml',
 );
 const doc = parse(readFileSync(workflowPath, 'utf8'));
+const prWorkflowPath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+  '.qwen',
+  'skills',
+  'triage',
+  'references',
+  'pr-workflow.md',
+);
+const prSkill = readFileSync(prWorkflowPath, 'utf8');
 const triageJob = doc.jobs.triage;
 const steps = triageJob.steps;
 const triageStep = steps.find((s) => s.id === 'triage');
@@ -257,5 +268,42 @@ describe('qwen-triage: git exec-vector cleanup', () => {
         assert.match(remaining(), new RegExp(kept.replace(/\./g, '\\.')));
       });
     }
+  });
+});
+
+describe('qwen-triage: Stage 1e revert-pattern signals', () => {
+  it('includes high-risk path detection', () => {
+    assert.ok(prSkill.includes('1e. High-risk path'));
+    assert.ok(prSkill.includes('openaiContentGenerator'));
+    assert.ok(prSkill.includes('streamingToolCallParser'));
+    assert.ok(prSkill.includes('geminiChat'));
+    assert.ok(prSkill.includes('acpConnection'));
+    assert.ok(prSkill.includes('shell\\.ts$'));
+    assert.ok(prSkill.includes('shellExecutionService'));
+    assert.ok(prSkill.includes('mcp-client'));
+    assert.ok(prSkill.includes('mcp-pool'));
+    assert.ok(prSkill.includes('LspServer'));
+    assert.ok(prSkill.includes('acp-integration'));
+    assert.ok(prSkill.includes('relaunch\\.ts$'));
+    assert.ok(prSkill.includes('sandbox\\.ts$'));
+    assert.ok(prSkill.includes('electron-run-as-node'));
+    assert.ok(prSkill.includes('66.7% revert precision'));
+  });
+
+  it('includes contested-merge detection', () => {
+    assert.ok(prSkill.includes('Contested-merge pattern'));
+    assert.ok(prSkill.includes('CHANGES_REQUESTED'));
+    assert.ok(prSkill.includes('after position 0'));
+    assert.ok(prSkill.includes('50.0% revert precision'));
+    assert.ok(prSkill.includes('need-discussion'));
+    assert.ok(!prSkill.includes('status/on-hold'));
+    assert.ok(prSkill.includes('maintainer sign-off'));
+  });
+
+  it('includes non-maintainer high-risk tier', () => {
+    assert.ok(prSkill.includes('Non-maintainer + high-risk'));
+    assert.ok(prSkill.includes('58.3% revert precision'));
+    assert.ok(prSkill.includes('highest-risk tier'));
+    assert.ok(prSkill.includes('do not auto-approve'));
   });
 });

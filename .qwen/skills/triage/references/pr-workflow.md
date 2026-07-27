@@ -86,7 +86,7 @@ gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
 
 **Approve once per commit — and only your OWN approval counts as already done.** Re-running triage three times must not stack three approvals, so check before posting. But "already approved" means **this bot's** `APPROVED` review on **this exact** `HEAD_SHA`, and nothing else:
 
-- **Another account's approval is not yours.** `main` requires two approving reviews, so a maintainer's approval is a *different* vote — the whole reason the bot's is still needed. Never read it as "already approved".
+- **Another account's approval is not yours.** `main` requires two approving reviews, so a maintainer's approval is a _different_ vote — the whole reason the bot's is still needed. Never read it as "already approved".
 - **A `DISMISSED` review is not an approval.** Branch protection runs with `dismiss_stale_reviews: true`, so every push dismisses the bot's prior approval. That is precisely when a fresh one is required.
 - **An approval on an earlier commit does not carry over**, for the same reason.
 
@@ -238,22 +238,24 @@ gh pr view "$PR_NUMBER" --repo "$REPO" --json files --jq '.files[].path' | grep 
 ```
 
 If any file matches (66.7% revert precision, 32.3% recall in the analysis):
+
 - For non-maintainer PRs: escalate to the deepest review tier — do not skip any review stage, run full `/review` with maximum agent coverage.
 - Flag the high-risk paths in the Stage 1 comment so the reviewer knows where to focus.
-- Recommend E2E verification in tmux (Stage 2b) before approval.
+- Recommend E2E verification in tmux (Stage 2c) before approval.
 
-**Contested-merge pattern** — check the PR's review history for a CHANGES_REQUESTED → APPROVE cycle:
+**Contested-merge pattern** — check the PR's review history for reviewer disagreement (a CHANGES_REQUESTED entry that is not the first review):
 
 ```bash
 gh pr view "$PR_NUMBER" --repo "$REPO" --json reviews --jq '[.reviews[] | select(.state != "PENDING" and .state != "COMMENTED") | .state]'
 ```
 
-If the review state array contains both `CHANGES_REQUESTED` and `APPROVE` entries (in any order) AND the PR touches core paths (50.0% revert precision, 19.4% recall):
+If the review state array has a `CHANGES_REQUESTED` entry after position 0 (a prior review preceded the disagreement) AND the PR touches core paths as defined in Stage 0 (50.0% revert precision, 19.4% recall):
+
 - Apply `need-discussion` label via `gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label need-discussion` (if the label exists).
 - Recommend maintainer sign-off before merge in the Stage 1 comment.
 - Do not auto-approve even if Stage 2 and Stage 3 are clean.
 
-**Non-maintainer + high-risk** (58.3% revert precision, 22.6% recall): a non-maintainer PR that matches the high-risk path patterns above is the highest-risk tier. Apply all actions: deepest review depth, recommend E2E verification, apply `need-discussion` label (if it exists), recommend maintainer sign-off, and do not auto-approve even if Stage 2 and Stage 3 are clean.
+**Non-maintainer + high-risk** (58.3% revert precision, 22.6% recall): a non-maintainer PR that matches the high-risk path patterns above is the highest-risk tier. Apply all actions: deepest review depth, flag the high-risk paths in the Stage 1 comment, recommend E2E verification, apply `need-discussion` label (if it exists), recommend maintainer sign-off, and do not auto-approve even if Stage 2 and Stage 3 are clean.
 
 These signals are NOT terminal gates — they do not stop the review or close the PR. They escalate review depth and flag risk so the reviewer knows where to focus. A PR that touches high-risk paths but passes full review with clean E2E verification can still be approved.
 
@@ -274,6 +276,8 @@ Size: <if core paths are touched, report production lines vs. test lines vs. gen
 
 Approach: <state your honest assessment — the scope feels right / feels like it could be much simpler / here's what I'd consider cutting>. <If you see a simpler path, name it: "Have you considered just X? It might cover most of the use case with a fraction of the complexity."> <If the diff carries unrelated changes or drive-by refactors, name them and suggest splitting them out.>
 
+Risk: <if Stage 1e signals matched, list the matched high-risk paths and/or contested-merge pattern, the recommended review depth, and whether maintainer sign-off is recommended. Otherwise say "no elevated risk signals".>
+
 <If passing:> Moving on to code review. 🔍
 <If concerns:> Flagging these for discussion before diving deeper.
 
@@ -291,6 +295,8 @@ Approach: <state your honest assessment — the scope feels right / feels like i
 规模：<如果触及核心路径，报告生产行数、测试行数、生成/schema 行数；适用时说明 500+ 生产行需维护者关注，或 1000+ 大 PR 建议。否则写"不适用"。>
 
 方案：<范围合理 / 感觉可以大幅简化 / 建议砍掉的部分>。<如果看到更简路径，点名：有没有考虑过直接 X？可能用很小的复杂度覆盖大部分场景。><如果 diff 夹带了无关改动或顺手重构，点名并建议拆成单独 PR。>
+
+风险：<如果 Stage 1e 信号命中，列出匹配的高风险路径和/或 contested-merge 模式、建议的 review 深度、是否需要维护者签字。否则写"无升级风险信号"。>
 
 <如果通过：> 进入代码审查 🔍
 <如果有顾虑：> 先提出来讨论，再深入看代码。

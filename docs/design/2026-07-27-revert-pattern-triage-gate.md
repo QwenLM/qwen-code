@@ -42,25 +42,26 @@ Three-phase analysis of the repo's full revert history:
    PRs and extracted the same signals. Computed precision (TP / (TP + FP))
    and recall for each signal.
 
-Scripts and raw data: `.qwen/scripts/revert-analysis-*.mjs`,
-`.qwen/scripts/revert-data-*.json`, `.qwen/scripts/revert-analysis-report-v2.json`.
+Scripts and raw data (local analysis artifacts, not committed):
+`.qwen/scripts/revert-analysis-*.mjs`, `.qwen/scripts/revert-data-*.json`,
+`.qwen/scripts/revert-analysis-report-v2.json`.
 
 ### Signal precision and recall
 
-| Signal | Precision | Recall | Reverted (n=31) | Control (n=60) |
-| ------ | --------- | ------ | --------------- | -------------- |
-| `touches_high_risk` | **66.7%** | 32.3% | 10 | 5 |
-| `non_maintainer + high_risk` | **58.3%** | 22.6% | 7 | 5 |
-| `core + contested` | **50.0%** | 19.4% | 6 | 6 |
-| `non_maintainer + core` | 46.2% | 38.7% | 12 | 14 |
-| `touches_core` | 44.7% | 54.8% | 17 | 21 |
-| `has_contested_pattern` | 40.9% | 29.0% | 9 | 13 |
-| `had_changes_requested` | 40.7% | 35.5% | 11 | 16 |
-| `non_maintainer` | 39.6% | 67.7% | 21 | 32 |
-| `large_diff_gt_200` | 37.0% | 54.8% | 17 | 29 |
-| `critical_count > 0` | 28.6% | 12.9% | 4 | 10 |
-| `fast_revert_24h` | 100.0% | 25.8% | 8 | 0 |
-| `self_reverted` | 100.0% | 9.7% | 3 | 0 |
+| Signal                       | Precision | Recall | Reverted (n=31) | Control (n=60) |
+| ---------------------------- | --------- | ------ | --------------- | -------------- |
+| `touches_high_risk`          | **66.7%** | 32.3%  | 10              | 5              |
+| `non_maintainer + high_risk` | **58.3%** | 22.6%  | 7               | 5              |
+| `core + contested`           | **50.0%** | 19.4%  | 6               | 6              |
+| `non_maintainer + core`      | 46.2%     | 38.7%  | 12              | 14             |
+| `touches_core`               | 44.7%     | 54.8%  | 17              | 21             |
+| `has_contested_pattern`      | 40.9%     | 29.0%  | 9               | 13             |
+| `had_changes_requested`      | 40.7%     | 35.5%  | 11              | 16             |
+| `non_maintainer`             | 39.6%     | 67.7%  | 21              | 32             |
+| `large_diff_gt_200`          | 37.0%     | 54.8%  | 17              | 29             |
+| `critical_count > 0`         | 28.6%     | 12.9%  | 4               | 10             |
+| `fast_revert_24h`            | 100.0%    | 25.8%  | 8               | 0              |
+| `self_reverted`              | 100.0%    | 9.7%   | 3               | 0              |
 
 `fast_revert_24h` and `self_reverted` have 100% precision but are
 **post-merge signals** — they cannot be used as triage gates because they are
@@ -87,7 +88,9 @@ subsystem patterns:
 - `mcp-client` / `mcp-pool` — MCP server management
 - `LspServer` — LSP server management
 - `acp-integration` — ACP session integration
-- `ELECTRON_RUN_AS_NODE` / `process.env` — environment variable propagation
+- `relaunch.ts` — desktop app relaunch lifecycle
+- `sandbox.ts` — sandbox process management
+- `electron-run-as-node` — Electron node-mode entry point (path match)
 
 These are the paths where incorrect changes are most likely to cause
 observable regressions that require reversion.
@@ -173,13 +176,13 @@ that has 22.6% recall — over 10× more effective at catching dangerous PRs.
 
 ## Comparison to PR #7414
 
-| | PR #7414 (behavior-neutral) | This design (revert-pattern) |
-| --- | --- | --- |
-| Signal | "diff is entirely behavior-neutral" | "touches high-risk paths" |
-| Hit rate (reverted PRs) | ~2% (2/102 live backlog) | 32.3% (10/31) |
-| Precision | unmeasured (no reverts to compare) | 66.7% |
-| Targets | harmless PRs (cost: low) | dangerous PRs (cost: high) |
-| False positive cost | skips review on a useful PR | escalates review depth (extra review time) |
+|                         | PR #7414 (behavior-neutral)         | This design (revert-pattern)               |
+| ----------------------- | ----------------------------------- | ------------------------------------------ |
+| Signal                  | "diff is entirely behavior-neutral" | "touches high-risk paths"                  |
+| Hit rate (reverted PRs) | ~2% (2/102 live backlog)            | 32.3% (10/31)                              |
+| Precision               | unmeasured (no reverts to compare)  | 66.7%                                      |
+| Targets                 | harmless PRs (cost: low)            | dangerous PRs (cost: high)                 |
+| False positive cost     | skips review on a useful PR         | escalates review depth (extra review time) |
 
 ## Files changed
 

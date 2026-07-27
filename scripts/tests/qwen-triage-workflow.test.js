@@ -328,9 +328,7 @@ describe('qwen-triage tmux workflow', () => {
 
     const finalizeStep = step('Finalize triage status comment');
     // Runs on both outcomes and edits the SAME marker comment (no second post).
-    expect(finalizeStep).toContain(
-      "MARKER='<!-- qwen-triage lifecycle -->'",
-    );
+    expect(finalizeStep).toContain("MARKER='<!-- qwen-triage lifecycle -->'");
     expect(finalizeStep).toContain(
       "LEGACY_MARKER='<!-- qwen-triage stage=status -->'",
     );
@@ -677,7 +675,7 @@ describe('qwen-triage tmux workflow', () => {
     expect(prSkill).toContain('Contested-merge pattern');
     expect(prSkill).toContain('CHANGES_REQUESTED');
     expect(prSkill).toContain('APPROVE');
-    expect(prSkill).toContain('in any order');
+    expect(prSkill).toContain('after position 0');
     expect(prSkill).toContain('50.0% revert precision');
     expect(prSkill).toContain('need-discussion');
     expect(prSkill).not.toContain('status/on-hold');
