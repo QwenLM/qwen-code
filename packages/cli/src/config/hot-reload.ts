@@ -140,11 +140,19 @@ export function registerMcpHotReload(
     const cwd = config.getTargetDir();
     // Rebuild exactly the way Config boot did — including top-tier
     // (CLI / session-injected) servers layered above settings + `.mcp.json`.
-    const next = assembleMcpServers(
-      settings.merged.mcpServers,
-      cwd,
-      topTierMcpServers,
-    );
+    // Bare/safe mode: mirror loadCliConfig's own guard (config.ts) — a live
+    // settings.json edit must not smuggle local/ambient MCP servers into an
+    // already-running bare/safe-mode session; only the top-tier servers this
+    // session started with (explicit, per-invocation, not ambient state)
+    // survive.
+    const next =
+      config.getBareMode() || config.isSafeMode()
+        ? { ...topTierMcpServers }
+        : assembleMcpServers(
+            settings.merged.mcpServers,
+            cwd,
+            topTierMcpServers,
+          );
     const isYolo = config.getApprovalMode() === ApprovalMode.YOLO;
     const nextGating = recomputeMcpGating(
       settings,

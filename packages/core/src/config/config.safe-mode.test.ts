@@ -292,14 +292,31 @@ describe('Config safe mode', () => {
     });
   });
 
-  describe('safe mode blocks MCP servers', () => {
-    it('should return empty MCP servers in safe mode', () => {
+  describe('safe mode blocks local/ambient MCP servers, preserves caller-supplied top-tier ones', () => {
+    it('should return empty MCP servers in safe mode when nothing was supplied as top-tier', () => {
       const config = new Config({
         ...baseParams,
         safeMode: true,
         mcpServers: { test: { command: 'test', args: [] } },
       });
       expect(config.getMcpServers()).toEqual({});
+    });
+
+    it('should still return top-tier (ACP session/new / --mcp-config-supplied) MCP servers in safe mode', () => {
+      // `mcpServers` here stands in for the LOCAL/ambient map `loadCliConfig`
+      // assembles from settings.json/.mcp.json — dropped under safe mode.
+      // `topTierMcpServers` stands in for the caller's own explicit,
+      // per-invocation request (ACP `session/new`, `--mcp-config`) — an
+      // explicit argument, not ambient local state, so it survives.
+      const config = new Config({
+        ...baseParams,
+        safeMode: true,
+        mcpServers: { local: { command: 'local', args: [] } },
+        topTierMcpServers: { probe: { command: 'probe', args: [] } },
+      });
+      expect(config.getMcpServers()).toEqual({
+        probe: { command: 'probe', args: [] },
+      });
     });
   });
 

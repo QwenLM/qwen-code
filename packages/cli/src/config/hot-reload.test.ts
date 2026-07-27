@@ -111,6 +111,8 @@ interface FakeConfigState {
   /** Startup `--allowed-mcp-server-names` upper bound (K); default undefined. */
   bootAllowed?: string[];
   approvalMode?: ApprovalMode;
+  bareMode?: boolean;
+  safeMode?: boolean;
 }
 
 function makeFakeConfig(cwd: string, state: FakeConfigState) {
@@ -126,6 +128,8 @@ function makeFakeConfig(cwd: string, state: FakeConfigState) {
   });
   const config = {
     getApprovalMode: () => state.approvalMode ?? ApprovalMode.DEFAULT,
+    getBareMode: () => state.bareMode ?? false,
+    isSafeMode: () => state.safeMode ?? false,
     getTargetDir: () => cwd,
     getSettingsMcpServers: () => state.settingsMcp,
     // Stand-in for the effective (settings + extensions + runtime) map; the
@@ -211,6 +215,41 @@ describe('registerMcpHotReload', () => {
       a: { command: 'a' },
       cliSrv: { command: 'cli' },
     });
+  });
+
+  it('safe mode: a settings.mcpServers change does NOT smuggle local servers into the live session, only top-tier survives', async () => {
+    const fc = makeFakeConfig(cwd, {
+      settingsMcp: {},
+      gating: {},
+      safeMode: true,
+    });
+    const topTier = { cliSrv: { command: 'cli' } };
+    registerMcpHotReload(watcher, settings, fc.config, topTier);
+
+    // A local settings.json edit fires while the safe-mode session is live.
+    merged.mcpServers = { local: { command: 'should-not-leak-in' } };
+    await listener([]);
+
+    expect(fc.reinitializeMcpServers).toHaveBeenCalledWith({
+      cliSrv: { command: 'cli' },
+    });
+  });
+
+  it('bare mode: a settings.mcpServers change does NOT smuggle local servers into the live session', async () => {
+    // Non-empty initial state so the bare-mode-forced `{}` below is a real,
+    // detectable diff (a `{} -> {}` no-op wouldn't exercise the reconcile
+    // path at all).
+    const fc = makeFakeConfig(cwd, {
+      settingsMcp: { stale: { command: 'stale' } },
+      gating: {},
+      bareMode: true,
+    });
+    registerMcpHotReload(watcher, settings, fc.config, undefined);
+
+    merged.mcpServers = { local: { command: 'should-not-leak-in' } };
+    await listener([]);
+
+    expect(fc.reinitializeMcpServers).toHaveBeenCalledWith({});
   });
 
   it('reconciles on an admission-list-only change (mcp.excluded), servers unchanged', async () => {

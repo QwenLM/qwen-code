@@ -1399,6 +1399,74 @@ describe('loadCliConfig', () => {
     expect(config.isMcpServerPendingApproval('ide-only')).toBe(false);
   });
 
+  it('preserves session/CLI-supplied MCP servers under safe mode while dropping settings-sourced ones', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      mcpServers: {
+        'settings-only': { command: 'settings-only-cmd' },
+      },
+    };
+    const sessionMcpServers = {
+      'session-server': new ServerConfig.MCPServerConfig('session-cmd'),
+    };
+
+    const config = await loadCliConfig(
+      settings,
+      argv,
+      process.cwd(),
+      undefined,
+      undefined,
+      undefined,
+      sessionMcpServers,
+    );
+
+    const servers = config.getMcpServers() ?? {};
+    // Session-supplied server survives safe mode — it's an explicit,
+    // per-invocation argument (ACP session/new), not ambient local state.
+    expect(servers['session-server']?.command).toBe('session-cmd');
+    // Settings-sourced server is still dropped under safe mode.
+    expect(servers['settings-only']).toBeUndefined();
+    // Never approval-gated, same as the non-safe-mode case above.
+    expect(config.isMcpServerPendingApproval('session-server')).toBe(false);
+  });
+
+  it('preserves --mcp-config-supplied MCP servers under safe mode while dropping settings-sourced ones', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--safe-mode',
+      '--mcp-config',
+      JSON.stringify({ 'cli-server': { command: 'cli-cmd' } }),
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      mcpServers: {
+        'settings-only': { command: 'settings-only-cmd' },
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, process.cwd());
+
+    const servers = config.getMcpServers() ?? {};
+    expect(servers['cli-server']?.command).toBe('cli-cmd');
+    expect(servers['settings-only']).toBeUndefined();
+  });
+
+  it('drops ALL MCP servers under safe mode when none were supplied by the caller', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      mcpServers: {
+        'settings-only': { command: 'settings-only-cmd' },
+      },
+    };
+
+    const config = await loadCliConfig(settings, argv, process.cwd());
+
+    expect(config.getMcpServers()).toEqual({});
+  });
+
   it('gates unapproved workspace MCP servers in non-interactive runs', async () => {
     process.argv = ['node', 'script.js', '-p', 'hello'];
     const argv = await parseArguments();

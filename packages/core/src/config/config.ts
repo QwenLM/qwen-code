@@ -4810,7 +4810,12 @@ export class Config {
   }
 
   getMcpServers(): Record<string, MCPServerConfig> | undefined {
-    if (this.isSafeMode()) return {};
+    // Safe mode distrusts LOCAL/ambient state (settings.json, extensions,
+    // project `.mcp.json`) — not the caller's own explicit, per-invocation
+    // request. `topTierMcpServers` (ACP `session/new`'s `mcpServers` field,
+    // `--mcp-config`) is that explicit request, so it survives safe mode;
+    // everything `getMergedMcpServers()` would otherwise fold in does not.
+    if (this.isSafeMode()) return { ...this.topTierMcpServers };
     let mcpServers = this.getMergedMcpServers();
 
     if (this.allowedMcpServers) {
