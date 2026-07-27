@@ -13,33 +13,22 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 
-const skillPath = resolve(
-  dirname(fileURLToPath(import.meta.url)),
-  '..',
-  'SKILL.md',
-);
+const skillDir = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const QWEN_TIMEOUT_MS = Number(process.env.QWEN_TIMEOUT_MS) || 50 * 60 * 1000;
 const specs = {
-  'scan-and-fix': {
-    inputs: [],
-    outputs: ['findings.json', 'report-only.md'],
-    required: ['branch'],
-    invocation: (o) =>
-      `/repo-hygiene scan-and-fix --workdir ${o.workdir} --branch ${o.branch}`,
-  },
   'scan': {
+    phaseDoc: 'scan.md',
     inputs: [],
     outputs: ['findings.json', 'report-only.md'],
     required: [],
-    invocation: (o) =>
-      `You are in the **scan phase** (step 1 of Execution Steps). --workdir ${o.workdir}`,
+    invocation: (o) => `--workdir ${o.workdir}`,
   },
   'fix': {
+    phaseDoc: 'fix.md',
     inputs: ['findings.json'],
     outputs: ['findings.json', 'report-only.md'],
     required: ['branch'],
-    invocation: (o) =>
-      `You are in the **fix phase** (steps 2-9 of Execution Steps). --workdir ${o.workdir} --branch ${o.branch}`,
+    invocation: (o) => `--workdir ${o.workdir} --branch ${o.branch}`,
   },
 };
 
@@ -144,17 +133,25 @@ function runQwen(options, prompt) {
 }
 
 function promptFor(options, spec) {
-  const skill = readFileSync(skillPath, 'utf8')
-    .replace(/\r\n/g, '\n')
-    .replace(/^---\n[\s\S]*?\n---(?:\n|$)/, '')
-    .trim();
+  const stripFrontmatter = (text) =>
+    text
+      .replace(/\r\n/g, '\n')
+      .replace(/^---\n[\s\S]*?\n---(?:\n|$)/, '')
+      .trim();
+  const base = stripFrontmatter(
+    readFileSync(resolve(skillDir, 'SKILL.md'), 'utf8'),
+  );
+  const phase = stripFrontmatter(
+    readFileSync(resolve(skillDir, spec.phaseDoc), 'utf8'),
+  );
   return [
-    `Skill directory: ${dirname(skillPath)}`,
+    `Skill directory: ${skillDir}`,
     'Resolve skill-relative paths from that directory.',
     '',
-    skill,
+    base,
     '',
-    `Mode: ${options.mode}`,
+    phase,
+    '',
     'Invocation:',
     spec.invocation(options),
     '',
