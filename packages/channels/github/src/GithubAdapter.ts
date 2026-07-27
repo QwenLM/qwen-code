@@ -30,12 +30,6 @@ interface GithubCursor {
    * causes the next poll to re-fetch the same thread.
    */
   dispatchedComments?: string[];
-  /**
-   * Notification `id`s already processed. Prevents re-dispatch when a failed
-   * `markNotificationsAsRead` aborts the poll before the cursor advances and the
-   * next poll re-fetches the same notifications.
-   */
-  dispatchedNotifications?: string[];
 }
 
 const MAX_DISPATCHED = 500;
@@ -84,11 +78,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     const base = super.validateCursor(parsed);
     if (!base || typeof base.lastProcessedAt !== 'string') return null;
     if (Number.isNaN(new Date(base.lastProcessedAt).getTime())) return null;
-    for (const key of [
-      'dispatchedBodies',
-      'dispatchedComments',
-      'dispatchedNotifications',
-    ] as const) {
+    delete (base as GithubCursor & { dispatchedNotifications?: unknown })
+      .dispatchedNotifications;
+    for (const key of ['dispatchedBodies', 'dispatchedComments'] as const) {
       const value = base[key];
       if (value !== undefined && !Array.isArray(value)) {
         (base[key] as string[]) = [];
@@ -206,11 +198,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
         continue;
       }
 
-      const notifId = String(notification.id);
-      if (this.isDispatched(this.cursor.dispatchedNotifications, notifId)) {
-        continue;
-      }
-
       const { chatId, threadId, issueNumber } = extracted;
       const lastReadAt = notification.last_read_at;
       const route = this.routeByReason(notification.reason, threadId);
@@ -228,7 +215,6 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
 
       try {
         await this.processByRoute(route, ctx);
-        this.recordDispatched('dispatchedNotifications', notifId);
       } catch (err) {
         process.stderr.write(
           `[Channel:${this.name}] API error processing ${threadId} (${notification.reason}), skipping: ${err}\n`,
@@ -280,7 +266,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       case 'assign':
         return this.processMetaLane(
           ctx,
-          'issue',
+          ctx.threadId.startsWith('pr:') ? 'pull' : 'issue',
           'Trigger: assign. You were assigned to this issue.',
         );
       case 'aggregate':
@@ -416,12 +402,19 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       messageId: `${kind}-body-${issueNumber}`,
       text,
       isGroup: true,
-      isMentioned: false,
+      isMentioned: true,
       isReplyToBot: false,
       metadata,
     };
     try {
       await this.handleInbound(envelope);
+      this.recordDispatched('dispatchedBodies', `${chatId}|${threadId}`);
+      for (const comment of comments) {
+        this.recordDispatched(
+          'dispatchedComments',
+          this.commentDedupKey(comment),
+        );
+      }
     } catch (err) {
       process.stderr.write(
         `[Channel:${this.name}] handleInbound failed for ${kind} ${issueNumber}: ${err}\n`,
@@ -446,13 +439,16 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       windowSince,
       maxUpdatedAt,
     );
-    const newComments = comments.filter(
-      (c) =>
+    const newComments = comments.filter((c) => {
+      const senderId = (c.user?.login || 'unknown').toLowerCase();
+      return (
+        this.gate.isAllowed(senderId) &&
         !this.isDispatched(
           this.cursor.dispatchedComments,
           this.commentDedupKey(c),
-        ),
-    );
+        )
+      );
+    });
     if (newComments.length === 0) return;
     const first = newComments[0]!;
     const framing =
@@ -472,7 +468,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       messageId: String(first.id),
       text: 'New comments were added to this thread. See the comment list below.',
       isGroup: true,
-      isMentioned: false,
+      isMentioned: true,
       isReplyToBot: false,
       metadata,
     };
@@ -666,10 +662,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   }
 
   private recordDispatched(
-    field:
-      | 'dispatchedBodies'
-      | 'dispatchedComments'
-      | 'dispatchedNotifications',
+    field: 'dispatchedBodies' | 'dispatchedComments',
     key: string,
   ): void {
     const list = this.cursor[field] ?? [];
