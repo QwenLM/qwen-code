@@ -58,12 +58,22 @@ export function PaneHeaderActions({
       const padding =
         (parseFloat(style.paddingLeft) || 0) +
         (parseFloat(style.paddingRight) || 0);
+      // Multi-workspace panes show a workspace tag before the title; reserve
+      // its width (and its flex gap) so host actions collapse before the title
+      // is crushed below TITLE_MIN_WIDTH_PX.
+      const workspaceTag = header.querySelector<HTMLElement>(
+        '[data-web-shell-pane-workspace]',
+      );
+      const workspaceTagWidth = workspaceTag?.offsetWidth ?? 0;
+      const workspaceTagGap = workspaceTagWidth > 0 ? headerGap : 0;
       // Compare natural host-action width against space left after the title
       // minimum and trailing built-ins. The overflow trigger is not part of
       // this budget so collapsing cannot oscillate at the threshold.
       const available =
         header.clientWidth -
         padding -
+        workspaceTagWidth -
+        workspaceTagGap -
         TITLE_MIN_WIDTH_PX -
         trailingWidth -
         headerGap -
@@ -76,8 +86,11 @@ export function PaneHeaderActions({
     observer.observe(header);
     observer.observe(measure);
     if (trailingRef.current) observer.observe(trailingRef.current);
+    // `children` is intentionally omitted: a new ReactNode each ChatPane
+    // render would tear down and recreate the observer on every stream token.
+    // Content-size changes are already covered by observing `measure`.
     return () => observer.disconnect();
-  }, [hasHostActions, children]);
+  }, [hasHostActions]);
 
   return (
     <div
