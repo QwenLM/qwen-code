@@ -49,6 +49,8 @@ const SAMPLE_RATE = 16_000;
 const FRAME_SIZE = 4096;
 const START_TIMEOUT_MS = 60_000;
 const TRANSCRIPTION_TIMEOUT_MS = 60_000;
+const MAX_BUFFERED_PCM_BYTES =
+  SAMPLE_RATE * Int16Array.BYTES_PER_ELEMENT * (START_TIMEOUT_MS / 1000);
 
 function toWebSocketUrl(baseUrl: string): string {
   const base = new URL(baseUrl);
@@ -203,6 +205,7 @@ export function useVoiceCapture(
     clearTranscribeTimeout();
     if (res.ws) {
       try {
+        res.ws.onopen = null;
         res.ws.onmessage = null;
         res.ws.onerror = null;
         res.ws.onclose = null;
@@ -356,14 +359,31 @@ export function useVoiceCapture(
         );
         ws.binaryType = 'arraybuffer';
         resourcesRef.current.ws = ws;
+        const bufferedPcm: ArrayBuffer[] = [];
+        let bufferedPcmBytes = 0;
+        let streamStarted = false;
 
         processor.onaudioprocess = (event: AudioProcessingEvent) => {
           const { pcm, level } = floatToPcm16(
             event.inputBuffer.getChannelData(0),
           );
           if (mountedRef.current) setAudioLevel(level);
-          if (ws.readyState === WebSocket.OPEN) ws.send(pcm);
+          if (streamStarted) {
+            if (ws.readyState === WebSocket.OPEN) ws.send(pcm);
+          } else {
+            if (bufferedPcmBytes + pcm.byteLength > MAX_BUFFERED_PCM_BYTES) {
+              fail('Voice capture timed out while starting.', generation);
+              return;
+            }
+            bufferedPcm.push(pcm);
+            bufferedPcmBytes += pcm.byteLength;
+          }
         };
+        if (!stopWhenConnectedRef.current) {
+          source.connect(processor);
+          processor.connect(sink);
+          sink.connect(context.destination);
+        }
 
         ws.onopen = () => {
           if (isStale()) {
@@ -394,9 +414,10 @@ export function useVoiceCapture(
             return;
           }
           ws.send(JSON.stringify({ type: 'start' }));
-          source.connect(processor);
-          processor.connect(sink);
-          sink.connect(context.destination);
+          streamStarted = true;
+          for (const pcm of bufferedPcm) ws.send(pcm);
+          bufferedPcm.length = 0;
+          bufferedPcmBytes = 0;
           clearTranscribeTimeout();
           if (stopWhenConnectedRef.current) {
             stopWhenConnectedRef.current = false;
@@ -480,6 +501,7 @@ export function useVoiceCapture(
     const ws = resourcesRef.current.ws;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       if (statusRef.current === 'connecting') {
+        if (resourcesRef.current.processor) teardownAudio();
         stopWhenConnectedRef.current = true;
         return;
       }
@@ -488,7 +510,7 @@ export function useVoiceCapture(
       return;
     }
     finalize(ws, captureGenerationRef.current);
-  }, [cleanup, finalize, applyStatus]);
+  }, [cleanup, finalize, applyStatus, teardownAudio]);
 
   const abort = useCallback(() => {
     const ws = resourcesRef.current.ws;

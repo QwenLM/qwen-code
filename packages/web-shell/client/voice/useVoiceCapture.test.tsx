@@ -49,11 +49,21 @@ function node() {
 }
 
 class MockAudioContext {
+  static latestProcessor:
+    | (ReturnType<typeof node> & {
+        onaudioprocess: ((event: AudioProcessingEvent) => void) | null;
+      })
+    | undefined;
+
   state = 'running';
   sampleRate = 16_000;
   readonly destination = {};
   createMediaStreamSource = vi.fn(() => node());
-  createScriptProcessor = vi.fn(() => ({ ...node(), onaudioprocess: null }));
+  createScriptProcessor = vi.fn(() => {
+    const processor = { ...node(), onaudioprocess: null };
+    MockAudioContext.latestProcessor = processor;
+    return processor;
+  });
   createGain = vi.fn(() => ({ ...node(), gain: { value: 1 } }));
   resume = vi.fn(async () => {});
   close = vi.fn(async () => {
@@ -110,6 +120,7 @@ beforeEach(() => {
   baseUrl = 'http://127.0.0.1:1234';
   token = undefined;
   MockWebSocket.latest = undefined;
+  MockAudioContext.latestProcessor = undefined;
   Object.defineProperty(globalThis, 'WebSocket', {
     value: MockWebSocket,
     configurable: true,
@@ -336,7 +347,46 @@ describe('useVoiceCapture', () => {
     expect(capture?.status).toBe('error');
   });
 
-  it('finalizes after a stop requested while microphone access is pending', async () => {
+  it('flushes buffered audio before a pending stop when the socket opens', async () => {
+    const result = await renderHookHost();
+
+    await act(async () => {
+      result.start();
+    });
+    const ws = MockWebSocket.latest;
+    if (!ws) throw new Error('WebSocket was not created');
+    ws.readyState = 0;
+    const processor = MockAudioContext.latestProcessor;
+    if (!processor?.onaudioprocess) {
+      throw new Error('Audio processor was not ready');
+    }
+
+    expect(processor.connect).toHaveBeenCalledOnce();
+    await act(async () => {
+      processor.onaudioprocess?.({
+        inputBuffer: {
+          getChannelData: () => new Float32Array([0.5, -0.5]),
+        },
+      } as AudioProcessingEvent);
+      result.stop();
+    });
+    expect(capture?.status).toBe('connecting');
+    expect(processor.onaudioprocess).toBeNull();
+
+    ws.readyState = MockWebSocket.OPEN;
+    await act(async () => {
+      ws.onopen?.();
+    });
+
+    expect(ws.sent[0]).toBe(JSON.stringify({ type: 'start' }));
+    expect(Array.from(new Int16Array(ws.sent[1] as ArrayBuffer))).toEqual([
+      16383, -16384,
+    ]);
+    expect(ws.sent[2]).toBe(JSON.stringify({ type: 'stop' }));
+    expect(capture?.status).toBe('transcribing');
+  });
+
+  it('does not start capturing after release while microphone access is pending', async () => {
     let resolveStream: (stream: {
       getTracks: () => (typeof track)[];
     }) => void = () => undefined;
@@ -357,15 +407,15 @@ describe('useVoiceCapture', () => {
       result.start();
       result.stop();
     });
-    expect(capture?.status).toBe('connecting');
-    expect(MockWebSocket.latest).toBeUndefined();
     await act(async () => {
       resolveStream({ getTracks: () => [track] });
       await Promise.resolve();
     });
     const ws = MockWebSocket.latest;
-    if (!ws) throw new Error('WebSocket was not created');
+    const processor = MockAudioContext.latestProcessor;
+    if (!ws || !processor) throw new Error('Voice capture was not ready');
 
+    expect(processor.connect).not.toHaveBeenCalled();
     await act(async () => {
       ws.onopen?.();
     });
