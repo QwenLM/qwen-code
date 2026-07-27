@@ -206,6 +206,7 @@ const {
       latestToolApprovalKeyboardActive: null as boolean | null,
       latestAskUserQuestionKeyboardActive: null as boolean | null,
       latestBackgroundTasksRefreshTrigger: null as number | null,
+      backgroundTasks: [] as DaemonSessionMonitorTaskStatus[],
       latestMonitorDetailsOnOpen: null as
         | ((tool: {
             callId: string;
@@ -311,7 +312,7 @@ vi.mock('./hooks/useBackgroundTasks', () => ({
     refreshTrigger = 0,
   ) => {
     testState.latestBackgroundTasksRefreshTrigger = refreshTrigger;
-    return [];
+    return testState.backgroundTasks;
   },
 }));
 
@@ -1086,6 +1087,119 @@ describe('background task activity key', () => {
     expect(testState.latestBackgroundTasksRefreshTrigger).toBe(1);
   });
 
+  it('merges a reopened monitor into its existing tab', async () => {
+    const stopped: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-1',
+      label: 'monitor-label',
+      description: 'stopped watch',
+      status: 'cancelled',
+      startTime: 1_000,
+      runtimeMs: 5_000,
+      endTime: 6_000,
+      command: 'tail -f server.log',
+      eventCount: 3,
+      lastEventTime: 5_000,
+      droppedLines: 0,
+    };
+    mockSessionActions.getTasks.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      now: 6_000,
+      tasks: [stopped],
+    });
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/tasks';
+    await clickSubmit(container);
+    await flush();
+    expect(testState.latestTasksStatusProps?.onOpenMonitor).toBeTypeOf(
+      'function',
+    );
+
+    act(() => {
+      testState.latestTasksStatusProps?.onOpenMonitor?.(stopped);
+    });
+    await flush();
+
+    let tabs =
+      container.querySelectorAll<HTMLButtonElement>('button[role="tab"]');
+    expect(tabs).toHaveLength(1);
+    expect(tabs[0]?.getAttribute('title')).toBe('stopped watch');
+
+    const running: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-1',
+      label: 'monitor-label',
+      description: 'running watch',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 5_000,
+      command: 'tail -f server.log',
+      eventCount: 3,
+      lastEventTime: 5_000,
+      droppedLines: 0,
+    };
+    act(() => {
+      testState.latestTasksStatusProps?.onOpenMonitor?.(running);
+    });
+    await flush();
+
+    tabs = container.querySelectorAll<HTMLButtonElement>('button[role="tab"]');
+    expect(tabs).toHaveLength(1);
+    expect(tabs[0]?.getAttribute('title')).toBe('stopped watch');
+    expect(container.querySelector('button[title="running watch"]')).toBeNull();
+  });
+
+  it('updates an open monitor tab from background task polling', async () => {
+    const running: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-1',
+      label: 'monitor-label',
+      description: 'watch server log',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 5_000,
+      command: 'tail -f server.log',
+      eventCount: 3,
+      lastEventTime: 5_000,
+      droppedLines: 0,
+      toolUseId: 'monitor-call',
+    };
+    mockSessionActions.getTasks.mockResolvedValue({
+      v: 1,
+      sessionId: 'session-1',
+      now: 6_000,
+      tasks: [running],
+    });
+    mockConnection.capabilities.features = ['session_monitor_tool_correlation'];
+    const { container, rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      await testState.latestMonitorDetailsOnOpen?.({
+        callId: 'monitor-call',
+        toolName: 'monitor',
+        status: 'completed',
+      });
+    });
+    await flush();
+    expect(
+      container.querySelector('button[title="watch server log"]'),
+    ).not.toBeNull();
+
+    testState.backgroundTasks = [
+      { ...running, description: 'updated watch', runtimeMs: 9_000 },
+    ];
+    rerender();
+    await flush();
+
+    expect(
+      container.querySelector('button[title="updated watch"]'),
+    ).not.toBeNull();
+  });
+
   it('returns to inline behavior when a capable daemon has no matching task', async () => {
     mockConnection.capabilities.features = ['session_monitor_tool_correlation'];
     renderApp();
@@ -1304,6 +1418,7 @@ beforeEach(() => {
   testState.latestToolApprovalKeyboardActive = null;
   testState.latestAskUserQuestionKeyboardActive = null;
   testState.latestBackgroundTasksRefreshTrigger = null;
+  testState.backgroundTasks = [];
   testState.latestMonitorDetailsOnOpen = null;
   testState.latestTasksStatusProps = null;
   testState.latestScheduledTasksProps = null;

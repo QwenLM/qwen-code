@@ -1572,6 +1572,7 @@ export const ToolGroup = memo(function ToolGroup({
 
   useEffect(() => {
     setMonitorDetailsUnavailable(false);
+    setChatExpanded(false);
     monitorDetailsRequestRef.current = null;
   }, [monitorDetailsAvailable, singleMonitor?.callId]);
 

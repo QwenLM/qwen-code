@@ -689,6 +689,11 @@ describe('tool row rendering', () => {
     });
 
     expect(onOpen).toHaveBeenCalledWith(tool);
+    expect(summary.hasAttribute('aria-expanded')).toBe(false);
+    expect(container.querySelector('[class*="chatChevronDown"]')).toBeNull();
+    expect(
+      container.querySelector('[class*="chatChevronRight"]'),
+    ).not.toBeNull();
   });
 
   it('opens a monitor tool line from a mixed tool group', async () => {
@@ -721,6 +726,11 @@ describe('tool row rendering', () => {
     });
 
     expect(onOpen).toHaveBeenCalledWith(tool);
+    expect(line.getAttribute('aria-expanded')).toBeNull();
+    expect(container.querySelector('[class*="lineChevronDown"]')).toBeNull();
+    expect(
+      container.querySelector('[class*="lineChevronRight"]'),
+    ).not.toBeNull();
   });
 
   it('falls back to the original summary expansion when monitor details are unavailable', async () => {
@@ -757,6 +767,58 @@ describe('tool row rendering', () => {
 
     expect(onOpen).toHaveBeenCalledTimes(1);
     expect(summary.getAttribute('aria-expanded')).toBe('false');
+  });
+
+  it('resets summary expansion when the monitor identity changes', async () => {
+    const onOpen = vi.fn().mockResolvedValue(false);
+    const tool = makeTool({
+      toolName: 'monitor',
+      status: 'completed',
+      args: { description: 'watch logs' },
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MonitorDetailsProvider onOpen={onOpen}>
+            <ToolGroup tools={[tool]} />
+          </MonitorDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    await act(async () => {
+      summary.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[class*="chatChevronDown"]'),
+    ).not.toBeNull();
+
+    const nextTool = makeTool({
+      callId: 'call-2',
+      toolName: 'monitor',
+      status: 'completed',
+      args: { description: 'watch logs' },
+    });
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <MonitorDetailsProvider onOpen={onOpen}>
+            <ToolGroup tools={[nextTool]} />
+          </MonitorDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.querySelector('[class*="chatChevronDown"]')).toBeNull();
+    expect(
+      container.querySelector('[class*="chatChevronRight"]'),
+    ).not.toBeNull();
   });
 
   it('deduplicates monitor summary clicks while details are loading', async () => {

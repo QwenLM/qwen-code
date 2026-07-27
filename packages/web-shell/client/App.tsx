@@ -1986,14 +1986,15 @@ export function App({
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === tab.id)
-          ? tabs.map((item) =>
-              item.id === tab.id && item.kind === 'monitor'
-                ? {
-                    ...tab,
-                    task: mergeMonitorTaskSnapshot(item.task, task),
-                  }
-                : item,
-            )
+          ? tabs.map((item) => {
+              if (item.id !== tab.id || item.kind !== 'monitor') return item;
+              const mergedTask = mergeMonitorTaskSnapshot(item.task, task);
+              return {
+                ...tab,
+                title: mergedTask.description,
+                task: mergedTask,
+              };
+            })
           : [...tabs, tab],
       );
       setActiveArtifactPanelTabId(tab.id);

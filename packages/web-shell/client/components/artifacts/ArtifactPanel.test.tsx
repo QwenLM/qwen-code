@@ -332,4 +332,44 @@ describe('ArtifactPanel monitor tab', () => {
     expect(container.textContent).toContain('Task already stopped');
     expect(container.textContent).toContain('8s');
   });
+
+  it('shows a cancel error when the stop request throws', async () => {
+    const task: DaemonSessionMonitorTaskStatus = {
+      kind: 'monitor',
+      id: 'monitor-1',
+      label: 'monitor-label',
+      description: 'watch server log',
+      status: 'running',
+      startTime: 1_000,
+      runtimeMs: 5_000,
+      command: 'tail -f server.log',
+      eventCount: 3,
+      lastEventTime: 5_000,
+      droppedLines: 0,
+    };
+    mockActions.cancelTask.mockRejectedValue(new Error('network'));
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    act(() => {
+      root.render(monitorPanel(task));
+    });
+    const stopButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Stop',
+    );
+    await act(async () => {
+      stopButton?.click();
+      await Promise.resolve();
+    });
+
+    expect(mockActions.cancelTask).toHaveBeenCalledWith('monitor-1', 'monitor');
+    expect(container.textContent).toContain('Failed to cancel task');
+    const stopButtonAfter = Array.from(
+      container.querySelectorAll('button'),
+    ).find((button) => button.textContent === 'Stop');
+    expect(stopButtonAfter).toBeDefined();
+    expect(stopButtonAfter?.disabled).toBe(false);
+  });
 });
