@@ -128,6 +128,23 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     expect(body).toContain('<workspace>');
   });
 
+  it('redacts the git root when the workspace is a sub-directory', async () => {
+    const dir = makeRepo();
+    const sub = path.join(dir, 'packages', 'app');
+    fs.mkdirSync(sub, { recursive: true });
+    // Wedge the index lock so git reports the repo-root path in the error.
+    fs.writeFileSync(path.join(dir, '.git', 'index.lock'), '');
+
+    const response = await request(appWithWorkspace(sub))
+      .post('/workspace/git/commit')
+      .send({ message: 'feat: x', all: true });
+
+    expect(response.status).toBe(500);
+    const body = JSON.stringify(response.body);
+    expect(body).not.toContain(dir);
+    expect(body).toContain('<workspace>');
+  });
+
   it('classifies a pull with no tracking information as no_upstream', async () => {
     const dir = makeRepo();
     const remote = fs.realpathSync(

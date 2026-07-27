@@ -4901,10 +4901,15 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  workspaceGitCheckout(ref: string): Promise<DaemonGitCheckoutResult> {
+  workspaceGitCheckout(
+    ref: string,
+    cwd?: string,
+  ): Promise<DaemonGitCheckoutResult> {
+    const suffix =
+      cwd != null ? `/git/checkout?cwd=${urlEncode(cwd)}` : '/git/checkout';
     return this.client.workspaceJsonRequest<DaemonGitCheckoutResult>(
       this.workspaceSelector,
-      '/git/checkout',
+      suffix,
       'POST /workspaces/:workspace/git/checkout',
       { method: 'POST', body: { ref }, mode: 'rest' },
     );
@@ -4913,34 +4918,47 @@ export class WorkspaceDaemonClient {
   workspaceGitCreateBranch(
     name: string,
     startPoint?: string,
+    cwd?: string,
   ): Promise<DaemonGitCheckoutResult> {
+    const suffix =
+      cwd != null ? `/git/branch?cwd=${urlEncode(cwd)}` : '/git/branch';
     return this.client.workspaceJsonRequest<DaemonGitCheckoutResult>(
       this.workspaceSelector,
-      '/git/branch',
+      suffix,
       'POST /workspaces/:workspace/git/branch',
       { method: 'POST', body: { name, startPoint }, mode: 'rest' },
     );
   }
 
-  workspaceGitPush(opts?: {
-    setUpstream?: boolean;
-    force?: boolean;
-  }): Promise<DaemonGitPushResult> {
+  workspaceGitPush(
+    opts?: {
+      setUpstream?: boolean;
+      force?: boolean;
+    },
+    cwd?: string,
+  ): Promise<DaemonGitPushResult> {
+    const suffix =
+      cwd != null ? `/git/push?cwd=${urlEncode(cwd)}` : '/git/push';
     return this.client.workspaceJsonRequest<DaemonGitPushResult>(
       this.workspaceSelector,
-      '/git/push',
+      suffix,
       'POST /workspaces/:workspace/git/push',
       { method: 'POST', body: opts ?? {}, mode: 'rest' },
     );
   }
 
-  workspaceGitPull(opts?: {
-    rebase?: boolean;
-    fetchOnly?: boolean;
-  }): Promise<DaemonGitPullResult> {
+  workspaceGitPull(
+    opts?: {
+      rebase?: boolean;
+      fetchOnly?: boolean;
+    },
+    cwd?: string,
+  ): Promise<DaemonGitPullResult> {
+    const suffix =
+      cwd != null ? `/git/pull?cwd=${urlEncode(cwd)}` : '/git/pull';
     return this.client.workspaceJsonRequest<DaemonGitPullResult>(
       this.workspaceSelector,
-      '/git/pull',
+      suffix,
       'POST /workspaces/:workspace/git/pull',
       { method: 'POST', body: opts ?? {}, mode: 'rest' },
     );
@@ -4949,10 +4967,13 @@ export class WorkspaceDaemonClient {
   workspaceGitCommit(
     message: string,
     opts?: { all?: boolean },
+    cwd?: string,
   ): Promise<DaemonGitCommitResult> {
+    const suffix =
+      cwd != null ? `/git/commit?cwd=${urlEncode(cwd)}` : '/git/commit';
     return this.client.workspaceJsonRequest<DaemonGitCommitResult>(
       this.workspaceSelector,
-      '/git/commit',
+      suffix,
       'POST /workspaces/:workspace/git/commit',
       { method: 'POST', body: { message, ...opts }, mode: 'rest' },
     );

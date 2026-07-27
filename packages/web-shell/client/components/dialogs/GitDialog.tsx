@@ -95,7 +95,6 @@ export function GitDialog({
     type: 'error' | 'success';
   } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const genAbortRef = useRef<AbortController | null>(null);
   const resolveSessionRef = useRef(resolveSessionForWorkspace);
   resolveSessionRef.current = resolveSessionForWorkspace;
   const sessionIdRef = useRef(sessionId);
@@ -133,7 +132,6 @@ export function GitDialog({
   useEffect(() => {
     if (!isCommit) return;
     const abort = new AbortController();
-    genAbortRef.current = abort;
     setGenerating(true);
     setGenFailed(false);
     setCommitMsg('');
@@ -326,7 +324,7 @@ export function GitDialog({
     const baseBranchPromise = ws
       .workspaceGitHubDefaultBranch()
       .then((r) => r.branch)
-      .catch(() => 'main');
+      .catch(() => 'origin/main');
 
     const resolveSession = resolveSessionRef.current
       ? resolveSessionRef.current(workspaceCwd)

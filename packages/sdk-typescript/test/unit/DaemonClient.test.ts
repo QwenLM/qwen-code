@@ -1074,6 +1074,30 @@ describe('DaemonClient', () => {
       });
     });
 
+    it('passes cwd as a query parameter on git mutation methods', async () => {
+      const ok = { v: 1 as const, workspaceCwd: '/work/secondary' };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, ok));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const ws = client.workspaceByCwd('/work/secondary');
+      const cwd = '/work/secondary/packages/app';
+
+      await ws.workspaceGitCheckout('feat/thing', cwd);
+      await ws.workspaceGitCreateBranch('feat/new', 'main', cwd);
+      await ws.workspaceGitPush({ setUpstream: true }, cwd);
+      await ws.workspaceGitPull({ rebase: true }, cwd);
+      await ws.workspaceGitCommit('fix: thing', { all: true }, cwd);
+
+      const base = 'http://daemon/workspaces/%2Fwork%2Fsecondary';
+      const enc = encodeURIComponent(cwd);
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['POST', `${base}/git/checkout?cwd=${enc}`],
+        ['POST', `${base}/git/branch?cwd=${enc}`],
+        ['POST', `${base}/git/push?cwd=${enc}`],
+        ['POST', `${base}/git/pull?cwd=${enc}`],
+        ['POST', `${base}/git/commit?cwd=${enc}`],
+      ]);
+    });
+
     it('lets ACP preheat wait longer than the client default timeout', async () => {
       let resolveResponse: ((value: Response) => void) | undefined;
       const slowFetch = vi.fn(

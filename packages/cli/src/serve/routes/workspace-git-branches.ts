@@ -7,6 +7,7 @@
 import type { Application, Request, RequestHandler, Response } from 'express';
 import {
   fetchGitBranches,
+  findGitRoot,
   gitCheckout,
   gitCreateBranch,
   gitPush,
@@ -59,14 +60,17 @@ function sendGitError(
     detail = err instanceof Error ? err.message : String(err);
   }
 
-  // Redact the workspace path and cap the length once, on every response —
-  // including the unclassified 500 fall-through. Raw git output embeds
-  // absolute paths (e.g. a wedged `.git/index.lock`) that must never reach
-  // the client, and a long message must not walk past the cap.
-  const message = detail
-    .split(cwd)
-    .join('<workspace>')
-    .slice(0, GIT_ERROR_MESSAGE_MAX);
+  // Redact the workspace path and the git root (which may be an ancestor
+  // of cwd when the workspace is a sub-directory or a symlink), then cap the
+  // length once, on every response — including the unclassified 500
+  // fall-through. Raw git output embeds absolute paths (e.g. a wedged
+  // `.git/index.lock`) that must never reach the client.
+  const gitRoot = findGitRoot(cwd);
+  let message = detail.split(cwd).join('<workspace>');
+  if (gitRoot && gitRoot !== cwd) {
+    message = message.split(gitRoot).join('<workspace>');
+  }
+  message = message.slice(0, GIT_ERROR_MESSAGE_MAX);
 
   if (
     /not a git repository/i.test(detail) ||

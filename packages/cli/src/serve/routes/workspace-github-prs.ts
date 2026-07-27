@@ -232,7 +232,7 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
 
     try {
       const branch = await getDefaultBranch(runtime.workspaceCwd);
-      res.status(200).json({ branch: branch ?? 'main' });
+      res.status(200).json({ branch: branch ?? 'origin/main' });
     } catch (err) {
       deps.sendBridgeError(res, err, { route });
     }

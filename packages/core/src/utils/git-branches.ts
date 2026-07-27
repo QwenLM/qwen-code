@@ -421,9 +421,22 @@ export async function gitCommit(
   // Snapshot the index before `git add -A` so a failed commit (e.g. a
   // rejecting pre-commit hook) can restore the user's original staging
   // instead of leaving the whole working tree staged.
-  const savedIndex = opts?.all
-    ? (await runGit(cwd, ['write-tree']).catch(() => '')).trim() || null
-    : null;
+  let savedIndex: string | null = null;
+  if (opts?.all) {
+    const tree = (await runGit(cwd, ['write-tree']).catch(() => '')).trim();
+    if (tree) {
+      savedIndex = tree;
+    } else {
+      // write-tree fails on an unmerged index; add -A would destroy the
+      // conflict state with no way to roll back.
+      const unmerged = (await runGit(cwd, ['ls-files', '--unmerged'])).trim();
+      if (unmerged) {
+        throw new Error(
+          'cannot stage all changes: unresolved merge conflicts in the index',
+        );
+      }
+    }
+  }
   try {
     if (opts?.all) {
       await runGit(cwd, ['add', '-A']);

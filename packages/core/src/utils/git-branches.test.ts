@@ -335,6 +335,47 @@ describe('gitCommit index rollback (R10 #1)', () => {
     // returns to exactly what the user had staged beforehand.
     expect(git(dir, 'diff', '--cached', '--name-only').trim()).toBe('a.txt');
   });
+
+  it('refuses add -A when unmerged entries prevent rollback', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', 'origin', 'HEAD');
+
+    // Create a conflicting change on the remote.
+    const clone = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitclone-'));
+    tmpRoots.push(clone);
+    git(clone, 'clone', '-q', remote, '.');
+    git(clone, 'config', 'user.email', 'other@example.com');
+    git(clone, 'config', 'user.name', 'Other');
+    git(clone, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(clone, 'a.txt'), 'remote change\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote edit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    // Create a conflicting local change and attempt merge.
+    fs.writeFileSync(path.join(dir, 'a.txt'), 'local change\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'local edit');
+    git(dir, 'fetch', '-q', 'origin');
+    let mergeFailed = false;
+    try {
+      git(dir, 'merge', 'origin/' + currentBranch(dir));
+    } catch {
+      mergeFailed = true;
+    }
+    expect(mergeFailed).toBe(true);
+
+    // The index now has unmerged entries; gitCommit with all:true must
+    // refuse rather than destroy the conflict state.
+    await expect(gitCommit(dir, 'fix: resolve', { all: true })).rejects.toThrow(
+      /unresolved merge conflicts/,
+    );
+
+    // Unmerged state is preserved.
+    expect(git(dir, 'ls-files', '--unmerged').trim()).not.toBe('');
+  });
 });
 
 describe('gitCheckout remote-tracking refs (R10 #4)', () => {
