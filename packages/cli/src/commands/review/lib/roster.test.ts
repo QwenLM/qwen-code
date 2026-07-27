@@ -200,22 +200,39 @@ describe('hasExecutableScript — the script-lint gate predicate', () => {
     ).toBe(true);
   });
 
-  it('is owed for a SURVIVING script but not a true deletion — keyed on post-image, not added lines', () => {
-    // A true deletion has no post-image (fileLines 0) — nothing to lint.
-    expect(
-      hasExecutableScript({ files: [{ path: 'gone.sh', fileLines: 0 }] }),
-    ).toBe(false);
-    // A deletion-only edit survives (fileLines > 0) with addedLines 0 — e.g. a
-    // removed `fi` that breaks a `.sh`. It is still owed, precisely the case the
-    // added-lines-only predicate used to miss.
+  it('trusts fileLines only in pr-worktree — a true deletion is exempt there, but never in local/diff-only', () => {
+    const wt = { worktreePath: '.qwen/tmp/review-pr-1' }; // pr-worktree mode
+    // pr-worktree: fileLines is a real post-image count, so 0 is a TRUE deletion
+    // (no file to lint) and is exempt...
     expect(
       hasExecutableScript({
+        ...wt,
+        files: [{ path: 'gone.sh', fileLines: 0 }],
+      }),
+    ).toBe(false);
+    // ...while a surviving file (fileLines > 0) with addedLines 0 — a removed `fi`
+    // that breaks a `.sh` — is still owed.
+    expect(
+      hasExecutableScript({
+        ...wt,
         files: [{ path: 'broke.sh', addedLines: 0, fileLines: 12 }],
+      }),
+    ).toBe(true);
+    // local/diff-only: the report builder writes fileLines 0 for EVERY file (no
+    // post-image), so 0 is "unknown", NOT "deleted" — a surviving script must still
+    // be owed, or a missing report would pass uncapped. This is the fail-open fix.
+    expect(
+      hasExecutableScript({
+        untrackedFiles: [], // local mode
+        files: [{ path: 'deploy.sh', fileLines: 0 }],
       }),
     ).toBe(true);
     // Absent fileLines fails safe to owed.
     expect(
-      hasExecutableScript({ files: [{ path: 'kept.sh', addedLines: 3 }] }),
+      hasExecutableScript({
+        ...wt,
+        files: [{ path: 'kept.sh', addedLines: 3 }],
+      }),
     ).toBe(true);
   });
 });

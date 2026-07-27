@@ -2636,6 +2636,31 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     expect(g.unreviewed[0]).toContain('not yet supported');
   });
 
+  it('neutralises a PR-controlled path before it reaches the review body', () => {
+    // A filename is workspace-controlled and git allows almost any byte in one, so a
+    // path carrying a newline / `@team` / Markdown must not inject structure or a
+    // mention into the body we post. It is rendered in an inline code span with
+    // backticks and newlines stripped.
+    const p = writePlan({});
+    writeReport({
+      deferred: [
+        {
+          path: '.github/workflows/x.yml\n@acme-team `pwn`',
+          tool: 'actionlint',
+          reason: 'source mapping not yet supported',
+        },
+      ],
+    });
+    const g = scriptLintGate(p);
+    expect(g.disclosed).toHaveLength(1);
+    const d = g.disclosed[0];
+    expect(d).not.toContain('\n'); // newline stripped — cannot forge a body line
+    expect(d).not.toContain('`pwn`'); // the PR's own backticks stripped — cannot break out
+    // `@acme-team` sits INSIDE a code span (backtick … no backtick … backtick), so
+    // it is inert as a GitHub mention — the whole path rendered as one code span.
+    expect(d).toMatch(/`[^`\n]*@acme-team[^`\n]*`/);
+  });
+
   it('reports an errored checker as unreviewed (fail closed)', () => {
     const p = writePlan({});
     writeReport({
@@ -2783,8 +2808,9 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
     // The gate ran the linter, so its finding is pre-confirmed and skips Step 4 —
     // exactly like [build]/[test]/[probe]. A verifier is absent here (only the
     // reverse audit ran), yet the Request changes must stand and must NOT be flagged
-    // criticals-unverified. This is what `gateCriticalCount` buys: drop it (treat the
-    // gate finding as a model claim) and this softens to a criticals-unverified Comment.
+    // criticals-unverified. Provenance (the gate produced it), not a tag, earns this:
+    // the gate's criticals are tracked apart from the model's, never counted as
+    // claims needing verification.
     const p = gateReadyPlan(['reverse-audit']); // verifier absent, none owed
     writeGateReport({ checked: [lintFinding], ok: false });
     const r = composeReview({
@@ -2797,6 +2823,51 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
     expect(r.event).toBe('REQUEST_CHANGES');
     expect(r.cappedBy).not.toContain('criticals-unverified');
     expect(r.body).toContain('SC2086');
+  });
+
+  it('a [probe] in a GATE finding text does not erase a model claim’s verification (identity, not count)', () => {
+    // Provenance is by IDENTITY, not by count-subtraction. The gate produces a [lint]
+    // finding whose MESSAGE happens to contain "[probe]", AND the model reports a
+    // plain unverified blocker. A count-based `(filtered) − gateCount` would drop the
+    // gate finding from the filtered set (it matches [probe]) and then subtract the
+    // gate count anyway — erasing the MODEL claim's verification requirement, so the
+    // unverified blocker would post unflagged. Identity-based tracking must keep the
+    // model claim flagged as needing verification even with no verifier on record.
+    const p = gateReadyPlan(['reverse-audit']); // verifier absent
+    writeGateReport({
+      checked: [
+        {
+          path: 'deploy.sh',
+          tool: 'shellcheck',
+          findings: [
+            {
+              line: 3,
+              code: 'SC2086',
+              level: 'info',
+              message: 'quote the [probe] variable',
+              inDiff: true,
+            },
+          ],
+        },
+      ],
+      ok: false,
+    });
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      bodyCriticals: ['an unanchored blocker the review could not verify'],
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    // The gate [lint] blocker still earns Request changes...
+    expect(r.event).toBe('REQUEST_CHANGES');
+    // ...and the model's plain critical is STILL flagged as needing verification —
+    // the "[probe]" in the gate finding did not absorb its verification requirement.
+    expect(r.body).toMatch(/verification — the review posts findings/);
+    expect(r.body).toContain(
+      'an unanchored blocker the review could not verify',
+    );
   });
 
   it('an ERRORED checker caps a would-be APPROVE to COMMENT and says the lint is unreviewed', () => {
@@ -2818,7 +2889,8 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
     });
     expect(r.event).toBe('COMMENT');
     expect(r.body).toContain('the executable-script lint');
-    expect(r.body).toMatch(/errored on deploy\.sh/);
+    // the PR-controlled path is rendered in a Markdown code span (injection-safe)
+    expect(r.body).toContain('errored on `deploy.sh`');
   });
 
   it('a DEFERRED-only report keeps APPROVE but discloses the deferral in the body', () => {

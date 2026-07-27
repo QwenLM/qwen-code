@@ -285,36 +285,34 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // carries an executable script but has no readable report is itself unreviewed
   // (fail closed). The report path is derived from the plan, not the input JSON a
   // model wrote, and the plan decides whether the lint was owed.
-  // How many of the body Criticals are the gate's own — deterministic by
-  // PROVENANCE, because `scriptLintGate` read a tool's report, not because a
-  // string contains `[lint]`. They still render and count toward `c` (pushed into
-  // `bodyCriticals`), but their deterministic status is tracked here, by count.
-  let gateCriticalCount = 0;
+  // The gate's own body Criticals are deterministic by PROVENANCE — `scriptLintGate`
+  // ran the linter — so they never need a verifier. Track them as a SEPARATE list
+  // rather than mix them into the model's criticals and subtract a COUNT: a count
+  // subtraction misfires when a model claim happens to carry a `[build]`/`[test]`/
+  // `[probe]` tag (filtered out before the subtract) or a gate finding's own text
+  // contains one, erasing an unrelated claim's verification requirement. Identity,
+  // not arithmetic, decides provenance.
+  const modelBodyCriticals = [...bodyCriticals]; // input's, captured before the gate
   // Disclosed-but-non-capping notes from the gate (a deferred checker). Rendered
   // in the body on every verdict, but never fed into the cap.
   const gateDisclosed: string[] = [];
   if (input.planPath) {
     const gate = scriptLintGate(input.planPath);
-    bodyCriticals.push(...gate.criticals);
-    gateCriticalCount = gate.criticals.length;
+    bodyCriticals.push(...gate.criticals); // render + count toward `c`, deterministic
     unreviewed.push(...gate.unreviewed);
     gateDisclosed.push(...gate.disclosed);
   }
 
-  // The Criticals a verifier must have ruled on before this review may post them
-  // as blockers. Deterministic body findings are pre-confirmed and skip
-  // verification by design: `[build]`/`[test]` (Agent 7 ran the tool), `[probe]`
-  // (the verifier confirmed it by *running* a probe — observed behaviour, not a
-  // re-reading), and the gate's own findings (this function ran the linter). But
-  // `[lint]` is NOT trusted as a tag — a model-written string containing it must
-  // not launder an unverified claim into a blocker — so for the gate, provenance
-  // decides: subtract its count, and every remaining body Critical (minus the
-  // trusted `[build]`/`[test]`/`[probe]` tags) is a claim Step 4 must confirm.
-  const nonDeterministicBodyCriticals = Math.max(
-    0,
-    bodyCriticals.filter((x) => !/\[(?:build|test|probe)\]/i.test(x)).length -
-      gateCriticalCount,
-  );
+  // The Criticals a verifier must have ruled on before this review may post them as
+  // blockers. Only the MODEL's criticals are candidates — the gate's are excluded by
+  // construction (they are not in `modelBodyCriticals`). Of the model's, `[build]`/
+  // `[test]` (Agent 7 ran the tool) and `[probe]` (the verifier ran a probe) are
+  // pre-confirmed and skip verification. `[lint]` is NOT trusted as a tag — a
+  // model-written string containing it must not launder an unverified claim into a
+  // blocker (that is what the gate's provenance-tracked criticals are for).
+  const nonDeterministicBodyCriticals = modelBodyCriticals.filter(
+    (x) => !/\[(?:build|test|probe)\]/i.test(x),
+  ).length;
   const criticalsNeedingVerify =
     criticalsInline + nonDeterministicBodyCriticals;
   // Fail closed at every exit: this flag softens a Request changes below, and
@@ -1230,7 +1228,7 @@ export function scriptLintGate(planPath: string): {
     for (const f of file.findings ?? []) {
       if (f.inDiff && f.level !== 'style') {
         criticals.push(
-          `${file.path}:${f.line} ${f.code} — ${f.message} [lint]`,
+          `${mdField(file.path)}:${f.line} ${f.code} — ${mdField(f.message)} [lint]`,
         );
       }
     }
@@ -1240,12 +1238,12 @@ export function scriptLintGate(planPath: string): {
   // deferred checker is NOT here: it is its own state, disclosed below without capping.
   for (const s of report.skipped ?? []) {
     unreviewed.push(
-      `the executable-script lint — ${s.path}: ${s.reason ?? `${s.tool} unavailable`}`,
+      `the executable-script lint — ${mdField(s.path)}: ${s.reason ?? `${s.tool} unavailable`}`,
     );
   }
   for (const e of report.errored ?? []) {
     unreviewed.push(
-      `the executable-script lint — ${e.tool} errored on ${e.path}`,
+      `the executable-script lint — ${e.tool} errored on ${mdField(e.path)}`,
     );
   }
   // A deferred checker (actionlint) is disclosed but does not cap — the reader is
@@ -1253,10 +1251,29 @@ export function scriptLintGate(planPath: string): {
   // workflow PR un-Approvable on a checker we deliberately decline to run.
   for (const d of report.deferred ?? []) {
     disclosed.push(
-      `the executable-script lint — ${d.path}: ${d.reason ?? `${d.tool} deferred`}`,
+      `the executable-script lint — ${mdField(d.path)}: ${d.reason ?? `${d.tool} deferred`}`,
     );
   }
   return { criticals, unreviewed, disclosed };
+}
+
+/**
+ * Render a PR-controlled segment — a diff file path, a linter's message — safe to
+ * splice into the review body we POST to GitHub. Git allows almost any byte in a
+ * filename, so an unescaped path could carry `@mentions`, HTML, Markdown, or a
+ * newline that forges body structure. An inline code span makes Markdown/HTML/`@`
+ * inert; stripping backticks and newlines stops the value breaking out of the span
+ * or forging new lines. (`capture-local`'s `display()` does the terminal-side
+ * equivalent for stderr; this is the Markdown-body side.)
+ */
+function mdField(s: unknown): string {
+  return (
+    '`' +
+    String(s)
+      .replace(/[`\r\n]+/g, ' ')
+      .trim() +
+    '`'
+  );
 }
 
 /**

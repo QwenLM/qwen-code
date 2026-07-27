@@ -202,22 +202,14 @@ function inAnyHunk(line: number, ranges: Array<[number, number]>): boolean {
  * every file. If the diff cannot be read we fall back to the (context-inclusive)
  * plan hunks — over-inclusive, but fail-closed, never fail-open to "nothing changed".
  */
-function addedRangesByPath(
-  diffPath: string,
+function addedRangesFromDiff(
+  diffText: string,
 ): Map<string, Array<[number, number]>> {
   const map = new Map<string, Array<[number, number]>>();
-  let text: string;
-  try {
-    text = readFileSync(diffPath, 'utf8');
-  } catch {
-    return map;
-  }
-  let parsed: ReturnType<typeof parseDiff>;
-  try {
-    parsed = parseDiff(text);
-  } catch {
-    return map;
-  }
+  // Let a parse failure THROW to the caller — it reads the diff once and needs to
+  // distinguish "parsed, no added lines for this path" (safe) from "could not parse
+  // at all" (fail closed), which it cannot do if we swallow the error into `[]`.
+  const parsed = parseDiff(diffText);
   for (const f of parsed.files) {
     map.set(
       f.path,
@@ -247,8 +239,15 @@ function firstLineOf(abs: string): FirstLine {
   let st;
   try {
     st = lstatSync(abs);
-  } catch {
-    return { kind: 'missing' };
+  } catch (e) {
+    // Only a genuinely absent path is "missing" (deleted on the new side — nothing
+    // to lint). Any OTHER metadata failure — EACCES on a parent dir, EIO, ELOOP —
+    // is NOT a clean deletion: classify it as irregular so it is disclosed as
+    // skipped and fails closed, never silently dropped into "nothing changed".
+    const code = (e as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' || code === 'ENOTDIR'
+      ? { kind: 'missing' }
+      : { kind: 'irregular' };
   }
   if (!st.isFile()) return { kind: 'irregular' };
   let fd: number | undefined;
@@ -517,24 +516,36 @@ export function runScriptLint(
     );
   }
   const files = Array.isArray(plan.files) ? plan.files : [];
-  // The lines this PR actually added or changed, context excluded — keyed off the
-  // diff, not the plan's context-inclusive hunks. Empty when the diff is absent or
-  // unreadable, in which case each file falls back to its (over-inclusive) plan
-  // hunks below — but a report produced without a readable diff carries no
-  // `diffHash`, so `compose-review`'s freshness guard rejects it as stale before it
-  // can reach a verdict; the fallback exists for the test fixtures, not production.
-  const addedRanges =
-    typeof plan.diffPathAbsolute === 'string'
-      ? addedRangesByPath(plan.diffPathAbsolute)
-      : new Map<string, Array<[number, number]>>();
-  if (typeof plan.diffPathAbsolute === 'string' && addedRanges.size === 0) {
-    // A diff was expected but could not be parsed. Make the degraded path visible
-    // rather than silently classifying every finding against context-inclusive hunks.
-    writeStderrLine(
-      'WARNING: script-lint could not parse the diff for added-line ranges; ' +
-        'findings fall back to context-inclusive hunks and this report will be ' +
-        'rejected as stale by the review gate.',
-    );
+  // Read the captured diff EXACTLY ONCE and derive BOTH the added-line ranges and
+  // the freshness hash from that one immutable buffer. Reading it twice (ranges
+  // before the linters run, hash after) opens a TOCTOU window: a concurrent
+  // recapture could classify findings against snapshot A while the report carries
+  // snapshot B's hash, and `compose-review` would accept it as fresh.
+  let addedRanges = new Map<string, Array<[number, number]>>();
+  let diffHash: string | undefined;
+  let diffBuf: Buffer | undefined;
+  if (typeof plan.diffPathAbsolute === 'string') {
+    try {
+      diffBuf = readFileSync(plan.diffPathAbsolute);
+    } catch {
+      diffBuf = undefined; // unreadable → no hash → the gate fails closed
+    }
+  }
+  if (diffBuf) {
+    try {
+      addedRanges = addedRangesFromDiff(diffBuf.toString('utf8'));
+      diffHash = createHash('sha256').update(diffBuf).digest('hex');
+    } catch {
+      // Diff read but UNPARSEABLE — we have no ground truth for `inDiff`. Leave
+      // `diffHash` undefined so the gate rejects the report as unverifiable (fail
+      // closed) rather than trust findings mapped against context-inclusive hunks.
+      addedRanges = new Map();
+      diffHash = undefined;
+      writeStderrLine(
+        'WARNING: script-lint could not parse the captured diff; the report is ' +
+          'left without a diffHash and the review gate will reject it as stale.',
+      );
+    }
   }
 
   const checked: FileLint[] = [];
@@ -664,7 +675,7 @@ export function runScriptLint(
     deferred,
     ok,
     note,
-    diffHash: diffHashOf(plan.diffPathAbsolute),
+    diffHash, // derived from the SAME buffer the ranges came from (read once, above)
   };
 }
 

@@ -141,12 +141,17 @@ export function isPositivePrNumber(value: unknown): boolean {
  */
 export function hasExecutableScript(plan: RosterPlan): boolean {
   const files = Array.isArray(plan.files) ? plan.files : [];
+  // `fileLines` distinguishes a TRUE deletion (0, no post-image, exempt) from a
+  // surviving file (>0, still owed) ONLY in pr-worktree, where the report resolves
+  // real post-image line counts. In local/diff-only NO post-image is available and
+  // the report builder writes `fileLines: 0` for EVERY file — there 0 means
+  // "unknown", not "deleted", so keying on it would read a surviving `deploy.sh` as
+  // deleted and let a missing script-lint report pass uncapped. Trust it only where
+  // it is real; elsewhere fail safe and owe any path-detected script.
+  const trustsFileLines = reviewMode(plan) === 'pr-worktree';
   return files.some((f) => {
     if (typeof f?.path !== 'string' || pathTool(f.path) === null) return false;
-    // Owed for any script that SURVIVES the diff — a deletion-only edit (no added
-    // lines, but the file remains, e.g. a removed `fi` that breaks a `.sh`) still
-    // needs linting; only a TRUE deletion (no post-image) is exempt. `fileLines`
-    // is 0 for a deletion and >0 for a surviving file; absent fails safe to owed.
+    if (!trustsFileLines) return true;
     return Number(f.fileLines ?? 1) > 0;
   });
 }
