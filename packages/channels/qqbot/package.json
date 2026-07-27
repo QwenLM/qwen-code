@@ -20,7 +20,7 @@
     "test:ci": "vitest run"
   },
   "dependencies": {
-    "@qwen-code/channel-base": "file:../base",
+    "@qwen-code/channel-base": "^0.21.0",
     "@tencent-connect/qqbot-connector": "^1.1.0",
     "ws": "^8.18.0"
   },
