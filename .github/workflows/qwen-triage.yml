@@ -894,6 +894,10 @@ jobs:
     # host filesystem across workflow runs.
     container:
       image: 'node:22-bookworm'
+      options: '--init'
+    defaults:
+      run:
+        shell: 'bash'
     permissions:
       contents: 'read'
     outputs:
@@ -919,6 +923,7 @@ jobs:
           apt-get install -y --no-install-recommends gh
 
           gh --version
+          git config --global --add safe.directory '*'
 
       - name: 'Resolve PR and check state'
         id: 'pr'
@@ -1788,6 +1793,10 @@ jobs:
     # host filesystem across workflow runs.
     container:
       image: 'node:22-bookworm'
+      options: '--init'
+    defaults:
+      run:
+        shell: 'bash'
     permissions:
       contents: 'read'
     outputs:
@@ -1816,6 +1825,7 @@ jobs:
           apt-get install -y --no-install-recommends gh
 
           gh --version
+          git config --global --add safe.directory '*'
 
       - name: 'Resolve PR and snapshot metadata'
         id: 'pr'
