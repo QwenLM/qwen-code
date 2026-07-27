@@ -3928,14 +3928,22 @@ export function App({
         let batch = cmds;
         while (batch.length > 0) {
           for (let i = 0; i < batch.length; i++) {
+            const generationChanged = drainGenerationRef.current !== generation;
             if (
-              drainGenerationRef.current !== generation ||
+              generationChanged ||
               connectionRef.current.sessionId !== drainSessionId ||
               connectionRef.current.status !== 'connected'
             ) {
-              const dropped =
-                batch.length - i + queuedShellCommandsRef.current.length;
-              queuedShellCommandsRef.current = [];
+              let dropped = batch.length - i;
+              if (!generationChanged) {
+                // The two generation-bump sites (session switch, cancel) wipe
+                // the queue themselves, so anything parked here was queued
+                // after the drop and is fresh user intent. A disconnect has no
+                // such wipe — clear it so a reconnect cannot resurrect a newer
+                // command behind an already-dropped older one.
+                dropped += queuedShellCommandsRef.current.length;
+                queuedShellCommandsRef.current = [];
+              }
               console.warn(
                 '[web-shell] dropping %d queued shell command(s)',
                 dropped,

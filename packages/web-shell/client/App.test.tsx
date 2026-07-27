@@ -1516,6 +1516,140 @@ describe('App shell command queueing', () => {
     expect(mockSessionActions.sendShellCommand).toHaveBeenCalledWith('a');
   });
 
+  it('preserves commands queued after cancel while a drain command is still running', async () => {
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    let resolveA!: () => void;
+    const aDone = new Promise<void>((r) => {
+      resolveA = r;
+    });
+    mockSessionActions.sendShellCommand
+      .mockReturnValueOnce(aDone)
+      .mockResolvedValue(undefined);
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onToast });
+    });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!a');
+      testState.latestChatEditorProps?.onSubmit('!b');
+      await Promise.resolve();
+    });
+
+    // Go idle — drain starts, dispatches `a` (pending).
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender({ onToast });
+    });
+    await flush();
+    expect(mockSessionActions.sendShellCommand).toHaveBeenCalledTimes(1);
+
+    // User presses Stop while `a` is still running.
+    await act(async () => {
+      testState.latestChatEditorProps?.onCancel?.();
+      await Promise.resolve();
+    });
+
+    // Queue `x` while `a` is still in flight.
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onToast });
+    });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!x');
+      await Promise.resolve();
+    });
+
+    // Resolve `a` — the stale drain bails but must NOT wipe `x`.
+    await act(async () => {
+      resolveA();
+      await Promise.resolve();
+    });
+
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender({ onToast });
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendShellCommand).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    expect(mockSessionActions.sendShellCommand).toHaveBeenNthCalledWith(1, 'a');
+    expect(mockSessionActions.sendShellCommand).toHaveBeenNthCalledWith(2, 'x');
+  });
+
+  it('preserves commands queued after a session switch while a drain command is still running', async () => {
+    const onToast = vi.fn();
+    const { rerender } = renderApp({ onToast });
+    await flush();
+
+    let resolveA!: () => void;
+    const aDone = new Promise<void>((r) => {
+      resolveA = r;
+    });
+    mockSessionActions.sendShellCommand
+      .mockReturnValueOnce(aDone)
+      .mockResolvedValue(undefined);
+
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onToast });
+    });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!a');
+      testState.latestChatEditorProps?.onSubmit('!b');
+      await Promise.resolve();
+    });
+
+    // Go idle — drain starts, dispatches `a` (pending).
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender({ onToast });
+    });
+    await flush();
+    expect(mockSessionActions.sendShellCommand).toHaveBeenCalledTimes(1);
+
+    // Switch session while `a` is still running.
+    act(() => {
+      mockConnection.sessionId = 'session-2';
+      rerender({ onToast });
+    });
+
+    // Queue `x` against the new session while `a` is still in flight.
+    act(() => {
+      testState.streamingState = 'responding';
+      rerender({ onToast });
+    });
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('!x');
+      await Promise.resolve();
+    });
+
+    // Resolve `a` — the stale drain bails but must NOT wipe `x`.
+    await act(async () => {
+      resolveA();
+      await Promise.resolve();
+    });
+
+    act(() => {
+      testState.streamingState = 'idle';
+      rerender({ onToast });
+    });
+    await act(async () => {
+      await vi.waitFor(() => {
+        expect(mockSessionActions.sendShellCommand).toHaveBeenCalledTimes(2);
+      });
+    });
+
+    expect(mockSessionActions.sendShellCommand).toHaveBeenNthCalledWith(1, 'a');
+    expect(mockSessionActions.sendShellCommand).toHaveBeenNthCalledWith(2, 'x');
+  });
+
   it('drains multiple queued commands in FIFO order', async () => {
     const onToast = vi.fn();
     const { rerender } = renderApp({ onToast });
