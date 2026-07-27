@@ -385,11 +385,9 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       ? Number(new URL(lastLink).searchParams.get('page'))
       : 1;
     // Issue events are oldest-first, so the trigger we want is near the end.
-    // Search the last page and, when it is partial (it can hold a single
-    // event), the page before it — reusing firstPage when it is that preceding
-    // page — so the window covers the newest ~100 events instead of only the
-    // last page. A trigger buried in the discarded earlier pages would
-    // otherwise be missed while still spending the page-1 request.
+    // Search the last two pages — reusing firstPage when it is the preceding
+    // page — so the window covers the newest ~200 events instead of only the
+    // last page.
     let events: GithubIssueEvent[];
     if (lastPageNumber <= 1) {
       events = firstPage.data as GithubIssueEvent[];
@@ -404,24 +402,20 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
           `listEvents(${ctx.threadId}, page=${lastPageNumber})`,
         )
       ).data as GithubIssueEvent[];
-      if (lastPage.length < params.per_page) {
-        const preceding =
-          lastPageNumber === 2
-            ? (firstPage.data as GithubIssueEvent[])
-            : ((
-                await this.githubApi(
-                  () =>
-                    this.octokit.rest.issues.listEvents({
-                      ...params,
-                      page: lastPageNumber - 1,
-                    }),
-                  `listEvents(${ctx.threadId}, page=${lastPageNumber - 1})`,
-                )
-              ).data as GithubIssueEvent[]);
-        events = [...preceding, ...lastPage];
-      } else {
-        events = lastPage;
-      }
+      const preceding =
+        lastPageNumber === 2
+          ? (firstPage.data as GithubIssueEvent[])
+          : ((
+              await this.githubApi(
+                () =>
+                  this.octokit.rest.issues.listEvents({
+                    ...params,
+                    page: lastPageNumber - 1,
+                  }),
+                `listEvents(${ctx.threadId}, page=${lastPageNumber - 1})`,
+              )
+            ).data as GithubIssueEvent[]);
+      events = [...preceding, ...lastPage];
     }
     const bot = this.botUsername?.toLowerCase();
     const event = events.findLast((candidate) => {
@@ -544,7 +538,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       );
     });
     if (newComments.length === 0) return;
-    const first = newComments[0]!;
+    const shownComments = newComments.slice(-MAX_AGGREGATE_COMMENTS);
+    const first = shownComments[0]!;
     const framing = 'Trigger: new comments on a thread you follow.';
     const summary = this.buildCommentsSummary(newComments);
     const metadata = this.appendFraming(
@@ -577,7 +572,7 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     await this.handleInbound(envelope);
     this.recordDispatched(
       'dispatchedComments',
-      newComments.map((comment) => this.eventKey(comment)),
+      shownComments.map((comment) => this.eventKey(comment)),
     );
   }
 

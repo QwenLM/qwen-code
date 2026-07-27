@@ -735,6 +735,51 @@ describe('GithubChannel', () => {
       );
     });
 
+    it('finds meta triggers on the page before a full last page', async () => {
+      await initWithoutLoop();
+      const laterEvents = Array.from({ length: 100 }, (_, index) =>
+        makeIssueEvent({
+          id: 1000 + index,
+          node_id: `E_later_${index}`,
+          requested_reviewer: { login: 'someone-else' },
+        }),
+      );
+      mockOctokit.rest.issues.listEvents
+        .mockResolvedValueOnce({
+          data: [makeIssueEvent({ id: 7, node_id: 'E_review' })],
+          headers: {
+            link: '<https://api.github.com/repos/owner/repo/issues/99/events?page=2>; rel="last"',
+          },
+        })
+        .mockResolvedValueOnce({
+          data: laterEvents,
+          headers: {},
+        });
+
+      const trigger = await (
+        channel as unknown as {
+          findMetaTrigger: (
+            ctx: Record<string, unknown>,
+            reason: 'review_requested' | 'assign',
+          ) => Promise<unknown>;
+        }
+      ).findMetaTrigger(
+        {
+          chatId: 'owner/repo',
+          threadId: 'pr:99',
+          issueNumber: 99,
+          lastReadAt: null,
+          windowSince: '2026-07-01T00:00:00.000Z',
+          maxUpdatedAt: '2026-07-02T10:00:00.000Z',
+          subjectTitle: 'feat: add divide',
+        },
+        'review_requested',
+      );
+
+      expect(trigger).toEqual({ actor: 'maintainer', key: 'E_review' });
+      expect(mockOctokit.rest.issues.listEvents).toHaveBeenCalledTimes(2);
+    });
+
     it('dispatches assign from issue metadata', async () => {
       await initWithoutLoop();
       channel.usePreflight = true;
@@ -1213,6 +1258,10 @@ describe('GithubChannel', () => {
       expect(text).toContain('latest 20 of 25');
       expect(text).toContain('comment number 6');
       expect(text).toContain('comment number 25');
+      expect(channel.cursor.dispatchedComments).not.toContain('C_kw1');
+      expect(channel.cursor.dispatchedComments).toContain('C_kw6');
+      expect(channel.cursor.dispatchedComments).toContain('C_kw25');
+      expect(channel.cursor.dispatchedComments).toHaveLength(20);
     });
 
     it('truncates each aggregate comment body to 1000 code points', async () => {
