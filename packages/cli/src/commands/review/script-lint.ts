@@ -262,20 +262,24 @@ function firstLineOf(abs: string): FirstLine {
 }
 
 /**
- * A private empty hadolint config, created once per process — or `undefined` when
- * we could not create one. Pointing `HADOLINT_CONFIG` at a config with no `ignored:`
- * rules is what stops a `.hadolint.yaml` a PR added from suppressing the findings we
- * run hadolint to catch.
+ * A private neutral hadolint config, created once per process — or `undefined` when
+ * we could not create one. Passed to hadolint via `--config` (see below); a config
+ * with no `ignored:` rules is what stops a `.hadolint.yaml` a PR added from
+ * suppressing the findings we run hadolint to catch.
  *
- * Two properties, both load-bearing and in OPPOSITE directions:
- * - The path must be UNPREDICTABLE and freshly ours, because it is a `writeFileSync`
- *   target — a fixed `tmpdir()` name is a symlink-race (we'd follow a planted symlink
- *   and truncate its target). `mkdtempSync` gives a 0700 dir with a random suffix.
- * - The path must also be one WE CONTROL, because `HADOLINT_CONFIG` is a file hadolint
- *   READS — a predictable fallback we do not own lets an attacker plant an `ignored:`
- *   config there and reopen the very suppression this closes. So there is NO fixed
- *   fallback: if `mkdtempSync`/`writeFileSync` fails we return `undefined`, and the
- *   caller fails the hadolint run CLOSED rather than read a config we cannot vouch for.
+ * The content is `ignored: []`, NOT an empty file: hadolint's `--config` rejects an
+ * empty file ("empty YAML stream", exit 1), which the fail-closed path would then
+ * (correctly) turn into an errored run — but that would disable hadolint entirely.
+ *
+ * Two path properties, both load-bearing and in OPPOSITE directions:
+ * - UNPREDICTABLE and freshly ours, because it is a `writeFileSync` target — a fixed
+ *   `tmpdir()` name is a symlink-race (we'd follow a planted symlink and truncate its
+ *   target). `mkdtempSync` gives a 0700 dir with a random suffix.
+ * - One WE CONTROL, because `--config` is a file hadolint READS — a predictable
+ *   fallback we do not own lets an attacker plant an `ignored:` config there and
+ *   reopen the very suppression this closes. So there is NO fixed fallback: if
+ *   `mkdtempSync`/`writeFileSync` fails we return `undefined`, and the caller fails
+ *   the hadolint run CLOSED rather than read a config we cannot vouch for.
  */
 let hadolintEmptyConfigPath: string | undefined;
 function emptyHadolintConfig(): string | undefined {
@@ -292,8 +296,8 @@ function emptyHadolintConfig(): string | undefined {
           /* best-effort */
         }
       });
-      const p = join(d, 'empty.yaml');
-      writeFileSync(p, '');
+      const p = join(d, 'config.yaml');
+      writeFileSync(p, 'ignored: []\n');
       hadolintEmptyConfigPath = p;
     } catch {
       return undefined; // no controllable config → caller must fail hadolint closed
@@ -324,11 +328,14 @@ export type ToolRunner = (tool: LintTool, absPath: string) => ToolRun;
  * - shellcheck: `--norc` ignores a PR-controlled `.shellcheckrc` (which could
  *   `disable=SC2086`), and `SHELLCHECK_OPTS` is dropped from the env for the same
  *   reason — configuration comes from us, not the diff.
- * - hadolint: has no working `--no-config` flag (a prior attempt made it exit 2 on
- *   every Dockerfile), so isolation is via env: `HADOLINT_CONFIG` points at a private
- *   empty file, neutralising a `.hadolint.yaml` the diff added. Env vars are benign if
- *   a tool ignores them — unlike a bad CLI flag. Set only for a hadolint run, and only
- *   when a private config exists; `runTool` fails hadolint closed when it does not.
+ * - hadolint: reads a config from `--config`, then a `.hadolint.yaml` in the process
+ *   CWD, then `$XDG_CONFIG_HOME/hadolint.yaml` — and NOT from any env var (real
+ *   hadolint 2.14.0 has no `HADOLINT_CONFIG`; an earlier env-based attempt was a
+ *   silent no-op, letting the diff's own `.hadolint.yaml` suppress findings because
+ *   `--worktree .` runs the linter inside the reviewed tree). Isolation is therefore
+ *   `--config <private neutral file>`, which overrides both the cwd and XDG configs.
+ *   Set only for a hadolint run, and only when a private config exists; `runTool`
+ *   fails hadolint closed when it does not (so it never runs unisolated).
  *
  * Also carries `timeoutMs`: the wall-clock bound `runTool` puts on the spawn, kept
  * here so the bound is one asserted value rather than a literal buried in the spawn.
@@ -337,20 +344,19 @@ export function buildToolInvocation(
   tool: LintTool,
   absPath: string,
 ): { argv: string[]; env: NodeJS.ProcessEnv; timeoutMs: number } {
+  const cfg = tool === 'hadolint' ? emptyHadolintConfig() : undefined;
   const argv: Record<LintTool, string[]> = {
     shellcheck: ['--norc', '--format=json1', '--severity=style', absPath],
     actionlint: ['-format', '{{json .}}', '-no-color', absPath],
-    hadolint: ['--format', 'json', absPath],
+    // `--config <neutral>` is the ONLY channel that isolates hadolint (env is
+    // ignored). When `cfg` is absent this bare form is unreachable — `runTool` has
+    // already failed the hadolint run closed rather than lint without isolation.
+    hadolint: cfg
+      ? ['--config', cfg, '--format', 'json', absPath]
+      : ['--format', 'json', absPath],
   };
-  const env: NodeJS.ProcessEnv = {
-    ...process.env,
-    HADOLINT_NO_COLOR: '1',
-  };
+  const env: NodeJS.ProcessEnv = { ...process.env };
   delete env['SHELLCHECK_OPTS'];
-  if (tool === 'hadolint') {
-    const cfg = emptyHadolintConfig();
-    if (cfg) env['HADOLINT_CONFIG'] = cfg;
-  }
   return { argv: argv[tool], env, timeoutMs: 120_000 };
 }
 
@@ -368,9 +374,10 @@ export function buildToolInvocation(
  * is reported through the error branch below — still fail-closed either way.
  */
 function runTool(tool: LintTool, absPath: string): ToolRun {
-  // hadolint READS `HADOLINT_CONFIG`; if we could not create a private empty config,
-  // running it would honour a PR-added (or planted) `.hadolint.yaml` and let it
-  // suppress findings. Fail the hadolint run CLOSED rather than lint without isolation.
+  // Isolation is `--config <private neutral file>`; if we could not create that file,
+  // running hadolint would honour a PR-added (or planted) `.hadolint.yaml` in the cwd
+  // and let it suppress findings. Fail the hadolint run CLOSED rather than lint
+  // without isolation (buildToolInvocation then also omits `--config`).
   if (tool === 'hadolint' && !emptyHadolintConfig()) {
     return {
       kind: 'error',

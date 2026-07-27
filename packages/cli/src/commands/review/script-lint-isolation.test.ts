@@ -13,7 +13,7 @@
 // `emptyHadolintConfig()` call then fails to `mkdtempSync`, and the guard fires.
 //
 // Two properties, deliberately split so a mutation attributes cleanly:
-//   1. buildToolInvocation sets no HADOLINT_CONFIG — the env logic; holds with or
+//   1. buildToolInvocation adds no `--config` — the argv logic; holds with or
 //      without the guard.
 //   2. runScriptLint fails the hadolint run CLOSED (errored, ok=false) — THIS is the
 //      guard. Delete `if (tool === 'hadolint' && !emptyHadolintConfig())` and the run
@@ -44,11 +44,13 @@ afterAll(() => {
 });
 
 describe('script-lint — hadolint fails closed when config isolation is unavailable', () => {
-  it('sets no HADOLINT_CONFIG when a private empty config cannot be created', async () => {
+  it('adds no --config when a private neutral config cannot be created', async () => {
     const { buildToolInvocation } = await import('./script-lint.js');
-    expect(
-      buildToolInvocation('hadolint', '/w/Dockerfile').env['HADOLINT_CONFIG'],
-    ).toBeUndefined();
+    // No private config → no `--config` on the argv (and the run fails closed below,
+    // so hadolint never lints unisolated against a cwd `.hadolint.yaml`).
+    expect(buildToolInvocation('hadolint', '/w/Dockerfile').argv).not.toContain(
+      '--config',
+    );
   });
 
   it('errors a Dockerfile (fail closed) instead of linting it unisolated', async () => {

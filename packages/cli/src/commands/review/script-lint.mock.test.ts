@@ -286,21 +286,26 @@ describe('buildToolInvocation — config isolation (a PR config cannot suppress 
     }
   });
 
-  it('points HADOLINT_CONFIG at an EMPTY config, neutralising a PR-added .hadolint.yaml', () => {
-    const { env } = buildToolInvocation('hadolint', '/w/Dockerfile');
-    expect(env['HADOLINT_CONFIG']).toBeTruthy();
-    // the file it points at has no `ignored:` rules — it is empty
-    expect(readFileSync(env['HADOLINT_CONFIG'] as string, 'utf8')).toBe('');
+  it('isolates hadolint via --config pointing at a neutral (ignored: []) config', () => {
+    // hadolint 2.14.0 reads `--config` (and a cwd `.hadolint.yaml`), NOT any env var,
+    // so isolation must be on the CLI: a private config with no `ignored:` rules, so a
+    // PR-added `.hadolint.yaml` cannot suppress findings. The content is a valid
+    // `ignored: []` — an empty file would be rejected by `--config`.
+    const { argv, env } = buildToolInvocation('hadolint', '/w/Dockerfile');
+    const ci = argv.indexOf('--config');
+    expect(ci).toBeGreaterThanOrEqual(0);
+    expect(readFileSync(argv[ci + 1], 'utf8')).toBe('ignored: []\n');
+    // and NOT via HADOLINT_CONFIG — the env channel the binary ignores
+    expect(env['HADOLINT_CONFIG']).toBeUndefined();
   });
 
-  it('HADOLINT_CONFIG is a fresh mkdtemp path (0700), not the old predictable name', () => {
+  it('the --config path is a fresh 0700 mkdtemp path, not a predictable name', () => {
     // The config is a file hadolint READS, so a predictable path is a suppression
     // vector (plant an `ignored:` config there). It must live in a private 0700
-    // mkdtemp dir, never the fixed `tmpdir()/qwen-review-hadolint-empty.yaml`. Revert
-    // to that fixed name and both assertions fail.
-    const cfg = buildToolInvocation('hadolint', '/w/Dockerfile').env[
-      'HADOLINT_CONFIG'
-    ] as string;
+    // mkdtemp dir, never a fixed `tmpdir()` name. Revert to a fixed name and the
+    // 0700-parent assertion fails.
+    const { argv } = buildToolInvocation('hadolint', '/w/Dockerfile');
+    const cfg = argv[argv.indexOf('--config') + 1];
     expect(cfg).not.toBe(join(tmpdir(), 'qwen-review-hadolint-empty.yaml'));
     expect(statSync(dirname(cfg)).mode & 0o777).toBe(0o700);
   });
