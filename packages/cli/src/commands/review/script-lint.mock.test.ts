@@ -20,6 +20,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import {
   runScriptLint,
   type ToolRun,
@@ -72,7 +73,7 @@ function setup(
 }
 
 describe('runScriptLint — tool JSON normalisation (injected runner)', () => {
-  it('defers a workflow to skipped without ever running actionlint', () => {
+  it('defers a workflow to its own `deferred` state without ever running actionlint', () => {
     fresh();
     // The runner would report findings, but a workflow is deferred BEFORE it runs
     // (actionlint's source-mapping is not yet parsed), so it lands in skipped, not
@@ -226,6 +227,51 @@ describe('runScriptLint — inDiff uses added lines, not hunk context', () => {
     expect(sc!.line).toBe(3);
     expect(sc!.inDiff).toBe(false); // line 3 is context, not an added line
     expect(r.ok).toBe(true);
+    clean();
+  });
+});
+
+describe('runScriptLint — the report is bound to the diff it ran against', () => {
+  it('stamps the report with a sha256 of the plan diff (the freshness key)', () => {
+    fresh();
+    // This is the headline of the staleness guard: the report carries a hash of the
+    // diff it reviewed, so `compose-review` can re-hash the plan's current diff and
+    // reject a stale report. Content, not HEAD — correct for a PR and for local
+    // uncommitted work alike. Drop the stamp and this fails; a stale report would
+    // then certify new code.
+    const diff = 'diff --git a/x.sh b/x.sh\n@@ -0,0 +1 @@\n+rm $X\n';
+    const diffPath = join(dir, 'pr.diff');
+    writeFileSync(diffPath, diff);
+    const { plan, worktree } = setup('x.sh', '#!/bin/bash\nrm $X\n', {
+      hunks: [{ newStart: 1, newEnd: 1 }],
+    });
+    const planObj = JSON.parse(readFileSync(plan, 'utf8'));
+    planObj.diffPathAbsolute = diffPath;
+    writeFileSync(plan, JSON.stringify(planObj));
+
+    const r = runScriptLint(
+      { plan, worktree },
+      shellcheckRunner([{ line: 1, code: 2086, level: 'info' }]),
+    );
+    const expected = createHash('sha256')
+      .update(readFileSync(diffPath))
+      .digest('hex');
+    expect(r.diffHash).toBe(expected);
+    clean();
+  });
+
+  it('leaves diffHash undefined when the plan carries no readable diff', () => {
+    fresh();
+    // No `diffPathAbsolute` on the plan → nothing to hash. `compose-review` treats an
+    // absent hash as unverifiable and fails closed, so undefined is the honest value.
+    const { plan, worktree } = setup('x.sh', '#!/bin/bash\nrm $X\n', {
+      hunks: [{ newStart: 1, newEnd: 1 }],
+    });
+    const r = runScriptLint(
+      { plan, worktree },
+      shellcheckRunner([{ line: 1, code: 2086, level: 'info' }]),
+    );
+    expect(r.diffHash).toBeUndefined();
     clean();
   });
 });

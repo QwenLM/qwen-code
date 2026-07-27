@@ -15,6 +15,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import { promptRecordDir, briefPath } from './lib/prompt-record.js';
 import { getGhHost, setGhHost } from './lib/gh.js';
 import {
@@ -2476,6 +2477,16 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     checked: [{ path: 'deploy.sh', tool: 'shellcheck', findings: [f] }],
     ok: false,
   });
+  /** Write a captured diff and return its path + the hash the gate will compute. */
+  function writeDiff(content = 'diff --git a/x b/x\n@@ -0,0 +1 @@\n+added\n'): {
+    path: string;
+    hash: string;
+  } {
+    const dp = join(dir, 'pr.diff');
+    writeFileSync(dp, content);
+    const hash = createHash('sha256').update(readFileSync(dp)).digest('hex');
+    return { path: dp, hash };
+  }
 
   it('turns an inDiff finding (above style) into a [lint] critical', () => {
     const p = writePlan({});
@@ -2487,54 +2498,63 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     expect(g.unreviewed).toEqual([]);
   });
 
-  it('fails closed on a STALE report — headSha disagrees with the plan', () => {
-    const p = writePlan({ fetchedSha: 'aaaaaaa' });
-    writeReport({ ...withFinding(finding()), headSha: 'bbbbbbb' });
+  it('fails closed on a STALE report — its diffHash disagrees with the plan diff', () => {
+    const d = writeDiff();
+    const p = writePlan({ diffPathAbsolute: d.path });
+    writeReport({ ...withFinding(finding()), diffHash: 'a-different-hash' });
     const g = scriptLintGate(p);
-    // The finding is NOT trusted (it was produced at a different commit); the
-    // review is unreviewed until script-lint re-runs at this head.
+    // The finding is NOT trusted (it was produced against a different diff); the
+    // review is unreviewed until script-lint re-runs against this one.
     expect(g.criticals).toEqual([]);
     expect(g.unreviewed).toHaveLength(1);
     expect(g.unreviewed[0]).toContain('stale');
   });
 
-  it('accepts a report whose headSha matches the plan (fresh)', () => {
-    const p = writePlan({ fetchedSha: 'aaaaaaa' });
-    writeReport({ ...withFinding(finding()), headSha: 'aaaaaaa' });
+  it('accepts a report whose diffHash matches the plan diff (fresh)', () => {
+    const d = writeDiff();
+    const p = writePlan({ diffPathAbsolute: d.path });
+    writeReport({ ...withFinding(finding()), diffHash: d.hash });
     const g = scriptLintGate(p);
     expect(g.criticals).toHaveLength(1);
     expect(g.unreviewed).toEqual([]);
   });
 
-  it('fails closed when the plan has a commit but the report has no headSha', () => {
-    // `headShaOf` could not read git → no `headSha`. When the plan DOES name a
-    // commit, an unverifiable report must not be trusted (the guard is not a no-op).
-    const p = writePlan({ fetchedSha: 'aaaaaaa' });
-    writeReport(withFinding(finding())); // no headSha
-    const g = scriptLintGate(p);
-    expect(g.criticals).toEqual([]);
-    expect(g.unreviewed[0]).toContain('could not be verified');
-  });
-
-  it('the staleness guard protects a LOCAL review too (capture-local writes fetchedSha)', () => {
-    // A local plan (untrackedFiles present, no worktreePath) is `local` mode, not
-    // diff-only, so the gate is armed; capture-local now writes `fetchedSha`, so a
-    // stale local report from another commit is caught rather than trusted.
-    const p = writePlan({
-      worktreePath: undefined,
-      untrackedFiles: [],
-      fetchedSha: 'aaaaaaa',
-    });
-    writeReport({ ...withFinding(finding()), headSha: 'bbbbbbb' });
+  it('fails closed when the plan diff is readable but the report has no diffHash', () => {
+    // The command could not hash the diff → no `diffHash`. When the plan's diff IS
+    // readable, an unverifiable report must not be trusted (the guard is not a no-op).
+    const d = writeDiff();
+    const p = writePlan({ diffPathAbsolute: d.path });
+    writeReport(withFinding(finding())); // no diffHash
     const g = scriptLintGate(p);
     expect(g.criticals).toEqual([]);
     expect(g.unreviewed[0]).toContain('stale');
   });
 
-  it('a DEFERRED-only report does not cap the verdict (actionlint deferral)', () => {
+  it('the staleness guard catches an uncommitted LOCAL edit (content, not HEAD)', () => {
+    // A local plan (untrackedFiles present, no worktreePath) is `local` mode, not
+    // diff-only, so the gate is armed. The identity is the DIFF's content, so an
+    // uncommitted edit that changes the diff — HEAD unchanged — still invalidates a
+    // stale report. This is exactly the local case a HEAD-based guard would miss.
+    const d = writeDiff('diff --git a/x b/x\n@@ -0,0 +1 @@\n+edited\n');
+    const p = writePlan({
+      worktreePath: undefined,
+      untrackedFiles: [],
+      diffPathAbsolute: d.path,
+    });
+    writeReport({
+      ...withFinding(finding()),
+      diffHash: 'hash-of-the-old-diff',
+    });
+    const g = scriptLintGate(p);
+    expect(g.criticals).toEqual([]);
+    expect(g.unreviewed[0]).toContain('stale');
+  });
+
+  it('a DEFERRED report is disclosed but does NOT cap the verdict (actionlint deferral)', () => {
     // actionlint is deferred, not skipped/errored — a workflow-only PR whose only
-    // "problem" is the deferral must NOT be made un-Approvable. The gate reads
-    // checked/skipped/errored, never `deferred`, so it contributes nothing.
+    // "problem" is the deferral must NOT be made un-Approvable. It contributes
+    // nothing to criticals/unreviewed (so it cannot cap), but it IS surfaced in
+    // `disclosed` so the body can say the workflow's shell went un-linted.
     const p = writePlan({
       files: [{ path: '.github/workflows/ci.yml', kind: 'source' }],
     });
@@ -2547,7 +2567,12 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
         },
       ],
     });
-    expect(scriptLintGate(p)).toEqual({ criticals: [], unreviewed: [] });
+    const g = scriptLintGate(p);
+    expect(g.criticals).toEqual([]);
+    expect(g.unreviewed).toEqual([]);
+    expect(g.disclosed).toHaveLength(1);
+    expect(g.disclosed[0]).toContain('.github/workflows/ci.yml');
+    expect(g.disclosed[0]).toContain('source mapping not yet supported');
   });
 
   it('ignores a cosmetic (style) or pre-existing (inDiff:false) finding', () => {
@@ -2623,7 +2648,11 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
   it('is a no-op when nothing was owed and no report exists', () => {
     const p = writePlan({ files: [{ path: 'a.ts', kind: 'source' }] });
     // no report written — not owed by path, and none produced → contribute nothing
-    expect(scriptLintGate(p)).toEqual({ criticals: [], unreviewed: [] });
+    expect(scriptLintGate(p)).toEqual({
+      criticals: [],
+      unreviewed: [],
+      disclosed: [],
+    });
   });
 
   it('is a no-op on a diff-only review — no worktree to have run it', () => {
@@ -2631,7 +2660,11 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     writeReport({
       errored: [{ path: 'deploy.sh', tool: 'shellcheck', reason: 'x' }],
     });
-    expect(scriptLintGate(p)).toEqual({ criticals: [], unreviewed: [] });
+    expect(scriptLintGate(p)).toEqual({
+      criticals: [],
+      unreviewed: [],
+      disclosed: [],
+    });
   });
 
   it('derives the pr-numbered report name from the plan', () => {
@@ -2642,40 +2675,57 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
 });
 
 describe('composeReview — the script-lint gate wired to the verdict', () => {
-  it('a [lint] critical yields REQUEST_CHANGES, deterministically (no verifier)', () => {
-    // Same-repo (worktreePath) so the gate fires; a [lint] finding is pre-confirmed,
-    // so its Request changes stands with or without full coverage or a verifier.
-    const p = coveredPlan();
+  // A worktree arms the gate (pr-worktree, not diff-only). That mode also owes the
+  // cross-file (1c) and build-and-test (7) roles, so a test that wants the gate's
+  // own outcome to decide the verdict — not an unrelated dimension gap — must record
+  // them too. `step45Keys` threads through to `coveredPlan` so a caller can drop the
+  // verifier (['reverse-audit']) to prove a finding stands with none.
+  function gateReadyPlan(
+    step45Keys: string[] = ['verify', 'reverse-audit'],
+  ): string {
+    const p = coveredPlan(step45Keys);
     const planObj = JSON.parse(readFileSync(p, 'utf8'));
     planObj.worktreePath = '.qwen/tmp/review-pr-1';
-    planObj.files.push({ path: 'deploy.sh', kind: 'source', addedLines: 3 });
     writeFileSync(p, JSON.stringify(planObj));
+    for (const role of ['1c', '7']) {
+      const d = promptRecordDir(p);
+      mkdirSync(d, { recursive: true });
+      const brief = briefPath(p, role);
+      writeFileSync(brief, `The ${role} brief.`);
+      const launch = `You are review agent \`${role}\`.\nread_file(file_path="${brief}")\nread_file(file_path="${DIFF}")`;
+      writeFileSync(join(d, `${role}.txt`), launch);
+      transcript(`r-${role}`, launch, { toolCalls: 2, opens: [brief] });
+    }
     const old = new Date(2020, 0, 1);
     utimesSync(p, old, old);
+    return p;
+  }
+  function writeGateReport(report: Record<string, unknown>): void {
     writeFileSync(
       join(dir, 'qwen-review-script-lint.json'),
       JSON.stringify({
-        checked: [
-          {
-            path: 'deploy.sh',
-            tool: 'shellcheck',
-            findings: [
-              {
-                line: 3,
-                code: 'SC2086',
-                level: 'info',
-                message: 'x',
-                inDiff: true,
-              },
-            ],
-          },
-        ],
+        checked: [],
         skipped: [],
         errored: [],
-        ok: false,
+        ok: true,
         note: '',
+        ...report,
       }),
     );
+  }
+  const lintFinding = {
+    path: 'deploy.sh',
+    tool: 'shellcheck',
+    findings: [
+      { line: 3, code: 'SC2086', level: 'info', message: 'x', inDiff: true },
+    ],
+  };
+
+  it('a [lint] critical yields REQUEST_CHANGES, deterministically (no verifier)', () => {
+    // Same-repo (worktreePath) so the gate fires; a [lint] finding is pre-confirmed,
+    // so its Request changes stands with or without full coverage or a verifier.
+    const p = gateReadyPlan();
+    writeGateReport({ checked: [lintFinding], ok: false });
     const r = composeReview({
       criticalsInline: 0,
       suggestionsInline: 0,
@@ -2685,5 +2735,77 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
     });
     expect(r.event).toBe('REQUEST_CHANGES');
     expect(r.body).toContain('SC2086');
+  });
+
+  it('the gate critical is deterministic by PROVENANCE — it stands with NO verifier', () => {
+    // The gate ran the linter, so its finding is pre-confirmed and skips Step 4 —
+    // exactly like [build]/[test]/[probe]. A verifier is absent here (only the
+    // reverse audit ran), yet the Request changes must stand and must NOT be flagged
+    // criticals-unverified. This is what `gateCriticalCount` buys: drop it (treat the
+    // gate finding as a model claim) and this softens to a criticals-unverified Comment.
+    const p = gateReadyPlan(['reverse-audit']); // verifier absent, none owed
+    writeGateReport({ checked: [lintFinding], ok: false });
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).not.toContain('criticals-unverified');
+    expect(r.body).toContain('SC2086');
+  });
+
+  it('an ERRORED checker caps a would-be APPROVE to COMMENT and says the lint is unreviewed', () => {
+    // A clean, fully-covered plan Approves — except the gate reports a checker that
+    // errored (fail closed). That unreviewed scope must reach the cap: the verdict
+    // drops to Comment and the body names the lint. Delete the `unreviewed.push` that
+    // wires the gate to the cap and this silently Approves over an unrun linter.
+    const p = gateReadyPlan();
+    writeGateReport({
+      errored: [{ path: 'deploy.sh', tool: 'shellcheck', reason: 'exited 2' }],
+      ok: false,
+    });
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain('the executable-script lint');
+    expect(r.body).toMatch(/errored on deploy\.sh/);
+  });
+
+  it('a DEFERRED-only report keeps APPROVE but discloses the deferral in the body', () => {
+    // A fully-covered plan Approves. Its only script-lint outcome is a deferred
+    // actionlint (a workflow's embedded shell) — which must NOT cap the Approve,
+    // but MUST be surfaced in the body so the reader knows that shell went unlinted.
+    // The gate reads the report as the sole authority, so the deferral is disclosed
+    // from the report itself; the plan stays fully covered so the Approve stands.
+    const p = gateReadyPlan();
+    writeGateReport({
+      deferred: [
+        {
+          path: '.github/workflows/ci.yml',
+          tool: 'actionlint',
+          reason: 'source mapping not yet supported',
+        },
+      ],
+    });
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).toContain('.github/workflows/ci.yml');
+    expect(r.body).toContain('source mapping not yet supported');
+    // the LGTM copy is still there — the disclosure augments, it doesn't replace
+    expect(r.body).toContain('LGTM');
   });
 });

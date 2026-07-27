@@ -37,7 +37,7 @@ import {
   reviewMode,
   type RosterPlan,
 } from './lib/roster.js';
-import type { ScriptLintReport } from './script-lint.js';
+import { diffHashOf, type ScriptLintReport } from './script-lint.js';
 import {
   CRITICAL_PREFIX,
   SUGGESTION_PREFIX,
@@ -290,11 +290,15 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // string contains `[lint]`. They still render and count toward `c` (pushed into
   // `bodyCriticals`), but their deterministic status is tracked here, by count.
   let gateCriticalCount = 0;
+  // Disclosed-but-non-capping notes from the gate (a deferred checker). Rendered
+  // in the body on every verdict, but never fed into the cap.
+  const gateDisclosed: string[] = [];
   if (input.planPath) {
     const gate = scriptLintGate(input.planPath);
     bodyCriticals.push(...gate.criticals);
     gateCriticalCount = gate.criticals.length;
     unreviewed.push(...gate.unreviewed);
+    gateDisclosed.push(...gate.disclosed);
   }
 
   // The Criticals a verifier must have ruled on before this review may post them
@@ -866,6 +870,19 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     zh: '仅审查了 diff——无法获取 PR 已有的讨论，因此这不构成批准，也不构成"无阻断问题"的结论。',
   };
 
+  // A deferred checker (actionlint's embedded shell): disclosed on EVERY verdict —
+  // including Approve — so the reader knows a workflow's shell was not linted, but
+  // it does not cap the verdict (it is a tool limitation, not a finding or an
+  // unrun-checker gap). This is the "disclosed but not capping" half.
+  const deferredBlock: Bi[] = gateDisclosed.length
+    ? [
+        {
+          en: `Not linted (tool limitation, not a blocker): ${gateDisclosed.join('; ')}.`,
+          zh: `未检查（工具限制，非阻断）：${gateDisclosed.join('; ')}。`,
+        },
+      ]
+    : [];
+
   if (event === 'REQUEST_CHANGES') {
     // Empty body, except the disclosures: every clause whose state holds
     // appears on every event — a confirmed blocker must not squeeze out the
@@ -875,6 +892,7 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       ...(contextUnavailable ? [contextUnavailableClause] : []),
       ...cannotTellBlock,
       ...notReviewedParts,
+      ...deferredBlock,
       ...bodyCriticalBlock,
     ];
     return {
@@ -892,8 +910,11 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     return {
       event,
       body: render(
-        [{ en: 'No issues found. LGTM! ✅', zh: '未发现问题。LGTM！✅' }],
-        ' ',
+        [
+          { en: 'No issues found. LGTM! ✅', zh: '未发现问题。LGTM！✅' },
+          ...deferredBlock,
+        ],
+        deferredBlock.length ? '\n\n' : ' ',
       ),
       baseEvent,
       cappedBy,
@@ -1000,6 +1021,10 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
 
   // 6. Not-reviewed disclosure.
   clauses.push(...notReviewedParts);
+
+  // 6b. Deferred-checker disclosure (non-capping) — a workflow whose embedded
+  //     shell actionlint would lint but we do not yet trust.
+  clauses.push(...deferredBlock);
 
   // 7. Body Criticals — on a COMMENT that stands where a REQUEST_CHANGES
   //    would have been: the presubmit carve-out, and the unverified-blockers
@@ -1124,10 +1149,19 @@ const fetchPrBodyViaGh: PrBodyFetcher = (ownerRepo, prNumber) => {
 export function scriptLintGate(planPath: string): {
   criticals: string[];
   unreviewed: string[];
+  disclosed: string[];
 } {
   const criticals: string[] = [];
   const unreviewed: string[] = [];
-  let plan: { prNumber?: unknown; files?: unknown; fetchedSha?: unknown };
+  // Disclosed-but-NOT-capping: a `deferred` checker (actionlint) is a known tool
+  // limitation, not a finding and not an unrun-checker gap — the reader is told a
+  // workflow's embedded shell was not linted, but the verdict is not capped on it.
+  const disclosed: string[] = [];
+  let plan: {
+    prNumber?: unknown;
+    files?: unknown;
+    diffPathAbsolute?: unknown;
+  };
   try {
     plan = JSON.parse(readFileSync(planPath, 'utf8'));
   } catch {
@@ -1136,13 +1170,13 @@ export function scriptLintGate(planPath: string): {
     unreviewed.push(
       'the executable-script lint — could not read the plan to check the gate',
     );
-    return { criticals, unreviewed };
+    return { criticals, unreviewed, disclosed };
   }
   // A diff-only (cross-repo lightweight) review has no worktree, so the
   // orchestrator could not have run script-lint — do not fail it closed for a
   // command it cannot run, exactly as the roster never owed it there.
   if (reviewMode(plan as RosterPlan) === 'diff-only') {
-    return { criticals, unreviewed };
+    return { criticals, unreviewed, disclosed };
   }
   const owed = hasExecutableScript(plan as RosterPlan);
   const reportPath = join(
@@ -1163,20 +1197,21 @@ export function scriptLintGate(planPath: string): {
         'the executable-script lint — `qwen review script-lint` produced no report',
       );
     }
-    return { criticals, unreviewed };
+    return { criticals, unreviewed, disclosed };
   }
-  // Fail closed on a STALE or unverifiable report. The filename is stable per PR,
-  // so an earlier review of an older commit can leave a report that a skipped lint
-  // step would read as current. The report records the HEAD it was produced at; if
-  // the plan has a commit and the report's does not MATCH it — including a report
-  // with no `headSha` at all (git could not be read) — it is not this review's.
-  const planSha =
-    typeof plan.fetchedSha === 'string' ? plan.fetchedSha : undefined;
-  if (planSha && report.headSha !== planSha) {
+  // Fail closed on a STALE report — bound to the diff's CONTENT, not a commit. The
+  // report carries a hash of the diff it ran against; we re-hash the plan's current
+  // diff. A mismatch means it is not this review's report: a later PR commit
+  // (different diff), OR — the local case HEAD cannot see — an uncommitted edit that
+  // changes the working-tree diff. An absent hash on EITHER side (the diff could
+  // not be read here or there) is unverifiable and also fails closed; only both
+  // sides genuinely matching is fresh.
+  const planDiffHash = diffHashOf(plan.diffPathAbsolute);
+  if (report.diffHash !== planDiffHash) {
     unreviewed.push(
-      'the executable-script lint — the report is stale or its commit could not be verified; re-run `qwen review script-lint`',
+      'the executable-script lint — the report is stale or its diff could not be verified; re-run `qwen review script-lint`',
     );
-    return { criticals, unreviewed };
+    return { criticals, unreviewed, disclosed };
   }
   // Process the report's findings REGARDLESS of the path-only owed predicate: the
   // report can name a shebang script (`hook.sh` by its `#!`) that `pathTool` could
@@ -1190,8 +1225,9 @@ export function scriptLintGate(planPath: string): {
       }
     }
   }
-  // Each skipped entry carries its OWN reason (not installed, an irregular file, a
-  // deferred checker) — surface it, rather than hard-coding "not installed".
+  // Each skipped entry carries its OWN reason (not installed, or an irregular file
+  // like a symlink) — surface it, rather than hard-coding "not installed". A
+  // deferred checker is NOT here: it is its own state, disclosed below without capping.
   for (const s of report.skipped ?? []) {
     unreviewed.push(
       `the executable-script lint — ${s.path}: ${s.reason ?? `${s.tool} unavailable`}`,
@@ -1202,7 +1238,15 @@ export function scriptLintGate(planPath: string): {
       `the executable-script lint — ${e.tool} errored on ${e.path}`,
     );
   }
-  return { criticals, unreviewed };
+  // A deferred checker (actionlint) is disclosed but does not cap — the reader is
+  // told the workflow's embedded shell was not linted, without making every
+  // workflow PR un-Approvable on a checker we deliberately decline to run.
+  for (const d of report.deferred ?? []) {
+    disclosed.push(
+      `the executable-script lint — ${d.path}: ${d.reason ?? `${d.tool} deferred`}`,
+    );
+  }
+  return { criticals, unreviewed, disclosed };
 }
 
 /**

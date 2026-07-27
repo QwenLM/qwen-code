@@ -24,6 +24,7 @@
 
 import type { CommandModule } from 'yargs';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   readFileSync,
   writeFileSync,
@@ -102,12 +103,15 @@ export interface ScriptLintReport {
   /** One line for the agent's report. */
   note: string;
   /**
-   * The worktree's `HEAD` when this report was produced (`git rev-parse HEAD`), or
-   * `undefined` when it could not be read. `compose-review` compares it to the
-   * plan's `fetchedSha` and treats a mismatch as no report — so a stale report
-   * left by an earlier review of an older commit cannot certify the current one.
+   * A hash of the diff this report was produced against (the plan's captured
+   * diff). `compose-review` re-hashes the plan's current diff and treats a
+   * mismatch as no report. Content, not commit: it identifies **what was
+   * reviewed**, so it is correct for a PR (a different commit → a different diff)
+   * AND for a local review of uncommitted work (an edit changes the diff even
+   * when `HEAD` does not) — a stale report from either can no longer certify.
+   * `undefined` only when the diff could not be read.
    */
-  headSha?: string;
+  diffHash?: string;
 }
 
 interface ScriptLintArgs {
@@ -419,13 +423,16 @@ function parseFindings(tool: LintTool, raw: string): LintFinding[] | null {
 
 /** The worktree's HEAD commit, or undefined when it is not a git checkout (tests,
  *  a plain directory). Best-effort — a missing SHA just skips the freshness check. */
-function headShaOf(worktree: string): string | undefined {
-  const r = spawnSync('git', ['-C', worktree, 'rev-parse', 'HEAD'], {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'ignore'],
-  });
-  const sha = `${r.stdout ?? ''}`.trim();
-  return r.status === 0 && /^[0-9a-f]{7,40}$/.test(sha) ? sha : undefined;
+/** A hash of the captured diff — the identity of *what was reviewed*. `undefined`
+ *  when the diff cannot be read (there is then nothing to bind freshness to).
+ *  Exported so `compose-review`'s gate hashes the plan's diff the SAME way. */
+export function diffHashOf(diffPath: unknown): string | undefined {
+  if (typeof diffPath !== 'string' || !diffPath) return undefined;
+  try {
+    return createHash('sha256').update(readFileSync(diffPath)).digest('hex');
+  } catch {
+    return undefined;
+  }
 }
 
 export function runScriptLint(
@@ -555,7 +562,7 @@ export function runScriptLint(
     deferred,
     ok,
     note,
-    headSha: headShaOf(args.worktree),
+    diffHash: diffHashOf(plan.diffPathAbsolute),
   };
 }
 
