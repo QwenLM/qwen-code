@@ -92,7 +92,10 @@ function createHarness() {
     }),
     openOrUpdateStream: vi.fn().mockResolvedValue(undefined),
     updateInstance: vi.fn().mockImplementation(async (request) => {
-      if (request.cardParamMap.statusLine === 'Completed') {
+      if (
+        typeof request.cardParamMap.statusLine === 'string' &&
+        request.cardParamMap.statusLine.startsWith('Completed · ')
+      ) {
         projectionOrder.push('finalize:segment-1');
       }
       if (request.cardParamMap.card_status === 'submitted') {
@@ -289,6 +292,31 @@ describe('DingtalkInteractionPresenter', () => {
       expect.objectContaining({
         cardParamMap: expect.objectContaining({
           content: 'first',
+        }),
+      }),
+    );
+  });
+
+  it('preserves the lifecycle cancellation reason for the status card', async () => {
+    const { client, presenter } = createHarness();
+    presenter.appendOutput(segment('segment-1'), 'Explanation');
+
+    await presenter.closeOutput('segment-1', '', 'cancelled');
+    presenter.terminalizeRun('run-1', 'cancelled', 'cancel_command');
+
+    await vi.waitFor(() => {
+      expect(client.updateInstance).toHaveBeenCalledWith(
+        expect.objectContaining({
+          cardParamMap: expect.objectContaining({
+            statusLine: expect.stringMatching(/^Stopped · \d+s$/),
+          }),
+        }),
+      );
+    });
+    expect(client.updateInstance).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          statusLine: expect.stringMatching(/^Cancelled · \d+s$/),
         }),
       }),
     );

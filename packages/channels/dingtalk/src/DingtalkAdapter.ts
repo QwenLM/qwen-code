@@ -316,6 +316,7 @@ export class DingtalkChannel extends ChannelBase {
           client: this.interactiveCardClient,
           cancelRun: (sessionId, runId) =>
             this.requestPromptRunCancellation(sessionId, runId),
+          ...(config.model ? { model: config.model } : {}),
           onError: (operation, error) => {
             process.stderr.write(
               `[DingTalk:${this.name}] ${operation} failed: ${sanitizeLogText(String(error), 300)}\n`,

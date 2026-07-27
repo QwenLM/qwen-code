@@ -12,6 +12,8 @@ const FLUSH_INTERVAL_MS = 500;
 const CONTENT_LIMIT = 20_000;
 const TRUNCATION_MARKER = '[Earlier output truncated]\n';
 
+type StatusState = 'Running' | 'Completed' | 'Failed' | 'Stopped' | 'Cancelled';
+
 interface StatusRecord {
   segmentId: string;
   runId: string;
@@ -19,6 +21,8 @@ interface StatusRecord {
   ownerId: string;
   outTrackId: string;
   content: string;
+  startedAt: number;
+  lastStatusSecond: number;
   ready: Promise<boolean>;
   terminal: boolean;
   streamFailed: boolean;
@@ -33,6 +37,7 @@ interface StatusRecord {
 export interface StatusCardControllerOptions {
   client: DingtalkInteractiveCardClient;
   cancelRun(sessionId: string, runId: string): Promise<boolean>;
+  model?: string;
   onError?(operation: string, error: unknown): void;
 }
 
@@ -80,6 +85,8 @@ export class StatusCardController {
       ownerId: segment.owner.id,
       outTrackId,
       content: '',
+      startedAt: Date.now(),
+      lastStatusSecond: 0,
       ready: Promise.resolve(false),
       terminal: false,
       streamFailed: false,
@@ -163,7 +170,7 @@ export class StatusCardController {
         cardParamMap: {
           content: '',
           flowStatus: 2,
-          statusLine: 'Running',
+          statusLine: this.statusLine(record, 'Running').text,
           hasAction: 'true',
           stop_action: 'true',
         },
@@ -223,6 +230,7 @@ export class StatusCardController {
           content,
           finalize: false,
         });
+        await this.updateRunningStatus(record);
       })
       .catch((error) => {
         record.streamFailed = true;
@@ -243,7 +251,7 @@ export class StatusCardController {
   private async finalize(
     segmentId: string,
     content: string,
-    statusLine: string,
+    state: Exclude<StatusState, 'Running'>,
     isError: boolean,
   ): Promise<boolean> {
     const record = this.recordsBySegment.get(segmentId);
@@ -281,7 +289,7 @@ export class StatusCardController {
           content: finalContent,
           copy_content: finalContent,
           flowStatus: 3,
-          statusLine,
+          statusLine: this.statusLine(record, state).text,
           hasAction: 'false',
           stop_action: 'false',
         },
@@ -303,6 +311,36 @@ export class StatusCardController {
       if (segmentIds?.size === 0) {
         this.segmentIdsByRun.delete(record.runId);
       }
+    }
+  }
+
+  private statusLine(
+    record: StatusRecord,
+    state: StatusState,
+  ): { text: string; second: number } {
+    const second = Math.max(
+      0,
+      Math.floor((Date.now() - record.startedAt) / 1000),
+    );
+    const model = this.options.model?.trim();
+    return {
+      text: [state, model, `${second}s`].filter(Boolean).join(' · '),
+      second,
+    };
+  }
+
+  private async updateRunningStatus(record: StatusRecord): Promise<void> {
+    if (record.terminal) return;
+    const status = this.statusLine(record, 'Running');
+    if (status.second === record.lastStatusSecond) return;
+    try {
+      await this.options.client.updateInstance({
+        outTrackId: record.outTrackId,
+        cardParamMap: { statusLine: status.text },
+      });
+      record.lastStatusSecond = status.second;
+    } catch (error) {
+      this.options.onError?.('status card metadata', error);
     }
   }
 }

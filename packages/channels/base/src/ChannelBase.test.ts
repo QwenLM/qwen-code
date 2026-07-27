@@ -11848,7 +11848,7 @@ describe('ChannelBase', () => {
       }
     });
 
-    it('logs turn errors that arrive after cancellation', async () => {
+    it('logs and contains turn errors that arrive after cancellation', async () => {
       let rejectPrompt!: (error: Error) => void;
       (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
         new Promise<string>((_resolve, reject) => {
@@ -11866,7 +11866,7 @@ describe('ChannelBase', () => {
         await ch.handleInbound(envelope({ text: '/cancel' }));
         rejectPrompt(new Error('bridge crashed'));
 
-        await expect(prompt).rejects.toThrow('bridge crashed');
+        await expect(prompt).resolves.toBeUndefined();
         expect(
           ch.taskEvents.filter((event) => event.type === 'failed'),
         ).toEqual([]);
@@ -12219,7 +12219,7 @@ describe('ChannelBase', () => {
       await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
       await ch.handleInbound(envelope({ text: '/cancel' }));
       rejectPrompt(new Error('bridge cancelled'));
-      await expect(prompt).rejects.toThrow('bridge cancelled');
+      await expect(prompt).resolves.toBeUndefined();
 
       expect(ch.taskEvents).toEqual([
         expect.objectContaining({
@@ -12249,7 +12249,7 @@ describe('ChannelBase', () => {
       const cancel = ch.cancelPromptForTest('s-1');
       expect(cancel).toBeDefined();
       rejectPrompt(Object.assign(new Error('aborted'), { name: 'AbortError' }));
-      await expect(prompt).rejects.toThrow('aborted');
+      await expect(prompt).resolves.toBeUndefined();
       await expect(cancel).resolves.toBe(true);
 
       expect(ch.taskEvents).toEqual([

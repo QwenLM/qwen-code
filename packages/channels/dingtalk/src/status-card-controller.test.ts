@@ -20,7 +20,12 @@ function segment(
 
 const target = { chatId: 'cid-1', isGroup: true };
 
-function createHarness() {
+function createHarness(
+  options: {
+    model?: string;
+    onError?(operation: string, error: unknown): void;
+  } = {},
+) {
   const client = {
     createAndDeliver: vi.fn().mockResolvedValue(undefined),
     openOrUpdateStream: vi.fn().mockResolvedValue(undefined),
@@ -30,6 +35,7 @@ function createHarness() {
   const controller = new StatusCardController({
     client,
     cancelRun,
+    ...options,
   });
   return { client, cancelRun, controller };
 }
@@ -89,6 +95,124 @@ describe('StatusCardController', () => {
     expect(content.length).toBeLessThanOrEqual(20_000);
     expect(content).toContain('[Earlier output truncated]');
     expect(content.endsWith('b'.repeat(2_000))).toBe(true);
+  });
+
+  it('shows the configured model and refreshes elapsed time only on text flushes', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { client, controller } = createHarness({
+      model: 'qwen3.7-max',
+    });
+
+    controller.append(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(client.createAndDeliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          statusLine: 'Running · qwen3.7-max · 0s',
+        }),
+      }),
+    );
+
+    vi.mocked(client.updateInstance).mockClear();
+    vi.setSystemTime(1_200);
+    await vi.advanceTimersByTimeAsync(500);
+
+    expect(client.updateInstance).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cardParamMap: {
+          statusLine: 'Running · qwen3.7-max · 1s',
+        },
+      }),
+    );
+
+    vi.mocked(client.updateInstance).mockClear();
+    vi.setSystemTime(10_000);
+    await vi.advanceTimersByTimeAsync(5_000);
+    expect(client.updateInstance).not.toHaveBeenCalled();
+  });
+
+  it('omits an unconfigured model from running status', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { client, controller } = createHarness();
+
+    controller.append(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(client.createAndDeliver).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          statusLine: 'Running · 0s',
+        }),
+      }),
+    );
+
+    vi.setSystemTime(1_200);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(client.updateInstance).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cardParamMap: {
+          statusLine: 'Running · 1s',
+        },
+      }),
+    );
+  });
+
+  it('keeps content streaming after a metadata update fails', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const onError = vi.fn();
+    const { client, controller } = createHarness({
+      model: 'qwen3.7-max',
+      onError,
+    });
+    controller.append(segment(), target, 'first');
+    await vi.advanceTimersByTimeAsync(0);
+
+    vi.mocked(client.updateInstance).mockRejectedValueOnce(
+      new Error('metadata failed'),
+    );
+    vi.setSystemTime(1_200);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(onError).toHaveBeenCalledWith(
+      'status card metadata',
+      expect.any(Error),
+    );
+
+    vi.mocked(client.openOrUpdateStream).mockClear();
+    controller.append(segment(), target, 'second');
+    vi.setSystemTime(2_200);
+    await vi.advanceTimersByTimeAsync(500);
+    expect(client.openOrUpdateStream).toHaveBeenCalledWith(
+      expect.objectContaining({
+        content: 'firstsecond',
+        finalize: false,
+      }),
+    );
+  });
+
+  it('writes the exact elapsed second with a stopped terminal state', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+    const { client, controller } = createHarness({
+      model: 'qwen3.7-max',
+    });
+    controller.append(segment(), target, 'answer');
+    await vi.advanceTimersByTimeAsync(0);
+
+    vi.setSystemTime(12_400);
+    controller.cancelRun('run-1', 'cancel_command');
+    await vi.runAllTimersAsync();
+
+    expect(client.updateInstance).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        cardParamMap: expect.objectContaining({
+          statusLine: 'Stopped · qwen3.7-max · 12s',
+        }),
+      }),
+    );
   });
 
   it('keeps two segments from the same run independent', async () => {
@@ -188,7 +312,7 @@ describe('StatusCardController', () => {
           content: 'answer',
           copy_content: 'answer',
           flowStatus: 3,
-          statusLine: 'Completed',
+          statusLine: 'Completed · 0s',
           hasAction: 'false',
           stop_action: 'false',
         },

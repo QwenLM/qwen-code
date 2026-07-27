@@ -1194,6 +1194,20 @@ describe('DingtalkChannel prompt reactions', () => {
 });
 
 describe('DingtalkChannel status cards', () => {
+  it('passes the configured model to the status card controller', () => {
+    const channel = createChannel({ model: 'qwen3.7-max' });
+
+    expect(
+      (
+        channel as unknown as {
+          statusCardController?: {
+            options: { model?: string };
+          };
+        }
+      ).statusCardController?.options.model,
+    ).toBe('qwen3.7-max');
+  });
+
   it('keeps status cards disabled when block streaming is enabled', () => {
     const channel = createChannel({ blockStreaming: 'on' });
 

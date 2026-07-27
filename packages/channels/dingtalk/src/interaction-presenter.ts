@@ -109,7 +109,6 @@ export class DingtalkInteractionPresenter {
         return statusCards !== undefined;
       }
       if (reason === 'cancelled') {
-        statusCards?.cancelRun(run.runId, 'dropped');
         return statusCards !== undefined;
       }
       const completed =

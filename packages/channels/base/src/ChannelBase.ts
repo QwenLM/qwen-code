@@ -5539,6 +5539,9 @@ export abstract class ChannelBase {
             `[${channel}] turn ${safeMessageId} threw after cancellation for session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
           );
         }
+        if (promptState.cancelled) {
+          return;
+        }
         throw err;
       } finally {
         promptBridge.off('textChunk', onChunk);
