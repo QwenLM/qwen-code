@@ -51,7 +51,7 @@ jobs:
             gh issue list \
               --repo "${REPO}" \
               --state open \
-              --search "${marker}" \
+              --search "${marker} in:body,comments" \
               --json number \
               --jq '.[0].number // ""'
           )"
