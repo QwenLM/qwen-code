@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import test from 'node:test';
 
 import {
@@ -13,6 +16,7 @@ import {
   failureSignature,
   renderIssueBody,
   renderIssueTitle,
+  runCli,
   shortenForTitle,
   testKey,
 } from './main-failure-signature.mjs';
@@ -468,4 +472,48 @@ test('the recurrence list is bounded and the trim note never re-enters it', () =
   assert.equal(lines.length, MAX_OCCURRENCES);
   assert.match(lines[0], /run 314/);
   assert.equal(body.split('_Older recurrences trimmed._').length - 1, 1);
+});
+
+test('runCli plan --existing merges recorded recurrences from the file', () => {
+  const analysis = analyzeLogs('E2E Tests', [VITEST_LOG]);
+  const existing = renderIssueBody({ analysis, occurrence: OCCURRENCE });
+
+  const dir = mkdtempSync(join(tmpdir(), 'sig-cli-'));
+  const analysisPath = join(dir, 'analysis.json');
+  const existingPath = join(dir, 'existing.md');
+  writeFileSync(analysisPath, JSON.stringify(analysis));
+  writeFileSync(existingPath, existing);
+
+  let output = '';
+  const original = process.stdout.write;
+  process.stdout.write = (chunk) => {
+    output += chunk;
+    return true;
+  };
+  try {
+    runCli([
+      'plan',
+      '--analysis',
+      analysisPath,
+      '--existing',
+      existingPath,
+      '--sha',
+      'b0ce7dc51999',
+      '--run-url',
+      'https://github.com/QwenLM/qwen-code/actions/runs/302',
+      '--run-id',
+      '302',
+      '--at',
+      '2026-07-27T03:20:00Z',
+    ]);
+  } finally {
+    process.stdout.write = original;
+  }
+
+  const planned = JSON.parse(output);
+  // The existing body's run-301 line must survive: a broken --existing path
+  // would produce a create-path body with only the new run.
+  assert.ok(planned.body.includes('[run 301]'));
+  assert.ok(planned.body.includes('[run 302]'));
+  assert.equal(planned.title, analysis.title);
 });

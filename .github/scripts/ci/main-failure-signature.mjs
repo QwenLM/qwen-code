@@ -331,7 +331,7 @@ function parseArgs(argv) {
   return { options, positional };
 }
 
-function runCli(argv) {
+export function runCli(argv) {
   const [command, ...rest] = argv;
   const { options, positional } = parseArgs(rest);
 
