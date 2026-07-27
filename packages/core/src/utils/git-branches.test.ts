@@ -44,6 +44,7 @@ function makeBareRemote(): string {
   const remote = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitremote-'));
   tmpRoots.push(remote);
   git(remote, 'init', '-q', '--bare');
+  git(remote, 'symbolic-ref', 'HEAD', 'refs/heads/master');
   return remote;
 }
 

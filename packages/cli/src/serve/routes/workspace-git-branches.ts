@@ -315,6 +315,7 @@ export function registerWorkspaceGitBranchRoutes(
     boundWorkspace: string;
     sendBridgeError: SendBridgeError;
     isWorkspaceTrusted?: () => boolean;
+    captureGenerationAssertion?: () => (() => void) | undefined;
     mutate: (opts?: { strict?: boolean }) => RequestHandler;
   },
 ): void {
@@ -328,6 +329,7 @@ export function registerWorkspaceGitBranchRoutes(
       deps.boundWorkspace,
       deps.sendBridgeError,
       'GET /workspace/git/branches',
+      deps.captureGenerationAssertion?.(),
     );
   });
   app.post(
@@ -336,6 +338,14 @@ export function registerWorkspaceGitBranchRoutes(
     (req, res) => {
       if (deps.isWorkspaceTrusted?.() === false) {
         sendUntrustedWorkspaceResponse(res);
+        return;
+      }
+      try {
+        deps.captureGenerationAssertion?.()?.();
+      } catch (err) {
+        deps.sendBridgeError(res, err, {
+          route: 'POST /workspace/git/checkout',
+        });
         return;
       }
       void handleCheckout(
@@ -355,6 +365,14 @@ export function registerWorkspaceGitBranchRoutes(
         sendUntrustedWorkspaceResponse(res);
         return;
       }
+      try {
+        deps.captureGenerationAssertion?.()?.();
+      } catch (err) {
+        deps.sendBridgeError(res, err, {
+          route: 'POST /workspace/git/branch',
+        });
+        return;
+      }
       void handleCreateBranch(
         req,
         res,
@@ -369,6 +387,12 @@ export function registerWorkspaceGitBranchRoutes(
       sendUntrustedWorkspaceResponse(res);
       return;
     }
+    try {
+      deps.captureGenerationAssertion?.()?.();
+    } catch (err) {
+      deps.sendBridgeError(res, err, { route: 'POST /workspace/git/push' });
+      return;
+    }
     void handlePush(
       req,
       res,
@@ -380,6 +404,12 @@ export function registerWorkspaceGitBranchRoutes(
   app.post('/workspace/git/pull', deps.mutate({ strict: true }), (req, res) => {
     if (deps.isWorkspaceTrusted?.() === false) {
       sendUntrustedWorkspaceResponse(res);
+      return;
+    }
+    try {
+      deps.captureGenerationAssertion?.()?.();
+    } catch (err) {
+      deps.sendBridgeError(res, err, { route: 'POST /workspace/git/pull' });
       return;
     }
     void handlePull(
@@ -396,6 +426,14 @@ export function registerWorkspaceGitBranchRoutes(
     (req, res) => {
       if (deps.isWorkspaceTrusted?.() === false) {
         sendUntrustedWorkspaceResponse(res);
+        return;
+      }
+      try {
+        deps.captureGenerationAssertion?.()?.();
+      } catch (err) {
+        deps.sendBridgeError(res, err, {
+          route: 'POST /workspace/git/commit',
+        });
         return;
       }
       void handleCommit(
