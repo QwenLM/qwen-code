@@ -8590,6 +8590,43 @@ describe('createServeApp', () => {
       expect(bridge.calls).toHaveLength(0);
     });
 
+    it('forwards a valid UUID sessionId to the bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const res = await request(app)
+        .post('/session')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionId: '550e8400-e29b-41d4-a716-446655440000' });
+
+      expect(res.status).toBe(200);
+      expect(bridge.calls[0]).toMatchObject({
+        sessionId: '550e8400-e29b-41d4-a716-446655440000',
+      });
+    });
+
+    it('400 when sessionId is not a UUID (path traversal guard)', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const bad = ['../../etc/cron.d/evil', 'my-feature-branch', 123, ''];
+      for (const sessionId of bad) {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sessionId });
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('invalid_session_id');
+      }
+      expect(bridge.calls).toHaveLength(0);
+    });
+
     it('400 when cwd is relative', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(

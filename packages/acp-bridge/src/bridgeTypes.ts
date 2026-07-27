@@ -100,9 +100,10 @@ export interface BridgeSpawnRequest {
   branch?: { name: string; baseBranch: string };
   /**
    * Optional caller-supplied session id. When provided, the agent uses this
-   * id instead of generating a random UUID. Validated by the core Config
-   * constructor (format + duplicate detection). Passed through ACP `_meta`
-   * since the protocol's NewSessionRequest has no native sessionId field.
+   * id instead of generating a random UUID. Must be validated at the route
+   * boundary since the core Config constructor uses it verbatim. Passed
+   * through ACP `_meta` since the protocol's NewSessionRequest has no native
+   * sessionId field.
    */
   sessionId?: string;
 }
@@ -174,6 +175,8 @@ export const LOAD_REPLAY_META_KEY = 'qwen.session.loadReplay';
 export const LOAD_REPLAY_PAGE_SIZE_META_KEY = 'qwen.session.loadReplayPageSize';
 export const LOAD_REPLAY_BULK_MODE = 'bulk';
 export const LOAD_REPLAY_VERSION = 1 as const;
+
+export const REQUESTED_SESSION_ID_META_KEY = 'qwen-code/sessionId';
 
 export const CHANNEL_STARTUP_PROFILE_META_KEY =
   'qwen.daemon.channelStartupProfile';

@@ -300,6 +300,7 @@ import {
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
   PROMPT_CANCEL_METHOD,
+  REQUESTED_SESSION_ID_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   type ClientMcpOverWsRuntimeConfig,
   type BridgeLoadReplayEnvelope,
@@ -3918,10 +3919,9 @@ class QwenAgent implements Agent {
 
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
     const { cwd, mcpServers } = params;
-    // Extract caller-supplied session id from ACP _meta extension (#7831).
     const requestedSessionId =
-      typeof params._meta?.['qwen-code.sessionId'] === 'string'
-        ? (params._meta['qwen-code.sessionId'] as string)
+      typeof params._meta?.[REQUESTED_SESSION_ID_META_KEY] === 'string'
+        ? (params._meta[REQUESTED_SESSION_ID_META_KEY] as string)
         : undefined;
     const parentContext = extractDaemonTraceContext(params);
     return await withDaemonSpan(

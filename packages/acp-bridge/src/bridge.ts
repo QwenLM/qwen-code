@@ -105,6 +105,7 @@ import {
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
   PROMPT_CANCEL_METHOD,
+  REQUESTED_SESSION_ID_META_KEY,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
 } from './bridgeTypes.js';
 import { getChannelStartupProfileAttributes } from './channel-startup-profile.js';
@@ -2602,7 +2603,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   cwd: boundWorkspace,
                   mcpServers: [],
                   ...(requestedSessionId
-                    ? { _meta: { 'qwen-code.sessionId': requestedSessionId } }
+                    ? {
+                        _meta: {
+                          [REQUESTED_SESSION_ID_META_KEY]: requestedSessionId,
+                        },
+                      }
                     : {}),
                 }),
               ),

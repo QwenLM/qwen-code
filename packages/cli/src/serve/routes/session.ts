@@ -1262,17 +1262,20 @@ export function registerSessionRoutes(
     // Optional caller-supplied session id. Validated at the route boundary
     // so a 400 surfaces before touching the bridge. The core Config
     // constructor uses it verbatim (falling back to randomUUID when absent).
+    // UUID format is enforced to prevent path traversal and to stay
+    // compatible with SessionService's SESSION_FILE_PATTERN.
     const rawSessionId = body['sessionId'];
     let requestedSessionId: string | undefined;
     if (rawSessionId !== undefined && rawSessionId !== null) {
       if (
         typeof rawSessionId !== 'string' ||
-        rawSessionId.length === 0 ||
-        rawSessionId.length > 128
+        !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+          rawSessionId,
+        )
       ) {
         res.status(400).json({
           error:
-            '`sessionId` must be a non-empty string (max 128 chars) when provided',
+            '`sessionId` must be a UUID (e.g. "550e8400-e29b-41d4-a716-446655440000")',
           code: 'invalid_session_id',
         });
         return;
