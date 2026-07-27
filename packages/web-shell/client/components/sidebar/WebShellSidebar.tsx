@@ -50,6 +50,7 @@ import {
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
   PlusIcon,
+  RadioTowerIcon,
   SearchIcon,
   SettingsIcon,
   SquarePenIcon,
@@ -148,6 +149,7 @@ export interface WebShellSidebarLockedWorkspace {
 export type WebShellSidebarPrimaryNavItem =
   | 'newTask'
   | 'plugins'
+  | 'channels'
   | 'scheduledTasks'
   | 'goals';
 
@@ -178,6 +180,7 @@ const DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] = [
 const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[] = [
   'newTask',
   'plugins',
+  'channels',
   'scheduledTasks',
   'goals',
 ];
@@ -270,6 +273,7 @@ interface WebShellSidebarProps {
   onCollapsedChange: (collapsed: boolean) => void;
   onOpenSettings: () => void;
   onOpenPlugins: () => void;
+  onOpenChannels: () => void;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
   onOpenGoals: () => void;
@@ -499,6 +503,7 @@ export function WebShellSidebar({
   onCollapsedChange,
   onOpenSettings,
   onOpenPlugins,
+  onOpenChannels,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
   onOpenGoals,
@@ -4013,6 +4018,20 @@ export function WebShellSidebar({
                 <BlocksIcon size={16} strokeWidth={1.2} />
               </span>
               {!collapsed && <span>{t('sidebar.plugins')}</span>}
+            </button>
+          )}
+          {primaryNavItems.has('channels') && (
+            <button
+              className={styles.pluginButton}
+              type="button"
+              title={t('sidebar.channels')}
+              aria-label={t('sidebar.channels')}
+              onClick={onOpenChannels}
+            >
+              <span className={styles.navIcon}>
+                <RadioTowerIcon size={16} strokeWidth={1.2} />
+              </span>
+              {!collapsed && <span>{t('sidebar.channels')}</span>}
             </button>
           )}
           {primaryNavItems.has('scheduledTasks') && (
