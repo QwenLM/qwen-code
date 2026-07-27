@@ -17,7 +17,7 @@ import { access, lstat, open, readFile, stat } from 'node:fs/promises';
 import * as path from 'node:path';
 import { promisify } from 'node:util';
 import type { Hunk } from 'diff';
-import { findGitRoot } from './gitUtils.js';
+import { findGitRoot, readFirstLineNoFollow } from './gitUtils.js';
 
 /** Re-export so consumers don't need to depend on `diff` directly. */
 export type GitDiffHunk = Hunk;
@@ -1381,13 +1381,17 @@ async function detectGitOperation(
  * which is the right answer for a main worktree (no `commondir` file).
  */
 async function resolveCommonGitDir(gitDir: string): Promise<string> {
-  try {
-    const raw = (await readFile(path.join(gitDir, 'commondir'), 'utf8')).trim();
-    if (!raw) return gitDir;
-    return path.isAbsolute(raw) ? raw : path.resolve(gitDir, raw);
-  } catch {
-    return gitDir;
-  }
+  // Read it the way gitDirect.ts already reads this same file: O_NOFOLLOW
+  // refuses a symlink and O_NONBLOCK never blocks on a FIFO. A plain readFile
+  // on a crafted `commondir` named pipe would hang forever and pin a libuv
+  // thread-pool slot, and `getGitWorkingTreeStatus` polls unattended, so it has
+  // to survive a hostile repository -- the same hazard countStashEntries below
+  // guards against for the reflog it reads.
+  const raw = (
+    await readFirstLineNoFollow(path.join(gitDir, 'commondir'))
+  )?.trim();
+  if (!raw) return gitDir;
+  return path.isAbsolute(raw) ? raw : path.resolve(gitDir, raw);
 }
 
 /** Stash count = lines in `<commonDir>/logs/refs/stash` (0 when absent). */
