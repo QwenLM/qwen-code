@@ -219,6 +219,19 @@ export interface BridgeOptions {
    */
   compactedReplayMaxBytes?: number;
   /**
+   * Per-session cap on the number of raw events retained in the in-flight
+   * live journal (the current unfinished turn). When exceeded, the oldest
+   * journal entries are dropped. Defaults to 10 000. Must be a positive
+   * safe integer.
+   */
+  maxJournalEvents?: number;
+  /**
+   * Per-session byte cap on the in-flight live journal. When exceeded, the
+   * oldest journal entries are dropped (at least one entry is always kept).
+   * Defaults to 8 MiB. Must be a positive safe integer.
+   */
+  maxJournalBytes?: number;
+  /**
    * Per-`requestPermission` wall clock. After this many ms with
    * no client vote, the agent's permission promise resolves as
    * cancelled — the per-session FIFO can drain instead of poisoning
@@ -451,6 +464,9 @@ export interface BridgeOptions {
    * reports itself unavailable (daemon-only).
    */
   onCreateSubSession?: CreateSubSessionHandler;
+  /** Handles one child-initiated Channel delivery attempt. The bridge
+   * authenticates the session and publishes the sanitized result event. */
+  onChannelDelivery?: ChannelDeliveryHandler;
 }
 
 /**
@@ -515,3 +531,50 @@ export interface CreateSubSessionResult {
 export type CreateSubSessionHandler = (
   info: CreateSubSessionInfo,
 ) => Promise<CreateSubSessionResult>;
+
+// Canonical set — cli channel-delivery-ipc.ts and bridgeClient.ts import this;
+// sdk-typescript events.ts carries an independent copy with a cross-check test.
+export type ChannelDeliveryErrorCode =
+  | 'channel_worker_unavailable'
+  | 'channel_delivery_timeout'
+  | 'channel_delivery_invalid'
+  | 'channel_delivery_rejected'
+  | 'channel_delivery_queue_full'
+  | 'channel_delivery_failed';
+
+export const CHANNEL_DELIVERY_ERROR_CODES: ReadonlySet<string> = new Set([
+  'channel_worker_unavailable',
+  'channel_delivery_timeout',
+  'channel_delivery_invalid',
+  'channel_delivery_rejected',
+  'channel_delivery_queue_full',
+  'channel_delivery_failed',
+]);
+
+export interface ChannelDeliveryInfo {
+  sessionId: string;
+  deliveryId: string;
+  source: 'prompt' | 'scheduled';
+  target: {
+    channelName: string;
+    type: 'user' | 'chat';
+    id: string;
+  };
+  text: string;
+  promptId?: string;
+  taskId?: string;
+  firedAt?: number;
+}
+
+export type ChannelDeliveryHostResult =
+  | { status: 'delivered' }
+  | { status: 'skipped' }
+  | {
+      status: 'failed';
+      code: ChannelDeliveryErrorCode;
+      error: string;
+    };
+
+export type ChannelDeliveryHandler = (
+  info: ChannelDeliveryInfo,
+) => Promise<ChannelDeliveryHostResult>;

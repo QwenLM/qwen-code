@@ -132,6 +132,13 @@ describe('AgentTool', () => {
     // paths, which now register/unregister in the BackgroundTaskRegistry
     // to surface the run in the pill+dialog. A no-op stub registry is
     // enough for these tests — they don't assert on registry behavior.
+    //
+    // It must still stub every registry method `agent.ts` reaches, though.
+    // The background body wraps its work in a try/catch that routes any
+    // throw to `registry.fail()`, so a method missing here does not surface
+    // as "not a function" — it silently turns a successful run into a
+    // failed one. Keep this list in sync with the `registry.*` calls in
+    // agent.ts.
     const stubRegistry = {
       assertCanStartBackgroundAgent: vi.fn(),
       canStartBackgroundAgent: vi.fn().mockReturnValue(true),
@@ -142,8 +149,15 @@ describe('AgentTool', () => {
         .fn()
         .mockResolvedValue({ id: Symbol('background-slot') }),
       releaseBackgroundSlot: vi.fn(),
+      getQueuedCount: vi.fn().mockReturnValue(0),
       register: vi.fn(),
       unregisterForeground: vi.fn(),
+      registerResidentAgent: vi.fn(),
+      // Returns boolean on the real registry; the GOAL completion path calls
+      // this immediately before registry.complete().
+      unregisterResidentAgent: vi.fn().mockReturnValue(true),
+      // AgentTask | undefined — undefined means "nothing to restart".
+      restartCompletedAgent: vi.fn(),
       complete: vi.fn(),
       fail: vi.fn(),
       finalizeCancelled: vi.fn(),
@@ -152,11 +166,15 @@ describe('AgentTool', () => {
       get: vi.fn(),
       getAll: vi.fn().mockReturnValue([]),
       drainMessages: vi.fn().mockReturnValue([]),
+      waitForMessages: vi.fn().mockResolvedValue([]),
       beginFinishing: vi.fn().mockReturnValue(true),
       queueMessage: vi.fn(),
       queueExternalInput: vi.fn(),
       wakeExternalInputWaiters: vi.fn(),
       appendActivity: vi.fn(),
+      // Real signature returns the unsubscribe callback, which agent.ts
+      // stores and later invokes — a bare vi.fn() would throw on cleanup.
+      bridgeApprovalEvents: vi.fn().mockReturnValue(vi.fn()),
     };
     const stubMonitorRegistry = {
       setAgentNotificationCallback: vi.fn(),
@@ -227,6 +245,8 @@ describe('AgentTool', () => {
       listSubagents: vi.fn().mockResolvedValue(mockSubagents),
       loadSubagent: vi.fn(),
       createAgentHeadless: vi.fn(),
+      resolveModelGrade: vi.fn().mockReturnValue(undefined),
+      getAvailableModelGrades: vi.fn().mockReturnValue(new Map()),
       addChangeListener: vi.fn((listener: () => void) => {
         changeListeners.push(listener);
         return () => {
@@ -444,6 +464,49 @@ describe('AgentTool', () => {
       expect(properties.properties.subagent_type.enum).toBeUndefined();
     });
 
+    it('advertises model grades without exposing model selectors', async () => {
+      vi.mocked(mockSubagentManager.getAvailableModelGrades).mockReturnValue(
+        new Map([['small', 'fast']]),
+      );
+
+      await agentTool.refreshSubagents();
+
+      const properties = agentTool.schema.parametersJsonSchema as {
+        properties: {
+          model?: {
+            enum?: string[];
+            description?: string;
+          };
+        };
+      };
+      expect(properties.properties.model?.enum).toEqual(['small']);
+      expect(properties.properties.model?.description).toContain(
+        'explicit model keep their configured model',
+      );
+    });
+
+    it('removes the model property when grades become empty', async () => {
+      vi.mocked(mockSubagentManager.getAvailableModelGrades).mockReturnValue(
+        new Map([['small', 'fast']]),
+      );
+      await agentTool.refreshSubagents();
+
+      const withGrades = agentTool.schema.parametersJsonSchema as {
+        properties: { model?: { enum?: string[] } };
+      };
+      expect(withGrades.properties.model?.enum).toEqual(['small']);
+
+      vi.mocked(mockSubagentManager.getAvailableModelGrades).mockReturnValue(
+        new Map(),
+      );
+      await agentTool.refreshSubagents();
+
+      const withoutGrades = agentTool.schema.parametersJsonSchema as {
+        properties: { model?: { enum?: string[] } };
+      };
+      expect(withoutGrades.properties.model).toBeUndefined();
+    });
+
     it('declares the background default and foreground opt-out', () => {
       const properties = agentTool.schema.parametersJsonSchema as {
         properties: {
@@ -460,6 +523,9 @@ describe('AgentTool', () => {
       );
       expect(properties.properties.run_in_background.description).toContain(
         'interactive fork',
+      );
+      expect(properties.properties.run_in_background.description).toContain(
+        'Nested agents run in the foreground unless run_in_background is explicitly true',
       );
     });
 
@@ -617,6 +683,52 @@ describe('AgentTool', () => {
       expect(result).toBe(
         'Parameter "subagent_type" must be a non-empty string.',
       );
+    });
+
+    it('rejects an empty model grade', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          model: '  ',
+        }),
+      ).toMatch(/model grade/i);
+    });
+
+    it('rejects an unknown model grade', () => {
+      vi.mocked(mockSubagentManager.getAvailableModelGrades).mockReturnValue(
+        new Map([['small', 'fast']]),
+      );
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          model: 'high',
+        }),
+      ).toBe('Unknown model grade "high". Available: small.');
+    });
+
+    it('rejects a model grade for fork agents', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          subagent_type: 'fork',
+          model: 'high',
+        }),
+      ).toMatch(/cannot be used with subagent_type "fork"/i);
+    });
+
+    it('rejects a model grade for named teammates', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate: vi.fn(),
+      } as never);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'helper',
+          model: 'high',
+        }),
+      ).toMatch(/not supported for a named teammate/i);
     });
 
     it.each(['all', '1', '12'] as const)(
@@ -1083,6 +1195,28 @@ describe('AgentTool', () => {
       );
     });
 
+    it('blocks a model grade if a team becomes active after validation', async () => {
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Search files',
+        prompt: 'Find the config',
+        name: 'searcher',
+        model: 'high',
+      });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(partToString(result.llmContent)).toMatch(
+        /not supported for a named teammate/i,
+      );
+      expect(spawnTeammate).not.toHaveBeenCalled();
+    });
+
     it('rejects plan_mode_required direct execution from a subagent context', async () => {
       const spawnTeammate = vi.fn().mockResolvedValue(undefined);
       vi.mocked(config.getTeamManager).mockReturnValue({
@@ -1311,6 +1445,7 @@ describe('AgentTool', () => {
         description: 'Fork from a nested sub-agent',
         prompt: 'Do work',
         subagent_type: 'fork',
+        run_in_background: true,
       });
       const result = await runWithAgentContext('sub-1', () =>
         invocation.execute(new AbortController().signal),
@@ -2494,11 +2629,13 @@ describe('AgentTool', () => {
       function lastStartSpec(): {
         depth?: number;
         parentAgentId?: string;
+        agentDescription?: string;
       } {
         const calls = mockStartSubagentSpan.mock.calls;
         return calls[calls.length - 1][0] as {
           depth?: number;
           parentAgentId?: string;
+          agentDescription?: string;
         };
       }
 
@@ -2643,6 +2780,9 @@ describe('AgentTool', () => {
         const spec = lastStartSpec();
         expect(spec.depth).toBe(0);
         expect(spec.parentAgentId).toBeUndefined();
+        expect(spec.agentDescription).toBe(
+          'Specialized agent for searching and analyzing files',
+        );
       });
 
       it('startSubagentSpan receives depth=parentDepth+1 when invoked inside an outer agent frame', async () => {
@@ -3116,6 +3256,7 @@ describe('AgentTool', () => {
           getBackgroundTaskRegistry: () => {
             register: ReturnType<typeof vi.fn>;
             complete: ReturnType<typeof vi.fn>;
+            fail: ReturnType<typeof vi.fn>;
           };
         }
       ).getBackgroundTaskRegistry();
@@ -3154,6 +3295,11 @@ describe('AgentTool', () => {
       );
 
       await vi.runAllTimersAsync();
+      // Checked before the completion assertion on purpose: the background
+      // body funnels any throw into registry.fail(), so an incomplete stub
+      // shows up here as the actual error message rather than as an
+      // inscrutable "complete: 0 calls" further down.
+      expect(stubRegistry.fail).not.toHaveBeenCalled();
       expect(stubRegistry.complete).toHaveBeenCalledWith(
         expect.any(String),
         'headless fork result',
@@ -4537,6 +4683,37 @@ describe('AgentTool', () => {
       writeMetaSpy.mockRestore();
     });
 
+    it('uses the resolved model grade for background slot selection and launch', async () => {
+      vi.mocked(mockSubagentManager.resolveModelGrade).mockReturnValue(
+        'mapped-model',
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+        model: 'high',
+      });
+      await invocation.execute();
+
+      expect(mockSubagentManager.resolveModelGrade).toHaveBeenCalledWith(
+        'high',
+        expect.objectContaining({ name: 'monitor' }),
+      );
+      expect(mockRegistry.tryReserveBackgroundSlot).toHaveBeenCalledWith(
+        'mapped-model',
+      );
+      expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'mapped-model' }),
+        expect.anything(),
+        expect.objectContaining({
+          modelConfigOverrides: { model: 'mapped-model' },
+        }),
+      );
+    });
+
     it('does not persist the parent base URL for a cross-provider runtime', async () => {
       const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
       vi.mocked(config.getContentGeneratorConfig).mockReturnValue({
@@ -5029,12 +5206,10 @@ describe('AgentTool', () => {
       );
     });
 
-    it('downgrades a background request from a nested sub-agent to an awaited foreground run', async () => {
+    it('rejects an explicit background request from a nested sub-agent', async () => {
       // Background delegation is top-level-only in v1: a nested launcher
-      // cannot honor the background completion contract (send_message /
-      // task_stop are excluded from its toolset, and completion
-      // notifications go to the top-level session). The run must complete
-      // inline instead of orphaning the child's results.
+      // cannot honor the completion contract. Do not silently turn an
+      // explicit background request into an awaited foreground run.
       vi.mocked(config.getMaxSubagentDepth).mockReturnValue(5);
       const params: AgentParams = {
         description: 'Start monitor from a nested sub-agent',
@@ -5051,11 +5226,19 @@ describe('AgentTool', () => {
       );
 
       const llmText = partToString(result.llmContent);
-      expect(llmText).not.toContain('Background agent launched');
-      expect(llmText).toContain('Monitor done');
-      expect(mockRegistry.register).toHaveBeenCalledWith(
-        expect.objectContaining({ isBackgrounded: false }),
-      );
+      expect(llmText).toContain('run_in_background: true');
+      expect(llmText).toContain('not supported from within a sub-agent');
+      expect(result.error?.message).toBe(llmText);
+      expect(result.returnDisplay).toMatchObject({
+        type: 'task_execution',
+        status: 'failed',
+        subagentName: 'monitor',
+      });
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+      expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+      expect(mockAgent.execute).not.toHaveBeenCalled();
+      expect(mockRegistry.register).not.toHaveBeenCalled();
+      expect(mockRegistry.tryReserveBackgroundSlot).not.toHaveBeenCalled();
     });
 
     it('keeps an omitted background flag in the foreground for nested sub-agents', async () => {

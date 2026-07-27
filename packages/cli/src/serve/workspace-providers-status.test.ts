@@ -422,6 +422,27 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     }
   });
 
+  it('loads the workspace env when no runtime env snapshot is injected', async () => {
+    const originalOpenaiModel = process.env['OPENAI_MODEL'];
+    delete process.env['OPENAI_MODEL'];
+    await fs.writeFile(path.join(workspace, '.env'), 'OPENAI_MODEL=env-model');
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      modelProviders: {
+        openai: [{ id: 'env-model', name: 'Env Model' }],
+      },
+    });
+    const provider = createWorkspaceProvidersStatusProvider();
+
+    try {
+      const result = await provider(workspace, false);
+
+      expect(result.current?.modelId).toBe('env-model(openai)');
+    } finally {
+      restoreEnv('OPENAI_MODEL', originalOpenaiModel);
+    }
+  });
+
   it('includes only non-empty fast model settings in current selection', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({

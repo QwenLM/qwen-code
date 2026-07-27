@@ -76,6 +76,7 @@ export type {
   BridgeSessionTranscriptPageRequest,
   BridgeGenerationModelSource,
   BridgeGenerationStreamEvent,
+  BridgeWorkspaceGenerationStreamEvent,
   BridgeSessionSummary,
   SessionMetadataUpdate,
   BridgeClientRequestContext,

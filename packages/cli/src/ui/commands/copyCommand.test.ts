@@ -541,6 +541,63 @@ describe('copyCommand', () => {
     });
   });
 
+  it('should copy single-character inline math and skip escaped/code spans', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistoryShallow.mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          {
+            text: 'Literal \\$xy$, code `$xy$`, longer ``a `$zz$` b``, then $x$ and $\\alpha$.',
+          },
+        ],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const first = await copyCommand.action(mockContext, 'inline-latex 1');
+    expect(mockCopyToClipboard).toHaveBeenLastCalledWith('x');
+    expect(first).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Inline LaTeX expression 1 copied to the clipboard',
+    });
+
+    const second = await copyCommand.action(mockContext, 'inline-latex 2');
+    expect(mockCopyToClipboard).toHaveBeenLastCalledWith('\\alpha');
+    expect(second).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Inline LaTeX expression 2 copied to the clipboard',
+    });
+  });
+
+  it('should copy formulas containing or adjacent to escaped dollars', async () => {
+    if (!copyCommand.action) throw new Error('Command has no action');
+
+    mockGetHistoryShallow.mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          {
+            text: String.raw`literal \$x$
+formula $x + \$5$
+literal then math: \$$x^2$
+math then literal: $x^2\$$`,
+          },
+        ],
+      },
+    ]);
+    mockCopyToClipboard.mockResolvedValue(undefined);
+
+    const expected = [String.raw`x + \$5`, 'x^2', String.raw`x^2\$`];
+    for (const [offset, expression] of expected.entries()) {
+      await copyCommand.action(mockContext, `inline-latex ${offset + 1}`);
+      expect(mockCopyToClipboard).toHaveBeenLastCalledWith(expression);
+    }
+  });
+
   it('should copy a numbered inline LaTeX expression with /copy latex inline 1', async () => {
     if (!copyCommand.action) throw new Error('Command has no action');
 

@@ -9,7 +9,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { FunctionDeclaration } from '@google/genai';
-import { AgentCore } from './agent-core.js';
+import { AgentCore, type ReasoningLoopResult } from './agent-core.js';
 import { attachJsonlTranscriptWriter } from '../agent-transcript.js';
 import {
   getCurrentAgentDepth,
@@ -40,6 +40,41 @@ import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../../core/contentGenerator.js';
+import {
+  getInvocationContext,
+  runWithInvocationContext,
+  type InvocationContextV1,
+} from '../../utils/invocation-context.js';
+import { GeminiChat } from '../../core/geminiChat.js';
+import { ContextState } from './agent-headless.js';
+
+describe('AgentCore.createChat manual plan-exit notice ownership', () => {
+  it('enables notices only for interactive agent chats', async () => {
+    const core = new AgentCore(
+      'notice-agent',
+      {} as Config,
+      { renderedSystemPrompt: 'system', initialMessages: [] },
+      { model: 'test-model' },
+      { max_turns: 1 },
+    );
+    const enableSpy = vi.spyOn(
+      GeminiChat.prototype,
+      'enableManualPlanExitNotices',
+    );
+
+    const interactiveChat = await core.createChat(new ContextState(), {
+      interactive: true,
+    });
+    expect(interactiveChat).toBeDefined();
+    expect(enableSpy).toHaveBeenCalledTimes(1);
+
+    const headlessChat = await core.createChat(new ContextState());
+    expect(headlessChat).toBeDefined();
+    expect(enableSpy).toHaveBeenCalledTimes(1);
+
+    enableSpy.mockRestore();
+  });
+});
 
 describe('AgentCore.runInAgentFrames', () => {
   // The deferred-approval `respond` callback that AgentCore hands to the
@@ -154,6 +189,31 @@ describe('AgentCore.runInAgentFrames', () => {
 
     expect(observedView).toBeUndefined();
     expect(observedName).toBe('inherit-agent');
+  });
+
+  it('clears the parent invocation context before running the reasoning loop', async () => {
+    const core = makeCore('isolated-agent');
+    const parentContext: InvocationContextV1 = {
+      version: 1,
+      sessionId: 'parent-session',
+      promptId: 'parent-prompt',
+    };
+    let observed: InvocationContextV1 | undefined;
+    vi.spyOn(
+      core as unknown as {
+        _runReasoningLoopInner: () => Promise<ReasoningLoopResult>;
+      },
+      '_runReasoningLoopInner',
+    ).mockImplementation(async () => {
+      observed = getInvocationContext();
+      return { text: '', terminateMode: null, turnsUsed: 0 };
+    });
+
+    await runWithInvocationContext(parentContext, () =>
+      core.runReasoningLoop({} as never, [], [], new AbortController()),
+    );
+
+    expect(observed).toBeUndefined();
   });
 
   it('uses inheritedView for deferred-approval continuation when the agent owns no view', async () => {

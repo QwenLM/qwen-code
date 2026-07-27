@@ -172,6 +172,7 @@ export {
 } from './session-tracing.js';
 export type {
   StartInteractionOptions,
+  StartLLMRequestSpanOptions,
   EndInteractionOptions,
   InteractionSpanResultStatus,
   LLMRequestMetadata,
@@ -238,6 +239,8 @@ export {
   addModelOutputAttributes,
   addToolInputAttributes,
   addToolResultAttributes,
+  addToolArgumentsAttributes,
+  addToolCallResultAttributes,
   areSensitiveSpanAttributesEnabled,
   truncateContent,
 } from './detailed-span-attributes.js';

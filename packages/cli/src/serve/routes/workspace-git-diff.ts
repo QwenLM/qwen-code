@@ -18,7 +18,9 @@ import type {
 } from '../workspace-registry.js';
 import {
   requireTrustedWorkspaceRuntime,
+  resolveContainedCwd,
   resolveWorkspaceRuntimeFromParam,
+  sendUntrustedWorkspaceResponse,
 } from '../workspace-route-runtime.js';
 import { applyReadHeaders } from './workspace-file-read.js';
 
@@ -104,12 +106,14 @@ async function handleDiffList(
   workspaceCwd: string,
   sendBridgeError: SendBridgeError,
   route: string,
+  assertGenerationOpen?: () => void,
 ): Promise<void> {
   try {
+    assertGenerationOpen?.();
     applyReadHeaders(res);
-    res
-      .status(200)
-      .json(buildDiffList(workspaceCwd, await fetchGitDiff(workspaceCwd)));
+    const result = await fetchGitDiff(workspaceCwd);
+    assertGenerationOpen?.();
+    res.status(200).json(buildDiffList(workspaceCwd, result));
   } catch (err) {
     sendBridgeError(res, err, { route });
   }
@@ -121,6 +125,7 @@ async function handleDiffFile(
   workspaceCwd: string,
   sendBridgeError: SendBridgeError,
   route: string,
+  assertGenerationOpen?: () => void,
 ): Promise<void> {
   const queryPath = req.query['path'];
   if (typeof queryPath !== 'string' || queryPath.length === 0) {
@@ -140,6 +145,7 @@ async function handleDiffFile(
       ? queryOldPath
       : undefined;
   try {
+    assertGenerationOpen?.();
     // Apply the read headers before the await (as handleDiffList does) so the
     // no-store/nosniff headers are also present on the error response if the
     // fetch throws.
@@ -149,6 +155,7 @@ async function handleDiffFile(
       queryPath,
       oldPath,
     );
+    assertGenerationOpen?.();
     res.status(200).json(buildFileHunks(workspaceCwd, queryPath, result));
   } catch (err) {
     sendBridgeError(res, err, { route });
@@ -157,23 +164,38 @@ async function handleDiffFile(
 
 export function registerWorkspaceGitDiffRoutes(
   app: Application,
-  deps: { boundWorkspace: string; sendBridgeError: SendBridgeError },
+  deps: {
+    boundWorkspace: string;
+    sendBridgeError: SendBridgeError;
+    isWorkspaceTrusted?: () => boolean;
+    captureGenerationAssertion?: () => (() => void) | undefined;
+  },
 ): void {
   app.get('/workspace/git/diff', (_req, res) => {
+    if (deps.isWorkspaceTrusted?.() === false) {
+      sendUntrustedWorkspaceResponse(res);
+      return;
+    }
     void handleDiffList(
       res,
       deps.boundWorkspace,
       deps.sendBridgeError,
       'GET /workspace/git/diff',
+      deps.captureGenerationAssertion?.(),
     );
   });
   app.get('/workspace/git/diff/file', (req, res) => {
+    if (deps.isWorkspaceTrusted?.() === false) {
+      sendUntrustedWorkspaceResponse(res);
+      return;
+    }
     void handleDiffFile(
       req,
       res,
       deps.boundWorkspace,
       deps.sendBridgeError,
       'GET /workspace/git/diff/file',
+      deps.captureGenerationAssertion?.(),
     );
   });
 }
@@ -200,9 +222,10 @@ export function registerWorkspaceQualifiedGitDiffRoutes(
     if (!runtime) return;
     void handleDiffList(
       res,
-      runtime.workspaceCwd,
+      resolveContainedCwd(req, runtime.workspaceCwd),
       deps.sendBridgeError,
       'GET /workspaces/:workspace/git/diff',
+      () => runtime.generationGuard?.assertOpen(),
     );
   });
   app.get('/workspaces/:workspace/git/diff/file', (req, res) => {
@@ -211,9 +234,10 @@ export function registerWorkspaceQualifiedGitDiffRoutes(
     void handleDiffFile(
       req,
       res,
-      runtime.workspaceCwd,
+      resolveContainedCwd(req, runtime.workspaceCwd),
       deps.sendBridgeError,
       'GET /workspaces/:workspace/git/diff/file',
+      () => runtime.generationGuard?.assertOpen(),
     );
   });
 }

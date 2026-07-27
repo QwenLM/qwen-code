@@ -8,14 +8,13 @@ import { type Config } from '../config/config.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import {
-  type PartListUnion,
-  type Content,
-  type FunctionDeclaration,
-  type GenerateContentResponseUsageMetadata,
-  createUserContent,
-  createModelContent,
+import type {
+  PartListUnion,
+  Content,
+  FunctionDeclaration,
+  GenerateContentResponseUsageMetadata,
 } from '@google/genai';
+import { createModelContent, createUserContent } from '../core/genai-compat.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';

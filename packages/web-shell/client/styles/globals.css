@@ -83,3 +83,52 @@
   --input: oklch(1 0 0 / 15%);
   --ring: oklch(0.556 0 0);
 }
+
+:is(
+  [data-web-shell-root]:where([data-web-shell-shadcn]),
+  [data-web-shell-portal-root]:where([data-web-shell-shadcn])
+),
+:is(
+    [data-web-shell-root]:where([data-web-shell-shadcn]),
+    [data-web-shell-portal-root]:where([data-web-shell-shadcn])
+  )
+  * {
+  box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+:is(
+    [data-web-shell-root]:where([data-web-shell-shadcn]),
+    [data-web-shell-portal-root]:where([data-web-shell-shadcn])
+  )
+  *::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+:is(
+    [data-web-shell-root]:where([data-web-shell-shadcn]),
+    [data-web-shell-portal-root]:where([data-web-shell-shadcn])
+  )
+  *::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+:is(
+    [data-web-shell-root]:where([data-web-shell-shadcn]),
+    [data-web-shell-portal-root]:where([data-web-shell-shadcn])
+  )
+  *::-webkit-scrollbar-thumb {
+  border: 2px solid var(--scrollbar-track);
+  border-radius: 999px;
+  background: var(--scrollbar-thumb);
+}
+
+:is(
+    [data-web-shell-root]:where([data-web-shell-shadcn]),
+    [data-web-shell-portal-root]:where([data-web-shell-shadcn])
+  )
+  *::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}

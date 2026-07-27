@@ -22,6 +22,11 @@ import {
   removeMCPServerStatus,
   updateMCPServerStatus,
 } from './mcp-client.js';
+import {
+  INVOCATION_CONTEXT_META_KEY,
+  runWithInvocationContext,
+  type InvocationContextV1,
+} from '../utils/invocation-context.js';
 
 vi.mock('node:fs/promises');
 
@@ -104,6 +109,115 @@ describe('DiscoveredMCPTool', () => {
   };
 
   let tool: DiscoveredMCPTool;
+
+  describe('invocation context metadata', () => {
+    const invocationContext: InvocationContextV1 = {
+      version: 1,
+      sessionId: 'session-1',
+      promptId: 'prompt-1',
+      originatorClientId: 'client-1',
+    };
+
+    const createDirectTool = (
+      mcpClient: McpDirectClient,
+      allowInvocationContext: boolean,
+    ) =>
+      new DiscoveredMCPTool(
+        mockCallableToolInstance,
+        serverName,
+        serverToolName,
+        baseDescription,
+        inputSchema,
+        undefined,
+        undefined,
+        undefined,
+        mcpClient,
+        undefined,
+        undefined,
+        undefined,
+        false,
+        allowInvocationContext,
+      );
+
+    const successfulClient = () =>
+      ({
+        callTool: vi.fn<McpDirectClient['callTool']>(async () => ({
+          content: [{ type: 'text', text: 'ok' }],
+        })),
+      }) satisfies McpDirectClient;
+
+    it('injects trusted request metadata for an allowed stdio tool', async () => {
+      const mcpClient = successfulClient();
+      const modelArguments = {
+        param: 'test',
+        _meta: {
+          [INVOCATION_CONTEXT_META_KEY]: { forged: true },
+        },
+      };
+
+      await runWithInvocationContext(invocationContext, () =>
+        createDirectTool(mcpClient, true)
+          .build(modelArguments)
+          .execute(new AbortController().signal),
+      );
+
+      expect(mcpClient.callTool).toHaveBeenCalledWith(
+        {
+          name: serverToolName,
+          arguments: modelArguments,
+          _meta: {
+            [INVOCATION_CONTEXT_META_KEY]: invocationContext,
+          },
+        },
+        undefined,
+        expect.objectContaining({ onprogress: expect.any(Function) }),
+      );
+    });
+
+    it.each([
+      { allowInvocationContext: false, runWithContext: true },
+      { allowInvocationContext: true, runWithContext: false },
+    ])(
+      'omits request metadata for $allowInvocationContext/$runWithContext',
+      async ({ allowInvocationContext, runWithContext }) => {
+        const mcpClient = successfulClient();
+        const execute = () =>
+          createDirectTool(mcpClient, allowInvocationContext)
+            .build({ param: 'test' })
+            .execute(new AbortController().signal);
+
+        if (runWithContext) {
+          await runWithInvocationContext(invocationContext, execute);
+        } else {
+          await execute();
+        }
+
+        expect(
+          Object.hasOwn(
+            vi.mocked(mcpClient.callTool).mock.calls[0][0],
+            '_meta',
+          ),
+        ).toBe(false);
+      },
+    );
+
+    it('preserves the policy through qualification and trust clones', async () => {
+      const mcpClient = successfulClient();
+      const clonedTool = createDirectTool(mcpClient, true)
+        .asFullyQualifiedTool()
+        .withTrust(true);
+
+      await runWithInvocationContext(invocationContext, () =>
+        clonedTool
+          .build({ param: 'test' })
+          .execute(new AbortController().signal),
+      );
+
+      expect(vi.mocked(mcpClient.callTool).mock.calls[0][0]._meta).toEqual({
+        [INVOCATION_CONTEXT_META_KEY]: invocationContext,
+      });
+    });
+  });
 
   beforeEach(() => {
     mockCallTool.mockClear();

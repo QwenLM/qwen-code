@@ -409,7 +409,43 @@ describe('agent-transcript', () => {
       cleanup();
     });
 
-    it('drops usage-only ROUND_TEXT to keep the canonical view valid', () => {
+    it('writes usage-only ROUND_TEXT with a model message for exporters', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath);
+
+      emitter.emit(AgentEventType.ROUND_TEXT, {
+        subagentId: 'agent-x',
+        runId: 'run-1',
+        round: 1,
+        text: '',
+        thoughtText: '',
+        usageMetadata: {
+          promptTokenCount: 100,
+          candidatesTokenCount: 20,
+          cachedContentTokenCount: 40,
+          totalTokenCount: 120,
+        },
+        timestamp: Date.now(),
+      });
+      cleanup();
+
+      const records = readJsonl(jsonlPath);
+      expect(records).toHaveLength(1);
+      expect(records[0]).toMatchObject({
+        type: 'assistant',
+        message: { role: 'model', parts: [] },
+        usageMetadata: {
+          promptTokenCount: 100,
+          candidatesTokenCount: 20,
+          cachedContentTokenCount: 40,
+          totalTokenCount: 120,
+        },
+        agentRunId: 'run-1',
+        agentRound: 1,
+      });
+    });
+
+    it('drops ROUND_TEXT with no text, thought, or usage', () => {
       const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
       const { emitter, cleanup } = makeWriter(jsonlPath);
 
@@ -418,7 +454,6 @@ describe('agent-transcript', () => {
         round: 1,
         text: '',
         thoughtText: '',
-        usageMetadata: { totalTokenCount: 42 },
         timestamp: Date.now(),
       });
       cleanup();

@@ -498,22 +498,33 @@ describe('package scripts', () => {
 
   it('runs changed autofix tests instead of full touched-package suites', () => {
     const workflow = readWorkflow('.github/workflows/qwen-autofix.yml');
+    const reviewVerificationRunner = readWorkflow(
+      '.github/scripts/run-autofix-review-verification.sh',
+    );
+    const reviewJob = getWorkflowJob(workflow, 'review-address');
 
-    for (const jobName of ['issue-autofix', 'review-address']) {
-      const job = getWorkflowJob(workflow, jobName);
-      const verifyStep = getWorkflowStep(job, 'Verification gate');
-
-      expect(verifyStep).toContain(
+    for (const verificationBody of [
+      getWorkflowStep(
+        getWorkflowJob(workflow, 'issue-autofix'),
+        'Verification gate',
+      ),
+      reviewVerificationRunner,
+    ]) {
+      expect(verificationBody).toContain(
         'npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests',
       );
-      expect(verifyStep).toContain(
+      expect(verificationBody).toContain(
         'bash "${RUNNER_TEMP}/resolve-owning-packages.sh"',
       );
-      expect(verifyStep).toContain('pkg.scripts?.test');
-      expect(verifyStep).toContain('!= *vitest*');
-      expect(verifyStep).not.toContain(
+      expect(verificationBody).toContain('pkg.scripts?.test');
+      expect(verificationBody).toContain('!= *vitest*');
+      expect(verificationBody).not.toContain(
         'npm run test --workspace "${p}" --if-present\n',
       );
     }
+
+    expect(getWorkflowStep(reviewJob, 'Verification gate')).toContain(
+      'bash "${RUNNER_TEMP}/run-autofix-review-verification.sh"',
+    );
   });
 });

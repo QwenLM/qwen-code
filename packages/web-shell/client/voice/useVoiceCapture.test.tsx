@@ -183,6 +183,85 @@ describe('useVoiceCapture', () => {
     expect(MockWebSocket.latest?.protocols).toBeUndefined();
   });
 
+  it('resumes audio during the start gesture before mic permission resolves', async () => {
+    let resolveStream: (stream: {
+      getTracks: () => (typeof track)[];
+    }) => void = () => undefined;
+    const getUserMedia = vi.fn(
+      () =>
+        new Promise<{ getTracks: () => (typeof track)[] }>((resolve) => {
+          resolveStream = resolve;
+        }),
+    );
+    Object.defineProperty(navigator, 'mediaDevices', {
+      value: { getUserMedia },
+      configurable: true,
+    });
+    const resume = vi.fn(async () => {});
+    class SuspendedAudioContext extends MockAudioContext {
+      override state = 'suspended';
+      override resume = resume;
+    }
+    Object.defineProperty(window, 'AudioContext', {
+      value: SuspendedAudioContext,
+      configurable: true,
+    });
+    const result = await renderHookHost();
+
+    act(() => {
+      result.start();
+    });
+
+    expect(getUserMedia).toHaveBeenCalledOnce();
+    expect(resume).toHaveBeenCalledOnce();
+    expect(capture?.status).toBe('connecting');
+
+    await act(async () => {
+      resolveStream({ getTracks: () => [track] });
+      await Promise.resolve();
+    });
+    const ws = MockWebSocket.latest;
+    if (!ws) throw new Error('WebSocket was not created');
+
+    await act(async () => {
+      ws.onopen?.();
+    });
+    expect(capture?.status).toBe('recording');
+  });
+
+  it('times out and cleans up when mobile audio resume stalls', async () => {
+    vi.useFakeTimers();
+    const close = vi.fn(async () => {});
+    class StalledAudioContext extends MockAudioContext {
+      override state = 'suspended';
+      override resume = vi.fn(() => new Promise<void>(() => undefined));
+      override close = close;
+    }
+    Object.defineProperty(window, 'AudioContext', {
+      value: StalledAudioContext,
+      configurable: true,
+    });
+    const result = await renderHookHost();
+
+    await act(async () => {
+      result.start();
+      await Promise.resolve();
+    });
+    expect(capture?.status).toBe('connecting');
+    expect(MockWebSocket.latest).toBeUndefined();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+
+    expect(onError).toHaveBeenCalledWith(
+      'Voice capture timed out while starting.',
+    );
+    expect(capture?.status).toBe('error');
+    expect(track.stop).toHaveBeenCalledOnce();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
   it('uses server error frame messages', async () => {
     const result = await renderHookHost();
 

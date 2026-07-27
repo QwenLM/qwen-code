@@ -412,7 +412,26 @@ function setupAcpTest(
 
   it('returns internal error details when model auth is required', async () => {
     const rig = new TestRig();
-    rig.setup('acp auth methods in error data');
+    rig.setup('acp auth methods in error data', {
+      settings: {
+        modelProviders: {
+          openai: [
+            {
+              id: 'e2e-authenticated-model',
+              name: 'E2E Authenticated Model',
+              baseUrl: 'http://127.0.0.1:9/v1',
+              envKey: 'E2E_OPENAI_API_KEY',
+            },
+          ],
+        },
+        env: { E2E_OPENAI_API_KEY: 'test-key' },
+        security: { auth: { selectedType: 'openai' } },
+        model: {
+          name: 'e2e-authenticated-model',
+          baseUrl: 'http://127.0.0.1:9/v1',
+        },
+      },
+    });
 
     const { sendRequest, cleanup, stderr } = setupAcpTest(rig);
 
@@ -430,21 +449,15 @@ function setupAcpTest(
         mcpServers: [],
       })) as {
         sessionId: string;
-        models: {
-          availableModels: Array<{ modelId: string }>;
-        };
       };
 
-      // Choose a qwen-oauth model to trigger auth-required path deterministically.
-      const qwenOauthModel = newSession.models.availableModels.find((model) =>
-        model.modelId.includes('qwen-oauth'),
-      );
-      expect(qwenOauthModel).toBeDefined();
+      // Request the discontinued route directly: non-OAuth sessions no longer
+      // advertise it, but the auth error path must still stay structured.
       await expect(
         sendRequest('session/set_config_option', {
           sessionId: newSession.sessionId,
           configId: 'model',
-          value: qwenOauthModel!.modelId,
+          value: 'coder-model(qwen-oauth)',
         }),
       ).rejects.toMatchObject({
         response: {
