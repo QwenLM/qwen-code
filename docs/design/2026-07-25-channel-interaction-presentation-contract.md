@@ -365,9 +365,19 @@ cancelled. The existing `ask_user_question` cancellation semantics then decide
 whether the run terminates; the adapter does not issue a second session-wide
 cancel.
 
-Optional model, elapsed-time, and token metadata may be projected into
-`statusLine` when the shared runtime supplies a snapshot. Missing metadata
-does not delay or change segment state.
+The first metadata projection is deliberately limited to the configured model
+and elapsed wall-clock time. DingTalk reads the optional model from the
+existing Channel configuration and renders a running line such as
+`Running · qwen3.7-max · 12s`. It refreshes the elapsed value no more than once
+every five seconds and writes the exact elapsed value with the terminal state,
+for example `Stopped · qwen3.7-max · 18s`. If the Channel configuration does
+not select a model, the line omits the model rather than inferring one.
+
+This increment does not expose token usage. Accurate per-turn token counts are
+not present in the current Channel bridge or lifecycle contract, and an
+estimate derived from visible text would be misleading. A later change may add
+token metadata only after the shared runtime supplies an authoritative
+per-turn snapshot. Missing metadata never delays or changes segment state.
 
 ## Feishu extension
 
