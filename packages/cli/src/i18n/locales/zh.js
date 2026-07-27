@@ -1705,8 +1705,9 @@ export default {
     '当前视觉模型：{{visionModel}}\n使用 "/model --vision <model-id>" 设置视觉桥接模型。',
   'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
     '当前图像模型：{{imageModel}}\n使用 "/model --image <model-id>" 设置图像生成模型。',
-  'Current compaction model: {{compactionModel}}\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction " to clear the override.':
-    '当前压缩模型：{{compactionModel}}\n使用 "/model --compaction <model-id>" 设置压缩模型，或使用 "/model --compaction " 清除覆盖设置。',
+  'Compaction model override cleared': '压缩模型覆盖已清除',
+  'Current compaction model: {{compactionModel}}\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.':
+    '当前压缩模型：{{compactionModel}}\n使用 "/model --compaction <model-id>" 设置压缩模型，或使用 "/model --compaction clear" 清除覆盖设置。',
   "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
     "语音模型 '{{modelName}}' 不唯一。请先配置唯一的模型 ID，再使用 /model --voice。",
   "Image model '{{modelName}}' matches multiple configured endpoints. Run /model --image without an argument and choose the exact endpoint.":

@@ -1914,7 +1914,7 @@ describe('modelCommand', () => {
         type: 'message',
         messageType: 'info',
         content:
-          'Current compaction model: compaction-model\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction " to clear the override.',
+          'Current compaction model: compaction-model\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.',
       });
     });
 
@@ -1943,7 +1943,45 @@ describe('modelCommand', () => {
         type: 'message',
         messageType: 'info',
         content:
-          'Current compaction model: not set (falls back to fast model, then main model)\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction " to clear the override.',
+          'Current compaction model: not set (falls back to fast model, then main model)\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.',
+      });
+    });
+
+    it('should clear compaction model override with --compaction clear', async () => {
+      const setValue = vi.fn();
+      const setCompactionModel = vi.fn();
+      mockContext = createMockCommandContext({
+        invocation: {
+          raw: '/model --compaction clear',
+          name: 'model',
+          args: '--compaction clear',
+        },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'gpt-4',
+              authType: AuthType.USE_OPENAI,
+            }),
+            setCompactionModel,
+          },
+          settings: createMockSettings(setValue),
+        },
+      });
+
+      const result = await modelCommand.action!(
+        mockContext,
+        '--compaction clear',
+      );
+
+      expect(setValue).toHaveBeenCalledWith(
+        expect.any(String),
+        'compactionModel',
+        undefined,
+      );
+      expect(setCompactionModel).toHaveBeenCalledWith(undefined);
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'info',
       });
     });
   });

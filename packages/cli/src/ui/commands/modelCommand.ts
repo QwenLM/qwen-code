@@ -779,11 +779,13 @@ export const modelCommand: SlashCommand = {
     }
 
     const isCompactionModelCommand =
-      args === '--compaction' || args.startsWith('--compaction ');
+      args === '--compaction' ||
+      args.startsWith('--compaction ') ||
+      args === '--compaction clear';
     if (isCompactionModelCommand) {
       const modelName = args.replace('--compaction', '').trim();
-      if (!modelName) {
-        if (args.startsWith('--compaction ') && settings) {
+      if (!modelName || modelName === 'clear') {
+        if (modelName === 'clear' && settings) {
           persistSetting(settings, 'compactionModel', undefined, scopeOverride);
           config.setCompactionModel(undefined);
           return {
@@ -800,7 +802,7 @@ export const modelCommand: SlashCommand = {
             type: 'message',
             messageType: 'info',
             content: t(
-              'Current compaction model: {{compactionModel}}\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction " to clear the override.',
+              'Current compaction model: {{compactionModel}}\nUse "/model --compaction <model-id>" to set compaction model, or "/model --compaction clear" to clear the override.',
               { compactionModel },
             ),
           };
