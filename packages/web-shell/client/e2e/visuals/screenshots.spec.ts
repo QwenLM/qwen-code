@@ -251,6 +251,13 @@ for (const theme of THEMES) {
       await expect(
         page.getByRole('heading', { name: 'Channels', level: 1 }),
       ).toBeVisible();
+      const configuredChannels = page.getByLabel('Configured channels');
+      await expect(
+        configuredChannels.getByText('dingtalk', { exact: true }),
+      ).toBeVisible();
+      await expect(
+        configuredChannels.getByText('release-notifier', { exact: true }),
+      ).toBeVisible();
       await expect(page.getByText('hidden-telegram')).toHaveCount(0);
       await captureScreenshot(page, `channel-manager-${theme}`);
     });

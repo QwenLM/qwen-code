@@ -46,6 +46,7 @@ const { channelState, useChannelsMock, workspaceState } = vi.hoisted(() => ({
       loading: false,
       error: undefined as Error | undefined,
       reload: vi.fn(),
+      setStartup: vi.fn(),
       start: vi.fn(),
       stop: vi.fn(),
       restart: vi.fn(),
@@ -140,6 +141,7 @@ beforeEach(() => {
   channelState.current.loading = false;
   channelState.current.error = undefined;
   useChannelsMock.mockReset();
+  channelState.current.setStartup.mockReset().mockResolvedValue(undefined);
   channelState.current.start.mockReset().mockResolvedValue(undefined);
   channelState.current.stop.mockReset().mockResolvedValue(undefined);
   channelState.current.restart.mockReset().mockResolvedValue(undefined);
@@ -182,6 +184,25 @@ describe('ChannelsManagerPage', () => {
     });
 
     expect(channelState.current.start).toHaveBeenCalledWith('DingTalk Bot');
+  });
+
+  it('updates whether a Channel starts with serve', async () => {
+    await renderPage();
+
+    const toggle =
+      container.querySelector<HTMLButtonElement>('[role="switch"]');
+    expect(toggle).not.toBeNull();
+    await act(async () => {
+      toggle?.click();
+    });
+
+    expect(channelState.current.setStartup).toHaveBeenCalledWith(
+      'DingTalk Bot',
+      {
+        expectedRevision: '1',
+        enabled: true,
+      },
+    );
   });
 
   it('disables lifecycle controls without a bearer token', async () => {

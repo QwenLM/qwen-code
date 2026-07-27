@@ -7198,7 +7198,8 @@ export function App({
                       initialFocusRef={
                         activePanel === 'plugins'
                           ? pluginTabRef
-                          : activePanel === 'extensions'
+                          : activePanel === 'extensions' ||
+                              activePanel === 'channels'
                             ? panelHeadingRef
                             : undefined
                       }
