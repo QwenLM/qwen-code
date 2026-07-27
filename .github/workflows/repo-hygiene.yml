@@ -120,6 +120,7 @@ jobs:
                 "glob",
                 "search_file_content",
                 "write_file",
+                "agent",
                 "run_shell_command(cat)",
                 "run_shell_command(rg)",
                 "run_shell_command(git diff)",
@@ -153,6 +154,8 @@ jobs:
           path: |
             ${{ env.WORKDIR }}/findings.json
             ${{ env.WORKDIR }}/report-only.md
+            ${{ env.WORKDIR }}/failure.md
+            ${{ env.WORKDIR }}/agent.log
           if-no-files-found: 'warn'
           retention-days: 7
 
