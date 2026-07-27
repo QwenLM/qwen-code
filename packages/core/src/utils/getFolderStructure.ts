@@ -91,9 +91,16 @@ async function readFullStructure(
     processedPaths.add(currentPath);
 
     if (currentItemCount >= options.maxItems) {
-      // If the root itself caused us to exceed, we can't really show anything.
-      // Otherwise, this folder won't be processed further.
-      // The parent that queued this would have set its own hasMoreSubfolders flag.
+      // The budget ran out before this folder's own contents could be read.
+      // It was already added to its parent, so without a marker it renders as
+      // a bare leaf and reads as an empty directory. The parent's
+      // hasMoreSubfolders flag says nothing about it either -- that flag means
+      // "I could not add every subfolder", and this one was added.
+      //
+      // Only one flag is set: formatStructure emits an indicator per flag, and
+      // hasMoreSubfolders alone produces the single trailing `...` that says
+      // the contents are unexplored, whether they are files or folders.
+      folderInfo.hasMoreSubfolders = true;
       continue;
     }
 
