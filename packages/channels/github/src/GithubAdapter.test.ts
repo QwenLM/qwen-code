@@ -758,6 +758,93 @@ describe('GithubChannel', () => {
       expect(channel.cursor.dispatchedComments).toContain('C1');
     });
 
+    it('skips meta lane bodies that were already dispatched', async () => {
+      await initWithoutLoop();
+      channel.cursor.dispatchedBodies = ['owner/repo|pr:99'];
+      mockOctokit.paginate.mockResolvedValueOnce([
+        makeNotification({
+          reason: 'review_requested',
+          last_read_at: '2026-07-01T12:00:00.000Z',
+          subject: {
+            title: 'feat: add divide',
+            url: 'https://api.github.com/repos/owner/repo/pulls/99',
+            type: 'PullRequest',
+          },
+        }),
+      ]);
+
+      await pollOnce();
+
+      expect(mockOctokit.rest.pulls.get).not.toHaveBeenCalled();
+      expect(channel.inboundEnvelopes).toHaveLength(0);
+    });
+
+    it('filters meta lane comments by sender and dedup before fallback', async () => {
+      channel = new TestableGithubChannel(
+        'test-github',
+        makeConfig({ senderPolicy: 'allowlist', allowedUsers: ['bob'] }),
+        makeBridge(),
+      );
+      mockOctokit.paginate.mockResolvedValueOnce([]);
+      await channel.connect();
+      channel.disconnect();
+      channel.cursor = {
+        lastProcessedAt: '2026-07-01T00:00:00.000Z',
+        dispatchedComments: ['C2'],
+      };
+      mockOctokit.paginate
+        .mockResolvedValueOnce([
+          makeNotification({
+            reason: 'review_requested',
+            last_read_at: '2026-07-01T12:00:00.000Z',
+            subject: {
+              title: 'feat: add divide',
+              url: 'https://api.github.com/repos/owner/repo/pulls/99',
+              type: 'PullRequest',
+            },
+          }),
+        ])
+        .mockResolvedValueOnce([
+          makeComment({
+            id: 1,
+            node_id: 'C1',
+            body: 'blocked',
+            user: { login: 'alice' },
+          }),
+          makeComment({
+            id: 2,
+            node_id: 'C2',
+            body: 'already sent',
+            user: { login: 'bob' },
+          }),
+          makeComment({
+            id: 3,
+            node_id: 'C3',
+            body: 'allowed',
+            user: { login: 'bob' },
+          }),
+        ]);
+      mockOctokit.rest.pulls.get.mockResolvedValue({
+        data: {
+          body: '',
+          state: 'open',
+          draft: false,
+          user: { login: 'alice' },
+          head: { ref: 'feature-divide' },
+          base: { ref: 'main' },
+        },
+      });
+
+      await pollOnce();
+
+      expect(channel.inboundEnvelopes[0]!.text).toBe('allowed');
+      expect(channel.inboundEnvelopes[0]!.metadata).not.toContain('@alice');
+      expect(channel.inboundEnvelopes[0]!.metadata).not.toContain(
+        'already sent',
+      );
+      expect(channel.cursor.dispatchedComments).toEqual(['C2', 'C3']);
+    });
+
     it('uses fallback review text when PR body and comments are empty', async () => {
       await initWithoutLoop();
       mockOctokit.paginate

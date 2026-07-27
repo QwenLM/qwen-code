@@ -362,6 +362,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       maxUpdatedAt,
       subjectTitle,
     } = ctx;
+    const bodyKey = `${chatId}|${threadId}`;
+    if (this.isDispatched(this.cursor.dispatchedBodies, bodyKey)) return;
     const meta =
       kind === 'pull'
         ? await this.fetchPrMeta(chatId, threadId, issueNumber)
@@ -374,18 +376,28 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
       windowSince,
       maxUpdatedAt,
     );
+    const newComments = comments.filter((c) => {
+      const senderId = (c.user?.login || 'unknown').toLowerCase();
+      return (
+        this.gate.isAllowed(senderId) &&
+        !this.isDispatched(
+          this.cursor.dispatchedComments,
+          this.commentDedupKey(c),
+        )
+      );
+    });
     const rawBody = meta.body || '';
     let text = this.botUsername
       ? stripBotMention(rawBody, this.botUsername)
       : rawBody;
-    let summaryComments = comments;
-    if (!text.trim() && comments.length > 0) {
-      const firstComment = comments[0]!;
+    let summaryComments = newComments;
+    if (!text.trim() && newComments.length > 0) {
+      const firstComment = newComments[0]!;
       const firstBody = firstComment.body || '';
       text = this.botUsername
         ? stripBotMention(firstBody, this.botUsername)
         : firstBody;
-      summaryComments = comments.slice(1);
+      summaryComments = newComments.slice(1);
     }
     if (!text.trim())
       text =
@@ -418,8 +430,8 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
     };
     try {
       await this.handleInbound(envelope);
-      this.recordDispatched('dispatchedBodies', `${chatId}|${threadId}`);
-      for (const comment of comments) {
+      this.recordDispatched('dispatchedBodies', bodyKey);
+      for (const comment of newComments) {
         this.recordDispatched(
           'dispatchedComments',
           this.commentDedupKey(comment),
