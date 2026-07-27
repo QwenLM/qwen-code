@@ -9314,6 +9314,80 @@ describe('DaemonSessionProvider', () => {
     expect(history?.hasMore).toBe(false);
   });
 
+  it('drops fetched transcript events whose records are already displayed', async () => {
+    // The pagination anchor can sit inside the retained window (e.g. the
+    // daemon's transcript backfill for a live-journal overflow returns the
+    // latest recordId), so a fetched page may include records the client
+    // already shows. prepend must dedup by sourceRecordId or those records
+    // render twice.
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const replayEvent = (
+      id: number,
+      text: string,
+      recordId: string,
+    ): DaemonEvent => ({
+      id,
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text },
+          _meta: {
+            'qwen.session.recordId': recordId,
+            qwenTranscript: { sourceRecordIds: [recordId] },
+          },
+        },
+      },
+    });
+    const session = createMockSession({
+      sessionId: 'session-history-dedup',
+      historyHasMore: true,
+      replaySnapshot: {
+        compactedReplay: [replayEvent(3, 'displayed prompt', 'record-2')],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    // The page overlaps the retained window: 'record-2' is already
+    // displayed; only 'record-1' is genuinely older.
+    sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: session.sessionId,
+      events: [
+        replayEvent(1, 'older prompt', 'record-1'),
+        replayEvent(2, 'displayed prompt', 'record-2'),
+      ],
+      hasMore: false,
+    });
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      history = useDaemonTranscriptHistory();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 25,
+    });
+    await act(async () => {
+      await history?.loadMore();
+      await flushPromises();
+    });
+
+    // 'record-2' is NOT duplicated; only the genuinely older 'record-1'
+    // is prepended.
+    expect(
+      blocks.map((block) => ('text' in block ? block.text : undefined)),
+    ).toEqual(['older prompt', 'displayed prompt']);
+  });
+
   it('keeps transient transcript page failures retryable', async () => {
     sdkMocks.capabilities.mockResolvedValue({
       workspaceCwd: '/mock-workspace',

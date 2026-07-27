@@ -1346,6 +1346,41 @@ describe('EventBus + CompactionEngine integration', () => {
     });
   });
 
+  it('replay marker anchor is the first retained recordId, not the last overall', () => {
+    // Critical regression (review): when the retained window holds
+    // MULTIPLE recordIds, the anchor must be the FIRST retained one (the
+    // eviction boundary). Anchoring on the last recordId across all seed
+    // events — which a retained segment may carry — puts `beforeRecordId`
+    // inside the retained window and re-fetches records the client
+    // already displays, duplicating transcript blocks (prepend has no
+    // dedup at the daemon boundary).
+    const engine = new TurnBoundaryCompactionEngine({ maxReplayBytes: 900 });
+    const bus = new EventBus(100, undefined, engine);
+    const segment = (recordId: string, pad: string) => ({
+      type: 'session_update' as const,
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: `${pad}-${'z'.repeat(300)}` },
+          _meta: { 'qwen.session.recordId': recordId },
+        },
+      },
+    });
+    // Three ~330B segments (total ~990 > 900): the first evicts, leaving
+    // rec-B (first retained) and rec-C (last overall) in the window.
+    bus.seedReplayEvents([
+      segment('rec-A', 'a'),
+      segment('rec-B', 'b'),
+      segment('rec-C', 'c'),
+    ]);
+
+    const snapshot = bus.snapshotReplay()!;
+    expect(snapshot.compactedTurns[0]?.type).toBe('history_truncated');
+    expect(snapshot.compactedTurns[0]?.data).toMatchObject({
+      recordId: 'rec-B',
+    });
+  });
+
   it('seed pre-scans compactedTurns for recordId anchor', () => {
     // Suggestion regression: seed() must pre-scan compactedTurns for
     // recordIds (mirroring seedReplayEvents) so eviction doesn't lose

@@ -174,11 +174,14 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
   // omitted from the marker in that case.
   private activeRecordId: string | undefined;
   // Pagination anchor for the replay-path `history_truncated` marker,
-  // captured at the first replay-window eviction. Unlike `activeRecordId`
-  // (which `ingest()` advances on every turn boundary), this value is
-  // frozen at the eviction boundary so the marker's `recordId` stays at
-  // the earliest retained position — a later `ingest()` must not push it
-  // past records the client already displays.
+  // frozen at the first replay-window eviction. Prefers the first
+  // retained recordId (the eviction boundary, so `beforeRecordId`
+  // fetches exactly the dropped records with no overlap); falls back to
+  // the last dropped recordId when the retained window carries no
+  // recordId. Deliberately NOT `activeRecordId` — that one is advanced
+  // by `ingest()` on every turn boundary and, when a retained segment
+  // carries the last seed recordId, would place the anchor inside the
+  // retained window and re-fetch records the client already displays.
   private replayAnchorRecordId: string | undefined;
 
   private slots: CompactedSlot[] = [];
@@ -602,6 +605,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
     let droppedBytes = 0;
     let droppedEvents = 0;
     let droppedTurns = 0;
+    let lastDroppedRecordId: string | undefined;
 
     while (
       this.replayBytes > this.maxReplayBytes &&
@@ -616,13 +620,28 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
       this.replayBytes -= dropped.bytes;
       this.truncatedEvents += dropped.events.length;
       this.truncatedTurns += dropped.turnCount;
+      const droppedRecordId = lastRecordIdIn(dropped.events);
+      if (droppedRecordId !== undefined) {
+        lastDroppedRecordId = droppedRecordId;
+      }
     }
 
     if (droppedSegmentCount > 0) {
       // Freeze the pagination anchor at the first eviction so later
-      // ingests don't advance it past the retained window's earliest
-      // recordId (see replayAnchorRecordId declaration).
-      this.replayAnchorRecordId ??= this.activeRecordId;
+      // ingests don't move it. Prefer the FIRST retained recordId — the
+      // eviction boundary itself — so `beforeRecordId` fetches exactly
+      // the dropped records with no overlap against the retained window.
+      // Only when the retained window carries no recordId at all (the
+      // live-journal-overflow fallback this anchor exists for) fall back
+      // to the last dropped recordId, which still reaches the older
+      // history without touching the recordId-less retained window.
+      // Using the pre-scanned `activeRecordId` (last recordId across ALL
+      // seed events) here was wrong: when a retained segment carried it,
+      // the anchor sat inside the retained window and `beforeRecordId`
+      // re-fetched records the client already displays, duplicating
+      // transcript blocks (prepend has no dedup).
+      this.replayAnchorRecordId ??=
+        this.firstRetainedReplayRecordId() ?? lastDroppedRecordId;
       this.compactReplaySegmentQueueIfNeeded();
       this.notifyReplayWindowEviction({
         droppedBytes,
@@ -634,6 +653,14 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         retainedEvents: this.flattenReplaySegments().length,
       });
     }
+  }
+
+  private firstRetainedReplayRecordId(): string | undefined {
+    for (let i = this.replaySegmentStart; i < this.replaySegments.length; i++) {
+      const recordId = lastRecordIdIn(this.replaySegments[i]!.events);
+      if (recordId !== undefined) return recordId;
+    }
+    return undefined;
   }
 
   private flattenReplaySegments(): BridgeEvent[] {

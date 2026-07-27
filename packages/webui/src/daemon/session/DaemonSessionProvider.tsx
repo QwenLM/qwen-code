@@ -150,8 +150,7 @@ function getPersistedReplayRecordId(event: DaemonEvent): string | undefined {
   if (event.type === 'history_truncated') {
     try {
       if (!isRecord(event.data)) return undefined;
-      const id = event.data['recordId'];
-      return typeof id === 'string' ? id : undefined;
+      return getString(event.data, 'recordId');
     } catch {
       return undefined;
     }
@@ -185,12 +184,33 @@ function prependTranscriptHistory(
   maxBlocks: number,
 ): boolean {
   const current = store.getSnapshot();
+  // Drop fetched events whose source records are already displayed.
+  // `beforeRecordId` pagination is exclusive of the anchor but the anchor
+  // can sit inside the retained window (e.g. the daemon's transcript
+  // backfill for a live-journal overflow returns the latest recordId), so
+  // a page may include records the client already shows. Prepend has no
+  // other dedup, so without this filter those records would render twice.
+  const displayedRecordIds = new Set<string>();
+  for (const block of current.blocks) {
+    for (const recordId of block.sourceRecordIds ?? []) {
+      displayedRecordIds.add(recordId);
+    }
+  }
+  const freshEvents =
+    displayedRecordIds.size === 0
+      ? events
+      : events.filter(
+          (event) =>
+            !event.sourceRecordIds?.some((recordId) =>
+              displayedRecordIds.has(recordId),
+            ),
+        );
   const historyStore = createDaemonTranscriptStore({
     maxBlocks: Number.MAX_SAFE_INTEGER,
     nextOrdinal: current.nextOrdinal,
     retainSubagentBlocks: current.retainSubagentBlocks,
   });
-  historyStore.dispatch(events);
+  historyStore.dispatch(freshEvents);
   const history = historyStore.getSnapshot();
   if (history.blocks.length + current.blocks.length > maxBlocks) {
     return false;
