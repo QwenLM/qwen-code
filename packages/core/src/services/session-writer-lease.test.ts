@@ -726,7 +726,7 @@ describe('SessionWriterLease', () => {
   );
 
   it.runIf(process.platform !== 'freebsd')(
-    'retries release after a transient filesystem failure',
+    'keeps a failed release terminal stable instead of retrying the primary path',
     async () => {
       const fixture = await createFixture();
       const lease = await SessionWriterLease.acquire(fixture.options);
@@ -738,15 +738,49 @@ describe('SessionWriterLease', () => {
       await fs.rename(lockPath, backupPath);
       await fs.mkdir(lockPath);
 
-      await expect(lease.release()).rejects.toBeInstanceOf(
-        SessionWriterUnavailableError,
-      );
+      const firstRelease = lease.release();
+      const secondRelease = lease.release();
+      expect(secondRelease).toBe(firstRelease);
+      await expect(firstRelease).rejects.toBeInstanceOf(SessionWriterLostError);
 
       await fs.rmdir(lockPath);
       await fs.rename(backupPath, lockPath);
-      await expect(lease.release()).resolves.toBeUndefined();
+      await expect(lease.release()).rejects.toBeInstanceOf(
+        SessionWriterLostError,
+      );
+      await fs.unlink(lockPath);
     },
   );
+
+  it('never reclaims a dead local owner when managed policy is enabled', async () => {
+    const fixture = await createFixture();
+    const owner = startLeaseProcess();
+    expect(
+      await requestChild(owner, { type: 'acquire', options: fixture.options }),
+    ).toMatchObject({ ok: true });
+    owner.kill('SIGKILL');
+    await waitForClose(owner);
+
+    await expect(
+      SessionWriterLease.acquire({
+        ...fixture.options,
+        reclaimPolicy: 'never',
+      }),
+    ).rejects.toBeInstanceOf(SessionWriterConflictError);
+  });
+
+  it('cannot remove a successor lock after release commits', async () => {
+    const fixture = await createFixture();
+    const first = await SessionWriterLease.acquire(fixture.options);
+    await first.release();
+    const successor = await SessionWriterLease.acquire(fixture.options);
+
+    await expect(first.release()).resolves.toBeUndefined();
+    await expect(successor.appendJsonLine({ successor: true })).resolves.toBe(
+      undefined,
+    );
+    await successor.release();
+  });
 
   it('elects only one stale-lock reclaimer across processes', async () => {
     const fixture = await createFixture();

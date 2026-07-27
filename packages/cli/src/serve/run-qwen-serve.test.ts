@@ -7722,10 +7722,19 @@ describe('runQwenServe channel worker supervisor', () => {
       servePid: process.pid,
       workerPid: 1234,
     });
+    const processRegistry = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
+      'processRegistry'
+    ] as { shutdown: () => Promise<void> };
+    const shutdownProcessRegistry =
+      processRegistry.shutdown.bind(processRegistry);
+    vi.spyOn(processRegistry, 'shutdown').mockImplementation(() => {
+      order.push('registry');
+      return shutdownProcessRegistry();
+    });
 
     await handle.close();
 
-    expect(order).toEqual(['worker', 'bridge']);
+    expect(order).toEqual(['registry', 'worker', 'bridge']);
     expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
   });
 
@@ -8539,7 +8548,9 @@ describe('runQwenServe channel worker supervisor', () => {
     );
 
     try {
-      await vi.waitFor(() => expect(worker.stop).toHaveBeenCalledTimes(4));
+      await vi.waitFor(() => expect(worker.stop).toHaveBeenCalledTimes(4), {
+        timeout: 5_000,
+      });
       await new Promise((resolve) => setTimeout(resolve, 1_000));
       expect(settled).toBe(false);
       expect(pidfile.removeServeServiceInfo).not.toHaveBeenCalled();

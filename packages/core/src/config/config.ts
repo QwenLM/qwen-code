@@ -1627,12 +1627,18 @@ export type SubSessionSpawner = (
   req: SubSessionSpawnRequest,
 ) => Promise<SubSessionSpawnResult>;
 
+class SessionWriterShutdownError extends SessionWriterUnavailableError {}
+
 export class Config {
   private sessionId: string;
   private sessionData?: ResumedSessionData;
   private readonly sessionRuntimeBaseDir: string;
   private sessionProjectDirRegistered = false;
   private pendingSessionWriterLease?: SessionWriterLease;
+  private sessionWriterReclaimPolicy: 'local' | 'never' = 'local';
+  private sessionWriterShutdownRequested = false;
+  private sessionWriterActivationPromise: Promise<void> | undefined;
+  private sessionWriterClosePromise: Promise<void> | undefined;
   /**
    * One-shot notice produced by `setupStartupWorktree` (Phase D-1) when the
    * CLI was launched with `--worktree`. The active entry point (TUI XOR
@@ -1905,6 +1911,10 @@ export class Config {
     rule: string,
   ) => Promise<void>;
   private initialized: boolean = false;
+  private initializationPromise?: Promise<void>;
+  private initializationSucceeded = false;
+  private shutdownRequested = false;
+  private resourceShutdownPromise?: Promise<void>;
   private proxyDispatcherReady?: Promise<void>;
   storage: Storage;
   private runtimeStatusWrite: Promise<void> = Promise.resolve();
@@ -2396,9 +2406,29 @@ export class Config {
     if (this.initialized) {
       throw Error('Config was already initialized');
     }
+    if (this.shutdownRequested) {
+      throw Error('Config is shutting down');
+    }
     this.initialized = true;
+    const initialization = this.initializeOnce(options);
+    this.initializationPromise = initialization;
+    await initialization;
+    this.initializationSucceeded = true;
+  }
+
+  private async initializeOnce(
+    options?: ConfigInitializeOptions,
+  ): Promise<void> {
     try {
-      await this.activateChatRecording();
+      const activation = this.activateChatRecording();
+      this.sessionWriterActivationPromise = activation;
+      try {
+        await activation;
+      } finally {
+        if (this.sessionWriterActivationPromise === activation) {
+          this.sessionWriterActivationPromise = undefined;
+        }
+      }
       registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
       this.sessionProjectDirRegistered = true;
       await this.initializeInternal(options);
@@ -2408,7 +2438,7 @@ export class Config {
         this.sessionProjectDirRegistered = false;
       }
       try {
-        await this.chatRecordingService?.close();
+        await this.closeSessionWriter();
       } catch (closeError) {
         throw new SessionWriterUnavailableError({
           cause: new AggregateError(
@@ -2896,6 +2926,9 @@ export class Config {
     if (!this.chatRecordingEnabled || !this.sessionWriterLeaseEnabled) {
       return;
     }
+    if (this.sessionWriterShutdownRequested) {
+      throw new SessionWriterShutdownError();
+    }
     const recorder = this.chatRecordingService;
     if (!recorder) throw new SessionWriterUnavailableError();
     let lease: SessionWriterLease | undefined;
@@ -2906,14 +2939,21 @@ export class Config {
         transcriptPath: this.getTranscriptPath(),
         processKind: 'acp',
         qwenVersion: this.cliVersion ?? null,
+        reclaimPolicy: this.sessionWriterReclaimPolicy,
         onOwnershipAcquired: (acquiredLease) => {
           lease = acquiredLease;
           this.pendingSessionWriterLease = acquiredLease;
         },
       });
+      if (this.sessionWriterShutdownRequested) {
+        throw new SessionWriterShutdownError();
+      }
       const location = await this.getSessionService().getSessionLocation(
         this.sessionId,
       );
+      if (this.sessionWriterShutdownRequested) {
+        throw new SessionWriterShutdownError();
+      }
       if (location === 'conflict' || location === 'archived') {
         throw new SessionTranscriptChangedError();
       }
@@ -2930,6 +2970,9 @@ export class Config {
         ? this.getSessionService().getSessionTitleInfo(this.sessionId)
         : undefined;
       await lease.assertOwnedAndUnchanged();
+      if (this.sessionWriterShutdownRequested) {
+        throw new SessionWriterShutdownError();
+      }
       this.sessionData = authoritative;
       recorder.activate(lease, authoritative, persistedTitleInfo);
       this.pendingSessionWriterLease = undefined;
@@ -2947,11 +2990,17 @@ export class Config {
       try {
         const ownedLease = lease ?? this.pendingSessionWriterLease;
         await ownedLease?.release();
-        if (this.pendingSessionWriterLease === ownedLease) {
+        if (
+          this.pendingSessionWriterLease === ownedLease &&
+          (ownedLease?.isReleased ?? true)
+        ) {
           this.pendingSessionWriterLease = undefined;
         }
       } catch (releaseError) {
-        if (releaseError instanceof SessionWriterLostError) {
+        if (
+          releaseError instanceof SessionWriterLostError ||
+          (lease ?? this.pendingSessionWriterLease)?.isReleased
+        ) {
           this.pendingSessionWriterLease = undefined;
         } else {
           failure = new SessionWriterUnavailableError({
@@ -4490,8 +4539,71 @@ export class Config {
    * This method is idempotent and safe to call multiple times.
    * It handles the case where initialization was not completed.
    */
-  async shutdown(options?: { shutdownTelemetry?: boolean }): Promise<void> {
+  async shutdown(options?: {
+    shutdownTelemetry?: boolean;
+    skipSessionWriter?: boolean;
+  }): Promise<void> {
+    this.shutdownRequested = true;
+    this.settingsWatcher?.stopWatching();
+    const closeWriter = () =>
+      this.closeSessionWriter().catch((error) => {
+        this.debugLogger.error(
+          'Failed to release session writer lease:',
+          error,
+        );
+      });
+    const earlyWriterClose =
+      !options?.skipSessionWriter &&
+      this.initializationPromise !== undefined &&
+      !this.initializationSucceeded
+        ? closeWriter()
+        : undefined;
+
     try {
+      if (!options?.skipSessionWriter && !earlyWriterClose) {
+        try {
+          this.chatRecordingService?.finalize();
+          await this.chatRecordingService?.flush();
+        } catch {
+          // Best-effort — don't block shutdown
+        }
+      }
+
+      await this.shutdownResources();
+    } finally {
+      if (!options?.skipSessionWriter) {
+        await (earlyWriterClose ?? closeWriter());
+      }
+      this.chatRecordingFailureListeners.clear();
+      if (options?.shutdownTelemetry !== false && isTelemetrySdkInitialized()) {
+        await shutdownTelemetry();
+      }
+    }
+  }
+
+  private shutdownResources(): Promise<void> {
+    if (this.resourceShutdownPromise) {
+      return this.resourceShutdownPromise;
+    }
+    const shutdown = this.shutdownResourcesOnce();
+    this.resourceShutdownPromise = shutdown;
+    const clear = () => {
+      if (this.resourceShutdownPromise === shutdown) {
+        this.resourceShutdownPromise = undefined;
+      }
+    };
+    void shutdown.then(clear, clear);
+    return shutdown;
+  }
+
+  private async shutdownResourcesOnce(): Promise<void> {
+    try {
+      try {
+        await this.initializationPromise;
+      } catch {
+        // Partial initialization still needs resource cleanup.
+      }
+
       // Drop this session's project-dir registry entry. It is registered during
       // initialization, so it is released here whenever that step completed —
       // in daemon mode, where one process serves many sessions, an unreleased
@@ -4501,22 +4613,9 @@ export class Config {
         this.sessionProjectDirRegistered = false;
       }
 
-      // Stop the settings watcher regardless of initialization state —
-      // it is started before Config.initialize() and would leak otherwise.
-      this.settingsWatcher?.stopWatching();
-
       if (!this.initialized) {
         // Nothing else to clean up if not initialized.
         return;
-      }
-
-      // Finalize the current session's metadata before cleanup, then drain
-      // the async write queue so no records are lost on exit.
-      try {
-        this.chatRecordingService?.finalize();
-        await this.chatRecordingService?.flush();
-      } catch {
-        // Best-effort — don't block shutdown
       }
 
       this.skillManager?.stopWatching();
@@ -4534,34 +4633,6 @@ export class Config {
     } catch (error) {
       // Log but don't throw - cleanup should be best-effort
       this.debugLogger.error('Error during Config shutdown:', error);
-    } finally {
-      await this.chatRecordingService?.close().catch((error) => {
-        this.debugLogger.error(
-          'Failed to release session writer lease:',
-          error,
-        );
-      });
-      const pendingLease = this.pendingSessionWriterLease;
-      if (pendingLease) {
-        try {
-          await pendingLease.release();
-          if (this.pendingSessionWriterLease === pendingLease) {
-            this.pendingSessionWriterLease = undefined;
-          }
-        } catch (error) {
-          if (error instanceof SessionWriterLostError) {
-            this.pendingSessionWriterLease = undefined;
-          }
-          this.debugLogger.error(
-            'Failed to release pending session writer lease:',
-            error,
-          );
-        }
-      }
-      this.chatRecordingFailureListeners.clear();
-      if (options?.shutdownTelemetry !== false && isTelemetrySdkInitialized()) {
-        await shutdownTelemetry();
-      }
     }
   }
 
@@ -6755,6 +6826,62 @@ export class Config {
       this.pendingSessionWriterLease !== undefined ||
       this.chatRecordingService?.hasWriteOwnership() === true
     );
+  }
+
+  setSessionWriterReclaimPolicy(policy: 'local' | 'never'): void {
+    if (this.initialized) {
+      throw new SessionWriterUnavailableError();
+    }
+    this.sessionWriterReclaimPolicy = policy;
+  }
+
+  closeSessionWriter(): Promise<void> {
+    this.sessionWriterShutdownRequested = true;
+    this.chatRecordingService?.beginClose();
+    this.sessionWriterClosePromise ??= this.closeSessionWriterOnce();
+    return this.sessionWriterClosePromise;
+  }
+
+  private async closeSessionWriterOnce(): Promise<void> {
+    const failures: unknown[] = [];
+    try {
+      await this.sessionWriterActivationPromise;
+    } catch (error) {
+      if (!(error instanceof SessionWriterShutdownError)) {
+        failures.push(error);
+      }
+    }
+    try {
+      await this.chatRecordingService?.close();
+    } catch (error) {
+      failures.push(error);
+    }
+    const pendingLease = this.pendingSessionWriterLease;
+    if (pendingLease) {
+      try {
+        await pendingLease.release();
+        if (
+          this.pendingSessionWriterLease === pendingLease &&
+          pendingLease.isReleased
+        ) {
+          this.pendingSessionWriterLease = undefined;
+        }
+      } catch (error) {
+        if (
+          error instanceof SessionWriterLostError ||
+          pendingLease.isReleased
+        ) {
+          this.pendingSessionWriterLease = undefined;
+        }
+        failures.push(error);
+      }
+    }
+    if (failures.length === 1) {
+      throw failures[0];
+    }
+    if (failures.length > 1) {
+      throw new AggregateError(failures, 'Session writer shutdown failed');
+    }
   }
 
   getSessionRuntimeBaseDir(): string {
