@@ -1369,11 +1369,36 @@ async function detectGitOperation(
   return undefined;
 }
 
-/** Stash count = lines in `<gitDir>/logs/refs/stash` (0 when absent). */
+/**
+ * Resolve the git dir shared by every worktree of a repository.
+ *
+ * For a linked worktree (`git worktree add`) `resolveGitDirFromRoot` returns
+ * the per-worktree dir `.git/worktrees/<name>`, which is correct for the
+ * per-worktree state the callers above probe — HEAD, the index, and the
+ * MERGE_HEAD / rebase-* / BISECT_LOG markers all live there. Refs and their
+ * reflogs do not: they live in the common dir, which git records in a
+ * `commondir` file next to those markers. Falls back to `gitDir` itself,
+ * which is the right answer for a main worktree (no `commondir` file).
+ */
+async function resolveCommonGitDir(gitDir: string): Promise<string> {
+  try {
+    const raw = (await readFile(path.join(gitDir, 'commondir'), 'utf8')).trim();
+    if (!raw) return gitDir;
+    return path.isAbsolute(raw) ? raw : path.resolve(gitDir, raw);
+  } catch {
+    return gitDir;
+  }
+}
+
+/** Stash count = lines in `<commonDir>/logs/refs/stash` (0 when absent). */
 async function countStashEntries(gitRoot: string): Promise<number> {
   const gitDir = await resolveGitDirFromRoot(gitRoot);
   if (!gitDir) return 0;
-  const stashLog = path.join(gitDir, 'logs', 'refs', 'stash');
+  // The stash is a single ref shared by the whole repository, so it must be
+  // read from the common dir. Reading it from the per-worktree dir reported 0
+  // stashes inside every linked worktree, whatever `git stash list` said.
+  const commonDir = await resolveCommonGitDir(gitDir);
+  const stashLog = path.join(commonDir, 'logs', 'refs', 'stash');
   // lstat before read: a symlink-to-FIFO would block readFile forever (the
   // same hazard the untracked-file readers guard against). Only count a
   // regular file.
