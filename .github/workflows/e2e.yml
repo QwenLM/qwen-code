@@ -116,6 +116,9 @@ jobs:
           # sandbox_command.js, which exits non-zero on Linux when this is unset
           # — the test script used to supply it.
           QWEN_SANDBOX: 'docker'
+          # Without this, build_sandbox.js pipes docker build output to
+          # /dev/null — the longest step in the docker leg becomes undiagnosable.
+          VERBOSE: 'true'
         run: |-
           npm run build:sandbox -- -s
 
