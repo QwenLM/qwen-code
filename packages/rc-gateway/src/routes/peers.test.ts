@@ -1,3 +1,9 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
 import { describe, it, expect } from 'vitest';
 import { createPeersRoute, type BrowsePeers } from './peers.js';
 import type { DaemonRecord } from '../mdns/advert.js';
