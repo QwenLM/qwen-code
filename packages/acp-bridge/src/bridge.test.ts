@@ -11978,6 +11978,66 @@ describe('createAcpSessionBridge', () => {
       );
       await bridge.shutdown();
     });
+
+    it('allows session MCP mutations to outlive the initialize timeout', async () => {
+      const add = deferred<Record<string, unknown>>();
+      const remove = deferred<Record<string, unknown>>();
+      const bridge = makeBridge({
+        initializeTimeoutMs: 5,
+        channelFactory: async () =>
+          makeChannel({
+            extMethodImpl: (method) => {
+              if (method === SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeAdd) {
+                return add.promise;
+              }
+              if (
+                method === SERVE_CONTROL_EXT_METHODS.sessionMcpRuntimeRemove
+              ) {
+                return remove.promise;
+              }
+              return Promise.resolve({});
+            },
+          }).channel,
+      });
+      const target = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      vi.useFakeTimers();
+      try {
+        const addResult = expect(
+          bridge.addSessionRuntimeMcpServer(target.sessionId, 'channel-loop', {
+            type: 'sdk',
+          }),
+        ).resolves.toMatchObject({ name: 'channel-loop' });
+        await vi.advanceTimersByTimeAsync(6);
+        add.resolve({
+          name: 'channel-loop',
+          transport: 'sdk',
+          replaced: false,
+          shadowedSettings: false,
+          toolCount: 1,
+          originatorClientId: 'daemon',
+        });
+        await addResult;
+
+        const removeResult = expect(
+          bridge.removeSessionRuntimeMcpServer(
+            target.sessionId,
+            'channel-loop',
+          ),
+        ).resolves.toMatchObject({ name: 'channel-loop', removed: true });
+        await vi.advanceTimersByTimeAsync(6);
+        remove.resolve({
+          name: 'channel-loop',
+          removed: true,
+          wasShadowingSettings: false,
+          originatorClientId: 'daemon',
+        });
+        await removeResult;
+      } finally {
+        vi.useRealTimers();
+        await bridge.shutdown();
+      }
+    });
   });
 
   describe('removeRuntimeMcpServer (T2.8 #4514)', () => {
