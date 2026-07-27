@@ -28,8 +28,9 @@ import { AgentViewProvider } from './contexts/AgentViewContext.js';
 import { BackgroundTaskViewProvider } from './contexts/BackgroundTaskViewContext.js';
 import { useKittyKeyboardProtocol } from './hooks/useKittyKeyboardProtocol.js';
 import {
-  disableKittyProtocol,
+  popKittyProtocolFlags,
   pushKittyProtocolFlags,
+  getKittyProtocolDepth,
 } from './utils/kittyProtocolDetector.js';
 import { installTerminalRedrawOptimizer } from './utils/terminalRedrawOptimizer.js';
 import { installSynchronizedOutput } from './utils/synchronizedOutput.js';
@@ -232,9 +233,9 @@ export async function startInteractiveUI(
     // the spec tracks them per screen, so re-push them onto the alternate
     // screen now — otherwise Shift+Enter (and other modified keys) arrive
     // without their modifier and degrade to a bare Enter or an orphaned Escape.
-    // The push is ordered after Ink's enter-alternate-screen write, and Ink
-    // discards the alternate screen (and its flag stack) on unmount, so the
-    // startup main-screen push remains balanced by disableKittyProtocol() below.
+    // The push is ordered after Ink's enter-alternate-screen write. Cleanup
+    // pops this alternate-screen entry before unmount, then returns to the main
+    // screen and pops the startup entry there (see #7779).
     pushKittyProtocolFlags();
   }
   // Records the moment Ink's `render()` call has returned, which is
@@ -282,15 +283,20 @@ export async function startInteractiveUI(
     }
     remoteInputWatcher?.shutdown();
     await dualOutputBridge?.shutdown();
+    // Kitty's progressive-enhancement flag stack is tracked separately for
+    // each terminal screen buffer. In VP mode, one push happened on the main
+    // screen during detection and a second push happened on the alternate
+    // screen immediately after Ink entered it. Pop the alternate-screen push
+    // *before* unmount while that screen is still current, then return to the
+    // main screen and pop the remaining startup push below. See #7779.
+    if (useVP && getKittyProtocolDepth() > 1) {
+      popKittyProtocolFlags();
+    }
     instance.unmount();
-    // Pop the Kitty keyboard protocol only after Ink has unmounted. The
-    // protocol was enabled on the main screen before render, and the kitty
-    // spec tracks keyboard flags per screen: with alternateScreen enabled, a
-    // pop written before unmount lands on the alternate screen's (empty)
-    // stack, unmount then leaves the alternate screen, and the main screen's
-    // flags stay set — the user's shell keeps receiving kitty escape codes
-    // (e.g. "9;5u" on Ctrl-C) after exit.
-    disableKittyProtocol();
+    // Non-VP mode owes only the startup main-screen push; VP mode owes the
+    // first push after balancing the alternate screen above. Pop that final
+    // entry now that Ink has returned to the main screen.
+    popKittyProtocolFlags();
     if (useVP) {
       process.stdout.setMaxListeners(stdoutMaxListeners);
     }

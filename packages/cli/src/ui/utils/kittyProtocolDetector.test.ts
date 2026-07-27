@@ -41,13 +41,17 @@ function installMockStreams(): { stdin: MockStdin; writes: string[] } {
 }
 
 const KITTY_PUSH = '\x1b[>1u';
+const KITTY_POP = '\x1b[<u';
+const EXIT_ALT_SCREEN = '\x1b[?1049l';
 
 describe('kittyProtocolDetector', () => {
   const realStdin = process.stdin;
   const realStdoutIsTTY = process.stdout.isTTY;
+  let exitListenersBefore: Set<unknown>;
 
   beforeEach(() => {
     vi.resetModules();
+    exitListenersBefore = new Set(process.listeners('exit'));
   });
 
   afterEach(() => {
@@ -60,6 +64,14 @@ describe('kittyProtocolDetector', () => {
       value: realStdoutIsTTY,
       configurable: true,
     });
+    // Remove exit listeners added during the test (the detection module
+    // registers one) without affecting framework listeners.
+    const current = process.listeners('exit');
+    for (const listener of current) {
+      if (!exitListenersBefore.has(listener)) {
+        process.removeListener('exit', listener);
+      }
+    }
   });
 
   async function detectWithSupport(stdin: MockStdin) {
@@ -90,6 +102,67 @@ describe('kittyProtocolDetector', () => {
     mod.pushKittyProtocolFlags();
 
     expect(writes).toEqual([KITTY_PUSH]);
+  });
+
+  it('tracks the push depth across main and alternate screens', async () => {
+    const { stdin, writes } = installMockStreams();
+    const mod = await detectWithSupport(stdin);
+
+    expect(mod.getKittyProtocolDepth()).toBe(1);
+
+    mod.pushKittyProtocolFlags();
+    expect(mod.getKittyProtocolDepth()).toBe(2);
+
+    writes.length = 0;
+    mod.popKittyProtocolFlags();
+    expect(mod.getKittyProtocolDepth()).toBe(1);
+    expect(writes).toEqual([KITTY_POP]);
+
+    mod.popKittyProtocolFlags();
+    expect(mod.getKittyProtocolDepth()).toBe(0);
+    expect(mod.isKittyProtocolEnabled()).toBe(false);
+    expect(writes).toEqual([KITTY_POP, KITTY_POP]);
+  });
+
+  it('does not write a pop when the depth is already zero', async () => {
+    const { stdin, writes } = installMockStreams();
+    const mod = await detectWithSupport(stdin);
+
+    mod.popKittyProtocolFlags();
+    writes.length = 0;
+    mod.popKittyProtocolFlags();
+
+    expect(writes).toEqual([]);
+    expect(mod.getKittyProtocolDepth()).toBe(0);
+  });
+
+  it('balances both screen-buffer stacks in the exit fallback', async () => {
+    const { stdin, writes } = installMockStreams();
+    const mod = await detectWithSupport(stdin);
+    mod.pushKittyProtocolFlags();
+    expect(mod.getKittyProtocolDepth()).toBe(2);
+
+    const newExitListener = process
+      .listeners('exit')
+      .find((listener) => !exitListenersBefore.has(listener));
+    expect(newExitListener).toBeDefined();
+
+    writes.length = 0;
+    newExitListener?.(0);
+
+    expect(writes.join('')).toBe(`${KITTY_POP}${EXIT_ALT_SCREEN}${KITTY_POP}`);
+    expect(mod.getKittyProtocolDepth()).toBe(0);
+  });
+
+  it('does not install raw SIGINT or SIGTERM Kitty pop handlers', async () => {
+    const { stdin } = installMockStreams();
+    const sigintBefore = process.listenerCount('SIGINT');
+    const sigtermBefore = process.listenerCount('SIGTERM');
+
+    await detectWithSupport(stdin);
+
+    expect(process.listenerCount('SIGINT')).toBe(sigintBefore);
+    expect(process.listenerCount('SIGTERM')).toBe(sigtermBefore);
   });
 
   it('is a no-op when the protocol is unsupported', async () => {

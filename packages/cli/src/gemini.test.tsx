@@ -2207,8 +2207,9 @@ describe('startInteractiveUI', () => {
 
   vi.mock('./ui/utils/kittyProtocolDetector.js', () => ({
     detectAndEnableKittyProtocol: vi.fn(() => Promise.resolve(true)),
-    disableKittyProtocol: vi.fn(),
+    popKittyProtocolFlags: vi.fn(),
     pushKittyProtocolFlags: vi.fn(),
+    getKittyProtocolDepth: vi.fn(() => 1),
   }));
 
   vi.mock('./utils/cleanup.js', () => ({
@@ -2355,18 +2356,69 @@ describe('startInteractiveUI', () => {
     );
   });
 
-  // Regression for #6776: the kitty keyboard flags are tracked per screen
-  // (main vs alternate). The protocol is enabled on the main screen before
-  // render, so the pop must be written after Ink unmounts — i.e. after the
-  // alternate screen (when enabled) has been left — or the main screen's
-  // flags survive the exit and the shell receives kitty escape codes.
-  it('disables the Kitty keyboard protocol only after Ink has unmounted', async () => {
+  // Regression for #7779: Kitty tracks progressive-enhancement flags per
+  // screen buffer. In VP mode the app pushes once on the main screen and once
+  // after Ink enters the alternate screen. Cleanup must pop the alternate
+  // screen before unmount, then pop the remaining main-screen depth after
+  // unmount; reversing either operation leaves one screen's stack active.
+  it('balances Kitty protocol pushes on both screen buffers around Ink unmount', async () => {
     const unmount = vi.fn();
     const { render } = await import('ink');
     vi.mocked(render).mockReturnValue({ unmount } as never);
-    const { disableKittyProtocol } = await import(
+    const { popKittyProtocolFlags, getKittyProtocolDepth } = await import(
       './ui/utils/kittyProtocolDetector.js'
     );
+    vi.mocked(getKittyProtocolDepth).mockReturnValue(2);
+
+    const vpSettings = {
+      ...mockSettings,
+      merged: {
+        ...mockSettings.merged,
+        ui: {
+          ...mockSettings.merged.ui,
+          useTerminalBuffer: true,
+        },
+      },
+    } as LoadedSettings;
+
+    await startInteractiveUI(
+      mockConfig,
+      vpSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      {
+        authError: null,
+        themeError: null,
+        shouldOpenAuthDialog: false,
+        geminiMdFileCount: 0,
+      },
+    );
+
+    const { registerCleanup } = await import('./utils/cleanup.js');
+    const cleanupFn = vi.mocked(registerCleanup).mock.calls.at(-1)?.[0] as
+      | (() => Promise<void> | void)
+      | undefined;
+    expect(cleanupFn).toBeTypeOf('function');
+    await cleanupFn?.();
+
+    expect(popKittyProtocolFlags).toHaveBeenCalledTimes(2);
+    expect(unmount).toHaveBeenCalledTimes(1);
+    const popCallOrders = vi.mocked(popKittyProtocolFlags).mock
+      .invocationCallOrder;
+    expect(popCallOrders[0]).toBeLessThan(unmount.mock.invocationCallOrder[0]);
+    expect(popCallOrders[1]).toBeGreaterThan(
+      unmount.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('pops only the main-screen Kitty depth in non-VP mode', async () => {
+    const unmount = vi.fn();
+    const { render } = await import('ink');
+    vi.mocked(render).mockReturnValue({ unmount } as never);
+    const { popKittyProtocolFlags, getKittyProtocolDepth } = await import(
+      './ui/utils/kittyProtocolDetector.js'
+    );
+    vi.mocked(getKittyProtocolDepth).mockReturnValue(1);
 
     await startInteractiveUI(
       mockConfig,
@@ -2388,10 +2440,10 @@ describe('startInteractiveUI', () => {
     expect(cleanupFn).toBeTypeOf('function');
     await cleanupFn?.();
 
+    expect(popKittyProtocolFlags).toHaveBeenCalledTimes(1);
     expect(unmount).toHaveBeenCalledTimes(1);
-    expect(disableKittyProtocol).toHaveBeenCalledTimes(1);
     expect(
-      vi.mocked(disableKittyProtocol).mock.invocationCallOrder[0],
+      vi.mocked(popKittyProtocolFlags).mock.invocationCallOrder[0],
     ).toBeGreaterThan(unmount.mock.invocationCallOrder[0]);
   });
 

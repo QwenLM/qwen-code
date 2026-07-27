@@ -6,7 +6,15 @@
 
 let detectionComplete = false;
 let protocolSupported = false;
-let protocolEnabled = false;
+/**
+ * Stack depth of the Kitty keyboard protocol escape flags. The flags are
+ * pushed once on the main screen at startup, and pushed again on the alternate
+ * screen when VP mode is active. The Kitty spec tracks the flag stack per
+ * screen buffer, so two pushes require two pops — one on each screen.
+ * Tracking depth rather than a boolean lets the teardown code correctly
+ * balance both screen buffers. See #7779.
+ */
+let kittyPushDepth = 0;
 
 // Progressive-enhancement flag stack control (per screen buffer):
 //   push (enable) / pop (disable). See
@@ -16,7 +24,20 @@ const KITTY_KEYBOARD_POP = '\x1b[<u';
 
 function enableProtocol(): void {
   process.stdout.write(KITTY_KEYBOARD_PUSH);
-  protocolEnabled = true;
+  kittyPushDepth++;
+}
+
+/**
+ * Pop one Kitty keyboard protocol flag from the current screen buffer's stack.
+ * No-op when the stack is already empty (depth < 1). The exit fallback writes
+ * a coordinated \x1b[?1049l inline when depth > 1 so each screen buffer is
+ * correctly balanced. See #7779.
+ */
+function popKittyProtocol(): void {
+  if (kittyPushDepth > 0) {
+    process.stdout.write(KITTY_KEYBOARD_POP);
+    kittyPushDepth--;
+  }
 }
 
 /**
@@ -96,11 +117,14 @@ export async function detectAndEnableKittyProtocol(): Promise<boolean> {
           protocolSupported = true;
           enableProtocol();
 
-          // Set up cleanup on exit (exit covers process.exit() calls,
-          // SIGTERM/SIGINT cover signal-based terminations).
-          process.on('exit', disableProtocol);
-          process.on('SIGTERM', disableProtocol);
-          process.on('SIGINT', disableProtocol);
+          // Set up best-effort cleanup on process exit. Signal-based
+          // terminations are routed through gemini.tsx → runExitCleanup(),
+          // which unmounts Ink and pops both screen-buffer stacks in the
+          // correct order. Raw SIGTERM/SIGINT handlers here used to pop before
+          // unmount, consuming only the alternate-screen stack and leaving the
+          // main-screen push active (#7779), so they intentionally live in the
+          // coordinated cleanup path now.
+          process.on('exit', cleanupKittyProtocolOnExit);
         }
 
         detectionComplete = true;
@@ -121,10 +145,27 @@ export async function detectAndEnableKittyProtocol(): Promise<boolean> {
   });
 }
 
-function disableProtocol() {
-  if (protocolEnabled) {
-    process.stdout.write(KITTY_KEYBOARD_POP);
-    protocolEnabled = false;
+function cleanupKittyProtocolOnExit(): void {
+  if (kittyPushDepth === 0) return;
+  try {
+    // With VP enabled the top stack belongs to the alternate screen. Pop it
+    // while that screen is current, return to the main screen, then pop the
+    // startup push there. A conforming Kitty terminal treats a pop on an empty
+    // stack as a no-op, so this remains safe if the alternate screen was never
+    // entered but depth somehow exceeds one.
+    if (kittyPushDepth > 1) {
+      process.stdout.write(
+        `${KITTY_KEYBOARD_POP}\x1b[?1049l${KITTY_KEYBOARD_POP}`,
+      );
+      kittyPushDepth = Math.max(0, kittyPushDepth - 2);
+    }
+    while (kittyPushDepth > 0) {
+      process.stdout.write(KITTY_KEYBOARD_POP);
+      kittyPushDepth--;
+    }
+  } catch {
+    // Best-effort: stdout may already be closed (e.g. EPIPE).
+    kittyPushDepth = 0;
   }
 }
 
@@ -149,16 +190,22 @@ export function pushKittyProtocolFlags(): void {
 }
 
 /**
- * Explicitly disables the Kitty keyboard protocol. Should be called during
- * application cleanup before process.exit() to ensure the terminal is restored
- * even if the 'exit' event handler does not fire in time (e.g. on SIGKILL).
+ * Pop one Kitty keyboard protocol flag from the **current** screen buffer's
+ * stack. The cleanup chain calls this while on the alternate screen (before
+ * Ink unmount) and again after returning to the main screen (after unmount).
+ * The depth counter prevents an extra pop when a corresponding push never
+ * occurred. See #7779.
  */
-export function disableKittyProtocol(): void {
-  disableProtocol();
+export function popKittyProtocolFlags(): void {
+  popKittyProtocol();
+}
+
+export function getKittyProtocolDepth(): number {
+  return kittyPushDepth;
 }
 
 export function isKittyProtocolEnabled(): boolean {
-  return protocolEnabled;
+  return kittyPushDepth > 0;
 }
 
 export function isKittyProtocolSupported(): boolean {
