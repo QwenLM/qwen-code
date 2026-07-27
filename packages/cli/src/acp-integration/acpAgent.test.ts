@@ -13812,6 +13812,8 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       getRuntimeMcpServers: vi.fn().mockReturnValue({}),
       getCliAllowedMcpServerNames: vi.fn().mockReturnValue(undefined),
       getApprovalMode: vi.fn().mockReturnValue('default'),
+      getBareMode: vi.fn().mockReturnValue(false),
+      isSafeMode: vi.fn().mockReturnValue(false),
       setExcludedMcpServers: vi.fn(),
       setAllowedMcpServers: vi.fn(),
       setPendingMcpServers: vi.fn(),
@@ -13881,6 +13883,8 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       getRuntimeMcpServers: vi.fn().mockReturnValue({}),
       getCliAllowedMcpServerNames: vi.fn().mockReturnValue(undefined),
       getApprovalMode: vi.fn().mockReturnValue('default'),
+      getBareMode: vi.fn().mockReturnValue(false),
+      isSafeMode: vi.fn().mockReturnValue(false),
       setExcludedMcpServers: vi.fn(),
       setAllowedMcpServers: vi.fn(),
       setPendingMcpServers: vi.fn(),
@@ -14022,6 +14026,96 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
     await vi.waitFor(() =>
       expect(forceDiscover).toHaveBeenCalledWith('secondary'),
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('safe mode: workspaceMcpReload does NOT leak settings.mcpServers/mcp.allowed into an already-running session', async () => {
+    // Same bare/safe guard as registerMcpHotReload (config/hot-reload.ts) and
+    // loadCliConfig (config.ts) — reloadWorkspaceMcpDiscovery (this ACP
+    // control-endpoint reload path) used to call assembleMcpServers /
+    // recomputeMcpGating unconditionally, per live Config in liveConfigs, so
+    // a workspaceMcpReload request against an already-running safe/bare
+    // session would fold settings.mcpServers/mcp.allowed (local state safe
+    // mode distrusts) back in, silently stranding or filtering the caller's
+    // own top-tier server. Found by an automated review pass on PR #7827.
+    mockConfig.isSafeMode = vi.fn().mockReturnValue(true);
+    mockConfig.getTopTierMcpServers = vi
+      .fn()
+      .mockReturnValue({ probe: { command: 'probe' } });
+
+    const discoveryManager = {
+      discoverAllMcpToolsIncremental: vi.fn().mockResolvedValue(undefined),
+      getDiscoveryState: vi.fn().mockReturnValue(MCPDiscoveryState.COMPLETED),
+      getMcpClientAccounting: vi.fn().mockReturnValue({
+        total: 0,
+        refusedServerNames: [],
+      }),
+      getMcpClientBudget: vi.fn().mockReturnValue(undefined),
+      getMcpBudgetMode: vi.fn().mockReturnValue(undefined),
+    };
+    const discoveryConfig = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      reinitializeMcpServers: vi.fn().mockResolvedValue(undefined),
+      setMcpTransportPool: vi.fn(),
+      getTargetDir: vi.fn().mockReturnValue('/tmp'),
+      getMcpServers: vi.fn().mockReturnValue({}),
+      getTopTierMcpServers: vi.fn().mockReturnValue(undefined),
+      getRuntimeMcpServers: vi.fn().mockReturnValue({}),
+      getCliAllowedMcpServerNames: vi.fn().mockReturnValue(undefined),
+      getApprovalMode: vi.fn().mockReturnValue('default'),
+      getBareMode: vi.fn().mockReturnValue(false),
+      isSafeMode: vi.fn().mockReturnValue(false),
+      setExcludedMcpServers: vi.fn(),
+      setAllowedMcpServers: vi.fn(),
+      setPendingMcpServers: vi.fn(),
+      getToolRegistry: vi.fn().mockReturnValue({
+        getMcpClientManager: vi.fn().mockReturnValue(discoveryManager),
+      }),
+    } as unknown as Config;
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { mcpServers: {} },
+      forScope: vi.fn().mockReturnValue({ settings: {} }),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings);
+    vi.mocked(loadCliConfig).mockResolvedValue(discoveryConfig);
+
+    const { agent, agentPromise } = await getAgent();
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize, {}),
+    ).resolves.toEqual({ accepted: true });
+    await vi.waitFor(() =>
+      expect(
+        discoveryManager.discoverAllMcpToolsIncremental,
+      ).toHaveBeenCalledWith(discoveryConfig),
+    );
+
+    // A settings.json edit fires while the safe-mode session is live —
+    // local mcpServers/mcp.allowed that must NOT reach an already-running
+    // safe-mode session.
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: {
+        mcpServers: { local: { command: 'should-not-leak-in' } },
+        mcp: { allowed: ['some-other-server'] },
+      },
+      forScope: vi.fn().mockReturnValue({ settings: {} }),
+      getUserHooks: vi.fn().mockReturnValue({}),
+      getProjectHooks: vi.fn().mockReturnValue({}),
+    } as unknown as LoadedSettings);
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMcpReload, {}),
+    ).resolves.toEqual({ accepted: true });
+
+    await vi.waitFor(() =>
+      expect(mockConfig.reinitializeMcpServers).toHaveBeenCalledWith({
+        probe: { command: 'probe' },
+      }),
+    );
+    expect(mockConfig.setAllowedMcpServers).toHaveBeenCalledWith(undefined);
+    expect(mockConfig.setExcludedMcpServers).toHaveBeenCalledWith([]);
+    expect(mockConfig.setPendingMcpServers).toHaveBeenCalledWith(undefined);
 
     mockConnectionState.resolve();
     await agentPromise;
