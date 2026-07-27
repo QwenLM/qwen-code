@@ -2816,12 +2816,10 @@ export class Config {
     // the bare-mode half of this gate was never updated alongside safe
     // mode's). Checking `getMcpServers()` (not `topTierMcpServers` directly)
     // also respects the `allowedMcpServers` filter already applied there.
+    const hasMcpServers = Object.keys(this.getMcpServers() ?? {}).length > 0;
     if (
       skipInlineMcpDiscovery &&
-      (!this.getBareMode() ||
-        Object.keys(this.getMcpServers() ?? {}).length > 0) &&
-      (!this.isSafeMode() ||
-        Object.keys(this.getMcpServers() ?? {}).length > 0) &&
+      (!(this.getBareMode() || this.isSafeMode()) || hasMcpServers) &&
       !options?.skipMcpDiscovery
     ) {
       this.startMcpDiscoveryInBackground();
