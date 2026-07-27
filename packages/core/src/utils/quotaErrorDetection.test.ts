@@ -161,6 +161,27 @@ describe('quotaErrorDetection', () => {
       );
     });
 
+    it('does not match quota + reset time without exhausted/exceeded', () => {
+      // Pins the (exhausted || exceeded) clause: an OpenAI-style TPM body
+      // "Rate limit reached … Your quota will reset at …" must stay false.
+      expect(
+        isQuotaExhaustedError(
+          new Error(
+            'Rate limit reached for gpt-4. Your quota will reset at 12:00:05Z.',
+          ),
+        ),
+      ).toBe(false);
+    });
+
+    it('does not match exhausted + reset time without quota', () => {
+      // Pins the quota clause.
+      expect(
+        isQuotaExhaustedError(
+          new Error('Resources exhausted. Will reset at 2026-08-01.'),
+        ),
+      ).toBe(false);
+    });
+
     it('does not match unrelated errors', () => {
       expect(isQuotaExhaustedError(new Error('Network timeout'))).toBe(false);
       expect(isQuotaExhaustedError(null)).toBe(false);
@@ -187,6 +208,29 @@ describe('quotaErrorDetection', () => {
       const message = formatQuotaExhaustedMessage(42);
       expect(message.startsWith('Quota exhausted: ')).toBe(true);
       expect(message).toContain('quota has been exhausted');
+    });
+
+    it('unwraps a JSON error body to surface the nested message', () => {
+      // openai-compatible providers emit 429 bodies as JSON; the friendly
+      // message must show the human-readable text, not raw JSON.
+      const error = new Error(
+        '{"error":{"code":"429","message":"Your token-plan 1-week quota has been exhausted. The quota will reset at 07-27 09:25:00 UTC.","status":"RESOURCE_EXHAUSTED","details":[]}}',
+      );
+      const message = formatQuotaExhaustedMessage(error);
+      expect(message).toContain(
+        'Your token-plan 1-week quota has been exhausted. The quota will reset at 07-27 09:25:00 UTC.',
+      );
+      expect(message).not.toContain('{"error"');
+    });
+
+    it('is idempotent — does not double-wrap its own output', () => {
+      const first = formatQuotaExhaustedMessage(
+        new Error(
+          'Your quota has been exhausted. It will reset at 2026-07-28.',
+        ),
+      );
+      const second = formatQuotaExhaustedMessage(new Error(first));
+      expect(second).toBe(first);
     });
   });
 

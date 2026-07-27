@@ -129,10 +129,24 @@ export const QUOTA_EXHAUSTED_PREFIX = 'Quota exhausted: ';
 
 /** Best-effort extraction of a human-readable message from common error shapes. */
 function getQuotaMessage(error: unknown): string | null {
-  if (typeof error === 'string') return error;
-  if (isStructuredError(error)) return error.message;
-  if (isApiError(error)) return error.error.message;
-  return null;
+  let message: string | null = null;
+  if (typeof error === 'string') message = error;
+  else if (isStructuredError(error)) message = error.message;
+  else if (isApiError(error)) message = error.error.message;
+  if (message === null) return null;
+  // Unwrap a JSON error body ('{"error":{"code":"429","message":"..."}}')
+  // so the nested human-readable message is surfaced instead of raw JSON —
+  // the same extraction parseAndFormatApiError performs.
+  const start = message.indexOf('{');
+  if (start !== -1) {
+    try {
+      const parsed = JSON.parse(message.substring(start)) as unknown;
+      if (isApiError(parsed)) return parsed.error.message;
+    } catch {
+      /* not a JSON error body */
+    }
+  }
+  return message;
 }
 
 /**
@@ -176,6 +190,7 @@ export function isQuotaExhaustedError(error: unknown): boolean {
  */
 export function formatQuotaExhaustedMessage(error: unknown): string {
   const raw = getQuotaMessage(error) ?? '';
+  if (raw.startsWith(QUOTA_EXHAUSTED_PREFIX)) return raw;
   // Strip a leading "NNN " HTTP-status prefix the OpenAI SDK prepends
   // (e.g. "429 Your token-plan …") so the surfaced text does not start with
   // a bare status code.

@@ -38,13 +38,17 @@ function getRateLimitMessage(authType?: AuthType): string {
 const API_ERROR_PREFIX = '[API Error: ';
 
 /**
- * Returns true when `value` already looks like the output of
- * parseAndFormatApiError.
+ * Returns true when `value` is already in final user-facing form and must not
+ * be re-wrapped by parseAndFormatApiError.
  *
  * Accepts:
  * 1) base format: "[API Error: ...]"
  * 2) 429 format: "[API Error: ...]" followed by one of the known quota
  *    guidance suffixes.
+ * 3) friendly quota-exhaustion messages ("Quota exhausted: ...") built by
+ *    formatQuotaExhaustedMessage — these live here rather than in the
+ *    Qwen-OAuth prefix list because they also arrive via the plain-string
+ *    path (a StreamContentError whose .message is the formatted text).
  *
  * Used as an idempotency guard: when an upstream caller has already passed an
  * Error through parseAndFormatApiError, stuffed the formatted string into
