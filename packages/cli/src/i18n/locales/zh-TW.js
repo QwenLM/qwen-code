@@ -2327,4 +2327,33 @@ export default {
     '工作階段錄製因寫入失敗而停止。受影響工作階段中的新訊息將不會被儲存。請檢查磁碟空間和權限，然後建立新的工作階段以恢復錄製。詳細資訊請查看偵錯日誌。',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     '工作階段錄製因寫入失敗而停止。受影響工作階段中的新訊息將不會被儲存。請檢查磁碟空間和權限，然後執行 `/clear` 建立新的可錄製工作階段。詳細資訊請查看偵錯日誌。',
+  'Maintain project auto-skills based on recent use.':
+    '根據最近的使用情況維護專案自動技能。',
+  'Show project auto-skill lifecycle status.':
+    '顯示專案自動技能的生命週期狀態。',
+  'Run project auto-skill lifecycle maintenance.':
+    '執行專案自動技能的生命週期維護。',
+  'Restore an archived project auto-skill.': '還原已封存的專案自動技能。',
+  'Auto-skill curator': '自動技能管理器',
+  'Last run: {{time}}': '上次執行：{{time}}',
+  'Active: {{count}}': '使用中：{{count}}',
+  'Stale: {{count}}': '陳舊：{{count}}',
+  'Archived: {{count}}': '已封存：{{count}}',
+  'Stale skills:': '陳舊技能：',
+  'Archived skills:': '已封存技能：',
+  'Dry run complete.': '試執行完成。',
+  'Curator run complete.': '維護執行完成。',
+  'Checked: {{count}}': '已檢查：{{count}}',
+  'Marked stale: {{count}}': '已標記為陳舊：{{count}}',
+  '{{verb}}: {{count}}': '{{verb}}：{{count}}',
+  'Would archive': '將封存',
+  Archived: '已封存',
+  'Failed to read auto-skill curator status: {{message}}':
+    '讀取自動技能管理器狀態失敗：{{message}}',
+  'Usage: /curator run [--dry-run]': '用法：/curator run [--dry-run]',
+  'Failed to run auto-skill curator: {{message}}':
+    '執行自動技能管理器失敗：{{message}}',
+  'Usage: /curator restore <directory>': '用法：/curator restore <directory>',
+  'Restored auto-skill: {{name}}': '已還原自動技能：{{name}}',
+  'Failed to restore auto-skill: {{message}}': '還原自動技能失敗：{{message}}',
 };

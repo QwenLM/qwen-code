@@ -2529,4 +2529,33 @@ export default {
     '会话录制因写入失败而停止。受影响会话中的新消息将不会被保存。请检查磁盘空间和权限，然后创建一个新会话以恢复录制。详情请查看调试日志。',
   'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
     '会话录制因写入失败而停止。受影响会话中的新消息将不会被保存。请检查磁盘空间和权限，然后运行 `/clear` 创建一个新的可录制会话。详情请查看调试日志。',
+  'Maintain project auto-skills based on recent use.':
+    '根据最近的使用情况维护项目自动技能。',
+  'Show project auto-skill lifecycle status.':
+    '显示项目自动技能的生命周期状态。',
+  'Run project auto-skill lifecycle maintenance.':
+    '运行项目自动技能的生命周期维护。',
+  'Restore an archived project auto-skill.': '恢复已归档的项目自动技能。',
+  'Auto-skill curator': '自动技能管理器',
+  'Last run: {{time}}': '上次运行：{{time}}',
+  'Active: {{count}}': '活跃：{{count}}',
+  'Stale: {{count}}': '陈旧：{{count}}',
+  'Archived: {{count}}': '已归档：{{count}}',
+  'Stale skills:': '陈旧技能：',
+  'Archived skills:': '已归档技能：',
+  'Dry run complete.': '试运行完成。',
+  'Curator run complete.': '维护运行完成。',
+  'Checked: {{count}}': '已检查：{{count}}',
+  'Marked stale: {{count}}': '已标记为陈旧：{{count}}',
+  '{{verb}}: {{count}}': '{{verb}}：{{count}}',
+  'Would archive': '将归档',
+  Archived: '已归档',
+  'Failed to read auto-skill curator status: {{message}}':
+    '读取自动技能管理器状态失败：{{message}}',
+  'Usage: /curator run [--dry-run]': '用法：/curator run [--dry-run]',
+  'Failed to run auto-skill curator: {{message}}':
+    '运行自动技能管理器失败：{{message}}',
+  'Usage: /curator restore <directory>': '用法：/curator restore <directory>',
+  'Restored auto-skill: {{name}}': '已恢复自动技能：{{name}}',
+  'Failed to restore auto-skill: {{message}}': '恢复自动技能失败：{{message}}',
 };
