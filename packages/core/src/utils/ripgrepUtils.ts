@@ -363,9 +363,12 @@ function isCanceledRipgrepExecution(
 
 function isRipgrepThreadEagain(stderr: string): boolean {
   const lower = stderr.toLowerCase();
+  if (lower.includes('os error 11')) {
+    return true;
+  }
+
   const mentionsThread = lower.includes('thread') || lower.includes('worker');
   const mentionsEagain =
-    lower.includes('os error 11') ||
     lower.includes('resource temporarily unavailable') ||
     lower.includes('eagain');
   return mentionsThread && mentionsEagain;
