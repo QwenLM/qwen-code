@@ -607,6 +607,69 @@ describe('createOpenAiCompleter retries', () => {
     );
     expect(calls).toBe(1);
   });
+
+  it('stops retrying before the shared time budget expires', async () => {
+    let calls = 0;
+    const timeout = vi.spyOn(globalThis, 'setTimeout');
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      baseDelayMs: 100,
+      totalTimeoutMs: 50,
+      fetchImpl: async () => {
+        calls += 1;
+        return { ok: false, status: 500 };
+      },
+    });
+
+    await expect(complete({ kind: 'summaries', entries: [] })).rejects.toThrow(
+      'Model generation time budget exhausted.',
+    );
+    expect(calls).toBe(1);
+    expect(timeout).not.toHaveBeenCalled();
+    timeout.mockRestore();
+  });
+
+  it('caps each request at the remaining shared time budget', async () => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      timeoutMs: 10_000,
+      totalTimeoutMs: 1_000,
+      fetchImpl: async () => okResponse,
+    });
+
+    await complete({ kind: 'summaries', entries: [] });
+    expect(timeout.mock.calls[0][0]).toBeLessThanOrEqual(1_000);
+    timeout.mockRestore();
+  });
+
+  it('shares the time budget across calls', async () => {
+    let now = 0;
+    let calls = 0;
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => now);
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      totalTimeoutMs: 50,
+      fetchImpl: async () => {
+        calls += 1;
+        return okResponse;
+      },
+    });
+
+    await complete({ kind: 'summaries', entries: [] });
+    now = 51;
+    await expect(complete({ kind: 'highlights', entries: [] })).rejects.toThrow(
+      'Model generation time budget exhausted.',
+    );
+    expect(calls).toBe(1);
+    clock.mockRestore();
+  });
 });
 
 describe('generateAiContent circuit breaker', () => {
@@ -745,18 +808,25 @@ describe('escapeWorkflowCommand', () => {
 });
 
 describe('appendDegradedStepSummary markdown hardening', () => {
-  it('collapses newlines in step-summary list items', () => {
+  it('renders warnings as escaped single-line code', () => {
     const dir = mkdtempSync(join(tmpdir(), 'qwen-rn-summary-'));
     const summaryPath = join(dir, 'summary.md');
     vi.mocked(appendFileSync).mockClear();
     appendDegradedStepSummary(
-      { usedAi: false, warnings: ['line1\nline2 ::error::x'] },
+      {
+        usedAi: true,
+        warnings: ['line1\n![x](https://evil.example/x.png) ```tick``` <b>&'],
+      },
       summaryPath,
     );
     expect(vi.mocked(appendFileSync)).toHaveBeenCalledTimes(1);
     const [, written] = vi.mocked(appendFileSync).mock.calls[0];
-    expect(written).toContain('- line1 line2 ::error::x');
-    expect(String(written)).not.toMatch(/\nline2/);
+    expect(written).toContain(
+      'AI generation was partially degraded; see the warnings on this run.',
+    );
+    expect(written).toContain(
+      '- ```` line1 ![x](https://evil.example/x.png) ```tick``` <b>& ````',
+    );
     rmSync(dir, { recursive: true, force: true });
   });
 

@@ -442,12 +442,18 @@ export function createOpenAiCompleter({
   timeoutMs = 60_000,
   maxRetries = 2,
   baseDelayMs = 2_000,
+  totalTimeoutMs = 12 * 60_000,
 }) {
   const endpoint = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
+  const deadline = Date.now() + totalTimeoutMs;
   return async (request) => {
     const prompt = promptFor(request);
     let attempt = 0;
     for (;;) {
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        throw new Error('Model generation time budget exhausted.');
+      }
       try {
         const response = await fetchImpl(endpoint, {
           method: 'POST',
@@ -455,7 +461,7 @@ export function createOpenAiCompleter({
             Authorization: `Bearer ${apiKey}`,
             'Content-Type': 'application/json',
           },
-          signal: AbortSignal.timeout(timeoutMs),
+          signal: AbortSignal.timeout(Math.min(timeoutMs, remainingMs)),
           body: JSON.stringify({
             model,
             messages: [
@@ -478,10 +484,18 @@ export function createOpenAiCompleter({
         return content;
       } catch (error) {
         attempt += 1;
+        if (Date.now() >= deadline) {
+          throw new Error('Model generation time budget exhausted.');
+        }
         if (attempt > maxRetries || !isRetryableModelError(error)) {
           throw error;
         }
-        await sleep(baseDelayMs * 2 ** (attempt - 1) * (0.5 + Math.random()));
+        const delayMs =
+          baseDelayMs * 2 ** (attempt - 1) * (0.5 + Math.random());
+        if (Date.now() + delayMs >= deadline) {
+          throw new Error('Model generation time budget exhausted.');
+        }
+        await sleep(delayMs);
       }
     }
   };
@@ -788,12 +802,17 @@ export function appendDegradedStepSummary(
     '## Release notes: AI generation degraded',
     '',
     result.usedAi
-      ? 'Some model batches fell back to pull-request titles; see the warnings on this run.'
+      ? 'AI generation was partially degraded; see the warnings on this run.'
       : 'No AI summaries or highlights were produced; the notes use pull-request titles only.',
     '',
-    ...result.warnings.map(
-      (warning) => `- ${warning.replace(/[\r\n]+/g, ' ')}`,
-    ),
+    ...result.warnings.map((warning) => {
+      const text = String(warning).replace(/[\r\n]+/g, ' ');
+      const backticks = text.match(/`+/g) ?? [];
+      const fence = '`'.repeat(
+        Math.max(0, ...backticks.map((run) => run.length)) + 1,
+      );
+      return `- ${fence} ${text} ${fence}`;
+    }),
     '',
   ];
   // The step-summary path's parent may not exist yet on a fresh runner.
