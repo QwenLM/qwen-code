@@ -42,7 +42,7 @@ OpenAPI, Node.js 22.
 
 **Interfaces:**
 
-- Consumes: `origin/main@ef69eff20` and the current PR commits.
+- Consumes: `origin/main@3209b89f3` and the current PR commits.
 - Produces: one conflict-free branch containing both outbound-image and
   interactive-card behavior.
 
@@ -56,7 +56,7 @@ git fetch origin main
 git rev-parse HEAD origin/main fork/agent/dingtalk-interactive-cards
 ```
 
-Expected: no uncommitted files; `origin/main` resolves to `ef69eff20`.
+Expected: no uncommitted files; `origin/main` resolves to `3209b89f3`.
 
 - [ ] **Step 2: Rebase the branch**
 
