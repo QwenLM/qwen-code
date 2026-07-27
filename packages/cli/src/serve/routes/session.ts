@@ -432,6 +432,10 @@ export function registerSessionRoutes(
   // after spawn). Closes the TOCTOU where two concurrent requests both pass
   // the guard before either populates `activeBranchSessions`.
   const inFlightBranchWorkspaces = new Set<string>();
+  // Caller-supplied session ids with a creation currently in flight. Closes
+  // the TOCTOU where two concurrent requests with the same sessionId both
+  // pass sessionExistsInAnyState before either session is created.
+  const inFlightSessionIds = new Set<string>();
 
   /** Remove the branch-session tracking entry when a session ends. */
   const clearBranchSessionEntry = (sessionId: string): void => {
@@ -1296,6 +1300,13 @@ export function registerSessionRoutes(
         });
         return;
       }
+      if (inFlightSessionIds.has(requestedSessionId)) {
+        res.status(409).json({
+          error: `Session "${requestedSessionId}" creation already in progress`,
+          code: 'session_id_conflict',
+        });
+        return;
+      }
     }
 
     // ── Branch creation ────────────────────────────────────────────
@@ -1577,6 +1588,19 @@ export function registerSessionRoutes(
       sessionScope = 'thread';
     }
 
+    // Authoritative in-flight reservation: synchronous check-and-add
+    // (no await between) so the finally below always cleans up.
+    if (requestedSessionId !== undefined) {
+      if (inFlightSessionIds.has(requestedSessionId)) {
+        res.status(409).json({
+          error: `Session "${requestedSessionId}" creation already in progress`,
+          code: 'session_id_conflict',
+        });
+        return;
+      }
+      inFlightSessionIds.add(requestedSessionId);
+    }
+
     try {
       const session = await runtime.bridge.spawnOrAttach({
         workspaceCwd,
@@ -1839,6 +1863,10 @@ export function registerSessionRoutes(
         );
       }
       sendBridgeError(res, err, { route: 'POST /session' });
+    } finally {
+      if (requestedSessionId !== undefined) {
+        inFlightSessionIds.delete(requestedSessionId);
+      }
     }
   });
 

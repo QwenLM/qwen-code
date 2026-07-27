@@ -8633,6 +8633,64 @@ describe('createServeApp', () => {
       }
     });
 
+    it('409 when concurrent request has same sessionId in flight', async () => {
+      let resolveFirstSpawn!: (v: BridgeSession) => void;
+      const firstSpawnBarrier = new Promise<BridgeSession>((r) => {
+        resolveFirstSpawn = r;
+      });
+      let spawnCallCount = 0;
+      const bridge = fakeBridge({
+        spawnImpl: (req) => {
+          spawnCallCount++;
+          if (spawnCallCount === 1) {
+            // First call hangs until released; resolve after a short delay
+            // so the overall test does not deadlock.
+            setTimeout(
+              () =>
+                resolveFirstSpawn({
+                  sessionId: req.sessionId ?? 'fake-0',
+                  workspaceCwd: req.workspaceCwd,
+                  attached: false,
+                  clientId: 'client-0',
+                }),
+              100,
+            );
+            return firstSpawnBarrier;
+          }
+          return Promise.resolve({
+            sessionId: req.sessionId ?? 'fake-dup',
+            workspaceCwd: req.workspaceCwd,
+            attached: false,
+            clientId: 'client-dup',
+          });
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const sid = '550e8400-e29b-41d4-a716-446655440000';
+      const makeReq = () =>
+        request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ sessionId: sid });
+      // Fire both concurrently; the 20 ms gap ensures the first reaches
+      // spawnOrAttach (and registers in inFlightSessionIds) before the
+      // second arrives at the guard.
+      const [firstRes, secondRes] = await Promise.all([
+        makeReq(),
+        new Promise((r) => setTimeout(r, 20)).then(() => makeReq()),
+      ]);
+      const statuses = [firstRes.status, secondRes.status].sort();
+      expect(statuses).toEqual([200, 409]);
+      const conflict = firstRes.status === 409 ? firstRes : secondRes;
+      expect(conflict.body.code).toBe('session_id_conflict');
+      // Only the first request should have reached spawnOrAttach.
+      expect(spawnCallCount).toBe(1);
+    });
+
     it('400 when sessionId is not a UUID (path traversal guard)', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
