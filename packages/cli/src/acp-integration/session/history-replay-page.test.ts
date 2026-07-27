@@ -231,6 +231,70 @@ describe('history replay page', () => {
     });
   });
 
+  it('seeds backward replay so a cleared Goal keeps its prior condition', async () => {
+    // Drives the real (unspied) replayPage: the authoritative pre-page Goal
+    // state must seed the replay machine so a `clear` record still projects its
+    // original condition, iteration count, and timing. Without the seed the
+    // cleared card degrades to an empty condition.
+    const priorGoalState: GoalSnapshotV2 = {
+      v: 2,
+      activity: 'idle',
+      goal: {
+        goalId: 'goal-1',
+        revision: 1,
+        objective: 'ship the transcript work',
+        status: 'active',
+        evidenceCursor: { recordId: 'goal-state' },
+        turnCount: 3,
+        activeTimeMs: 1234,
+        createdAt: 10,
+        updatedAt: 20,
+      },
+    };
+    const goalClearRecord = {
+      uuid: 'goal-clear',
+      parentUuid: 'u2',
+      sessionId: SESSION_ID,
+      timestamp: TIMESTAMP,
+      type: 'system',
+      subtype: 'goal_state',
+      cwd: '/workspace',
+      version: '1.0.0',
+      systemPayload: {
+        v: 2,
+        cause: 'clear',
+        snapshot: { v: 2, activity: 'idle', goal: null },
+      },
+    } as unknown as ChatRecord;
+
+    const result = await replayTranscriptRecordPage({
+      sessionId: SESSION_ID,
+      page: recordPage({
+        direction: 'backward',
+        records: [goalClearRecord],
+        replay: { goalState: priorGoalState },
+      }),
+      encodeCursor: vi.fn(),
+    });
+
+    const goalUpdate = result.updates.find((update) => {
+      const meta = (update as { _meta?: Record<string, unknown> })._meta;
+      return meta?.['goalStatus'] !== undefined;
+    }) as { _meta?: Record<string, unknown> } | undefined;
+
+    expect(goalUpdate?._meta).toMatchObject({
+      goalState: { v: 2, goal: null, activity: 'idle' },
+      goalStatus: {
+        kind: 'cleared',
+        condition: 'ship the transcript work',
+        iterations: 3,
+        setAt: 10,
+        durationMs: 1234,
+      },
+    });
+    expect(goalUpdate?._meta?.['goalStatus']).not.toHaveProperty('type');
+  });
+
   it('terminates pagination when replay conversion fails', async () => {
     vi.spyOn(HistoryReplayer.prototype, 'replayPage').mockRejectedValueOnce(
       new Error('replay failed'),

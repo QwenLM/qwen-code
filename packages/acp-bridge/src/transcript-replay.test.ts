@@ -112,6 +112,26 @@ describe('createTranscriptReplayMachine', () => {
     });
   });
 
+  it('emits legacy goalTerminal metadata for a terminal goal_state', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      goalStateRecord('goal-complete', 'complete', {
+        ...GOAL,
+        status: 'complete',
+      }),
+    );
+
+    expect(projected[0]?._meta).toMatchObject({
+      goalStatus: { kind: 'achieved', condition: GOAL.objective },
+      goalTerminal: {
+        kind: 'achieved',
+        condition: GOAL.objective,
+        iterations: GOAL.turnCount,
+        durationMs: GOAL.activeTimeMs,
+      },
+    });
+  });
+
   it('reports and skips a malformed goal_state record', () => {
     const onDiagnostic = vi.fn();
     const machine = createTranscriptReplayMachine({ onDiagnostic });

@@ -429,7 +429,24 @@ describe('SessionTranscriptReader', () => {
       systemPayload: {
         v: 2,
         cause: 'clear',
-        snapshot: null,
+        // Truthy but invalid: the parser only accepts `activity === 'idle'`,
+        // so a `running` snapshot must be rejected. A falsy `null` here would
+        // pass even with the validation deleted, leaving the guard untested.
+        snapshot: {
+          v: 2,
+          activity: 'running',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'do not revive me',
+            status: 'active',
+            evidenceCursor: { recordId: null },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        },
       } as unknown as ChatRecord['systemPayload'],
     };
     await writeRecords([

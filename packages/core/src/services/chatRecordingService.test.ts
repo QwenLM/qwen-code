@@ -562,6 +562,77 @@ describe('ChatRecordingService', () => {
       expect(rewind.parentUuid).toBe('pre-resume-parent');
     });
 
+    it('does not treat a resumed Goal runtime continuation as a rewind boundary', async () => {
+      chatRecordingService.rebuildTurnBoundaries([
+        {
+          uuid: 'user-1',
+          parentUuid: null,
+          sessionId: 'test-session-id',
+          timestamp: '2026-06-27T00:00:00.000Z',
+          type: 'user',
+          cwd: '/test/project/root',
+          version: '1.0.0',
+          message: { role: 'user', parts: [{ text: 'first turn' }] },
+        },
+        {
+          uuid: 'assistant-1',
+          parentUuid: 'user-1',
+          sessionId: 'test-session-id',
+          timestamp: '2026-06-27T00:00:01.000Z',
+          type: 'assistant',
+          cwd: '/test/project/root',
+          version: '1.0.0',
+          message: { role: 'model', parts: [{ text: 'response' }] },
+          model: 'gemini-pro',
+        },
+        {
+          uuid: 'goal-runtime-1',
+          parentUuid: 'assistant-1',
+          sessionId: 'test-session-id',
+          timestamp: '2026-06-27T00:00:02.000Z',
+          type: 'user',
+          subtype: 'goal_runtime',
+          provenance: 'goal_runtime',
+          cwd: '/test/project/root',
+          version: '1.0.0',
+          message: { role: 'user', parts: [{ text: 'Continue working.' }] },
+        },
+        {
+          uuid: 'assistant-2',
+          parentUuid: 'goal-runtime-1',
+          sessionId: 'test-session-id',
+          timestamp: '2026-06-27T00:00:03.000Z',
+          type: 'assistant',
+          cwd: '/test/project/root',
+          version: '1.0.0',
+          message: { role: 'model', parts: [{ text: 'still working' }] },
+          model: 'gemini-pro',
+        },
+        {
+          uuid: 'user-2',
+          parentUuid: 'assistant-2',
+          sessionId: 'test-session-id',
+          timestamp: '2026-06-27T00:00:04.000Z',
+          type: 'user',
+          cwd: '/test/project/root',
+          version: '1.0.0',
+          message: { role: 'user', parts: [{ text: 'second turn' }] },
+        },
+      ]);
+
+      // The Goal runtime continuation is not a turn boundary, so turn index 1
+      // is the second REAL user turn (user-2), re-rooting at assistant-2. Were
+      // the continuation counted, index 1 would re-root at assistant-1.
+      chatRecordingService.rewindRecording(1, { truncatedCount: 3 });
+      await chatRecordingService.flush();
+
+      const records = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      const rewind = records.find((record) => record.subtype === 'rewind');
+      expect(rewind?.parentUuid).toBe('assistant-2');
+    });
+
     it('restores a rebuilt persisted tail after a failed append', async () => {
       chatRecordingService.rebuildTurnBoundaries([
         {
