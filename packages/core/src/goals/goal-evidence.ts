@@ -16,7 +16,7 @@ const CATALOG_ENTRY_LIMIT = 100;
 const CATALOG_BYTE_LIMIT = 24_000;
 const CATALOG_LINEAGE_LIMIT = 16;
 export const GOAL_EVIDENCE_REFERENCE_LIMIT = CATALOG_ENTRY_LIMIT;
-const VERIFIER_EVIDENCE_BYTE_LIMIT = 24_000;
+const VERIFIER_EVIDENCE_BYTE_LIMIT = 256_000;
 
 export type GoalEvidenceProvenance =
   | 'real_user'
@@ -145,9 +145,7 @@ export function buildGoalEvidenceCatalog(
   return {
     entries: analysis.catalog.map((entry) => ({ ...entry })),
     lineageTurnIds: analysis.lineageTurnIds.slice(-CATALOG_LINEAGE_LIMIT),
-    truncated:
-      analysis.catalogTruncated ||
-      analysis.lineageTurnIds.length > CATALOG_LINEAGE_LIMIT,
+    truncated: analysis.catalogTruncated,
   };
 }
 

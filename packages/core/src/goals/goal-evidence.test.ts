@@ -239,7 +239,7 @@ describe('Goal evidence catalog', () => {
         record(`evidence-${index}`, 'assistant', {
           provenance: 'assistant_output',
           turnId: 'turn-3',
-          text: index === 0 ? 'x'.repeat(24_001) : `output ${index}`,
+          text: index === 0 ? 'x'.repeat(256_001) : `output ${index}`,
         }),
       ),
     ];
@@ -271,6 +271,24 @@ describe('Goal evidence catalog', () => {
     expect(() => validate(records, complete(['evidence-0']))).toThrowError(
       expect.objectContaining({ code: 'evidence_payload_too_large' }),
     );
+  });
+
+  it('admits delivered output larger than the catalog preview budget', () => {
+    const records = [
+      record('cursor', 'system'),
+      record('output', 'assistant', {
+        provenance: 'assistant_output',
+        turnId: 'turn-3',
+        text: 'x'.repeat(24_001),
+      }),
+    ];
+
+    expect(
+      validate(records, complete(['output'])).citedRecords[0],
+    ).toMatchObject({
+      uuid: 'output',
+      content: 'x'.repeat(24_001),
+    });
   });
 
   it('admits thirteen delivered outputs plus independent evidence', () => {
@@ -406,6 +424,32 @@ describe('Goal evidence catalog', () => {
 });
 
 describe('Goal evidence lineage and blockers', () => {
+  it('keeps completion available after the lineage display window fills', () => {
+    const records = [
+      record('cursor', 'system'),
+      ...Array.from({ length: 17 }, (_, index) =>
+        record(`output-${index + 1}`, 'assistant', {
+          provenance: 'assistant_output',
+          turnId: `turn-${index + 1}`,
+          text: `output ${index + 1}`,
+        }),
+      ),
+    ];
+    const currentPermit = permit('turn-17');
+    const input = { records, goal: goal(), permit: currentPermit };
+
+    expect(buildGoalEvidenceCatalog(input)).toMatchObject({
+      truncated: false,
+      lineageTurnIds: Array.from(
+        { length: 16 },
+        (_, index) => `turn-${index + 2}`,
+      ),
+    });
+    expect(
+      validate(records, complete(['output-17']), currentPermit).citedRecords,
+    ).toHaveLength(1);
+  });
+
   it('rejects permit mismatch, malformed ownership, re-entry, and wrong tail', () => {
     const base = [record('cursor', 'system')];
 
