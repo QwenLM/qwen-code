@@ -386,6 +386,40 @@ describe('useVoiceCapture', () => {
     expect(capture?.status).toBe('transcribing');
   });
 
+  it('fails and stops buffering when pre-open audio exceeds the limit', async () => {
+    const result = await renderHookHost();
+
+    await act(async () => {
+      result.start();
+    });
+    const ws = MockWebSocket.latest;
+    const processor = MockAudioContext.latestProcessor;
+    if (!ws || !processor?.onaudioprocess) {
+      throw new Error('Voice capture was not ready');
+    }
+    ws.readyState = 0;
+
+    const event = {
+      inputBuffer: {
+        getChannelData: () => new Float32Array(4096),
+      },
+    } as AudioProcessingEvent;
+    await act(async () => {
+      for (let frame = 0; frame < 235; frame += 1) {
+        processor.onaudioprocess?.(event);
+      }
+    });
+
+    expect(onError).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith(
+      'Voice capture timed out while starting.',
+    );
+    expect(capture?.status).toBe('error');
+    expect(processor.onaudioprocess).toBeNull();
+    expect(ws.sent).toEqual([]);
+    expect(track.stop).toHaveBeenCalledOnce();
+  });
+
   it('does not start capturing after release while microphone access is pending', async () => {
     let resolveStream: (stream: {
       getTracks: () => (typeof track)[];
