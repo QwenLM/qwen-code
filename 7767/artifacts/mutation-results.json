@@ -1,0 +1,183 @@
+[
+  {
+    "id": "M1",
+    "file": "/private/tmp/claude-501/-Users-cici-git-qwen-code-x3/c4fae785-c3e4-4e61-8274-7bc972654d30/scratchpad/wt-pr/packages/core/src/core/contentGenerator.ts",
+    "desc": "getGeneratorForUse() no longer clears preloadedOnly (a used generator stays discardable)",
+    "from": "  private getGeneratorForUse(): Promise<ContentGenerator> {\n    this.preloadedOnly = false;\n    return this.getGenerator();\n  }",
+    "to": "  private getGeneratorForUse(): Promise<ContentGenerator> {\n    return this.getGenerator();\n  }",
+    "suite": "core",
+    "spec": "src/core/contentGenerator.test.ts",
+    "applied": true,
+    "killed": true,
+    "failed": [
+      "\u001b[22mcreateContentGenerator\u001b[2m > \u001b[22mdoes not discard a generator that has already been used"
+    ],
+    "tail": "39m\u001b[33m\u001b[39m\u001b[32m·\u001b[39m\u001b[33m\u001b[39m\u001b[32m·\u001b[39m\u001b[33m\u001b[39m\u001b[32m·\u001b[39m\u001b[33m\u001b[39m\u001b[32m·\u001b[39m\u001b[33m\u001b[39m\u001b[32m·\u001b[39m\u001b[33m\u001b[39m\u001b[32m·\u001b[39m\n\n\u001b[2m Test Files \u001b[22m \u001b[1m\u001b[31m1 failed\u001b[39m\u001b[22m\u001b[90m (1)\u001b[39m\n\u001b[2m      Tests \u001b[22m \u001b[1m\u001b[31m1 failed\u001b[39m\u001b[22m\u001b[2m | \u001b[22m\u001b[1m\u001b[32m20 passed\u001b[39m\u001b[22m\u001b[90m (21)\u001b[39m\n\u001b[2m   Start at \u001b[22m 23:12:13\n\u001b[2m   Duration \u001b[22m 4.92s\u001b[2m (transform 553ms, setup 17ms, collect 294ms, tests 814ms, environment 0ms, prepare 63ms)\u001b[22m\n\n\u001b[33mLoaded \u001b[7m\u001b[33m vitest@3.2.7 \u001b[33m\u001b[27m and \u001b[7m\u001b[33m @vitest/coverage-v8@3.2.4 \u001b[33m\u001b[27m.\nRunning mixed versions is not supported and may lead into bugs\nUpdate your dependencies and make sure the versions match.\u001b[39m\n\n\u001b[31m⎯⎯⎯⎯⎯⎯⎯\u001b[39m\u001b[1m\u001b[41m Failed Tests 1 \u001b[49m\u001b[22m\u001b[31m⎯⎯⎯⎯⎯⎯⎯\u001b[39m\n\n\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m src/core/contentGenerator.test.ts\u001b[2m > \u001b[22mcreateContentGenerator\u001b[2m > \u001b[22mdoes not discard a generator that has already been used\n\u001b[31m\u001b[1mAssertionError\u001b[22m: expected 2 to be 1 // Object.is equality\u001b[39m\n\n\u001b[32m- Expected\u001b[39m\n\u001b[31m+ Received\u001b[39m\n\n\u001b[32m- 1\u001b[39m\n\u001b[31m+ 2\u001b[39m\n\n\u001b[36m \u001b[2m❯\u001b[22m src/core/contentGenerator.test.ts:\u001b[2m328:41\u001b[22m\u001b[39m\n    \u001b[90m326| \u001b[39m    })\u001b[33m;\u001b[39m\n    \u001b[90m327| \u001b[39m\n    \u001b[90m328| \u001b[39m    \u001b[34mexpect\u001b[39m(openaiMockState\u001b[33m.\u001b[39mcreateCount)\u001b[33m.\u001b[39m\u001b[34mtoBe\u001b[39m(\u001b[34m1\u001b[39m)\u001b[33m;\u001b[39m\n    \u001b[90m   | \u001b[39m                                        \u001b[31m^\u001b[39m\n    \u001b[90m329| \u001b[39m  })\u001b[33m;\u001b[39m\n    \u001b[90m330| \u001b[39m\n\n\u001b[31m\u001b[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\u001b[22m\u001b[39m\n\n"
+  },
+  {
+    "id": "M2",
+    "file": "/private/tmp/claude-501/-Users-cici-git-qwen-code-x3/c4fae785-c3e4-4e61-8274-7bc972654d30/scratchpad/wt-pr/packages/core/src/core/contentGenerator.ts",
+    "desc": "preload() marks preloadedOnly even when a generator already exists",
+    "from": "  preload(): Promise<ContentGenerator> {\n    if (!this.generatorPromise) {\n      this.preloadedOnly = true;\n    }\n    return this.getGenerator();\n  }",
+    "to": "  preload(): Promise<ContentGenerator> {\n    this.preloadedOnly = true;\n    return this.getGenerator();\n  }",
+    "suite": "core",
+    "spec": "src/core/contentGenerator.test.ts",
+    "applied": true,
+    "killed": false,
+    "failed": []
+  },
+  {
+    "id": "M3",
+    "file": "/private/tmp/claude-501/-Users-cici-git-qwen-code-x3/c4fae785-c3e4-4e61-8274-7bc972654d30/scratchpad/wt-pr/packages/core/src/core/contentGenerator.ts",
+    "desc": "resetPreload() drops the preloadedOnly guard (discards any generator)",
+    "from": "  resetPreload(): void {\n    if (!this.preloadedOnly) return;\n    this.preloadedOnly = false;\n    this.generatorPromise = undefined;\n  }",
+    "to": "  resetPreload(): void {\n    this.preloadedOnly = false;\n    this.generatorPromise = undefined;\n  }",
+    "suite": "core",
+    "spec": "src/core/contentGenerator.test.ts",
+    "applied": true,
+    "killed": true,
+    "failed": [
+      "\u001b[22mcreateContentGenerator\u001b[2m > \u001b[22mdoes not discard a generator that has already been used"
+    ],
+    "tail": "39m\u001b[33m\u001b[39m\u001b[32m·\u001b[39m\u001b[33m\u001b[39m\u001b[32m·\u001b[39m\u001b[33m\u001b[39m\u001b[32m·\u001b[39m\u001b[33m\u001b[39m\u001b[32m·\u001b[39m\u001b[33m\u001b[39m\u001b[32m·\u001b[39m\u001b[33m\u001b[39m\u001b[32m·\u001b[39m\n\n\u001b[2m Test Files \u001b[22m \u001b[1m\u001b[31m1 failed\u001b[39m\u001b[22m\u001b[90m (1)\u001b[39m\n\u001b[2m      Tests \u001b[22m \u001b[1m\u001b[31m1 failed\u001b[39m\u001b[22m\u001b[2m | \u001b[22m\u001b[1m\u001b[32m20 passed\u001b[39m\u001b[22m\u001b[90m (21)\u001b[39m\n\u001b[2m   Start at \u001b[22m 23:12:26\n\u001b[2m   Duration \u001b[22m 4.74s\u001b[2m (transform 471ms, setup 15ms, collect 237ms, tests 710ms, environment 0ms, prepare 64ms)\u001b[22m\n\n\u001b[33mLoaded \u001b[7m\u001b[33m vitest@3.2.7 \u001b[33m\u001b[27m and \u001b[7m\u001b[33m @vitest/coverage-v8@3.2.4 \u001b[33m\u001b[27m.\nRunning mixed versions is not supported and may lead into bugs\nUpdate your dependencies and make sure the versions match.\u001b[39m\n\n\u001b[31m⎯⎯⎯⎯⎯⎯⎯\u001b[39m\u001b[1m\u001b[41m Failed Tests 1 \u001b[49m\u001b[22m\u001b[31m⎯⎯⎯⎯⎯⎯⎯\u001b[39m\n\n\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m src/core/contentGenerator.test.ts\u001b[2m > \u001b[22mcreateContentGenerator\u001b[2m > \u001b[22mdoes not discard a generator that has already been used\n\u001b[31m\u001b[1mAssertionError\u001b[22m: expected 2 to be 1 // Object.is equality\u001b[39m\n\n\u001b[32m- Expected\u001b[39m\n\u001b[31m+ Received\u001b[39m\n\n\u001b[32m- 1\u001b[39m\n\u001b[31m+ 2\u001b[39m\n\n\u001b[36m \u001b[2m❯\u001b[22m src/core/contentGenerator.test.ts:\u001b[2m328:41\u001b[22m\u001b[39m\n    \u001b[90m326| \u001b[39m    })\u001b[33m;\u001b[39m\n    \u001b[90m327| \u001b[39m\n    \u001b[90m328| \u001b[39m    \u001b[34mexpect\u001b[39m(openaiMockState\u001b[33m.\u001b[39mcreateCount)\u001b[33m.\u001b[39m\u001b[34mtoBe\u001b[39m(\u001b[34m1\u001b[39m)\u001b[33m;\u001b[39m\n    \u001b[90m   | \u001b[39m                                        \u001b[31m^\u001b[39m\n    \u001b[90m329| \u001b[39m  })\u001b[33m;\u001b[39m\n    \u001b[90m330| \u001b[39m\n\n\u001b[31m\u001b[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\u001b[22m\u001b[39m\n\n"
+  },
+  {
+    "id": "M4",
+    "file": "/private/tmp/claude-501/-Users-cici-git-qwen-code-x3/c4fae785-c3e4-4e61-8274-7bc972654d30/scratchpad/wt-pr/packages/core/src/core/contentGenerator.ts",
+    "desc": "resetPreload() is a no-op (a stale preload is never discarded)",
+    "from": "  resetPreload(): void {\n    if (!this.preloadedOnly) return;\n    this.preloadedOnly = false;\n    this.generatorPromise = undefined;\n  }",
+    "to": "  resetPreload(): void {\n    return;\n  }",
+    "suite": "core",
+    "spec": "src/core/contentGenerator.test.ts",
+    "applied": true,
+    "killed": true,
+    "failed": [
+      "\u001b[22mcreateContentGenerator\u001b[2m > \u001b[22mdiscards an unused preload after session configuration changes",
+      "\u001b[22mcreateContentGenerator\u001b[2m > \u001b[22misolates a reset in-flight preload from the replacement first use",
+      "\u001b[22mcreateContentGenerator\u001b[2m > \u001b[22mrebuilds a preloaded Qwen generator from a hot-switched config",
+      "\u001b[22mcreateContentGenerator\u001b[2m > \u001b[22mrebuilds OpenAI logging with the relocated working directory"
+    ],
+    "tail": "4mtoEqual\u001b[39m([\n    \u001b[90m   | \u001b[39m                                            \u001b[31m^\u001b[39m\n    \u001b[90m444| \u001b[39m      \u001b[32m'qwen3-coder-flash'\u001b[39m\u001b[33m,\u001b[39m\n    \u001b[90m445| \u001b[39m      \u001b[32m'coder-model'\u001b[39m\u001b[33m,\u001b[39m\n\n\u001b[31m\u001b[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[3/4]⎯\u001b[22m\u001b[39m\n\n\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m src/core/contentGenerator.test.ts\u001b[2m > \u001b[22mcreateContentGenerator\u001b[2m > \u001b[22mrebuilds OpenAI logging with the relocated working directory\n\u001b[31m\u001b[1mAssertionError\u001b[22m: expected [ { customLogDir: 'logs', …(1) } ] to deeply equal [ Array(2) ]\u001b[39m\n\n\u001b[32m- Expected\u001b[39m\n\u001b[31m+ Received\u001b[39m\n\n\u001b[2m  [\u001b[22m\n\u001b[2m    {\u001b[22m\n\u001b[2m      \"customLogDir\": \"logs\",\u001b[22m\n\u001b[2m      \"cwd\": \"/workspace/before\",\u001b[22m\n\u001b[2m    },\u001b[22m\n\u001b[32m-   {\u001b[39m\n\u001b[32m-     \"customLogDir\": \"logs\",\u001b[39m\n\u001b[32m-     \"cwd\": \"/workspace/after\",\u001b[39m\n\u001b[32m-   },\u001b[39m\n\u001b[2m  ]\u001b[22m\n\n\u001b[36m \u001b[2m❯\u001b[22m src/core/contentGenerator.test.ts:\u001b[2m478:52\u001b[22m\u001b[39m\n    \u001b[90m476| \u001b[39m    })\u001b[33m;\u001b[39m\n    \u001b[90m477| \u001b[39m\n    \u001b[90m478| \u001b[39m    \u001b[34mexpect\u001b[39m(openaiLoggerMockState\u001b[33m.\u001b[39mconstructorCalls)\u001b[33m.\u001b[39m\u001b[34mtoEqual\u001b[39m([\n    \u001b[90m   | \u001b[39m                                                   \u001b[31m^\u001b[39m\n    \u001b[90m479| \u001b[39m      { customLogDir\u001b[33m:\u001b[39m \u001b[32m'logs'\u001b[39m\u001b[33m,\u001b[39m cwd\u001b[33m:\u001b[39m \u001b[32m'/workspace/before'\u001b[39m }\u001b[33m,\u001b[39m\n    \u001b[90m480| \u001b[39m      { customLogDir\u001b[33m:\u001b[39m \u001b[32m'logs'\u001b[39m\u001b[33m,\u001b[39m cwd\u001b[33m:\u001b[39m \u001b[32m'/workspace/after'\u001b[39m }\u001b[33m,\u001b[39m\n\n\u001b[31m\u001b[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[4/4]⎯\u001b[22m\u001b[39m\n\n"
+  },
+  {
+    "id": "M5",
+    "file": "/private/tmp/claude-501/-Users-cici-git-qwen-code-x3/c4fae785-c3e4-4e61-8274-7bc972654d30/scratchpad/wt-pr/packages/core/src/core/contentGenerator.ts",
+    "desc": "preloadContentGenerator() drops the LazyContentGenerator instanceof guard",
+    "from": "  if (generator instanceof LazyContentGenerator) {\n    await generator.preload();\n  }",
+    "to": "  await (generator as unknown as LazyContentGenerator).preload();",
+    "suite": "core",
+    "spec": "src/core/contentGenerator.test.ts",
+    "applied": true,
+    "killed": true,
+    "failed": [
+      "\u001b[22mcreateContentGenerator\u001b[2m > \u001b[22mdoes not preload non-lazy content generators"
+    ],
+    "tail": "m 4.71s\u001b[2m (transform 470ms, setup 13ms, collect 230ms, tests 716ms, environment 0ms, prepare 48ms)\u001b[22m\n\n\u001b[33mLoaded \u001b[7m\u001b[33m vitest@3.2.7 \u001b[33m\u001b[27m and \u001b[7m\u001b[33m @vitest/coverage-v8@3.2.4 \u001b[33m\u001b[27m.\nRunning mixed versions is not supported and may lead into bugs\nUpdate your dependencies and make sure the versions match.\u001b[39m\n\n\u001b[31m⎯⎯⎯⎯⎯⎯⎯\u001b[39m\u001b[1m\u001b[41m Failed Tests 1 \u001b[49m\u001b[22m\u001b[31m⎯⎯⎯⎯⎯⎯⎯\u001b[39m\n\n\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m src/core/contentGenerator.test.ts\u001b[2m > \u001b[22mcreateContentGenerator\u001b[2m > \u001b[22mdoes not preload non-lazy content generators\n\u001b[31m\u001b[1mAssertionError\u001b[22m: promise rejected \"TypeError: generator.preload is not a fun…\" instead of resolving\u001b[39m\n\u001b[36m \u001b[2m❯\u001b[22m src/core/contentGenerator.test.ts:\u001b[2m239:52\u001b[22m\u001b[39m\n    \u001b[90m237| \u001b[39m    }\u001b[33m;\u001b[39m\n    \u001b[90m238| \u001b[39m\n    \u001b[90m239| \u001b[39m    await expect(preloadContentGenerator(generator)).resolves.toBeUnde…\n    \u001b[90m   | \u001b[39m                                                   \u001b[31m^\u001b[39m\n    \u001b[90m240| \u001b[39m    \u001b[34mresetPreloadedContentGenerator\u001b[39m(generator)\u001b[33m;\u001b[39m\n    \u001b[90m241| \u001b[39m    \u001b[34mexpect\u001b[39m(generator\u001b[33m.\u001b[39mgenerateContent)\u001b[33m.\u001b[39mnot\u001b[33m.\u001b[39m\u001b[34mtoHaveBeenCalled\u001b[39m()\u001b[33m;\u001b[39m\n\n\u001b[31m\u001b[1mCaused by: TypeError\u001b[22m: generator.preload is not a function\u001b[39m\n\u001b[36m \u001b[2m❯\u001b[22m Module.preloadContentGenerator src/core/contentGenerator.ts:\u001b[2m444:56\u001b[22m\u001b[39m\n\u001b[90m \u001b[2m❯\u001b[22m src/core/contentGenerator.test.ts:\u001b[2m239:18\u001b[22m\u001b[39m\n\n\u001b[31m\u001b[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\u001b[22m\u001b[39m\n\n"
+  },
+  {
+    "id": "M6",
+    "file": "/private/tmp/claude-501/-Users-cici-git-qwen-code-x3/c4fae785-c3e4-4e61-8274-7bc972654d30/scratchpad/wt-pr/packages/core/src/config/config.ts",
+    "desc": "switchModel() no longer invalidates an unused preload (Qwen OAuth hot switch)",
+    "from": "      resetPreloadedContentGenerator(this.contentGenerator);\n      return;",
+    "to": "      return;",
+    "suite": "core",
+    "spec": "src/config/config.test.ts",
+    "applied": true,
+    "killed": true,
+    "failed": [
+      "\u001b[22mServer Config (config.ts)\u001b[2m > \u001b[22mmodel switching optimization (QWEN_OAUTH)\u001b[2m > \u001b[22mshould switch qwen-oauth model in-place without refreshing auth when safe"
+    ],
+    "tail": "d\u001b[39m\u001b[22m\u001b[90m (1)\u001b[39m\n\u001b[2m      Tests \u001b[22m \u001b[1m\u001b[31m1 failed\u001b[39m\u001b[22m\u001b[2m | \u001b[22m\u001b[1m\u001b[32m436 passed\u001b[39m\u001b[22m\u001b[90m (437)\u001b[39m\n\u001b[2m   Start at \u001b[22m 23:12:44\n\u001b[2m   Duration \u001b[22m 6.68s\u001b[2m (transform 1.98s, setup 14ms, collect 3.08s, tests 454ms, environment 0ms, prepare 45ms)\u001b[22m\n\n\u001b[33mLoaded \u001b[7m\u001b[33m vitest@3.2.7 \u001b[33m\u001b[27m and \u001b[7m\u001b[33m @vitest/coverage-v8@3.2.4 \u001b[33m\u001b[27m.\nRunning mixed versions is not supported and may lead into bugs\nUpdate your dependencies and make sure the versions match.\u001b[39m\n\n\u001b[31m⎯⎯⎯⎯⎯⎯⎯\u001b[39m\u001b[1m\u001b[41m Failed Tests 1 \u001b[49m\u001b[22m\u001b[31m⎯⎯⎯⎯⎯⎯⎯\u001b[39m\n\n\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m src/config/config.test.ts\u001b[2m > \u001b[22mServer Config (config.ts)\u001b[2m > \u001b[22mmodel switching optimization (QWEN_OAUTH)\u001b[2m > \u001b[22mshould switch qwen-oauth model in-place without refreshing auth when safe\n\u001b[31m\u001b[1mAssertionError\u001b[22m: expected \"resetPreloadedContentGenerator\" to be called once, but got 0 times\u001b[39m\n\u001b[36m \u001b[2m❯\u001b[22m src/config/config.test.ts:\u001b[2m3596:46\u001b[22m\u001b[39m\n    \u001b[90m3594| \u001b[39m      ).toHaveBeenCalledTimes(2);\n    \u001b[90m3595| \u001b[39m      expect(vi.mocked(createContentGenerator)).toHaveBeenCalledTimes(…\n    \u001b[90m3596| \u001b[39m      expect(resetPreloadedContentGenerator).toHaveBeenCalledOnce();\n    \u001b[90m   | \u001b[39m                                             \u001b[31m^\u001b[39m\n    \u001b[90m3597| \u001b[39m      expect(resetPreloadedContentGenerator).toHaveBeenCalledWith(\n    \u001b[90m3598| \u001b[39m        config.getContentGenerator(),\n\n\u001b[31m\u001b[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\u001b[22m\u001b[39m\n\n"
+  },
+  {
+    "id": "M7",
+    "file": "/private/tmp/claude-501/-Users-cici-git-qwen-code-x3/c4fae785-c3e4-4e61-8274-7bc972654d30/scratchpad/wt-pr/packages/core/src/config/config.ts",
+    "desc": "relocateWorkingDirectory() no longer invalidates an unused preload",
+    "from": "    this.cwd = expected;\n    resetPreloadedContentGenerator(this.contentGenerator);",
+    "to": "    this.cwd = expected;",
+    "suite": "core",
+    "spec": "src/config/config.test.ts",
+    "applied": true,
+    "killed": true,
+    "failed": [
+      "\u001b[22mServer Config (config.ts)\u001b[2m > \u001b[22mrelocateWorkingDirectory should preserve leased storage for an ACP cwd change"
+    ],
+    "tail": "m\u001b[39m\u001b[32m·\u001b[39m\n\n\u001b[2m Test Files \u001b[22m \u001b[1m\u001b[31m1 failed\u001b[39m\u001b[22m\u001b[90m (1)\u001b[39m\n\u001b[2m      Tests \u001b[22m \u001b[1m\u001b[31m1 failed\u001b[39m\u001b[22m\u001b[2m | \u001b[22m\u001b[1m\u001b[32m436 passed\u001b[39m\u001b[22m\u001b[90m (437)\u001b[39m\n\u001b[2m   Start at \u001b[22m 23:12:51\n\u001b[2m   Duration \u001b[22m 6.76s\u001b[2m (transform 2.02s, setup 14ms, collect 3.06s, tests 487ms, environment 0ms, prepare 46ms)\u001b[22m\n\n\u001b[33mLoaded \u001b[7m\u001b[33m vitest@3.2.7 \u001b[33m\u001b[27m and \u001b[7m\u001b[33m @vitest/coverage-v8@3.2.4 \u001b[33m\u001b[27m.\nRunning mixed versions is not supported and may lead into bugs\nUpdate your dependencies and make sure the versions match.\u001b[39m\n\n\u001b[31m⎯⎯⎯⎯⎯⎯⎯\u001b[39m\u001b[1m\u001b[41m Failed Tests 1 \u001b[49m\u001b[22m\u001b[31m⎯⎯⎯⎯⎯⎯⎯\u001b[39m\n\n\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m src/config/config.test.ts\u001b[2m > \u001b[22mServer Config (config.ts)\u001b[2m > \u001b[22mrelocateWorkingDirectory should preserve leased storage for an ACP cwd change\n\u001b[31m\u001b[1mAssertionError\u001b[22m: expected \"resetPreloadedContentGenerator\" to be called with arguments: [ {} ]\u001b[90m\n\nNumber of calls: \u001b[1m0\u001b[22m\n\u001b[31m\u001b[39m\n\u001b[36m \u001b[2m❯\u001b[22m src/config/config.test.ts:\u001b[2m4566:44\u001b[22m\u001b[39m\n    \u001b[90m4564| \u001b[39m\n    \u001b[90m4565| \u001b[39m    expect(config.getTargetDir()).toBe(newDir);\n    \u001b[90m4566| \u001b[39m    expect(resetPreloadedContentGenerator).toHaveBeenCalledWith(genera…\n    \u001b[90m   | \u001b[39m                                           \u001b[31m^\u001b[39m\n    \u001b[90m4567| \u001b[39m    expect(config.storage).toBe(originalStorage);\n    \u001b[90m4568| \u001b[39m    expect(config.getSessionService().getProjectRoot()).toBe(\n\n\u001b[31m\u001b[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\u001b[22m\u001b[39m\n\n"
+  },
+  {
+    "id": "M8",
+    "file": "/private/tmp/claude-501/-Users-cici-git-qwen-code-x3/c4fae785-c3e4-4e61-8274-7bc972654d30/scratchpad/wt-pr/packages/cli/src/acp-integration/acpAgent.ts",
+    "desc": "preload runs synchronously inside the transport hook instead of setImmediate",
+    "from": "          const sessionId = message.result.sessionId;\n          setImmediate(() => {",
+    "to": "          const sessionId = message.result.sessionId;\n          ((fn: () => void) => {\n            fn();\n            return { unref: () => undefined };\n          })(() => {",
+    "suite": "cli",
+    "spec": "src/acp-integration/acpAgent.test.ts",
+    "applied": true,
+    "killed": true,
+    "failed": [
+      "\u001b[22mrunAcpAgent shutdown cleanup\u001b[2m > \u001b[22mpreloads out-of-order session/new responses with string, number, and null ids",
+      "\u001b[22mrunAcpAgent shutdown cleanup\u001b[2m > \u001b[22mre-finds the live session and its current generator in the scheduled callback"
+    ],
+    "tail": "lls: \u001b[1m3\u001b[22m\n\u001b[31m\u001b[39m\n\u001b[36m \u001b[2m❯\u001b[22m src/acp-integration/acpAgent.test.ts:\u001b[2m1138:45\u001b[22m\u001b[39m\n    \u001b[90m1136| \u001b[39m    });\n    \u001b[90m1137| \u001b[39m\n    \u001b[90m1138| \u001b[39m    expect(mockPreloadContentGenerator).not.toHaveBeenCalled();\n    \u001b[90m   | \u001b[39m                                            \u001b[31m^\u001b[39m\n    \u001b[90m1139| \u001b[39m    await flushImmediate();\n    \u001b[90m1140| \u001b[39m    expect(mockPreloadContentGenerator.mock.calls).toEqual([\n\n\u001b[31m\u001b[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/2]⎯\u001b[22m\u001b[39m\n\n\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m src/acp-integration/acpAgent.test.ts\u001b[2m > \u001b[22mrunAcpAgent shutdown cleanup\u001b[2m > \u001b[22mre-finds the live session and its current generator in the scheduled callback\n\u001b[31m\u001b[1mAssertionError\u001b[22m: expected \"spy\" to be called with arguments: [ { id: 'current-generator' } ]\u001b[90m\n\nReceived: \n\n\u001b[1m  1st spy call:\n\n\u001b[22m\u001b[2m  [\u001b[22m\n\u001b[2m    {\u001b[22m\n\u001b[32m-     \"id\": \"current-generator\",\u001b[90m\n\u001b[31m+     \"id\": \"old-generator\",\u001b[90m\n\u001b[2m    },\u001b[22m\n\u001b[2m  ]\u001b[22m\n\u001b[31m\u001b[90m\n\nNumber of calls: \u001b[1m1\u001b[22m\n\u001b[31m\u001b[39m\n\u001b[36m \u001b[2m❯\u001b[22m src/acp-integration/acpAgent.test.ts:\u001b[2m1196:41\u001b[22m\u001b[39m\n    \u001b[90m1194| \u001b[39m\n    \u001b[90m1195| \u001b[39m    expect(mockPreloadContentGenerator).toHaveBeenCalledOnce();\n    \u001b[90m1196| \u001b[39m    expect(mockPreloadContentGenerator).toHaveBeenCalledWith(currentGe…\n    \u001b[90m   | \u001b[39m                                        \u001b[31m^\u001b[39m\n    \u001b[90m1197| \u001b[39m\n    \u001b[90m1198| \u001b[39m    observeNewSessionRequest(hook, 2);\n\n\u001b[31m\u001b[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[2/2]⎯\u001b[22m\u001b[39m\n\n"
+  },
+  {
+    "id": "M9",
+    "file": "/private/tmp/claude-501/-Users-cici-git-qwen-code-x3/c4fae785-c3e4-4e61-8274-7bc972654d30/scratchpad/wt-pr/packages/cli/src/acp-integration/acpAgent.ts",
+    "desc": "the scheduled callback keeps the wrapper captured at response time instead of re-finding the session",
+    "from": "          const sessionId = message.result.sessionId;\n          setImmediate(() => {\n            const session = agentInstance\n              ?.getActiveSessions()\n              .find((candidate) => candidate.getId() === sessionId);\n            if (!session) return;\n            void preloadContentGenerator(\n              session.getConfig().getContentGenerator(),\n            ).catch((error: unknown) => {",
+    "to": "          const sessionId = message.result.sessionId;\n          const capturedSession = agentInstance\n            ?.getActiveSessions()\n            .find((candidate) => candidate.getId() === sessionId);\n          const capturedGenerator = capturedSession\n            ?.getConfig()\n            .getContentGenerator();\n          setImmediate(() => {\n            const session = capturedSession;\n            if (!session) return;\n            void preloadContentGenerator(\n              capturedGenerator as never,\n            ).catch((error: unknown) => {",
+    "suite": "cli",
+    "spec": "src/acp-integration/acpAgent.test.ts",
+    "applied": true,
+    "killed": true,
+    "failed": [
+      "\u001b[22mrunAcpAgent shutdown cleanup\u001b[2m > \u001b[22mre-finds the live session and its current generator in the scheduled callback"
+    ],
+    "tail": ".\nqwen serve: ignoring invalid QWEN_SERVE_MCP_CLIENT_BUDGET='-5' (expected positive integer); MCP budget enforcement disabled for this child.\nqwen serve: ignoring invalid QWEN_SERVE_MCP_CLIENT_BUDGET='0' (expected positive integer); MCP budget enforcement disabled for this child.\nqwen serve: ignoring invalid QWEN_SERVE_MCP_CLIENT_BUDGET=' ' (expected positive integer); MCP budget enforcement disabled for this child.\n\n\u001b[31m⎯⎯⎯⎯⎯⎯⎯\u001b[39m\u001b[1m\u001b[41m Failed Tests 1 \u001b[49m\u001b[22m\u001b[31m⎯⎯⎯⎯⎯⎯⎯\u001b[39m\n\n\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m src/acp-integration/acpAgent.test.ts\u001b[2m > \u001b[22mrunAcpAgent shutdown cleanup\u001b[2m > \u001b[22mre-finds the live session and its current generator in the scheduled callback\n\u001b[31m\u001b[1mAssertionError\u001b[22m: expected \"spy\" to be called with arguments: [ { id: 'current-generator' } ]\u001b[90m\n\nReceived: \n\n\u001b[1m  1st spy call:\n\n\u001b[22m\u001b[2m  [\u001b[22m\n\u001b[2m    {\u001b[22m\n\u001b[32m-     \"id\": \"current-generator\",\u001b[90m\n\u001b[31m+     \"id\": \"old-generator\",\u001b[90m\n\u001b[2m    },\u001b[22m\n\u001b[2m  ]\u001b[22m\n\u001b[31m\u001b[90m\n\nNumber of calls: \u001b[1m1\u001b[22m\n\u001b[31m\u001b[39m\n\u001b[36m \u001b[2m❯\u001b[22m src/acp-integration/acpAgent.test.ts:\u001b[2m1196:41\u001b[22m\u001b[39m\n    \u001b[90m1194| \u001b[39m\n    \u001b[90m1195| \u001b[39m    expect(mockPreloadContentGenerator).toHaveBeenCalledOnce();\n    \u001b[90m1196| \u001b[39m    expect(mockPreloadContentGenerator).toHaveBeenCalledWith(currentGe…\n    \u001b[90m   | \u001b[39m                                        \u001b[31m^\u001b[39m\n    \u001b[90m1197| \u001b[39m\n    \u001b[90m1198| \u001b[39m    observeNewSessionRequest(hook, 2);\n\n\u001b[31m\u001b[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\u001b[22m\u001b[39m\n\n"
+  },
+  {
+    "id": "M10",
+    "file": "/private/tmp/claude-501/-Users-cici-git-qwen-code-x3/c4fae785-c3e4-4e61-8274-7bc972654d30/scratchpad/wt-pr/packages/cli/src/acp-integration/acpAgent.ts",
+    "desc": "the background preload rejection is no longer caught",
+    "from": "            void preloadContentGenerator(\n              session.getConfig().getContentGenerator(),\n            ).catch((error: unknown) => {\n              debugLogger.debug(\n                `[ACP] Session provider preload failed for ${sessionId}: ${\n                  error instanceof Error ? error.message : String(error)\n                }`,\n              );\n            });",
+    "to": "            void preloadContentGenerator(\n              session.getConfig().getContentGenerator(),\n            );",
+    "suite": "cli",
+    "spec": "src/acp-integration/acpAgent.test.ts",
+    "applied": true,
+    "killed": true,
+    "failed": [
+      "\u001b[22mrunAcpAgent shutdown cleanup\u001b[2m > \u001b[22mcatches and debug-logs background preload rejection"
+    ],
+    "tail": "QWEN_SERVE_MCP_CLIENT_BUDGET='5 abc' (expected positive integer); MCP budget enforcement disabled for this child.\nqwen serve: ignoring invalid QWEN_SERVE_MCP_CLIENT_BUDGET='abc' (expected positive integer); MCP budget enforcement disabled for this child.\nqwen serve: ignoring invalid QWEN_SERVE_MCP_CLIENT_BUDGET='-5' (expected positive integer); MCP budget enforcement disabled for this child.\nqwen serve: ignoring invalid QWEN_SERVE_MCP_CLIENT_BUDGET='0' (expected positive integer); MCP budget enforcement disabled for this child.\nqwen serve: ignoring invalid QWEN_SERVE_MCP_CLIENT_BUDGET=' ' (expected positive integer); MCP budget enforcement disabled for this child.\n\n\u001b[31m⎯⎯⎯⎯⎯⎯⎯\u001b[39m\u001b[1m\u001b[41m Failed Tests 1 \u001b[49m\u001b[22m\u001b[31m⎯⎯⎯⎯⎯⎯⎯\u001b[39m\n\n\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m src/acp-integration/acpAgent.test.ts\u001b[2m > \u001b[22mrunAcpAgent shutdown cleanup\u001b[2m > \u001b[22mcatches and debug-logs background preload rejection\n\u001b[31m\u001b[1mAssertionError\u001b[22m: expected \"spy\" to be called with arguments: [ Array(1) ]\u001b[90m\n\nNumber of calls: \u001b[1m0\u001b[22m\n\u001b[31m\u001b[39m\n\u001b[36m \u001b[2m❯\u001b[22m src/acp-integration/acpAgent.test.ts:\u001b[2m1237:35\u001b[22m\u001b[39m\n    \u001b[90m1235| \u001b[39m    await flushImmediate();\n    \u001b[90m1236| \u001b[39m\n    \u001b[90m1237| \u001b[39m    expect(mockDebugLogger.debug).toHaveBeenCalledWith(\n    \u001b[90m   | \u001b[39m                                  \u001b[31m^\u001b[39m\n    \u001b[90m1238| \u001b[39m      '[ACP] Session provider preload failed for rejected-session: pro…\n    \u001b[90m1239| \u001b[39m    );\n\n\u001b[31m\u001b[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\u001b[22m\u001b[39m\n\n"
+  },
+  {
+    "id": "M11",
+    "file": "/private/tmp/claude-501/-Users-cici-git-qwen-code-x3/c4fae785-c3e4-4e61-8274-7bc972654d30/scratchpad/wt-pr/packages/cli/src/acp-integration/acpAgent.ts",
+    "desc": "the pending session/new id is matched but never consumed (duplicate responses re-preload)",
+    "from": "          pendingNewSessionRequestIds.delete(message.id) &&",
+    "to": "          pendingNewSessionRequestIds.has(message.id) &&",
+    "suite": "cli",
+    "spec": "src/acp-integration/acpAgent.test.ts",
+    "applied": true,
+    "killed": true,
+    "failed": [
+      "\u001b[22mrunAcpAgent shutdown cleanup\u001b[2m > \u001b[22mconsumes errors and ignores duplicate, nonmatching, and premature responses"
+    ],
+    "tail": "noring invalid QWEN_SERVE_MCP_CLIENT_BUDGET='5 abc' (expected positive integer); MCP budget enforcement disabled for this child.\nqwen serve: ignoring invalid QWEN_SERVE_MCP_CLIENT_BUDGET='abc' (expected positive integer); MCP budget enforcement disabled for this child.\nqwen serve: ignoring invalid QWEN_SERVE_MCP_CLIENT_BUDGET='-5' (expected positive integer); MCP budget enforcement disabled for this child.\nqwen serve: ignoring invalid QWEN_SERVE_MCP_CLIENT_BUDGET='0' (expected positive integer); MCP budget enforcement disabled for this child.\nqwen serve: ignoring invalid QWEN_SERVE_MCP_CLIENT_BUDGET=' ' (expected positive integer); MCP budget enforcement disabled for this child.\n\n\u001b[31m⎯⎯⎯⎯⎯⎯⎯\u001b[39m\u001b[1m\u001b[41m Failed Tests 1 \u001b[49m\u001b[22m\u001b[31m⎯⎯⎯⎯⎯⎯⎯\u001b[39m\n\n\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m src/acp-integration/acpAgent.test.ts\u001b[2m > \u001b[22mrunAcpAgent shutdown cleanup\u001b[2m > \u001b[22mconsumes errors and ignores duplicate, nonmatching, and premature responses\n\u001b[31m\u001b[1mAssertionError\u001b[22m: expected \"spy\" to be called once, but got 3 times\u001b[39m\n\u001b[36m \u001b[2m❯\u001b[22m src/acp-integration/acpAgent.test.ts:\u001b[2m1176:41\u001b[22m\u001b[39m\n    \u001b[90m1174| \u001b[39m\n    \u001b[90m1175| \u001b[39m    await flushImmediate();\n    \u001b[90m1176| \u001b[39m    expect(mockPreloadContentGenerator).toHaveBeenCalledOnce();\n    \u001b[90m   | \u001b[39m                                        \u001b[31m^\u001b[39m\n    \u001b[90m1177| \u001b[39m    expect(mockPreloadContentGenerator).toHaveBeenCalledWith(generator…\n    \u001b[90m1178| \u001b[39m\n\n\u001b[31m\u001b[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\u001b[22m\u001b[39m\n\n"
+  },
+  {
+    "id": "M12",
+    "file": "/private/tmp/claude-501/-Users-cici-git-qwen-code-x3/c4fae785-c3e4-4e61-8274-7bc972654d30/scratchpad/wt-pr/packages/cli/src/acp-integration/acpAgent.ts",
+    "desc": "any sent result carrying a sessionId triggers a preload (no request correlation at all)",
+    "from": "          pendingNewSessionRequestIds.delete(message.id) &&\n          'result' in message &&",
+    "to": "          'result' in message &&",
+    "suite": "cli",
+    "spec": "src/acp-integration/acpAgent.test.ts",
+    "applied": true,
+    "killed": true,
+    "failed": [
+      "\u001b[22mrunAcpAgent shutdown cleanup\u001b[2m > \u001b[22mconsumes errors and ignores duplicate, nonmatching, and premature responses"
+    ],
+    "tail": "noring invalid QWEN_SERVE_MCP_CLIENT_BUDGET='5 abc' (expected positive integer); MCP budget enforcement disabled for this child.\nqwen serve: ignoring invalid QWEN_SERVE_MCP_CLIENT_BUDGET='abc' (expected positive integer); MCP budget enforcement disabled for this child.\nqwen serve: ignoring invalid QWEN_SERVE_MCP_CLIENT_BUDGET='-5' (expected positive integer); MCP budget enforcement disabled for this child.\nqwen serve: ignoring invalid QWEN_SERVE_MCP_CLIENT_BUDGET='0' (expected positive integer); MCP budget enforcement disabled for this child.\nqwen serve: ignoring invalid QWEN_SERVE_MCP_CLIENT_BUDGET=' ' (expected positive integer); MCP budget enforcement disabled for this child.\n\n\u001b[31m⎯⎯⎯⎯⎯⎯⎯\u001b[39m\u001b[1m\u001b[41m Failed Tests 1 \u001b[49m\u001b[22m\u001b[31m⎯⎯⎯⎯⎯⎯⎯\u001b[39m\n\n\u001b[41m\u001b[1m FAIL \u001b[22m\u001b[49m src/acp-integration/acpAgent.test.ts\u001b[2m > \u001b[22mrunAcpAgent shutdown cleanup\u001b[2m > \u001b[22mconsumes errors and ignores duplicate, nonmatching, and premature responses\n\u001b[31m\u001b[1mAssertionError\u001b[22m: expected \"spy\" to be called once, but got 4 times\u001b[39m\n\u001b[36m \u001b[2m❯\u001b[22m src/acp-integration/acpAgent.test.ts:\u001b[2m1176:41\u001b[22m\u001b[39m\n    \u001b[90m1174| \u001b[39m\n    \u001b[90m1175| \u001b[39m    await flushImmediate();\n    \u001b[90m1176| \u001b[39m    expect(mockPreloadContentGenerator).toHaveBeenCalledOnce();\n    \u001b[90m   | \u001b[39m                                        \u001b[31m^\u001b[39m\n    \u001b[90m1177| \u001b[39m    expect(mockPreloadContentGenerator).toHaveBeenCalledWith(generator…\n    \u001b[90m1178| \u001b[39m\n\n\u001b[31m\u001b[2m⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯⎯[1/1]⎯\u001b[22m\u001b[39m\n\n"
+  }
+]

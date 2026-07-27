@@ -1,0 +1,32 @@
+[
+  {
+    "name": "S1 session/new response shape unchanged",
+    "pass": true,
+    "detail": "1623 bytes, identical=true"
+  },
+  {
+    "name": "S1b initialize response unchanged",
+    "pass": true,
+    "detail": "588 bytes, identical=true"
+  },
+  {
+    "name": "S2 preload issues zero model requests (2 s window)",
+    "pass": true,
+    "detail": "control#0: req=0 exit=0 rss=166MiB | control#1: req=0 exit=0 rss=165MiB | control#2: req=0 exit=0 rss=168MiB | candidate#0: req=0 exit=0 rss=165MiB | candidate#1: req=0 exit=0 rss=60MiB | candidate#2: req=0 exit=0 rss=169MiB"
+  },
+  {
+    "name": "S3 8 idle prepared sessions: no requests, clean exit",
+    "pass": true,
+    "detail": "control: sessions=8 req=0 exit=0 rss=166.2MiB | candidate: sessions=8 req=0 exit=0 rss=166.2MiB | ΔRSS=-0.0MiB"
+  },
+  {
+    "name": "S4 unreachable provider: no unhandled rejection, clean exit",
+    "pass": true,
+    "detail": "control: unhandled=false exit=0 promptErr=yes | candidate: unhandled=false exit=0 promptErr=yes"
+  },
+  {
+    "name": "S5 immediate prompt: exactly one request, correct output",
+    "pass": true,
+    "detail": "control#0: out=PONG reqs=1 stop=end_turn | control#1: out=PONG reqs=1 stop=end_turn | control#2: out=PONG reqs=1 stop=end_turn | candidate#0: out=PONG reqs=1 stop=end_turn | candidate#1: out=PONG reqs=1 stop=end_turn | candidate#2: out=PONG reqs=1 stop=end_turn"
+  }
+]

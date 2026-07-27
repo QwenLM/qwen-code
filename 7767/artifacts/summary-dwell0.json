@@ -1,0 +1,95 @@
+{
+  "mode": "prompt",
+  "dwellMs": 0,
+  "sessions": 1,
+  "pairs": 15,
+  "validPairs": 15,
+  "controlBundle": "/private/tmp/claude-501/-Users-cici-git-qwen-code-x3/c4fae785-c3e4-4e61-8274-7bc972654d30/scratchpad/wt-base/dist/cli.js",
+  "candidateBundle": "/private/tmp/claude-501/-Users-cici-git-qwen-code-x3/c4fae785-c3e4-4e61-8274-7bc972654d30/scratchpad/wt-pr/dist/cli.js",
+  "platform": "darwin arm64 node v22.23.1",
+  "gateSummary": {
+    "preloadWindowProviderRequests": 0,
+    "unhandledRejections": 0,
+    "nonZeroExits": 0
+  },
+  "stats": {
+    "processToSessionReadyMs": {
+      "n": 15,
+      "controlP50": 605.836916,
+      "candidateP50": 603.011208,
+      "pairedMedianDelta": -1.5976260000001048,
+      "ci95": [
+        -3.887250999999992,
+        0.5777500000000373
+      ],
+      "candidateFasterIn": 11,
+      "abMedian": -1.9740840000000048,
+      "baMedian": -1.5976260000001048
+    },
+    "sessionCreateMs": {
+      "n": 15,
+      "controlP50": 35.61145799999997,
+      "candidateP50": 35.274791999999934,
+      "pairedMedianDelta": -0.697667000000024,
+      "ci95": [
+        -1.1421660000000884,
+        -0.015124999999898137
+      ],
+      "candidateFasterIn": 12,
+      "abMedian": -0.7390834999999925,
+      "baMedian": -0.3275829999998905
+    },
+    "promptToProviderRequestArrivalMs": {
+      "n": 15,
+      "controlP50": 47.42758300000003,
+      "candidateP50": 46.68895800000007,
+      "pairedMedianDelta": -0.3837499999999636,
+      "ci95": [
+        -1.3815000000000737,
+        0.7088750000000346
+      ],
+      "candidateFasterIn": 9,
+      "abMedian": -0.6153749999999718,
+      "baMedian": -0.35762499999998454
+    },
+    "promptToFirstModelOutputMs": {
+      "n": 15,
+      "controlP50": 107.19316700000002,
+      "candidateP50": 106.61899999999991,
+      "pairedMedianDelta": -1.5589580000000751,
+      "ci95": [
+        -1.745708000000036,
+        -0.104624000000058
+      ],
+      "candidateFasterIn": 12,
+      "abMedian": -1.540083500000037,
+      "baMedian": -1.618624000000068
+    },
+    "processToFirstModelOutputMs": {
+      "n": 15,
+      "controlP50": 714.7457919999999,
+      "candidateP50": 711.1943749999999,
+      "pairedMedianDelta": -3.2150830000000497,
+      "ci95": [
+        -3.7858759999999165,
+        0.41258399999992434
+      ],
+      "candidateFasterIn": 11,
+      "abMedian": -2.9900425000000155,
+      "baMedian": -3.2150830000000497
+    },
+    "promptTurnMs": {
+      "n": 15,
+      "controlP50": 110.63516699999991,
+      "candidateP50": 109.89625000000001,
+      "pairedMedianDelta": -1.5372090000000753,
+      "ci95": [
+        -1.6970839999999043,
+        -0.3726239999999734
+      ],
+      "candidateFasterIn": 13,
+      "abMedian": -1.6135419999999954,
+      "baMedian": -1.5229580000001306
+    }
+  }
+}
