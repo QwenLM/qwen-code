@@ -310,6 +310,11 @@ export async function gitCheckout(
     .catch(() => false);
   if (isRemoteTracking) {
     const localName = ref.slice(ref.indexOf('/') + 1);
+    if (!isValidCheckoutRef(localName)) {
+      throw new Error(
+        `invalid local branch name derived from remote ref: ${localName}`,
+      );
+    }
     const hasLocal = await runGit(
       cwd,
       ['show-ref', '--verify', '--quiet', `refs/heads/${localName}`],

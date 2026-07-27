@@ -122,6 +122,17 @@ describe('resolveContainedCwdOrFail', () => {
   it('fails closed for a cwd that escapes the workspace', () => {
     expect(resolveContainedCwdOrFail(fakeReq(outside), workspace)).toBeNull();
   });
+
+  it('fails closed for a symlink escaping the workspace', () => {
+    const link = path.join(workspace, 'link');
+    fs.symlinkSync(outside, link);
+    expect(resolveContainedCwdOrFail(fakeReq(link), workspace)).toBeNull();
+  });
+
+  it('fails closed when the path does not exist', () => {
+    const missing = path.join(workspace, 'missing');
+    expect(resolveContainedCwdOrFail(fakeReq(missing), workspace)).toBeNull();
+  });
 });
 
 function makeRuntime(): WorkspaceRuntime {

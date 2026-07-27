@@ -33,6 +33,7 @@ interface BranchPickerPopoverProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   workspaceCwd: string;
+  gitCwd?: string;
   onBranchChanged?: () => void;
   onOpenDiff?: () => void;
   onOpenCommit?: () => void;
@@ -45,6 +46,7 @@ export function BranchPickerPopover({
   open,
   onOpenChange,
   workspaceCwd,
+  gitCwd,
   onBranchChanged,
   onOpenDiff,
   onOpenCommit,
@@ -123,7 +125,7 @@ export function BranchPickerPopover({
       if (busyAction) return;
       setBusyAction('checkout');
       try {
-        await ws.workspaceGitCheckout(ref);
+        await ws.workspaceGitCheckout(ref, gitCwd);
         showStatus(t('branchPicker.checkedOut', { branch: ref }), 'success');
         onBranchChanged?.();
         onOpenChange(false);
@@ -133,14 +135,14 @@ export function BranchPickerPopover({
         setBusyAction(null);
       }
     },
-    [ws, busyAction, onBranchChanged, onOpenChange, showStatus, t],
+    [ws, busyAction, gitCwd, onBranchChanged, onOpenChange, showStatus, t],
   );
 
   const handleNewBranch = useCallback(async () => {
     if (busyAction || !validateBranchName(newBranchName)) return;
     setBusyAction('newBranch');
     try {
-      await ws.workspaceGitCreateBranch(newBranchName);
+      await ws.workspaceGitCreateBranch(newBranchName, undefined, gitCwd);
       showStatus(
         t('branchPicker.createdBranch', { branch: newBranchName }),
         'success',
@@ -155,6 +157,7 @@ export function BranchPickerPopover({
   }, [
     ws,
     busyAction,
+    gitCwd,
     newBranchName,
     onBranchChanged,
     onOpenChange,
@@ -171,7 +174,7 @@ export function BranchPickerPopover({
     if (busyAction) return;
     setBusyAction('push');
     try {
-      const result = await ws.workspaceGitPush({ setUpstream: true });
+      const result = await ws.workspaceGitPush({ setUpstream: true }, gitCwd);
       showStatus(result.output || t('branchPicker.pushSuccess'), 'success');
       onBranchChanged?.();
     } catch (err) {
@@ -179,13 +182,13 @@ export function BranchPickerPopover({
     } finally {
       setBusyAction(null);
     }
-  }, [ws, busyAction, onBranchChanged, showStatus, t]);
+  }, [ws, busyAction, gitCwd, onBranchChanged, showStatus, t]);
 
   const handlePull = useCallback(async () => {
     if (busyAction) return;
     setBusyAction('pull');
     try {
-      const result = await ws.workspaceGitPull();
+      const result = await ws.workspaceGitPull(undefined, gitCwd);
       showStatus(result.output || t('branchPicker.pullSuccess'), 'success');
       onBranchChanged?.();
     } catch (err) {
@@ -193,7 +196,7 @@ export function BranchPickerPopover({
     } finally {
       setBusyAction(null);
     }
-  }, [ws, busyAction, onBranchChanged, showStatus, t]);
+  }, [ws, busyAction, gitCwd, onBranchChanged, showStatus, t]);
 
   const q = search.toLowerCase().trim();
 

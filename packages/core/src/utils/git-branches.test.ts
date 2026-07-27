@@ -30,7 +30,7 @@ function git(cwd: string, ...args: string[]): string {
 function makeRepo(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitbranches-'));
   tmpRoots.push(dir);
-  git(dir, 'init', '-q');
+  git(dir, 'init', '-q', '-b', 'master');
   git(dir, 'config', 'user.email', 'test@example.com');
   git(dir, 'config', 'user.name', 'Test');
   git(dir, 'config', 'commit.gpgsign', 'false');
@@ -461,6 +461,61 @@ describe('gitPull', () => {
     const fetched = git(dir, 'rev-parse', `origin/${branch}`).trim();
     expect(fetched).not.toBe(headBefore);
   });
+
+  it('merge pull integrates a remote commit', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitclone-'));
+    tmpRoots.push(clone);
+    git(clone, 'clone', '-q', remote, '.');
+    git(clone, 'config', 'user.email', 'other@example.com');
+    git(clone, 'config', 'user.name', 'Other');
+    git(clone, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    const headBefore = headSha(dir);
+
+    const result = await gitPull(dir);
+
+    expect(result.success).toBe(true);
+    expect(headSha(dir)).not.toBe(headBefore);
+    expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
+  });
+
+  it('rebase pull integrates a remote commit', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', '-u', 'origin', 'HEAD');
+
+    const clone = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-gitclone-'));
+    tmpRoots.push(clone);
+    git(clone, 'clone', '-q', remote, '.');
+    git(clone, 'config', 'user.email', 'other@example.com');
+    git(clone, 'config', 'user.name', 'Other');
+    git(clone, 'config', 'commit.gpgsign', 'false');
+    fs.writeFileSync(path.join(clone, 'remote-only.txt'), 'remote\n');
+    git(clone, 'add', '.');
+    git(clone, 'commit', '-q', '-m', 'remote commit');
+    git(clone, 'push', '-q', 'origin', 'HEAD');
+
+    // Create a local commit so rebase has something to replay.
+    fs.writeFileSync(path.join(dir, 'local-only.txt'), 'local\n');
+    git(dir, 'add', '.');
+    git(dir, 'commit', '-q', '-m', 'local commit');
+
+    const result = await gitPull(dir, { rebase: true });
+
+    expect(result.success).toBe(true);
+    expect(fs.existsSync(path.join(dir, 'remote-only.txt'))).toBe(true);
+    expect(fs.existsSync(path.join(dir, 'local-only.txt'))).toBe(true);
+  });
 });
 
 describe('gitCommit index rollback (R10 #1)', () => {
@@ -585,6 +640,21 @@ describe('gitCheckout remote-tracking refs (R10 #4)', () => {
       `${branch}@{u}`,
     ).trim();
     expect(tracking).toBe(`upstream/${branch}`);
+  });
+
+  it('rejects a remote-tracking ref whose local name is an option (e.g. origin/-f)', async () => {
+    const dir = makeRepo();
+    const remote = makeBareRemote();
+    git(dir, 'remote', 'add', 'origin', remote);
+    git(dir, 'push', '-q', 'origin', 'HEAD');
+    // Create refs directly — git branch rejects '-f' as a name, but a
+    // malicious remote could still carry refs/heads/-f.
+    git(dir, 'update-ref', 'refs/heads/-f', 'HEAD');
+    git(dir, 'update-ref', 'refs/remotes/origin/-f', 'HEAD');
+
+    await expect(gitCheckout(dir, 'origin/-f')).rejects.toThrow(
+      'invalid local branch name derived from remote ref',
+    );
   });
 
   it('checks out the existing local branch rather than the remote commit', async () => {
