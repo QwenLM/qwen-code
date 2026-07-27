@@ -54,21 +54,12 @@ export function useGitBranchName(cwd: string): string | undefined {
         dispose = disposer;
       }
 
-      // Polling fallback: fs.watch can silently drop events on NFS, FUSE,
-      // Docker overlay, and some Linux filesystems. Poll every 5 s so the
-      // branch name self-heals even when the watcher misses a switch (#7828).
       if (!cancelled) {
         pollTimer = setInterval(() => {
           void refresh().catch(() => {});
         }, BRANCH_POLL_INTERVAL_MS);
         // Don't keep the process alive just for this timer.
-        if (
-          pollTimer &&
-          typeof pollTimer === 'object' &&
-          'unref' in pollTimer
-        ) {
-          (pollTimer as NodeJS.Timeout).unref();
-        }
+        pollTimer.unref?.();
       }
     };
 
