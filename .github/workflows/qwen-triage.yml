@@ -922,6 +922,7 @@ jobs:
           apt-get install -y --no-install-recommends gh
 
           gh --version
+          git config --global --add safe.directory '*'
 
       - name: 'Resolve PR and check state'
         id: 'pr'
@@ -1822,6 +1823,7 @@ jobs:
           apt-get install -y --no-install-recommends gh
 
           gh --version
+          git config --global --add safe.directory '*'
 
       - name: 'Resolve PR and snapshot metadata'
         id: 'pr'
