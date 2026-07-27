@@ -82,8 +82,9 @@ export interface DaemonSessionClientOptions {
   /** True when older persisted records precede the replay snapshot. */
   historyHasMore?: boolean;
   /**
-   * Fallback pagination anchor from the daemon: the latest persisted
-   * `qwen.session.recordId` read from the transcript when the replay
+   * Fallback pagination anchor from the daemon: the oldest
+   * `qwen.session.recordId` in the last persisted transcript page,
+   * read from the transcript when the replay
    * snapshot's `history_truncated` marker carries none (live sessions
    * whose in-flight turn capped the journal before any turn boundary).
    * Clients use it as `beforeRecordId` when no recordId is available

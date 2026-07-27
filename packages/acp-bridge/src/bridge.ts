@@ -4260,9 +4260,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
    * is only stamped during replay of the persisted transcript
    * (HistoryReplayer), never on the live event stream — so the
    * compaction engine's marker ships without an anchor and the client
-   * has no `beforeRecordId` to page backward with. Read the latest
-   * recordId from the persisted transcript and return it so the client
-   * can still recover the dropped history. Best-effort: any failure
+   * has no `beforeRecordId` to page backward with. Read the oldest
+   * recordId from the last persisted transcript page and return it so
+   * the client can still recover the dropped history. The oldest anchor
+   * is deliberately conservative: it cannot re-fetch records the client
+   * already displays, at the cost of leaving records newer than the
+   * anchor in the same page unreachable via backward pagination.
+   * Best-effort: any failure
    * (missing transcript, workspace timeout, no recordId in the page)
    * yields `undefined` and the caller simply omits the field.
    */
@@ -4286,7 +4290,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // (`data._meta`) shapes so this holds for the in-memory snapshot
     // and the refreshed persisted page alike.
     const hasRecordId = events.some(
-      (e) => transcriptEventRecordId(e) !== undefined,
+      (e) =>
+        transcriptEventRecordId(e) !== undefined ||
+        (e.type === 'history_truncated' &&
+          isRecord(e.data) &&
+          typeof e.data['recordId'] === 'string'),
     );
     if (hasRecordId) return undefined;
     try {
@@ -4295,8 +4303,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         direction: 'backward',
         limit: 50,
       });
-      // Backward page is newest-first; the first recordId we hit is the
-      // latest persisted anchor.
+      // The backward page is chronological ascending; the first recordId
+      // we hit is the oldest in the last page — a conservative anchor
+      // that cannot re-fetch displayed records.
       for (const event of page.events) {
         const recordId = transcriptEventRecordId(event);
         if (recordId !== undefined) return recordId;
@@ -4339,9 +4348,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         action === 'load' && req.historyPageSize !== undefined
           ? await refreshedReplayFieldsFor(existing, req.historyPageSize)
           : replayFieldsFor(existing, action);
-      if (byId.get(req.sessionId) !== existing || existing.closing) {
-        throw new SessionNotFoundError(req.sessionId);
-      }
       // Backfill a pagination anchor when the snapshot's truncation
       // marker carries no recordId (live session, in-flight turn capped
       // the journal before any turn boundary). Best-effort; omitted on
@@ -4350,6 +4356,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         action === 'load'
           ? await resolveHistoryAnchorRecordId(existing, replayFields)
           : undefined;
+      if (byId.get(req.sessionId) !== existing || existing.closing) {
+        throw new SessionNotFoundError(req.sessionId);
+      }
       existing.attachCount++;
       const clientId = registerClient(existing, req.clientId);
       recordAttachRef(existing, clientId);

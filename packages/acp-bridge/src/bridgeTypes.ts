@@ -235,9 +235,10 @@ export interface BridgeRestoredSession extends BridgeSession {
   /** True when persisted records exist before the returned replay page. */
   historyHasMore?: boolean;
   /**
-   * Fallback pagination anchor: the latest persisted recordId read from
-   * the transcript when the replay snapshot's `history_truncated` marker
-   * carries none (live session whose in-flight turn capped the journal
+   * Fallback pagination anchor: the oldest recordId in the last
+   * persisted transcript page, read when the replay snapshot's
+   * `history_truncated` marker carries none (live session whose
+   * in-flight turn capped the journal
    * before any turn boundary). Clients use it as `beforeRecordId` when
    * no recordId is available in the retained window. Absent when no
    * anchor was needed or none could be read.

@@ -736,8 +736,8 @@ export interface DaemonRestoredSession extends DaemonSession {
   /** True when older persisted records precede this load replay page. */
   historyHasMore?: boolean;
   /**
-   * Fallback pagination anchor: the latest `qwen.session.recordId` the
-   * daemon could read from the persisted transcript when the replay
+   * Fallback pagination anchor: the oldest `qwen.session.recordId` in
+   * the last persisted transcript page the daemon could read when the replay
    * snapshot's `history_truncated` marker carries none. Live sessions
    * whose in-flight turn pushed the journal past its cap before any
    * turn boundary fired have no recordId-bearing `session_update` in
