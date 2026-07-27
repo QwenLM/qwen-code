@@ -474,11 +474,14 @@ export function GitDialog({
       const baseBranch = remotePrefix
         ? trimmedBase.slice(remotePrefix.length + 1)
         : trimmedBase;
-      const result = await ws.workspaceGitHubCreatePullRequest({
-        title: prTitle.trim(),
-        body: prBody.trim() || undefined,
-        base: baseBranch || undefined,
-      });
+      const result = await ws.workspaceGitHubCreatePullRequest(
+        {
+          title: prTitle.trim(),
+          body: prBody.trim() || undefined,
+          base: baseBranch || undefined,
+        },
+        gitCwd,
+      );
       setPrStatus({
         msg: t('gitCommit.prCreated', { number: result.number ?? '' }),
         type: 'success',
@@ -496,6 +499,7 @@ export function GitDialog({
   }, [
     client,
     workspaceCwd,
+    gitCwd,
     prTitle,
     prBody,
     prBase,

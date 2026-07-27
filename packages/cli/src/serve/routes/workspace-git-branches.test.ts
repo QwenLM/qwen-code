@@ -149,11 +149,10 @@ afterEach(() => {
 });
 
 describe('workspace Git branch routes against a real repo (R10 #2)', () => {
-  it('redacts the workspace path on an unclassified git failure', async () => {
+  it('rejects a commit --all when write-tree cannot snapshot the index', async () => {
     const dir = makeRepo();
     fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
-    // Wedge the index lock so `git add -A` fails with an unclassified error
-    // whose message embeds the absolute workspace path.
+    // Wedge the index lock so `write-tree` fails before `add -A` runs.
     fs.writeFileSync(path.join(dir, '.git', 'index.lock'), '');
 
     const response = await request(appWithWorkspace(dir))
@@ -163,14 +162,14 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     expect(response.status).toBe(500);
     const body = JSON.stringify(response.body);
     expect(body).not.toContain(dir);
-    expect(body).toContain('<workspace>');
+    expect(body).toContain('failed to snapshot index');
   });
 
-  it('redacts the git root when the workspace is a sub-directory', async () => {
+  it('does not leak the git root when the workspace is a sub-directory', async () => {
     const dir = makeRepo();
     const sub = path.join(dir, 'packages', 'app');
     fs.mkdirSync(sub, { recursive: true });
-    // Wedge the index lock so git reports the repo-root path in the error.
+    // Wedge the index lock so write-tree fails.
     fs.writeFileSync(path.join(dir, '.git', 'index.lock'), '');
 
     const response = await request(appWithWorkspace(sub))
@@ -180,7 +179,7 @@ describe('workspace Git branch routes against a real repo (R10 #2)', () => {
     expect(response.status).toBe(500);
     const body = JSON.stringify(response.body);
     expect(body).not.toContain(dir);
-    expect(body).toContain('<workspace>');
+    expect(body).toContain('failed to snapshot index');
   });
 
   it('classifies a pull with no tracking information as no_upstream', async () => {
@@ -213,8 +212,9 @@ describe('workspace qualified Git branch routes (generation guard)', () => {
       workspaceCwd,
       primary: workspaceId === 'primary',
       trusted,
+      env: { mode: 'parent-process', overlayKeys: [] },
       bridge: { publishWorkspaceEvent: vi.fn() } as unknown as AcpSessionBridge,
-    } as WorkspaceRuntime;
+    } as unknown as WorkspaceRuntime;
   }
 
   it('returns runtime-unavailable when the generation is already closed', async () => {

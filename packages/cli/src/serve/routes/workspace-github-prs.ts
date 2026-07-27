@@ -17,6 +17,7 @@ import { safeBody } from '../server/request-helpers.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
   requireTrustedWorkspaceRuntime,
+  resolveContainedCwdOrFail,
   resolveWorkspaceRuntimeFromParam,
   sendGenerationClosedError,
 } from '../workspace-route-runtime.js';
@@ -184,9 +185,18 @@ export function registerWorkspaceQualifiedGitHubPrsRoutes(
       const base = typeof body['base'] === 'string' ? body['base'] : undefined;
       const head = typeof body['head'] === 'string' ? body['head'] : undefined;
 
+      const cwd = resolveContainedCwdOrFail(req, runtime.workspaceCwd);
+      if (cwd === null) {
+        res.status(400).json({
+          error: 'invalid_cwd',
+          message: 'The supplied cwd is invalid or outside the workspace',
+        });
+        return;
+      }
+
       try {
         const result = await createGitHubPullRequest(
-          runtime.workspaceCwd,
+          cwd,
           {
             title: title.trim(),
             body: prBody,

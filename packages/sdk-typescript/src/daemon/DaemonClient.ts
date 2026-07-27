@@ -4988,15 +4988,22 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  workspaceGitHubCreatePullRequest(opts: {
-    title: string;
-    body?: string;
-    base?: string;
-    head?: string;
-  }): Promise<DaemonGitHubPullRequestCreateResult> {
+  workspaceGitHubCreatePullRequest(
+    opts: {
+      title: string;
+      body?: string;
+      base?: string;
+      head?: string;
+    },
+    cwd?: string,
+  ): Promise<DaemonGitHubPullRequestCreateResult> {
+    const suffix =
+      cwd != null
+        ? `/github/prs/create?cwd=${urlEncode(cwd)}`
+        : '/github/prs/create';
     return this.client.workspaceJsonRequest<DaemonGitHubPullRequestCreateResult>(
       this.workspaceSelector,
-      '/github/prs/create',
+      suffix,
       'POST /workspaces/:workspace/github/prs/create',
       { method: 'POST', body: opts, mode: 'rest' },
     );

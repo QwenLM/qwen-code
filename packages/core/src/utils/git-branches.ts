@@ -82,12 +82,16 @@ export function gitEnv(
   return env;
 }
 
-function runGit(cwd: string, args: string[]): Promise<string> {
+function runGit(
+  cwd: string,
+  args: string[],
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
   return execFileAsync('git', args, {
     cwd,
     timeout: GIT_TIMEOUT_MS,
     maxBuffer: 10 * 1024 * 1024,
-    env: gitEnv(),
+    env: gitEnv(env),
   }).then(({ stdout }) => stdout);
 }
 
@@ -100,36 +104,48 @@ const SEPARATOR = '\x00';
  */
 export async function fetchGitBranches(
   cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
 ): Promise<GitBranchesResult> {
   // Defining probe: fail fast with a clear error when `cwd` is not inside a
   // git repository, instead of letting every individual query swallow its
   // error and returning an empty-but-"available" result.
-  await runGit(cwd, ['rev-parse', '--git-dir']);
+  await runGit(cwd, ['rev-parse', '--git-dir'], env);
 
   const [localRaw, remoteRaw, tagsRaw, headRaw, reflogRaw] = await Promise.all([
-    runGit(cwd, [
-      'for-each-ref',
-      '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)%00%(symref)',
-      'refs/heads/',
-    ]).catch(() => ''),
-    runGit(cwd, [
-      'for-each-ref',
-      '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)%00%(symref)',
-      'refs/remotes/',
-    ]).catch(() => ''),
-    runGit(cwd, [
-      'for-each-ref',
-      '--format=%(refname:short)%00%(creatordate:unix)%00%(subject)',
-      '--sort=-creatordate',
-      'refs/tags/',
-    ]).catch(() => ''),
-    runGit(cwd, ['symbolic-ref', '--short', 'HEAD']).catch(() => ''),
-    runGit(cwd, [
-      'reflog',
-      'show',
-      '--format=%gs',
-      `-${MAX_REFLOG_ENTRIES}`,
-    ]).catch(() => ''),
+    runGit(
+      cwd,
+      [
+        'for-each-ref',
+        '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)%00%(symref)',
+        'refs/heads/',
+      ],
+      env,
+    ).catch(() => ''),
+    runGit(
+      cwd,
+      [
+        'for-each-ref',
+        '--format=%(refname:short)%00%(HEAD)%00%(upstream:short)%00%(upstream:track,nobracket)%00%(committerdate:unix)%00%(subject)%00%(symref)',
+        'refs/remotes/',
+      ],
+      env,
+    ).catch(() => ''),
+    runGit(
+      cwd,
+      [
+        'for-each-ref',
+        '--format=%(refname:short)%00%(creatordate:unix)%00%(subject)',
+        '--sort=-creatordate',
+        'refs/tags/',
+      ],
+      env,
+    ).catch(() => ''),
+    runGit(cwd, ['symbolic-ref', '--short', 'HEAD'], env).catch(() => ''),
+    runGit(
+      cwd,
+      ['reflog', 'show', '--format=%gs', `-${MAX_REFLOG_ENTRIES}`],
+      env,
+    ).catch(() => ''),
   ]);
 
   const local = parseBranchLines(localRaw);
@@ -145,7 +161,7 @@ export async function fetchGitBranches(
     remote,
     tags,
     recent,
-    head: headTrimmed || (await getDetachedHead(cwd)),
+    head: headTrimmed || (await getDetachedHead(cwd, env)),
     detached,
   };
 }
@@ -235,9 +251,12 @@ function parseRecentBranches(reflogRaw: string, currentHead: string): string[] {
   return result;
 }
 
-async function getDetachedHead(cwd: string): Promise<string> {
+async function getDetachedHead(
+  cwd: string,
+  env?: Readonly<Record<string, string | undefined>>,
+): Promise<string> {
   try {
-    const sha = await runGit(cwd, ['rev-parse', '--short', 'HEAD']);
+    const sha = await runGit(cwd, ['rev-parse', '--short', 'HEAD'], env);
     return sha.trim();
   } catch {
     return '';
@@ -271,6 +290,7 @@ export interface GitCheckoutResult {
 export async function gitCheckout(
   cwd: string,
   ref: string,
+  env?: Readonly<Record<string, string | undefined>>,
 ): Promise<GitCheckoutResult> {
   if (!isValidCheckoutRef(ref)) {
     throw new Error(`invalid checkout ref: ${ref}`);
@@ -281,47 +301,47 @@ export async function gitCheckout(
   // and checking out the remote ref directly detaches HEAD. When no local
   // branch of that name exists yet, create one tracking the exact remote ref
   // so a fork layout (origin + upstream) lands on the clicked commit.
-  const isRemoteTracking = await runGit(cwd, [
-    'show-ref',
-    '--verify',
-    '--quiet',
-    `refs/remotes/${ref}`,
-  ])
+  const isRemoteTracking = await runGit(
+    cwd,
+    ['show-ref', '--verify', '--quiet', `refs/remotes/${ref}`],
+    env,
+  )
     .then(() => true)
     .catch(() => false);
   if (isRemoteTracking) {
     const localName = ref.slice(ref.indexOf('/') + 1);
-    const hasLocal = await runGit(cwd, [
-      'show-ref',
-      '--verify',
-      '--quiet',
-      `refs/heads/${localName}`,
-    ])
+    const hasLocal = await runGit(
+      cwd,
+      ['show-ref', '--verify', '--quiet', `refs/heads/${localName}`],
+      env,
+    )
       .then(() => true)
       .catch(() => false);
     if (hasLocal) {
-      await runGit(cwd, ['checkout', localName, '--']);
+      await runGit(cwd, ['checkout', localName, '--'], env);
     } else {
       // `--track` forces commit-ish interpretation of the verified
       // remote-tracking ref, so no pathspec terminator is needed.
-      await runGit(cwd, ['checkout', '--track', ref]);
+      await runGit(cwd, ['checkout', '--track', ref], env);
     }
     const head = (
-      await runGit(cwd, ['symbolic-ref', '--short', 'HEAD'])
+      await runGit(cwd, ['symbolic-ref', '--short', 'HEAD'], env)
     ).trim();
     return { branch: head, detached: false };
   }
   // `--` terminates options/pathspecs so a validated ref can never be
   // reinterpreted as a path (e.g. `.` wiping the working tree).
-  await runGit(cwd, ['checkout', ref, '--']);
-  const headRaw = await runGit(cwd, ['symbolic-ref', '--short', 'HEAD']).catch(
-    () => '',
-  );
+  await runGit(cwd, ['checkout', ref, '--'], env);
+  const headRaw = await runGit(
+    cwd,
+    ['symbolic-ref', '--short', 'HEAD'],
+    env,
+  ).catch(() => '');
   const trimmed = headRaw.trim();
   if (trimmed) {
     return { branch: trimmed, detached: false };
   }
-  const sha = await runGit(cwd, ['rev-parse', '--short', 'HEAD']);
+  const sha = await runGit(cwd, ['rev-parse', '--short', 'HEAD'], env);
   return { branch: sha.trim(), detached: true };
 }
 
@@ -333,6 +353,7 @@ export async function gitCreateBranch(
   cwd: string,
   name: string,
   startPoint?: string,
+  env?: Readonly<Record<string, string | undefined>>,
 ): Promise<GitCheckoutResult> {
   if (!isValidRefName(name) || name.startsWith('-')) {
     throw new Error(`invalid branch name: ${name}`);
@@ -350,30 +371,36 @@ export async function gitCreateBranch(
   // workspace is already on the new branch; capture the previous HEAD so we
   // can roll the half-created branch back instead of leaving it in place.
   const originalRef = (
-    await runGit(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(
-      () => '',
-    )
+    await runGit(
+      cwd,
+      ['symbolic-ref', '--quiet', '--short', 'HEAD'],
+      env,
+    ).catch(() => '')
   ).trim();
   const originalCommit = originalRef
     ? ''
-    : (await runGit(cwd, ['rev-parse', 'HEAD']).catch(() => '')).trim();
+    : (await runGit(cwd, ['rev-parse', 'HEAD'], env).catch(() => '')).trim();
   try {
-    await runGit(cwd, args);
+    await runGit(cwd, args, env);
   } catch (err) {
     const nowOn = (
-      await runGit(cwd, ['symbolic-ref', '--quiet', '--short', 'HEAD']).catch(
-        () => '',
-      )
+      await runGit(
+        cwd,
+        ['symbolic-ref', '--quiet', '--short', 'HEAD'],
+        env,
+      ).catch(() => '')
     ).trim();
     if (nowOn === name) {
       if (originalRef) {
-        await runGit(cwd, ['checkout', originalRef, '--']).catch(() => {});
+        await runGit(cwd, ['checkout', originalRef, '--'], env).catch(() => {});
       } else if (originalCommit) {
-        await runGit(cwd, ['checkout', '--detach', originalCommit, '--']).catch(
-          () => {},
-        );
+        await runGit(
+          cwd,
+          ['checkout', '--detach', originalCommit, '--'],
+          env,
+        ).catch(() => {});
       }
-      await runGit(cwd, ['branch', '-D', name]).catch(() => {});
+      await runGit(cwd, ['branch', '-D', name], env).catch(() => {});
     }
     throw err;
   }
@@ -396,26 +423,29 @@ export interface GitPushResult {
 export async function gitPush(
   cwd: string,
   opts?: { setUpstream?: boolean; force?: boolean },
+  env?: Readonly<Record<string, string | undefined>>,
 ): Promise<GitPushResult> {
   const args = ['push'];
   if (opts?.force) args.push('--force-with-lease');
   if (opts?.setUpstream) {
     let branch: string;
     try {
-      branch = (await runGit(cwd, ['symbolic-ref', '--short', 'HEAD'])).trim();
+      branch = (
+        await runGit(cwd, ['symbolic-ref', '--short', 'HEAD'], env)
+      ).trim();
     } catch {
       throw new Error(
         'cannot push with --set-upstream in detached HEAD state; check out a branch first',
       );
     }
     // If the branch already tracks an upstream, push without rewriting it.
-    const hasUpstream = await runGit(cwd, [
-      'rev-parse',
-      '--abbrev-ref',
-      `${branch}@{u}`,
-    ]).catch(() => '');
+    const hasUpstream = await runGit(
+      cwd,
+      ['rev-parse', '--abbrev-ref', `${branch}@{u}`],
+      env,
+    ).catch(() => '');
     if (hasUpstream.trim()) {
-      const output = await runGit(cwd, args);
+      const output = await runGit(cwd, args, env);
       return { success: true, output: output.trim() };
     }
     // No upstream — resolve the push remote using Git's precedence:
@@ -424,28 +454,32 @@ export async function gitPush(
     // with the pull remote when a push remote is configured would publish to
     // the wrong repository (e.g. the shared upstream instead of a fork).
     let remote = (
-      await runGit(cwd, ['config', `branch.${branch}.pushRemote`]).catch(
+      await runGit(cwd, ['config', `branch.${branch}.pushRemote`], env).catch(
         () => '',
       )
     ).trim();
     if (!remote) {
       remote = (
-        await runGit(cwd, ['config', 'remote.pushDefault']).catch(() => '')
+        await runGit(cwd, ['config', 'remote.pushDefault'], env).catch(() => '')
       ).trim();
     }
     if (!remote) {
       remote = (
-        await runGit(cwd, ['config', `branch.${branch}.remote`]).catch(() => '')
+        await runGit(cwd, ['config', `branch.${branch}.remote`], env).catch(
+          () => '',
+        )
       ).trim();
     }
     if (!remote) {
-      const remotes = (await runGit(cwd, ['remote']).catch(() => '')).trim();
+      const remotes = (
+        await runGit(cwd, ['remote'], env).catch(() => '')
+      ).trim();
       const remoteList = remotes ? remotes.split('\n') : [];
       remote = remoteList.length === 1 ? (remoteList[0] ?? 'origin') : 'origin';
     }
     args.push('--set-upstream', remote, branch);
   }
-  const output = await runGit(cwd, args);
+  const output = await runGit(cwd, args, env);
   return { success: true, output: output.trim() };
 }
 
@@ -460,14 +494,15 @@ export interface GitPullResult {
 export async function gitPull(
   cwd: string,
   opts?: { rebase?: boolean; fetchOnly?: boolean },
+  env?: Readonly<Record<string, string | undefined>>,
 ): Promise<GitPullResult> {
   if (opts?.fetchOnly) {
-    const output = await runGit(cwd, ['fetch', '--all', '--prune']);
+    const output = await runGit(cwd, ['fetch', '--all', '--prune'], env);
     return { success: true, output: output.trim() };
   }
   const args = ['pull'];
   if (opts?.rebase) args.push('--rebase');
-  const output = await runGit(cwd, args);
+  const output = await runGit(cwd, args, env);
   return { success: true, output: output.trim() };
 }
 
@@ -485,38 +520,46 @@ export async function gitCommit(
   cwd: string,
   message: string,
   opts?: { all?: boolean },
+  env?: Readonly<Record<string, string | undefined>>,
 ): Promise<GitCommitResult> {
   // Snapshot the index before `git add -A` so a failed commit (e.g. a
   // rejecting pre-commit hook) can restore the user's original staging
   // instead of leaving the whole working tree staged.
   let savedIndex: string | null = null;
   if (opts?.all) {
-    const tree = (await runGit(cwd, ['write-tree']).catch(() => '')).trim();
+    const tree = (
+      await runGit(cwd, ['write-tree'], env).catch(() => '')
+    ).trim();
     if (tree) {
       savedIndex = tree;
     } else {
       // write-tree fails on an unmerged index; add -A would destroy the
       // conflict state with no way to roll back.
-      const unmerged = (await runGit(cwd, ['ls-files', '--unmerged'])).trim();
+      const unmerged = (
+        await runGit(cwd, ['ls-files', '--unmerged'], env)
+      ).trim();
       if (unmerged) {
         throw new Error(
           'cannot stage all changes: unresolved merge conflicts in the index',
         );
       }
+      throw new Error(
+        'cannot stage all changes: failed to snapshot index (write-tree failed)',
+      );
     }
   }
   try {
     if (opts?.all) {
-      await runGit(cwd, ['add', '-A']);
+      await runGit(cwd, ['add', '-A'], env);
     }
-    await runGit(cwd, ['commit', '-m', message]);
+    await runGit(cwd, ['commit', '-m', message], env);
   } catch (err) {
     if (savedIndex) {
-      await runGit(cwd, ['read-tree', savedIndex]).catch(() => {});
+      await runGit(cwd, ['read-tree', savedIndex], env).catch(() => {});
     }
     throw err;
   }
-  const sha = (await runGit(cwd, ['rev-parse', '--short', 'HEAD'])).trim();
-  const subject = (await runGit(cwd, ['log', '-1', '--format=%s'])).trim();
+  const sha = (await runGit(cwd, ['rev-parse', '--short', 'HEAD'], env)).trim();
+  const subject = (await runGit(cwd, ['log', '-1', '--format=%s'], env)).trim();
   return { sha, subject };
 }

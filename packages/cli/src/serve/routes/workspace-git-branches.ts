@@ -111,10 +111,11 @@ async function handleBranches(
   sendBridgeError: SendBridgeError,
   route: string,
   assertGenerationOpen?: () => void,
+  env?: Readonly<Record<string, string | undefined>>,
 ): Promise<void> {
   try {
     assertGenerationOpen?.();
-    const result = await fetchGitBranches(cwd);
+    const result = await fetchGitBranches(cwd, env);
     assertGenerationOpen?.();
     res.status(200).json({
       v: 1,
@@ -139,6 +140,7 @@ async function handleCheckout(
   cwd: string,
   sendBridgeError: SendBridgeError,
   route: string,
+  env?: Readonly<Record<string, string | undefined>>,
 ): Promise<void> {
   const body = safeBody(req);
   const ref = body['ref'];
@@ -153,7 +155,7 @@ async function handleCheckout(
     return;
   }
   try {
-    const result = await gitCheckout(cwd, ref.trim());
+    const result = await gitCheckout(cwd, ref.trim(), env);
     res.status(200).json(result);
   } catch (err) {
     sendGitError(res, err, route, sendBridgeError, cwd);
@@ -166,6 +168,7 @@ async function handleCreateBranch(
   cwd: string,
   sendBridgeError: SendBridgeError,
   route: string,
+  env?: Readonly<Record<string, string | undefined>>,
 ): Promise<void> {
   const body = safeBody(req);
   const name = body['name'];
@@ -198,7 +201,7 @@ async function handleCreateBranch(
     return;
   }
   try {
-    const result = await gitCreateBranch(cwd, name, startPoint);
+    const result = await gitCreateBranch(cwd, name, startPoint, env);
     res.status(200).json(result);
   } catch (err) {
     sendGitError(res, err, route, sendBridgeError, cwd);
@@ -211,6 +214,7 @@ async function handlePush(
   cwd: string,
   sendBridgeError: SendBridgeError,
   route: string,
+  env?: Readonly<Record<string, string | undefined>>,
 ): Promise<void> {
   const body = safeBody(req);
   if (
@@ -232,7 +236,7 @@ async function handlePush(
   const setUpstream = body['setUpstream'] === true;
   const force = body['force'] === true;
   try {
-    const result = await gitPush(cwd, { setUpstream, force });
+    const result = await gitPush(cwd, { setUpstream, force }, env);
     res.status(200).json(result);
   } catch (err) {
     sendGitError(res, err, route, sendBridgeError, cwd);
@@ -245,6 +249,7 @@ async function handlePull(
   cwd: string,
   sendBridgeError: SendBridgeError,
   route: string,
+  env?: Readonly<Record<string, string | undefined>>,
 ): Promise<void> {
   const body = safeBody(req);
   if (body['rebase'] !== undefined && typeof body['rebase'] !== 'boolean') {
@@ -266,7 +271,7 @@ async function handlePull(
   const rebase = body['rebase'] === true;
   const fetchOnly = body['fetchOnly'] === true;
   try {
-    const result = await gitPull(cwd, { rebase, fetchOnly });
+    const result = await gitPull(cwd, { rebase, fetchOnly }, env);
     res.status(200).json(result);
   } catch (err) {
     sendGitError(res, err, route, sendBridgeError, cwd);
@@ -279,6 +284,7 @@ async function handleCommit(
   cwd: string,
   sendBridgeError: SendBridgeError,
   route: string,
+  env?: Readonly<Record<string, string | undefined>>,
 ): Promise<void> {
   const body = safeBody(req);
   const message = body['message'];
@@ -296,7 +302,7 @@ async function handleCommit(
   }
   const all = body['all'] === true;
   try {
-    const result = await gitCommit(cwd, message.trim(), { all });
+    const result = await gitCommit(cwd, message.trim(), { all }, env);
     res.status(200).json(result);
   } catch (err) {
     sendGitError(res, err, route, sendBridgeError, cwd);
@@ -420,6 +426,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
       deps.sendBridgeError,
       'GET /workspaces/:workspace/git/branches',
       () => runtime.generationGuard?.assertOpen(),
+      runtime.env.effectiveEnv,
     );
   });
   app.post(
@@ -450,6 +457,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
         cwd,
         deps.sendBridgeError,
         'POST /workspaces/:workspace/git/checkout',
+        runtime.env.effectiveEnv,
       );
     },
   );
@@ -481,6 +489,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
         cwd,
         deps.sendBridgeError,
         'POST /workspaces/:workspace/git/branch',
+        runtime.env.effectiveEnv,
       );
     },
   );
@@ -512,6 +521,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
         cwd,
         deps.sendBridgeError,
         'POST /workspaces/:workspace/git/push',
+        runtime.env.effectiveEnv,
       );
     },
   );
@@ -543,6 +553,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
         cwd,
         deps.sendBridgeError,
         'POST /workspaces/:workspace/git/pull',
+        runtime.env.effectiveEnv,
       );
     },
   );
@@ -574,6 +585,7 @@ export function registerWorkspaceQualifiedGitBranchRoutes(
         cwd,
         deps.sendBridgeError,
         'POST /workspaces/:workspace/git/commit',
+        runtime.env.effectiveEnv,
       );
     },
   );

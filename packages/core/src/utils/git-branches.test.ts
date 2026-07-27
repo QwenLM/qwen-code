@@ -527,6 +527,19 @@ describe('gitCommit index rollback (R10 #1)', () => {
     // Unmerged state is preserved.
     expect(git(dir, 'ls-files', '--unmerged').trim()).not.toBe('');
   });
+
+  it('refuses add -A when write-tree fails for a non-unmerged reason', async () => {
+    const dir = makeRepo();
+    fs.writeFileSync(path.join(dir, 'b.txt'), 'two\n');
+    // Wedge the index lock so write-tree fails but ls-files --unmerged is
+    // empty — the code must throw instead of silently continuing without
+    // an index snapshot.
+    fs.writeFileSync(path.join(dir, '.git', 'index.lock'), '');
+
+    await expect(gitCommit(dir, 'feat: x', { all: true })).rejects.toThrow(
+      /failed to snapshot index/,
+    );
+  });
 });
 
 describe('gitCheckout remote-tracking refs (R10 #4)', () => {
