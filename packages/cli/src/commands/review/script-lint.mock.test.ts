@@ -17,6 +17,7 @@ import {
   writeFileSync,
   readFileSync,
   statSync,
+  symlinkSync,
   rmSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -283,6 +284,29 @@ describe('runScriptLint — refuses a path that escapes the worktree', () => {
     expect(r.skipped).toHaveLength(1);
     expect(r.skipped[0].reason).toContain('outside the worktree');
   });
+
+  it('refuses a path whose ANCESTOR is a symlink out of the worktree (lexical is not enough)', () => {
+    // `evil/` is a symlink to a directory outside the worktree that holds a real
+    // `x.sh`. `evil/x.sh` passes the lexical `startsWith` check but its canonical
+    // path is outside — `realpathSync` must catch it, or the linter reads external
+    // content and the trusted report certifies it.
+    const outside = mkdtempSync(join(tmpdir(), 'sl-outside-'));
+    writeFileSync(join(outside, 'x.sh'), '#!/bin/bash\nrm $X\n');
+    symlinkSync(outside, join(dir, 'evil')); // dir/evil -> outside
+    const planPath = join(dir, 'plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({ files: [{ path: 'evil/x.sh', kind: 'source' }] }),
+    );
+    const runner = () => {
+      throw new Error('runner must not be called for a symlink-escaped path');
+    };
+    const r = runScriptLint({ plan: planPath, worktree: dir }, runner);
+    rmSync(outside, { recursive: true, force: true });
+    expect(r.checked).toEqual([]);
+    expect(r.skipped).toHaveLength(1);
+    expect(r.skipped[0].reason).toContain('outside the worktree');
+  });
 });
 
 describe('runScriptLint — the report is bound to the diff it ran against', () => {
@@ -360,6 +384,28 @@ describe('buildToolInvocation — config isolation (a PR config cannot suppress 
     expect(env['HADOLINT_CONFIG']).toBeUndefined();
   });
 
+  it('scrubs inherited HADOLINT_* vars so a reviewer env cannot suppress findings', () => {
+    // hadolint 2.14 merges HADOLINT_IGNORE / HADOLINT_OVERRIDE_* / HADOLINT_CONFIG
+    // from the env WITH --config. An inherited one must not reach the child (and this
+    // is also what keeps the HADOLINT_CONFIG assertion above hermetic under CI).
+    const saved: Record<string, string | undefined> = {};
+    for (const k of ['HADOLINT_IGNORE', 'HADOLINT_CONFIG', 'HADOLINT_NOFAIL']) {
+      saved[k] = process.env[k];
+      process.env[k] = 'hostile';
+    }
+    try {
+      const { env } = buildToolInvocation('hadolint', '/w/Dockerfile');
+      expect(Object.keys(env).filter((k) => k.startsWith('HADOLINT_'))).toEqual(
+        [],
+      );
+    } finally {
+      for (const [k, v] of Object.entries(saved)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+    }
+  });
+
   it('the --config path is a fresh 0700 mkdtemp path, not a predictable name', () => {
     // The config is a file hadolint READS, so a predictable path is a suppression
     // vector (plant an `ignored:` config there). It must live in a private 0700
@@ -368,7 +414,10 @@ describe('buildToolInvocation — config isolation (a PR config cannot suppress 
     const { argv } = buildToolInvocation('hadolint', '/w/Dockerfile');
     const cfg = argv[argv.indexOf('--config') + 1];
     expect(cfg).not.toBe(join(tmpdir(), 'qwen-review-hadolint-empty.yaml'));
-    expect(statSync(dirname(cfg)).mode & 0o777).toBe(0o700);
+    // POSIX mode bits only — Windows has no owner/group/other distinction.
+    if (process.platform !== 'win32') {
+      expect(statSync(dirname(cfg)).mode & 0o777).toBe(0o700);
+    }
   });
 
   it('carries the spawn timeout as an asserted bound (not a buried literal)', () => {

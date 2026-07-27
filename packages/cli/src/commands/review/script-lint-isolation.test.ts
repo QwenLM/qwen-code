@@ -24,23 +24,31 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-let prevTmp: string | undefined;
+// `os.tmpdir()` reads TMPDIR on POSIX but TEMP/TMP on Windows — override all three
+// so the "no private config could be created" path is exercised on every platform,
+// not left vacuous on the Windows job.
+const TMP_VARS = ['TMPDIR', 'TEMP', 'TMP'] as const;
+const savedTmp: Record<string, string | undefined> = {};
 let workDir: string;
 
 beforeAll(() => {
   // A real dir to hold the plan/worktree (built with absolute paths, so it does not
-  // depend on TMPDIR), created BEFORE we break TMPDIR.
+  // depend on the temp vars), created BEFORE we break them.
   workDir = mkdtempSync(join(tmpdir(), 'iso-'));
-  prevTmp = process.env['TMPDIR'];
-  // Point TMPDIR at a path that does not exist → `os.tmpdir()` returns it, and the
-  // `mkdtempSync(join(tmpdir(), 'qwen-review-hadolint-'))` inside emptyHadolintConfig
-  // hits ENOENT and throws — exactly the "cannot create a private config" failure.
-  process.env['TMPDIR'] = join(workDir, 'nope') + '/';
+  const nope = join(workDir, 'nope') + '/'; // a path that does not exist
+  for (const v of TMP_VARS) {
+    savedTmp[v] = process.env[v];
+    // → `os.tmpdir()` returns it, and `mkdtempSync(join(tmpdir(), …))` inside
+    //   emptyHadolintConfig hits ENOENT and throws: the fail-closed path.
+    process.env[v] = nope;
+  }
 });
 
 afterAll(() => {
-  if (prevTmp === undefined) delete process.env['TMPDIR'];
-  else process.env['TMPDIR'] = prevTmp;
+  for (const v of TMP_VARS) {
+    if (savedTmp[v] === undefined) delete process.env[v];
+    else process.env[v] = savedTmp[v];
+  }
 });
 
 describe('script-lint — hadolint fails closed when config isolation is unavailable', () => {

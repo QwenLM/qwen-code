@@ -32,6 +32,7 @@ import {
   mkdtempSync,
   rmSync,
   lstatSync,
+  realpathSync,
   openSync,
   readSync,
   closeSync,
@@ -235,6 +236,17 @@ type FirstLine =
    *  owed if a linter recognises the path, but we will not follow/read it. */
   | { kind: 'irregular' };
 
+/** `realpathSync`, or undefined when the path does not fully exist (a deleted child,
+ *  a broken link). Used for worktree containment — a path we cannot canonicalise is
+ *  handled downstream as missing/irregular, never trusted as inside. */
+function realIfExists(p: string): string | undefined {
+  try {
+    return realpathSync(p);
+  } catch {
+    return undefined;
+  }
+}
+
 function firstLineOf(abs: string): FirstLine {
   let st;
   try {
@@ -361,6 +373,14 @@ export function buildToolInvocation(
   };
   const env: NodeJS.ProcessEnv = { ...process.env };
   delete env['SHELLCHECK_OPTS'];
+  // hadolint 2.14 MERGES config from its `HADOLINT_*` env vars — `HADOLINT_IGNORE`,
+  // `HADOLINT_OVERRIDE_*`, `HADOLINT_CONFIG`, trusted-registry settings — WITH the
+  // explicit `--config`, so an inherited one could suppress or downgrade the findings
+  // the neutral config exists to force. Scrub them all: hadolint's configuration
+  // comes from our `--config` alone, never from whatever the reviewer's env carries.
+  for (const k of Object.keys(env)) {
+    if (k.startsWith('HADOLINT_')) delete env[k];
+  }
   return { argv: argv[tool], env, timeoutMs: 120_000 };
 }
 
@@ -554,17 +574,25 @@ export function runScriptLint(
   const deferred: ScriptLintReport['deferred'] = [];
   const missing = new Set<LintTool>();
 
+  const wt = resolve(args.worktree);
+  const wtReal = realIfExists(wt); // canonical worktree, symlinks resolved
   for (const f of files) {
     const path = typeof f?.path === 'string' ? f.path : '';
     if (!path) continue;
     const abs = resolve(join(args.worktree, path));
     // Defence-in-depth: the plan is a file the orchestrator writes, not fully
-    // trusted input, and a `../../etc/passwd`-style path (or any `..` escape) would
-    // resolve OUTSIDE the tree we were asked to review. Refuse to stat or lint
-    // anything that leaves the worktree; disclose it as skipped if a linter owned it
-    // by name, rather than reading a file the review has no business touching.
-    const wt = resolve(args.worktree);
-    if (abs !== wt && !abs.startsWith(wt + sep)) {
+    // trusted input. Two escapes to refuse, disclosed as skipped rather than read:
+    //  1. LEXICAL — a `../../etc/passwd`-style path resolves outside the worktree.
+    //  2. SYMLINKED ANCESTOR — the path is lexically inside, but a directory on the
+    //     way has been replaced with a symlink, so its REAL location is outside.
+    //     `lstatSync` only spares the final component; ancestors are followed, so
+    //     the canonical path is what the linter would actually read. `realIfExists`
+    //     returns undefined for a path that does not fully exist — that is fine, it
+    //     is handled as `missing`/`irregular` by `firstLineOf` below.
+    const escapes = (p: string, root: string) =>
+      p !== root && !p.startsWith(root + sep);
+    const real = realIfExists(abs);
+    if (escapes(abs, wt) || (wtReal && real && escapes(real, wtReal))) {
       const byName = pathTool(path);
       if (byName) {
         skipped.push({
