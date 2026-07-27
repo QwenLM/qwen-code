@@ -101,6 +101,10 @@ const composerCoreState = vi.hoisted(() => ({
   openHistorySearch: vi.fn(),
 }));
 
+const voiceButtonState = vi.hoisted(() => ({
+  onActiveChange: undefined as ((active: boolean) => void) | undefined,
+}));
+
 Object.defineProperty(window, 'matchMedia', {
   writable: true,
   value: vi.fn().mockImplementation(() => ({
@@ -191,7 +195,14 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
 });
 
 vi.mock('../voice/VoiceButton', () => ({
-  VoiceButton: () => <span data-testid="voice-button" />,
+  VoiceButton: ({
+    onActiveChange,
+  }: {
+    onActiveChange?: (active: boolean) => void;
+  }) => {
+    voiceButtonState.onActiveChange = onActiveChange;
+    return <span data-testid="voice-button" />;
+  },
 }));
 
 const mounted: Array<{
@@ -206,6 +217,7 @@ afterEach(() => {
   composerCoreState.closeSlashMenu.mockReset();
   composerCoreState.mobileComposer = null;
   composerCoreState.openHistorySearch.mockReset();
+  voiceButtonState.onActiveChange = undefined;
   for (const { root, container, portalRoot } of mounted.splice(0)) {
     act(() => root.unmount());
     container.remove();
@@ -883,6 +895,43 @@ describe('ChatEditor mobile composer quick actions', () => {
           (button) => button.textContent === 'Tab',
         ),
       ).toBe(true);
+    });
+  });
+
+  it('hides other toolbar actions while mobile voice capture is active', () => {
+    withTouchDevice(() => {
+      const container = renderChatEditor({
+        currentModel: 'qwen-test',
+        availableModels: [{ id: 'qwen-test' }],
+      });
+
+      expect(
+        container.querySelector('[data-web-shell-toolbar-leading]'),
+      ).toBeTruthy();
+      expect(
+        container.querySelector(
+          'button[aria-label="more actions"][data-hide-during-mobile-voice]',
+        ),
+      ).toBeTruthy();
+      expect(
+        container.querySelector('[data-web-shell-composer-submit]'),
+      ).toBeTruthy();
+
+      act(() => {
+        voiceButtonState.onActiveChange?.(true);
+      });
+
+      expect(
+        container.querySelector('[data-mobile-voice-active="true"]'),
+      ).toBeTruthy();
+
+      act(() => {
+        voiceButtonState.onActiveChange?.(false);
+      });
+
+      expect(
+        container.querySelector('[data-mobile-voice-active="true"]'),
+      ).toBeFalsy();
     });
   });
 });

@@ -18,6 +18,8 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   glob: 'Glob',
   run_shell_command: 'Shell',
   todo_write: 'TodoList',
+  get_goal: 'Goal',
+  update_goal: 'UpdateGoal',
   save_memory: 'SaveMemory',
   agent: 'Agent',
   skill: 'Skill',
